@@ -18,6 +18,8 @@
 //! threshold is exceeded, selected items can be exported as a `DataObject` via
 //! the `DragDropManager`.
 
+use core::num::NonZeroUsize;
+
 use crate::color::Color;
 use crate::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -393,6 +395,20 @@ pub enum GridEvent {
 // Computed layout cache
 // =============================================================================
 
+/// `base` moved by `delta`, saturating at either end.
+///
+/// Splitting on the sign is what makes it total: each direction saturates
+/// towards the end it is heading for, so a step off the bottom gives zero and
+/// a step off the top gives the maximum, rather than one `checked_add_signed`
+/// whose single fallback would have to be wrong in one of the two directions.
+fn offset(base: usize, delta: isize) -> usize {
+    if delta >= 0 {
+        base.saturating_add(delta.unsigned_abs())
+    } else {
+        base.saturating_sub(delta.unsigned_abs())
+    }
+}
+
 /// Precomputed grid layout metrics, recalculated when the container size
 /// or configuration changes.
 #[derive(Clone, Debug)]
@@ -402,7 +418,13 @@ struct LayoutCache {
     /// Height of each cell.
     cell_height: f32,
     /// Number of columns that fit in the container.
-    columns: usize,
+    ///
+    /// Non-zero because every conversion between an item's index and its cell
+    /// divides by it. It used to be a `usize` that [`Self::compute`] happened
+    /// to keep at one or more, which each division then took on trust —
+    /// `items_in_rect` did not, and re-tested `columns == 0` on entry, while
+    /// `item_position` divided without asking.
+    columns: NonZeroUsize,
     /// Total number of rows needed for all items.
     total_rows: usize,
     /// Total content height (for scrolling).
@@ -437,19 +459,21 @@ impl LayoutCache {
             }
         };
 
-        // Number of columns that fit.
+        // Number of columns that fit. A container too narrow for one whole
+        // cell still shows one, clipped, rather than none — so the floor is
+        // one, and saying so as a `NonZeroUsize` is what lets every later
+        // division by it be written without a guard.
         let columns = if cell_width <= 0.0 {
-            1
+            NonZeroUsize::MIN
         } else {
-            ((usable_width + config.gap_x) / (cell_width + config.gap_x))
-                .floor()
-                .max(1.0) as usize
+            let fitting = ((usable_width + config.gap_x) / (cell_width + config.gap_x)).floor();
+            NonZeroUsize::new(fitting.max(1.0) as usize).unwrap_or(NonZeroUsize::MIN)
         };
 
         let total_rows = if item_count == 0 {
             0
         } else {
-            item_count.div_ceil(columns)
+            item_count.div_ceil(columns.get())
         };
 
         let content_height = if total_rows == 0 {
@@ -473,9 +497,34 @@ impl LayoutCache {
 
     /// Returns the (col, row) for a given item index.
     fn item_position(&self, index: usize) -> (usize, usize) {
-        let col = index % self.columns;
-        let row = index / self.columns;
-        (col, row)
+        (index % self.columns, index / self.columns)
+    }
+
+    /// The cell `col_delta` columns and `row_delta` rows from (`col`, `row`),
+    /// stopped at the edges of the grid rather than stepping over them.
+    ///
+    /// The step is taken in `usize`, saturating in whichever direction it is
+    /// going. The two callers used to cast to `i32`, step, and clamp back —
+    /// which leaves the cursor out of range between the step and the clamp,
+    /// silently wraps a grid with more than two billion rows, and, on the one
+    /// path that could reach it with no rows at all, would have called
+    /// `clamp(0, -1)` and panicked on the crossed bounds.
+    fn step(&self, col: usize, row: usize, col_delta: isize, row_delta: isize) -> (usize, usize) {
+        (
+            offset(col, col_delta).min(self.columns.get().saturating_sub(1)),
+            offset(row, row_delta).min(self.total_rows.saturating_sub(1)),
+        )
+    }
+
+    /// The index of the item in cell (`col`, `row`).
+    ///
+    /// The cell need not hold one: a row past the end of the grid, or a column
+    /// past the end of a short last row, gives an index past the item count,
+    /// and every caller compares it against theirs. Saturating rather than
+    /// wrapping, so an absurd row gives an index that is too large — which is
+    /// rejected — instead of one that is small and wrong.
+    fn item_index(&self, col: usize, row: usize) -> usize {
+        row.saturating_mul(self.columns.get()).saturating_add(col)
     }
 
     /// Returns the pixel position (x, y) of the top-left corner of a cell.
@@ -498,8 +547,12 @@ impl LayoutCache {
         }
 
         let first_visible = ((scroll_y - config.padding).max(0.0) / row_height).floor() as usize;
-        let visible_count = (self.container_height / row_height).ceil() as usize + 2; // +2 for partial rows
-        let last_visible = (first_visible + visible_count).min(self.total_rows);
+        // Two rows of slack: the partial row at each edge of the viewport.
+        let visible_count =
+            ((self.container_height / row_height).ceil() as usize).saturating_add(2);
+        let last_visible = first_visible
+            .saturating_add(visible_count)
+            .min(self.total_rows);
 
         (first_visible, last_visible)
     }
@@ -539,11 +592,11 @@ impl LayoutCache {
             return None; // Click was in the gap between cells.
         }
 
-        if col >= self.columns {
+        if col >= self.columns.get() {
             return None;
         }
 
-        let index = row * self.columns + col;
+        let index = self.item_index(col, row);
         if index >= item_count {
             return None;
         }
@@ -565,7 +618,7 @@ impl LayoutCache {
         item_count: usize,
     ) -> Vec<usize> {
         let mut result = Vec::new();
-        if self.columns == 0 || item_count == 0 {
+        if item_count == 0 {
             return result;
         }
 
@@ -579,15 +632,25 @@ impl LayoutCache {
         // Determine the range of rows and columns the rectangle could overlap.
         let start_col = ((rx - padding).max(0.0) / col_stride).floor() as usize;
         let end_col = (((rx + rw - padding).max(0.0) / col_stride).floor() as usize)
-            .min(self.columns.saturating_sub(1));
+            .min(self.columns.get().saturating_sub(1));
         let start_row = ((ry - padding).max(0.0) / row_stride).floor() as usize;
-        let end_row = ((ry + rh - padding).max(0.0) / row_stride).floor() as usize;
+        // Bounded by the grid, as `end_col` already was. Without it the walk
+        // ran to wherever the rectangle's far edge landed: a rubber band
+        // dragged well below a small grid stepped through every empty row down
+        // to the pointer, one row at a time, and with a short cell height that
+        // is millions of iterations of nothing.
+        let end_row = (((ry + rh - padding).max(0.0) / row_stride).floor() as usize)
+            .min(self.total_rows.saturating_sub(1));
 
-        for row in start_row..=end_row {
+        'rows: for row in start_row..=end_row {
             for col in start_col..=end_col {
-                let idx = row * self.columns + col;
+                let idx = self.item_index(col, row);
                 if idx >= item_count {
-                    break;
+                    // The index rises with both row and column, so the first
+                    // cell past the last item ends the whole walk. Leaving
+                    // only the inner loop re-tested every remaining row of the
+                    // short final row's tail.
+                    break 'rows;
                 }
 
                 // Verify actual intersection with the cell (not just the stride).
@@ -750,9 +813,9 @@ impl GridView {
         })
     }
 
-    /// Number of columns in the current layout.
+    /// Number of columns in the current layout. Always at least one.
     pub fn columns(&self) -> usize {
-        self.layout().columns
+        self.layout().columns.get()
     }
 
     /// Total content height (for external scrollbar integration).
@@ -924,12 +987,11 @@ impl GridView {
     }
 
     fn handle_mouse_move(&mut self, x: f32, y: f32) -> EventResult {
-        // Update rubber-band.
-        if self.rubber_band.is_some() {
+        // Update rubber-band. Taken and tested in one expression: the test and
+        // the band it proves is there were two statements apart, so the second
+        // had to re-fetch it and assert what the first had established.
+        if let Some(rb) = self.rubber_band.as_mut() {
             let content_y = y + self.scroll_y;
-
-            // Update position on the rubber band.
-            let rb = self.rubber_band.as_mut().expect("checked above");
             rb.current_x = x;
             rb.current_y = content_y;
 
@@ -1098,7 +1160,12 @@ impl GridView {
     }
 
     /// Navigate by row/column offset.
-    fn navigate(&mut self, row_delta: i32, col_delta: i32, modifiers: Modifiers) -> EventResult {
+    fn navigate(
+        &mut self,
+        row_delta: isize,
+        col_delta: isize,
+        modifiers: Modifiers,
+    ) -> EventResult {
         if self.items.is_empty() {
             return EventResult::Ignored;
         }
@@ -1108,10 +1175,12 @@ impl GridView {
         let current = self.selection.focused().unwrap_or(0);
         let (col, row) = layout.item_position(current);
 
-        let new_col = (col as i32 + col_delta).clamp(0, layout.columns as i32 - 1) as usize;
-        let new_row = (row as i32 + row_delta).clamp(0, layout.total_rows as i32 - 1) as usize;
-        let new_index =
-            (new_row * layout.columns + new_col).min(self.items.len().saturating_sub(1));
+        let (new_col, new_row) = layout.step(col, row, col_delta, row_delta);
+        // The last row may be short, so a cell inside the grid can still be
+        // past the last item.
+        let new_index = layout
+            .item_index(new_col, new_row)
+            .min(self.items.len().saturating_sub(1));
 
         if modifiers.shift && self.config.multi_select {
             self.selection.select_range(new_index);
@@ -1146,7 +1215,7 @@ impl GridView {
     }
 
     /// Navigate by page (visible rows).
-    fn navigate_page(&mut self, direction: i32) -> EventResult {
+    fn navigate_page(&mut self, direction: isize) -> EventResult {
         if self.items.is_empty() {
             return EventResult::Ignored;
         }
@@ -1155,16 +1224,17 @@ impl GridView {
         let layout = self.layout();
 
         let rows_per_page = if layout.cell_height + self.config.gap_y > 0.0 {
-            (self.container_height / (layout.cell_height + self.config.gap_y)).floor() as i32
+            (self.container_height / (layout.cell_height + self.config.gap_y)).floor() as isize
         } else {
             1
         };
 
         let current = self.selection.focused().unwrap_or(0);
         let (col, row) = layout.item_position(current);
-        let new_row = (row as i32 + direction * rows_per_page)
-            .clamp(0, layout.total_rows as i32 - 1) as usize;
-        let new_index = (new_row * layout.columns + col).min(self.items.len().saturating_sub(1));
+        let (_, new_row) = layout.step(col, row, 0, direction.saturating_mul(rows_per_page));
+        let new_index = layout
+            .item_index(col, new_row)
+            .min(self.items.len().saturating_sub(1));
 
         self.selection.select_single(new_index);
         self.scroll_to_item(new_index);
@@ -1231,15 +1301,21 @@ impl GridView {
         // Determine visible row range.
         let (first_row, last_row) = layout.visible_rows(self.scroll_y, &self.config);
 
-        // Render visible items.
-        let first_item = first_row * layout.columns;
-        let last_item = (last_row * layout.columns).min(self.items.len());
+        // Render visible items. `take` before `skip` so both count absolute
+        // indices; the item comes out of the iterator rather than being read
+        // back with an index whose bound was established here and re-checked
+        // inside the loop.
+        let first_item = layout.item_index(0, first_row);
+        let last_item = layout.item_index(0, last_row);
 
-        for index in first_item..last_item {
-            if index >= self.items.len() {
-                break;
-            }
-            self.render_cell(tree, &layout, index);
+        for (index, item) in self
+            .items
+            .iter()
+            .enumerate()
+            .take(last_item)
+            .skip(first_item)
+        {
+            self.render_cell(tree, &layout, index, item);
         }
 
         // Render rubber-band overlay.
@@ -1277,8 +1353,13 @@ impl GridView {
     }
 
     /// Render a single grid cell.
-    fn render_cell(&self, tree: &mut RenderTree, layout: &LayoutCache, index: usize) {
-        let item = &self.items[index];
+    fn render_cell(
+        &self,
+        tree: &mut RenderTree,
+        layout: &LayoutCache,
+        index: usize,
+        item: &GridItem,
+    ) {
         let (cx, cy) = layout.cell_origin(
             index,
             self.config.padding,
@@ -1409,6 +1490,18 @@ impl Default for GridView {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     fn make_items(n: usize) -> Vec<GridItem> {
@@ -1442,7 +1535,7 @@ mod tests {
             ..GridConfig::default()
         };
         let layout = LayoutCache::compute(&config, 400.0, 600.0, 10);
-        assert_eq!(layout.columns, 3);
+        assert_eq!(layout.columns.get(), 3);
     }
 
     #[test]
@@ -1450,7 +1543,7 @@ mod tests {
         let config = GridConfig::default();
         // With 3 columns and 10 items: ceil(10/3) = 4 rows.
         let layout = LayoutCache::compute(&config, 400.0, 600.0, 10);
-        let cols = layout.columns;
+        let cols = layout.columns.get();
         let expected_rows = 10_usize.div_ceil(cols);
         assert_eq!(layout.total_rows, expected_rows);
     }
@@ -1495,7 +1588,7 @@ mod tests {
         // cols = floor((380+10)/(80+10)) = floor(390/90) = 4 columns.
         // cell_width = (380 - 10*3) / 4 = (380-30)/4 = 87.5.
         let layout = LayoutCache::compute(&config, 400.0, 600.0, 12);
-        assert_eq!(layout.columns, 4);
+        assert_eq!(layout.columns.get(), 4);
         assert!((layout.cell_width - 87.5).abs() < 0.01);
         assert!((layout.cell_height - 87.5 * 1.2).abs() < 0.01);
         assert_eq!(layout.total_rows, 3); // 12 items / 4 cols = 3 rows.
@@ -1934,7 +2027,7 @@ mod tests {
         };
         // 300px wide, 0 padding: cols = floor((300+10)/(50+10)) = floor(310/60) = 5.
         let layout = LayoutCache::compute(&config, 300.0, 300.0, 20);
-        assert_eq!(layout.columns, 5);
+        assert_eq!(layout.columns.get(), 5);
 
         // Rectangle covering first two columns, first two rows.
         // Cells: (0,0)=0..50, (1,0)=60..110 in x. (0,0)=0..50, (0,1)=60..110 in y.
@@ -2007,5 +2100,133 @@ mod tests {
         };
         let result = grid.handle_key(&key);
         assert_eq!(result, EventResult::Ignored);
+    }
+
+    // --- Index and cell are two views of the same thing ---
+
+    /// A cell converted to an index and back is the cell it started as, for
+    /// every cell of the grid. The two conversions were written separately —
+    /// one dividing, five multiplying — and nothing said they agreed.
+    #[test]
+    fn an_index_and_its_cell_convert_to_each_other() {
+        let config = GridConfig {
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 80.0,
+            },
+            ..Default::default()
+        };
+        let layout = LayoutCache::compute(&config, 400.0, 600.0, 10);
+
+        for index in 0..10 {
+            let (col, row) = layout.item_position(index);
+            assert!(col < layout.columns.get(), "a cell is inside its grid");
+            assert_eq!(layout.item_index(col, row), index);
+        }
+    }
+
+    /// A container too narrow for a whole cell still has a column. Every
+    /// conversion between an index and a cell divides by the column count, so
+    /// zero of them would be a division by zero — which is why the count is a
+    /// `NonZeroUsize` rather than a `usize` the constructor merely happens to
+    /// keep positive.
+    #[test]
+    fn a_container_narrower_than_one_cell_still_has_a_column() {
+        let config = GridConfig {
+            cell_sizing: CellSizing::Fixed {
+                width: 500.0,
+                height: 80.0,
+            },
+            ..Default::default()
+        };
+        let layout = LayoutCache::compute(&config, 10.0, 600.0, 4);
+
+        assert_eq!(layout.columns.get(), 1);
+        assert_eq!(layout.total_rows, 4);
+        assert_eq!(layout.item_position(3), (0, 3));
+    }
+
+    /// A step stops at the edge it is walking towards, from either end and
+    /// however far it overshoots.
+    #[test]
+    fn a_step_stops_at_the_edge_rather_than_stepping_over_it() {
+        let config = GridConfig {
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 80.0,
+            },
+            ..Default::default()
+        };
+        // 10 items over 3 columns: 4 rows, the last of them short.
+        let layout = LayoutCache::compute(&config, 400.0, 600.0, 10);
+        assert_eq!(layout.columns.get(), 3);
+        assert_eq!(layout.total_rows, 4);
+
+        assert_eq!(layout.step(0, 0, -1, -1), (0, 0), "the near edge holds");
+        assert_eq!(layout.step(2, 3, 1, 1), (2, 3), "the far edge holds");
+        assert_eq!(
+            layout.step(0, 0, isize::MAX, isize::MAX),
+            (2, 3),
+            "an absurd step lands on the far edge, not past it"
+        );
+        assert_eq!(
+            layout.step(2, 3, isize::MIN, isize::MIN),
+            (0, 0),
+            "and an absurd step back lands on the near one"
+        );
+    }
+
+    /// Paging past the end lands on the last item rather than panicking on a
+    /// clamp whose bounds had crossed.
+    #[test]
+    fn paging_past_either_end_lands_on_the_grid() {
+        let mut grid = GridView::new();
+        grid.set_items(make_items(10));
+        grid.set_container_size(400.0, 600.0);
+
+        grid.handle_key(&KeyEvent {
+            key: Key::PageDown,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        });
+        assert!(grid.selection().focused().is_some_and(|i| i < 10));
+
+        grid.handle_key(&KeyEvent {
+            key: Key::PageUp,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        });
+        assert_eq!(grid.selection().focused(), Some(0));
+    }
+
+    /// A rubber band dragged far below the grid selects what is in the grid,
+    /// and looks at no more cells than the grid has. The row range used to run
+    /// to wherever the rectangle's far edge landed while only the column range
+    /// was bounded, so dragging off the bottom walked every empty row down to
+    /// the pointer.
+    #[test]
+    fn a_rectangle_reaching_past_the_grid_only_walks_the_grid() {
+        let config = GridConfig {
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 80.0,
+            },
+            ..Default::default()
+        };
+        let layout = LayoutCache::compute(&config, 400.0, 600.0, 4);
+
+        let hit = layout.items_in_rect(
+            0.0,
+            0.0,
+            1.0e9,
+            1.0e9,
+            config.padding,
+            config.gap_x,
+            config.gap_y,
+            4,
+        );
+        assert_eq!(hit, vec![0, 1, 2, 3], "every item, and only the items");
     }
 }

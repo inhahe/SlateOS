@@ -14,6 +14,8 @@
 //!
 //! All rendering produces `Vec<RenderCommand>` that any backend can consume.
 
+use core::num::NonZeroUsize;
+
 use crate::color::Color;
 use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -61,6 +63,27 @@ const HUE_BAR_WIDTH: f32 = 20.0;
 const SV_SQUARE_SIZE: f32 = 180.0;
 const ALPHA_BAR_HEIGHT: f32 = 16.0;
 const MAX_RECENT_COLORS: usize = 16;
+/// Height of the dialog's title bar.
+const TITLE_BAR_HEIGHT: f32 = 32.0;
+/// Where the dialog's content begins, below the title bar.
+const CONTENT_Y: f32 = TITLE_BAR_HEIGHT + 4.0;
+/// Vertical room a small section label ("Presets", "Recent") takes above the
+/// swatches it names.
+const SECTION_LABEL_HEIGHT: f32 = 14.0;
+/// Height of the RGB/HSV tab strip above the sliders.
+const SLIDER_TABS_HEIGHT: f32 = 28.0;
+/// Size of a slider tab button.
+const SLIDER_TAB_SIZE: (f32, f32) = (40.0, 22.0);
+/// Horizontal step between the two slider tabs.
+const SLIDER_TAB_PITCH: f32 = 46.0;
+/// Size of the eyedropper button.
+const EYEDROPPER_SIZE: (f32, f32) = (90.0, 24.0);
+/// Room a slider's name takes to the left of its track.
+const SLIDER_LABEL_WIDTH: f32 = 20.0;
+/// Room a slider's number takes to the right of its track.
+const SLIDER_VALUE_WIDTH: f32 = 30.0;
+/// Height of the OK/Cancel strip at the foot of the dialog.
+const BUTTON_STRIP_HEIGHT: f32 = 44.0;
 
 // ============================================================================
 // HSV ↔ RGB ↔ Hex conversion
@@ -213,13 +236,16 @@ pub fn parse_hex_color(input: &str) -> Option<Color> {
 }
 
 /// Convert a single hex character to its 4-bit value.
+///
+/// This was three hand-written subtractions from `b'0'`, `b'a'` and `b'A'`,
+/// each safe only because the `match` arm above it had already narrowed the
+/// character to that range. `char::to_digit` is the same function with the
+/// range check and the subtraction in one place, and it is the one the rest of
+/// the standard library agrees with.
 fn hex_char_to_u8(c: char) -> Option<u8> {
-    match c {
-        '0'..='9' => Some(c as u8 - b'0'),
-        'a'..='f' => Some(c as u8 - b'a' + 10),
-        'A'..='F' => Some(c as u8 - b'A' + 10),
-        _ => None,
-    }
+    // `to_digit(16)` yields 0..=15, so the conversion cannot fail; `ok()` is
+    // discarding an error that no input can produce.
+    u8::try_from(c.to_digit(16)?).ok()
 }
 
 // ============================================================================
@@ -991,75 +1017,67 @@ impl ColorPickerDialog {
     }
 
     /// Handle a mouse event (coordinates relative to the dialog origin).
-    pub fn handle_mouse(&mut self, event: &MouseEvent) -> Option<ColorPickerEvent> {
+    /// Handle a mouse event against a dialog of this size.
+    ///
+    /// The size is required because the layout depends on it — the preset
+    /// palette's column count is a function of the width — and a widget that
+    /// lays out against a width cannot hit-test without one. It used to guess,
+    /// which is why clicking a swatch picked the wrong colour at any width
+    /// other than the picker's intrinsic one.
+    pub fn handle_mouse(
+        &mut self,
+        event: &MouseEvent,
+        width: f32,
+        height: f32,
+    ) -> Option<ColorPickerEvent> {
+        let layout = self.layout(width, height);
+
         // Delegate to the inner picker for the SV square / hue bar region.
-        // The dialog places the picker at (PADDING, PADDING).
-        if let Some(evt) = self.picker.handle_mouse(event, PADDING, PADDING) {
+        if let Some(evt) = self.picker.handle_mouse(event, layout.sv_x, layout.sv_y) {
             return Some(evt);
         }
 
-        // Check clicks on preset swatches, eyedropper button, etc.
         if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
-            let local_x = event.x;
-            let local_y = event.y;
+            let (x, y) = (event.x, event.y);
 
-            // Preset palette area
-            if let Some(color) = self.hit_test_presets(local_x, local_y) {
+            if let Some(color) = self
+                .hit_test_presets(&layout, x, y)
+                .or_else(|| self.hit_test_recent(&layout, x, y))
+            {
                 self.picker.set_color(color);
                 return Some(ColorPickerEvent::Changed(color));
             }
 
-            // Recent colors area
-            if let Some(color) = self.hit_test_recent(local_x, local_y) {
-                self.picker.set_color(color);
-                return Some(ColorPickerEvent::Changed(color));
-            }
-
-            // Eyedropper button
-            if self.hit_test_eyedropper(local_x, local_y) {
+            if Self::hit_test_eyedropper(&layout, x, y) {
                 self.picker.activate_eyedropper();
                 return Some(ColorPickerEvent::EyedropperActivated);
             }
 
-            // Slider tab buttons
-            if self.hit_test_slider_tab(local_x, local_y, SliderTab::Rgb) {
-                self.slider_tab = SliderTab::Rgb;
-                return None;
-            }
-            if self.hit_test_slider_tab(local_x, local_y, SliderTab::Hsv) {
-                self.slider_tab = SliderTab::Hsv;
-                return None;
+            for tab in [SliderTab::Rgb, SliderTab::Hsv] {
+                if Self::hit_test_slider_tab(&layout, x, y, tab) {
+                    self.slider_tab = tab;
+                    return None;
+                }
             }
 
-            // Alpha bar
-            let alpha_y = self.alpha_bar_y();
-            if local_y >= alpha_y && local_y <= alpha_y + ALPHA_BAR_HEIGHT {
-                let sv_size = self.picker.sv_size;
-                let t = ((local_x - PADDING) / sv_size).clamp(0.0, 1.0);
-                self.picker.alpha = (t * 255.0 + 0.5) as u8;
+            if y >= layout.alpha_y && y <= layout.alpha_y + ALPHA_BAR_HEIGHT {
                 self.picker.drag = Some(DragTarget::AlphaBar);
-                return Some(ColorPickerEvent::Changed(self.picker.current_color()));
+                return Some(self.drag_alpha_to(&layout, x));
             }
 
-            // RGB/HSV sliders
-            if let Some(target) = self.hit_test_sliders(local_x, local_y) {
+            if let Some(target) = self.hit_test_sliders(&layout, x, y) {
                 self.picker.drag = Some(target);
-                self.apply_slider_drag(local_x);
+                self.apply_slider_drag(&layout, x);
                 return Some(ColorPickerEvent::Changed(self.picker.current_color()));
             }
         }
 
-        // Continue drag for sliders/alpha
-        if matches!(event.kind, MouseEventKind::Move) && self.picker.drag.is_some() {
+        // Continue an in-progress drag.
+        if matches!(event.kind, MouseEventKind::Move) {
             match self.picker.drag {
-                Some(DragTarget::AlphaBar) => {
-                    let sv_size = self.picker.sv_size;
-                    let t = ((event.x - PADDING) / sv_size).clamp(0.0, 1.0);
-                    self.picker.alpha = (t * 255.0 + 0.5) as u8;
-                    return Some(ColorPickerEvent::Changed(self.picker.current_color()));
-                }
+                Some(DragTarget::AlphaBar) => return Some(self.drag_alpha_to(&layout, event.x)),
                 Some(DragTarget::RgbSlider(_) | DragTarget::HsvSlider(_)) => {
-                    self.apply_slider_drag(event.x);
+                    self.apply_slider_drag(&layout, event.x);
                     return Some(ColorPickerEvent::Changed(self.picker.current_color()));
                 }
                 _ => {}
@@ -1074,9 +1092,20 @@ impl ColorPickerDialog {
         None
     }
 
+    /// Set alpha from a pointer position along the alpha bar.
+    ///
+    /// The press and the drag-move both did this, each with its own copy of
+    /// the "where along the bar is this" arithmetic.
+    fn drag_alpha_to(&mut self, layout: &DialogLayout, x: f32) -> ColorPickerEvent {
+        let t = ((x - layout.sv_x) / layout.sv_size).clamp(0.0, 1.0);
+        self.picker.alpha = (t * 255.0 + 0.5) as u8;
+        ColorPickerEvent::Changed(self.picker.current_color())
+    }
+
     /// Render the full dialog at the given dimensions.
     pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
+        let layout = self.layout(width, height);
 
         // Dialog background
         cmds.push(RenderCommand::FillRect {
@@ -1093,7 +1122,7 @@ impl ColorPickerDialog {
             x: 0.0,
             y: 0.0,
             width,
-            height: 32.0,
+            height: TITLE_BAR_HEIGHT,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii {
                 top_left: CORNER_RADIUS + 2.0,
@@ -1113,53 +1142,32 @@ impl ColorPickerDialog {
             overflow: TextOverflow::Clip,
         });
 
-        let content_y = 36.0;
-        let sv_size = self.picker.sv_size;
-
         // --- Left column: SV square + Hue bar ---
-        let sv_x = PADDING;
-        let sv_y = content_y + PADDING;
-        self.picker.render_sv_square(&mut cmds, sv_x, sv_y, sv_size);
-
-        let hue_x = sv_x + sv_size + PADDING;
         self.picker
-            .render_hue_bar(&mut cmds, hue_x, sv_y, HUE_BAR_WIDTH, sv_size);
+            .render_sv_square(&mut cmds, layout.sv_x, layout.sv_y, layout.sv_size);
+        self.picker.render_hue_bar(
+            &mut cmds,
+            layout.hue_x,
+            layout.sv_y,
+            HUE_BAR_WIDTH,
+            layout.sv_size,
+        );
+        self.render_alpha_bar(&mut cmds, layout.sv_x, layout.alpha_y, layout.sv_size);
 
-        // Alpha bar below SV square
-        let alpha_y = self.alpha_bar_y();
-        self.render_alpha_bar(&mut cmds, sv_x, alpha_y, sv_size);
-
-        // --- Right column: Preview, sliders, hex, eyedropper ---
-        let right_x = hue_x + HUE_BAR_WIDTH + PADDING * 2.0;
-        let right_width = width - right_x - PADDING;
-
-        // Color preview (new vs old)
-        self.picker.render_preview(&mut cmds, right_x, sv_y);
-
-        // Hex input
-        let hex_y = sv_y + PREVIEW_SIZE + PADDING * 2.0 + 16.0;
-        self.render_hex_input(&mut cmds, right_x, hex_y, right_width);
-
-        // Eyedropper button
-        let eye_y = hex_y + 32.0;
-        self.render_eyedropper_button(&mut cmds, right_x, eye_y);
+        // --- Right column: Preview, hex, eyedropper ---
+        self.picker
+            .render_preview(&mut cmds, layout.right_x, layout.sv_y);
+        self.render_hex_input(&mut cmds, layout.right_x, layout.hex_y, layout.right_width);
+        self.render_eyedropper_button(&mut cmds, layout.right_x, layout.eye_y);
 
         // --- Slider section ---
-        let slider_y = alpha_y + ALPHA_BAR_HEIGHT + PADDING * 2.0;
-        self.render_slider_tabs(&mut cmds, PADDING, slider_y);
-        self.render_sliders(&mut cmds, PADDING, slider_y + 28.0, sv_size);
+        self.render_slider_tabs(&mut cmds, layout.slider_y);
+        self.render_sliders(&mut cmds, &layout);
 
-        // --- Preset palette ---
-        let preset_y = slider_y + 28.0 + (SLIDER_HEIGHT + PADDING) * 3.0 + PADDING;
-        self.render_preset_palette(&mut cmds, PADDING, preset_y, width - PADDING * 2.0);
-
-        // --- Recent colors ---
-        let recent_y = preset_y + self.preset_palette_height() + PADDING;
-        self.render_recent_colors(&mut cmds, PADDING, recent_y, width - PADDING * 2.0);
-
-        // --- Bottom buttons ---
-        let btn_y = height - 44.0;
-        self.render_bottom_buttons(&mut cmds, btn_y, width);
+        // --- Preset palette, recent colours, buttons ---
+        self.render_preset_palette(&mut cmds, &layout);
+        self.render_recent_colors(&mut cmds, &layout);
+        self.render_bottom_buttons(&mut cmds, layout.button_y, layout.width);
 
         cmds
     }
@@ -1324,146 +1332,100 @@ impl ColorPickerDialog {
         });
     }
 
-    fn render_slider_tabs(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
-        // RGB tab
-        let rgb_bg = if self.slider_tab == SliderTab::Rgb {
-            COLOR_BLUE
-        } else {
-            COLOR_SURFACE1
-        };
-        let rgb_text = if self.slider_tab == SliderTab::Rgb {
-            COLOR_BASE
-        } else {
-            COLOR_TEXT
-        };
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: 40.0,
-            height: 22.0,
-            color: rgb_bg,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: x + 8.0,
-            y: y + 5.0,
-            text: String::from("RGB"),
-            color: rgb_text,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // HSV tab
-        let hsv_bg = if self.slider_tab == SliderTab::Hsv {
-            COLOR_BLUE
-        } else {
-            COLOR_SURFACE1
-        };
-        let hsv_text = if self.slider_tab == SliderTab::Hsv {
-            COLOR_BASE
-        } else {
-            COLOR_TEXT
-        };
-        cmds.push(RenderCommand::FillRect {
-            x: x + 46.0,
-            y,
-            width: 40.0,
-            height: 22.0,
-            color: hsv_bg,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: x + 54.0,
-            y: y + 5.0,
-            text: String::from("HSV"),
-            color: hsv_text,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+    /// The RGB/HSV tab strip.
+    ///
+    /// This was the two tabs written out one after the other, with the second
+    /// one's x offset — the 46 that `DialogLayout::slider_tab_x` now owns —
+    /// spelled as a literal here and again in the hit-test.
+    fn render_slider_tabs(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+        let (tab_w, tab_h) = SLIDER_TAB_SIZE;
+        for (tab, label) in [(SliderTab::Rgb, "RGB"), (SliderTab::Hsv, "HSV")] {
+            let active = self.slider_tab == tab;
+            let x = DialogLayout::slider_tab_x(tab);
+            cmds.push(RenderCommand::FillRect {
+                x,
+                y,
+                width: tab_w,
+                height: tab_h,
+                color: if active { COLOR_BLUE } else { COLOR_SURFACE1 },
+                corner_radii: CornerRadii::all(3.0),
+            });
+            cmds.push(RenderCommand::Text {
+                x: x + 8.0,
+                y: y + 5.0,
+                text: String::from(label),
+                color: if active { COLOR_BASE } else { COLOR_TEXT },
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+        }
     }
 
-    fn render_sliders(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    /// The three channel sliders for whichever tab is showing.
+    ///
+    /// This was six calls written out one under the other, each repeating the
+    /// row offset for its position. The row offsets now come from the layout,
+    /// which is where the hit-test gets them too.
+    fn render_sliders(&self, cmds: &mut Vec<RenderCommand>, layout: &DialogLayout) {
+        let hsv = self.picker.hsv;
         match self.slider_tab {
             SliderTab::Rgb => {
-                let (r, g, b) = hsv_to_rgb(self.picker.hsv);
-                self.render_channel_slider(cmds, x, y, width, "R", r as f32 / 255.0, Color::RED, r);
-                self.render_channel_slider(
-                    cmds,
-                    x,
-                    y + SLIDER_HEIGHT + PADDING,
-                    width,
-                    "G",
-                    g as f32 / 255.0,
-                    Color::GREEN,
-                    g,
-                );
-                self.render_channel_slider(
-                    cmds,
-                    x,
-                    y + (SLIDER_HEIGHT + PADDING) * 2.0,
-                    width,
-                    "B",
-                    b as f32 / 255.0,
-                    Color::BLUE,
-                    b,
-                );
+                let (r, g, b) = hsv_to_rgb(hsv);
+                for (row, label, color, value) in [
+                    (0u8, "R", Color::RED, r),
+                    (1, "G", Color::GREEN, g),
+                    (2, "B", Color::BLUE, b),
+                ] {
+                    let fraction = f32::from(value) / 255.0;
+                    self.render_channel_slider(
+                        cmds,
+                        layout,
+                        row,
+                        label,
+                        fraction,
+                        color,
+                        u16::from(value),
+                    );
+                }
             }
             SliderTab::Hsv => {
-                let hue_frac = self.picker.hsv.h / 360.0;
-                let h_display = self.picker.hsv.h as u8;
-                let s_display = (self.picker.hsv.s * 100.0 + 0.5) as u8;
-                let v_display = (self.picker.hsv.v * 100.0 + 0.5) as u8;
-
-                // Hue slider with rainbow gradient
-                self.render_hue_slider(cmds, x, y, width, hue_frac, h_display);
-                self.render_channel_slider(
-                    cmds,
-                    x,
-                    y + SLIDER_HEIGHT + PADDING,
-                    width,
-                    "S",
-                    self.picker.hsv.s,
-                    COLOR_BLUE,
-                    s_display,
-                );
-                self.render_channel_slider(
-                    cmds,
-                    x,
-                    y + (SLIDER_HEIGHT + PADDING) * 2.0,
-                    width,
-                    "V",
-                    self.picker.hsv.v,
-                    Color::WHITE,
-                    v_display,
-                );
+                // Hue gets a rainbow track rather than a single-colour fill,
+                // and its readout runs to 360 rather than 255.
+                self.render_hue_slider(cmds, layout, hsv.h / 360.0, hsv.h as u16);
+                for (row, label, color, fraction) in
+                    [(1u8, "S", COLOR_BLUE, hsv.s), (2, "V", Color::WHITE, hsv.v)]
+                {
+                    let display = (fraction * 100.0 + 0.5) as u16;
+                    self.render_channel_slider(cmds, layout, row, label, fraction, color, display);
+                }
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)] // Rendering helper bundles many UI-layout parameters; grouping them in a struct would obscure intent at the call site.
+    /// One slider: its name, its track, its thumb and its number.
+    ///
+    /// The track's position came from `label_width`/`value_width` locals here
+    /// and from two more copies of the same arithmetic in the hit-test and the
+    /// drag handler. It now comes from the layout, so what you can drag is
+    /// exactly what was drawn.
     fn render_channel_slider(
         &self,
         cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
+        layout: &DialogLayout,
+        row: u8,
         label: &str,
         fraction: f32,
         color: Color,
-        value_display: u8,
+        value_display: u16,
     ) {
-        let label_width = 20.0;
-        let value_width = 30.0;
-        let track_x = x + label_width;
-        let track_width = width - label_width - value_width - PADDING;
+        let y = layout.slider_row_y(row);
+        let (track_x, track_width) = layout.slider_track();
 
         // Label
         cmds.push(RenderCommand::Text {
-            x,
+            x: PADDING,
             y: y + 2.0,
             text: label.to_string(),
             color: COLOR_SUBTEXT,
@@ -1529,23 +1491,22 @@ impl ColorPickerDialog {
         });
     }
 
+    /// The hue slider, which is a channel slider with a rainbow for a track.
+    ///
+    /// Hue always occupies the first row of the HSV tab.
     fn render_hue_slider(
         &self,
         cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
+        layout: &DialogLayout,
         fraction: f32,
-        value_display: u8,
+        value_display: u16,
     ) {
-        let label_width = 20.0;
-        let value_width = 30.0;
-        let track_x = x + label_width;
-        let track_width = width - label_width - value_width - PADDING;
+        let y = layout.slider_row_y(0);
+        let (track_x, track_width) = layout.slider_track();
 
         // Label
         cmds.push(RenderCommand::Text {
-            x,
+            x: PADDING,
             y: y + 2.0,
             text: String::from("H"),
             color: COLOR_SUBTEXT,
@@ -1622,17 +1583,11 @@ impl ColorPickerDialog {
         });
     }
 
-    fn render_preset_palette(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        available_width: f32,
-    ) {
+    fn render_preset_palette(&self, cmds: &mut Vec<RenderCommand>, layout: &DialogLayout) {
         // Section label
         cmds.push(RenderCommand::Text {
-            x,
-            y,
+            x: PADDING,
+            y: layout.preset_y,
             text: String::from("Presets"),
             color: COLOR_SUBTEXT,
             font_size: FONT_SIZE_SMALL,
@@ -1641,14 +1596,8 @@ impl ColorPickerDialog {
             overflow: TextOverflow::Clip,
         });
 
-        let swatch_y = y + 14.0;
-        let cols = self.preset_columns(available_width);
-
         for (i, color) in PRESET_COLORS.iter().enumerate() {
-            let col = i % cols;
-            let row = i / cols;
-            let sx = x + col as f32 * (SWATCH_SIZE + SWATCH_GAP);
-            let sy = swatch_y + row as f32 * (SWATCH_SIZE + SWATCH_GAP);
+            let (sx, sy) = layout.preset_swatch(i);
 
             cmds.push(RenderCommand::FillRect {
                 x: sx,
@@ -1675,21 +1624,15 @@ impl ColorPickerDialog {
         }
     }
 
-    fn render_recent_colors(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        _available_width: f32,
-    ) {
+    fn render_recent_colors(&self, cmds: &mut Vec<RenderCommand>, layout: &DialogLayout) {
         if self.picker.recent_colors.is_empty() {
             return;
         }
 
         // Section label
         cmds.push(RenderCommand::Text {
-            x,
-            y,
+            x: PADDING,
+            y: layout.recent_y,
             text: String::from("Recent"),
             color: COLOR_SUBTEXT,
             font_size: FONT_SIZE_SMALL,
@@ -1698,9 +1641,8 @@ impl ColorPickerDialog {
             overflow: TextOverflow::Clip,
         });
 
-        let swatch_y = y + 14.0;
         for (i, color) in self.picker.recent_colors.iter().enumerate() {
-            let sx = x + i as f32 * (SWATCH_SIZE + SWATCH_GAP);
+            let (sx, swatch_y) = layout.recent_swatch(i);
             cmds.push(RenderCommand::FillRect {
                 x: sx,
                 y: swatch_y,
@@ -1761,104 +1703,50 @@ impl ColorPickerDialog {
 
     // --- Private hit-test helpers ---
 
-    fn hit_test_presets(&self, x: f32, y: f32) -> Option<Color> {
-        let sv_size = self.picker.sv_size;
-        let alpha_y = self.alpha_bar_y();
-        let slider_y = alpha_y + ALPHA_BAR_HEIGHT + PADDING * 2.0;
-        let preset_y = slider_y + 28.0 + (SLIDER_HEIGHT + PADDING) * 3.0 + PADDING + 14.0;
-        let cols = self.preset_columns(sv_size + HUE_BAR_WIDTH + PADDING * 4.0 + PREVIEW_SIZE);
+    fn hit_test_presets(&self, layout: &DialogLayout, x: f32, y: f32) -> Option<Color> {
+        PRESET_COLORS
+            .iter()
+            .enumerate()
+            .find(|&(i, _)| DialogLayout::in_swatch(layout.preset_swatch(i), x, y))
+            .map(|(_, color)| *color)
+    }
 
-        for (i, color) in PRESET_COLORS.iter().enumerate() {
-            let col = i % cols;
-            let row = i / cols;
-            let sx = PADDING + col as f32 * (SWATCH_SIZE + SWATCH_GAP);
-            let sy = preset_y + row as f32 * (SWATCH_SIZE + SWATCH_GAP);
+    fn hit_test_recent(&self, layout: &DialogLayout, x: f32, y: f32) -> Option<Color> {
+        self.picker
+            .recent_colors
+            .iter()
+            .enumerate()
+            .find(|&(i, _)| DialogLayout::in_swatch(layout.recent_swatch(i), x, y))
+            .map(|(_, color)| *color)
+    }
 
-            if x >= sx && x <= sx + SWATCH_SIZE && y >= sy && y <= sy + SWATCH_SIZE {
-                return Some(*color);
+    fn hit_test_eyedropper(layout: &DialogLayout, x: f32, y: f32) -> bool {
+        let (w, h) = EYEDROPPER_SIZE;
+        x >= layout.right_x && x <= layout.right_x + w && y >= layout.eye_y && y <= layout.eye_y + h
+    }
+
+    fn hit_test_slider_tab(layout: &DialogLayout, x: f32, y: f32, tab: SliderTab) -> bool {
+        let tab_x = DialogLayout::slider_tab_x(tab);
+        let (w, h) = SLIDER_TAB_SIZE;
+        x >= tab_x && x <= tab_x + w && y >= layout.slider_y && y <= layout.slider_y + h
+    }
+
+    fn hit_test_sliders(&self, layout: &DialogLayout, x: f32, y: f32) -> Option<DragTarget> {
+        let (track_x, track_width) = layout.slider_track();
+        (0..3u8).find_map(|row| {
+            let sy = layout.slider_row_y(row);
+            let inside =
+                y >= sy && y <= sy + SLIDER_HEIGHT && x >= track_x && x <= track_x + track_width;
+            match (inside, self.slider_tab) {
+                (false, _) => None,
+                (true, SliderTab::Rgb) => Some(DragTarget::RgbSlider(row)),
+                (true, SliderTab::Hsv) => Some(DragTarget::HsvSlider(row)),
             }
-        }
-        None
+        })
     }
 
-    fn hit_test_recent(&self, x: f32, y: f32) -> Option<Color> {
-        if self.picker.recent_colors.is_empty() {
-            return None;
-        }
-
-        let alpha_y = self.alpha_bar_y();
-        let slider_y = alpha_y + ALPHA_BAR_HEIGHT + PADDING * 2.0;
-        let preset_y = slider_y + 28.0 + (SLIDER_HEIGHT + PADDING) * 3.0 + PADDING;
-        let recent_y = preset_y + self.preset_palette_height() + PADDING + 14.0;
-
-        for (i, color) in self.picker.recent_colors.iter().enumerate() {
-            let sx = PADDING + i as f32 * (SWATCH_SIZE + SWATCH_GAP);
-            let sy = recent_y;
-            if x >= sx && x <= sx + SWATCH_SIZE && y >= sy && y <= sy + SWATCH_SIZE {
-                return Some(*color);
-            }
-        }
-        None
-    }
-
-    fn hit_test_eyedropper(&self, x: f32, y: f32) -> bool {
-        let sv_size = self.picker.sv_size;
-        let content_y = 36.0;
-        let right_x = PADDING + sv_size + PADDING + HUE_BAR_WIDTH + PADDING * 2.0;
-        let hex_y = content_y + PADDING + PREVIEW_SIZE + PADDING * 2.0 + 16.0;
-        let eye_y = hex_y + 32.0;
-
-        x >= right_x && x <= right_x + 90.0 && y >= eye_y && y <= eye_y + 24.0
-    }
-
-    fn hit_test_slider_tab(&self, x: f32, local_y: f32, tab: SliderTab) -> bool {
-        let alpha_y = self.alpha_bar_y();
-        let slider_y = alpha_y + ALPHA_BAR_HEIGHT + PADDING * 2.0;
-
-        let tab_x = match tab {
-            SliderTab::Rgb => PADDING,
-            SliderTab::Hsv => PADDING + 46.0,
-        };
-        let tab_width = 40.0;
-        let tab_height = 22.0;
-
-        x >= tab_x
-            && x <= tab_x + tab_width
-            && local_y >= slider_y
-            && local_y <= slider_y + tab_height
-    }
-
-    fn hit_test_sliders(&self, x: f32, local_y: f32) -> Option<DragTarget> {
-        let alpha_y = self.alpha_bar_y();
-        let slider_y = alpha_y + ALPHA_BAR_HEIGHT + PADDING * 2.0 + 28.0;
-        let sv_size = self.picker.sv_size;
-        let label_width = 20.0;
-        let track_x = PADDING + label_width;
-        let value_width = 30.0;
-        let track_width = sv_size - label_width - value_width - PADDING;
-
-        for i in 0..3u8 {
-            let sy = slider_y + (SLIDER_HEIGHT + PADDING) * i as f32;
-            if local_y >= sy
-                && local_y <= sy + SLIDER_HEIGHT
-                && x >= track_x
-                && x <= track_x + track_width
-            {
-                return match self.slider_tab {
-                    SliderTab::Rgb => Some(DragTarget::RgbSlider(i)),
-                    SliderTab::Hsv => Some(DragTarget::HsvSlider(i)),
-                };
-            }
-        }
-        None
-    }
-
-    fn apply_slider_drag(&mut self, mouse_x: f32) {
-        let sv_size = self.picker.sv_size;
-        let label_width = 20.0;
-        let track_x = PADDING + label_width;
-        let value_width = 30.0;
-        let track_width = sv_size - label_width - value_width - PADDING;
+    fn apply_slider_drag(&mut self, layout: &DialogLayout, mouse_x: f32) {
+        let (track_x, track_width) = layout.slider_track();
         let t = ((mouse_x - track_x) / track_width).clamp(0.0, 1.0);
 
         match self.picker.drag {
@@ -1881,23 +1769,152 @@ impl ColorPickerDialog {
         }
     }
 
-    // --- Layout helpers ---
+    /// Where everything goes when the dialog is this size.
+    fn layout(&self, width: f32, height: f32) -> DialogLayout {
+        DialogLayout::new(self.picker.sv_size, width, height)
+    }
+}
 
-    fn alpha_bar_y(&self) -> f32 {
-        let content_y = 36.0;
-        content_y + PADDING + self.picker.sv_size + PADDING
+/// Where each part of the dialog sits, for one size of dialog.
+///
+/// `render` worked the layout out as it drew, and each of the five hit-test
+/// methods worked the same chain of constants out again to decide what a click
+/// had landed on. Six derivations of one layout stay in agreement only while
+/// nobody edits one of them — and two of them had already drifted apart:
+///
+/// - The preset palette's column count is a function of the dialog's width.
+///   The hit-test had no width to work from, so it guessed one from the
+///   picker's intrinsic size. Render the dialog at any other width and the
+///   grid you clicked was not the grid that was drawn, so a click landed on a
+///   different colour than the one under the pointer — further out the wider
+///   the dialog, and off the palette entirely at the extremes.
+/// - The recent-colours row sits below the palette, so it inherited the same
+///   error, displaced by however many rows the two column counts differed by.
+///
+/// Computing it once, from the size the dialog is actually being drawn at,
+/// is what makes the click and the pixel refer to the same thing. It is also
+/// why [`ColorPickerDialog::handle_mouse`] takes the dialog's size: a widget
+/// that lays out against a width cannot hit-test without one.
+struct DialogLayout {
+    width: f32,
+    height: f32,
+    /// Top-left corner of the saturation/value square, and its side.
+    sv_x: f32,
+    sv_y: f32,
+    sv_size: f32,
+    /// Left edge of the hue bar, which is the SV square's height.
+    hue_x: f32,
+    /// Top of the alpha bar, directly below the SV square.
+    alpha_y: f32,
+    /// Left edge and width of the right-hand column (preview, hex, eyedropper).
+    right_x: f32,
+    right_width: f32,
+    /// Top of the hex input field.
+    hex_y: f32,
+    /// Top of the eyedropper button.
+    eye_y: f32,
+    /// Top of the RGB/HSV tab strip; the sliders start [`SLIDER_TABS_HEIGHT`]
+    /// below it.
+    slider_y: f32,
+    /// Top of the "Presets" label; its swatches start
+    /// [`SECTION_LABEL_HEIGHT`] below.
+    preset_y: f32,
+    /// How many preset swatches fit across the dialog — at least one, however
+    /// narrow it gets.
+    ///
+    /// A `NonZeroUsize` rather than a `usize` kept positive by a `.max(1)`,
+    /// because the swatch index is divided by it to get a row and a column.
+    /// The condition lives in the type, so neither division needs a guard.
+    preset_columns: NonZeroUsize,
+    /// Top of the "Recent" label.
+    recent_y: f32,
+    /// Top of the OK/Cancel strip.
+    button_y: f32,
+}
+
+impl DialogLayout {
+    fn new(sv_size: f32, width: f32, height: f32) -> Self {
+        let sv_x = PADDING;
+        let sv_y = CONTENT_Y + PADDING;
+        let hue_x = sv_x + sv_size + PADDING;
+        let alpha_y = sv_y + sv_size + PADDING;
+        let right_x = hue_x + HUE_BAR_WIDTH + PADDING * 2.0;
+        let hex_y = sv_y + PREVIEW_SIZE + PADDING * 2.0 + 16.0;
+        let slider_y = alpha_y + ALPHA_BAR_HEIGHT + PADDING * 2.0;
+        let preset_y = slider_y + SLIDER_TABS_HEIGHT + (SLIDER_HEIGHT + PADDING) * 3.0 + PADDING;
+
+        let available_width = width - PADDING * 2.0;
+        let fitting = ((available_width + SWATCH_GAP) / (SWATCH_SIZE + SWATCH_GAP)) as usize;
+        let preset_columns = NonZeroUsize::new(fitting).unwrap_or(NonZeroUsize::MIN);
+        let preset_rows = PRESET_COLORS.len().div_ceil(preset_columns.get());
+        let preset_height = SECTION_LABEL_HEIGHT + preset_rows as f32 * (SWATCH_SIZE + SWATCH_GAP);
+
+        Self {
+            width,
+            height,
+            sv_x,
+            sv_y,
+            sv_size,
+            hue_x,
+            alpha_y,
+            right_x,
+            right_width: width - right_x - PADDING,
+            hex_y,
+            eye_y: hex_y + 32.0,
+            slider_y,
+            preset_y,
+            preset_columns,
+            recent_y: preset_y + preset_height + PADDING,
+            button_y: height - BUTTON_STRIP_HEIGHT,
+        }
     }
 
-    fn preset_columns(&self, available_width: f32) -> usize {
-        let cols = ((available_width + SWATCH_GAP) / (SWATCH_SIZE + SWATCH_GAP)) as usize;
-        cols.max(1)
+    /// Top-left corner of preset swatch `i`.
+    ///
+    /// The palette is drawn by one loop and hit-tested by another; the square
+    /// you can click is the square that was drawn because there is one function
+    /// that says where a square goes, not two that agree.
+    fn preset_swatch(&self, i: usize) -> (f32, f32) {
+        let col = i % self.preset_columns;
+        let row = i / self.preset_columns;
+        (
+            PADDING + col as f32 * (SWATCH_SIZE + SWATCH_GAP),
+            self.preset_y + SECTION_LABEL_HEIGHT + row as f32 * (SWATCH_SIZE + SWATCH_GAP),
+        )
     }
 
-    fn preset_palette_height(&self) -> f32 {
-        let cols =
-            self.preset_columns(self.picker.sv_size + HUE_BAR_WIDTH + PADDING * 4.0 + PREVIEW_SIZE);
-        let rows = PRESET_COLORS.len().div_ceil(cols);
-        14.0 + rows as f32 * (SWATCH_SIZE + SWATCH_GAP)
+    /// Top-left corner of recent-colour swatch `i`. They occupy a single row.
+    fn recent_swatch(&self, i: usize) -> (f32, f32) {
+        (
+            PADDING + i as f32 * (SWATCH_SIZE + SWATCH_GAP),
+            self.recent_y + SECTION_LABEL_HEIGHT,
+        )
+    }
+
+    /// Whether (`x`, `y`) is inside the `SWATCH_SIZE` square at `origin`.
+    fn in_swatch(origin: (f32, f32), x: f32, y: f32) -> bool {
+        x >= origin.0 && x <= origin.0 + SWATCH_SIZE && y >= origin.1 && y <= origin.1 + SWATCH_SIZE
+    }
+
+    /// Top of slider row `i` (0, 1 or 2), below the tab strip.
+    fn slider_row_y(&self, i: u8) -> f32 {
+        self.slider_y + SLIDER_TABS_HEIGHT + (SLIDER_HEIGHT + PADDING) * f32::from(i)
+    }
+
+    /// Left edge and width of a slider's draggable track.
+    fn slider_track(&self) -> (f32, f32) {
+        (
+            PADDING + SLIDER_LABEL_WIDTH,
+            self.sv_size - SLIDER_LABEL_WIDTH - SLIDER_VALUE_WIDTH - PADDING,
+        )
+    }
+
+    /// Left edge of slider tab `tab`.
+    fn slider_tab_x(tab: SliderTab) -> f32 {
+        match tab {
+            SliderTab::Rgb => PADDING,
+            SliderTab::Hsv => PADDING + SLIDER_TAB_PITCH,
+        }
     }
 }
 
@@ -1918,11 +1935,16 @@ fn render_checkerboard(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32
         corner_radii: CornerRadii::ZERO,
     });
     // Dark cells
-    let cols = (width / cell) as u32 + 1;
-    let rows = (height / cell) as u32 + 1;
+    // One extra of each so the partial cell at the right and bottom edges is
+    // still drawn; the per-cell clamp below trims it to the panel.
+    let cols = ((width / cell) as u32).saturating_add(1);
+    let rows = ((height / cell) as u32).saturating_add(1);
     for row in 0..rows {
         for col in 0..cols {
-            if (row + col) % 2 == 1 {
+            // The parity of `row + col`, without the sum: a checkerboard cell
+            // is dark exactly when its two coordinates disagree in the last
+            // bit, which xor answers directly and cannot overflow.
+            if (row ^ col) % 2 == 1 {
                 let cx = x + col as f32 * cell;
                 let cy = y + row as f32 * cell;
                 let cw = cell.min(x + width - cx);
@@ -1948,7 +1970,122 @@ fn render_checkerboard(cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
+
+    /// Every hex digit, in both cases, must still come out as the value the
+    /// three hand-written subtractions produced — and every non-digit must
+    /// still be refused, including the ones adjacent to each old range.
+    #[test]
+    fn every_hex_digit_keeps_the_value_the_old_table_gave_it() {
+        for (i, c) in "0123456789".chars().enumerate() {
+            assert_eq!(hex_char_to_u8(c), Some(i as u8), "{c}");
+        }
+        for (i, c) in "abcdef".chars().enumerate() {
+            assert_eq!(hex_char_to_u8(c), Some(i as u8 + 10), "{c}");
+            let upper = c.to_ascii_uppercase();
+            assert_eq!(hex_char_to_u8(upper), Some(i as u8 + 10), "{upper}");
+        }
+        // '/' and ':' bracket the digits; '`'/'g' and '@'/'G' the letters.
+        for c in ['/', ':', '`', 'g', '@', 'G', ' ', '\u{e9}', '\u{ff10}'] {
+            assert_eq!(hex_char_to_u8(c), None, "{c:?}");
+        }
+    }
+
+    /// A grid one column wide is what a dialog too narrow for two swatches
+    /// gets; without it the row and column would be a division by zero.
+    #[test]
+    fn a_palette_too_narrow_for_a_swatch_still_has_one_column() {
+        for width in [-100.0, 0.0, 1.0, f32::NAN] {
+            let layout = DialogLayout::new(SV_SQUARE_SIZE, width, 600.0);
+            assert_eq!(layout.preset_columns, NonZeroUsize::MIN, "{width}");
+        }
+    }
+
+    /// Swatches run left to right and wrap to the next row, and no two share a
+    /// position — the property the drawing loop and the hit-test both rely on.
+    #[test]
+    fn preset_swatches_fill_rows_left_to_right_without_overlapping() {
+        let layout = DialogLayout::new(SV_SQUARE_SIZE, 400.0, 600.0);
+        let pitch = SWATCH_SIZE + SWATCH_GAP;
+        let cols = layout.preset_columns.get();
+        let (x0, y0) = layout.preset_swatch(0);
+        assert_eq!(
+            layout.preset_swatch(cols - 1),
+            (x0 + (cols - 1) as f32 * pitch, y0)
+        );
+        assert_eq!(
+            layout.preset_swatch(cols),
+            (x0, y0 + pitch),
+            "the swatch after the last of a row begins the next one"
+        );
+
+        let mut seen = Vec::new();
+        for i in 0..PRESET_COLORS.len() {
+            let (x, y) = layout.preset_swatch(i);
+            let key = (x.to_bits(), y.to_bits());
+            assert!(!seen.contains(&key), "swatch {i} repeats a position");
+            seen.push(key);
+        }
+    }
+
+    /// The point of the layout type: what you click is what was drawn. Every
+    /// preset swatch is looked up at the centre of the square the renderer
+    /// filled for it, at three dialog widths — the palette's column count is a
+    /// function of the width, so a hit-test that assumed one width used to
+    /// return a different colour at any other.
+    #[test]
+    fn every_preset_swatch_is_clickable_where_it_was_drawn() {
+        for width in [320.0, 400.0, 640.0] {
+            let mut dialog = ColorPickerDialog::new(Color::rgb(1, 2, 3));
+            let layout = dialog.layout(width, 600.0);
+            let drawn: Vec<(f32, f32)> = (0..PRESET_COLORS.len())
+                .map(|i| layout.preset_swatch(i))
+                .collect();
+
+            // The renderer really did fill a square at each of those points.
+            let cmds = dialog.render(width, 600.0);
+            for (i, &(sx, sy)) in drawn.iter().enumerate() {
+                assert!(
+                    cmds.iter().any(|c| matches!(c, RenderCommand::FillRect {
+                        x, y, width: w, height: h, color, ..
+                    } if *x == sx
+                        && *y == sy
+                        && *w == SWATCH_SIZE
+                        && *h == SWATCH_SIZE
+                        && *color == PRESET_COLORS[i])),
+                    "no swatch drawn for preset {i} at width {width}"
+                );
+            }
+
+            // And clicking the middle of each one selects it.
+            for (i, &(sx, sy)) in drawn.iter().enumerate() {
+                let event = MouseEvent {
+                    x: sx + SWATCH_SIZE / 2.0,
+                    y: sy + SWATCH_SIZE / 2.0,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                };
+                let got = dialog.handle_mouse(&event, width, 600.0);
+                let want = PRESET_COLORS[i];
+                assert!(
+                    matches!(got, Some(ColorPickerEvent::Changed(c))
+                        if (c.r, c.g, c.b) == (want.r, want.g, want.b)),
+                    "clicking preset {i} at width {width} gave {got:?}, wanted {want:?}"
+                );
+            }
+        }
+    }
 
     // --- HSV ↔ RGB conversion tests ---
 

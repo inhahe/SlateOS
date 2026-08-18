@@ -10,3 +10,6 @@ guitk = { path = "../toolkit" }
 # Integration tests construct RenderCommands directly to drive the scene
 # protocol the way a compositor would.
 guitk = { path = "../toolkit" }
+
+[lints]
+workspace = true

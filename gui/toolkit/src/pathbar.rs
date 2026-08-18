@@ -9,6 +9,7 @@
 //! and the host provides completions via `set_completions()`.
 
 use crate::color::Color;
+use crate::cycle;
 use crate::event::{EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
@@ -54,6 +55,21 @@ const DROPDOWN_ITEM_HEIGHT: f32 = 24.0;
 const DROPDOWN_MAX_VISIBLE: usize = 8;
 const DROPDOWN_PADDING: f32 = 4.0;
 const CURSOR_WIDTH: f32 = 2.0;
+/// The height of a breadcrumb pill: one line of text with padding above and
+/// below it.
+///
+/// Named because three places want it, and one of them had spelled it out
+/// again inside a halving — `y_center - (FONT_SIZE + SEGMENT_PADDING_V * 2.0)
+/// / 2.0` — where it read as the midpoint between a font size and a padding,
+/// two quantities that have no midpoint.
+const SEGMENT_HEIGHT: f32 = FONT_SIZE + SEGMENT_PADDING_V * 2.0;
+/// Stands for the segments that did not fit and were dropped from the left.
+const ELLIPSIS: &str = "...";
+/// Room held back for [`ELLIPSIS`] when deciding how many segments fit.
+///
+/// Held back rather than measured, because whether the marker is drawn at all
+/// depends on how many segments fit — which is the question being answered.
+const ELLIPSIS_RESERVE: f32 = 20.0;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -394,7 +410,9 @@ impl PathBar {
                 {
                     self.delete_selection();
                     self.edit_text.insert(self.cursor.byte, ch);
-                    self.cursor = (self.cursor.byte + ch.len_utf8()).into();
+                    // The caret stop after the insertion point is the far side
+                    // of the character just inserted, so there is always one.
+                    self.cursor = self.cursor.next_in(&self.edit_text).unwrap_or(self.cursor);
                     self.selection_anchor = None;
                     self.on_text_changed();
                     return EventResult::Consumed;
@@ -425,11 +443,8 @@ impl PathBar {
         // unresolved: `open-questions.md` → C-Q2. `text::caret_left` is the
         // visual alternative, built and tested, and switching is calling it
         // here instead — but not without an answer.
-        if self.cursor.byte() > 0 {
-            let s = &self.edit_text[..self.cursor.byte()];
-            if let Some(ch) = s.chars().next_back() {
-                self.cursor = (self.cursor.byte() - ch.len_utf8()).into();
-            }
+        if let Some(prev) = self.cursor.prev_in(&self.edit_text) {
+            self.cursor = prev;
         }
     }
 
@@ -445,11 +460,8 @@ impl PathBar {
         }
 
         // Logical, for the reason given in `move_cursor_left` above.
-        if self.cursor.byte() < self.edit_text.len() {
-            let s = &self.edit_text[self.cursor.byte()..];
-            if let Some(ch) = s.chars().next() {
-                self.cursor = (self.cursor.byte() + ch.len_utf8()).into();
-            }
+        if let Some(next) = self.cursor.next_in(&self.edit_text) {
+            self.cursor = next;
         }
     }
 
@@ -476,14 +488,13 @@ impl PathBar {
             self.on_text_changed();
             return;
         }
-        if self.cursor.byte > 0 {
-            let s = &self.edit_text[..self.cursor.byte];
-            if let Some(ch) = s.chars().next_back() {
-                let new_cursor = self.cursor.byte - ch.len_utf8();
-                self.edit_text.remove(new_cursor);
-                self.cursor = new_cursor.into();
-                self.on_text_changed();
-            }
+        // `String::remove` takes the offset of the character to remove, which is
+        // exactly the cursor's new home — so the two come out of one lookup
+        // rather than a subtraction guarded further up.
+        if let Some(prev) = self.cursor.prev_in(&self.edit_text) {
+            self.edit_text.remove(prev.byte());
+            self.cursor = prev;
+            self.on_text_changed();
         }
     }
 
@@ -549,14 +560,12 @@ impl PathBar {
         if !self.dropdown_visible || self.completions.is_empty() {
             return;
         }
-        match self.completion_index {
-            Some(0) | None => {
-                self.completion_index = Some(self.completions.len().saturating_sub(1));
-            }
-            Some(i) => {
-                self.completion_index = Some(i - 1);
-            }
-        }
+        let len = self.completions.len();
+        self.completion_index = Some(match self.completion_index {
+            Some(i) => cycle::before(len, i),
+            // Nothing selected: Up enters the list from the bottom.
+            None => len.saturating_sub(1),
+        });
         self.ensure_completion_visible();
     }
 
@@ -564,59 +573,66 @@ impl PathBar {
         if !self.dropdown_visible || self.completions.is_empty() {
             return;
         }
-        match self.completion_index {
-            None => {
-                self.completion_index = Some(0);
-            }
-            Some(i) => {
-                if i + 1 >= self.completions.len() {
-                    self.completion_index = Some(0);
-                } else {
-                    self.completion_index = Some(i + 1);
-                }
-            }
-        }
+        let len = self.completions.len();
+        self.completion_index = Some(match self.completion_index {
+            Some(i) => cycle::after(len, i),
+            // Nothing selected: Down enters the list from the top.
+            None => 0,
+        });
         self.ensure_completion_visible();
     }
 
+    /// Scroll the dropdown the least distance that brings the selected row into
+    /// view.
     fn ensure_completion_visible(&mut self) {
-        if let Some(idx) = self.completion_index {
-            if idx < self.dropdown_scroll {
-                self.dropdown_scroll = idx;
-            } else if idx >= self.dropdown_scroll + DROPDOWN_MAX_VISIBLE {
-                self.dropdown_scroll = idx + 1 - DROPDOWN_MAX_VISIBLE;
-            }
-        }
+        let Some(idx) = self.completion_index else {
+            return;
+        };
+        // The topmost scroll position that still shows `idx`: far enough down
+        // that `idx` is the last visible row. `saturating_sub` is what makes it
+        // 0 for a row already within the first windowful, which is the same
+        // answer the old `idx + 1 - DROPDOWN_MAX_VISIBLE` gave — except that
+        // one computed a negative number first and relied on never reaching
+        // this line unless it was positive.
+        let lowest = idx.saturating_add(1).saturating_sub(DROPDOWN_MAX_VISIBLE);
+        // `min` then `max` rather than `clamp`, which panics when its bounds
+        // cross — a hidden precondition is what this whole pass is removing.
+        self.dropdown_scroll = self.dropdown_scroll.min(idx).max(lowest);
     }
 
     fn accept_completion(&mut self) {
         if !self.dropdown_visible {
             return;
         }
-        let idx = match self.completion_index {
-            Some(i) if i < self.completions.len() => i,
-            _ => return,
+        let Some(item) = self
+            .completion_index
+            .and_then(|idx| self.completions.get(idx))
+            .cloned()
+        else {
+            return;
         };
 
-        let item = self.completions[idx].clone();
-
-        // Replace the partial name after the last '/' with the completion.
-        let prefix_end = self.edit_text[..self.cursor.byte]
-            .rfind('/')
-            .map_or(0, |pos| pos + 1);
+        // Replace the partial name after the last '/' with the completion. The
+        // prefix to keep is "everything but the trailing name", which measures
+        // straight off the split — the old form added one to a byte position
+        // found in a different expression, which is only a character boundary
+        // because the separator it found is one byte wide.
+        let typed = self.edit_text.get(..self.cursor.byte).unwrap_or_default();
+        let prefix_end = typed
+            .rsplit_once('/')
+            .map_or(0, |(_, name)| typed.len().saturating_sub(name.len()));
 
         // Remove everything after the prefix up to cursor.
         self.edit_text.drain(prefix_end..self.cursor.byte);
-        self.cursor = prefix_end.into();
 
-        // Insert the completion name.
+        // Insert the completion name; the cursor lands at its far end.
         let insert = if item.is_directory {
             format!("{}/", item.name)
         } else {
             item.name.clone()
         };
-        self.edit_text.insert_str(self.cursor.byte, &insert);
-        self.cursor = (self.cursor.byte + insert.len()).into();
+        self.edit_text.insert_str(prefix_end, &insert);
+        self.cursor = prefix_end.saturating_add(insert.len()).into();
 
         self.selection_anchor = None;
         self.dropdown_visible = false;
@@ -678,30 +694,28 @@ impl PathBar {
         self.segment_rects.clear();
         let y_center = height / 2.0;
 
-        // Calculate total width needed for all segments.
-        let mut total_width = BAR_PADDING;
-        let mut seg_widths: Vec<f32> = Vec::new();
-        for seg in &self.segments {
-            let text_w = crate::text::width(seg, FONT_SIZE);
-            let seg_w = text_w + SEGMENT_PADDING_H * 2.0;
-            seg_widths.push(seg_w);
-            total_width += seg_w + SEGMENT_GAP + SEPARATOR_WIDTH;
+        // The whole trail: every pill, with a gap and a separator between each
+        // neighbouring pair, inside the bar's padding.
+        let mut total_width = BAR_PADDING * 2.0;
+        for (i, seg) in self.segments.iter().enumerate() {
+            if i > 0 {
+                total_width += SEGMENT_GAP + SEPARATOR_WIDTH;
+            }
+            total_width += pill_width(seg);
         }
-        // Remove trailing gap+separator.
-        if !self.segments.is_empty() {
-            total_width -= SEGMENT_GAP + SEPARATOR_WIDTH;
-        }
-        total_width += BAR_PADDING;
 
-        // Determine overflow: if total_width > width, hide leading segments.
+        // When the trail is too long the leading segments are dropped, so the
+        // deepest — the one the user is actually in — always survives. Walk
+        // back from the end taking segments while they fit; `first_visible`
+        // ends at `len` if not even the last one does, and the "..." then
+        // stands for the lot.
         let overflow = total_width > width;
         let first_visible = if overflow {
-            // Find the first segment that fits from the right.
-            let available = width - BAR_PADDING * 2.0 - SEPARATOR_WIDTH - 20.0; // 20 for "..."
+            let available = width - BAR_PADDING * 2.0 - SEPARATOR_WIDTH - ELLIPSIS_RESERVE;
             let mut accum = 0.0f32;
             let mut first = self.segments.len();
-            for i in (0..self.segments.len()).rev() {
-                let seg_total = seg_widths[i] + SEGMENT_GAP + SEPARATOR_WIDTH;
+            for (i, seg) in self.segments.iter().enumerate().rev() {
+                let seg_total = pill_width(seg) + SEGMENT_GAP + SEPARATOR_WIDTH;
                 if accum + seg_total > available {
                     break;
                 }
@@ -713,95 +727,28 @@ impl PathBar {
             0
         };
 
+        // A separator belongs between two pills, so it is drawn before a pill
+        // that has one in front of it rather than after a pill that has one
+        // behind it — which is the same set of separators without having to
+        // ask whether an index is the last.
         let mut x = BAR_PADDING;
+        let mut preceded = false;
 
-        // Render overflow indicator.
         if overflow && first_visible > 0 {
-            let ellipsis = "...";
-            let ew = crate::text::width(ellipsis, FONT_SIZE);
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: y_center - (FONT_SIZE + SEGMENT_PADDING_V * 2.0) / 2.0,
-                width: ew + SEGMENT_PADDING_H * 2.0,
-                height: FONT_SIZE + SEGMENT_PADDING_V * 2.0,
-                color: COLOR_SURFACE0,
-                corner_radii: CornerRadii::all(SEGMENT_RADIUS),
-            });
-            cmds.push(RenderCommand::Text {
-                x: x + SEGMENT_PADDING_H,
-                y: y_center - FONT_SIZE / 2.0,
-                text: ellipsis.to_string(),
-                color: COLOR_SUBTEXT0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            x += ew + SEGMENT_PADDING_H * 2.0 + SEGMENT_GAP;
-
-            // Separator after ellipsis.
-            cmds.push(RenderCommand::Text {
-                x,
-                y: y_center - FONT_SIZE / 2.0,
-                text: ">".to_string(),
-                color: COLOR_SUBTEXT0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            x += SEPARATOR_WIDTH;
+            let (_, _, ellipsis_w, _) = push_pill(cmds, x, y_center, ELLIPSIS, COLOR_SUBTEXT0);
+            x += ellipsis_w + SEGMENT_GAP;
+            preceded = true;
         }
 
-        // Render visible segments.
-        for i in first_visible..self.segments.len() {
-            let seg = &self.segments[i];
-            let text_w = crate::text::width(seg, FONT_SIZE);
-            let seg_w = text_w + SEGMENT_PADDING_H * 2.0;
-            let seg_h = FONT_SIZE + SEGMENT_PADDING_V * 2.0;
-            let seg_y = y_center - seg_h / 2.0;
-
-            // Segment background.
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: seg_y,
-                width: seg_w,
-                height: seg_h,
-                color: COLOR_SURFACE0,
-                corner_radii: CornerRadii::all(SEGMENT_RADIUS),
-            });
-
-            // Segment text.
-            cmds.push(RenderCommand::Text {
-                x: x + SEGMENT_PADDING_H,
-                y: y_center - FONT_SIZE / 2.0,
-                text: seg.clone(),
-                color: COLOR_TEXT,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            // Store rect for hit testing.
-            self.segment_rects.push((x, seg_y, seg_w, seg_h));
-
-            x += seg_w + SEGMENT_GAP;
-
-            // Separator (except after last).
-            if i < self.segments.len() - 1 {
-                cmds.push(RenderCommand::Text {
-                    x,
-                    y: y_center - FONT_SIZE / 2.0,
-                    text: ">".to_string(),
-                    color: COLOR_SUBTEXT0,
-                    font_size: FONT_SIZE,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
+        for seg in self.segments.get(first_visible..).unwrap_or_default() {
+            if preceded {
+                push_separator(cmds, x, y_center);
                 x += SEPARATOR_WIDTH;
             }
+            let (rx, ry, rw, rh) = push_pill(cmds, x, y_center, seg, COLOR_TEXT);
+            self.segment_rects.push((rx, ry, rw, rh));
+            x += rw + SEGMENT_GAP;
+            preceded = true;
         }
     }
 
@@ -920,14 +867,27 @@ impl PathBar {
             corner_radii: CornerRadii::all(SEGMENT_RADIUS),
         });
 
-        // Items.
-        let end_idx = (self.dropdown_scroll + visible_count).min(self.completions.len());
-        for (vi, idx) in (self.dropdown_scroll..end_idx).enumerate() {
-            let item = &self.completions[idx];
+        // Items. The window is taken as a slice from the scroll position, so
+        // its end is the slice's own rather than a sum to be clamped back
+        // against the length it was derived from.
+        let window = self
+            .completions
+            .get(self.dropdown_scroll..)
+            .unwrap_or_default();
+
+        // Which *row* of the window is selected — the comparison the highlight
+        // wants — rather than which entry of the whole list, which would have
+        // to be added back up per row. An entry above the window subtracts to
+        // `None`; one below matches no row that is drawn.
+        let selected_row = self
+            .completion_index
+            .and_then(|idx| idx.checked_sub(self.dropdown_scroll));
+
+        for (vi, item) in window.iter().take(visible_count).enumerate() {
             let item_y = dropdown_y + DROPDOWN_PADDING + vi as f32 * DROPDOWN_ITEM_HEIGHT;
 
             // Highlight selected item.
-            if self.completion_index == Some(idx) {
+            if selected_row == Some(vi) {
                 cmds.push(RenderCommand::FillRect {
                     x: DROPDOWN_PADDING,
                     y: item_y,
@@ -972,6 +932,72 @@ impl PathBar {
 }
 
 // ---------------------------------------------------------------------------
+// Breadcrumb geometry
+// ---------------------------------------------------------------------------
+//
+// The breadcrumb draws one shape — a rounded box with a label in it — three
+// times over: once notionally, to measure the trail; once for the "..." that
+// stands for the segments scrolled off the left; and once per visible segment.
+// Each had its own copy of the same four numbers, and the copies had drifted:
+// the measuring pass summed a width the drawing pass then recomputed, so the
+// two agreed only by both being edited together.
+//
+// These are free functions rather than methods because the drawing loop holds
+// a shared borrow of `segments` while pushing to `segment_rects`, and only a
+// disjoint field borrow may coexist with that.
+
+/// The width of the rounded box drawn behind `label`.
+fn pill_width(label: &str) -> f32 {
+    crate::text::width(label, FONT_SIZE) + SEGMENT_PADDING_H * 2.0
+}
+
+/// Draw one pill — `label` in a rounded box, centred vertically on `y_center`
+/// — and return the rectangle it occupies, for hit testing.
+fn push_pill(
+    cmds: &mut Vec<RenderCommand>,
+    x: f32,
+    y_center: f32,
+    label: &str,
+    text_color: Color,
+) -> (f32, f32, f32, f32) {
+    let width = pill_width(label);
+    let y = y_center - SEGMENT_HEIGHT / 2.0;
+    cmds.push(RenderCommand::FillRect {
+        x,
+        y,
+        width,
+        height: SEGMENT_HEIGHT,
+        color: COLOR_SURFACE0,
+        corner_radii: CornerRadii::all(SEGMENT_RADIUS),
+    });
+    cmds.push(RenderCommand::Text {
+        x: x + SEGMENT_PADDING_H,
+        y: y_center - FONT_SIZE / 2.0,
+        text: label.to_string(),
+        color: text_color,
+        font_size: FONT_SIZE,
+        font_weight: FontWeightHint::Regular,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+    (x, y, width, SEGMENT_HEIGHT)
+}
+
+/// Draw the ">" that stands between two pills.
+fn push_separator(cmds: &mut Vec<RenderCommand>, x: f32, y_center: f32) {
+    cmds.push(RenderCommand::Text {
+        x,
+        y: y_center - FONT_SIZE / 2.0,
+        text: ">".to_string(),
+        color: COLOR_SUBTEXT0,
+        font_size: FONT_SIZE,
+        font_weight: FontWeightHint::Regular,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Path utilities
 // ---------------------------------------------------------------------------
 
@@ -1009,8 +1035,8 @@ fn normalize_path(path: &str) -> String {
 }
 
 /// Split a normalized path into display segments.
-/// "/" -> ["/"]
-/// "/home/user" -> ["/", "home", "user"]
+///
+/// `"/"` becomes `["/"]`; `"/home/user"` becomes `["/", "home", "user"]`.
 fn split_path(path: &str) -> Vec<String> {
     if path.is_empty() || path == "/" {
         return vec!["/".to_string()];
@@ -1041,19 +1067,22 @@ fn split_path(path: &str) -> Vec<String> {
 }
 
 /// Rebuild a path from segments up to and including `up_to_index`.
+///
+/// An index past the end names the whole trail rather than being an error:
+/// `take` clamps by construction, so there is no prefix length to compute and
+/// then clamp back against the slice it was derived from.
+///
+/// The two early returns this replaced — for an empty slice and for a prefix
+/// that is exactly the root — both re-derived answers the loop below already
+/// gives: no segments leaves `path` empty, and a lone `"/"` segment pushes a
+/// single slash.
 fn rebuild_path(segments: &[String], up_to_index: usize) -> String {
-    if segments.is_empty() {
-        return "/".to_string();
-    }
-
-    let end = (up_to_index + 1).min(segments.len());
-
-    if end == 1 && segments[0] == "/" {
-        return "/".to_string();
-    }
-
     let mut path = String::new();
-    for (i, seg) in segments[..end].iter().enumerate() {
+    for (i, seg) in segments
+        .iter()
+        .take(up_to_index.saturating_add(1))
+        .enumerate()
+    {
         if i == 0 && seg == "/" {
             path.push('/');
         } else {
@@ -1064,6 +1093,7 @@ fn rebuild_path(segments: &[String], up_to_index: usize) -> String {
         }
     }
 
+    // An empty trail, or one whose segments were all empty, is the root.
     if path.is_empty() {
         "/".to_string()
     } else {
@@ -1089,6 +1119,18 @@ fn autocomplete_prefix(text: &str, cursor: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
     use crate::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 
@@ -1610,5 +1652,182 @@ mod tests {
         };
         bar.handle_mouse_event(&click);
         assert!(bar.is_editing());
+    }
+
+    // --- Breadcrumb geometry ---
+
+    /// The rectangles the click handler tests against are the rectangles that
+    /// were drawn. These used to be two separate calculations of the same
+    /// four numbers — the measuring pass summed a width the drawing pass then
+    /// recomputed — so they agreed only for as long as both were edited
+    /// together, and nothing said so.
+    #[test]
+    fn every_segment_is_clickable_exactly_where_it_was_drawn() {
+        let mut bar = PathBar::new("/home/user/Documents");
+        let cmds = bar.render(800, 32);
+
+        // The bar's own background is a fill too; the pills are the ones one
+        // line of text tall.
+        let pills: Vec<(f32, f32, f32, f32)> = cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if *height == SEGMENT_HEIGHT => Some((*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(bar.segment_rects, pills, "hit boxes are the drawn boxes");
+        assert_eq!(bar.segment_rects.len(), 4);
+    }
+
+    /// Consecutive pills are one gap and one separator apart — the spacing the
+    /// measuring pass charges for each join. A separator is drawn *before* a
+    /// pill that has one in front of it rather than after a pill that is not
+    /// the last, and the two must lay out identically.
+    #[test]
+    fn neighbouring_segments_are_a_gap_and_a_separator_apart() {
+        let mut bar = PathBar::new("/home/user/Documents");
+        bar.render(800, 32);
+
+        for pair in bar.segment_rects.windows(2) {
+            let (left, right) = (pair[0], pair[1]);
+            let expected = left.0 + left.2 + SEGMENT_GAP + SEPARATOR_WIDTH;
+            assert!(
+                (right.0 - expected).abs() < 0.01,
+                "segment at {} should follow the one ending at {left:?}",
+                right.0
+            );
+        }
+    }
+
+    /// The trail is laid out inside the width it was measured against: when
+    /// nothing overflows, the last pill ends within the bar's padding.
+    #[test]
+    fn a_trail_that_fits_stays_inside_the_bar() {
+        let mut bar = PathBar::new("/home/user/Documents");
+        let width = 800.0;
+        bar.render(800, 32);
+
+        let last = *bar.segment_rects.last().expect("four segments were drawn");
+        assert!(last.0 + last.2 <= width - BAR_PADDING);
+        assert_eq!(
+            bar.segment_rects.first().map(|r| r.0),
+            Some(BAR_PADDING),
+            "with no overflow the first pill starts at the padding"
+        );
+    }
+
+    /// When the trail overflows, the ellipsis is followed by one separator and
+    /// then only the segments that fit — never a separator with nothing on one
+    /// side of it.
+    #[test]
+    fn an_overflowing_trail_draws_one_separator_per_join() {
+        let mut bar = PathBar::new("/very/long/path/with/many/segments/that/will/overflow");
+        let cmds = bar.render(150, 32);
+
+        let texts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(texts.contains(&ELLIPSIS), "the dropped segments are marked");
+        let separators = texts.iter().filter(|t| **t == ">").count();
+        // One join per visible segment: each is preceded by the ellipsis or by
+        // another segment.
+        assert_eq!(separators, bar.segment_rects.len());
+    }
+
+    /// An index past the last segment names the whole trail. It reaches
+    /// `rebuild_path` from a click test against a stale `segment_rects`, so it
+    /// must not be a panic.
+    #[test]
+    fn rebuilding_past_the_end_yields_the_whole_path() {
+        let segments = vec!["/".to_string(), "home".to_string(), "user".to_string()];
+        assert_eq!(rebuild_path(&segments, 2), "/home/user");
+        assert_eq!(rebuild_path(&segments, 99), "/home/user");
+        assert_eq!(rebuild_path(&segments, usize::MAX), "/home/user");
+        assert_eq!(rebuild_path(&[], 0), "/");
+        assert_eq!(rebuild_path(&[], usize::MAX), "/");
+    }
+
+    // --- Editing text that is not one byte per character ---
+
+    /// The caret moves by characters, not by bytes. Stepping onto a byte
+    /// inside a character is the difference between a cursor and a panic, and
+    /// the arrow keys used to reach the offset by subtraction.
+    #[test]
+    fn the_caret_steps_over_a_multibyte_character_whole() {
+        // "é" is two bytes, "日" and "本" three each.
+        let mut bar = PathBar::new("/é/日本");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        bar.drain_events();
+
+        bar.handle_key_event(&key_press(Key::Home));
+        assert_eq!(bar.cursor.byte, 0);
+
+        // Every stop is a character boundary, and every character is stepped
+        // over in one press.
+        for expected in [1, 3, 4, 7, 10] {
+            bar.handle_key_event(&key_press(Key::Right));
+            assert_eq!(bar.cursor.byte, expected);
+        }
+
+        // At the end the caret stays put rather than stepping out of range.
+        bar.handle_key_event(&key_press(Key::Right));
+        assert_eq!(bar.cursor.byte, 10);
+
+        // And back down the same offsets.
+        for expected in [7, 4, 3, 1, 0] {
+            bar.handle_key_event(&key_press(Key::Left));
+            assert_eq!(bar.cursor.byte, expected);
+        }
+        bar.handle_key_event(&key_press(Key::Left));
+        assert_eq!(bar.cursor.byte, 0);
+    }
+
+    /// Backspace removes one character, not one byte — and the offset it
+    /// removes at is the offset the caret lands on, so the two cannot disagree.
+    #[test]
+    fn backspace_removes_a_whole_multibyte_character() {
+        let mut bar = PathBar::new("/é");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        bar.drain_events();
+        assert_eq!(bar.cursor.byte, 3);
+
+        bar.handle_key_event(&key_press(Key::Backspace));
+        assert_eq!(bar.edit_text, "/");
+        assert_eq!(bar.cursor.byte, 1);
+
+        bar.handle_key_event(&key_press(Key::Backspace));
+        assert_eq!(bar.edit_text, "");
+        assert_eq!(bar.cursor.byte, 0);
+
+        // Nothing left to remove, and no offset to underflow.
+        bar.handle_key_event(&key_press(Key::Backspace));
+        assert_eq!(bar.edit_text, "");
+        assert_eq!(bar.cursor.byte, 0);
+    }
+
+    /// Typing a character leaves the caret on its far side, whatever its
+    /// width in bytes.
+    #[test]
+    fn typing_a_multibyte_character_leaves_the_caret_past_it() {
+        let mut bar = PathBar::new("/");
+        bar.handle_key_event(&key_press_ctrl(Key::L));
+        bar.drain_events();
+        bar.handle_key_event(&key_press(Key::Home));
+
+        bar.handle_key_event(&key_press_with_text(Key::E, 'é'));
+        assert_eq!(bar.edit_text, "é/");
+        assert_eq!(bar.cursor.byte, 2);
     }
 }

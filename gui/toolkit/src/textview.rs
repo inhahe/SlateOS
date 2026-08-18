@@ -8,6 +8,7 @@
 //! Both support vertical scrolling, text selection, copy-to-clipboard, and search.
 
 use crate::color::Color;
+use crate::cycle;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
@@ -215,22 +216,123 @@ const ANSI_COLORS: [Color; 16] = [
     Color::rgb(255, 255, 255), // 15: bright white
 ];
 
+/// One of the sixteen named ANSI colours.
+///
+/// Every caller derives its index by subtracting an SGR base (30, 40, 90, 100)
+/// from a parameter it has already range-checked — but the check and the table's
+/// length are two separate facts, and only `get` ties them together. An index
+/// outside the table means the range check was wrong, and rendering the default
+/// foreground is a better answer to that than a panic in a terminal view.
+fn ansi_color(index: usize) -> Color {
+    ANSI_COLORS.get(index).copied().unwrap_or(TEXT_COLOR)
+}
+
 /// Convert a 256-color index to an RGB Color.
 fn color_from_256(index: u8) -> Color {
     match index {
-        0..=15 => ANSI_COLORS[index as usize],
-        // 216-color cube (indices 16-231): 6x6x6
+        0..=15 => ansi_color(usize::from(index)),
+        // 216-color cube (indices 16-231): 6x6x6, each axis stepping by 51.
         16..=231 => {
-            let idx = index - 16;
-            let b = (idx % 6) * 51;
-            let g = ((idx / 6) % 6) * 51;
-            let r = (idx / 36) * 51;
-            Color::rgb(r, g, b)
+            let idx = index.saturating_sub(16);
+            let level = |n: u8| n.saturating_mul(51);
+            Color::rgb(level(idx / 36), level((idx / 6) % 6), level(idx % 6))
         }
-        // Grayscale ramp (indices 232-255): 24 shades
+        // Grayscale ramp (indices 232-255): 24 shades from 8 to 238.
         232..=255 => {
-            let gray = 8 + (index - 232) * 10;
+            let gray = index
+                .saturating_sub(232)
+                .saturating_mul(10)
+                .saturating_add(8);
             Color::rgb(gray, gray, gray)
+        }
+    }
+}
+
+/// A cursor over the input as *characters*, not bytes.
+///
+/// `parse_ansi` takes a `&str` — already known-valid UTF-8 — and the previous
+/// version nonetheless decoded it by hand: it guessed a sequence's length from
+/// the lead byte, clamped that guess to the buffer, and silently dropped the
+/// character if the guess produced something `from_utf8` rejected. Every step
+/// of that is redundant on a `&str`, and each was an index the compiler could
+/// not check. Holding the *unread remainder* instead of an offset means the
+/// cursor is a `&str` at all times: it cannot leave a character boundary, and
+/// there is no arithmetic to get wrong.
+struct StrCursor<'a> {
+    rest: &'a str,
+}
+
+impl<'a> StrCursor<'a> {
+    fn new(rest: &'a str) -> Self {
+        Self { rest }
+    }
+
+    fn at_end(&self) -> bool {
+        self.rest.is_empty()
+    }
+
+    /// Take the next character and advance past it.
+    fn next_char(&mut self) -> Option<char> {
+        let mut chars = self.rest.chars();
+        let c = chars.next()?;
+        self.rest = chars.as_str();
+        Some(c)
+    }
+
+    /// Consume `prefix` if it is what comes next, reporting whether it was.
+    fn eat(&mut self, prefix: &str) -> bool {
+        match self.rest.strip_prefix(prefix) {
+            Some(tail) => {
+                self.rest = tail;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// Move the pending text into `line` as one span, if there is any.
+fn flush_span(text: &mut String, line: &mut Vec<StyledSpan>, style: AnsiStyle) {
+    if !text.is_empty() {
+        line.push(StyledSpan::styled(core::mem::take(text), style));
+    }
+}
+
+/// Consume a CSI sequence's parameters and final byte, applying it if it is SGR.
+///
+/// The cursor arrives positioned just past `ESC [`. Every path through the loop
+/// consumes a character — `next_char` is what drives it — so the sequence
+/// always ends, which is why the caller's loop terminates. A sequence that runs
+/// off the end of the input is simply dropped, matching a terminal's behaviour
+/// on a truncated escape.
+fn parse_csi(cursor: &mut StrCursor<'_>, style: &mut AnsiStyle) {
+    let mut params: Vec<u16> = Vec::new();
+    let mut num: Option<u16> = None;
+
+    while let Some(c) = cursor.next_char() {
+        match c {
+            '0'..='9' => {
+                // The arm has already established this is a decimal digit, so
+                // both conversions succeed; `unwrap_or` states that without
+                // needing a panic to do it.
+                let digit = c
+                    .to_digit(10)
+                    .and_then(|d| u16::try_from(d).ok())
+                    .unwrap_or(0);
+                num = Some(num.unwrap_or(0).saturating_mul(10).saturating_add(digit));
+            }
+            ';' => params.push(num.take().unwrap_or(0)),
+            // Final byte of an SGR sequence.
+            'm' => {
+                params.push(num.unwrap_or(0));
+                apply_sgr_params(&params, style);
+                return;
+            }
+            // Any other CSI final byte: a sequence we don't handle, consumed
+            // and discarded. This arm must stay below `'m'`, which it contains.
+            '@'..='~' => return,
+            // Anything else is malformed; drop it and resume as plain text.
+            _ => return,
         }
     }
 }
@@ -243,90 +345,20 @@ pub fn parse_ansi(input: &str) -> Vec<Vec<StyledSpan>> {
     let mut current_text = String::new();
     let mut current_style = AnsiStyle::default();
 
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        if bytes[i] == b'\x1b' && i + 1 < len && bytes[i + 1] == b'[' {
-            // Flush current text as a span
-            if !current_text.is_empty() {
-                current_line.push(StyledSpan::styled(
-                    core::mem::take(&mut current_text),
-                    current_style,
-                ));
-            }
-
-            // Parse CSI sequence
-            i += 2; // skip ESC [
-            let mut params: Vec<u16> = Vec::new();
-            let mut num: Option<u16> = None;
-
-            while i < len {
-                match bytes[i] {
-                    b'0'..=b'9' => {
-                        let digit = (bytes[i] - b'0') as u16;
-                        num = Some(num.unwrap_or(0).saturating_mul(10).saturating_add(digit));
-                        i += 1;
-                    }
-                    b';' => {
-                        params.push(num.unwrap_or(0));
-                        num = None;
-                        i += 1;
-                    }
-                    // Final byte of SGR sequence
-                    b'm' => {
-                        params.push(num.unwrap_or(0));
-                        apply_sgr_params(&params, &mut current_style);
-                        i += 1;
-                        break;
-                    }
-                    // Some other CSI sequence we don't handle — skip to final byte
-                    b'@'..=b'~' => {
-                        i += 1;
-                        break;
-                    }
-                    _ => {
-                        i += 1;
-                        break;
-                    }
-                }
-            }
-        } else if bytes[i] == b'\n' {
-            // End of line
-            if !current_text.is_empty() {
-                current_line.push(StyledSpan::styled(
-                    core::mem::take(&mut current_text),
-                    current_style,
-                ));
-            }
+    let mut cursor = StrCursor::new(input);
+    while !cursor.at_end() {
+        if cursor.eat("\x1b[") {
+            flush_span(&mut current_text, &mut current_line, current_style);
+            parse_csi(&mut cursor, &mut current_style);
+        } else if cursor.eat("\n") {
+            flush_span(&mut current_text, &mut current_line, current_style);
             lines.push(core::mem::take(&mut current_line));
-            i += 1;
-        } else if bytes[i] == b'\r' {
-            // Skip carriage return
-            i += 1;
-        } else {
-            // Collect UTF-8 characters
-            let ch_start = i;
-            // Advance past a single UTF-8 character
-            if bytes[i] & 0x80 == 0 {
-                current_text.push(bytes[i] as char);
-                i += 1;
-            } else {
-                // Multi-byte UTF-8
-                let ch_len = if bytes[i] & 0xE0 == 0xC0 {
-                    2
-                } else if bytes[i] & 0xF0 == 0xE0 {
-                    3
-                } else {
-                    4
-                };
-                let end = (ch_start + ch_len).min(len);
-                if let Ok(s) = core::str::from_utf8(&bytes[ch_start..end]) {
-                    current_text.push_str(s);
-                }
-                i = end;
-            }
+        } else if cursor.eat("\r") {
+            // Dropped: this view has no cursor to return to column zero, so a
+            // CR-LF pair must produce one line break rather than two.
+        } else if let Some(c) = cursor.next_char() {
+            // Includes a lone ESC not followed by '[', which is shown as text.
+            current_text.push(c);
         }
     }
 
@@ -341,11 +373,76 @@ pub fn parse_ansi(input: &str) -> Vec<Vec<StyledSpan>> {
     lines
 }
 
+/// A cursor over the unread tail of an SGR parameter list.
+///
+/// The extended-colour codes (`38`/`48`) read a variable number of parameters
+/// that follow them, and the previous version did it by guarding `params[i + 2]`
+/// with an `i + 2 < params.len()` written in the *pattern guard* of the arm
+/// above — a bound and a read in different expressions, twice for each of four
+/// forms. Holding the remainder rather than an offset means a read that has no
+/// bytes behind it simply yields `None`.
+struct ParamCursor<'a> {
+    rest: &'a [u16],
+}
+
+impl<'a> ParamCursor<'a> {
+    fn new(rest: &'a [u16]) -> Self {
+        Self { rest }
+    }
+
+    /// Take the next parameter and advance past it.
+    fn next_param(&mut self) -> Option<u16> {
+        let (first, tail) = self.rest.split_first()?;
+        self.rest = tail;
+        Some(*first)
+    }
+
+    /// Take the next `N` parameters, or none at all if there are fewer.
+    ///
+    /// All-or-nothing on purpose: a truncated extended-colour sequence must
+    /// leave its remaining parameters to be read as ordinary SGR codes, which
+    /// is what a terminal does, and a partial consume would eat one of them.
+    fn take<const N: usize>(&mut self) -> Option<[u16; N]> {
+        let (head, tail) = self.rest.split_at_checked(N)?;
+        let taken = <[u16; N]>::try_from(head).ok()?;
+        self.rest = tail;
+        Some(taken)
+    }
+}
+
+/// Narrow an SGR parameter to a colour channel.
+///
+/// Out-of-range values are clamped rather than truncated: `as u8` turned a
+/// malformed `38;2;300;0;0` into channel 44, a colour with no relationship to
+/// what was asked for. Saturating at least keeps "very red" red.
+fn sgr_channel(value: u16) -> u8 {
+    u8::try_from(value).unwrap_or(u8::MAX)
+}
+
+/// Consume the tail of a `38`/`48` extended-colour code and report its colour.
+///
+/// The `38`/`48` introducer has already been consumed. `5;N` names a 256-colour
+/// index and `2;R;G;B` a direct triple; anything else — including a truncated
+/// form — selects no colour and leaves what follows to be read as ordinary SGR.
+fn extended_color(params: &mut ParamCursor<'_>) -> Option<Color> {
+    match params.next_param()? {
+        5 => {
+            let [index] = params.take::<1>()?;
+            Some(color_from_256(sgr_channel(index)))
+        }
+        2 => {
+            let [r, g, b] = params.take::<3>()?;
+            Some(Color::rgb(sgr_channel(r), sgr_channel(g), sgr_channel(b)))
+        }
+        _ => None,
+    }
+}
+
 /// Apply SGR (Select Graphic Rendition) parameters to a style.
 fn apply_sgr_params(params: &[u16], style: &mut AnsiStyle) {
-    let mut i = 0;
-    while i < params.len() {
-        match params[i] {
+    let mut params = ParamCursor::new(params);
+    while let Some(code) = params.next_param() {
+        match code {
             0 => *style = AnsiStyle::default(),
             1 => style.bold = true,
             2 => style.dim = true,
@@ -360,62 +457,39 @@ fn apply_sgr_params(params: &[u16], style: &mut AnsiStyle) {
             24 => style.underline = false,
             27 => style.reverse = false,
             // Foreground colors 30-37
-            30..=37 => style.fg = Some(ANSI_COLORS[(params[i] - 30) as usize]),
+            30..=37 => style.fg = Some(ansi_color(usize::from(code.saturating_sub(30)))),
             // Default foreground
             39 => style.fg = None,
             // Background colors 40-47
-            40..=47 => style.bg = Some(ANSI_COLORS[(params[i] - 40) as usize]),
+            40..=47 => style.bg = Some(ansi_color(usize::from(code.saturating_sub(40)))),
             // Default background
             49 => style.bg = None,
-            // Bright foreground 90-97
-            90..=97 => style.fg = Some(ANSI_COLORS[(params[i] - 90 + 8) as usize]),
+            // Bright foreground 90-97 — the second half of the 16-colour table
+            90..=97 => {
+                style.fg = Some(ansi_color(
+                    usize::from(code.saturating_sub(90)).saturating_add(8),
+                ));
+            }
             // Bright background 100-107
-            100..=107 => style.bg = Some(ANSI_COLORS[(params[i] - 100 + 8) as usize]),
+            100..=107 => {
+                style.bg = Some(ansi_color(
+                    usize::from(code.saturating_sub(100)).saturating_add(8),
+                ));
+            }
             // Extended color: 38;5;N or 38;2;R;G;B
-            38 if i + 1 < params.len() => {
-                match params[i + 1] {
-                        5
-                            // 256-color
-                            if i + 2 < params.len() => {
-                                style.fg = Some(color_from_256(params[i + 2] as u8));
-                                i += 2;
-                            }
-                        2
-                            // True color
-                            if i + 4 < params.len() => {
-                                style.fg = Some(Color::rgb(
-                                    params[i + 2] as u8,
-                                    params[i + 3] as u8,
-                                    params[i + 4] as u8,
-                                ));
-                                i += 4;
-                            }
-                        _ => {}
-                    }
-                i += 1;
+            38 => {
+                if let Some(color) = extended_color(&mut params) {
+                    style.fg = Some(color);
+                }
             }
             // Extended background: 48;5;N or 48;2;R;G;B
-            48 if i + 1 < params.len() => {
-                match params[i + 1] {
-                    5 if i + 2 < params.len() => {
-                        style.bg = Some(color_from_256(params[i + 2] as u8));
-                        i += 2;
-                    }
-                    2 if i + 4 < params.len() => {
-                        style.bg = Some(Color::rgb(
-                            params[i + 2] as u8,
-                            params[i + 3] as u8,
-                            params[i + 4] as u8,
-                        ));
-                        i += 4;
-                    }
-                    _ => {}
+            48 => {
+                if let Some(color) = extended_color(&mut params) {
+                    style.bg = Some(color);
                 }
-                i += 1;
             }
             _ => {} // Unknown SGR parameter — ignore
         }
-        i += 1;
     }
 }
 
@@ -495,6 +569,33 @@ pub struct SearchState {
     pub case_sensitive: bool,
 }
 
+impl SearchState {
+    /// The match after the current one, wrapping at the end.
+    ///
+    /// Returns `None` when there is nothing to move to, which is the emptiness
+    /// check both views used to write as a separate early return above their
+    /// own copy of this arithmetic.
+    fn next_index(&self) -> Option<usize> {
+        if self.matches.is_empty() {
+            return None;
+        }
+        Some(match self.current_match {
+            Some(idx) => cycle::after(self.matches.len(), idx),
+            // No current match: start at the first.
+            None => 0,
+        })
+    }
+
+    /// The match before the current one, wrapping at the start.
+    fn prev_index(&self) -> Option<usize> {
+        let last = self.matches.len().checked_sub(1)?;
+        Some(match self.current_match {
+            Some(idx) => cycle::before(self.matches.len(), idx),
+            None => last,
+        })
+    }
+}
+
 impl SimpleTextView {
     /// Create a new empty SimpleTextView with default config.
     pub fn new(width: f32, height: f32) -> Self {
@@ -542,22 +643,30 @@ impl SimpleTextView {
     /// Width of the line-number gutter in pixels.
     fn gutter_width(&self) -> f32 {
         if self.config.show_line_numbers {
-            let digits = (self.lines.len() as f32).log10().floor() as usize + 1;
-            let digits = digits.max(3); // minimum 3 digits wide
+            let digits = line_number_digits(self.lines.len());
             (digits as f32 + 1.0) * self.config.char_width
         } else {
             0.0
         }
     }
 
+    /// The largest scroll offset that still fills the view.
+    ///
+    /// Three call sites used to derive this independently — `is_at_bottom`,
+    /// `clamp_scroll` and `scroll_to_bottom` — each pairing a
+    /// `lines.len() - visible` with its own `lines.len() <= visible` guard
+    /// written several lines away from it. Saturating subtraction *is* that
+    /// guard, so the two can no longer disagree.
+    fn max_scroll_offset(&self) -> usize {
+        self.lines.len().saturating_sub(self.visible_lines())
+    }
+
     /// Whether the view is scrolled to the bottom.
     pub fn is_at_bottom(&self) -> bool {
-        let visible = self.visible_lines();
-        if self.lines.len() <= visible {
-            true
-        } else {
-            self.scroll_offset >= self.lines.len() - visible
-        }
+        // A view shorter than the screen has a maximum offset of zero, so it is
+        // always at the bottom — which is what the old `len() <= visible` early
+        // return said in three more lines.
+        self.scroll_offset >= self.max_scroll_offset()
     }
 
     /// Set plain text content (replaces everything).
@@ -629,7 +738,7 @@ impl SimpleTextView {
     /// Drop oldest lines to stay within max_lines.
     fn enforce_max_lines(&mut self) {
         if self.config.max_lines > 0 && self.lines.len() > self.config.max_lines {
-            let excess = self.lines.len() - self.config.max_lines;
+            let excess = self.lines.len().saturating_sub(self.config.max_lines);
             self.lines.drain(0..excess);
             // Adjust scroll offset
             self.scroll_offset = self.scroll_offset.saturating_sub(excess);
@@ -640,11 +749,11 @@ impl SimpleTextView {
                         self.selection = None;
                     } else {
                         sel.start = TextPosition::new(0, 0);
-                        sel.end.line -= excess;
+                        sel.end.line = sel.end.line.saturating_sub(excess);
                     }
                 } else {
-                    sel.start.line -= excess;
-                    sel.end.line -= excess;
+                    sel.start.line = sel.start.line.saturating_sub(excess);
+                    sel.end.line = sel.end.line.saturating_sub(excess);
                 }
             }
         }
@@ -652,25 +761,12 @@ impl SimpleTextView {
 
     /// Clamp scroll offset to valid range.
     fn clamp_scroll(&mut self) {
-        let visible = self.visible_lines();
-        if self.lines.len() <= visible {
-            self.scroll_offset = 0;
-        } else {
-            let max_offset = self.lines.len() - visible;
-            if self.scroll_offset > max_offset {
-                self.scroll_offset = max_offset;
-            }
-        }
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll_offset());
     }
 
     /// Scroll to the very bottom.
     pub fn scroll_to_bottom(&mut self) {
-        let visible = self.visible_lines();
-        if self.lines.len() > visible {
-            self.scroll_offset = self.lines.len() - visible;
-        } else {
-            self.scroll_offset = 0;
-        }
+        self.scroll_offset = self.max_scroll_offset();
     }
 
     /// Scroll to the very top.
@@ -680,11 +776,14 @@ impl SimpleTextView {
 
     /// Scroll by a number of lines (positive = down, negative = up).
     pub fn scroll_by(&mut self, delta: i32) {
-        if delta < 0 {
-            self.scroll_offset = self.scroll_offset.saturating_sub((-delta) as usize);
+        // `unsigned_abs` rather than `-delta`: negating `i32::MIN` overflows,
+        // and this is a public entry point, so the argument is the caller's.
+        let magnitude = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+        self.scroll_offset = if delta < 0 {
+            self.scroll_offset.saturating_sub(magnitude)
         } else {
-            self.scroll_offset = self.scroll_offset.saturating_add(delta as usize);
-        }
+            self.scroll_offset.saturating_add(magnitude)
+        };
         self.clamp_scroll();
     }
 
@@ -776,7 +875,10 @@ impl SimpleTextView {
         let gutter = self.gutter_width();
         let text_x = (x - gutter).max(0.0);
         let line_in_view = (y / self.config.line_height) as usize;
-        let line = (self.scroll_offset + line_in_view).min(self.lines.len().saturating_sub(1));
+        let line = self
+            .scroll_offset
+            .saturating_add(line_in_view)
+            .min(self.lines.len().saturating_sub(1));
 
         // The inverse of `column_offsets`, and deliberately written as one:
         // dividing by a cell width would disagree with the placement of every
@@ -861,10 +963,12 @@ impl SimpleTextView {
 
     /// Select all text.
     pub fn select_all(&mut self) {
-        if self.lines.is_empty() {
+        // `checked_sub` rather than an `is_empty` guard three lines above the
+        // `- 1`: one expression both rejects the empty case and produces the
+        // index, so neither can be changed without the other.
+        let Some(last_line) = self.lines.len().checked_sub(1) else {
             return;
-        }
-        let last_line = self.lines.len() - 1;
+        };
         let last_col = self.line_char_count(last_line);
         self.selection = Some(Selection::new(
             TextPosition::ZERO,
@@ -875,21 +979,7 @@ impl SimpleTextView {
     /// Find word boundaries around a position (for double-click).
     fn word_at(&self, pos: TextPosition) -> Selection {
         let text = self.line_text(pos.line);
-        let bytes = text.as_bytes();
-        let col = pos.col.min(text.len());
-
-        // Scan left to find word start
-        let mut start = col;
-        while start > 0 && is_word_char(bytes[start - 1]) {
-            start -= 1;
-        }
-
-        // Scan right to find word end
-        let mut end = col;
-        while end < bytes.len() && is_word_char(bytes[end]) {
-            end += 1;
-        }
-
+        let (start, end) = word_range_at(&text, pos.col);
         Selection::new(
             TextPosition::new(pos.line, start),
             TextPosition::new(pos.line, end),
@@ -914,12 +1004,8 @@ impl SimpleTextView {
 
     /// Navigate to the next match.
     pub fn next_match(&mut self) {
-        if self.search.matches.is_empty() {
+        let Some(next) = self.search.next_index() else {
             return;
-        }
-        let next = match self.search.current_match {
-            Some(idx) => (idx + 1) % self.search.matches.len(),
-            None => 0,
         };
         self.search.current_match = Some(next);
         self.scroll_to_match(next);
@@ -927,12 +1013,8 @@ impl SimpleTextView {
 
     /// Navigate to the previous match.
     pub fn prev_match(&mut self) {
-        if self.search.matches.is_empty() {
+        let Some(prev) = self.search.prev_index() else {
             return;
-        }
-        let prev = match self.search.current_match {
-            Some(0) | None => self.search.matches.len() - 1,
-            Some(idx) => idx - 1,
         };
         self.search.current_match = Some(prev);
         self.scroll_to_match(prev);
@@ -975,7 +1057,7 @@ impl SimpleTextView {
     fn scroll_to_match(&mut self, match_idx: usize) {
         if let Some(&(line, _, _)) = self.search.matches.get(match_idx) {
             let visible = self.visible_lines();
-            if line < self.scroll_offset || line >= self.scroll_offset + visible {
+            if line < self.scroll_offset || line >= self.scroll_offset.saturating_add(visible) {
                 // Center the match
                 self.scroll_offset = line.saturating_sub(visible / 2);
                 self.clamp_scroll();
@@ -999,7 +1081,7 @@ impl SimpleTextView {
             // Still handle scroll
             if let MouseEventKind::Scroll { dy, .. } = event.kind {
                 let lines = (dy / self.config.line_height).round() as i32;
-                self.scroll_by(-lines);
+                self.scroll_by(lines.saturating_neg());
                 return (EventResult::Consumed, None);
             }
             return (EventResult::Ignored, None);
@@ -1033,7 +1115,7 @@ impl SimpleTextView {
             }
             MouseEventKind::Scroll { dy, .. } => {
                 let lines = (dy / self.config.line_height).round() as i32;
-                self.scroll_by(-lines);
+                self.scroll_by(lines.saturating_neg());
                 (EventResult::Consumed, None)
             }
             _ => (EventResult::Ignored, None),
@@ -1061,7 +1143,7 @@ impl SimpleTextView {
         match event.key {
             Key::PageUp => {
                 let page = self.visible_lines().max(1) as i32;
-                self.scroll_by(-page);
+                self.scroll_by(page.saturating_neg());
                 return (EventResult::Consumed, None);
             }
             Key::PageDown => {
@@ -1118,7 +1200,6 @@ impl SimpleTextView {
 
         let gutter_w = self.gutter_width();
         let visible = self.visible_lines();
-        let _end_line = (self.scroll_offset + visible).min(self.lines.len());
 
         // Draw gutter background
         if self.config.show_line_numbers && gutter_w > 0.0 {
@@ -1126,7 +1207,7 @@ impl SimpleTextView {
         }
 
         for view_line in 0..visible {
-            let line_idx = self.scroll_offset + view_line;
+            let line_idx = self.scroll_offset.saturating_add(view_line);
             if line_idx >= self.lines.len() {
                 break;
             }
@@ -1146,7 +1227,7 @@ impl SimpleTextView {
 
             // Line number
             if self.config.show_line_numbers {
-                let num_str = format!("{}", line_idx + 1);
+                let num_str = format!("{}", line_idx.saturating_add(1));
                 let num_x = gutter_w - (num_str.len() as f32 + 0.5) * self.config.char_width;
                 tree.push(RenderCommand::Text {
                     x: num_x,
@@ -1254,11 +1335,13 @@ fn resolve_span_fg(style: &AnsiStyle) -> Color {
     if style.reverse {
         style.bg.unwrap_or(BG_COLOR)
     } else if style.dim {
-        // Dim: blend toward background
+        // Dim: blend halfway toward the background. `u8::midpoint` does the
+        // widen-add-halve in one step, so there is no intermediate that has to
+        // be a `u16` to avoid overflowing.
         Color::rgba(
-            ((base.r as u16 + BG_COLOR.r as u16) / 2) as u8,
-            ((base.g as u16 + BG_COLOR.g as u16) / 2) as u8,
-            ((base.b as u16 + BG_COLOR.b as u16) / 2) as u8,
+            u8::midpoint(base.r, BG_COLOR.r),
+            u8::midpoint(base.g, BG_COLOR.g),
+            u8::midpoint(base.b, BG_COLOR.b),
             base.a,
         )
     } else {
@@ -1275,9 +1358,55 @@ fn resolve_span_bg(style: &AnsiStyle) -> Option<Color> {
     }
 }
 
+/// The narrowest gutter either view will draw, in digits.
+const MIN_GUTTER_DIGITS: usize = 3;
+
+/// How many digits the largest line number needs.
+///
+/// Both views computed this, and both relied on `log10(0)` being negative
+/// infinity and the cast saturating it to zero — true, but true by accident
+/// rather than by anything either function said. Stating the empty case makes
+/// the reliance explicit and puts it in one place.
+fn line_number_digits(line_count: usize) -> usize {
+    if line_count == 0 {
+        return MIN_GUTTER_DIGITS;
+    }
+    let digits = (line_count as f32).log10().floor() as usize;
+    digits.saturating_add(1).max(MIN_GUTTER_DIGITS)
+}
+
 /// Check whether a byte is a "word" character (for double-click selection).
 fn is_word_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// The byte range of the word surrounding `col` in `text`.
+///
+/// Both views wrote this scan out longhand — `while start > 0 && is_word_char(
+/// bytes[start - 1])` and its mirror — so the identical four lines appeared
+/// twice, each with a bound tested in one expression and used in the next.
+/// `iter().rposition` and `iter().position` do the same walk with the bound
+/// inside the iterator, and there is now one copy of it.
+///
+/// `col` is clamped into the string, so a stale caret from a shorter line
+/// cannot name a byte that is no longer there.
+fn word_range_at(text: &str, col: usize) -> (usize, usize) {
+    let bytes = text.as_bytes();
+    let col = col.min(bytes.len());
+    let (before, after) = bytes.split_at(col.min(bytes.len()));
+
+    // The first non-word byte scanning backwards ends the run; nothing before
+    // it belongs to the word, and no such byte means the run reaches the start.
+    let start = before
+        .iter()
+        .rposition(|b| !is_word_char(*b))
+        .map_or(0, |last_gap| last_gap.saturating_add(1));
+    let end = after
+        .iter()
+        .position(|b| !is_word_char(*b))
+        .map_or(bytes.len(), |gap| col.saturating_add(gap));
+
+    (start, end)
 }
 
 // ===========================================================================
@@ -2041,9 +2170,7 @@ impl RichTextView {
     /// Width of the line-number gutter.
     fn gutter_width(&self) -> f32 {
         if self.config.show_line_numbers {
-            let total_lines = self.wrapped_lines.len().max(1);
-            let digits = (total_lines as f32).log10().floor() as usize + 1;
-            let digits = digits.max(3);
+            let digits = line_number_digits(self.wrapped_lines.len());
             (digits as f32 + 1.0) * self.config.char_width
         } else {
             0.0
@@ -2059,17 +2186,15 @@ impl RichTextView {
         let gutter_w = self.gutter_width();
         let text_x = (x - gutter_w).max(0.0);
 
-        // Find which wrapped line this y falls on
-        let mut line_idx = 0;
-        for (i, wl) in self.wrapped_lines.iter().enumerate() {
-            if abs_y >= wl.y && abs_y < wl.y + wl.line_height {
-                line_idx = i;
-                break;
-            }
-            if i == self.wrapped_lines.len() - 1 {
-                line_idx = i;
-            }
-        }
+        // The first wrapped line whose band contains this y, falling back to the
+        // last line when none does. The old loop spelled that fallback out with
+        // an `i == len - 1` test *inside* the loop — a length re-derived on
+        // every iteration to say what the search running out already says.
+        let line_idx = self
+            .wrapped_lines
+            .iter()
+            .position(|wl| abs_y >= wl.y && abs_y < wl.y + wl.line_height)
+            .unwrap_or_else(|| self.wrapped_lines.len().saturating_sub(1));
 
         let col = if let Some(wl) = self.wrapped_lines.get(line_idx) {
             self.col_at_x(wl, (text_x - wl.indent).max(0.0))
@@ -2158,10 +2283,9 @@ impl RichTextView {
     /// Select all text.
     pub fn select_all(&mut self) {
         self.ensure_layout();
-        if self.wrapped_lines.is_empty() {
+        let Some(last) = self.wrapped_lines.len().checked_sub(1) else {
             return;
-        }
-        let last = self.wrapped_lines.len() - 1;
+        };
         let last_col = self.wrapped_line_text(last).len();
         self.selection = Some(Selection::new(
             TextPosition::ZERO,
@@ -2185,12 +2309,8 @@ impl RichTextView {
 
     /// Next match.
     pub fn next_match(&mut self) {
-        if self.search.matches.is_empty() {
+        let Some(next) = self.search.next_index() else {
             return;
-        }
-        let next = match self.search.current_match {
-            Some(idx) => (idx + 1) % self.search.matches.len(),
-            None => 0,
         };
         self.search.current_match = Some(next);
         self.scroll_to_match(next);
@@ -2198,12 +2318,8 @@ impl RichTextView {
 
     /// Previous match.
     pub fn prev_match(&mut self) {
-        if self.search.matches.is_empty() {
+        let Some(prev) = self.search.prev_index() else {
             return;
-        }
-        let prev = match self.search.current_match {
-            Some(0) | None => self.search.matches.len() - 1,
-            Some(idx) => idx - 1,
         };
         self.search.current_match = Some(prev);
         self.scroll_to_match(prev);
@@ -2396,18 +2512,7 @@ impl RichTextView {
     /// Word boundaries for double-click in wrapped lines.
     fn word_at_wrapped(&self, pos: TextPosition) -> Selection {
         let text = self.wrapped_line_text(pos.line);
-        let bytes = text.as_bytes();
-        let col = pos.col.min(text.len());
-
-        let mut start = col;
-        while start > 0 && is_word_char(bytes[start - 1]) {
-            start -= 1;
-        }
-        let mut end = col;
-        while end < bytes.len() && is_word_char(bytes[end]) {
-            end += 1;
-        }
-
+        let (start, end) = word_range_at(&text, pos.col);
         Selection::new(
             TextPosition::new(pos.line, start),
             TextPosition::new(pos.line, end),
@@ -2490,7 +2595,7 @@ impl RichTextView {
 
             // Line number
             if self.config.show_line_numbers {
-                let num_str = format!("{}", vis_idx + 1);
+                let num_str = format!("{}", vis_idx.saturating_add(1));
                 let num_x = gutter_w - (num_str.len() as f32 + 0.5) * self.config.char_width;
                 tree.push(RenderCommand::Text {
                     x: num_x,
@@ -2667,25 +2772,25 @@ impl RichTextView {
 // ---------------------------------------------------------------------------
 
 /// Split text at the next word boundary, returning (word_including_trailing_space, rest).
+///
+/// The leading spaces belong to the word rather than to what follows, because
+/// the caller is measuring how wide the next chunk will draw and the spaces
+/// take width wherever they land.
+///
+/// Written as two `find`s rather than two hand-advanced index loops: each bound
+/// now lives inside the search that uses it, and `split_at` produces both halves
+/// from the single offset instead of two independent slices of the same string.
 fn split_next_word(s: &str) -> (&str, &str) {
-    if s.is_empty() {
-        return ("", "");
-    }
+    // Past the run of leading spaces…
+    let after_spaces = s.find(|c| c != ' ').unwrap_or(s.len());
+    // …and then past the run of non-spaces that follows it. The second search
+    // is relative to the tail, so its result has to be rebased onto `s`.
+    let word_end = s
+        .get(after_spaces..)
+        .and_then(|tail| tail.find(' '))
+        .map_or(s.len(), |gap| after_spaces.saturating_add(gap));
 
-    let bytes = s.as_bytes();
-    let mut i = 0;
-
-    // Skip leading whitespace (include it in the "word" for width calculation)
-    while i < bytes.len() && bytes[i] == b' ' {
-        i += 1;
-    }
-
-    // Find end of word (non-space characters)
-    while i < bytes.len() && bytes[i] != b' ' {
-        i += 1;
-    }
-
-    (&s[..i], &s[i..])
+    s.split_at(word_end)
 }
 
 // ===========================================================================
@@ -2694,6 +2799,18 @@ fn split_next_word(s: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     /// Width of one grid cell in the tests below, in pixels.
@@ -2791,6 +2908,168 @@ mod tests {
     fn test_parse_ansi_bg_color() {
         let lines = parse_ansi("\x1b[44mblue bg\x1b[0m");
         assert_eq!(lines[0][0].style.bg, Some(ANSI_COLORS[4])); // blue
+    }
+
+    #[test]
+    fn multi_byte_characters_survive_the_parser_intact() {
+        // The parser used to decode UTF-8 by hand from `input.as_bytes()`,
+        // guessing each sequence's length from its lead byte. The input is a
+        // `&str`, so every character in it is already valid — anything that
+        // comes out different is the decoder's fault, not the text's.
+        for text in [
+            "héllo wörld",
+            "日本語のテキスト",
+            "emoji: 🦀🚀 and combining: é",
+            "mixed ascii ünd nön-ascii",
+        ] {
+            let lines = parse_ansi(text);
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0][0].text, text, "round-tripping {text:?}");
+        }
+        // ...and still does when styling splits the run mid-way.
+        let lines = parse_ansi("日本\x1b[31m語\x1b[0m");
+        assert_eq!(lines[0][0].text, "日本");
+        assert_eq!(lines[0][1].text, "語");
+    }
+
+    #[test]
+    fn a_truncated_or_bogus_escape_does_not_eat_the_rest_of_the_line() {
+        // An escape that runs off the end of the input is dropped.
+        let lines = parse_ansi("before\x1b[38;5");
+        assert_eq!(lines[0][0].text, "before");
+        assert_eq!(lines[0].len(), 1, "a truncated CSI produces no span");
+
+        // A lone ESC that is not followed by '[' is ordinary text.
+        let lines = parse_ansi("a\x1bb");
+        assert_eq!(lines[0][0].text, "a\u{1b}b");
+
+        // `38;5` with no index leaves the colour alone, and what follows is
+        // read as ordinary SGR — here, bold.
+        let lines = parse_ansi("\x1b[38;5;1mx");
+        assert!(lines[0][0].style.fg.is_some());
+        let lines = parse_ansi("\x1b[38;2;1;2mx");
+        assert_eq!(lines[0][0].style.fg, None, "a short truecolor sets nothing");
+
+        // A CSI we don't handle is consumed and discarded, not printed.
+        let lines = parse_ansi("a\x1b[2Jb");
+        assert_eq!(lines[0][0].text, "a");
+        assert_eq!(lines[0][1].text, "b");
+    }
+
+    #[test]
+    fn an_out_of_range_truecolor_channel_clamps_rather_than_wrapping() {
+        // `as u8` turned 300 into 44 — a colour with no relationship to what
+        // was asked for. A malformed "very red" should still be red.
+        let lines = parse_ansi("\x1b[38;2;300;0;0mx");
+        assert_eq!(lines[0][0].style.fg, Some(Color::rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn crlf_is_one_line_break_not_two() {
+        let lines = parse_ansi("a\r\nb\r\nc");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0][0].text, "a");
+        assert_eq!(lines[2][0].text, "c");
+    }
+
+    #[test]
+    fn the_256_colour_cube_covers_its_whole_range() {
+        // Every index must produce a colour without panicking, including the
+        // boundaries between the named block, the cube and the grey ramp.
+        for index in 0..=u8::MAX {
+            let _ = color_from_256(index);
+        }
+        assert_eq!(color_from_256(0), ANSI_COLORS[0]);
+        assert_eq!(color_from_256(15), ANSI_COLORS[15]);
+        // First cube entry is black, last is white.
+        assert_eq!(color_from_256(16), Color::rgb(0, 0, 0));
+        assert_eq!(color_from_256(231), Color::rgb(255, 255, 255));
+        // The grey ramp runs 8..=238 in steps of 10.
+        assert_eq!(color_from_256(232), Color::rgb(8, 8, 8));
+        assert_eq!(color_from_256(255), Color::rgb(238, 238, 238));
+    }
+
+    #[test]
+    fn a_word_range_stops_at_the_characters_that_are_not_words() {
+        assert_eq!(word_range_at("hello world", 2), (0, 5));
+        assert_eq!(word_range_at("hello world", 8), (6, 11));
+        // A caret just past a word still selects that word: the backward scan
+        // reaches it even though the forward one stops immediately.
+        assert_eq!(word_range_at("hello world", 5), (0, 5));
+        // Between two spaces, with no word on either side, the range is empty.
+        assert_eq!(word_range_at("a  b", 2), (2, 2));
+        assert_eq!(word_range_at("snake_case99 x", 3), (0, 12));
+        assert_eq!(word_range_at("", 0), (0, 0));
+        // A column past the end is clamped rather than panicking — a caret can
+        // outlive the line it was placed on.
+        assert_eq!(word_range_at("ab", 99), (0, 2));
+    }
+
+    #[test]
+    fn splitting_words_keeps_the_leading_spaces_with_the_word() {
+        assert_eq!(split_next_word("hello world"), ("hello", " world"));
+        assert_eq!(split_next_word(" world"), (" world", ""));
+        assert_eq!(split_next_word("  two  words"), ("  two", "  words"));
+        assert_eq!(split_next_word(""), ("", ""));
+        assert_eq!(split_next_word("   "), ("   ", ""));
+        // Repeatedly splitting must consume the whole string and terminate.
+        let mut rest = "  a bb   ccc d";
+        let mut seen = String::new();
+        while !rest.is_empty() {
+            let (word, tail) = split_next_word(rest);
+            assert!(!word.is_empty(), "a split that consumes nothing would loop");
+            seen.push_str(word);
+            rest = tail;
+        }
+        assert_eq!(seen, "  a bb   ccc d");
+    }
+
+    #[test]
+    fn search_navigation_wraps_at_both_ends() {
+        let mut view = simple_view(200.0, 160.0);
+        view.set_text("aa\nbb\naa\ncc\naa");
+        view.find("aa", true);
+        assert_eq!(view.match_count(), 3);
+        assert_eq!(view.search.current_match, Some(0));
+
+        view.next_match();
+        assert_eq!(view.search.current_match, Some(1));
+        view.next_match();
+        assert_eq!(view.search.current_match, Some(2));
+        view.next_match();
+        assert_eq!(view.search.current_match, Some(0), "wraps past the end");
+        view.prev_match();
+        assert_eq!(view.search.current_match, Some(2), "wraps past the start");
+
+        // With no matches at all, navigation is a no-op rather than a panic.
+        view.find("zzz", true);
+        assert_eq!(view.match_count(), 0);
+        view.next_match();
+        view.prev_match();
+        assert_eq!(view.search.current_match, None);
+    }
+
+    #[test]
+    fn an_extreme_scroll_delta_clamps_instead_of_overflowing() {
+        // `scroll_by` is public, so the delta is the caller's; negating
+        // `i32::MIN` would overflow before the saturating subtraction ran.
+        let mut view = simple_view(200.0, 160.0);
+        view.set_text(&"line\n".repeat(50));
+        view.scroll_by(i32::MIN);
+        assert_eq!(view.scroll_offset, 0);
+        view.scroll_by(i32::MAX);
+        assert_eq!(view.scroll_offset, view.max_scroll_offset());
+        assert!(view.is_at_bottom());
+    }
+
+    #[test]
+    fn the_gutter_is_never_narrower_than_three_digits() {
+        assert_eq!(line_number_digits(0), 3);
+        assert_eq!(line_number_digits(1), 3);
+        assert_eq!(line_number_digits(999), 3);
+        assert_eq!(line_number_digits(1000), 4);
+        assert_eq!(line_number_digits(9999), 4);
+        assert_eq!(line_number_digits(10_000), 5);
     }
 
     #[test]
@@ -3482,7 +3761,7 @@ mod tests {
                 FontWeightHint::Regular,
                 FontFamily::Mono,
             );
-            assert!(w <= cell + 0.01, "{ch:?} measures {w} in a {cell} cell",);
+            assert!(w <= cell + 0.01, "{ch:?} measures {w} in a {cell} cell");
         }
     }
 

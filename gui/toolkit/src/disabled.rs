@@ -775,31 +775,30 @@ impl ValidationRule {
     }
 }
 
-/// Basic email validation: requires non-empty local part, `@`, and a domain
-/// with at least one dot.
+/// Basic email validation: a non-empty local part, an `@`, and a domain whose
+/// first dot is neither the first nor the last character.
+///
+/// Deliberately far short of RFC 5322 — no quoting, no comments, no bracketed
+/// address literals, and a second `@` is accepted because the split takes the
+/// first one. This is the "your typing has clearly gone wrong" check that runs
+/// as the user types, not an authority on whether an address exists; only
+/// sending mail to it settles that. Rejecting more aggressively here would turn
+/// a form into an argument with people whose real addresses are unusual.
+///
+/// Written with `split_once` rather than `find` plus a slice: the offsets the
+/// old form carried — `&value[at_pos + 1..]`, `dot_pos == domain.len() - 1` —
+/// were correct only because of the `if`s standing above them, and both were
+/// arithmetic on a `usize` whose bounds lived in a different statement.
 fn is_valid_email(value: &str) -> bool {
-    let value = value.trim();
-    if value.is_empty() {
-        return false;
-    }
-    let Some(at_pos) = value.find('@') else {
+    let Some((local, domain)) = value.trim().split_once('@') else {
         return false;
     };
-    if at_pos == 0 {
-        return false;
-    }
-    let domain = &value[at_pos + 1..];
-    if domain.is_empty() {
-        return false;
-    }
-    // Domain must have at least one dot and no leading/trailing dots.
-    let Some(dot_pos) = domain.find('.') else {
-        return false;
-    };
-    if dot_pos == 0 || dot_pos == domain.len() - 1 {
-        return false;
-    }
-    true
+    // A non-empty part on each side of the first dot is exactly "the domain
+    // does not begin with a dot, and does not end at its first one".
+    !local.is_empty()
+        && domain
+            .split_once('.')
+            .is_some_and(|(host, rest)| !host.is_empty() && !rest.is_empty())
 }
 
 /// Result of validating a single field.
@@ -858,23 +857,71 @@ impl Default for ValidationState {
     }
 }
 
-/// A field registration for the form validator.
+impl From<ValidationResult> for ValidationState {
+    /// A rule's verdict *is* the field's state when that rule is the one that
+    /// failed; the two types differ only in which layer names them.
+    fn from(result: ValidationResult) -> Self {
+        Self {
+            valid: result.valid,
+            message: result.message,
+        }
+    }
+}
+
+/// A field registration for the form validator, and its verdict as of the last
+/// time it was checked.
+///
+/// The state lives here rather than in a second `Vec` keyed by `widget_id`.
+/// Two collections that must agree about which fields exist is an invariant
+/// maintained by hand at every call site, and this one was not maintained: a
+/// query for an unregistered widget used to *push* an entry into the state list
+/// so it could return a reference to something, after which the form counted a
+/// field nobody had registered as part of its own validity, for good. One
+/// collection cannot disagree with itself.
 struct FormField {
     /// Widget ID of the field.
     widget_id: WidgetId,
-    /// Label for error messages.
+    /// Label, used where an error is reported away from the field itself.
     label: String,
     /// Validation rules (all must pass).
     rules: Vec<ValidationRule>,
+    /// Verdict from the last `check`; valid until the field is first checked.
+    state: ValidationState,
 }
+
+impl FormField {
+    /// Run the rules in order and record the first failure, if any.
+    ///
+    /// Returns whether the field now passes. The iterator stops at the first
+    /// failing rule, so a later rule never overwrites an earlier complaint --
+    /// the user is told the first thing that is wrong, not the last.
+    fn check(&mut self, value: &str) -> bool {
+        self.state = self
+            .rules
+            .iter()
+            .map(|rule| rule.validate(value))
+            .find(|result| !result.valid)
+            .map_or_else(ValidationState::valid, ValidationState::from);
+        self.state.valid
+    }
+}
+
+/// The verdict reported for a widget the form has never heard of.
+///
+/// A `static` rather than an entry invented on demand: a validator asked about
+/// a widget it does not own has nothing to say, and saying so must not change
+/// what the validator is. Held as a value so the answer can be handed out by
+/// reference like any registered field's.
+static UNREGISTERED: ValidationState = ValidationState {
+    valid: true,
+    message: None,
+};
 
 /// Form-level validator that checks all fields and controls submit button state.
 pub struct FormValidator {
     fields: Vec<FormField>,
     /// Widget ID of the submit button (disabled when form is invalid).
     submit_button: Option<WidgetId>,
-    /// Cached validation states per field.
-    states: Vec<(WidgetId, ValidationState)>,
 }
 
 impl FormValidator {
@@ -883,7 +930,6 @@ impl FormValidator {
         Self {
             fields: Vec::new(),
             submit_button: None,
-            states: Vec::new(),
         }
     }
 
@@ -908,81 +954,38 @@ impl FormValidator {
             widget_id,
             label: label.into(),
             rules,
+            state: ValidationState::valid(),
         });
-        self.states.push((widget_id, ValidationState::valid()));
     }
 
     /// Validate a single field by its widget ID. Returns the validation state.
+    ///
+    /// A widget this form does not own is reported valid and left alone; see
+    /// [`UNREGISTERED`].
     pub fn validate_field(&mut self, widget_id: WidgetId, value: &str) -> &ValidationState {
-        let field_idx = self.fields.iter().position(|f| f.widget_id == widget_id);
-        let Some(idx) = field_idx else {
-            // Field not registered; return a static valid state.
-            // We cannot return a reference to a temporary, so ensure there is an entry.
-            if self.states.iter().all(|(id, _)| *id != widget_id) {
-                self.states.push((widget_id, ValidationState::valid()));
+        match self.fields.iter_mut().find(|f| f.widget_id == widget_id) {
+            Some(field) => {
+                field.check(value);
+                &field.state
             }
-            return &self
-                .states
-                .iter()
-                .find(|(id, _)| *id == widget_id)
-                .expect("just pushed")
-                .1;
-        };
-
-        let mut result = ValidationState::valid();
-        for rule in &self.fields[idx].rules {
-            let r = rule.validate(value);
-            if !r.valid {
-                result = ValidationState {
-                    valid: false,
-                    message: r.message,
-                };
-                break;
-            }
+            None => &UNREGISTERED,
         }
-
-        // Update cached state.
-        if let Some(entry) = self.states.iter_mut().find(|(id, _)| *id == widget_id) {
-            entry.1 = result;
-        }
-
-        &self
-            .states
-            .iter()
-            .find(|(id, _)| *id == widget_id)
-            .expect("state exists")
-            .1
     }
 
     /// Validate all fields with provided values. Returns overall validity.
+    ///
+    /// A field with no entry in `values` is checked against the empty string,
+    /// which is what an untouched text box holds -- so a `Required` field the
+    /// caller forgot to pass fails rather than passing by omission.
     pub fn validate_all(&mut self, values: &[(WidgetId, &str)]) -> bool {
         let mut all_valid = true;
-        for field in &self.fields {
+        for field in &mut self.fields {
             let value = values
                 .iter()
                 .find(|(id, _)| *id == field.widget_id)
-                .map(|(_, v)| *v)
-                .unwrap_or("");
-
-            let mut state = ValidationState::valid();
-            for rule in &field.rules {
-                let r = rule.validate(value);
-                if !r.valid {
-                    state = ValidationState {
-                        valid: false,
-                        message: r.message,
-                    };
-                    all_valid = false;
-                    break;
-                }
-            }
-
-            if let Some(entry) = self
-                .states
-                .iter_mut()
-                .find(|(id, _)| *id == field.widget_id)
-            {
-                entry.1 = state;
+                .map_or("", |(_, v)| *v);
+            if !field.check(value) {
+                all_valid = false;
             }
         }
         all_valid
@@ -990,29 +993,34 @@ impl FormValidator {
 
     /// Whether the entire form is currently valid (based on last validation run).
     pub fn is_valid(&self) -> bool {
-        self.states.iter().all(|(_, s)| s.valid)
+        self.fields.iter().all(|f| f.state.valid)
     }
 
     /// Get the validation state of a field.
     pub fn field_state(&self, widget_id: WidgetId) -> Option<&ValidationState> {
-        self.states
+        self.fields
             .iter()
-            .find(|(id, _)| *id == widget_id)
-            .map(|(_, s)| s)
+            .find(|f| f.widget_id == widget_id)
+            .map(|f| &f.state)
     }
 
     /// Get the disabled state for the submit button based on form validity.
+    ///
+    /// The reason names the field. The submit button sits at the bottom of the
+    /// form, nowhere near whatever failed, so an unqualified "Required" -- which
+    /// is what this used to hand over -- tells the user nothing about which of
+    /// five boxes to go back to. This is what `FormField::label` is for.
     pub fn submit_disabled_state(&self) -> DisabledState {
-        if self.is_valid() {
-            DisabledState::Enabled
-        } else {
-            // Collect first error message for the reason.
-            let reason = self
-                .states
-                .iter()
-                .find(|(_, s)| !s.valid)
-                .and_then(|(_, s)| s.message.clone());
-            DisabledState::Disabled { reason }
+        let Some(failed) = self.fields.iter().find(|f| !f.state.valid) else {
+            return DisabledState::Enabled;
+        };
+        let label = &failed.label;
+        let reason = failed.state.message.as_ref().map_or_else(
+            || format!("{label} is invalid"),
+            |message| format!("{label}: {message}"),
+        );
+        DisabledState::Disabled {
+            reason: Some(reason),
         }
     }
 }
@@ -1029,6 +1037,18 @@ impl Default for FormValidator {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     // -- DisabledState tests --
@@ -1534,6 +1554,141 @@ mod tests {
 
         let state = validator.validate_field(field, "abc");
         assert!(state.valid);
+    }
+
+    /// Asking about a widget the form does not own must not enrol it. The old
+    /// code pushed a state entry so it had something to return a reference to,
+    /// after which `is_valid` counted a field nobody had registered.
+    #[test]
+    fn asking_about_an_unregistered_widget_does_not_enrol_it() {
+        let mut validator = FormValidator::new();
+        let known = WidgetId(1);
+        let stranger = WidgetId(2);
+        validator.add_field(known, "Name", vec![ValidationRule::Required]);
+
+        // Anything at all is reported valid, including what would fail a rule.
+        let state = validator.validate_field(stranger, "");
+        assert!(state.valid);
+        assert!(state.message.is_none());
+        assert!(
+            validator.field_state(stranger).is_none(),
+            "the stranger must not have become a field"
+        );
+
+        // And the form's own validity still turns only on the field that exists.
+        assert!(validator.validate_all(&[(known, "Alice")]));
+        assert!(validator.is_valid());
+        assert!(!validator.validate_all(&[(known, "")]));
+        assert!(!validator.is_valid());
+    }
+
+    /// A field the caller left out of `values` is checked against the empty
+    /// string, so a `Required` field cannot pass by being forgotten.
+    #[test]
+    fn a_field_missing_from_the_values_is_checked_as_empty() {
+        let mut validator = FormValidator::new();
+        let name = WidgetId(1);
+        let email = WidgetId(2);
+        validator.add_field(name, "Name", vec![ValidationRule::Required]);
+        validator.add_field(email, "Email", vec![ValidationRule::Required]);
+
+        assert!(!validator.validate_all(&[(name, "Alice")]));
+        assert!(!validator.field_state(email).unwrap().valid);
+    }
+
+    /// The submit button is nowhere near the field that failed, so its reason
+    /// has to say which field it is talking about.
+    #[test]
+    fn the_submit_buttons_reason_names_the_field_that_failed() {
+        let mut validator = FormValidator::new();
+        let name = WidgetId(1);
+        let email = WidgetId(2);
+        validator.add_field(name, "Name", vec![ValidationRule::Required]);
+        validator.add_field(email, "Email", vec![ValidationRule::Email]);
+
+        assert!(
+            validator.submit_disabled_state().is_enabled(),
+            "nothing checked yet"
+        );
+
+        validator.validate_all(&[(name, ""), (email, "nope")]);
+        let reason = validator
+            .submit_disabled_state()
+            .reason()
+            .expect("a disabled submit button says why")
+            .to_string();
+        assert!(reason.starts_with("Name"), "reason was {reason:?}");
+
+        // With the first field fixed the reason moves to the next failure.
+        validator.validate_all(&[(name, "Alice"), (email, "nope")]);
+        let reason = validator
+            .submit_disabled_state()
+            .reason()
+            .expect("still disabled")
+            .to_string();
+        assert!(reason.starts_with("Email"), "reason was {reason:?}");
+    }
+
+    /// The first failing rule is the one reported; a later rule must not
+    /// overwrite it, and a passing later rule must not clear it.
+    #[test]
+    fn the_first_failing_rule_is_the_one_reported() {
+        let mut validator = FormValidator::new();
+        let field = WidgetId(1);
+        validator.add_field(
+            field,
+            "Username",
+            vec![
+                ValidationRule::MinLength(5),
+                ValidationRule::MaxLength(2),
+                ValidationRule::Required,
+            ],
+        );
+
+        let state = validator.validate_field(field, "abc");
+        assert!(!state.valid);
+        assert!(
+            state.message.as_deref().unwrap().contains('5'),
+            "expected the MinLength complaint, got {:?}",
+            state.message
+        );
+    }
+
+    /// Re-checking a field replaces its verdict rather than accumulating one.
+    #[test]
+    fn a_field_that_becomes_valid_stops_being_reported_as_invalid() {
+        let mut validator = FormValidator::new();
+        let field = WidgetId(1);
+        validator.add_field(field, "Name", vec![ValidationRule::Required]);
+
+        assert!(!validator.validate_field(field, "").valid);
+        assert!(!validator.is_valid());
+        let state = validator.validate_field(field, "Alice");
+        assert!(state.valid);
+        assert!(state.message.is_none(), "the old complaint must be gone");
+        assert!(validator.is_valid());
+        assert!(validator.submit_disabled_state().is_enabled());
+    }
+
+    /// The offsets `is_valid_email` used to compute by hand were all at the
+    /// ends of the string, which is where an off-by-one shows up.
+    #[test]
+    fn email_validation_holds_at_the_ends_of_the_string() {
+        let rule = ValidationRule::Email;
+        for good in [
+            "a@b.c",
+            "user@example.com",
+            "a@b.c.d",
+            "a@b.c.",
+            "  a@b.c  ",
+        ] {
+            assert!(rule.validate(good).valid, "{good:?} should be accepted");
+        }
+        for bad in [
+            "", "@", ".", "a@", "@b.c", "a@.", "a@.c", "a@b.", "a@b", "ab.c", "@.",
+        ] {
+            assert!(!rule.validate(bad).valid, "{bad:?} should be rejected");
+        }
     }
 
     // -- DisabledOverlay tests --

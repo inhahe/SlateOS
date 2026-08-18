@@ -321,10 +321,34 @@ impl Default for SignalGroup {
 
 /// Type-erased signal entry in the event bus.
 struct BusSignal {
-    /// `TypeId` of the signal's value type `T`.
+    /// `TypeId` of the signal's value type `T`, kept only so a type mismatch
+    /// can say what the signal actually carries. It is deliberately *not* what
+    /// decides whether the downcast is allowed — see [`BusSignal::typed`].
     type_id: TypeId,
     /// The actual `Signal<T>` stored as `Any`.
     signal: Box<dyn Any>,
+}
+
+impl BusSignal {
+    /// This entry as a `Signal<T>`, or the mismatch that says why it is not.
+    ///
+    /// `emit` and `subscribe` each used to compare `type_id` against
+    /// `TypeId::of::<T>()` in an `if`, and then, in a later statement,
+    /// `downcast_ref().expect("type_id matched but downcast failed")`. The
+    /// expectation was justified — but by a condition established several
+    /// lines earlier, which is exactly the shape that turns into a panic the
+    /// day someone inserts a third statement between the two. `downcast_ref`
+    /// *is* the type test; asking it directly leaves nothing to assume, and
+    /// `type_id` is then free to do the one job it is actually needed for.
+    fn typed<T: Clone + 'static>(&self, name: &str) -> Result<&Signal<T>, BusError> {
+        self.signal
+            .downcast_ref::<Signal<T>>()
+            .ok_or_else(|| BusError::TypeMismatch {
+                name: name.to_string(),
+                expected: self.type_id,
+                got: TypeId::of::<T>(),
+            })
+    }
 }
 
 /// A named signal registry for decoupled widget communication.
@@ -385,20 +409,7 @@ impl EventBus {
         let entry = signals
             .get(name)
             .ok_or_else(|| BusError::NotFound(name.to_string()))?;
-
-        if entry.type_id != TypeId::of::<T>() {
-            return Err(BusError::TypeMismatch {
-                name: name.to_string(),
-                expected: entry.type_id,
-                got: TypeId::of::<T>(),
-            });
-        }
-
-        let signal = entry
-            .signal
-            .downcast_ref::<Signal<T>>()
-            .expect("type_id matched but downcast failed — this is a bug");
-        signal.emit(value);
+        entry.typed::<T>(name)?.emit(value);
         Ok(())
     }
 
@@ -413,20 +424,7 @@ impl EventBus {
         let entry = signals
             .get(name)
             .ok_or_else(|| BusError::NotFound(name.to_string()))?;
-
-        if entry.type_id != TypeId::of::<T>() {
-            return Err(BusError::TypeMismatch {
-                name: name.to_string(),
-                expected: entry.type_id,
-                got: TypeId::of::<T>(),
-            });
-        }
-
-        let signal = entry
-            .signal
-            .downcast_ref::<Signal<T>>()
-            .expect("type_id matched but downcast failed — this is a bug");
-        Ok(signal.connect(handler))
+        Ok(entry.typed::<T>(name)?.connect(handler))
     }
 
     /// Check if a named signal exists.
@@ -488,6 +486,18 @@ pub struct Activated(pub usize);
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     #[test]
@@ -508,12 +518,12 @@ mod tests {
         let count = Rc::new(Cell::new(0u32));
 
         let c1 = Rc::clone(&count);
-        signal.connect(move |_: &()| {
+        signal.connect(move |(): &()| {
             c1.set(c1.get() + 1);
         });
 
         let c2 = Rc::clone(&count);
-        signal.connect(move |_: &()| {
+        signal.connect(move |(): &()| {
             c2.set(c2.get() + 1);
         });
 
@@ -527,17 +537,17 @@ mod tests {
         let order = Rc::new(RefCell::new(Vec::new()));
 
         let o1 = Rc::clone(&order);
-        signal.connect(move |_: &()| {
+        signal.connect(move |(): &()| {
             o1.borrow_mut().push(1);
         });
 
         let o2 = Rc::clone(&order);
-        signal.connect(move |_: &()| {
+        signal.connect(move |(): &()| {
             o2.borrow_mut().push(2);
         });
 
         let o3 = Rc::clone(&order);
-        signal.connect(move |_: &()| {
+        signal.connect(move |(): &()| {
             o3.borrow_mut().push(3);
         });
 
@@ -550,7 +560,7 @@ mod tests {
         let signal = Signal::new();
         let count = Rc::new(Cell::new(0u32));
         let c = Rc::clone(&count);
-        let id = signal.connect(move |_: &()| {
+        let id = signal.connect(move |(): &()| {
             c.set(c.get() + 1);
         });
 
@@ -574,11 +584,11 @@ mod tests {
         assert_eq!(signal.connection_count(), 0);
         assert!(!signal.is_connected());
 
-        let id1 = signal.connect(|_| {});
+        let id1 = signal.connect(|(): &()| {});
         assert_eq!(signal.connection_count(), 1);
         assert!(signal.is_connected());
 
-        let _id2 = signal.connect(|_| {});
+        let _id2 = signal.connect(|(): &()| {});
         assert_eq!(signal.connection_count(), 2);
 
         signal.disconnect(id1);
@@ -645,11 +655,11 @@ mod tests {
         let mut group = SignalGroup::new();
 
         let c1 = Rc::clone(&count);
-        let id1 = signal_a.connect(move |_| c1.set(c1.get() + 1));
+        let id1 = signal_a.connect(move |(): &()| c1.set(c1.get() + 1));
         group.track(&signal_a, id1);
 
         let c2 = Rc::clone(&count);
-        let id2 = signal_b.connect(move |_| c2.set(c2.get() + 1));
+        let id2 = signal_b.connect(move |(): &()| c2.set(c2.get() + 1));
         group.track(&signal_b, id2);
 
         signal_a.emit(());
@@ -669,7 +679,7 @@ mod tests {
         let mut group = SignalGroup::new();
         assert!(group.is_empty());
 
-        let id = signal.connect(|_| {});
+        let id = signal.connect(|(): &()| {});
         group.track(&signal, id);
         assert_eq!(group.len(), 1);
         assert!(!group.is_empty());
@@ -699,6 +709,65 @@ mod tests {
         // Try to emit a String on an i32 signal.
         let result = bus.emit("my_signal", "wrong type".to_string());
         assert!(matches!(result, Err(BusError::TypeMismatch { .. })));
+    }
+
+    /// The mismatch has to say *which* signal and *which* two types, or the
+    /// caller learns only that something somewhere was the wrong shape. The
+    /// older tests matched the variant and ignored the payload, which would
+    /// have passed just as happily if the fields were filled in backwards.
+    #[test]
+    fn a_type_mismatch_names_the_signal_and_both_types() {
+        let bus = EventBus::new();
+        bus.register_signal::<i32>("my_signal");
+
+        let Err(BusError::TypeMismatch {
+            name,
+            expected,
+            got,
+        }) = bus.emit("my_signal", "wrong type".to_string())
+        else {
+            panic!("emitting a String on an i32 signal must be a type mismatch");
+        };
+        assert_eq!(name, "my_signal");
+        assert_eq!(expected, TypeId::of::<i32>());
+        assert_eq!(got, TypeId::of::<String>());
+    }
+
+    /// A rejected emit must be rejected *before* it reaches anyone: the check
+    /// and the delivery are now one expression, so there is no window in which
+    /// a handler could see a value the bus was about to refuse.
+    #[test]
+    fn a_mismatched_emit_reaches_no_handler() {
+        let bus = EventBus::new();
+        bus.register_signal::<i32>("value");
+
+        let seen = Rc::new(Cell::new(0i32));
+        let s = Rc::clone(&seen);
+        bus.subscribe::<i32, _>("value", move |v| s.set(*v))
+            .unwrap();
+
+        assert!(bus.emit("value", "not an i32".to_string()).is_err());
+        assert_eq!(seen.get(), 0, "the handler must not have run");
+        bus.emit("value", 7).unwrap();
+        assert_eq!(seen.get(), 7, "and the signal still works afterwards");
+    }
+
+    /// Registering over a name replaces the signal, type included — including
+    /// its subscribers, who were attached to the signal and not to the name.
+    #[test]
+    fn re_registering_a_name_replaces_its_type_and_its_handlers() {
+        let bus = EventBus::new();
+        bus.register_signal::<i32>("thing");
+
+        let seen = Rc::new(Cell::new(0i32));
+        let s = Rc::clone(&seen);
+        bus.subscribe::<i32, _>("thing", move |v| s.set(*v))
+            .unwrap();
+
+        bus.register_signal::<String>("thing");
+        assert!(bus.emit("thing", 1i32).is_err(), "the old type is gone");
+        bus.emit("thing", "hello".to_string()).unwrap();
+        assert_eq!(seen.get(), 0, "the old handler went with the old signal");
     }
 
     #[test]

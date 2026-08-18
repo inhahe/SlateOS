@@ -551,10 +551,13 @@ impl ThemeManager {
     ///
     /// If a custom theme with the same name already exists, it is replaced.
     pub fn set_custom_theme(&mut self, name: &str, theme: Theme) {
-        if let Some(pos) = self.custom_themes.iter().position(|(n, _)| n == name) {
-            self.custom_themes[pos] = (name.to_string(), theme);
-        } else {
-            self.custom_themes.push((name.to_string(), theme));
+        // `find` hands back the entry rather than a number to look it back up
+        // with, so the "this index exists" step disappears -- and with it the
+        // second `name.to_string()`, which rebuilt a name the entry already
+        // held and was equal to by construction.
+        match self.custom_themes.iter_mut().find(|(n, _)| n == name) {
+            Some(entry) => entry.1 = theme,
+            None => self.custom_themes.push((name.to_string(), theme)),
         }
     }
 
@@ -594,6 +597,18 @@ impl ThemeManager {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     #[test]

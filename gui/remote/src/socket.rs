@@ -270,9 +270,13 @@ impl Transport for Socket {
                     break;
                 }
                 Ok(n) => {
-                    // `n <= chunk.len()` is guaranteed by `Read::read`; the
-                    // slice cannot be out of range.
-                    buf.extend_from_slice(&chunk[..n]);
+                    // `n <= chunk.len()` is guaranteed by `Read::read`, but a
+                    // broken `Read` impl is exactly the kind of thing a socket
+                    // layer should survive rather than trust: `get` turns "the
+                    // OS lied about how much it read" into a short read
+                    // instead of a panic in the middle of the event loop.
+                    let Some(filled) = chunk.get(..n) else { break };
+                    buf.extend_from_slice(filled);
                     total = total.saturating_add(n);
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,

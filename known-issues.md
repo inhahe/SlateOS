@@ -31876,6 +31876,140 @@ error inflated the number and blurred which code it belonged to. The rule:
 possible yet, reproduce the table on the command line **and filter the
 diagnostics by file path**. Never quote a raw total from a `-p` invocation.
 
+### Three crates done, 2026-08-17 — and a third figure that was wrong
+
+`gui/notifications`, `gui/window` and `gui/remote` now opt in and are at **0
+warnings**. Eight of ten `gui/` crates are compliant; `toolkit` and `desktop`
+remain.
+
+| Crate | predicted above | actual, opted in | after |
+|---|---|---|---|
+| `gui/notifications` | 20 | 20 | 0 |
+| `gui/window` | **0** | **16** | 0 |
+| `gui/remote` | 281 | **137** | 0 |
+
+**Two of those three predictions were wrong, in opposite directions, and for
+the same reason.** Both were measured *before* the opt-in, under whatever lint
+set the crate already had. `gui/window` measured 0 because its private
+`#![deny(clippy::all)] #![warn(clippy::pedantic)]` does not include the
+defensive five — they are restriction lints, in neither group — so the
+measurement was of a strictly smaller table than the one being adopted, and
+"0 warnings, a one-commit no-op" was a prediction the measurement could not
+support. `gui/remote` went the other way: 281 double-counted sites appearing
+in both the lib and test builds of the same file, where 137 is the count of
+distinct source locations. **Deduplicate by `(file, line, column, lint)`, and
+never predict a post-opt-in count from a pre-opt-in build.**
+
+**What the three found.** The pattern from `credentials` and `compositor` held
+in two of three: the warnings were not style complaints.
+
+- `gui/notifications` — a real bug. `DndSchedule` was four public `u8`s
+  validated nowhere, so `set_dnd_schedule(25, 0, 7, 0)` was accepted silently,
+  produced a start of 1500 minutes (past the largest time of day, 1439), and
+  compared as an overnight window that then never opened. Quiet hours simply
+  stopped happening with nothing reporting it. Fixed by making the state
+  unrepresentable: private minutes-from-midnight, a checked constructor, and a
+  setter that refuses and keeps the previous schedule.
+- `gui/window` — no user-visible bug, but `pub mod testing` is a test double
+  that *ships in the library*, so nothing had ever held it to production
+  standards though it compiles as production code. Its decode loop could spin
+  forever on a decoder reporting zero bytes consumed: a hang, which is the one
+  failure mode a test harness must not have, because the suite then dies on a
+  timeout naming no test at all.
+- `gui/remote` — 137 warnings that were four shapes, not 137 problems. The
+  largest: `Reader`'s fields carried no `pub`, which reads like encapsulation
+  and is not, because **a field private to the crate root is visible to every
+  descendant module**. All five sibling modules reached past the checked
+  accessors and indexed `buf` directly, with the same four lines each — in a
+  decoder whose module doc promises that all reads are bounds-checked. Moving
+  the type into its own module made the fields private in the sense originally
+  intended, and turned any future reach-around into a compile error.
+
+**The generalisable finding**, which is new and worth carrying to `toolkit`
+and `desktop`: *a lint firing many times in a crate that looks well-factored
+is often reporting a broken abstraction rather than sloppy call sites.* Three
+of the four `guiremote` shapes were an abstraction that existed, was correct,
+and was bypassed everywhere — the cursor, the count back-fill, the capacity
+hint. The fix was never "check the bound at the call site"; it was to make the
+bypass impossible or the mechanism unnecessary. Fixing 137 sites would have
+left the design that produced them intact.
+
+### Nine of ten done, 2026-08-18: `gui/toolkit` is at 0, from 1488
+
+`gui/toolkit` (`guitk`) opted in at **1488** distinct sites and is now at
+**zero**, with the crate's test count up from 660 to 865 over the sweep. Only
+`gui/desktop` (1561) remains.
+
+**The generalisable finding from `gui/remote` held for all 1488.** Not one of
+the ~35 files in the sweep was fixed by adding a bounds check at a call site.
+Every file was fixed by finding the abstraction that should have existed, and
+in about a third of cases the abstraction *already existed in the same crate*
+and was simply not reached for. Reusing what was there:
+
+| Written once | Files that had re-derived it |
+|---|---|
+| `cycle::before` / `after` / `indices` | `menubar`, `tree`, `pathbar`, `textview`, `modal`, `menu`, `tabs` |
+| `TextCursor::prev_in` / `next_in` | `pathbar`, `modal` |
+| `Canvas` | `svg`, `screenshot`, `colorpicker` |
+| `tzrules` (the whole-tree TZ engine) | `dialog` |
+
+The new abstractions the sweep had to write, each replacing a shape repeated
+many times: a lexer cursor type in `svg` (the single largest group in the
+crate — `i += 1;` seventy-four times was one cursor, not seventy-four
+problems), a non-backtracking glob matcher in `context_ext`, `Color::mean`,
+and a `NonZeroU32`/`NonZeroU64` divisor wherever a computed denominator had
+been guarded by an `if` two statements away.
+
+**The recurring fault, stated once.** Almost every one of the 1488 was the same
+sentence: *a proof that lives in a different statement from the code it
+justifies.* `if slot <= MAX` then `TABLE[slot]`; `if out_a == 0 { return }`
+then `/ out_a`; `if len > 1` then `len - 1`; `if header.len() >= end` then
+`&header[..end]`; a signed cursor stepped off the end and pushed back by the
+next iteration's first `if`. The lint is not asking for the proof to be
+repeated. It is pointing out that the proof and the use can drift apart,
+and in this crate they had — see the defects below, every one of which is an
+instance of exactly that drift.
+
+**What it found.** Eleven defects that were live, not hypothetical:
+
+- `svg::parse_transform` **panicked** on a malformed `transform` attribute —
+  reachable from any SVG file the user opens.
+- `Canvas`/`SvgRenderer::new` computed `width * height` and let `Vec` abort on
+  the byte count; an image header can claim any dimensions it likes.
+- `scaling::set_monitor_scale(usize::MAX, ..)` wrapped past an upper-bound-only
+  check onto slot 0 — which was the **global** scale factor. One bad monitor id
+  rescaled the whole desktop.
+- `dialog`'s Modified column showed **a date that does not exist**: no leap
+  years and twelve 30-day months, so by 2026 it was about two weeks early, with
+  the year advancing early and the day-of-month almost never right. It now
+  reads through `tzrules`, the same engine as the libc, the shell's `%(…)T` and
+  the taskbar clock.
+- `Color::lerp` returned **transparent black** for a NaN factor, which is what
+  an animation produces the instant it divides elapsed time by a zero duration.
+  `f32::clamp` passes NaN through; `NaN as u8` is 0.
+- `Color::over`'s `out_a == 0` guard was dead code given the `sa == 0` early
+  return, and stood apart from the four divisions it was supposed to protect.
+- `textview::scroll_by` overflowed on `i32::MIN`.
+- `colorpicker` measured its palette grid in the drawing code and again in the
+  hit-test, and the two had drifted — clicks landed on the wrong swatch. The
+  hue readout truncated through `u8` besides.
+- `context_ext`'s glob matcher was exponential on a pattern with several `*`s.
+- `tree::items_in_rect` walked rows without an upper bound.
+- `FormValidator` (`disabled`) kept two parallel `Vec`s that had to agree about
+  which fields exist, and did not: a query for an unregistered widget *pushed*
+  a state entry so it had something to return a reference to, after which the
+  form counted a field nobody had registered as part of its own validity. Its
+  `label` was also stored, documented as "for error messages", and never read —
+  so the disabled submit button's tooltip said "Required" and named none of the
+  five boxes the user had to go back to.
+
+**One methodological note to carry into `gui/desktop`.** The largest single win
+in the crate came from *deleting* code, not fixing it: `svg.rs`'s ~600 sites
+were one hand-rolled tokeniser cursor, and `textview`'s ANSI parser was
+hand-decoding UTF-8 it had already been handed decoded. Before fixing a group,
+check whether the group is one shape — the repeated *source line* is the tell,
+and `scripts/clippy-sites.py --sites` prints it.
+
 ## C-TEXT-WAS-CUT-BY-COUNTING-CHARACTERS-INSTEAD-OF-MEASURING-IT (lane C, 2026-08-17) - **fixed**
 
 **What.** Twenty-odd places across `gui/` and `apps/` decided how much text
@@ -33261,6 +33395,82 @@ do not overlap in time.
 debug --top 40`, and `--diff BEFORE_ELF AFTER_ELF` to check a change.
 Note the profile: these numbers are debug, which is what `boot-test.sh`
 builds and therefore what any canary halt will come from.
+
+### Progress - 2026-08-18: four functions split, and what stopped the rest
+
+The prescribed fix ("split each self-test into `#[inline(never)]` per-case
+functions") is now mechanised as `scripts/split-frames.py` and applied to the
+four functions it fits.  Measured on the debug kernel:
+
+| Function | before | after (peak) | cases |
+|---|---:|---:|---:|
+| `self_test_prctl_dispatch` | 32 160 | **4 064** | 23 |
+| `self_test_legacy_deprecated_syscalls` | 18 832 | **3 312** | 34 |
+| `net::httpd::self_test` | 17 152 | **11 152** | 8 |
+| `self_test_numa_sched_landlock` | 19 664 | **16 768** | 3 |
+
+That is 52 512 bytes off the four peaks, and `self_test_prctl_dispatch` -
+previously the largest frame in the kernel - is now a rounding error.
+**`kshell::cmd_oci` (31 760) is the new top offender.**
+
+**"Peak" means `outer + deepest case`, and that distinction is the whole
+point.** The per-symbol ranking is misleading in the flattering direction
+after a split: it reports the shrunken outer frame and lists the case
+functions as separate symbols, so a split that achieved nothing looks like a
+large win.  `linux_fd::self_test` is the cautionary case - the ranking called
+it 28 224 -> 18 896, but its one case claims 9 344, so what is really on the
+stack while that case runs is 28 240, i.e. **16 bytes worse than before**.
+`scripts/stack-frames.py --peak` now reports this grouping directly; use it,
+not the ranking, to judge a split.
+
+**Three splits were applied, measured and reverted** on that basis:
+
+| Function | peak before | peak after | verdict |
+|---|---:|---:|---|
+| `self_test_seccomp_ptrace_clone3` | 13 888 | 13 056 | -6%, not worth 35 lines |
+| `self_test_remap_ioprio_futex2` | 13 712 | 13 552 | -1%, noise |
+| `linux_fd::self_test` | 28 224 | 28 240 | a regression |
+
+The common cause is *coverage*: the cases only spanned 73-722 lines of a much
+longer function, so most of the frame stayed outside them.  A partial split
+buys nothing, because the peak is set by whatever the outer frame still holds.
+
+**What is out of the transformer's scope, and why** - these need hand work, not
+a better tool:
+
+- `kshell::cmd_oci` (31 760) and `kshell::cmd_container` (27 432) are
+  `match cmd { "inspect" => { .. }, .. }`.  The arms read outer locals
+  (`parts`), so each needs its fixtures threaded through as parameters -
+  a judgement call about what that interface should be.
+- `eventlog::self_test` (26 720), `self_test_sysv_ipc_mqueue` (15 808) and
+  `self_test_bpf_perf_keyring` (15 568) have **flat** bodies: a long run of
+  `let a = SyscallArgs { .. }; if dispatch(..) { fail }` with no block
+  structure at all.  Splitting them means *inventing* the case boundaries,
+  which is a decision about what the test's units are.
+- `scfilter::init` (21 872), `test_per_cpu_work_stealing` (19 504),
+  `PerCpuScheduler::new_const` (18 752) and `xhci::init` (15 504) are not
+  self-tests and have no case structure to exploit.
+
+**Two properties make the rewrite safe to apply mechanically**, and both are
+worth knowing before hand-splitting anything else:
+
+- A nested `fn` cannot capture, so a case that reads an outer local is
+  `E0434` at compile time, never a silent miscompile.  This fired on the first
+  real attempt (`self_test_remap_ioprio_futex2` shares one futex word across
+  its cases); `--param NAME:TYPE` threads such a fixture through explicitly.
+- `case()?` reproduces `return Err(..)` exactly - both abandon the whole
+  self-test - but it does *not* reproduce `return Ok(())`, which used to end
+  the self-test and would now end only the case, letting every later case run.
+  The transformer refuses a case containing any non-`Err` return rather than
+  rewrite it.  No case in the tree hit this, but nothing else about the
+  rewrite can change behaviour, so it is the one thing worth refusing over.
+
+`python scripts/split-frames.py --check` runs a regression suite of synthetic
+inputs, one per trap the transformer actually fell into against real source:
+the wrapped-`if` brace rustfmt puts on its own line, a block closed by
+`} else {`, a `}` inside a comment (`sched::{set,copy}_task_name`), braces in
+strings and nested block comments, a multi-line raw string (refused, because
+re-indenting would change its value), and the `return Ok(())` case above.
 
 ---
 

@@ -7263,6 +7263,16 @@ pub fn sys_console_try_read_char(args: &SyscallArgs) -> SyscallResult {
 // Randomness handler (90)
 // ---------------------------------------------------------------------------
 
+/// How long `SYS_GETRANDOM` will wait for the CSPRNG to be credited.
+///
+/// The wait only ever happens during boot, before enough interrupt-arrival
+/// timing has accumulated, and on a machine with a working RDRAND/RDSEED it
+/// never happens at all.  15 seconds is far beyond any plausible honest wait,
+/// so reaching it means entropy is not accruing — a broken state that must
+/// surface as an error rather than as an unbounded hang or, worse, as
+/// predictable key material.
+const GETRANDOM_WAIT_NS: u64 = 15_000_000_000;
+
 /// `SYS_GETRANDOM` — fill a userspace buffer with CSPRNG output.
 ///
 /// `arg0`: pointer to the destination buffer.
@@ -7272,6 +7282,24 @@ pub fn sys_console_try_read_char(args: &SyscallArgs) -> SyscallResult {
 ///
 /// See [`crate::syscall::number::SYS_GETRANDOM`] for why this is not
 /// capability-gated and why the length is capped.
+///
+/// # Waiting for the pool
+///
+/// This blocks until the kernel CSPRNG has been *credited* real entropy, which
+/// is the guarantee `getrandom(2)` exists to provide and the one Linux's
+/// original `/dev/urandom` failed to give: a pool keyed only from boot-time
+/// clock reads produces correlated output across two boots of the same VM
+/// image, so handing that out as key material is worse than refusing.  On
+/// timeout the call **fails** rather than returning weak bytes — a caller that
+/// gets an error can fail closed; a caller handed predictable bytes cannot.
+///
+/// `arg2` is reserved for Linux's `GRND_*` flags and is currently **ignored**.
+/// It cannot yet be honoured because libc reaches this syscall through a
+/// two-argument stub (`posix/src/random.rs` → `syscall2`), which leaves the
+/// third argument register holding whatever the caller last put there;
+/// interpreting that as flags would make every already-built binary pass
+/// garbage.  Plumbing it is a syscall ABI change and so is sequenced with lane
+/// B — see `requests/a-b-getrandom-now-waits-for-a-credited-pool.md`.
 pub fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
     let len = (args.arg1 as usize).min(crate::syscall::number::GETRANDOM_MAX);
 
@@ -7283,6 +7311,13 @@ pub fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
     }
     if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Wait before validating the buffer, not after: `wait_until_ready` sleeps,
+    // and a pointer validated before a sleep is a pointer another thread has
+    // had time to unmap.
+    if !crate::rng::wait_until_ready(GETRANDOM_WAIT_NS) {
+        return SyscallResult::err(KernelError::TimedOut);
     }
 
     // `with_user_out_buf` validates before generating anything, which matters

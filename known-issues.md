@@ -35126,16 +35126,100 @@ fallback and two fresh games *are* identical — exactly as they were under the
 old hardcoded `42`. A variety check therefore passes on the broken code and
 fails on the fix. Those tests are `#[cfg(not(unix))]` for that reason.
 
-**Still open**, all with the arithmetic inlined and no type at all — the ones
-a name-based grep could never find:
+~~**Still open**, all with the arithmetic inlined and no type at all — the ones
+a name-based grep could never find:~~
 
-- `apps/flashcards:356` (`1_664_525` / `1_013_904_223`, so even the
-  constant grep recommended above misses it — a *third* set of constants)
-- `apps/radio:553` (`1103515245` / `12345`)
-- `apps/speedtest:414,546`
-- `apps/videoplayer:1291,1295`
-- `gui/toolkit/src/listview.rs:427`
-- `gui/desktop/src/wallpaper.rs:758`
+- ~~`apps/flashcards:356` (`1_664_525` / `1_013_904_223`, so even the
+  constant grep recommended above misses it — a *third* set of constants)~~
+- ~~`apps/radio:553` (`1103515245` / `12345`)~~
+- ~~`apps/speedtest:414,546`~~
+- ~~`apps/videoplayer:1291,1295`~~
+- ~~`gui/toolkit/src/listview.rs:427`~~
+- ~~`gui/desktop/src/wallpaper.rs:758`~~
+
+#### CLOSED 2026-08-18 — and the inventory itself was the last defect
+
+All six inlined sites are converted (`5af5b1c9e`, `d9deeb3a4`, `55ef7b558`).
+A constant grep across `apps/ gui/ net*/ pkg/` now returns `apps/breakout:2129`
+— the deliberate historical reproduction inside its own tests — and two doc
+comments that name the old constants in order to explain what was removed.
+
+**The list above was wrong, and it was wrong for a structural reason.** It was
+assembled by grepping for `6364136223846793005`, exactly as the "lesson for the
+next sweep" three sections up recommends. That lesson was an improvement on
+grepping for the name `Rng`, and it is still what caught fourteen of the
+crates — but it inherits the same flaw one level down. **Keying an inventory on
+any token keys it on the copies that kept that token.** The entry even records
+its own counter-example without drawing the conclusion: flashcards is listed
+with a note that it uses a *third* set of constants and "even the constant grep
+recommended above misses it". It was in the list only because it had been found
+some other way.
+
+Two crates were missed entirely, and both were worse than any of the twenty
+counted:
+
+- **`apps/musicplayer`** — shuffle was `(idx * 7 + 3) % len`, which is not a
+  generator at all but an affine map, and its orbit is a fixed cycle. Measured
+  on a real album: **a 12-track album shuffled between exactly 2 of its
+  tracks**, and a 7-track list reached **1**. The visualiser was
+  `(t * 31 + i * 7) % 100` — a sliding staircase, not noise. The shuffle
+  branch also never consulted `repeat_mode`, so shuffle could never end.
+- **`apps/mixer`** — peak meters were `(id * 7 + tick * 13) % 100`: stream 1
+  read 20, 33, 46, 59, 72, 85, 98, 11, 24 — thirteen hundredths per tick,
+  period exactly 100, and every stream ran the same ramp offset by 7 per id.
+  Eight channels displayed eight copies of one climbing bar.
+
+Neither contains a single LCG constant, so no constant grep at any width would
+have found them. What found them was **grepping for the behaviour**: the
+comment phrases people write when they roll their own —
+`pseudo.rand|pseudo-rand|pseudorandom|simple random|fake random|deterministic
+shuffle|poor man's random|cheap random` — plus a broad `wrapping_mul` scan.
+Four lines of grep, and it found the two worst sites in the lane.
+
+**The lesson, superseding the one above:** an inventory keyed on a token
+measures how uniform the copying was, not how much of it there is. Grep for
+what the code *does* and for how a person *describes* doing it. Both misses
+here announced themselves in a comment.
+
+**And not all of it is even a generator.** Three distinct failure shapes turned
+up in this tail, none of them the low-bit LCG bias the entry was written about:
+
+| Shape | Example | What it actually is |
+|---|---|---|
+| Affine map | `(idx * 7 + 3) % len` | a fixed cycle; visits `len / gcd(7, len)` values |
+| Arithmetic ramp | `(t * 31 + i * 7) % 100` | a sawtooth with a known period |
+| Width mismatch | `(state >> 33) / u32::MAX` | 31 bits over a 32-bit maximum — a "fraction" that never reaches 0.5 |
+
+The third is the one to watch for, because it looks like arithmetic rather than
+randomness and reads as correct. It made **speedtest's simulated jitter
+one-sided**: `frac - 0.5` was always negative, so 0 of 20 latency probes landed
+above the base and 0 of 60 throughput steps above the target. A progress bar
+that only ever undershoots.
+
+**Also fixed while here**, each found by the same behaviour sweep rather than by
+any list: `apps/videoplayer`'s shuffle was a fixed permutation (1 distinct order
+over 10 rebuilds; only track 5 ever came first over 60 runs), and
+`gui/desktop`'s `populate_slideshow_paths` demanded its shuffle seed from a
+caller that did not exist yet — the same defect `random_wallpaper` in that file
+had already been fixed for, surviving because the two were read separately
+(`1003a4dae`).
+
+**Two tests in this tail passed on broken code and were caught only by the
+reintroduce-the-defect step**, which is the strongest argument for keeping that
+step mandatory:
+
+- `the_visualizer_is_not_an_arithmetic_ramp` first asked that bar-to-bar steps
+  "not all be equal" — but the ramp's modulo wrap supplies a second step value,
+  so it passed. Counting *distinct* steps bucketed to a hundredth fails it:
+  "bar heights take only 2 distinct steps -- a ramp, not a level".
+- `different_streams_have_independent_peak_levels` first asked for a spread of
+  differences between two meters — but the smoothing is asymmetric (attack 0.6,
+  decay 0.15), so a constant target-offset still yields a varying level-offset,
+  and it passed. Counting direction *disagreements* fails it: "the two meters
+  moved the same way on all but 18 of 120 ticks -- lockstep".
+
+Both near-misses are recorded in the comments above the tests that replaced
+them, so the next reader learns the shape rather than just the assertion.
 
 ---
 

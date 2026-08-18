@@ -26166,12 +26166,13 @@ one-line substitution, because the missing regex is not the only thing missing:
   `$0`/field duality, and a static array-versus-scalar pass (arrays pass by
   reference, so `function fill(a){a[1]="x"}` has to be resolved before the run,
   not during it). Verified differentially against the host's GNU `awk --posix` —
-  `scripts/awk-diff.sh`, **112 of 121 cases byte-identical** on stdout and exit
-  status, and the other nine differ deliberately: four are character-versus-byte
-  counting, two are `printf` edge cases, and three are diagnostics we raise
-  before the program runs where gawk raises them when first reached. The reasons
-  are recorded in the script and in `awk/main.rs`, and the script fails if one
-  of them ever stops being true.
+  `scripts/awk-diff.sh`, **112 of 122 cases byte-identical** on stdout and exit
+  status, and the other ten differ deliberately: four are character-versus-byte
+  counting, two are `printf` edge cases, three are diagnostics we raise
+  before the program runs where gawk raises them when first reached, and one is
+  `\1` in a pattern — a backreference here, as in GNU `grep -E`, and the octal
+  escape `\001` in gawk. The reasons are recorded in the script and in
+  `awk/main.rs`, and the script fails if one of them ever stops being true.
 * ~~**`expr`** — BRE anchored at the start, with the POSIX `:` return rule (the
   first group if there is one, else the match length).~~ **Done, `cd9e23600`.**
   A rewrite, and for the same reason as the other two: the regex was not the
@@ -26190,9 +26191,10 @@ one-line substitution, because the missing regex is not the only thing missing:
   first branch alone.
 
   Verified differentially against the host's GNU `expr` — `scripts/expr-diff.sh`,
-  **156 of 156 cases byte-identical** on stdout and exit status, plus two
-  recorded divergences the script *requires* to keep diverging (a backreference
-  needs a backtracking matcher; `a**` is refused where GNU folds it to `a*`).
+  **161 of 161 cases byte-identical** on stdout and exit status, plus one
+  recorded divergence the script *requires* to keep diverging (`a**` is refused
+  where GNU folds it to `a*`). Backreferences were a second such divergence
+  until `ere` grew a backtracking matcher for them; those five cases now agree.
   The cases it took to find GNU's corners are the value here: `expr '' '|' ''`
   prints `0`, not an empty line; `+0` is true and `-0` is false, because null is
   exactly `^-?0+$` or empty; `index` searches for any character of a *set*; and
@@ -26257,7 +26259,11 @@ so it is as much untrusted input as the subject is.
 `no_std`, fixed-buffer, C-ABI, and answers to POSIX's error codes byte for byte.
 For the Rust programs, see `design-decisions.md` §322.
 
-## B-BACKREFERENCES-ARE-REFUSED-SO-SOME-CLASSIC-ONE-LINERS-FAIL (lane B, 2026-08-16) — **open**
+## B-BACKREFERENCES-ARE-REFUSED-SO-SOME-CLASSIC-ONE-LINERS-FAIL (lane B, 2026-08-16) — **FIXED 2026-08-18**
+
+**Status:** FIXED 2026-08-18 — `userspace/ere` grew the backtracking matcher
+this entry asked for, and the design entry it asked for first is
+`design-decisions.md` §333. See the "Fixed" section at the end.
 
 **In short:** a backreference is the part of a pattern that says "and here the
 *same text* again" — `\(.*\)\n\1` means "some text, a newline, then that exact
@@ -26310,6 +26316,47 @@ error rather than hanging, and the existing `MAX_PROG` bound on program size.
 construct it cannot do, and it exits non-zero. Nothing silently produces a wrong
 answer. What it costs is GNU compatibility for a small, well-known family of
 scripts.
+
+### Fixed (2026-08-18)
+
+Built as the entry above proposed, and as glibc does it: the Pike VM still runs
+every pattern that has no `\1`–`\9`, and a pattern that has one is run by a new
+backtracker instead. The choice is made once, at compile time, from a flag the
+parser sets — `Regex::has_backref` — so no pattern that does not use the feature
+pays anything for its existence. `design-decisions.md` §333 records the
+alternatives and why each was rejected; the short version:
+
+- **The step budget is real and reachable.** `1_000_000 + 1_000 × len(subject)`,
+  capped at `100_000_000`. The pathological `\(a*\)\(a*\)\(a*\)\(a*\)\(a*\)\1\2\3\4\5b`
+  against 300 `a`s now stops in **54 ms** with
+  `grep: '…': backreference matching exceeded its step limit` and status 2.
+- **"I gave up" is not spelled "no match."** This is the part that reached
+  outside `ere`: every matching entry point returns `Result<_, MatchLimit>`, so
+  the five callers had to be changed rather than merely recompiled. Reading an
+  abandoned search as a non-match would have made `sed '/re/!d'` delete the
+  lines it declined to examine and `grep -v` nominate them for `xargs rm`.
+  `awk`'s `FS`/`RS` are program-chosen regexes, so the same requirement made
+  record splitting — and therefore field and variable access — fallible there.
+- **The backtracker uses an explicit stack**, not recursion (depth grows with
+  repetitions matched, so a megabyte of `a` would otherwise overflow), and
+  refuses a backward jump twice at the same input position on the same path,
+  which is how an empty loop terminates.
+- **A reference to a group that did not participate fails**, per POSIX; it does
+  not match the empty string. A reference to a group the pattern does not have
+  is a compile error, not the literal digit.
+
+What the fix bought, measured:
+
+| Check | Before | After |
+|---|---|---|
+| `printf 'x\nx\ny\n' \| sed '$!N;/^\(.*\)\n\1$/!P;D'` | error, rc=1 | `x` `y`, rc=0 |
+| `scripts/sed-diff.sh` | 88/89, 1 differed | **89 passed, 0 differed** |
+| `scripts/expr-diff.sh` | 1 xfail for `\1` | that case is a `run_case` now; 5 backreference cases agree with GNU |
+| `scripts/nl-diff.sh` | 227 passed, 5 xfail, one of them `-bp'\(ab\)\1'` | **228 passed, 4 xfail**; the backreference case agrees |
+| `scripts/awk-diff.sh` | 9 xfail | 10 — awk gains one, because `gawk --posix` reads `\1` as the octal escape `\001` and we read GNU `grep -E`'s backreference. POSIX leaves it undefined, so this is a choice between two extensions and the one that agrees with this system's other four regex users wins. |
+
+The `nl -bp` and `sed-diff` divergences this entry named as *possibly* caused by
+the gap were in fact caused by it: both disappeared with no further change.
 
 ---
 

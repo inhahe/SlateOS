@@ -24,3 +24,6 @@ yamldoc = { path = "../../yamldoc" }
 # two processes cannot disagree about what the user chose. The shell paints
 # from it (DesktopTheme::from_settings) and hosts the panel that edits it.
 appearance = { path = "../appearance" }
+
+[lints]
+workspace = true

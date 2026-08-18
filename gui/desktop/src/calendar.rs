@@ -32,6 +32,12 @@
 //! ```
 
 use guitk::color::Color;
+// One calendar for the whole GUI tree. This module used to carry its own
+// leap-year rule, month lengths, Sakamoto day-of-week, ISO week number and
+// both directions of the timestamp conversion; all of it is now `guitk::date`,
+// which derives them from the same `tzrules` era arithmetic the libc's
+// `localtime` and the shell's `%(…)T` render through.
+use guitk::date::{self, Date, Weekday};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -111,6 +117,10 @@ const SECS_PER_HOUR: u64 = 3600;
 /// Seconds per day.
 const SECS_PER_DAY: u64 = 86400;
 
+/// The same, signed, for the arithmetic that has to survive a pre-epoch
+/// instant without wrapping.
+const SECS_PER_DAY_I: i64 = 86_400;
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -147,123 +157,63 @@ impl Default for CalendarConfig {
 // Date arithmetic helpers
 // ============================================================================
 
-/// Returns `true` if `year` is a leap year.
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
-}
-
 /// Number of days in the given month (1-indexed).
+///
+/// A thin alias for [`date::days_in_month`], kept because the argument order
+/// here is `(year, month)` and the toolkit's is `(month, year)` — the shared
+/// one follows the C convention `tzrules` was extracted from.
 fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            if is_leap_year(year) {
-                29
-            } else {
-                28
-            }
-        }
-        _ => 0,
-    }
+    date::days_in_month(year, month)
 }
 
-/// Day-of-week for a given date using Tomohiko Sakamoto's algorithm.
-/// Returns 0 = Sunday, 1 = Monday, ..., 6 = Saturday.
+/// Day-of-week for a given date. 0 = Sunday, 1 = Monday, ..., 6 = Saturday.
 fn day_of_week(year: i32, month: u32, day: u32) -> u32 {
-    // Sakamoto's algorithm works for the Gregorian calendar.
-    static T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
-    let mut y = year;
-    if month < 3 {
-        y -= 1;
-    }
-    let m = month as i32;
-    let d = day as i32;
-    let result = (y + y / 4 - y / 100 + y / 400 + T[(m - 1) as usize] + d) % 7;
-    // Ensure non-negative result.
-    if result < 0 {
-        (result + 7) as u32
-    } else {
-        result as u32
-    }
+    u32::try_from(Date::from_ymd(year, month, day).weekday().index()).unwrap_or(0)
 }
 
-/// ISO 8601 week number for a given date.
-/// Returns (iso_year, week_number) where week 1 contains the year's first Thursday.
+/// ISO 8601 week number: `(iso_year, week)`, week 1 being the one containing
+/// the year's first Thursday.
 fn iso_week_number(year: i32, month: u32, day: u32) -> (i32, u32) {
-    // Day of year (1-based).
-    let mut doy: i32 = day as i32;
-    for m in 1..month {
-        doy += days_in_month(year, m) as i32;
-    }
-
-    // Day-of-week where Monday = 1, Sunday = 7.
-    let dow_sun = day_of_week(year, month, day);
-    let dow_iso = if dow_sun == 0 { 7 } else { dow_sun };
-
-    // Thursday of the same ISO week.
-    let thursday_doy = doy + (4 - dow_iso as i32);
-
-    if thursday_doy < 1 {
-        // Belongs to the last week of the previous year.
-        let prev_dec31_dow = day_of_week(year - 1, 12, 31);
-        let prev_iso = if prev_dec31_dow == 0 {
-            7
-        } else {
-            prev_dec31_dow
-        };
-        let prev_doy = 365 + if is_leap_year(year - 1) { 1 } else { 0 };
-        let prev_thursday = prev_doy + (4 - prev_iso as i32);
-        let week = ((prev_thursday - 1) / 7 + 1) as u32;
-        return (year - 1, week);
-    }
-
-    let days_this_year = if is_leap_year(year) { 366 } else { 365 };
-    if thursday_doy > days_this_year {
-        // Belongs to week 1 of the next year.
-        return (year + 1, 1);
-    }
-
-    let week = ((thursday_doy - 1) / 7 + 1) as u32;
-    (year, week)
+    Date::from_ymd(year, month, day).iso_week()
 }
 
-/// Decompose a Unix timestamp (seconds since epoch) into (year, month, day, hour, min, sec).
-/// Handles dates from 1970 onwards. Negative timestamps are not supported.
+/// Split a Unix timestamp into the day it falls on and the time within it.
+///
+/// The time of day is a plain remainder — `rem_euclid`, so an instant before
+/// 1970 lands at a positive offset into the day that contains it rather than
+/// a negative one into the day after. `Date` handles the day half.
+fn timestamp_parts(ts: u64) -> (Date, u32, u32, u32) {
+    let secs = i64::try_from(ts).unwrap_or(i64::MAX);
+    let within = secs.rem_euclid(SECS_PER_DAY_I);
+    let hour = u32::try_from(within.div_euclid(3600)).unwrap_or(0);
+    let min = u32::try_from(within.div_euclid(60).rem_euclid(60)).unwrap_or(0);
+    let sec = u32::try_from(within.rem_euclid(60)).unwrap_or(0);
+    (Date::from_unix_utc(secs), hour, min, sec)
+}
+
+/// Decompose a Unix timestamp into `(year, month, day, hour, min, sec)`.
 fn timestamp_to_date(ts: u64) -> (i32, u32, u32, u32, u32, u32) {
-    let secs = ts % SECS_PER_DAY;
-    let hour = (secs / SECS_PER_HOUR) as u32;
-    let min = ((secs % SECS_PER_HOUR) / SECS_PER_MIN) as u32;
-    let sec = (secs % SECS_PER_MIN) as u32;
-
-    // Total days since epoch.
-    let mut days = (ts / SECS_PER_DAY) as i64;
-    let mut year: i32 = 1970;
-
-    loop {
-        let yd = if is_leap_year(year) { 366 } else { 365 };
-        if days < yd {
-            break;
-        }
-        days -= yd;
-        year += 1;
-    }
-
-    let mut month: u32 = 1;
-    loop {
-        let md = days_in_month(year, month) as i64;
-        if days < md {
-            break;
-        }
-        days -= md;
-        month += 1;
-    }
-
-    let day = days as u32 + 1;
+    let (date, hour, min, sec) = timestamp_parts(ts);
+    let (year, month, day) = date.ymd();
     (year, month, day, hour, min, sec)
 }
 
-/// Convert (year, month, day, hour, min, sec) to Unix timestamp.
+/// The Unix timestamp of `date` at `hour:min:sec`, or `None` before the epoch.
+///
+/// The `None` is the store's own limit, not the calendar's — event timestamps
+/// are `u64` — so it is stated here as one comparison against the epoch rather
+/// than as a `year < 1970` test standing in front of a loop that counts up
+/// from 1970 one year at a time.
+fn timestamp_at(date: Date, hour: u32, min: u32, sec: u32) -> Option<u64> {
+    let secs = date
+        .unix_secs_utc()
+        .checked_add(i64::from(hour).checked_mul(3600)?)?
+        .checked_add(i64::from(min).checked_mul(60)?)?
+        .checked_add(i64::from(sec))?;
+    u64::try_from(secs).ok()
+}
+
+/// Convert (year, month, day, hour, min, sec) to a Unix timestamp.
 /// Returns `None` for dates before 1970-01-01.
 fn date_to_timestamp(
     year: i32,
@@ -273,58 +223,17 @@ fn date_to_timestamp(
     min: u32,
     sec: u32,
 ) -> Option<u64> {
-    if year < 1970 {
-        return None;
-    }
-
-    let mut days: u64 = 0;
-    for y in 1970..year {
-        days += if is_leap_year(y) { 366 } else { 365 };
-    }
-    for m in 1..month {
-        days += days_in_month(year, m) as u64;
-    }
-    days += (day.saturating_sub(1)) as u64;
-
-    Some(days * SECS_PER_DAY + hour as u64 * SECS_PER_HOUR + min as u64 * SECS_PER_MIN + sec as u64)
+    timestamp_at(Date::from_ymd(year, month, day), hour, min, sec)
 }
 
 /// Name of a month (1-indexed).
 fn month_name(month: u32) -> &'static str {
-    match month {
-        1 => "January",
-        2 => "February",
-        3 => "March",
-        4 => "April",
-        5 => "May",
-        6 => "June",
-        7 => "July",
-        8 => "August",
-        9 => "September",
-        10 => "October",
-        11 => "November",
-        12 => "December",
-        _ => "???",
-    }
+    date::month_name(month)
 }
 
 /// Short (3-char) name of a month.
 fn month_name_short(month: u32) -> &'static str {
-    match month {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        12 => "Dec",
-        _ => "???",
-    }
+    date::month_short_name(month)
 }
 
 /// Day-of-week abbreviations starting from the given first day.
@@ -335,18 +244,9 @@ fn dow_headers(first: FirstDayOfWeek) -> [&'static str; 7] {
     }
 }
 
-/// Day-of-week name for display.
+/// Day-of-week name for display, 0 = Sunday.
 fn day_of_week_name(dow: u32) -> &'static str {
-    match dow {
-        0 => "Sunday",
-        1 => "Monday",
-        2 => "Tuesday",
-        3 => "Wednesday",
-        4 => "Thursday",
-        5 => "Friday",
-        6 => "Saturday",
-        _ => "???",
-    }
+    Weekday::from_index(i32::try_from(dow).unwrap_or(0)).name()
 }
 
 // ============================================================================
@@ -658,24 +558,36 @@ fn expand_recurrence(
     // Walk forward from the event's original date, generating occurrences.
     // Limit to a reasonable window to avoid infinite loops.
     let max_iterations = 1000;
-    let mut year = orig_year;
-    let mut month = orig_month;
-    let mut day = orig_day;
+    // Every occurrence is a fixed step from the *original* date, not from the
+    // one before it. That distinction is the whole reason the old walk needed
+    // an unclamped `day` carried alongside a `clamped_day`: stepping
+    // 31 January by one month and keeping the result gives 28 February and
+    // then 28 March, so "the 31st of every month" decays into "the 28th".
+    // Measuring from the anchor each time, `add_months` clamps for display
+    // without the series ever losing the day it was anchored on.
+    let anchor = Date::from_ymd(orig_year, orig_month, orig_day);
 
-    for _ in 0..max_iterations {
-        let clamped_day = day.min(days_in_month(year, month));
-        let occ_start =
-            match date_to_timestamp(year, month, clamped_day, orig_hour, orig_min, orig_sec) {
-                Some(ts) => ts,
-                None => break,
-            };
+    for step in 0..max_iterations {
+        let occurrence = match recurrence {
+            Recurrence::Daily => anchor.add_days(step),
+            // `saturating_mul`: `step` is bounded by `max_iterations`, but the
+            // bound lives in the loop header rather than in this expression,
+            // which is exactly the arrangement that goes wrong when one of the
+            // two is edited.
+            Recurrence::Weekly => anchor.add_days(step.saturating_mul(7)),
+            Recurrence::Monthly => anchor.add_months(step),
+            Recurrence::Yearly => anchor.add_years(step),
+        };
+        let Some(occ_start) = timestamp_at(occurrence, orig_hour, orig_min, orig_sec) else {
+            break;
+        };
 
         // Stop if we've passed the range.
         if occ_start >= range_end {
             break;
         }
 
-        let occ_end = occ_start + duration;
+        let occ_end = occ_start.saturating_add(duration);
 
         // Include if there is overlap.
         if occ_end > range_start {
@@ -689,45 +601,6 @@ fn expand_recurrence(
                 color: event.color,
                 description: event.description.clone(),
             });
-        }
-
-        // Advance to next occurrence.
-        match recurrence {
-            Recurrence::Daily => {
-                day += 1;
-                if day > days_in_month(year, month) {
-                    day = 1;
-                    month += 1;
-                    if month > 12 {
-                        month = 1;
-                        year += 1;
-                    }
-                }
-            }
-            Recurrence::Weekly => {
-                day += 7;
-                // Normalize.
-                while day > days_in_month(year, month) {
-                    day -= days_in_month(year, month);
-                    month += 1;
-                    if month > 12 {
-                        month = 1;
-                        year += 1;
-                    }
-                }
-            }
-            Recurrence::Monthly => {
-                month += 1;
-                if month > 12 {
-                    month = 1;
-                    year += 1;
-                }
-                // day stays the same (clamped above on each iteration).
-            }
-            Recurrence::Yearly => {
-                year += 1;
-                // month and day stay the same.
-            }
         }
     }
 
@@ -1122,23 +995,17 @@ impl CalendarView {
     }
 
     /// Navigate to the previous month.
+    ///
+    /// The year rollover used to be an `if self.view_month == 1` standing
+    /// above a `self.view_year -= 1` that was only in range because of it.
+    /// Stepping a `Date` carries the rollover inside the step.
     pub fn prev_month(&mut self) {
-        if self.view_month == 1 {
-            self.view_month = 12;
-            self.view_year -= 1;
-        } else {
-            self.view_month -= 1;
-        }
+        self.set_view_to(self.view_anchor().add_months(-1));
     }
 
     /// Navigate to the next month.
     pub fn next_month(&mut self) {
-        if self.view_month == 12 {
-            self.view_month = 1;
-            self.view_year += 1;
-        } else {
-            self.view_month += 1;
-        }
+        self.set_view_to(self.view_anchor().add_months(1));
     }
 
     /// Jump to today's month.
@@ -1160,12 +1027,12 @@ impl CalendarView {
 
     /// Navigate to previous year (year view).
     pub fn prev_year(&mut self) {
-        self.view_year -= 1;
+        self.set_view_to(self.view_anchor().add_years(-1));
     }
 
     /// Navigate to next year (year view).
     pub fn next_year(&mut self) {
-        self.view_year += 1;
+        self.set_view_to(self.view_anchor().add_years(1));
     }
 
     // ========================================================================
@@ -1177,73 +1044,45 @@ impl CalendarView {
     /// The grid always has 6 rows (42 cells). Cells outside the current
     /// month are filled with days from the previous/next month.
     pub fn generate_grid(&self) -> Vec<GridCell> {
-        let mut cells = Vec::with_capacity(42);
-
-        // Day-of-week of the 1st of the month (0=Sun, 6=Sat).
-        let first_dow = day_of_week(self.view_year, self.view_month, 1);
-
-        // Offset: how many cells from previous month to show before the 1st.
-        let offset = match self.config.first_day_of_week {
-            FirstDayOfWeek::Sunday => first_dow,
-            FirstDayOfWeek::Monday => {
-                if first_dow == 0 {
-                    6
-                } else {
-                    first_dow - 1
+        // One iterator replaces the three loops this used to be: a lead-in
+        // computed as `prev_days - offset + 1 + i` (in range only while
+        // `offset` was provably no larger than the previous month), the month
+        // itself, and a spill-over `while cells.len() < 42`. `month_grid`
+        // yields 42 consecutive dates and cannot do otherwise, so
+        // `current_month` is a comparison rather than a flag three loops have
+        // to agree about.
+        self.view_anchor()
+            .month_grid(self.week_start())
+            .map(|date| {
+                let (year, month, day) = date.ymd();
+                GridCell {
+                    day,
+                    current_month: month == self.view_month && year == self.view_year,
+                    year,
+                    month,
                 }
-            }
-        };
+            })
+            .collect()
+    }
 
-        // Previous month info.
-        let (prev_year, prev_month) = if self.view_month == 1 {
-            (self.view_year - 1, 12)
-        } else {
-            (self.view_year, self.view_month - 1)
-        };
-        let prev_days = days_in_month(prev_year, prev_month);
+    /// The 1st of the month on display.
+    fn view_anchor(&self) -> Date {
+        Date::from_ymd(self.view_year, self.view_month, 1)
+    }
 
-        // Fill leading days from previous month.
-        for i in 0..offset {
-            let d = prev_days - offset + 1 + i;
-            cells.push(GridCell {
-                day: d,
-                current_month: false,
-                year: prev_year,
-                month: prev_month,
-            });
+    /// The weekday the user's week begins on.
+    fn week_start(&self) -> Weekday {
+        match self.config.first_day_of_week {
+            FirstDayOfWeek::Sunday => Weekday::Sunday,
+            FirstDayOfWeek::Monday => Weekday::Monday,
         }
+    }
 
-        // Current month days.
-        let cur_days = days_in_month(self.view_year, self.view_month);
-        for d in 1..=cur_days {
-            cells.push(GridCell {
-                day: d,
-                current_month: true,
-                year: self.view_year,
-                month: self.view_month,
-            });
-        }
-
-        // Next month info.
-        let (next_year, next_month) = if self.view_month == 12 {
-            (self.view_year + 1, 1)
-        } else {
-            (self.view_year, self.view_month + 1)
-        };
-
-        // Fill trailing days from next month.
-        let mut next_day = 1;
-        while cells.len() < 42 {
-            cells.push(GridCell {
-                day: next_day,
-                current_month: false,
-                year: next_year,
-                month: next_month,
-            });
-            next_day += 1;
-        }
-
-        cells
+    /// Move the view to the month containing `date`.
+    fn set_view_to(&mut self, date: Date) {
+        let (year, month, _) = date.ymd();
+        self.view_year = year;
+        self.view_month = month;
     }
 
     /// Compute the week number for the first day in a given row (0..6).
@@ -1853,16 +1692,6 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn leap_year_basic() {
-        assert!(is_leap_year(2000));
-        assert!(is_leap_year(2024));
-        assert!(!is_leap_year(1900));
-        assert!(!is_leap_year(2023));
-        assert!(is_leap_year(2400));
-        assert!(!is_leap_year(2100));
-    }
-
-    #[test]
     fn days_in_month_non_leap() {
         assert_eq!(days_in_month(2023, 1), 31);
         assert_eq!(days_in_month(2023, 2), 28);
@@ -1886,9 +1715,14 @@ mod tests {
     }
 
     #[test]
-    fn days_in_month_invalid_returns_zero() {
-        assert_eq!(days_in_month(2024, 0), 0);
-        assert_eq!(days_in_month(2024, 13), 0);
+    fn an_impossible_month_is_clamped_rather_than_being_zero_days_long() {
+        // This used to answer 0, which is not a month length any caller could
+        // use: the recurrence walk stepped `while day > days_in_month(..)`,
+        // and a zero there is a loop that never advances. Clamping means every
+        // month number names a real month.
+        assert_eq!(days_in_month(2024, 0), 31, "month 0 reads as January");
+        assert_eq!(days_in_month(2024, 13), 31, "month 13 reads as December");
+        assert_eq!(days_in_month(2024, u32::MAX), 31);
     }
 
     #[test]

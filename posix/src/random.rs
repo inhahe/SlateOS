@@ -172,6 +172,23 @@ pub(crate) enum KernelFill {
     /// `out` is fully populated.
     Filled,
     /// There is no kernel to ask.  Try the hardware sources.
+    ///
+    /// Constructed only by the host build: [`classify_refusal`] keys this on
+    /// `-ENOSYS`, which every `syscallN` returns when built for the host, and
+    /// that check is `cfg`'d away on the OS target.  On the target there is
+    /// always a kernel, so `dead_code` correctly observes that nothing
+    /// constructs this — the `allow` records that as the intended invariant
+    /// rather than an oversight.
+    ///
+    /// It is deliberately *not* `cfg`'d out of the enum. Removing the variant
+    /// would make both matches on it exhaustive after two arms that always
+    /// return, which turns the hardware fallback following each match into
+    /// `unreachable_code` — trading one warning for two and scattering `cfg`
+    /// through three functions to silence them.  Nor is the fix to let the
+    /// target construct it: a target kernel that does not implement 90 is a
+    /// *broken* kernel, and quietly serving `RDRAND` in its place is precisely
+    /// what design-decisions.md §334 decided against.
+    #[cfg_attr(target_os = "none", allow(dead_code))]
     Absent,
     /// The kernel is present and declined, reporting this errno.  Its answer
     /// is final — see [`secure_bytes`] for why we do not then try hardware.

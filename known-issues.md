@@ -33304,10 +33304,13 @@ buys nothing, because the peak is set by whatever the outer frame still holds.
 **What is out of the transformer's scope, and why** - these need hand work, not
 a better tool:
 
-- `kshell::cmd_oci` (31 760) and `kshell::cmd_container` (27 432) are
+- ~~`kshell::cmd_oci` (31 760) and `kshell::cmd_container` (27 432) are
   `match cmd { "inspect" => { .. }, .. }`.  The arms read outer locals
   (`parts`), so each needs its fixtures threaded through as parameters -
-  a judgement call about what that interface should be.
+  a judgement call about what that interface should be.~~  **Done the next
+  day by `--arms`; see the 2026-08-18 progress note below.**  The threading
+  turned out not to be a judgement call at all: the compiler names the
+  fixtures for you, one `E0434` at a time.
 - `eventlog::self_test` (26 720), `self_test_sysv_ipc_mqueue` (15 808) and
   `self_test_bpf_perf_keyring` (15 568) have **flat** bodies: a long run of
   `let a = SyscallArgs { .. }; if dispatch(..) { fail }` with no block
@@ -33337,6 +33340,59 @@ the wrapped-`if` brace rustfmt puts on its own line, a block closed by
 `} else {`, a `}` inside a comment (`sched::{set,copy}_task_name`), braces in
 strings and nested block comments, a multi-line raw string (refused, because
 re-indenting would change its value), and the `return Ok(())` case above.
+
+### Progress - 2026-08-18: the four kshell dispatchers, via `--arms`
+
+The note above called the `match`-arm shape a judgement call and left it for
+hand work.  That was wrong, and cheaply so: the arms *are* the cases, and the
+only thing that made them different was syntax.  `split-frames.py --arms`
+handles them, and the four biggest dispatchers came out as follows.
+
+| Function | before | after (peak) | outer | cases |
+|---|---:|---:|---:|---:|
+| `kshell::cmd_oci` | 31 760 | **18 512** | 208 | 12 |
+| `kshell::cmd_container` | 27 432 | **5 000** | 160 | 33 |
+| `kshell::cmd_firewall` | 14 032 | **5 760** | 192 | 13 |
+| `kshell::cmd_mmtune` | 12 512 | **4 496** | 2 352 | 19 |
+
+51 968 bytes off the peaks, on top of the 52 512 from the self-tests.  Note the
+`outer` column: 160-208 bytes.  That is the difference from the three splits
+that had to be reverted - a dispatcher's arms cover *all* of it, so nothing is
+left behind in the outer frame to set the peak.  Coverage was the whole story
+there and it is the whole story here.
+
+**The safety argument is not the same one**, and this is the part worth
+carrying forward.  A dispatcher arm rejects bad arguments with a bare
+`return;`, meaning *leave the command*.  Inside a nested `fn` that becomes
+*leave this case*, and the two coincide only when there is nothing after the
+match for control to fall back into.  So `--arms` asserts two things rather
+than assuming them: the function returns unit, and the match is its **last**
+statement.  Both hold for every kshell dispatcher; neither is checked by the
+compiler, which is exactly why they are asserted.
+
+Everything else stayed the compiler's job, and it did it:
+
+- **`E0434` named the fixtures.** The first build failed with eight of them,
+  identifying `cmd` (shared by `cmd_firewall`'s `allow`/`allow6` arms) and
+  `args` (`cmd_container`). Adding `--param cmd:&str --param args:&str` and
+  rebuilding was the entire "judgement call" the earlier note anticipated.
+- **`unused_variables` caught the use-test's one false positive.**
+  `--param cmd:&str` matched `image.config.cmd`, a *field*, and passed a `cmd`
+  no arm used.  `_used_params` now ignores a name after a `.` - except after
+  `..`, where `a..cmd` is a real use - and `--check` has a case for it.
+- **`clippy::needless_borrow` caught the one hand-fix.**  `cmd_container`'s
+  network arm already called `cmd_container_network(&parts)`, which was right
+  when `parts` was a `Vec` and a double borrow once it arrives as a slice.
+
+Clippy against a pristine `kshell.rs` (stash the one file, run, unstash):
+18 235 -> 18 235 diagnostics, changed kinds 0.
+
+**What is left, and why the tool cannot take it.**  `cmd_oci`'s peak is still
+18 304, and it is now one single case: the `"run" | "create"` arm, 1 178 of the
+function's 1 691 lines.  Its body is *flat* - a long sequential build-up of one
+container configuration, where the locals genuinely do all stay live - so it is
+in the same class as `eventlog::self_test`, and shrinking it means restructuring
+what it computes, not moving braces.
 
 ---
 

@@ -644,9 +644,26 @@ def _used_params(
     textual use-test, not name resolution -- but it does not need to be sound,
     because the compiler is: a fixture this misses is still `E0434`, and one it
     adds spuriously is still an unused-variable warning.
+
+    It is worth excluding *field* accesses even so, because they are not rare:
+    `--param cmd:&str` matched `image.config.cmd` throughout `cmd_oci`'s
+    inspect arm and passed a `cmd` nothing used.  A name after a `.` is a field
+    or a method, never the local -- unless the dot is half of a `..` range,
+    where `a..cmd` really is a use.
     """
     masked = _masked(text, code, lo, hi)
-    return [p for p in params if re.search(rf"\b{re.escape(p[0])}\b", masked)]
+    return [p for p in params if _mentions(masked, p[0])]
+
+
+def _mentions(masked: str, name: str) -> bool:
+    for m in re.finditer(rf"\b{re.escape(name)}\b", masked):
+        k = m.start() - 1
+        while k >= 0 and masked[k].isspace():
+            k -= 1
+        if k >= 0 and masked[k] == "." and not (k and masked[k - 1] == "."):
+            continue  # `x.name` -- a field or method, not the local
+        return True
+    return False
 
 
 def rewrite(
@@ -1087,6 +1104,44 @@ _case(
 }
 """,
     [("u32_ptr", "u64")],
+)
+
+_case(
+    # `cmd_oci`'s inspect arm never uses the outer `cmd`, but prints
+    # `image.config.cmd` five times.  A bare `\bcmd\b` test took the field for
+    # the local and passed an argument nothing used -- one warning per arm.
+    "a field of the same name is not a use of the fixture",
+    """fn self_test() -> KernelResult<()> {
+    {
+        check(image.config.cmd)?;
+    }
+    {
+        check(&buf[start..cmd])?;
+    }
+    Ok(())
+}
+""",
+    """fn self_test() -> KernelResult<()> {
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            check(image.config.cmd)?;
+            Ok(())
+        }
+        case()?;
+    }
+    {
+        #[inline(never)]
+        fn case(cmd: &str) -> crate::error::KernelResult<()> {
+            check(&buf[start..cmd])?;
+            Ok(())
+        }
+        case(cmd)?;
+    }
+    Ok(())
+}
+""",
+    [("cmd", "&str")],
 )
 
 _case(

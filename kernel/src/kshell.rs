@@ -31562,35 +31562,43 @@ fn cmd_mmtune(args: &str) {
 
     match sub {
         "init" => {
-            mmtune::init_defaults();
-            shell_println!("Initialised default memory profiles.");
+            #[inline(never)]
+            fn case() {
+                mmtune::init_defaults();
+                shell_println!("Initialised default memory profiles.");
+            }
+            case();
         }
         "list" | "ls" => {
-            let profiles = mmtune::list_profiles();
-            if profiles.is_empty() {
-                shell_println!("No memory profiles configured.");
-                return;
-            }
-            shell_println!(
-                "{:<4} {:<25} {:<12} {:<12} {:<12} {}",
-                "ID",
-                "NAME",
-                "WORKLOAD",
-                "ALLOCATOR",
-                "RECLAIM",
-                "ACTIVE"
-            );
-            for p in &profiles {
+            #[inline(never)]
+            fn case() {
+                let profiles = mmtune::list_profiles();
+                if profiles.is_empty() {
+                    shell_println!("No memory profiles configured.");
+                    return;
+                }
                 shell_println!(
                     "{:<4} {:<25} {:<12} {:<12} {:<12} {}",
-                    p.id,
-                    p.name,
-                    format!("{:?}", p.workload),
-                    format!("{:?}", p.alloc_model),
-                    format!("{:?}", p.reclaim),
-                    p.active
+                    "ID",
+                    "NAME",
+                    "WORKLOAD",
+                    "ALLOCATOR",
+                    "RECLAIM",
+                    "ACTIVE"
                 );
+                for p in &profiles {
+                    shell_println!(
+                        "{:<4} {:<25} {:<12} {:<12} {:<12} {}",
+                        p.id,
+                        p.name,
+                        format!("{:?}", p.workload),
+                        format!("{:?}", p.alloc_model),
+                        format!("{:?}", p.reclaim),
+                        p.active
+                    );
+                }
             }
+            case();
         }
         "active" | "show" => match mmtune::active_profile() {
             Ok(a) => {
@@ -31626,401 +31634,469 @@ fn cmd_mmtune(args: &str) {
             Err(_) => shell_println!("No active profile."),
         },
         "get" => {
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: mmtune get <id>");
-                    return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: mmtune get <id>");
+                        return;
+                    }
+                };
+                match mmtune::get_profile(id) {
+                    Ok(p) => {
+                        shell_println!("ID:            {}", p.id);
+                        shell_println!("Name:          {}", p.name);
+                        shell_println!("Workload:      {:?}", p.workload);
+                        shell_println!("Allocator:     {:?}", p.alloc_model);
+                        shell_println!("Reclaim:       {:?}", p.reclaim);
+                        shell_println!(
+                            "Overcommit:    {:?} ({}%)",
+                            p.overcommit,
+                            p.overcommit_ratio
+                        );
+                        shell_println!("Huge pages:    {:?}", p.huge_pages);
+                        shell_println!("Compaction:    {:?}", p.compact_level);
+                        shell_println!("Swappiness:    {}", p.swappiness);
+                        shell_println!("Dirty:         {}/{}", p.dirty_ratio, p.dirty_bg_ratio);
+                        shell_println!("Cache press:   {}", p.vfs_cache_pressure);
+                        shell_println!("Min free:      {} KiB", p.min_free_kib);
+                        shell_println!("ZRAM:          {} ({}%)", p.zram_enabled, p.zram_max_pct);
+                        shell_println!("Zero free:     {}", p.zero_on_free);
+                        shell_println!("NUMA:          {}", p.numa_interleave);
+                        shell_println!("Built-in:      {}", p.builtin);
+                        shell_println!("Active:        {}", p.active);
+                        shell_println!("Recompile:     {}", p.requires_recompile);
+                        shell_println!("Reboot:        {}", p.requires_reboot);
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match mmtune::get_profile(id) {
-                Ok(p) => {
-                    shell_println!("ID:            {}", p.id);
-                    shell_println!("Name:          {}", p.name);
-                    shell_println!("Workload:      {:?}", p.workload);
-                    shell_println!("Allocator:     {:?}", p.alloc_model);
-                    shell_println!("Reclaim:       {:?}", p.reclaim);
-                    shell_println!(
-                        "Overcommit:    {:?} ({}%)",
-                        p.overcommit,
-                        p.overcommit_ratio
-                    );
-                    shell_println!("Huge pages:    {:?}", p.huge_pages);
-                    shell_println!("Compaction:    {:?}", p.compact_level);
-                    shell_println!("Swappiness:    {}", p.swappiness);
-                    shell_println!("Dirty:         {}/{}", p.dirty_ratio, p.dirty_bg_ratio);
-                    shell_println!("Cache press:   {}", p.vfs_cache_pressure);
-                    shell_println!("Min free:      {} KiB", p.min_free_kib);
-                    shell_println!("ZRAM:          {} ({}%)", p.zram_enabled, p.zram_max_pct);
-                    shell_println!("Zero free:     {}", p.zero_on_free);
-                    shell_println!("NUMA:          {}", p.numa_interleave);
-                    shell_println!("Built-in:      {}", p.builtin);
-                    shell_println!("Active:        {}", p.active);
-                    shell_println!("Recompile:     {}", p.requires_recompile);
-                    shell_println!("Reboot:        {}", p.requires_reboot);
-                }
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "create" => {
-            if parts.len() < 4 {
-                shell_println!("Usage: mmtune create <name> <workload> <allocator>");
-                shell_println!("Workloads: desktop, server, gaming, dev, lowmem, vmhost");
-                shell_println!("Allocators: buddy, slabbuddy, bitmap, zonebased");
-                return;
-            }
-            let name = parts[1];
-            let workload = match parts[2] {
-                "desktop" => mmtune::WorkloadType::Desktop,
-                "server" => mmtune::WorkloadType::Server,
-                "gaming" => mmtune::WorkloadType::Gaming,
-                "dev" | "development" => mmtune::WorkloadType::Development,
-                "lowmem" | "embedded" => mmtune::WorkloadType::LowMemory,
-                "vmhost" | "vm" => mmtune::WorkloadType::VmHost,
-                _ => {
-                    shell_println!("Unknown workload.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 4 {
+                    shell_println!("Usage: mmtune create <name> <workload> <allocator>");
+                    shell_println!("Workloads: desktop, server, gaming, dev, lowmem, vmhost");
+                    shell_println!("Allocators: buddy, slabbuddy, bitmap, zonebased");
                     return;
                 }
-            };
-            let alloc = match parts[3] {
-                "buddy" => mmtune::AllocModel::Buddy,
-                "slabbuddy" | "slab" => mmtune::AllocModel::SlabBuddy,
-                "bitmap" => mmtune::AllocModel::Bitmap,
-                "zonebased" | "zone" => mmtune::AllocModel::ZoneBased,
-                _ => {
-                    shell_println!("Unknown allocator.");
-                    return;
+                let name = parts[1];
+                let workload = match parts[2] {
+                    "desktop" => mmtune::WorkloadType::Desktop,
+                    "server" => mmtune::WorkloadType::Server,
+                    "gaming" => mmtune::WorkloadType::Gaming,
+                    "dev" | "development" => mmtune::WorkloadType::Development,
+                    "lowmem" | "embedded" => mmtune::WorkloadType::LowMemory,
+                    "vmhost" | "vm" => mmtune::WorkloadType::VmHost,
+                    _ => {
+                        shell_println!("Unknown workload.");
+                        return;
+                    }
+                };
+                let alloc = match parts[3] {
+                    "buddy" => mmtune::AllocModel::Buddy,
+                    "slabbuddy" | "slab" => mmtune::AllocModel::SlabBuddy,
+                    "bitmap" => mmtune::AllocModel::Bitmap,
+                    "zonebased" | "zone" => mmtune::AllocModel::ZoneBased,
+                    _ => {
+                        shell_println!("Unknown allocator.");
+                        return;
+                    }
+                };
+                match mmtune::create_profile(name, workload, alloc) {
+                    Ok(id) => shell_println!("Created profile {} (id={}).", name, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match mmtune::create_profile(name, workload, alloc) {
-                Ok(id) => shell_println!("Created profile {} (id={}).", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "remove" | "rm" => {
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: mmtune remove <id>");
-                    return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: mmtune remove <id>");
+                        return;
+                    }
+                };
+                match mmtune::remove_profile(id) {
+                    Ok(()) => shell_println!("Removed profile {}.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match mmtune::remove_profile(id) {
-                Ok(()) => shell_println!("Removed profile {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "apply" => {
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: mmtune apply <id>");
-                    return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: mmtune apply <id>");
+                        return;
+                    }
+                };
+                match mmtune::apply_profile(id) {
+                    Ok(()) => shell_println!("Applied profile {}.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match mmtune::apply_profile(id) {
-                Ok(()) => shell_println!("Applied profile {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "overcommit" | "oc" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: mmtune overcommit <id> <never|heuristic|always>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: mmtune overcommit <id> <never|heuristic|always>");
                     return;
                 }
-            };
-            let mode = match parts[2] {
-                "never" => mmtune::OvercommitMode::Never,
-                "heuristic" | "heur" => mmtune::OvercommitMode::Heuristic,
-                "always" => mmtune::OvercommitMode::Always,
-                _ => {
-                    shell_println!("Unknown mode.");
-                    return;
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let mode = match parts[2] {
+                    "never" => mmtune::OvercommitMode::Never,
+                    "heuristic" | "heur" => mmtune::OvercommitMode::Heuristic,
+                    "always" => mmtune::OvercommitMode::Always,
+                    _ => {
+                        shell_println!("Unknown mode.");
+                        return;
+                    }
+                };
+                match mmtune::set_overcommit(id, mode) {
+                    Ok(()) => shell_println!("Set overcommit mode."),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match mmtune::set_overcommit(id, mode) {
-                Ok(()) => shell_println!("Set overcommit mode."),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "hugepages" | "hp" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: mmtune hugepages <id> <off|madvise|transparent|always>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: mmtune hugepages <id> <off|madvise|transparent|always>");
                     return;
                 }
-            };
-            let mode = match parts[2] {
-                "off" | "disabled" => mmtune::HugePageMode::Disabled,
-                "madvise" => mmtune::HugePageMode::MadviseOnly,
-                "transparent" | "thp" => mmtune::HugePageMode::Transparent,
-                "always" => mmtune::HugePageMode::Always,
-                _ => {
-                    shell_println!("Unknown mode.");
-                    return;
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let mode = match parts[2] {
+                    "off" | "disabled" => mmtune::HugePageMode::Disabled,
+                    "madvise" => mmtune::HugePageMode::MadviseOnly,
+                    "transparent" | "thp" => mmtune::HugePageMode::Transparent,
+                    "always" => mmtune::HugePageMode::Always,
+                    _ => {
+                        shell_println!("Unknown mode.");
+                        return;
+                    }
+                };
+                match mmtune::set_huge_pages(id, mode) {
+                    Ok(()) => shell_println!("Set huge page mode."),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match mmtune::set_huge_pages(id, mode) {
-                Ok(()) => shell_println!("Set huge page mode."),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "compact" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: mmtune compact <id> <off|light|background|aggressive>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: mmtune compact <id> <off|light|background|aggressive>");
                     return;
                 }
-            };
-            let lvl = match parts[2] {
-                "off" => mmtune::CompactLevel::Off,
-                "light" => mmtune::CompactLevel::Light,
-                "background" | "bg" => mmtune::CompactLevel::Background,
-                "aggressive" | "agg" => mmtune::CompactLevel::Aggressive,
-                _ => {
-                    shell_println!("Unknown level.");
-                    return;
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let lvl = match parts[2] {
+                    "off" => mmtune::CompactLevel::Off,
+                    "light" => mmtune::CompactLevel::Light,
+                    "background" | "bg" => mmtune::CompactLevel::Background,
+                    "aggressive" | "agg" => mmtune::CompactLevel::Aggressive,
+                    _ => {
+                        shell_println!("Unknown level.");
+                        return;
+                    }
+                };
+                match mmtune::set_compact_level(id, lvl) {
+                    Ok(()) => shell_println!("Set compaction level."),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match mmtune::set_compact_level(id, lvl) {
-                Ok(()) => shell_println!("Set compaction level."),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "swappiness" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: mmtune swappiness <id> <0-200>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: mmtune swappiness <id> <0-200>");
                     return;
                 }
-            };
-            let val: u16 = match parts.get(2).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid value.");
-                    return;
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let val: u16 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid value.");
+                        return;
+                    }
+                };
+                match mmtune::set_swappiness(id, val) {
+                    Ok(()) => shell_println!("Set swappiness to {}.", val),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match mmtune::set_swappiness(id, val) {
-                Ok(()) => shell_println!("Set swappiness to {}.", val),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "dirty" => {
-            if parts.len() < 4 {
-                shell_println!("Usage: mmtune dirty <id> <ratio> <bg_ratio>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 4 {
+                    shell_println!("Usage: mmtune dirty <id> <ratio> <bg_ratio>");
                     return;
                 }
-            };
-            let ratio: u8 = match parts.get(2).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid ratio.");
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let ratio: u8 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid ratio.");
+                        return;
+                    }
+                };
+                let bg: u8 = match parts.get(3).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid bg ratio.");
+                        return;
+                    }
+                };
+                if let Err(e) = mmtune::set_dirty_ratio(id, ratio) {
+                    shell_println!("Error: {:?}", e);
                     return;
                 }
-            };
-            let bg: u8 = match parts.get(3).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid bg ratio.");
-                    return;
+                match mmtune::set_dirty_bg_ratio(id, bg) {
+                    Ok(()) => shell_println!("Set dirty ratios to {}/{}.", ratio, bg),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            if let Err(e) = mmtune::set_dirty_ratio(id, ratio) {
-                shell_println!("Error: {:?}", e);
-                return;
             }
-            match mmtune::set_dirty_bg_ratio(id, bg) {
-                Ok(()) => shell_println!("Set dirty ratios to {}/{}.", ratio, bg),
-                Err(e) => shell_println!("Error: {:?}", e),
-            }
+            case(&parts);
         }
         "cache" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: mmtune cache <id> <pressure 0-1000>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: mmtune cache <id> <pressure 0-1000>");
                     return;
                 }
-            };
-            let val: u16 = match parts.get(2).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid value.");
-                    return;
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let val: u16 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid value.");
+                        return;
+                    }
+                };
+                match mmtune::set_cache_pressure(id, val) {
+                    Ok(()) => shell_println!("Set VFS cache pressure to {}.", val),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match mmtune::set_cache_pressure(id, val) {
-                Ok(()) => shell_println!("Set VFS cache pressure to {}.", val),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "zram" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: mmtune zram <id> <on|off>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: mmtune zram <id> <on|off>");
                     return;
                 }
-            };
-            let on = parts[2] == "on" || parts[2] == "true";
-            match mmtune::set_zram_enabled(id, on) {
-                Ok(()) => shell_println!("Set ZRAM {}.", if on { "on" } else { "off" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let on = parts[2] == "on" || parts[2] == "true";
+                match mmtune::set_zram_enabled(id, on) {
+                    Ok(()) => shell_println!("Set ZRAM {}.", if on { "on" } else { "off" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
+            case(&parts);
         }
         "zerofree" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: mmtune zerofree <id> <on|off>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: mmtune zerofree <id> <on|off>");
                     return;
                 }
-            };
-            let on = parts[2] == "on" || parts[2] == "true";
-            match mmtune::set_zero_on_free(id, on) {
-                Ok(()) => shell_println!("Set zero-on-free {}.", if on { "on" } else { "off" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let on = parts[2] == "on" || parts[2] == "true";
+                match mmtune::set_zero_on_free(id, on) {
+                    Ok(()) => shell_println!("Set zero-on-free {}.", if on { "on" } else { "off" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
+            case(&parts);
         }
         "reclaim" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: mmtune reclaim <id> <lru|clock|mglru|workingset>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: mmtune reclaim <id> <lru|clock|mglru|workingset>");
                     return;
                 }
-            };
-            let rs = match parts[2] {
-                "lru" => mmtune::ReclaimStrategy::Lru,
-                "clock" => mmtune::ReclaimStrategy::Clock,
-                "mglru" | "multigen" => mmtune::ReclaimStrategy::MultiGenLru,
-                "workingset" | "ws" => mmtune::ReclaimStrategy::WorkingSet,
-                _ => {
-                    shell_println!("Unknown strategy.");
-                    return;
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let rs = match parts[2] {
+                    "lru" => mmtune::ReclaimStrategy::Lru,
+                    "clock" => mmtune::ReclaimStrategy::Clock,
+                    "mglru" | "multigen" => mmtune::ReclaimStrategy::MultiGenLru,
+                    "workingset" | "ws" => mmtune::ReclaimStrategy::WorkingSet,
+                    _ => {
+                        shell_println!("Unknown strategy.");
+                        return;
+                    }
+                };
+                match mmtune::set_reclaim(id, rs) {
+                    Ok(()) => shell_println!("Set reclaim strategy."),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match mmtune::set_reclaim(id, rs) {
-                Ok(()) => shell_println!("Set reclaim strategy."),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "tradeoffs" | "pros" => {
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: mmtune tradeoffs <id>");
-                    return;
-                }
-            };
-            match mmtune::tradeoffs(id) {
-                Ok(info) => {
-                    shell_println!("{}", info.label);
-                    shell_println!();
-                    shell_println!("Advantages:");
-                    for a in &info.advantages {
-                        shell_println!("  + {}", a);
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: mmtune tradeoffs <id>");
+                        return;
                     }
-                    shell_println!();
-                    shell_println!("Disadvantages:");
-                    for d in &info.disadvantages {
-                        shell_println!("  - {}", d);
+                };
+                match mmtune::tradeoffs(id) {
+                    Ok(info) => {
+                        shell_println!("{}", info.label);
+                        shell_println!();
+                        shell_println!("Advantages:");
+                        for a in &info.advantages {
+                            shell_println!("  + {}", a);
+                        }
+                        shell_println!();
+                        shell_println!("Disadvantages:");
+                        for d in &info.disadvantages {
+                            shell_println!("  - {}", d);
+                        }
                     }
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "stats" => {
-            let (total, active, tradeoffs, ops) = mmtune::stats();
-            shell_println!("Profiles:    {}", total);
-            shell_println!("Active:      {}", active);
-            shell_println!("Tradeoffs:   {}", tradeoffs);
-            shell_println!("Operations:  {}", ops);
+            #[inline(never)]
+            fn case() {
+                let (total, active, tradeoffs, ops) = mmtune::stats();
+                shell_println!("Profiles:    {}", total);
+                shell_println!("Active:      {}", active);
+                shell_println!("Tradeoffs:   {}", tradeoffs);
+                shell_println!("Operations:  {}", ops);
+            }
+            case();
         }
         "clear" => {
-            mmtune::clear_all();
-            shell_println!("Cleared all memory profiles.");
+            #[inline(never)]
+            fn case() {
+                mmtune::clear_all();
+                shell_println!("Cleared all memory profiles.");
+            }
+            case();
         }
         "test" => match mmtune::self_test() {
             Ok(()) => shell_println!("mmtune: all tests passed."),
             Err(e) => shell_println!("mmtune: test failed: {:?}", e),
         },
         _ => {
-            shell_println!("mmtune — memory management tuning parameters");
-            shell_println!();
-            shell_println!("Subcommands:");
-            shell_println!("  init                          Load default profiles");
-            shell_println!("  list / ls                     List all profiles");
-            shell_println!("  active / show                 Show active profile details");
-            shell_println!("  get <id>                      Show profile details");
-            shell_println!("  create <name> <wl> <alloc>    Create custom profile");
-            shell_println!("  remove / rm <id>              Remove custom profile");
-            shell_println!("  apply <id>                    Activate a profile");
-            shell_println!("  overcommit <id> <mode>        Set overcommit mode");
-            shell_println!("  hugepages <id> <mode>         Set huge page mode");
-            shell_println!("  compact <id> <level>          Set compaction level");
-            shell_println!("  swappiness <id> <0-200>       Set swappiness");
-            shell_println!("  dirty <id> <ratio> <bg>       Set dirty ratios");
-            shell_println!("  cache <id> <pressure>         Set VFS cache pressure");
-            shell_println!("  zram <id> <on|off>            Toggle ZRAM");
-            shell_println!("  zerofree <id> <on|off>        Toggle zero-on-free");
-            shell_println!("  reclaim <id> <strategy>       Set reclaim strategy");
-            shell_println!("  tradeoffs <id>                Show pros/cons");
-            shell_println!("  stats                         Show statistics");
-            shell_println!("  clear                         Clear all profiles");
-            shell_println!("  test                          Run self-tests");
-            shell_println!();
-            shell_println!("Workloads: desktop, server, gaming, dev, lowmem, vmhost");
-            shell_println!("Allocators: buddy, slabbuddy, bitmap, zonebased");
-            shell_println!("Overcommit: never, heuristic, always");
-            shell_println!("Huge pages: off, madvise, transparent, always");
-            shell_println!("Compaction: off, light, background, aggressive");
-            shell_println!("Reclaim: lru, clock, mglru, workingset");
-            shell_println!("Alias: mtune");
+            #[inline(never)]
+            fn case() {
+                shell_println!("mmtune — memory management tuning parameters");
+                shell_println!();
+                shell_println!("Subcommands:");
+                shell_println!("  init                          Load default profiles");
+                shell_println!("  list / ls                     List all profiles");
+                shell_println!("  active / show                 Show active profile details");
+                shell_println!("  get <id>                      Show profile details");
+                shell_println!("  create <name> <wl> <alloc>    Create custom profile");
+                shell_println!("  remove / rm <id>              Remove custom profile");
+                shell_println!("  apply <id>                    Activate a profile");
+                shell_println!("  overcommit <id> <mode>        Set overcommit mode");
+                shell_println!("  hugepages <id> <mode>         Set huge page mode");
+                shell_println!("  compact <id> <level>          Set compaction level");
+                shell_println!("  swappiness <id> <0-200>       Set swappiness");
+                shell_println!("  dirty <id> <ratio> <bg>       Set dirty ratios");
+                shell_println!("  cache <id> <pressure>         Set VFS cache pressure");
+                shell_println!("  zram <id> <on|off>            Toggle ZRAM");
+                shell_println!("  zerofree <id> <on|off>        Toggle zero-on-free");
+                shell_println!("  reclaim <id> <strategy>       Set reclaim strategy");
+                shell_println!("  tradeoffs <id>                Show pros/cons");
+                shell_println!("  stats                         Show statistics");
+                shell_println!("  clear                         Clear all profiles");
+                shell_println!("  test                          Run self-tests");
+                shell_println!();
+                shell_println!("Workloads: desktop, server, gaming, dev, lowmem, vmhost");
+                shell_println!("Allocators: buddy, slabbuddy, bitmap, zonebased");
+                shell_println!("Overcommit: never, heuristic, always");
+                shell_println!("Huge pages: off, madvise, transparent, always");
+                shell_println!("Compaction: off, light, background, aggressive");
+                shell_println!("Reclaim: lru, clock, mglru, workingset");
+                shell_println!("Alias: mtune");
+            }
+            case();
         }
     }
 }
@@ -85272,39 +85348,43 @@ fn cmd_firewall(args: &str) {
 
     match cmd {
         "" | "status" => {
-            let enabled = firewall::is_enabled();
-            let policy = firewall::default_policy();
-            let nrules = firewall::rule_count();
-            let (allowed, denied) = firewall::stats();
-            let ct = firewall::conntrack_count();
+            #[inline(never)]
+            fn case() {
+                let enabled = firewall::is_enabled();
+                let policy = firewall::default_policy();
+                let nrules = firewall::rule_count();
+                let (allowed, denied) = firewall::stats();
+                let ct = firewall::conntrack_count();
 
-            crate::console_println!("=== Firewall (IPv4) ===");
-            crate::console_println!(
-                "  Status:   {}",
-                if enabled { "ENABLED" } else { "disabled" }
-            );
-            crate::console_println!("  Policy:   {:?}", policy);
-            crate::console_println!("  Rules:    {}", nrules);
-            crate::console_println!("  Conntrack: {} entries", ct);
-            crate::console_println!("  Allowed:  {}", allowed);
-            crate::console_println!("  Denied:   {}", denied);
+                crate::console_println!("=== Firewall (IPv4) ===");
+                crate::console_println!(
+                    "  Status:   {}",
+                    if enabled { "ENABLED" } else { "disabled" }
+                );
+                crate::console_println!("  Policy:   {:?}", policy);
+                crate::console_println!("  Rules:    {}", nrules);
+                crate::console_println!("  Conntrack: {} entries", ct);
+                crate::console_println!("  Allowed:  {}", allowed);
+                crate::console_println!("  Denied:   {}", denied);
 
-            let enabled6 = firewall::is_enabled6();
-            let policy6 = firewall::default_policy6();
-            let nrules6 = firewall::rule6_count();
-            let (allowed6, denied6) = firewall::stats6();
-            let ct6 = firewall::conntrack6_count();
+                let enabled6 = firewall::is_enabled6();
+                let policy6 = firewall::default_policy6();
+                let nrules6 = firewall::rule6_count();
+                let (allowed6, denied6) = firewall::stats6();
+                let ct6 = firewall::conntrack6_count();
 
-            crate::console_println!("=== Firewall (IPv6) ===");
-            crate::console_println!(
-                "  Status:   {}",
-                if enabled6 { "ENABLED" } else { "disabled" }
-            );
-            crate::console_println!("  Policy:   {:?}", policy6);
-            crate::console_println!("  Rules:    {}", nrules6);
-            crate::console_println!("  Conntrack: {} entries", ct6);
-            crate::console_println!("  Allowed:  {}", allowed6);
-            crate::console_println!("  Denied:   {}", denied6);
+                crate::console_println!("=== Firewall (IPv6) ===");
+                crate::console_println!(
+                    "  Status:   {}",
+                    if enabled6 { "ENABLED" } else { "disabled" }
+                );
+                crate::console_println!("  Policy:   {:?}", policy6);
+                crate::console_println!("  Rules:    {}", nrules6);
+                crate::console_println!("  Conntrack: {} entries", ct6);
+                crate::console_println!("  Allowed:  {}", allowed6);
+                crate::console_println!("  Denied:   {}", denied6);
+            }
+            case();
         }
         "on" | "enable" => firewall::enable(),
         "off" | "disable" => firewall::disable(),
@@ -85321,351 +85401,399 @@ fn cmd_firewall(args: &str) {
             _ => crate::console_println!("Usage: firewall policy6 accept|drop"),
         },
         "allow" | "deny" => {
-            // Parse: allow|deny in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]
-            let action = if cmd == "allow" {
-                firewall::Action::Allow
-            } else {
-                firewall::Action::Deny
-            };
+            #[inline(never)]
+            fn case(parts: &[&str], cmd: &str) {
+                // Parse: allow|deny in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]
+                let action = if cmd == "allow" {
+                    firewall::Action::Allow
+                } else {
+                    firewall::Action::Deny
+                };
 
-            let direction = match parts.get(1).copied() {
-                Some("in") => firewall::Direction::In,
-                Some("out") => firewall::Direction::Out,
-                Some("both") => firewall::Direction::Both,
-                _ => {
-                    crate::console_println!(
-                        "Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
-                        cmd
-                    );
-                    return;
-                }
-            };
-
-            let protocol = match parts.get(2).copied() {
-                Some("tcp") => firewall::Protocol::Tcp,
-                Some("udp") => firewall::Protocol::Udp,
-                Some("icmp") => firewall::Protocol::Icmp,
-                Some("any") | Some("all") => firewall::Protocol::Any,
-                _ => {
-                    crate::console_println!(
-                        "Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
-                        cmd
-                    );
-                    return;
-                }
-            };
-
-            // Parse optional modifiers.
-            let mut dst_port: u16 = 0;
-            let mut src_ip = crate::net::interface::Ipv4Addr::UNSPECIFIED;
-            let mut src_prefix: u8 = 0;
-            let mut priority: u16 = 100;
-
-            let mut i = 3;
-            while i < parts.len() {
-                match parts[i] {
-                    "port" => {
-                        if let Some(p) = parts.get(i + 1) {
-                            if let Ok(port) = p.parse::<u16>() {
-                                dst_port = port;
-                            }
-                        }
-                        i += 2;
-                    }
-                    "ip" => {
-                        if let Some(ip_str) = parts.get(i + 1) {
-                            // Parse IP[/prefix].
-                            if let Some((ip_part, prefix_part)) = ip_str.split_once('/') {
-                                if let Some(ip) = parse_ipv4(ip_part) {
-                                    src_ip = ip;
-                                    src_prefix = prefix_part.parse::<u8>().unwrap_or(32);
-                                }
-                            } else if let Some(ip) = parse_ipv4(ip_str) {
-                                src_ip = ip;
-                                src_prefix = 32;
-                            }
-                        }
-                        i += 2;
-                    }
-                    "prio" | "priority" => {
-                        if let Some(p) = parts.get(i + 1) {
-                            priority = p.parse::<u16>().unwrap_or(100);
-                        }
-                        i += 2;
-                    }
+                let direction = match parts.get(1).copied() {
+                    Some("in") => firewall::Direction::In,
+                    Some("out") => firewall::Direction::Out,
+                    Some("both") => firewall::Direction::Both,
                     _ => {
-                        i += 1;
+                        crate::console_println!(
+                            "Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
+                            cmd
+                        );
+                        return;
+                    }
+                };
+
+                let protocol = match parts.get(2).copied() {
+                    Some("tcp") => firewall::Protocol::Tcp,
+                    Some("udp") => firewall::Protocol::Udp,
+                    Some("icmp") => firewall::Protocol::Icmp,
+                    Some("any") | Some("all") => firewall::Protocol::Any,
+                    _ => {
+                        crate::console_println!(
+                            "Usage: firewall {} in|out|both tcp|udp|icmp|any [port N] [ip A.B.C.D[/N]] [prio N]",
+                            cmd
+                        );
+                        return;
+                    }
+                };
+
+                // Parse optional modifiers.
+                let mut dst_port: u16 = 0;
+                let mut src_ip = crate::net::interface::Ipv4Addr::UNSPECIFIED;
+                let mut src_prefix: u8 = 0;
+                let mut priority: u16 = 100;
+
+                let mut i = 3;
+                while i < parts.len() {
+                    match parts[i] {
+                        "port" => {
+                            if let Some(p) = parts.get(i + 1) {
+                                if let Ok(port) = p.parse::<u16>() {
+                                    dst_port = port;
+                                }
+                            }
+                            i += 2;
+                        }
+                        "ip" => {
+                            if let Some(ip_str) = parts.get(i + 1) {
+                                // Parse IP[/prefix].
+                                if let Some((ip_part, prefix_part)) = ip_str.split_once('/') {
+                                    if let Some(ip) = parse_ipv4(ip_part) {
+                                        src_ip = ip;
+                                        src_prefix = prefix_part.parse::<u8>().unwrap_or(32);
+                                    }
+                                } else if let Some(ip) = parse_ipv4(ip_str) {
+                                    src_ip = ip;
+                                    src_prefix = 32;
+                                }
+                            }
+                            i += 2;
+                        }
+                        "prio" | "priority" => {
+                            if let Some(p) = parts.get(i + 1) {
+                                priority = p.parse::<u16>().unwrap_or(100);
+                            }
+                            i += 2;
+                        }
+                        _ => {
+                            i += 1;
+                        }
                     }
                 }
-            }
 
-            let rule = firewall::Rule {
-                active: true,
-                direction,
-                action,
-                protocol,
-                src_ip,
-                src_prefix,
-                dst_port,
-                priority,
-                match_count: 0,
-            };
+                let rule = firewall::Rule {
+                    active: true,
+                    direction,
+                    action,
+                    protocol,
+                    src_ip,
+                    src_prefix,
+                    dst_port,
+                    priority,
+                    match_count: 0,
+                };
 
-            match firewall::add_rule(rule) {
-                Ok(idx) => crate::console_println!("Rule {} added", idx),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                match firewall::add_rule(rule) {
+                    Ok(idx) => crate::console_println!("Rule {} added", idx),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
             }
+            case(&parts, cmd);
         }
         "allow6" | "deny6" => {
-            // Parse: allow6|deny6 in|out|both tcp|udp|icmp|any [port N] [ip ADDR[/N]] [prio N]
-            use crate::net::ipv6::Ipv6Addr;
+            #[inline(never)]
+            fn case(parts: &[&str], cmd: &str) {
+                // Parse: allow6|deny6 in|out|both tcp|udp|icmp|any [port N] [ip ADDR[/N]] [prio N]
+                use crate::net::ipv6::Ipv6Addr;
 
-            let action = if cmd == "allow6" {
-                firewall::Action::Allow
-            } else {
-                firewall::Action::Deny
-            };
+                let action = if cmd == "allow6" {
+                    firewall::Action::Allow
+                } else {
+                    firewall::Action::Deny
+                };
 
-            let direction = match parts.get(1).copied() {
-                Some("in") => firewall::Direction::In,
-                Some("out") => firewall::Direction::Out,
-                Some("both") => firewall::Direction::Both,
-                _ => {
-                    crate::console_println!(
-                        "Usage: fw {} in|out|both tcp|udp|icmp|any [port N] [ip ADDR[/N]] [prio N]",
-                        cmd
-                    );
-                    return;
-                }
-            };
-
-            let protocol = match parts.get(2).copied() {
-                Some("tcp") => firewall::Protocol::Tcp,
-                Some("udp") => firewall::Protocol::Udp,
-                Some("icmp") | Some("icmpv6") => firewall::Protocol::Icmp,
-                Some("any") | Some("all") => firewall::Protocol::Any,
-                _ => {
-                    crate::console_println!(
-                        "Usage: fw {} in|out|both tcp|udp|icmp|any [port N] [ip ADDR[/N]] [prio N]",
-                        cmd
-                    );
-                    return;
-                }
-            };
-
-            let mut dst_port: u16 = 0;
-            let mut src_ip = Ipv6Addr::UNSPECIFIED;
-            let mut src_prefix: u8 = 0;
-            let mut priority: u16 = 100;
-
-            let mut i = 3;
-            while i < parts.len() {
-                match parts[i] {
-                    "port" => {
-                        if let Some(p) = parts.get(i + 1) {
-                            if let Ok(port) = p.parse::<u16>() {
-                                dst_port = port;
-                            }
-                        }
-                        i += 2;
-                    }
-                    "ip" => {
-                        if let Some(ip_str) = parts.get(i + 1) {
-                            if let Some((ip_part, prefix_part)) = ip_str.split_once('/') {
-                                if let Some(ip) = Ipv6Addr::parse(ip_part) {
-                                    src_ip = ip;
-                                    src_prefix = prefix_part.parse::<u8>().unwrap_or(128);
-                                }
-                            } else if let Some(ip) = Ipv6Addr::parse(ip_str) {
-                                src_ip = ip;
-                                src_prefix = 128;
-                            }
-                        }
-                        i += 2;
-                    }
-                    "prio" | "priority" => {
-                        if let Some(p) = parts.get(i + 1) {
-                            priority = p.parse::<u16>().unwrap_or(100);
-                        }
-                        i += 2;
-                    }
+                let direction = match parts.get(1).copied() {
+                    Some("in") => firewall::Direction::In,
+                    Some("out") => firewall::Direction::Out,
+                    Some("both") => firewall::Direction::Both,
                     _ => {
-                        i += 1;
+                        crate::console_println!(
+                            "Usage: fw {} in|out|both tcp|udp|icmp|any [port N] [ip ADDR[/N]] [prio N]",
+                            cmd
+                        );
+                        return;
+                    }
+                };
+
+                let protocol = match parts.get(2).copied() {
+                    Some("tcp") => firewall::Protocol::Tcp,
+                    Some("udp") => firewall::Protocol::Udp,
+                    Some("icmp") | Some("icmpv6") => firewall::Protocol::Icmp,
+                    Some("any") | Some("all") => firewall::Protocol::Any,
+                    _ => {
+                        crate::console_println!(
+                            "Usage: fw {} in|out|both tcp|udp|icmp|any [port N] [ip ADDR[/N]] [prio N]",
+                            cmd
+                        );
+                        return;
+                    }
+                };
+
+                let mut dst_port: u16 = 0;
+                let mut src_ip = Ipv6Addr::UNSPECIFIED;
+                let mut src_prefix: u8 = 0;
+                let mut priority: u16 = 100;
+
+                let mut i = 3;
+                while i < parts.len() {
+                    match parts[i] {
+                        "port" => {
+                            if let Some(p) = parts.get(i + 1) {
+                                if let Ok(port) = p.parse::<u16>() {
+                                    dst_port = port;
+                                }
+                            }
+                            i += 2;
+                        }
+                        "ip" => {
+                            if let Some(ip_str) = parts.get(i + 1) {
+                                if let Some((ip_part, prefix_part)) = ip_str.split_once('/') {
+                                    if let Some(ip) = Ipv6Addr::parse(ip_part) {
+                                        src_ip = ip;
+                                        src_prefix = prefix_part.parse::<u8>().unwrap_or(128);
+                                    }
+                                } else if let Some(ip) = Ipv6Addr::parse(ip_str) {
+                                    src_ip = ip;
+                                    src_prefix = 128;
+                                }
+                            }
+                            i += 2;
+                        }
+                        "prio" | "priority" => {
+                            if let Some(p) = parts.get(i + 1) {
+                                priority = p.parse::<u16>().unwrap_or(100);
+                            }
+                            i += 2;
+                        }
+                        _ => {
+                            i += 1;
+                        }
                     }
                 }
-            }
 
-            let rule = firewall::Rule6 {
-                active: true,
-                direction,
-                action,
-                protocol,
-                src_ip,
-                src_prefix,
-                dst_port,
-                priority,
-                match_count: 0,
-            };
+                let rule = firewall::Rule6 {
+                    active: true,
+                    direction,
+                    action,
+                    protocol,
+                    src_ip,
+                    src_prefix,
+                    dst_port,
+                    priority,
+                    match_count: 0,
+                };
 
-            match firewall::add_rule6(rule) {
-                Ok(idx) => crate::console_println!("IPv6 rule {} added", idx),
-                Err(e) => crate::console_println!("Error: {:?}", e),
+                match firewall::add_rule6(rule) {
+                    Ok(idx) => crate::console_println!("IPv6 rule {} added", idx),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
             }
+            case(&parts, cmd);
         }
         "remove" | "rm" | "del" => {
-            if let Some(idx_str) = parts.get(1) {
-                if let Ok(idx) = idx_str.parse::<usize>() {
-                    match firewall::remove_rule(idx) {
-                        Ok(()) => crate::console_println!("Rule {} removed", idx),
-                        Err(e) => crate::console_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let Some(idx_str) = parts.get(1) {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        match firewall::remove_rule(idx) {
+                            Ok(()) => crate::console_println!("Rule {} removed", idx),
+                            Err(e) => crate::console_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        crate::console_println!("Usage: firewall remove <index>");
                     }
                 } else {
                     crate::console_println!("Usage: firewall remove <index>");
                 }
-            } else {
-                crate::console_println!("Usage: firewall remove <index>");
             }
+            case(&parts);
         }
         "remove6" | "rm6" | "del6" => {
-            if let Some(idx_str) = parts.get(1) {
-                if let Ok(idx) = idx_str.parse::<usize>() {
-                    match firewall::remove_rule6(idx) {
-                        Ok(()) => crate::console_println!("IPv6 rule {} removed", idx),
-                        Err(e) => crate::console_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let Some(idx_str) = parts.get(1) {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        match firewall::remove_rule6(idx) {
+                            Ok(()) => crate::console_println!("IPv6 rule {} removed", idx),
+                            Err(e) => crate::console_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        crate::console_println!("Usage: firewall remove6 <index>");
                     }
                 } else {
                     crate::console_println!("Usage: firewall remove6 <index>");
                 }
-            } else {
-                crate::console_println!("Usage: firewall remove6 <index>");
             }
+            case(&parts);
         }
         "clear" | "flush" => {
-            firewall::clear_rules();
-            crate::console_println!("All IPv4 rules cleared");
+            #[inline(never)]
+            fn case() {
+                firewall::clear_rules();
+                crate::console_println!("All IPv4 rules cleared");
+            }
+            case();
         }
         "clear6" | "flush6" => {
-            firewall::clear_rules6();
-            crate::console_println!("All IPv6 rules cleared");
+            #[inline(never)]
+            fn case() {
+                firewall::clear_rules6();
+                crate::console_println!("All IPv6 rules cleared");
+            }
+            case();
         }
         "stats" => {
-            let (allowed, denied) = firewall::stats();
-            crate::console_println!("IPv4 — Allowed: {}  Denied: {}", allowed, denied);
-            let (allowed6, denied6) = firewall::stats6();
-            crate::console_println!("IPv6 — Allowed: {}  Denied: {}", allowed6, denied6);
+            #[inline(never)]
+            fn case() {
+                let (allowed, denied) = firewall::stats();
+                crate::console_println!("IPv4 — Allowed: {}  Denied: {}", allowed, denied);
+                let (allowed6, denied6) = firewall::stats6();
+                crate::console_println!("IPv6 — Allowed: {}  Denied: {}", allowed6, denied6);
+            }
+            case();
         }
         "rules" | "list" | "ls" => {
-            let (rule_stats, count) = firewall::rule_stats();
-            if count == 0 {
-                crate::console_println!("No IPv4 rules configured");
-            } else {
-                crate::console_println!("=== IPv4 Firewall Rules ({}) ===", count);
-                crate::console_println!(
-                    "{:<4} {:<6} {:<5} {:<6} {:<20} {:<6} {:<6} {}",
-                    "Idx",
-                    "Action",
-                    "Dir",
-                    "Proto",
-                    "Source",
-                    "Port",
-                    "Prio",
-                    "Matches"
-                );
-                for rs in rule_stats.iter().take(count) {
-                    let src =
-                        core::str::from_utf8(&rs.source[..rs.source_len as usize]).unwrap_or("?");
-                    let port_str = if rs.dst_port == 0 {
-                        alloc::string::String::from("any")
-                    } else {
-                        alloc::format!("{}", rs.dst_port)
-                    };
+            #[inline(never)]
+            fn case() {
+                let (rule_stats, count) = firewall::rule_stats();
+                if count == 0 {
+                    crate::console_println!("No IPv4 rules configured");
+                } else {
+                    crate::console_println!("=== IPv4 Firewall Rules ({}) ===", count);
                     crate::console_println!(
                         "{:<4} {:<6} {:<5} {:<6} {:<20} {:<6} {:<6} {}",
-                        rs.index,
-                        rs.action,
-                        rs.direction,
-                        rs.protocol,
-                        src,
-                        port_str,
-                        rs.priority,
-                        rs.matches
+                        "Idx",
+                        "Action",
+                        "Dir",
+                        "Proto",
+                        "Source",
+                        "Port",
+                        "Prio",
+                        "Matches"
                     );
+                    for rs in rule_stats.iter().take(count) {
+                        let src =
+                            core::str::from_utf8(&rs.source[..rs.source_len as usize]).unwrap_or("?");
+                        let port_str = if rs.dst_port == 0 {
+                            alloc::string::String::from("any")
+                        } else {
+                            alloc::format!("{}", rs.dst_port)
+                        };
+                        crate::console_println!(
+                            "{:<4} {:<6} {:<5} {:<6} {:<20} {:<6} {:<6} {}",
+                            rs.index,
+                            rs.action,
+                            rs.direction,
+                            rs.protocol,
+                            src,
+                            port_str,
+                            rs.priority,
+                            rs.matches
+                        );
+                    }
                 }
             }
+            case();
         }
         "rules6" | "list6" | "ls6" => {
-            let (rule_stats, count) = firewall::rule6_stats();
-            if count == 0 {
-                crate::console_println!("No IPv6 rules configured");
-            } else {
-                crate::console_println!("=== IPv6 Firewall Rules ({}) ===", count);
-                crate::console_println!(
-                    "{:<4} {:<6} {:<5} {:<8} {:<42} {:<6} {:<6} {}",
-                    "Idx",
-                    "Action",
-                    "Dir",
-                    "Proto",
-                    "Source",
-                    "Port",
-                    "Prio",
-                    "Matches"
-                );
-                for rs in rule_stats.iter().take(count) {
-                    let src =
-                        core::str::from_utf8(&rs.source[..rs.source_len as usize]).unwrap_or("?");
-                    let port_str = if rs.dst_port == 0 {
-                        alloc::string::String::from("any")
-                    } else {
-                        alloc::format!("{}", rs.dst_port)
-                    };
-                    // For IPv6 rules, "icmp" actually means "icmpv6".
-                    let proto = if rs.protocol == firewall::Protocol::Icmp {
-                        "icmpv6"
-                    } else {
-                        match rs.protocol {
-                            firewall::Protocol::Any => "any",
-                            firewall::Protocol::Tcp => "tcp",
-                            firewall::Protocol::Udp => "udp",
-                            firewall::Protocol::Icmp => "icmpv6",
-                        }
-                    };
+            #[inline(never)]
+            fn case() {
+                let (rule_stats, count) = firewall::rule6_stats();
+                if count == 0 {
+                    crate::console_println!("No IPv6 rules configured");
+                } else {
+                    crate::console_println!("=== IPv6 Firewall Rules ({}) ===", count);
                     crate::console_println!(
                         "{:<4} {:<6} {:<5} {:<8} {:<42} {:<6} {:<6} {}",
-                        rs.index,
-                        rs.action,
-                        rs.direction,
-                        proto,
-                        src,
-                        port_str,
-                        rs.priority,
-                        rs.matches
+                        "Idx",
+                        "Action",
+                        "Dir",
+                        "Proto",
+                        "Source",
+                        "Port",
+                        "Prio",
+                        "Matches"
                     );
+                    for rs in rule_stats.iter().take(count) {
+                        let src =
+                            core::str::from_utf8(&rs.source[..rs.source_len as usize]).unwrap_or("?");
+                        let port_str = if rs.dst_port == 0 {
+                            alloc::string::String::from("any")
+                        } else {
+                            alloc::format!("{}", rs.dst_port)
+                        };
+                        // For IPv6 rules, "icmp" actually means "icmpv6".
+                        let proto = if rs.protocol == firewall::Protocol::Icmp {
+                            "icmpv6"
+                        } else {
+                            match rs.protocol {
+                                firewall::Protocol::Any => "any",
+                                firewall::Protocol::Tcp => "tcp",
+                                firewall::Protocol::Udp => "udp",
+                                firewall::Protocol::Icmp => "icmpv6",
+                            }
+                        };
+                        crate::console_println!(
+                            "{:<4} {:<6} {:<5} {:<8} {:<42} {:<6} {:<6} {}",
+                            rs.index,
+                            rs.action,
+                            rs.direction,
+                            proto,
+                            src,
+                            port_str,
+                            rs.priority,
+                            rs.matches
+                        );
+                    }
                 }
             }
+            case();
         }
         "conntrack" | "ct" => {
-            let count = firewall::conntrack_count();
-            let count6 = firewall::conntrack6_count();
-            crate::console_println!(
-                "Connection tracking: {} IPv4, {} IPv6 active entries",
-                count,
-                count6
-            );
+            #[inline(never)]
+            fn case() {
+                let count = firewall::conntrack_count();
+                let count6 = firewall::conntrack6_count();
+                crate::console_println!(
+                    "Connection tracking: {} IPv4, {} IPv6 active entries",
+                    count,
+                    count6
+                );
+            }
+            case();
         }
         "reset" => {
-            firewall::reset_stats();
-            firewall::clear_conntrack();
-            firewall::reset_stats6();
-            firewall::clear_conntrack6();
-            crate::console_println!("Stats and conntrack reset (IPv4 + IPv6)");
+            #[inline(never)]
+            fn case() {
+                firewall::reset_stats();
+                firewall::clear_conntrack();
+                firewall::reset_stats6();
+                firewall::clear_conntrack6();
+                crate::console_println!("Stats and conntrack reset (IPv4 + IPv6)");
+            }
+            case();
         }
         _ => {
-            crate::console_println!(
-                "Usage: fw [on|off|on6|off6|policy|policy6|allow|deny|allow6|deny6|"
-            );
-            crate::console_println!(
-                "          remove|remove6|clear|clear6|rules|rules6|stats|conntrack|reset]"
-            );
+            #[inline(never)]
+            fn case() {
+                crate::console_println!(
+                    "Usage: fw [on|off|on6|off6|policy|policy6|allow|deny|allow6|deny6|"
+                );
+                crate::console_println!(
+                    "          remove|remove6|clear|clear6|rules|rules6|stats|conntrack|reset]"
+                );
+            }
+            case();
         }
     }
 }
@@ -87398,1828 +87526,1960 @@ fn cmd_container(args: &str) {
 
     match cmd {
         "" | "list" | "ls" => {
-            // Optional Docker-style `--filter`/`-f`, repeatable, with three
-            // supported keys:
-            //   label=KEY            label present (any value)
-            //   label=KEY=VALUE      label equals value
-            //   name=SUBSTRING       container name contains the substring
-            //   status=STATE         state is created|running|stopped|failed
-            // A container must satisfy ALL given filters (AND semantics). Note
-            // this is slightly stricter than Docker for repeated same-key
-            // filters (Docker ORs those), but it is simple and predictable.
-            let mut label_filters: alloc::vec::Vec<(&str, Option<&str>)> = alloc::vec::Vec::new();
-            let mut name_filters: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-            let mut status_filters: alloc::vec::Vec<container::ContainerState> =
-                alloc::vec::Vec::new();
-            // `-q`/`--quiet` (Docker `ps -q`): print only container IDs, one per
-            // line, with no header — for scripting (`rm $(ls -q)`).
-            let mut quiet = false;
-            // `-a`/`--all` (Docker `ps -a`): include non-running containers.
-            // Without it, `ps` shows only Running containers, matching Docker
-            // (a `status=` filter, if given, overrides this running-only
-            // default so `ls --filter status=stopped` still works).
-            let mut all_states = false;
-            // `-n N` (Docker `ps -n`): show the N most-recently-created
-            // containers of any state; `-l`/`--latest` == `-n 1`. Setting a
-            // limit implies `-a` (last-N spans all states).
-            let mut limit: Option<usize> = None;
-            let mut fi = 1;
-            while fi < parts.len() {
-                match parts.get(fi) {
-                    Some(&"-q") | Some(&"--quiet") => {
-                        quiet = true;
-                        fi = fi.saturating_add(1);
-                    }
-                    Some(&"-a") | Some(&"--all") => {
-                        all_states = true;
-                        fi = fi.saturating_add(1);
-                    }
-                    Some(&"-l") | Some(&"--latest") => {
-                        limit = Some(1);
-                        all_states = true;
-                        fi = fi.saturating_add(1);
-                    }
-                    Some(&"-n") | Some(&"--last") => {
-                        match parts
-                            .get(fi.saturating_add(1))
-                            .and_then(|s| s.parse::<usize>().ok())
-                        {
-                            Some(n) => {
-                                limit = Some(n);
-                                all_states = true;
-                            }
-                            None => crate::console_println!(
-                                "[container] Ignoring -n: expected a count (e.g. -n 5)"
-                            ),
-                        }
-                        fi = fi.saturating_add(2);
-                    }
-                    Some(&"--filter") | Some(&"-f") => {
-                        if let Some(&spec) = parts.get(fi.saturating_add(1)) {
-                            if let Some(lbl) = spec.strip_prefix("label=") {
-                                match lbl.split_once('=') {
-                                    Some((k, v)) if !k.is_empty() => {
-                                        label_filters.push((k, Some(v)));
-                                    }
-                                    None if !lbl.is_empty() => {
-                                        label_filters.push((lbl, None));
-                                    }
-                                    _ => crate::console_println!(
-                                        "[container] Ignoring filter '{}': expected label=KEY[=VALUE]",
-                                        spec
-                                    ),
-                                }
-                            } else if let Some(nm) = spec.strip_prefix("name=") {
-                                if nm.is_empty() {
-                                    crate::console_println!(
-                                        "[container] Ignoring filter '{}': empty name",
-                                        spec
-                                    );
-                                } else {
-                                    name_filters.push(nm);
-                                }
-                            } else if let Some(st) = spec.strip_prefix("status=") {
-                                match container::parse_state(st) {
-                                    Some(state) => status_filters.push(state),
-                                    None => crate::console_println!(
-                                        "[container] Ignoring filter '{}': status must be created|running|stopped|failed",
-                                        spec
-                                    ),
-                                }
-                            } else {
-                                crate::console_println!(
-                                    "[container] Unsupported filter '{}' (supported: label=, name=, status=)",
-                                    spec
-                                );
-                            }
-                            fi = fi.saturating_add(2);
-                        } else {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // Optional Docker-style `--filter`/`-f`, repeatable, with three
+                // supported keys:
+                //   label=KEY            label present (any value)
+                //   label=KEY=VALUE      label equals value
+                //   name=SUBSTRING       container name contains the substring
+                //   status=STATE         state is created|running|stopped|failed
+                // A container must satisfy ALL given filters (AND semantics). Note
+                // this is slightly stricter than Docker for repeated same-key
+                // filters (Docker ORs those), but it is simple and predictable.
+                let mut label_filters: alloc::vec::Vec<(&str, Option<&str>)> = alloc::vec::Vec::new();
+                let mut name_filters: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+                let mut status_filters: alloc::vec::Vec<container::ContainerState> =
+                    alloc::vec::Vec::new();
+                // `-q`/`--quiet` (Docker `ps -q`): print only container IDs, one per
+                // line, with no header — for scripting (`rm $(ls -q)`).
+                let mut quiet = false;
+                // `-a`/`--all` (Docker `ps -a`): include non-running containers.
+                // Without it, `ps` shows only Running containers, matching Docker
+                // (a `status=` filter, if given, overrides this running-only
+                // default so `ls --filter status=stopped` still works).
+                let mut all_states = false;
+                // `-n N` (Docker `ps -n`): show the N most-recently-created
+                // containers of any state; `-l`/`--latest` == `-n 1`. Setting a
+                // limit implies `-a` (last-N spans all states).
+                let mut limit: Option<usize> = None;
+                let mut fi = 1;
+                while fi < parts.len() {
+                    match parts.get(fi) {
+                        Some(&"-q") | Some(&"--quiet") => {
+                            quiet = true;
                             fi = fi.saturating_add(1);
                         }
-                    }
-                    _ => fi = fi.saturating_add(1),
-                }
-            }
-
-            let all = container::list();
-            if all.is_empty() {
-                // Quiet mode stays silent so `rm $(ls -q)` degrades to a no-op.
-                if !quiet {
-                    crate::console_println!("No containers.");
-                }
-                return;
-            }
-            // A container matches only if every filter is satisfied. Name and
-            // status are checked against the listing tuple directly; labels
-            // require an info() lookup (only performed when label filters exist).
-            let matches = |id: container::ContainerId,
-                           name: &str,
-                           state: container::ContainerState|
-             -> bool {
-                if !name_filters.iter().all(|sub| name.contains(sub)) {
-                    return false;
-                }
-                if status_filters.is_empty() {
-                    // No explicit status filter: Docker `ps` shows only Running
-                    // unless `-a`/`--all` was given.
-                    if !all_states && state != container::ContainerState::Running {
-                        return false;
-                    }
-                } else if !status_filters.contains(&state) {
-                    return false;
-                }
-                if label_filters.is_empty() {
-                    return true;
-                }
-                let Some(ci) = container::info(id) else {
-                    return false;
-                };
-                container::labels_match(&ci.labels, &label_filters)
-            };
-
-            let mut shown: alloc::vec::Vec<&(container::ContainerId, alloc::string::String, _)> =
-                all.iter()
-                    .filter(|(id, name, state)| matches(*id, name, *state))
-                    .collect();
-            // Order newest-first by creation sequence (Docker `ps` lists the
-            // most recently created container at the top). `-n N`/`-l` then
-            // keeps only the first N of that order.
-            shown.sort_by(|a, b| {
-                let sa = container::info(a.0).map_or(0, |ci| ci.created_seq);
-                let sb = container::info(b.0).map_or(0, |ci| ci.created_seq);
-                sb.cmp(&sa)
-            });
-            if let Some(n) = limit {
-                shown.truncate(n);
-            }
-            if shown.is_empty() {
-                if !quiet {
-                    // Distinguish "filtered everything out" from "only stopped
-                    // containers exist and -a wasn't given".
-                    if !all_states
-                        && status_filters.is_empty()
-                        && label_filters.is_empty()
-                        && name_filters.is_empty()
-                    {
-                        crate::console_println!("No running containers (use -a to show all).");
-                    } else {
-                        crate::console_println!("No containers match the filter.");
-                    }
-                }
-                return;
-            }
-            // Quiet mode: just the IDs, one per line (Docker `ps -q`).
-            if quiet {
-                for (id, _name, _state) in &shown {
-                    crate::console_println!("{}", id);
-                }
-                return;
-            }
-            crate::console_println!("=== Containers ({}) ===", shown.len());
-            crate::console_println!("{:<5} {:<20} {:<26}", "ID", "Name", "Status");
-            for (id, name, state) in &shown {
-                // Docker `ps -a` style status: a stopped container shows its
-                // recorded init exit code ("exited (N)"); other states show the
-                // bare state word. The exit code requires an info() lookup, so
-                // we only pay for it for stopped containers.
-                let status = if *state == container::ContainerState::Stopped {
-                    match container::info(*id).and_then(|ci| ci.exit_code) {
-                        Some(code) => alloc::format!("exited ({})", code),
-                        None => alloc::format!("{}", state),
-                    }
-                } else if *state == container::ContainerState::Running
-                    && container::is_frozen(*id) == Some(true)
-                {
-                    // A frozen running container shows "paused" (Docker `ps`).
-                    alloc::format!("{} (paused)", state)
-                } else if *state == container::ContainerState::Running {
-                    // Running: append the health sub-state when a healthcheck is
-                    // configured (Docker's "Up (healthy)" / "(health: starting)").
-                    match container::health_status(*id) {
-                        Some(container::HealthStatus::Healthy) => {
-                            alloc::format!("{} (healthy)", state)
+                        Some(&"-a") | Some(&"--all") => {
+                            all_states = true;
+                            fi = fi.saturating_add(1);
                         }
-                        Some(container::HealthStatus::Unhealthy) => {
-                            alloc::format!("{} (unhealthy)", state)
+                        Some(&"-l") | Some(&"--latest") => {
+                            limit = Some(1);
+                            all_states = true;
+                            fi = fi.saturating_add(1);
                         }
-                        Some(container::HealthStatus::Starting) => {
-                            alloc::format!("{} (health: starting)", state)
+                        Some(&"-n") | Some(&"--last") => {
+                            match parts
+                                .get(fi.saturating_add(1))
+                                .and_then(|s| s.parse::<usize>().ok())
+                            {
+                                Some(n) => {
+                                    limit = Some(n);
+                                    all_states = true;
+                                }
+                                None => crate::console_println!(
+                                    "[container] Ignoring -n: expected a count (e.g. -n 5)"
+                                ),
+                            }
+                            fi = fi.saturating_add(2);
                         }
-                        _ => alloc::format!("{}", state),
-                    }
-                } else {
-                    alloc::format!("{}", state)
-                };
-                crate::console_println!("{:<5} {:<20} {:<26}", id, name, status);
-            }
-        }
-        "create" => {
-            // container create <name> [options...]
-            // Options: cpu=<N> mem=<N> uid=<inner:outer:count> net=<ip>[/<mask>][,gw=<ip>][,dns=<ip>]
-            let name = parts.get(1).unwrap_or(&"unnamed");
-            let mut cfg = container::ContainerConfig::new(name);
-
-            // Parse key=value options from remaining args.
-            for &arg in parts.iter().skip(2) {
-                if let Some(val) = arg.strip_prefix("cpu=") {
-                    if let Ok(cpu) = val.parse::<u64>() {
-                        cfg.cpu_quota = cpu;
-                    }
-                } else if let Some(val) = arg.strip_prefix("mem=") {
-                    if let Ok(mem) = val.parse::<u64>() {
-                        cfg.mem_limit = mem;
-                    }
-                } else if let Some(val) = arg.strip_prefix("uid=") {
-                    let uid_parts: alloc::vec::Vec<&str> = val.split(':').collect();
-                    if uid_parts.len() == 3 {
-                        if let (Ok(inner), Ok(outer), Ok(count)) = (
-                            uid_parts[0].parse::<u32>(),
-                            uid_parts[1].parse::<u32>(),
-                            uid_parts[2].parse::<u32>(),
-                        ) {
-                            cfg = cfg.uid_map(inner, outer, count);
-                        }
-                    }
-                } else if let Some(val) = arg.strip_prefix("net=") {
-                    // net=10.88.0.2 or net=10.88.0.2,gw=10.88.0.1,dns=8.8.8.8
-                    let net_parts: alloc::vec::Vec<&str> = val.split(',').collect();
-                    if let Some(ip) = parse_ipv4_octets(net_parts.first().copied().unwrap_or("")) {
-                        cfg.net_ip = Some(ip);
-                        cfg.net_mask = Some([255, 255, 255, 0]); // default /24
-                        for &part in net_parts.iter().skip(1) {
-                            if let Some(gw) = part.strip_prefix("gw=") {
-                                cfg.net_gateway = parse_ipv4_octets(gw);
-                            } else if let Some(dns) = part.strip_prefix("dns=") {
-                                cfg.net_dns = parse_ipv4_octets(dns);
+                        Some(&"--filter") | Some(&"-f") => {
+                            if let Some(&spec) = parts.get(fi.saturating_add(1)) {
+                                if let Some(lbl) = spec.strip_prefix("label=") {
+                                    match lbl.split_once('=') {
+                                        Some((k, v)) if !k.is_empty() => {
+                                            label_filters.push((k, Some(v)));
+                                        }
+                                        None if !lbl.is_empty() => {
+                                            label_filters.push((lbl, None));
+                                        }
+                                        _ => crate::console_println!(
+                                            "[container] Ignoring filter '{}': expected label=KEY[=VALUE]",
+                                            spec
+                                        ),
+                                    }
+                                } else if let Some(nm) = spec.strip_prefix("name=") {
+                                    if nm.is_empty() {
+                                        crate::console_println!(
+                                            "[container] Ignoring filter '{}': empty name",
+                                            spec
+                                        );
+                                    } else {
+                                        name_filters.push(nm);
+                                    }
+                                } else if let Some(st) = spec.strip_prefix("status=") {
+                                    match container::parse_state(st) {
+                                        Some(state) => status_filters.push(state),
+                                        None => crate::console_println!(
+                                            "[container] Ignoring filter '{}': status must be created|running|stopped|failed",
+                                            spec
+                                        ),
+                                    }
+                                } else {
+                                    crate::console_println!(
+                                        "[container] Unsupported filter '{}' (supported: label=, name=, status=)",
+                                        spec
+                                    );
+                                }
+                                fi = fi.saturating_add(2);
+                            } else {
+                                fi = fi.saturating_add(1);
                             }
                         }
-                    }
-                } else if let Some(val) = arg.strip_prefix("restart=") {
-                    // restart=no|always|unless-stopped|on-failure[:N] (Docker
-                    // `--restart`).
-                    match container::parse_restart_policy(val) {
-                        Some(policy) => cfg.restart_policy = policy,
-                        None => crate::console_println!(
-                            "[container] Ignoring restart='{}' (want no|always|unless-stopped|on-failure[:N])",
-                            val
-                        ),
-                    }
-                } else if arg == "rm" || arg == "--rm" || arg == "rm=true" {
-                    // Docker `--rm`: auto-delete the container when its init
-                    // exits (unless a restart policy takes precedence).
-                    cfg.auto_remove = true;
-                } else if arg == "rm=false" {
-                    cfg.auto_remove = false;
-                } else {
-                    // Legacy positional: arg2=cpu, arg3=mem, arg4=uid
-                    if parts.get(2) == Some(&arg) {
-                        if let Ok(cpu) = arg.parse::<u64>() {
-                            cfg.cpu_quota = cpu;
-                        }
-                    } else if parts.get(3) == Some(&arg) {
-                        if let Ok(mem) = arg.parse::<u64>() {
-                            cfg.mem_limit = mem;
-                        }
+                        _ => fi = fi.saturating_add(1),
                     }
                 }
-            }
 
-            match container::create(&cfg) {
-                Ok(id) => crate::console_println!("Created container '{}' (id={})", name, id),
-                Err(e) => crate::console_println!("Error: {:?}", e),
-            }
-        }
-        "delete" | "del" | "rm" => {
-            // `--force`/`-f` removes a running container (Docker `rm -f`); the
-            // flag may appear before or after the ids.  Every non-flag token
-            // after the subcommand is treated as a container id (Docker `rm`
-            // accepts multiple targets and processes each independently).
-            let force = parts.iter().skip(1).any(|&t| t == "-f" || t == "--force");
-            let ids: alloc::vec::Vec<&str> = parts
-                .iter()
-                .skip(1)
-                .copied()
-                .filter(|&t| t != "-f" && t != "--force")
-                .collect();
-            if ids.is_empty() {
-                crate::console_println!("Usage: container delete [-f|--force] <id> [id...]");
-                return;
-            }
-            for id_str in ids {
-                let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID '{}'", id_str);
-                    continue;
-                };
-                let result = if force {
-                    container::force_delete(id)
-                } else {
-                    container::delete(id)
-                };
-                match result {
-                    Ok(()) => crate::console_println!("Deleted container {}", id),
-                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
-                }
-            }
-        }
-        "start" => {
-            // Docker `start` accepts multiple targets: each is processed
-            // independently and failures don't abort the rest.
-            if parts.len() < 2 {
-                crate::console_println!("Usage: container start <id> [id...]");
-                return;
-            }
-            for &id_str in parts.iter().skip(1) {
-                let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID '{}'", id_str);
-                    continue;
-                };
-                match container::start(id) {
-                    Ok(()) => crate::console_println!("Container {} started", id),
-                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
-                }
-            }
-        }
-        "stop" => {
-            if parts.len() < 2 {
-                crate::console_println!("Usage: container stop <id> [id...]");
-                return;
-            }
-            for &id_str in parts.iter().skip(1) {
-                let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID '{}'", id_str);
-                    continue;
-                };
-                match container::stop(id) {
-                    Ok(()) => crate::console_println!("Container {} stopped", id),
-                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
-                }
-            }
-        }
-        "info" | "inspect" => {
-            // Optional `--json`/`-j` (Docker `inspect` emits JSON): the first
-            // non-flag token is the container id.
-            let mut want_json = false;
-            let mut id_str: Option<&str> = None;
-            for &tok in parts.iter().skip(1) {
-                if tok == "--json" || tok == "-j" {
-                    want_json = true;
-                } else if id_str.is_none() {
-                    id_str = Some(tok);
-                }
-            }
-            let Some(id_str) = id_str else {
-                crate::console_println!("Usage: container info [--json] <id>");
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            let Some(ci) = container::info(id) else {
-                crate::console_println!("Container {} not found", id);
-                return;
-            };
-            if want_json {
-                // JSON string escaper: names/labels are OS-boundary data that
-                // may contain quotes, backslashes, or control bytes.
-                let esc = |s: &str| -> alloc::string::String {
-                    let mut out = alloc::string::String::with_capacity(s.len());
-                    for c in s.chars() {
-                        match c {
-                            '"' => out.push_str("\\\""),
-                            '\\' => out.push_str("\\\\"),
-                            '\n' => out.push_str("\\n"),
-                            '\r' => out.push_str("\\r"),
-                            '\t' => out.push_str("\\t"),
-                            c if (c as u32) < 0x20 => {
-                                out.push_str(&alloc::format!("\\u{:04x}", c as u32));
-                            }
-                            _ => out.push(c),
-                        }
+                let all = container::list();
+                if all.is_empty() {
+                    // Quiet mode stays silent so `rm $(ls -q)` degrades to a no-op.
+                    if !quiet {
+                        crate::console_println!("No containers.");
                     }
-                    out
-                };
-                // A path is a byte string and may not be valid UTF-8, so it
-                // cannot be placed in a JSON string verbatim.  It is
-                // octal-escaped first (Linux `mangle()` — the encoding
-                // `/proc/mounts` already uses), which is total and lossless
-                // and yields pure ASCII; that is then JSON-escaped.
-                let esc_path = |p: &Path| -> alloc::string::String {
-                    esc(&crate::fs::escape::escape_octal(p.as_bytes(), &[]))
-                };
-                let mut labels_json = alloc::string::String::from("{");
-                for (i, (k, v)) in ci.labels.iter().enumerate() {
-                    if i > 0 {
-                        labels_json.push(',');
-                    }
-                    labels_json.push_str(&alloc::format!("\"{}\":\"{}\"", esc(k), esc(v)));
-                }
-                labels_json.push('}');
-                let init_pid_json = match ci.init_pid {
-                    Some(pid) => alloc::format!("{}", pid),
-                    None => alloc::string::String::from("null"),
-                };
-                let exit_json = match ci.exit_code {
-                    Some(code) => alloc::format!("{}", code),
-                    None => alloc::string::String::from("null"),
-                };
-                // Health surfaces as a JSON string only when a healthcheck is
-                // configured; otherwise `null` (Docker omits the Health object
-                // for containers without a healthcheck).
-                let health_json = if ci.has_healthcheck {
-                    alloc::format!("\"{}\"", ci.health_status)
-                } else {
-                    alloc::string::String::from("null")
-                };
-                // User-defined-network memberships (Docker multi-network, §60).
-                let mut networks_json = alloc::string::String::from("[");
-                for (i, m) in ci.memberships.iter().enumerate() {
-                    if i > 0 {
-                        networks_json.push(',');
-                    }
-                    networks_json.push_str(&alloc::format!(
-                        "{{\"name\":\"{}\",\"ip\":\"{}\",\"veth\":{}}}",
-                        esc(&m.network_name),
-                        fmt_ipv4(m.ip),
-                        m.veth_pair
-                    ));
-                }
-                networks_json.push(']');
-                crate::console_println!(
-                    "{{\"id\":{},\"name\":\"{}\",\"state\":\"{}\",\"paused\":{},\"health\":{},\"exit_code\":{},\"restart_policy\":\"{}\",\"restart_count\":{},\"auto_remove\":{},\"init_pid\":{},\"processes\":{},\"rootfs\":\"{}\",\"hostname\":\"{}\",\"pid_ns\":{},\"user_ns\":{},\"net_ns\":{},\"cgroup\":{},\"created_seq\":{},\"networks\":{},\"labels\":{}}}",
-                    id,
-                    esc(&ci.name),
-                    ci.state,
-                    ci.frozen,
-                    health_json,
-                    exit_json,
-                    ci.restart_policy,
-                    ci.restart_count,
-                    ci.auto_remove,
-                    init_pid_json,
-                    ci.nr_procs,
-                    esc_path(&ci.root_path),
-                    esc(&ci.hostname),
-                    ci.pid_ns,
-                    ci.user_ns,
-                    ci.net_ns,
-                    ci.cgroup_id,
-                    ci.created_seq,
-                    networks_json,
-                    labels_json,
-                );
-                return;
-            }
-            crate::console_println!("=== Container {} ===", id);
-            crate::console_println!("  Name:       {}", ci.name);
-            // A frozen running container shows "running (paused)" (Docker
-            // reports paused as a sub-state of running).
-            if ci.frozen {
-                crate::console_println!("  State:      {} (paused)", ci.state);
-            } else {
-                crate::console_println!("  State:      {}", ci.state);
-            }
-            // Health (Docker `HEALTHCHECK`): shown only when a healthcheck is
-            // configured; the failure streak is appended while unhealthy.
-            if ci.has_healthcheck {
-                if ci.health_status == container::HealthStatus::Unhealthy {
-                    crate::console_println!(
-                        "  Health:     {} (failing streak: {})",
-                        ci.health_status,
-                        ci.health_fail_streak
-                    );
-                } else {
-                    crate::console_println!("  Health:     {}", ci.health_status);
-                }
-            }
-            // Docker's "Exited (N)": show the init process's recorded exit
-            // code once the container has stopped.
-            if let Some(code) = ci.exit_code {
-                crate::console_println!("  Exit code:  {}", code);
-            }
-            // Restart policy (Docker `--restart`); show the auto-restart count
-            // only when a policy other than `no` is in effect.
-            if ci.restart_policy == container::RestartPolicy::No {
-                crate::console_println!("  Restart:    {}", ci.restart_policy);
-            } else {
-                crate::console_println!(
-                    "  Restart:    {} (restarts: {})",
-                    ci.restart_policy,
-                    ci.restart_count
-                );
-            }
-            if ci.auto_remove {
-                crate::console_println!("  AutoRemove: yes (--rm)");
-            }
-            crate::console_println!("  Processes:  {}", ci.nr_procs);
-            match ci.init_pid {
-                Some(pid) => crate::console_println!("  Init PID:   {}", pid),
-                None => crate::console_println!("  Init PID:   (not run)"),
-            }
-            if ci.root_path.is_empty() {
-                crate::console_println!("  Rootfs:     (host root)");
-            } else {
-                crate::console_println!("  Rootfs:     {}", ci.root_path.display());
-            }
-            crate::console_println!("  PID NS:     {}", ci.pid_ns);
-            crate::console_println!("  User NS:    {}", ci.user_ns);
-            crate::console_println!("  Net NS:     {}", ci.net_ns);
-            crate::console_println!("  Cgroup:     {}", ci.cgroup_id);
-            // Show sub-resource details.
-            if let Some(s) = crate::userns::stats(ci.user_ns) {
-                crate::console_println!("  UID maps:   {}", s.uid_map_count);
-                crate::console_println!("  GID maps:   {}", s.gid_map_count);
-            }
-            if let Some(pair_id) = ci.veth_pair {
-                crate::console_println!("  Veth pair:  {} (host A <-> container B)", pair_id);
-            }
-            // User-defined-network memberships (Docker multi-network, §60).
-            if !ci.memberships.is_empty() {
-                crate::console_println!("  Networks:");
-                for m in &ci.memberships {
-                    crate::console_println!(
-                        "    {} -> ip {} (veth {})",
-                        m.network_name,
-                        fmt_ipv4(m.ip),
-                        m.veth_pair
-                    );
-                }
-            }
-            if let Some(s) = crate::netns::stats(ci.net_ns) {
-                if s.iface_up {
-                    crate::console_println!("  Net IP:     {}", s.ip);
-                } else {
-                    crate::console_println!("  Net IP:     (not configured)");
-                }
-                crate::console_println!("  Routes:     {}", s.route_count);
-            }
-            if let Some(s) = crate::cgroup::stats(ci.cgroup_id) {
-                if s.cpu_quota > 0 {
-                    crate::console_println!("  CPU quota:  {} ticks/period", s.cpu_quota);
-                }
-                if s.mem_limit > 0 {
-                    crate::console_println!("  Mem limit:  {} frames", s.mem_limit);
-                }
-            }
-            if !ci.hostname.is_empty() {
-                crate::console_println!("  Hostname:   {}", ci.hostname);
-            }
-            for (k, v) in &ci.labels {
-                crate::console_println!("  Label:      {}={}", k, v);
-            }
-        }
-        "top" | "ps-in" => {
-            // container top <id>  —  list the processes running inside a
-            // container (Docker `top`), with each process's live state and
-            // name resolved from the process table.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container top <id>");
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            let Some(pids) = container::pids(id) else {
-                crate::console_println!("Container {} not found", id);
-                return;
-            };
-            if pids.is_empty() {
-                crate::console_println!("Container {} has no running processes.", id);
-                return;
-            }
-            crate::console_println!("=== Container {} processes ({}) ===", id, pids.len());
-            crate::console_println!("{:<8} {:<10} {}", "PID", "State", "Name");
-            for pid in pids {
-                // The process may exit between the snapshot and the lookup;
-                // show "(gone)" rather than dropping the row so the count
-                // still matches the header.
-                let state = match crate::proc::pcb::state(pid) {
-                    Some(s) => alloc::format!("{:?}", s),
-                    None => alloc::string::String::from("(gone)"),
-                };
-                let name = crate::proc::pcb::name(pid)
-                    .unwrap_or_else(|| alloc::string::String::from("(gone)"));
-                crate::console_println!("{:<8} {:<10} {}", pid, state, name);
-            }
-        }
-        "stats" => {
-            // container stats <id>  —  live resource usage from the
-            // container's cgroup (Docker `stats`): CPU ticks, memory, I/O,
-            // PIDs, and throttle counts.  Memory/I/O byte figures are stored
-            // as 16 KiB frame counts; we surface both frames and MiB.
-            let Some(id_str) = parts.get(1) else {
-                // No id: one-shot table of every running container's cgroup
-                // usage (Docker `docker stats --no-stream`).  We do not stream
-                // (the shell has no interactive interrupt), so this is a single
-                // snapshot rather than a live refresh.
-                let running: alloc::vec::Vec<_> = container::list()
-                    .into_iter()
-                    .filter(|(_, _, st)| *st == container::ContainerState::Running)
-                    .collect();
-                if running.is_empty() {
-                    crate::console_println!("(no running containers)");
                     return;
                 }
-                crate::console_println!(
-                    "{:>4}  {:<20} {:>8} {:>10} {:>6}",
-                    "ID",
-                    "NAME",
-                    "CPU",
-                    "MEM(MiB)",
-                    "TASKS"
-                );
-                for (rid, rname, _) in running {
-                    let Some(rci) = container::info(rid) else {
+                // A container matches only if every filter is satisfied. Name and
+                // status are checked against the listing tuple directly; labels
+                // require an info() lookup (only performed when label filters exist).
+                let matches = |id: container::ContainerId,
+                               name: &str,
+                               state: container::ContainerState|
+                 -> bool {
+                    if !name_filters.iter().all(|sub| name.contains(sub)) {
+                        return false;
+                    }
+                    if status_filters.is_empty() {
+                        // No explicit status filter: Docker `ps` shows only Running
+                        // unless `-a`/`--all` was given.
+                        if !all_states && state != container::ContainerState::Running {
+                            return false;
+                        }
+                    } else if !status_filters.contains(&state) {
+                        return false;
+                    }
+                    if label_filters.is_empty() {
+                        return true;
+                    }
+                    let Some(ci) = container::info(id) else {
+                        return false;
+                    };
+                    container::labels_match(&ci.labels, &label_filters)
+                };
+
+                let mut shown: alloc::vec::Vec<&(container::ContainerId, alloc::string::String, _)> =
+                    all.iter()
+                        .filter(|(id, name, state)| matches(*id, name, *state))
+                        .collect();
+                // Order newest-first by creation sequence (Docker `ps` lists the
+                // most recently created container at the top). `-n N`/`-l` then
+                // keeps only the first N of that order.
+                shown.sort_by(|a, b| {
+                    let sa = container::info(a.0).map_or(0, |ci| ci.created_seq);
+                    let sb = container::info(b.0).map_or(0, |ci| ci.created_seq);
+                    sb.cmp(&sa)
+                });
+                if let Some(n) = limit {
+                    shown.truncate(n);
+                }
+                if shown.is_empty() {
+                    if !quiet {
+                        // Distinguish "filtered everything out" from "only stopped
+                        // containers exist and -a wasn't given".
+                        if !all_states
+                            && status_filters.is_empty()
+                            && label_filters.is_empty()
+                            && name_filters.is_empty()
+                        {
+                            crate::console_println!("No running containers (use -a to show all).");
+                        } else {
+                            crate::console_println!("No containers match the filter.");
+                        }
+                    }
+                    return;
+                }
+                // Quiet mode: just the IDs, one per line (Docker `ps -q`).
+                if quiet {
+                    for (id, _name, _state) in &shown {
+                        crate::console_println!("{}", id);
+                    }
+                    return;
+                }
+                crate::console_println!("=== Containers ({}) ===", shown.len());
+                crate::console_println!("{:<5} {:<20} {:<26}", "ID", "Name", "Status");
+                for (id, name, state) in &shown {
+                    // Docker `ps -a` style status: a stopped container shows its
+                    // recorded init exit code ("exited (N)"); other states show the
+                    // bare state word. The exit code requires an info() lookup, so
+                    // we only pay for it for stopped containers.
+                    let status = if *state == container::ContainerState::Stopped {
+                        match container::info(*id).and_then(|ci| ci.exit_code) {
+                            Some(code) => alloc::format!("exited ({})", code),
+                            None => alloc::format!("{}", state),
+                        }
+                    } else if *state == container::ContainerState::Running
+                        && container::is_frozen(*id) == Some(true)
+                    {
+                        // A frozen running container shows "paused" (Docker `ps`).
+                        alloc::format!("{} (paused)", state)
+                    } else if *state == container::ContainerState::Running {
+                        // Running: append the health sub-state when a healthcheck is
+                        // configured (Docker's "Up (healthy)" / "(health: starting)").
+                        match container::health_status(*id) {
+                            Some(container::HealthStatus::Healthy) => {
+                                alloc::format!("{} (healthy)", state)
+                            }
+                            Some(container::HealthStatus::Unhealthy) => {
+                                alloc::format!("{} (unhealthy)", state)
+                            }
+                            Some(container::HealthStatus::Starting) => {
+                                alloc::format!("{} (health: starting)", state)
+                            }
+                            _ => alloc::format!("{}", state),
+                        }
+                    } else {
+                        alloc::format!("{}", state)
+                    };
+                    crate::console_println!("{:<5} {:<20} {:<26}", id, name, status);
+                }
+            }
+            case(&parts);
+        }
+        "create" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container create <name> [options...]
+                // Options: cpu=<N> mem=<N> uid=<inner:outer:count> net=<ip>[/<mask>][,gw=<ip>][,dns=<ip>]
+                let name = parts.get(1).unwrap_or(&"unnamed");
+                let mut cfg = container::ContainerConfig::new(name);
+
+                // Parse key=value options from remaining args.
+                for &arg in parts.iter().skip(2) {
+                    if let Some(val) = arg.strip_prefix("cpu=") {
+                        if let Ok(cpu) = val.parse::<u64>() {
+                            cfg.cpu_quota = cpu;
+                        }
+                    } else if let Some(val) = arg.strip_prefix("mem=") {
+                        if let Ok(mem) = val.parse::<u64>() {
+                            cfg.mem_limit = mem;
+                        }
+                    } else if let Some(val) = arg.strip_prefix("uid=") {
+                        let uid_parts: alloc::vec::Vec<&str> = val.split(':').collect();
+                        if uid_parts.len() == 3 {
+                            if let (Ok(inner), Ok(outer), Ok(count)) = (
+                                uid_parts[0].parse::<u32>(),
+                                uid_parts[1].parse::<u32>(),
+                                uid_parts[2].parse::<u32>(),
+                            ) {
+                                cfg = cfg.uid_map(inner, outer, count);
+                            }
+                        }
+                    } else if let Some(val) = arg.strip_prefix("net=") {
+                        // net=10.88.0.2 or net=10.88.0.2,gw=10.88.0.1,dns=8.8.8.8
+                        let net_parts: alloc::vec::Vec<&str> = val.split(',').collect();
+                        if let Some(ip) = parse_ipv4_octets(net_parts.first().copied().unwrap_or("")) {
+                            cfg.net_ip = Some(ip);
+                            cfg.net_mask = Some([255, 255, 255, 0]); // default /24
+                            for &part in net_parts.iter().skip(1) {
+                                if let Some(gw) = part.strip_prefix("gw=") {
+                                    cfg.net_gateway = parse_ipv4_octets(gw);
+                                } else if let Some(dns) = part.strip_prefix("dns=") {
+                                    cfg.net_dns = parse_ipv4_octets(dns);
+                                }
+                            }
+                        }
+                    } else if let Some(val) = arg.strip_prefix("restart=") {
+                        // restart=no|always|unless-stopped|on-failure[:N] (Docker
+                        // `--restart`).
+                        match container::parse_restart_policy(val) {
+                            Some(policy) => cfg.restart_policy = policy,
+                            None => crate::console_println!(
+                                "[container] Ignoring restart='{}' (want no|always|unless-stopped|on-failure[:N])",
+                                val
+                            ),
+                        }
+                    } else if arg == "rm" || arg == "--rm" || arg == "rm=true" {
+                        // Docker `--rm`: auto-delete the container when its init
+                        // exits (unless a restart policy takes precedence).
+                        cfg.auto_remove = true;
+                    } else if arg == "rm=false" {
+                        cfg.auto_remove = false;
+                    } else {
+                        // Legacy positional: arg2=cpu, arg3=mem, arg4=uid
+                        if parts.get(2) == Some(&arg) {
+                            if let Ok(cpu) = arg.parse::<u64>() {
+                                cfg.cpu_quota = cpu;
+                            }
+                        } else if parts.get(3) == Some(&arg) {
+                            if let Ok(mem) = arg.parse::<u64>() {
+                                cfg.mem_limit = mem;
+                            }
+                        }
+                    }
+                }
+
+                match container::create(&cfg) {
+                    Ok(id) => crate::console_println!("Created container '{}' (id={})", name, id),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
+            }
+            case(&parts);
+        }
+        "delete" | "del" | "rm" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // `--force`/`-f` removes a running container (Docker `rm -f`); the
+                // flag may appear before or after the ids.  Every non-flag token
+                // after the subcommand is treated as a container id (Docker `rm`
+                // accepts multiple targets and processes each independently).
+                let force = parts.iter().skip(1).any(|&t| t == "-f" || t == "--force");
+                let ids: alloc::vec::Vec<&str> = parts
+                    .iter()
+                    .skip(1)
+                    .copied()
+                    .filter(|&t| t != "-f" && t != "--force")
+                    .collect();
+                if ids.is_empty() {
+                    crate::console_println!("Usage: container delete [-f|--force] <id> [id...]");
+                    return;
+                }
+                for id_str in ids {
+                    let Ok(id) = id_str.parse::<u32>() else {
+                        crate::console_println!("Invalid container ID '{}'", id_str);
                         continue;
                     };
-                    match crate::cgroup::stats(rci.cgroup_id) {
-                        Some(cg) => {
-                            // 16 KiB per frame: MiB = frames / 64.
-                            let mem_mib = cg.mem_usage / 64;
-                            let name_disp = if rname.len() > 20 {
-                                rname.get(..20).unwrap_or(&rname)
-                            } else {
-                                &rname
-                            };
-                            crate::console_println!(
-                                "{:>4}  {:<20} {:>8} {:>10} {:>6}",
-                                rid,
-                                name_disp,
-                                cg.cpu_used,
-                                mem_mib,
-                                cg.nr_tasks
-                            );
-                        }
-                        None => crate::console_println!(
-                            "{:>4}  {:<20} {:>8} {:>10} {:>6}",
-                            rid,
-                            rname,
-                            "-",
-                            "-",
-                            "-"
-                        ),
-                    }
-                }
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            let Some(ci) = container::info(id) else {
-                crate::console_println!("Container {} not found", id);
-                return;
-            };
-            let Some(cg) = crate::cgroup::stats(ci.cgroup_id) else {
-                crate::console_println!(
-                    "Container {} has no cgroup stats (cgroup {} inactive)",
-                    id,
-                    ci.cgroup_id
-                );
-                return;
-            };
-            // 16 KiB per frame: MiB = frames / 64 (1024 KiB / 16 KiB).
-            let frames_to_mib = |frames: u64| frames / 64;
-            crate::console_println!("=== Container {} stats ({}) ===", id, ci.name);
-            crate::console_println!("  Tasks:      {}", cg.nr_tasks);
-            // CPU.
-            if cg.cpu_quota > 0 {
-                crate::console_println!(
-                    "  CPU:        {} / {} ticks this period (throttled {}x)",
-                    cg.cpu_used,
-                    cg.cpu_quota,
-                    cg.cpu_throttle_count
-                );
-            } else {
-                crate::console_println!(
-                    "  CPU:        {} ticks this period (unlimited)",
-                    cg.cpu_used
-                );
-            }
-            // Memory.
-            if cg.mem_limit > 0 {
-                crate::console_println!(
-                    "  Memory:     {} / {} frames ({} / {} MiB), peak {} frames",
-                    cg.mem_usage,
-                    cg.mem_limit,
-                    frames_to_mib(cg.mem_usage),
-                    frames_to_mib(cg.mem_limit),
-                    cg.mem_peak
-                );
-            } else {
-                crate::console_println!(
-                    "  Memory:     {} frames ({} MiB) of unlimited, peak {} frames",
-                    cg.mem_usage,
-                    frames_to_mib(cg.mem_usage),
-                    cg.mem_peak
-                );
-            }
-            // I/O (bytes stored as frame counts).
-            let io_limited = cg.io_ops_limit > 0 || cg.io_bytes_limit > 0;
-            if io_limited {
-                crate::console_println!(
-                    "  I/O:        {} ops, {} frames ({} MiB) this period (throttled {}x)",
-                    cg.io_ops_used,
-                    cg.io_bytes_used,
-                    frames_to_mib(cg.io_bytes_used),
-                    cg.io_throttle_count
-                );
-            } else {
-                crate::console_println!(
-                    "  I/O:        {} ops, {} frames ({} MiB) this period (unlimited)",
-                    cg.io_ops_used,
-                    cg.io_bytes_used,
-                    frames_to_mib(cg.io_bytes_used)
-                );
-            }
-        }
-        "update" => {
-            // container update <id> [--cpus N[.M]] [--memory SIZE] [--restart POLICY]
-            //
-            // Docker `update`: change a running container's CPU and/or memory
-            // limits in place (applied to its cgroup, affecting live
-            // processes), and/or its restart policy. A value of 0 (`--cpus 0` /
-            // `--memory 0`) sets the corresponding limit to unlimited. At least
-            // one field is required.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!(
-                    "Usage: container update <id> [--cpus N] [--memory SIZE] [--restart POLICY]"
-                );
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            let mut cpu_percent: Option<u64> = None;
-            let mut mem_frames: Option<u64> = None;
-            let mut restart: Option<container::RestartPolicy> = None;
-            let mut i = 2;
-            while let Some(&arg) = parts.get(i) {
-                // Accept both `--restart POLICY` (separate token) and
-                // `--restart=POLICY` (Docker's `=` form).
-                if let Some(val) = arg
-                    .strip_prefix("--restart=")
-                    .or_else(|| arg.strip_prefix("restart="))
-                {
-                    match container::parse_restart_policy(val) {
-                        Some(p) => restart = Some(p),
-                        None => {
-                            crate::console_println!(
-                                "Invalid restart policy '{}' (want no|always|unless-stopped|on-failure[:N])",
-                                val
-                            );
-                            return;
-                        }
-                    }
-                    i += 1;
-                    continue;
-                }
-                if arg == "--restart" {
-                    let Some(&val) = parts.get(i + 1) else {
-                        crate::console_println!("--restart requires a value");
-                        return;
+                    let result = if force {
+                        container::force_delete(id)
+                    } else {
+                        container::delete(id)
                     };
-                    match container::parse_restart_policy(val) {
-                        Some(p) => restart = Some(p),
-                        None => {
-                            crate::console_println!(
-                                "Invalid restart policy '{}' (want no|always|unless-stopped|on-failure[:N])",
-                                val
-                            );
-                            return;
-                        }
+                    match result {
+                        Ok(()) => crate::console_println!("Deleted container {}", id),
+                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
                     }
-                    i += 2;
-                    continue;
                 }
-                match arg {
-                    "--cpus" => {
-                        let Some(&val) = parts.get(i + 1) else {
-                            crate::console_println!("--cpus requires a value");
-                            return;
-                        };
-                        // "0" explicitly means unlimited; parse_cpus_to_percent
-                        // returns None for 0, so treat it specially.
-                        if val == "0" {
-                            cpu_percent = Some(0);
-                        } else {
-                            match parse_cpus_to_percent(val) {
-                                Some(p) => cpu_percent = Some(p),
-                                None => {
-                                    crate::console_println!("Invalid --cpus value: {}", val);
-                                    return;
+            }
+            case(&parts);
+        }
+        "start" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // Docker `start` accepts multiple targets: each is processed
+                // independently and failures don't abort the rest.
+                if parts.len() < 2 {
+                    crate::console_println!("Usage: container start <id> [id...]");
+                    return;
+                }
+                for &id_str in parts.iter().skip(1) {
+                    let Ok(id) = id_str.parse::<u32>() else {
+                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        continue;
+                    };
+                    match container::start(id) {
+                        Ok(()) => crate::console_println!("Container {} started", id),
+                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                    }
+                }
+            }
+            case(&parts);
+        }
+        "stop" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    crate::console_println!("Usage: container stop <id> [id...]");
+                    return;
+                }
+                for &id_str in parts.iter().skip(1) {
+                    let Ok(id) = id_str.parse::<u32>() else {
+                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        continue;
+                    };
+                    match container::stop(id) {
+                        Ok(()) => crate::console_println!("Container {} stopped", id),
+                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                    }
+                }
+            }
+            case(&parts);
+        }
+        "info" | "inspect" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // Optional `--json`/`-j` (Docker `inspect` emits JSON): the first
+                // non-flag token is the container id.
+                let mut want_json = false;
+                let mut id_str: Option<&str> = None;
+                for &tok in parts.iter().skip(1) {
+                    if tok == "--json" || tok == "-j" {
+                        want_json = true;
+                    } else if id_str.is_none() {
+                        id_str = Some(tok);
+                    }
+                }
+                let Some(id_str) = id_str else {
+                    crate::console_println!("Usage: container info [--json] <id>");
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                let Some(ci) = container::info(id) else {
+                    crate::console_println!("Container {} not found", id);
+                    return;
+                };
+                if want_json {
+                    // JSON string escaper: names/labels are OS-boundary data that
+                    // may contain quotes, backslashes, or control bytes.
+                    let esc = |s: &str| -> alloc::string::String {
+                        let mut out = alloc::string::String::with_capacity(s.len());
+                        for c in s.chars() {
+                            match c {
+                                '"' => out.push_str("\\\""),
+                                '\\' => out.push_str("\\\\"),
+                                '\n' => out.push_str("\\n"),
+                                '\r' => out.push_str("\\r"),
+                                '\t' => out.push_str("\\t"),
+                                c if (c as u32) < 0x20 => {
+                                    out.push_str(&alloc::format!("\\u{:04x}", c as u32));
                                 }
+                                _ => out.push(c),
                             }
                         }
-                        i += 2;
-                    }
-                    "--memory" | "-m" => {
-                        let Some(&val) = parts.get(i + 1) else {
-                            crate::console_println!("--memory requires a value");
-                            return;
-                        };
-                        if val == "0" {
-                            mem_frames = Some(0);
-                        } else {
-                            match parse_mem_size_to_frames(val) {
-                                Some(f) => mem_frames = Some(f),
-                                None => {
-                                    crate::console_println!("Invalid --memory value: {}", val);
-                                    return;
-                                }
-                            }
+                        out
+                    };
+                    // A path is a byte string and may not be valid UTF-8, so it
+                    // cannot be placed in a JSON string verbatim.  It is
+                    // octal-escaped first (Linux `mangle()` — the encoding
+                    // `/proc/mounts` already uses), which is total and lossless
+                    // and yields pure ASCII; that is then JSON-escaped.
+                    let esc_path = |p: &Path| -> alloc::string::String {
+                        esc(&crate::fs::escape::escape_octal(p.as_bytes(), &[]))
+                    };
+                    let mut labels_json = alloc::string::String::from("{");
+                    for (i, (k, v)) in ci.labels.iter().enumerate() {
+                        if i > 0 {
+                            labels_json.push(',');
                         }
-                        i += 2;
+                        labels_json.push_str(&alloc::format!("\"{}\":\"{}\"", esc(k), esc(v)));
                     }
-                    other => {
-                        crate::console_println!("Unknown option: {}", other);
+                    labels_json.push('}');
+                    let init_pid_json = match ci.init_pid {
+                        Some(pid) => alloc::format!("{}", pid),
+                        None => alloc::string::String::from("null"),
+                    };
+                    let exit_json = match ci.exit_code {
+                        Some(code) => alloc::format!("{}", code),
+                        None => alloc::string::String::from("null"),
+                    };
+                    // Health surfaces as a JSON string only when a healthcheck is
+                    // configured; otherwise `null` (Docker omits the Health object
+                    // for containers without a healthcheck).
+                    let health_json = if ci.has_healthcheck {
+                        alloc::format!("\"{}\"", ci.health_status)
+                    } else {
+                        alloc::string::String::from("null")
+                    };
+                    // User-defined-network memberships (Docker multi-network, §60).
+                    let mut networks_json = alloc::string::String::from("[");
+                    for (i, m) in ci.memberships.iter().enumerate() {
+                        if i > 0 {
+                            networks_json.push(',');
+                        }
+                        networks_json.push_str(&alloc::format!(
+                            "{{\"name\":\"{}\",\"ip\":\"{}\",\"veth\":{}}}",
+                            esc(&m.network_name),
+                            fmt_ipv4(m.ip),
+                            m.veth_pair
+                        ));
+                    }
+                    networks_json.push(']');
+                    crate::console_println!(
+                        "{{\"id\":{},\"name\":\"{}\",\"state\":\"{}\",\"paused\":{},\"health\":{},\"exit_code\":{},\"restart_policy\":\"{}\",\"restart_count\":{},\"auto_remove\":{},\"init_pid\":{},\"processes\":{},\"rootfs\":\"{}\",\"hostname\":\"{}\",\"pid_ns\":{},\"user_ns\":{},\"net_ns\":{},\"cgroup\":{},\"created_seq\":{},\"networks\":{},\"labels\":{}}}",
+                        id,
+                        esc(&ci.name),
+                        ci.state,
+                        ci.frozen,
+                        health_json,
+                        exit_json,
+                        ci.restart_policy,
+                        ci.restart_count,
+                        ci.auto_remove,
+                        init_pid_json,
+                        ci.nr_procs,
+                        esc_path(&ci.root_path),
+                        esc(&ci.hostname),
+                        ci.pid_ns,
+                        ci.user_ns,
+                        ci.net_ns,
+                        ci.cgroup_id,
+                        ci.created_seq,
+                        networks_json,
+                        labels_json,
+                    );
+                    return;
+                }
+                crate::console_println!("=== Container {} ===", id);
+                crate::console_println!("  Name:       {}", ci.name);
+                // A frozen running container shows "running (paused)" (Docker
+                // reports paused as a sub-state of running).
+                if ci.frozen {
+                    crate::console_println!("  State:      {} (paused)", ci.state);
+                } else {
+                    crate::console_println!("  State:      {}", ci.state);
+                }
+                // Health (Docker `HEALTHCHECK`): shown only when a healthcheck is
+                // configured; the failure streak is appended while unhealthy.
+                if ci.has_healthcheck {
+                    if ci.health_status == container::HealthStatus::Unhealthy {
+                        crate::console_println!(
+                            "  Health:     {} (failing streak: {})",
+                            ci.health_status,
+                            ci.health_fail_streak
+                        );
+                    } else {
+                        crate::console_println!("  Health:     {}", ci.health_status);
+                    }
+                }
+                // Docker's "Exited (N)": show the init process's recorded exit
+                // code once the container has stopped.
+                if let Some(code) = ci.exit_code {
+                    crate::console_println!("  Exit code:  {}", code);
+                }
+                // Restart policy (Docker `--restart`); show the auto-restart count
+                // only when a policy other than `no` is in effect.
+                if ci.restart_policy == container::RestartPolicy::No {
+                    crate::console_println!("  Restart:    {}", ci.restart_policy);
+                } else {
+                    crate::console_println!(
+                        "  Restart:    {} (restarts: {})",
+                        ci.restart_policy,
+                        ci.restart_count
+                    );
+                }
+                if ci.auto_remove {
+                    crate::console_println!("  AutoRemove: yes (--rm)");
+                }
+                crate::console_println!("  Processes:  {}", ci.nr_procs);
+                match ci.init_pid {
+                    Some(pid) => crate::console_println!("  Init PID:   {}", pid),
+                    None => crate::console_println!("  Init PID:   (not run)"),
+                }
+                if ci.root_path.is_empty() {
+                    crate::console_println!("  Rootfs:     (host root)");
+                } else {
+                    crate::console_println!("  Rootfs:     {}", ci.root_path.display());
+                }
+                crate::console_println!("  PID NS:     {}", ci.pid_ns);
+                crate::console_println!("  User NS:    {}", ci.user_ns);
+                crate::console_println!("  Net NS:     {}", ci.net_ns);
+                crate::console_println!("  Cgroup:     {}", ci.cgroup_id);
+                // Show sub-resource details.
+                if let Some(s) = crate::userns::stats(ci.user_ns) {
+                    crate::console_println!("  UID maps:   {}", s.uid_map_count);
+                    crate::console_println!("  GID maps:   {}", s.gid_map_count);
+                }
+                if let Some(pair_id) = ci.veth_pair {
+                    crate::console_println!("  Veth pair:  {} (host A <-> container B)", pair_id);
+                }
+                // User-defined-network memberships (Docker multi-network, §60).
+                if !ci.memberships.is_empty() {
+                    crate::console_println!("  Networks:");
+                    for m in &ci.memberships {
+                        crate::console_println!(
+                            "    {} -> ip {} (veth {})",
+                            m.network_name,
+                            fmt_ipv4(m.ip),
+                            m.veth_pair
+                        );
+                    }
+                }
+                if let Some(s) = crate::netns::stats(ci.net_ns) {
+                    if s.iface_up {
+                        crate::console_println!("  Net IP:     {}", s.ip);
+                    } else {
+                        crate::console_println!("  Net IP:     (not configured)");
+                    }
+                    crate::console_println!("  Routes:     {}", s.route_count);
+                }
+                if let Some(s) = crate::cgroup::stats(ci.cgroup_id) {
+                    if s.cpu_quota > 0 {
+                        crate::console_println!("  CPU quota:  {} ticks/period", s.cpu_quota);
+                    }
+                    if s.mem_limit > 0 {
+                        crate::console_println!("  Mem limit:  {} frames", s.mem_limit);
+                    }
+                }
+                if !ci.hostname.is_empty() {
+                    crate::console_println!("  Hostname:   {}", ci.hostname);
+                }
+                for (k, v) in &ci.labels {
+                    crate::console_println!("  Label:      {}={}", k, v);
+                }
+            }
+            case(&parts);
+        }
+        "top" | "ps-in" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container top <id>  —  list the processes running inside a
+                // container (Docker `top`), with each process's live state and
+                // name resolved from the process table.
+                let Some(id_str) = parts.get(1) else {
+                    crate::console_println!("Usage: container top <id>");
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                let Some(pids) = container::pids(id) else {
+                    crate::console_println!("Container {} not found", id);
+                    return;
+                };
+                if pids.is_empty() {
+                    crate::console_println!("Container {} has no running processes.", id);
+                    return;
+                }
+                crate::console_println!("=== Container {} processes ({}) ===", id, pids.len());
+                crate::console_println!("{:<8} {:<10} {}", "PID", "State", "Name");
+                for pid in pids {
+                    // The process may exit between the snapshot and the lookup;
+                    // show "(gone)" rather than dropping the row so the count
+                    // still matches the header.
+                    let state = match crate::proc::pcb::state(pid) {
+                        Some(s) => alloc::format!("{:?}", s),
+                        None => alloc::string::String::from("(gone)"),
+                    };
+                    let name = crate::proc::pcb::name(pid)
+                        .unwrap_or_else(|| alloc::string::String::from("(gone)"));
+                    crate::console_println!("{:<8} {:<10} {}", pid, state, name);
+                }
+            }
+            case(&parts);
+        }
+        "stats" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container stats <id>  —  live resource usage from the
+                // container's cgroup (Docker `stats`): CPU ticks, memory, I/O,
+                // PIDs, and throttle counts.  Memory/I/O byte figures are stored
+                // as 16 KiB frame counts; we surface both frames and MiB.
+                let Some(id_str) = parts.get(1) else {
+                    // No id: one-shot table of every running container's cgroup
+                    // usage (Docker `docker stats --no-stream`).  We do not stream
+                    // (the shell has no interactive interrupt), so this is a single
+                    // snapshot rather than a live refresh.
+                    let running: alloc::vec::Vec<_> = container::list()
+                        .into_iter()
+                        .filter(|(_, _, st)| *st == container::ContainerState::Running)
+                        .collect();
+                    if running.is_empty() {
+                        crate::console_println!("(no running containers)");
                         return;
                     }
-                }
-            }
-            if cpu_percent.is_none() && mem_frames.is_none() && restart.is_none() {
-                crate::console_println!(
-                    "Usage: container update <id> [--cpus N] [--memory SIZE] [--restart POLICY] (at least one)"
-                );
-                return;
-            }
-            // Apply the restart-policy change first (it can't fail on a valid
-            // id and doesn't touch the cgroup), then the resource limits.
-            if let Some(policy) = restart {
-                match container::set_restart_policy(id, policy) {
-                    Ok(()) => {
-                        crate::console_println!("Container {} restart policy: {}", id, policy)
-                    }
-                    Err(e) => {
-                        crate::console_println!("Error: {:?}", e);
-                        return;
-                    }
-                }
-            }
-            if cpu_percent.is_some() || mem_frames.is_some() {
-                match container::update_resources(id, cpu_percent, mem_frames) {
-                    Ok(()) => {
-                        if let Some(p) = cpu_percent {
-                            if p == 0 {
-                                crate::console_println!("Container {} CPU: unlimited", id);
-                            } else {
-                                crate::console_println!("Container {} CPU: {}%", id, p);
-                            }
-                        }
-                        if let Some(f) = mem_frames {
-                            if f == 0 {
-                                crate::console_println!("Container {} memory: unlimited", id);
-                            } else {
+                    crate::console_println!(
+                        "{:>4}  {:<20} {:>8} {:>10} {:>6}",
+                        "ID",
+                        "NAME",
+                        "CPU",
+                        "MEM(MiB)",
+                        "TASKS"
+                    );
+                    for (rid, rname, _) in running {
+                        let Some(rci) = container::info(rid) else {
+                            continue;
+                        };
+                        match crate::cgroup::stats(rci.cgroup_id) {
+                            Some(cg) => {
+                                // 16 KiB per frame: MiB = frames / 64.
+                                let mem_mib = cg.mem_usage / 64;
+                                let name_disp = if rname.len() > 20 {
+                                    rname.get(..20).unwrap_or(&rname)
+                                } else {
+                                    &rname
+                                };
                                 crate::console_println!(
-                                    "Container {} memory: {} frames ({} MiB)",
-                                    id,
-                                    f,
-                                    f / 64
+                                    "{:>4}  {:<20} {:>8} {:>10} {:>6}",
+                                    rid,
+                                    name_disp,
+                                    cg.cpu_used,
+                                    mem_mib,
+                                    cg.nr_tasks
                                 );
                             }
+                            None => crate::console_println!(
+                                "{:>4}  {:<20} {:>8} {:>10} {:>6}",
+                                rid,
+                                rname,
+                                "-",
+                                "-",
+                                "-"
+                            ),
                         }
+                    }
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                let Some(ci) = container::info(id) else {
+                    crate::console_println!("Container {} not found", id);
+                    return;
+                };
+                let Some(cg) = crate::cgroup::stats(ci.cgroup_id) else {
+                    crate::console_println!(
+                        "Container {} has no cgroup stats (cgroup {} inactive)",
+                        id,
+                        ci.cgroup_id
+                    );
+                    return;
+                };
+                // 16 KiB per frame: MiB = frames / 64 (1024 KiB / 16 KiB).
+                let frames_to_mib = |frames: u64| frames / 64;
+                crate::console_println!("=== Container {} stats ({}) ===", id, ci.name);
+                crate::console_println!("  Tasks:      {}", cg.nr_tasks);
+                // CPU.
+                if cg.cpu_quota > 0 {
+                    crate::console_println!(
+                        "  CPU:        {} / {} ticks this period (throttled {}x)",
+                        cg.cpu_used,
+                        cg.cpu_quota,
+                        cg.cpu_throttle_count
+                    );
+                } else {
+                    crate::console_println!(
+                        "  CPU:        {} ticks this period (unlimited)",
+                        cg.cpu_used
+                    );
+                }
+                // Memory.
+                if cg.mem_limit > 0 {
+                    crate::console_println!(
+                        "  Memory:     {} / {} frames ({} / {} MiB), peak {} frames",
+                        cg.mem_usage,
+                        cg.mem_limit,
+                        frames_to_mib(cg.mem_usage),
+                        frames_to_mib(cg.mem_limit),
+                        cg.mem_peak
+                    );
+                } else {
+                    crate::console_println!(
+                        "  Memory:     {} frames ({} MiB) of unlimited, peak {} frames",
+                        cg.mem_usage,
+                        frames_to_mib(cg.mem_usage),
+                        cg.mem_peak
+                    );
+                }
+                // I/O (bytes stored as frame counts).
+                let io_limited = cg.io_ops_limit > 0 || cg.io_bytes_limit > 0;
+                if io_limited {
+                    crate::console_println!(
+                        "  I/O:        {} ops, {} frames ({} MiB) this period (throttled {}x)",
+                        cg.io_ops_used,
+                        cg.io_bytes_used,
+                        frames_to_mib(cg.io_bytes_used),
+                        cg.io_throttle_count
+                    );
+                } else {
+                    crate::console_println!(
+                        "  I/O:        {} ops, {} frames ({} MiB) this period (unlimited)",
+                        cg.io_ops_used,
+                        cg.io_bytes_used,
+                        frames_to_mib(cg.io_bytes_used)
+                    );
+                }
+            }
+            case(&parts);
+        }
+        "update" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container update <id> [--cpus N[.M]] [--memory SIZE] [--restart POLICY]
+                //
+                // Docker `update`: change a running container's CPU and/or memory
+                // limits in place (applied to its cgroup, affecting live
+                // processes), and/or its restart policy. A value of 0 (`--cpus 0` /
+                // `--memory 0`) sets the corresponding limit to unlimited. At least
+                // one field is required.
+                let Some(id_str) = parts.get(1) else {
+                    crate::console_println!(
+                        "Usage: container update <id> [--cpus N] [--memory SIZE] [--restart POLICY]"
+                    );
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                let mut cpu_percent: Option<u64> = None;
+                let mut mem_frames: Option<u64> = None;
+                let mut restart: Option<container::RestartPolicy> = None;
+                let mut i = 2;
+                while let Some(&arg) = parts.get(i) {
+                    // Accept both `--restart POLICY` (separate token) and
+                    // `--restart=POLICY` (Docker's `=` form).
+                    if let Some(val) = arg
+                        .strip_prefix("--restart=")
+                        .or_else(|| arg.strip_prefix("restart="))
+                    {
+                        match container::parse_restart_policy(val) {
+                            Some(p) => restart = Some(p),
+                            None => {
+                                crate::console_println!(
+                                    "Invalid restart policy '{}' (want no|always|unless-stopped|on-failure[:N])",
+                                    val
+                                );
+                                return;
+                            }
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    if arg == "--restart" {
+                        let Some(&val) = parts.get(i + 1) else {
+                            crate::console_println!("--restart requires a value");
+                            return;
+                        };
+                        match container::parse_restart_policy(val) {
+                            Some(p) => restart = Some(p),
+                            None => {
+                                crate::console_println!(
+                                    "Invalid restart policy '{}' (want no|always|unless-stopped|on-failure[:N])",
+                                    val
+                                );
+                                return;
+                            }
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    match arg {
+                        "--cpus" => {
+                            let Some(&val) = parts.get(i + 1) else {
+                                crate::console_println!("--cpus requires a value");
+                                return;
+                            };
+                            // "0" explicitly means unlimited; parse_cpus_to_percent
+                            // returns None for 0, so treat it specially.
+                            if val == "0" {
+                                cpu_percent = Some(0);
+                            } else {
+                                match parse_cpus_to_percent(val) {
+                                    Some(p) => cpu_percent = Some(p),
+                                    None => {
+                                        crate::console_println!("Invalid --cpus value: {}", val);
+                                        return;
+                                    }
+                                }
+                            }
+                            i += 2;
+                        }
+                        "--memory" | "-m" => {
+                            let Some(&val) = parts.get(i + 1) else {
+                                crate::console_println!("--memory requires a value");
+                                return;
+                            };
+                            if val == "0" {
+                                mem_frames = Some(0);
+                            } else {
+                                match parse_mem_size_to_frames(val) {
+                                    Some(f) => mem_frames = Some(f),
+                                    None => {
+                                        crate::console_println!("Invalid --memory value: {}", val);
+                                        return;
+                                    }
+                                }
+                            }
+                            i += 2;
+                        }
+                        other => {
+                            crate::console_println!("Unknown option: {}", other);
+                            return;
+                        }
+                    }
+                }
+                if cpu_percent.is_none() && mem_frames.is_none() && restart.is_none() {
+                    crate::console_println!(
+                        "Usage: container update <id> [--cpus N] [--memory SIZE] [--restart POLICY] (at least one)"
+                    );
+                    return;
+                }
+                // Apply the restart-policy change first (it can't fail on a valid
+                // id and doesn't touch the cgroup), then the resource limits.
+                if let Some(policy) = restart {
+                    match container::set_restart_policy(id, policy) {
+                        Ok(()) => {
+                            crate::console_println!("Container {} restart policy: {}", id, policy)
+                        }
+                        Err(e) => {
+                            crate::console_println!("Error: {:?}", e);
+                            return;
+                        }
+                    }
+                }
+                if cpu_percent.is_some() || mem_frames.is_some() {
+                    match container::update_resources(id, cpu_percent, mem_frames) {
+                        Ok(()) => {
+                            if let Some(p) = cpu_percent {
+                                if p == 0 {
+                                    crate::console_println!("Container {} CPU: unlimited", id);
+                                } else {
+                                    crate::console_println!("Container {} CPU: {}%", id, p);
+                                }
+                            }
+                            if let Some(f) = mem_frames {
+                                if f == 0 {
+                                    crate::console_println!("Container {} memory: unlimited", id);
+                                } else {
+                                    crate::console_println!(
+                                        "Container {} memory: {} frames ({} MiB)",
+                                        id,
+                                        f,
+                                        f / 64
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => crate::console_println!("Error: {:?}", e),
+                    }
+                }
+            }
+            case(&parts);
+        }
+        "rename" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container rename <id> <new-name>  (Docker `rename`)
+                let Some(id_str) = parts.get(1) else {
+                    crate::console_println!("Usage: container rename <id> <new-name>");
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                let Some(&new_name) = parts.get(2) else {
+                    crate::console_println!("Usage: container rename <id> <new-name>");
+                    return;
+                };
+                match container::rename(id, new_name) {
+                    Ok(()) => crate::console_println!("Container {} renamed to '{}'", id, new_name),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
+            }
+            case(&parts);
+        }
+        "kill" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container kill <id> [id...]  (Docker `kill`): force-terminate the
+                // container by killing all its processes; the init's exit
+                // auto-stops the container with exit code 137.
+                if parts.len() < 2 {
+                    crate::console_println!("Usage: container kill <id> [id...]");
+                    return;
+                }
+                for &id_str in parts.iter().skip(1) {
+                    let Ok(id) = id_str.parse::<u32>() else {
+                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        continue;
+                    };
+                    match container::kill(id) {
+                        Ok(0) => {
+                            crate::console_println!("Container {}: no running processes to kill", id)
+                        }
+                        Ok(n) => crate::console_println!("Container {}: killed {} process(es)", id, n),
+                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                    }
+                }
+            }
+            case(&parts);
+        }
+        "port" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container port <id>  (Docker `port`): list the container's
+                // published port mappings (`-p host:container[/proto]`) in the
+                // form `CONTAINER/PROTO -> HOST`, matching Docker's output.
+                let Some(id_str) = parts.get(1) else {
+                    crate::console_println!("Usage: container port <id>");
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                let Some(ports) = container::published_ports(id) else {
+                    crate::console_println!("Container {} not found", id);
+                    return;
+                };
+                if ports.is_empty() {
+                    crate::console_println!("Container {} publishes no ports.", id);
+                    return;
+                }
+                for (proto, host_port, container_port) in ports {
+                    let p = match proto {
+                        crate::net::nat::NatProto::Tcp => "tcp",
+                        crate::net::nat::NatProto::Udp => "udp",
+                    };
+                    // Docker renders forwards as `80/tcp -> 0.0.0.0:8080`.
+                    crate::console_println!("{}/{} -> 0.0.0.0:{}", container_port, p, host_port);
+                }
+            }
+            case(&parts);
+        }
+        "wait" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container wait <id>  (Docker `wait`): block until the container
+                // reaches a terminal state (stopped/failed), then print its init
+                // exit code.  Uses the event-driven `container::wait`, which parks
+                // the shell task on the container's init process and is woken by the
+                // scheduler when it exits — no CPU-burning poll loop.
+                let Some(id_str) = parts.get(1) else {
+                    crate::console_println!("Usage: container wait <id>");
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                match container::wait(id) {
+                    Ok(container::WaitOutcome::Exited(code)) => {
+                        crate::console_println!("{}", code);
+                    }
+                    Ok(container::WaitOutcome::Removed) => {
+                        crate::console_println!("Container {} removed while waiting", id);
+                    }
+                    Err(_) => {
+                        crate::console_println!("Container {} not found", id);
+                    }
+                }
+            }
+            case(&parts);
+        }
+        "diff" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container diff <id>  (Docker `diff`): list filesystem changes in
+                // the container relative to its image — A (added), C (changed),
+                // D (deleted) — by inspecting the overlay's writable upper layer.
+                let Some(id_str) = parts.get(1) else {
+                    crate::console_println!("Usage: container diff <id>");
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                match container::diff(id) {
+                    Ok(changes) => {
+                        if changes.is_empty() {
+                            crate::console_println!("(no changes)");
+                        } else {
+                            for c in &changes {
+                                crate::console_println!("{} {}", c.kind.prefix(), c.path.display());
+                            }
+                        }
+                    }
+                    Err(crate::error::KernelError::InvalidArgument) => {
+                        crate::console_println!(
+                            "Container {} has no overlay rootfs (nothing to diff)",
+                            id
+                        );
+                    }
+                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                }
+            }
+            case(&parts);
+        }
+        "pause" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container pause <id> [id...]  (Docker `pause`): freeze the
+                // container, suspending all of its threads until `unpause`.
+                if parts.len() < 2 {
+                    crate::console_println!("Usage: container pause <id> [id...]");
+                    return;
+                }
+                for &id_str in parts.iter().skip(1) {
+                    let Ok(id) = id_str.parse::<u32>() else {
+                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        continue;
+                    };
+                    match container::pause(id) {
+                        Ok(n) => crate::console_println!(
+                            "Container {} paused ({} thread(s) suspended)",
+                            id,
+                            n
+                        ),
+                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                    }
+                }
+            }
+            case(&parts);
+        }
+        "unpause" | "resume" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container unpause <id> [id...]  (Docker `unpause`): thaw a frozen
+                // container, resuming all of its threads.
+                if parts.len() < 2 {
+                    crate::console_println!("Usage: container unpause <id> [id...]");
+                    return;
+                }
+                for &id_str in parts.iter().skip(1) {
+                    let Ok(id) = id_str.parse::<u32>() else {
+                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        continue;
+                    };
+                    match container::unpause(id) {
+                        Ok(n) => crate::console_println!(
+                            "Container {} unpaused ({} thread(s) resumed)",
+                            id,
+                            n
+                        ),
+                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
+                    }
+                }
+            }
+            case(&parts);
+        }
+        "rootfs" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container rootfs <id> <host-path>
+                //
+                // Configures the container's filesystem root (chroot) before it
+                // is run.  Every process launched by `container run` is jailed
+                // to this host subtree: it resolves `/bin/sh`, `/lib/...`, etc.
+                // against the rootfs, and `..` cannot escape it.  Must be set
+                // while the container is still in the Created state.
+                let Some(id_str) = parts.get(1) else {
+                    crate::console_println!("Usage: container rootfs <id> <host-path>");
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                let Some(&path) = parts.get(2) else {
+                    crate::console_println!("Usage: container rootfs <id> <host-path>");
+                    return;
+                };
+                match container::set_root_path(id, path) {
+                    Ok(()) => crate::console_println!("Container {} rootfs set to '{}'", id, path),
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
+            }
+            case(&parts);
+        }
+        "run" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container run <id> <elf-path> [args...]
+                //
+                // Launches a real init process inside an existing (Created)
+                // container: loads the ELF from the host VFS, binds the process
+                // to the container's cgroup (Q14 billing) + PID/user/network
+                // namespaces, jails it to the container's rootfs (if one was set
+                // via `container rootfs`), and transitions Created → Running.
+                //
+                // NOTE: the ELF path passed here is resolved against the *host*
+                // filesystem (the kernel reads the image before the jail takes
+                // effect).  Once the process is running, its own syscalls
+                // resolve against the container rootfs.  Give an absolute host
+                // path to the binary you want as the container's init process.
+                let Some(id_str) = parts.get(1) else {
+                    crate::console_println!("Usage: container run <id> <elf-path> [args...]");
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                let Some(&path) = parts.get(2) else {
+                    crate::console_println!("Usage: container run <id> <elf-path> [args...]");
+                    return;
+                };
+
+                // Delegate to run_path: it reads the ELF from the host VFS, builds
+                // argv (argv[0] = path, then extra args), launches the init
+                // process, and records the launch spec so the container can later
+                // be restarted (`container restart`).
+                let extra_args: alloc::vec::Vec<&str> = parts.iter().skip(3).copied().collect();
+                match container::run_path(id, path, &extra_args) {
+                    Ok(pid) => {
+                        crate::console_println!(
+                            "Container {} running: init pid={} (ELF: {})",
+                            id,
+                            pid,
+                            path
+                        );
                     }
                     Err(e) => crate::console_println!("Error: {:?}", e),
                 }
             }
-        }
-        "rename" => {
-            // container rename <id> <new-name>  (Docker `rename`)
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container rename <id> <new-name>");
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            let Some(&new_name) = parts.get(2) else {
-                crate::console_println!("Usage: container rename <id> <new-name>");
-                return;
-            };
-            match container::rename(id, new_name) {
-                Ok(()) => crate::console_println!("Container {} renamed to '{}'", id, new_name),
-                Err(e) => crate::console_println!("Error: {:?}", e),
-            }
-        }
-        "kill" => {
-            // container kill <id> [id...]  (Docker `kill`): force-terminate the
-            // container by killing all its processes; the init's exit
-            // auto-stops the container with exit code 137.
-            if parts.len() < 2 {
-                crate::console_println!("Usage: container kill <id> [id...]");
-                return;
-            }
-            for &id_str in parts.iter().skip(1) {
-                let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID '{}'", id_str);
-                    continue;
-                };
-                match container::kill(id) {
-                    Ok(0) => {
-                        crate::console_println!("Container {}: no running processes to kill", id)
-                    }
-                    Ok(n) => crate::console_println!("Container {}: killed {} process(es)", id, n),
-                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
-                }
-            }
-        }
-        "port" => {
-            // container port <id>  (Docker `port`): list the container's
-            // published port mappings (`-p host:container[/proto]`) in the
-            // form `CONTAINER/PROTO -> HOST`, matching Docker's output.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container port <id>");
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            let Some(ports) = container::published_ports(id) else {
-                crate::console_println!("Container {} not found", id);
-                return;
-            };
-            if ports.is_empty() {
-                crate::console_println!("Container {} publishes no ports.", id);
-                return;
-            }
-            for (proto, host_port, container_port) in ports {
-                let p = match proto {
-                    crate::net::nat::NatProto::Tcp => "tcp",
-                    crate::net::nat::NatProto::Udp => "udp",
-                };
-                // Docker renders forwards as `80/tcp -> 0.0.0.0:8080`.
-                crate::console_println!("{}/{} -> 0.0.0.0:{}", container_port, p, host_port);
-            }
-        }
-        "wait" => {
-            // container wait <id>  (Docker `wait`): block until the container
-            // reaches a terminal state (stopped/failed), then print its init
-            // exit code.  Uses the event-driven `container::wait`, which parks
-            // the shell task on the container's init process and is woken by the
-            // scheduler when it exits — no CPU-burning poll loop.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container wait <id>");
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match container::wait(id) {
-                Ok(container::WaitOutcome::Exited(code)) => {
-                    crate::console_println!("{}", code);
-                }
-                Ok(container::WaitOutcome::Removed) => {
-                    crate::console_println!("Container {} removed while waiting", id);
-                }
-                Err(_) => {
-                    crate::console_println!("Container {} not found", id);
-                }
-            }
-        }
-        "diff" => {
-            // container diff <id>  (Docker `diff`): list filesystem changes in
-            // the container relative to its image — A (added), C (changed),
-            // D (deleted) — by inspecting the overlay's writable upper layer.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container diff <id>");
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match container::diff(id) {
-                Ok(changes) => {
-                    if changes.is_empty() {
-                        crate::console_println!("(no changes)");
-                    } else {
-                        for c in &changes {
-                            crate::console_println!("{} {}", c.kind.prefix(), c.path.display());
-                        }
-                    }
-                }
-                Err(crate::error::KernelError::InvalidArgument) => {
-                    crate::console_println!(
-                        "Container {} has no overlay rootfs (nothing to diff)",
-                        id
-                    );
-                }
-                Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
-            }
-        }
-        "pause" => {
-            // container pause <id> [id...]  (Docker `pause`): freeze the
-            // container, suspending all of its threads until `unpause`.
-            if parts.len() < 2 {
-                crate::console_println!("Usage: container pause <id> [id...]");
-                return;
-            }
-            for &id_str in parts.iter().skip(1) {
-                let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID '{}'", id_str);
-                    continue;
-                };
-                match container::pause(id) {
-                    Ok(n) => crate::console_println!(
-                        "Container {} paused ({} thread(s) suspended)",
-                        id,
-                        n
-                    ),
-                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
-                }
-            }
-        }
-        "unpause" | "resume" => {
-            // container unpause <id> [id...]  (Docker `unpause`): thaw a frozen
-            // container, resuming all of its threads.
-            if parts.len() < 2 {
-                crate::console_println!("Usage: container unpause <id> [id...]");
-                return;
-            }
-            for &id_str in parts.iter().skip(1) {
-                let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID '{}'", id_str);
-                    continue;
-                };
-                match container::unpause(id) {
-                    Ok(n) => crate::console_println!(
-                        "Container {} unpaused ({} thread(s) resumed)",
-                        id,
-                        n
-                    ),
-                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
-                }
-            }
-        }
-        "rootfs" => {
-            // container rootfs <id> <host-path>
-            //
-            // Configures the container's filesystem root (chroot) before it
-            // is run.  Every process launched by `container run` is jailed
-            // to this host subtree: it resolves `/bin/sh`, `/lib/...`, etc.
-            // against the rootfs, and `..` cannot escape it.  Must be set
-            // while the container is still in the Created state.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container rootfs <id> <host-path>");
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            let Some(&path) = parts.get(2) else {
-                crate::console_println!("Usage: container rootfs <id> <host-path>");
-                return;
-            };
-            match container::set_root_path(id, path) {
-                Ok(()) => crate::console_println!("Container {} rootfs set to '{}'", id, path),
-                Err(e) => crate::console_println!("Error: {:?}", e),
-            }
-        }
-        "run" => {
-            // container run <id> <elf-path> [args...]
-            //
-            // Launches a real init process inside an existing (Created)
-            // container: loads the ELF from the host VFS, binds the process
-            // to the container's cgroup (Q14 billing) + PID/user/network
-            // namespaces, jails it to the container's rootfs (if one was set
-            // via `container rootfs`), and transitions Created → Running.
-            //
-            // NOTE: the ELF path passed here is resolved against the *host*
-            // filesystem (the kernel reads the image before the jail takes
-            // effect).  Once the process is running, its own syscalls
-            // resolve against the container rootfs.  Give an absolute host
-            // path to the binary you want as the container's init process.
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container run <id> <elf-path> [args...]");
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            let Some(&path) = parts.get(2) else {
-                crate::console_println!("Usage: container run <id> <elf-path> [args...]");
-                return;
-            };
-
-            // Delegate to run_path: it reads the ELF from the host VFS, builds
-            // argv (argv[0] = path, then extra args), launches the init
-            // process, and records the launch spec so the container can later
-            // be restarted (`container restart`).
-            let extra_args: alloc::vec::Vec<&str> = parts.iter().skip(3).copied().collect();
-            match container::run_path(id, path, &extra_args) {
-                Ok(pid) => {
-                    crate::console_println!(
-                        "Container {} running: init pid={} (ELF: {})",
-                        id,
-                        pid,
-                        path
-                    );
-                }
-                Err(e) => crate::console_println!("Error: {:?}", e),
-            }
+            case(&parts);
         }
         "restart" => {
-            // container restart <id> [id...]  (Docker `restart`): re-launch each
-            // container's recorded init command (from the last `run`).
-            if parts.len() < 2 {
-                crate::console_println!("Usage: container restart <id> [id...]");
-                return;
-            }
-            for &id_str in parts.iter().skip(1) {
-                let Ok(id) = id_str.parse::<u32>() else {
-                    crate::console_println!("Invalid container ID '{}'", id_str);
-                    continue;
-                };
-                match container::restart(id) {
-                    Ok(pid) => {
-                        crate::console_println!("Container {} restarted: init pid={}", id, pid)
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container restart <id> [id...]  (Docker `restart`): re-launch each
+                // container's recorded init command (from the last `run`).
+                if parts.len() < 2 {
+                    crate::console_println!("Usage: container restart <id> [id...]");
+                    return;
+                }
+                for &id_str in parts.iter().skip(1) {
+                    let Ok(id) = id_str.parse::<u32>() else {
+                        crate::console_println!("Invalid container ID '{}'", id_str);
+                        continue;
+                    };
+                    match container::restart(id) {
+                        Ok(pid) => {
+                            crate::console_println!("Container {} restarted: init pid={}", id, pid)
+                        }
+                        Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
                     }
-                    Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
                 }
             }
+            case(&parts);
         }
         "cp" => {
-            // container cp <src> <dest>  (Docker `cp`): copy a file between the
-            // host VFS and a container's rootfs.  Exactly one of <src>/<dest>
-            // is a container reference of the form `ID:/path`; the other is a
-            // plain host VFS path.
-            let (Some(&src), Some(&dst)) = (parts.get(1), parts.get(2)) else {
-                crate::console_println!("Usage: container cp <src> <dest>  (one side is ID:/path)");
-                return;
-            };
-            // Parse "ID:/path" into (id, path); a plain host path yields None.
-            let parse_ref = |s: &str| -> Option<(u32, alloc::string::String)> {
-                let (left, right) = s.split_once(':')?;
-                let id = left.parse::<u32>().ok()?;
-                Some((id, alloc::string::String::from(right)))
-            };
-            use crate::fs::vfs::{EntryType, Vfs};
-            match (parse_ref(src), parse_ref(dst)) {
-                (Some((id, cpath)), None) => {
-                    // container -> host.  Directories are copied recursively via
-                    // a tar transfer; regular files copy their bytes directly.
-                    match container::entry_kind_in_container(id, &cpath) {
-                        Ok(EntryType::Directory) => {
-                            match container::copy_dir_from_container(id, &cpath) {
-                                Ok(archive) => match container::untar_tree(dst, &archive) {
-                                    Ok(()) => crate::console_println!(
-                                        "Copied directory {}:{} -> {} ({} bytes archived)",
-                                        id,
-                                        cpath,
-                                        dst,
-                                        archive.len()
-                                    ),
-                                    Err(e) => crate::console_println!(
-                                        "Failed to extract into '{}': {:?}",
-                                        dst,
-                                        e
-                                    ),
-                                },
-                                Err(e) => crate::console_println!("Error: {:?}", e),
-                            }
-                        }
-                        Ok(_) => match container::copy_from_container(id, &cpath) {
-                            Ok(data) => match Vfs::write_file(dst, &data) {
-                                Ok(()) => crate::console_println!(
-                                    "Copied {} bytes from container {}:{} to {}",
-                                    data.len(),
-                                    id,
-                                    cpath,
-                                    dst
-                                ),
-                                Err(e) => {
-                                    crate::console_println!("Failed to write '{}': {:?}", dst, e)
-                                }
-                            },
-                            Err(e) => crate::console_println!("Error: {:?}", e),
-                        },
-                        Err(e) => crate::console_println!("Error: {:?}", e),
-                    }
-                }
-                (None, Some((id, cpath))) => {
-                    // host -> container.  A host directory is copied recursively
-                    // via a tar transfer; a regular file copies its bytes.
-                    match Vfs::stat(src) {
-                        Ok(meta) if meta.entry_type == EntryType::Directory => {
-                            match container::tar_tree(src) {
-                                Ok(archive) => {
-                                    match container::copy_dir_to_container(id, &cpath, &archive) {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container cp <src> <dest>  (Docker `cp`): copy a file between the
+                // host VFS and a container's rootfs.  Exactly one of <src>/<dest>
+                // is a container reference of the form `ID:/path`; the other is a
+                // plain host VFS path.
+                let (Some(&src), Some(&dst)) = (parts.get(1), parts.get(2)) else {
+                    crate::console_println!("Usage: container cp <src> <dest>  (one side is ID:/path)");
+                    return;
+                };
+                // Parse "ID:/path" into (id, path); a plain host path yields None.
+                let parse_ref = |s: &str| -> Option<(u32, alloc::string::String)> {
+                    let (left, right) = s.split_once(':')?;
+                    let id = left.parse::<u32>().ok()?;
+                    Some((id, alloc::string::String::from(right)))
+                };
+                use crate::fs::vfs::{EntryType, Vfs};
+                match (parse_ref(src), parse_ref(dst)) {
+                    (Some((id, cpath)), None) => {
+                        // container -> host.  Directories are copied recursively via
+                        // a tar transfer; regular files copy their bytes directly.
+                        match container::entry_kind_in_container(id, &cpath) {
+                            Ok(EntryType::Directory) => {
+                                match container::copy_dir_from_container(id, &cpath) {
+                                    Ok(archive) => match container::untar_tree(dst, &archive) {
                                         Ok(()) => crate::console_println!(
-                                            "Copied directory {} -> {}:{} ({} bytes archived)",
-                                            src,
+                                            "Copied directory {}:{} -> {} ({} bytes archived)",
                                             id,
                                             cpath,
+                                            dst,
                                             archive.len()
                                         ),
-                                        Err(e) => crate::console_println!("Error: {:?}", e),
-                                    }
-                                }
-                                Err(e) => {
-                                    crate::console_println!("Failed to archive '{}': {:?}", src, e)
+                                        Err(e) => crate::console_println!(
+                                            "Failed to extract into '{}': {:?}",
+                                            dst,
+                                            e
+                                        ),
+                                    },
+                                    Err(e) => crate::console_println!("Error: {:?}", e),
                                 }
                             }
-                        }
-                        Ok(_) => match Vfs::read_file(src) {
-                            Ok(data) => match container::copy_to_container(id, &cpath, &data) {
-                                Ok(()) => crate::console_println!(
-                                    "Copied {} bytes from {} to container {}:{}",
-                                    data.len(),
-                                    src,
-                                    id,
-                                    cpath
-                                ),
+                            Ok(_) => match container::copy_from_container(id, &cpath) {
+                                Ok(data) => match Vfs::write_file(dst, &data) {
+                                    Ok(()) => crate::console_println!(
+                                        "Copied {} bytes from container {}:{} to {}",
+                                        data.len(),
+                                        id,
+                                        cpath,
+                                        dst
+                                    ),
+                                    Err(e) => {
+                                        crate::console_println!("Failed to write '{}': {:?}", dst, e)
+                                    }
+                                },
                                 Err(e) => crate::console_println!("Error: {:?}", e),
                             },
-                            Err(e) => crate::console_println!("Failed to read '{}': {:?}", src, e),
-                        },
-                        Err(e) => crate::console_println!("Failed to stat '{}': {:?}", src, e),
+                            Err(e) => crate::console_println!("Error: {:?}", e),
+                        }
+                    }
+                    (None, Some((id, cpath))) => {
+                        // host -> container.  A host directory is copied recursively
+                        // via a tar transfer; a regular file copies its bytes.
+                        match Vfs::stat(src) {
+                            Ok(meta) if meta.entry_type == EntryType::Directory => {
+                                match container::tar_tree(src) {
+                                    Ok(archive) => {
+                                        match container::copy_dir_to_container(id, &cpath, &archive) {
+                                            Ok(()) => crate::console_println!(
+                                                "Copied directory {} -> {}:{} ({} bytes archived)",
+                                                src,
+                                                id,
+                                                cpath,
+                                                archive.len()
+                                            ),
+                                            Err(e) => crate::console_println!("Error: {:?}", e),
+                                        }
+                                    }
+                                    Err(e) => {
+                                        crate::console_println!("Failed to archive '{}': {:?}", src, e)
+                                    }
+                                }
+                            }
+                            Ok(_) => match Vfs::read_file(src) {
+                                Ok(data) => match container::copy_to_container(id, &cpath, &data) {
+                                    Ok(()) => crate::console_println!(
+                                        "Copied {} bytes from {} to container {}:{}",
+                                        data.len(),
+                                        src,
+                                        id,
+                                        cpath
+                                    ),
+                                    Err(e) => crate::console_println!("Error: {:?}", e),
+                                },
+                                Err(e) => crate::console_println!("Failed to read '{}': {:?}", src, e),
+                            },
+                            Err(e) => crate::console_println!("Failed to stat '{}': {:?}", src, e),
+                        }
+                    }
+                    (Some(_), Some(_)) => {
+                        crate::console_println!("cp between two containers is not supported");
+                    }
+                    (None, None) => {
+                        crate::console_println!(
+                            "One of <src>/<dest> must be a container ref (ID:/path)"
+                        );
                     }
                 }
-                (Some(_), Some(_)) => {
-                    crate::console_println!("cp between two containers is not supported");
-                }
-                (None, None) => {
-                    crate::console_println!(
-                        "One of <src>/<dest> must be a container ref (ID:/path)"
-                    );
-                }
             }
+            case(&parts);
         }
         "exec" => {
-            // container exec <id> <kshell-command...>   (Q17/§58, option B)
-            //
-            // The *netns-debug facade*: temporarily enter the container's
-            // network namespace, run a **kshell builtin** there (so DNS/TCP/UDP
-            // operations resolve inside the container's netns), then restore the
-            // caller's namespace. This is deliberately NOT Docker `docker exec`
-            // semantics — it runs a shell builtin, not a process from the
-            // container rootfs. For a *real* in-container process launch use
-            // `container run-in` (or the `container exec --rootfs` alias below,
-            // which is what `docker exec` maps to).
-            //
-            // `container exec --rootfs [-d] <id> <path> [args...]` is an alias
-            // for `run-in`: launch a genuine process from the container rootfs.
-            if parts.get(1).copied() == Some("--rootfs") {
-                container_exec_rootfs(parts.get(2..).unwrap_or(&[]));
-                return;
-            }
+            #[inline(never)]
+            fn case(parts: &[&str], args: &str) {
+                // container exec <id> <kshell-command...>   (Q17/§58, option B)
+                //
+                // The *netns-debug facade*: temporarily enter the container's
+                // network namespace, run a **kshell builtin** there (so DNS/TCP/UDP
+                // operations resolve inside the container's netns), then restore the
+                // caller's namespace. This is deliberately NOT Docker `docker exec`
+                // semantics — it runs a shell builtin, not a process from the
+                // container rootfs. For a *real* in-container process launch use
+                // `container run-in` (or the `container exec --rootfs` alias below,
+                // which is what `docker exec` maps to).
+                //
+                // `container exec --rootfs [-d] <id> <path> [args...]` is an alias
+                // for `run-in`: launch a genuine process from the container rootfs.
+                if parts.get(1).copied() == Some("--rootfs") {
+                    container_exec_rootfs(parts.get(2..).unwrap_or(&[]));
+                    return;
+                }
 
-            let Some(id_str) = parts.get(1) else {
-                crate::console_println!("Usage: container exec <id> <kshell-command...>");
-                crate::console_println!(
-                    "       container exec --rootfs [-d] [-w DIR] <id> <path> [args...]  (real rootfs exec)"
-                );
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            // The command tail is everything in the raw arg string after the id
-            // token (preserves the builtin's own argument spacing for `execute`).
-            let cmd_offset = args.find(id_str).unwrap_or(0);
-            let after_id = args.get(cmd_offset..).unwrap_or("").trim_start();
-            let after_id = after_id.strip_prefix(id_str).unwrap_or("").trim_start();
-            if after_id.is_empty() {
-                crate::console_println!("Usage: container exec <id> <kshell-command...>");
-                return;
-            }
+                let Some(id_str) = parts.get(1) else {
+                    crate::console_println!("Usage: container exec <id> <kshell-command...>");
+                    crate::console_println!(
+                        "       container exec --rootfs [-d] [-w DIR] <id> <path> [args...]  (real rootfs exec)"
+                    );
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                // The command tail is everything in the raw arg string after the id
+                // token (preserves the builtin's own argument spacing for `execute`).
+                let cmd_offset = args.find(id_str).unwrap_or(0);
+                let after_id = args.get(cmd_offset..).unwrap_or("").trim_start();
+                let after_id = after_id.strip_prefix(id_str).unwrap_or("").trim_start();
+                if after_id.is_empty() {
+                    crate::console_println!("Usage: container exec <id> <kshell-command...>");
+                    return;
+                }
 
-            // Look up the container's network namespace and verify it is running.
-            let Some((_, _, net_ns)) = container::namespace_ids(id) else {
-                crate::console_println!("Container {} not found", id);
-                return;
-            };
-            let Some(ci) = container::info(id) else {
-                crate::console_println!("Container {} not found", id);
-                return;
-            };
-            if !matches!(ci.state, container::ContainerState::Running) {
-                crate::console_println!("Container {} is not running (state: {:?})", id, ci.state);
-                return;
-            }
+                // Look up the container's network namespace and verify it is running.
+                let Some((_, _, net_ns)) = container::namespace_ids(id) else {
+                    crate::console_println!("Container {} not found", id);
+                    return;
+                };
+                let Some(ci) = container::info(id) else {
+                    crate::console_println!("Container {} not found", id);
+                    return;
+                };
+                if !matches!(ci.state, container::ContainerState::Running) {
+                    crate::console_println!("Container {} is not running (state: {:?})", id, ci.state);
+                    return;
+                }
 
-            // Save the caller's namespace, switch to the container's netns, run
-            // the builtin, then restore — so DNS/TCP/UDP use the container's
-            // network stack for the duration of this one command.
-            let task_id = crate::sched::current_task_id();
-            let orig_ns = crate::sched::current_task_net_ns();
-            if let Err(e) = crate::sched::set_task_net_ns(task_id, net_ns) {
-                crate::console_println!("Failed to enter namespace: {:?}", e);
-                return;
+                // Save the caller's namespace, switch to the container's netns, run
+                // the builtin, then restore — so DNS/TCP/UDP use the container's
+                // network stack for the duration of this one command.
+                let task_id = crate::sched::current_task_id();
+                let orig_ns = crate::sched::current_task_net_ns();
+                if let Err(e) = crate::sched::set_task_net_ns(task_id, net_ns) {
+                    crate::console_println!("Failed to enter namespace: {:?}", e);
+                    return;
+                }
+                crate::console_println!("[exec] Entering container {} (net_ns={})", id, net_ns);
+                execute(after_id);
+                let _ = crate::sched::set_task_net_ns(task_id, orig_ns);
+                crate::console_println!("[exec] Exited container {} namespace", id);
             }
-            crate::console_println!("[exec] Entering container {} (net_ns={})", id, net_ns);
-            execute(after_id);
-            let _ = crate::sched::set_task_net_ns(task_id, orig_ns);
-            crate::console_println!("[exec] Exited container {} namespace", id);
+            case(&parts, args);
         }
         "run-in" => {
-            // container run-in [-d] <id> <path> [args...]   (Q17/§58, option B)
-            //
-            // Real in-container process launch (Docker `docker exec` semantics):
-            // read <path> from the container's rootfs and spawn it as a genuine
-            // process bound into the container's cgroup + PID/user/network
-            // namespaces + rootfs jail. Foreground (default) blocks until it
-            // exits and prints the status; `-d` detaches and prints the pid.
-            container_exec_rootfs(parts.get(1..).unwrap_or(&[]));
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container run-in [-d] <id> <path> [args...]   (Q17/§58, option B)
+                //
+                // Real in-container process launch (Docker `docker exec` semantics):
+                // read <path> from the container's rootfs and spawn it as a genuine
+                // process bound into the container's cgroup + PID/user/network
+                // namespaces + rootfs jail. Foreground (default) blocks until it
+                // exits and prints the status; `-d` detaches and prints the pid.
+                container_exec_rootfs(parts.get(1..).unwrap_or(&[]));
+            }
+            case(&parts);
         }
         "prune" => {
-            // container prune  (Docker `container prune`): remove all stopped
-            // containers (Stopped/Failed).  Created and running containers are
-            // preserved.
-            let removed = container::prune();
-            crate::console_println!("Removed {} stopped container(s)", removed);
+            #[inline(never)]
+            fn case() {
+                // container prune  (Docker `container prune`): remove all stopped
+                // containers (Stopped/Failed).  Created and running containers are
+                // preserved.
+                let removed = container::prune();
+                crate::console_println!("Removed {} stopped container(s)", removed);
+            }
+            case();
         }
         "system" => {
-            // container system <df|prune>  (Docker `docker system df` /
-            // `docker system prune`): aggregate disk usage across the three
-            // runtime registries, and a combined reclaim sweep.
-            match parts.get(1).copied() {
-                Some("df") => {
-                    // Docker `system df`: a per-type usage summary. Counts come
-                    // straight from the registries; volume "size" is the summed
-                    // byte total of each volume's backing tree (walked on the
-                    // host VFS). Images are directory-referenced (no name-keyed
-                    // store), so there is no image row to total.
-                    let cts = container::list();
-                    let total_ct = cts.len();
-                    let running_ct = cts
-                        .iter()
-                        .filter(|(_, _, st)| *st == container::ContainerState::Running)
-                        .count();
-                    let vols = crate::volume::list();
-                    let mut vol_bytes: u64 = 0;
-                    for v in &vols {
-                        vol_bytes = vol_bytes.saturating_add(crate::volume::backing_size(v));
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container system <df|prune>  (Docker `docker system df` /
+                // `docker system prune`): aggregate disk usage across the three
+                // runtime registries, and a combined reclaim sweep.
+                match parts.get(1).copied() {
+                    Some("df") => {
+                        // Docker `system df`: a per-type usage summary. Counts come
+                        // straight from the registries; volume "size" is the summed
+                        // byte total of each volume's backing tree (walked on the
+                        // host VFS). Images are directory-referenced (no name-keyed
+                        // store), so there is no image row to total.
+                        let cts = container::list();
+                        let total_ct = cts.len();
+                        let running_ct = cts
+                            .iter()
+                            .filter(|(_, _, st)| *st == container::ContainerState::Running)
+                            .count();
+                        let vols = crate::volume::list();
+                        let mut vol_bytes: u64 = 0;
+                        for v in &vols {
+                            vol_bytes = vol_bytes.saturating_add(crate::volume::backing_size(v));
+                        }
+                        let nets = crate::cnetwork::count();
+                        let active_nets = crate::cnetwork::list()
+                            .iter()
+                            .filter(|n| !n.allocations.is_empty())
+                            .count();
+                        crate::console_println!("TYPE            TOTAL     ACTIVE    SIZE");
+                        crate::console_println!("Containers      {:<9} {:<9} -", total_ct, running_ct);
+                        crate::console_println!(
+                            "Volumes         {:<9} {:<9} {}",
+                            vols.len(),
+                            "-",
+                            format_size_human(vol_bytes)
+                        );
+                        crate::console_println!("Networks        {:<9} {:<9} -", nets, active_nets);
                     }
-                    let nets = crate::cnetwork::count();
-                    let active_nets = crate::cnetwork::list()
-                        .iter()
-                        .filter(|n| !n.allocations.is_empty())
-                        .count();
-                    crate::console_println!("TYPE            TOTAL     ACTIVE    SIZE");
-                    crate::console_println!("Containers      {:<9} {:<9} -", total_ct, running_ct);
-                    crate::console_println!(
-                        "Volumes         {:<9} {:<9} {}",
-                        vols.len(),
-                        "-",
-                        format_size_human(vol_bytes)
-                    );
-                    crate::console_println!("Networks        {:<9} {:<9} -", nets, active_nets);
-                }
-                Some("prune") => {
-                    // Docker `system prune`: reclaim stopped containers and
-                    // unused (zero-allocation) networks. Volumes are NOT pruned:
-                    // our runtime does not track per-volume usage, so "unused"
-                    // is undeterminable — sweeping them could delete live data.
-                    // (Docker likewise leaves volumes alone without --volumes.)
-                    let ct_removed = container::prune();
-                    let net_removed = crate::cnetwork::prune();
-                    crate::console_println!(
-                        "Removed {} stopped container(s), {} unused network(s)",
-                        ct_removed,
-                        net_removed
-                    );
-                    crate::console_println!(
-                        "Volumes left intact (usage is untracked; remove explicitly with `container volume remove`)"
-                    );
-                }
-                _ => {
-                    crate::console_println!("Usage: container system <df|prune>");
-                    crate::console_println!(
-                        "  container system df     — disk usage by containers/volumes/networks"
-                    );
-                    crate::console_println!(
-                        "  container system prune  — remove stopped containers + unused networks"
-                    );
+                    Some("prune") => {
+                        // Docker `system prune`: reclaim stopped containers and
+                        // unused (zero-allocation) networks. Volumes are NOT pruned:
+                        // our runtime does not track per-volume usage, so "unused"
+                        // is undeterminable — sweeping them could delete live data.
+                        // (Docker likewise leaves volumes alone without --volumes.)
+                        let ct_removed = container::prune();
+                        let net_removed = crate::cnetwork::prune();
+                        crate::console_println!(
+                            "Removed {} stopped container(s), {} unused network(s)",
+                            ct_removed,
+                            net_removed
+                        );
+                        crate::console_println!(
+                            "Volumes left intact (usage is untracked; remove explicitly with `container volume remove`)"
+                        );
+                    }
+                    _ => {
+                        crate::console_println!("Usage: container system <df|prune>");
+                        crate::console_println!(
+                            "  container system df     — disk usage by containers/volumes/networks"
+                        );
+                        crate::console_println!(
+                            "  container system prune  — remove stopped containers + unused networks"
+                        );
+                    }
                 }
             }
+            case(&parts);
         }
         "export" => {
-            // container export <id> <host-tar-path>  (Docker `export`): pack the
-            // container's rootfs into a tar archive written to the host VFS.
-            let (Some(id_str), Some(&out_path)) = (parts.get(1), parts.get(2)) else {
-                crate::console_println!("Usage: container export <id> <host-tar-path>");
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match container::export_rootfs(id) {
-                Ok(archive) => match crate::fs::vfs::Vfs::write_file(out_path, &archive) {
-                    Ok(()) => crate::console_println!(
-                        "Exported container {} rootfs: {} bytes -> {}",
-                        id,
-                        archive.len(),
-                        out_path
-                    ),
-                    Err(e) => crate::console_println!("Failed to write '{}': {:?}", out_path, e),
-                },
-                Err(e) => crate::console_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container export <id> <host-tar-path>  (Docker `export`): pack the
+                // container's rootfs into a tar archive written to the host VFS.
+                let (Some(id_str), Some(&out_path)) = (parts.get(1), parts.get(2)) else {
+                    crate::console_println!("Usage: container export <id> <host-tar-path>");
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                match container::export_rootfs(id) {
+                    Ok(archive) => match crate::fs::vfs::Vfs::write_file(out_path, &archive) {
+                        Ok(()) => crate::console_println!(
+                            "Exported container {} rootfs: {} bytes -> {}",
+                            id,
+                            archive.len(),
+                            out_path
+                        ),
+                        Err(e) => crate::console_println!("Failed to write '{}': {:?}", out_path, e),
+                    },
+                    Err(e) => crate::console_println!("Error: {:?}", e),
+                }
             }
+            case(&parts);
         }
         "import" => {
-            // container import <host-tar-path> <name> <rootfs-dir>  (Docker
-            // `import`): create a container named <name> whose rootfs is the
-            // tar archive at <host-tar-path>, extracted into <rootfs-dir>.
-            let (Some(&tar_path), Some(&name), Some(&dest_dir)) =
-                (parts.get(1), parts.get(2), parts.get(3))
-            else {
-                crate::console_println!(
-                    "Usage: container import <host-tar-path> <name> <rootfs-dir>"
-                );
-                return;
-            };
-            match crate::fs::vfs::Vfs::read_file(tar_path) {
-                Ok(archive) => match container::import_rootfs(name, &archive, dest_dir) {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container import <host-tar-path> <name> <rootfs-dir>  (Docker
+                // `import`): create a container named <name> whose rootfs is the
+                // tar archive at <host-tar-path>, extracted into <rootfs-dir>.
+                let (Some(&tar_path), Some(&name), Some(&dest_dir)) =
+                    (parts.get(1), parts.get(2), parts.get(3))
+                else {
+                    crate::console_println!(
+                        "Usage: container import <host-tar-path> <name> <rootfs-dir>"
+                    );
+                    return;
+                };
+                match crate::fs::vfs::Vfs::read_file(tar_path) {
+                    Ok(archive) => match container::import_rootfs(name, &archive, dest_dir) {
+                        Ok(id) => crate::console_println!(
+                            "Imported {} ({} bytes) -> container {} (rootfs {})",
+                            tar_path,
+                            archive.len(),
+                            id,
+                            dest_dir
+                        ),
+                        Err(e) => crate::console_println!("Error: {:?}", e),
+                    },
+                    Err(e) => crate::console_println!("Failed to read '{}': {:?}", tar_path, e),
+                }
+            }
+            case(&parts);
+        }
+        "commit" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container commit <src-id> <new-name> <rootfs-dir>  (Docker
+                // `commit`): snapshot a container's rootfs into a new, independent
+                // container with its own rootfs at <rootfs-dir>.
+                let (Some(id_str), Some(&new_name), Some(&dest_dir)) =
+                    (parts.get(1), parts.get(2), parts.get(3))
+                else {
+                    crate::console_println!("Usage: container commit <src-id> <new-name> <rootfs-dir>");
+                    return;
+                };
+                let Ok(src) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                match container::commit(src, new_name, dest_dir) {
                     Ok(id) => crate::console_println!(
-                        "Imported {} ({} bytes) -> container {} (rootfs {})",
-                        tar_path,
-                        archive.len(),
+                        "Committed container {} -> container {} (rootfs {})",
+                        src,
                         id,
                         dest_dir
                     ),
                     Err(e) => crate::console_println!("Error: {:?}", e),
-                },
-                Err(e) => crate::console_println!("Failed to read '{}': {:?}", tar_path, e),
+                }
             }
-        }
-        "commit" => {
-            // container commit <src-id> <new-name> <rootfs-dir>  (Docker
-            // `commit`): snapshot a container's rootfs into a new, independent
-            // container with its own rootfs at <rootfs-dir>.
-            let (Some(id_str), Some(&new_name), Some(&dest_dir)) =
-                (parts.get(1), parts.get(2), parts.get(3))
-            else {
-                crate::console_println!("Usage: container commit <src-id> <new-name> <rootfs-dir>");
-                return;
-            };
-            let Ok(src) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match container::commit(src, new_name, dest_dir) {
-                Ok(id) => crate::console_println!(
-                    "Committed container {} -> container {} (rootfs {})",
-                    src,
-                    id,
-                    dest_dir
-                ),
-                Err(e) => crate::console_println!("Error: {:?}", e),
-            }
+            case(&parts);
         }
         "logs" => {
-            // container logs [--tail N] <id>  (Docker `logs`): print the
-            // container init process's captured stdout+stderr.  `--tail N`
-            // limits output to the last N lines (Docker `logs --tail`).
-            let mut tail: Option<usize> = None;
-            let mut id_str: Option<&str> = None;
-            let mut li = 1;
-            while li < parts.len() {
-                match parts.get(li) {
-                    Some(&"--tail") | Some(&"-n") => match parts.get(li.saturating_add(1)) {
-                        Some(&"all") => {
-                            tail = None;
-                            li = li.saturating_add(2);
-                        }
-                        Some(n) => match n.parse::<usize>() {
-                            Ok(v) => {
-                                tail = Some(v);
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container logs [--tail N] <id>  (Docker `logs`): print the
+                // container init process's captured stdout+stderr.  `--tail N`
+                // limits output to the last N lines (Docker `logs --tail`).
+                let mut tail: Option<usize> = None;
+                let mut id_str: Option<&str> = None;
+                let mut li = 1;
+                while li < parts.len() {
+                    match parts.get(li) {
+                        Some(&"--tail") | Some(&"-n") => match parts.get(li.saturating_add(1)) {
+                            Some(&"all") => {
+                                tail = None;
                                 li = li.saturating_add(2);
                             }
-                            Err(_) => {
-                                crate::console_println!(
-                                    "container logs: invalid --tail value '{}'",
-                                    n
-                                );
+                            Some(n) => match n.parse::<usize>() {
+                                Ok(v) => {
+                                    tail = Some(v);
+                                    li = li.saturating_add(2);
+                                }
+                                Err(_) => {
+                                    crate::console_println!(
+                                        "container logs: invalid --tail value '{}'",
+                                        n
+                                    );
+                                    return;
+                                }
+                            },
+                            None => {
+                                crate::console_println!("container logs: --tail needs a value");
                                 return;
                             }
                         },
-                        None => {
-                            crate::console_println!("container logs: --tail needs a value");
-                            return;
+                        Some(tok) => {
+                            id_str = Some(tok);
+                            li = li.saturating_add(1);
                         }
-                    },
-                    Some(tok) => {
-                        id_str = Some(tok);
-                        li = li.saturating_add(1);
+                        None => li = li.saturating_add(1),
                     }
-                    None => li = li.saturating_add(1),
+                }
+                let Some(id_str) = id_str else {
+                    crate::console_println!("Usage: container logs [--tail N] ID");
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                match container::logs(id) {
+                    Ok(data) => match core::str::from_utf8(&data) {
+                        // Captured output is text: print it verbatim (or the last
+                        // N lines under --tail).
+                        Ok(text) => {
+                            let out = match tail {
+                                Some(n) => {
+                                    // Trailing newline shouldn't count as an empty
+                                    // final line; trim it before splitting, then
+                                    // keep the last N lines.
+                                    let trimmed = text.strip_suffix('\n').unwrap_or(text);
+                                    let lines: alloc::vec::Vec<&str> = trimmed.split('\n').collect();
+                                    let start = lines.len().saturating_sub(n);
+                                    lines.get(start..).unwrap_or(&[]).join("\n")
+                                }
+                                None => {
+                                    alloc::string::String::from(text.strip_suffix('\n').unwrap_or(text))
+                                }
+                            };
+                            if !out.is_empty() {
+                                crate::console::write_str(&out);
+                                crate::console_println!();
+                            }
+                        }
+                        // Non-UTF-8 capture: don't force bytes through the text
+                        // console — report the size (matches `cat`'s convention).
+                        Err(_) => crate::console_println!("(binary log, {} bytes)", data.len()),
+                    },
+                    Err(e) => crate::console_println!("Error: {:?}", e),
                 }
             }
-            let Some(id_str) = id_str else {
-                crate::console_println!("Usage: container logs [--tail N] ID");
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match container::logs(id) {
-                Ok(data) => match core::str::from_utf8(&data) {
-                    // Captured output is text: print it verbatim (or the last
-                    // N lines under --tail).
-                    Ok(text) => {
-                        let out = match tail {
-                            Some(n) => {
-                                // Trailing newline shouldn't count as an empty
-                                // final line; trim it before splitting, then
-                                // keep the last N lines.
-                                let trimmed = text.strip_suffix('\n').unwrap_or(text);
-                                let lines: alloc::vec::Vec<&str> = trimmed.split('\n').collect();
-                                let start = lines.len().saturating_sub(n);
-                                lines.get(start..).unwrap_or(&[]).join("\n")
-                            }
-                            None => {
-                                alloc::string::String::from(text.strip_suffix('\n').unwrap_or(text))
-                            }
-                        };
-                        if !out.is_empty() {
-                            crate::console::write_str(&out);
-                            crate::console_println!();
-                        }
-                    }
-                    // Non-UTF-8 capture: don't force bytes through the text
-                    // console — report the size (matches `cat`'s convention).
-                    Err(_) => crate::console_println!("(binary log, {} bytes)", data.len()),
-                },
-                Err(e) => crate::console_println!("Error: {:?}", e),
-            }
+            case(&parts);
         }
         "events" => {
-            // container events [-n N] [--id ID]  (Docker `events`): print the
-            // recent container lifecycle event log (create/start/die/stop/kill/
-            // pause/unpause/restart/destroy), oldest first.  We record a bounded
-            // ring, so this is the recent window rather than the full history.
-            let mut limit: usize = 0; // 0 = all retained events
-            let mut filter_id: Option<u32> = None;
-            let mut ei = 1;
-            while ei < parts.len() {
-                match parts.get(ei) {
-                    Some(&"-n") | Some(&"--tail") => {
-                        match parts
-                            .get(ei.saturating_add(1))
-                            .and_then(|n| n.parse::<usize>().ok())
-                        {
-                            Some(v) => {
-                                limit = v;
-                                ei = ei.saturating_add(2);
-                            }
-                            None => {
-                                crate::console_println!(
-                                    "container events: -n needs a numeric value"
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    Some(&"--id") | Some(&"-c") | Some(&"--container") => {
-                        match parts
-                            .get(ei.saturating_add(1))
-                            .and_then(|n| n.parse::<u32>().ok())
-                        {
-                            Some(v) => {
-                                filter_id = Some(v);
-                                ei = ei.saturating_add(2);
-                            }
-                            None => {
-                                crate::console_println!(
-                                    "container events: --id needs a container ID"
-                                );
-                                return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container events [-n N] [--id ID]  (Docker `events`): print the
+                // recent container lifecycle event log (create/start/die/stop/kill/
+                // pause/unpause/restart/destroy), oldest first.  We record a bounded
+                // ring, so this is the recent window rather than the full history.
+                let mut limit: usize = 0; // 0 = all retained events
+                let mut filter_id: Option<u32> = None;
+                let mut ei = 1;
+                while ei < parts.len() {
+                    match parts.get(ei) {
+                        Some(&"-n") | Some(&"--tail") => {
+                            match parts
+                                .get(ei.saturating_add(1))
+                                .and_then(|n| n.parse::<usize>().ok())
+                            {
+                                Some(v) => {
+                                    limit = v;
+                                    ei = ei.saturating_add(2);
+                                }
+                                None => {
+                                    crate::console_println!(
+                                        "container events: -n needs a numeric value"
+                                    );
+                                    return;
+                                }
                             }
                         }
-                    }
-                    Some(tok) => {
-                        // Bare token: treat as a container ID filter (Docker allows
-                        // `events --filter container=ID`; we accept the id directly).
-                        match tok.parse::<u32>() {
-                            Ok(v) => filter_id = Some(v),
-                            Err(_) => {
-                                crate::console_println!(
-                                    "container events: unknown argument '{}'",
-                                    tok
-                                );
-                                return;
+                        Some(&"--id") | Some(&"-c") | Some(&"--container") => {
+                            match parts
+                                .get(ei.saturating_add(1))
+                                .and_then(|n| n.parse::<u32>().ok())
+                            {
+                                Some(v) => {
+                                    filter_id = Some(v);
+                                    ei = ei.saturating_add(2);
+                                }
+                                None => {
+                                    crate::console_println!(
+                                        "container events: --id needs a container ID"
+                                    );
+                                    return;
+                                }
                             }
                         }
-                        ei = ei.saturating_add(1);
-                    }
-                    None => ei = ei.saturating_add(1),
-                }
-            }
-            let events = container::events_snapshot(0, limit, filter_id);
-            if events.is_empty() {
-                crate::console_println!("(no container events recorded)");
-            } else {
-                for e in &events {
-                    // Monotonic timestamp shown as seconds.milliseconds since boot
-                    // (we have no wall clock in this context; relative time is the
-                    // honest representation).
-                    let secs = e.time_ns / 1_000_000_000;
-                    let ms = (e.time_ns % 1_000_000_000) / 1_000_000;
-                    let action = e.kind.action();
-                    match e.exit_code {
-                        Some(code) => crate::console_println!(
-                            "{:>6}.{:03}s  container {:<8} id={} name={} (exit {})",
-                            secs,
-                            ms,
-                            action,
-                            e.id,
-                            e.name,
-                            code
-                        ),
-                        None => crate::console_println!(
-                            "{:>6}.{:03}s  container {:<8} id={} name={}",
-                            secs,
-                            ms,
-                            action,
-                            e.id,
-                            e.name
-                        ),
+                        Some(tok) => {
+                            // Bare token: treat as a container ID filter (Docker allows
+                            // `events --filter container=ID`; we accept the id directly).
+                            match tok.parse::<u32>() {
+                                Ok(v) => filter_id = Some(v),
+                                Err(_) => {
+                                    crate::console_println!(
+                                        "container events: unknown argument '{}'",
+                                        tok
+                                    );
+                                    return;
+                                }
+                            }
+                            ei = ei.saturating_add(1);
+                        }
+                        None => ei = ei.saturating_add(1),
                     }
                 }
+                let events = container::events_snapshot(0, limit, filter_id);
+                if events.is_empty() {
+                    crate::console_println!("(no container events recorded)");
+                } else {
+                    for e in &events {
+                        // Monotonic timestamp shown as seconds.milliseconds since boot
+                        // (we have no wall clock in this context; relative time is the
+                        // honest representation).
+                        let secs = e.time_ns / 1_000_000_000;
+                        let ms = (e.time_ns % 1_000_000_000) / 1_000_000;
+                        let action = e.kind.action();
+                        match e.exit_code {
+                            Some(code) => crate::console_println!(
+                                "{:>6}.{:03}s  container {:<8} id={} name={} (exit {})",
+                                secs,
+                                ms,
+                                action,
+                                e.id,
+                                e.name,
+                                code
+                            ),
+                            None => crate::console_println!(
+                                "{:>6}.{:03}s  container {:<8} id={} name={}",
+                                secs,
+                                ms,
+                                action,
+                                e.id,
+                                e.name
+                            ),
+                        }
+                    }
+                }
             }
+            case(&parts);
         }
         "volume" | "vol" => {
-            // container volume <create|ls|rm|inspect|prune> ... (Docker
-            // `docker volume`): manage named volumes — runtime-owned backing
-            // directories mounted into containers via `-v NAME:/path`.
-            let action = parts.get(1).copied().unwrap_or("ls");
-            match action {
-                "ls" | "list" => {
-                    let names = crate::volume::list();
-                    if names.is_empty() {
-                        crate::console_println!("(no volumes)");
-                    } else {
-                        crate::console_println!("{:<24} {}", "NAME", "MOUNTPOINT");
-                        for name in &names {
-                            let mount = crate::volume::path_of(name).unwrap_or_default();
-                            crate::console_println!("{:<24} {}", name, mount.display());
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // container volume <create|ls|rm|inspect|prune> ... (Docker
+                // `docker volume`): manage named volumes — runtime-owned backing
+                // directories mounted into containers via `-v NAME:/path`.
+                let action = parts.get(1).copied().unwrap_or("ls");
+                match action {
+                    "ls" | "list" => {
+                        let names = crate::volume::list();
+                        if names.is_empty() {
+                            crate::console_println!("(no volumes)");
+                        } else {
+                            crate::console_println!("{:<24} {}", "NAME", "MOUNTPOINT");
+                            for name in &names {
+                                let mount = crate::volume::path_of(name).unwrap_or_default();
+                                crate::console_println!("{:<24} {}", name, mount.display());
+                            }
                         }
                     }
-                }
-                "create" => {
-                    let Some(name) = parts.get(2) else {
-                        crate::console_println!("Usage: container volume create NAME");
-                        return;
-                    };
-                    match crate::volume::create(name) {
-                        Ok(path) => crate::console_println!("{} ({})", name, path.display()),
-                        Err(e) => crate::console_println!("Error: {:?}", e),
-                    }
-                }
-                "rm" | "remove" | "delete" => {
-                    if parts.len() < 3 {
-                        crate::console_println!("Usage: container volume rm NAME [NAME...]");
-                        return;
-                    }
-                    for name in parts.iter().skip(2) {
-                        match crate::volume::remove(name) {
-                            Ok(()) => crate::console_println!("{}", name),
-                            Err(e) => crate::console_println!("{}: {:?}", name, e),
+                    "create" => {
+                        let Some(name) = parts.get(2) else {
+                            crate::console_println!("Usage: container volume create NAME");
+                            return;
+                        };
+                        match crate::volume::create(name) {
+                            Ok(path) => crate::console_println!("{} ({})", name, path.display()),
+                            Err(e) => crate::console_println!("Error: {:?}", e),
                         }
                     }
-                }
-                "inspect" => {
-                    let Some(name) = parts.get(2) else {
-                        crate::console_println!("Usage: container volume inspect NAME");
-                        return;
-                    };
-                    match crate::volume::path_of(name) {
-                        Some(path) => {
-                            crate::console_println!("Name:       {}", name);
-                            crate::console_println!("Driver:     local");
-                            crate::console_println!("Mountpoint: {}", path.display());
+                    "rm" | "remove" | "delete" => {
+                        if parts.len() < 3 {
+                            crate::console_println!("Usage: container volume rm NAME [NAME...]");
+                            return;
                         }
-                        None => crate::console_println!("Volume '{}' not found", name),
+                        for name in parts.iter().skip(2) {
+                            match crate::volume::remove(name) {
+                                Ok(()) => crate::console_println!("{}", name),
+                                Err(e) => crate::console_println!("{}: {:?}", name, e),
+                            }
+                        }
                     }
-                }
-                "prune" => {
-                    let n = crate::volume::prune();
-                    crate::console_println!("Removed {} volume(s)", n);
-                }
-                other => {
-                    crate::console_println!("Unknown volume action '{}'", other);
-                    crate::console_println!(
-                        "Usage: container volume <create|ls|rm|inspect|prune> ..."
-                    );
+                    "inspect" => {
+                        let Some(name) = parts.get(2) else {
+                            crate::console_println!("Usage: container volume inspect NAME");
+                            return;
+                        };
+                        match crate::volume::path_of(name) {
+                            Some(path) => {
+                                crate::console_println!("Name:       {}", name);
+                                crate::console_println!("Driver:     local");
+                                crate::console_println!("Mountpoint: {}", path.display());
+                            }
+                            None => crate::console_println!("Volume '{}' not found", name),
+                        }
+                    }
+                    "prune" => {
+                        let n = crate::volume::prune();
+                        crate::console_println!("Removed {} volume(s)", n);
+                    }
+                    other => {
+                        crate::console_println!("Unknown volume action '{}'", other);
+                        crate::console_println!(
+                            "Usage: container volume <create|ls|rm|inspect|prune> ..."
+                        );
+                    }
                 }
             }
+            case(&parts);
         }
         "network" | "net" => {
-            cmd_container_network(&parts);
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                cmd_container_network(parts);
+            }
+            case(&parts);
         }
         "test" => {
-            container::self_test();
+            #[inline(never)]
+            fn case() {
+                container::self_test();
+            }
+            case();
         }
         _ => {
-            crate::console_println!(
-                "Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|system|exec|cp|export|import|commit|logs|events|volume|network|info|top|stats|update|rename|port|wait|test]"
-            );
-            crate::console_println!(
-                "  container [list] [-a] [-q] [-n N|-l] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-a: all, -q: IDs, -n/-l: last N/latest)"
-            );
-            crate::console_println!(
-                "  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] [rm] — create container"
-            );
-            crate::console_println!(
-                "  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)"
-            );
-            crate::console_println!(
-                "  container rootfs ID <host-path>          — set filesystem root (chroot)"
-            );
-            crate::console_println!(
-                "  container run ID <elf-path> [args...]    — launch init process in container"
-            );
-            crate::console_println!(
-                "  container restart ID [ID...]             — re-launch the recorded init command"
-            );
-            crate::console_println!("  container start ID [ID...]               — mark as running");
-            crate::console_println!("  container stop ID [ID...]                — mark as stopped");
-            crate::console_println!(
-                "  container kill ID [ID...]                — force-kill all container processes"
-            );
-            crate::console_println!(
-                "  container pause ID [ID...]               — freeze (suspend all threads)"
-            );
-            crate::console_println!(
-                "  container unpause ID [ID...]             — thaw (resume all threads)"
-            );
-            crate::console_println!(
-                "  container prune                          — remove all stopped containers"
-            );
-            crate::console_println!(
-                "  container system <df|prune>              — disk usage summary / reclaim stopped containers+unused networks"
-            );
-            crate::console_println!(
-                "  container exec ID <kshell-command>       — netns-debug facade: run a kshell builtin in the container's network namespace"
-            );
-            crate::console_println!(
-                "  container run-in [-d] ID <path> [args]   — run a real process from the container rootfs (docker exec; foreground waits + prints exit status; -d detaches)"
-            );
-            crate::console_println!(
-                "  container exec --rootfs [-d] ID <path> [args]  — alias for run-in"
-            );
-            crate::console_println!(
-                "  container cp <src> <dest>                — copy file/dir host<->rootfs (one side ID:/path)"
-            );
-            crate::console_println!(
-                "  container export ID <host-tar-path>      — pack rootfs into a tar archive"
-            );
-            crate::console_println!(
-                "  container import <tar> <name> <rootfs-dir> — create container from a tar archive"
-            );
-            crate::console_println!(
-                "  container commit ID <name> <rootfs-dir>  — snapshot rootfs into a new container"
-            );
-            crate::console_println!(
-                "  container logs [--tail N] ID             — print captured init stdout/stderr (--tail: last N lines)"
-            );
-            crate::console_println!(
-                "  container events [-n N] [--id ID]        — recent lifecycle events (create/start/die/stop/kill/pause/restart/destroy)"
-            );
-            crate::console_println!(
-                "  container volume <create|ls|rm|inspect|prune> NAME — manage named volumes (mount with -v NAME:/path)"
-            );
-            crate::console_println!(
-                "  container network <create|ls|rm|inspect|prune> NAME [--subnet CIDR] [--gateway IP] — manage user-defined networks (IPAM)"
-            );
-            crate::console_println!(
-                "  container info [--json] ID               — detailed inspection (--json: machine-readable)"
-            );
-            crate::console_println!(
-                "  container top ID                         — list processes running in container"
-            );
-            crate::console_println!(
-                "  container stats [ID]                     — cgroup resource usage (no ID: table of all running)"
-            );
-            crate::console_println!(
-                "  container update ID [--cpus N] [--memory SIZE] [--restart POLICY] — change live limits/restart policy"
-            );
-            crate::console_println!(
-                "  container rename ID <new-name>           — rename a container"
-            );
-            crate::console_println!(
-                "  container port ID                        — list published port mappings"
-            );
-            crate::console_println!(
-                "  container wait ID                        — block until container stops, print exit code"
-            );
-            crate::console_println!(
-                "  container diff ID                        — list rootfs changes vs image (A/C/D)"
-            );
-            crate::console_println!("  container test                           — run self-test");
-            crate::console_println!();
-            crate::console_println!("Aliases: ct");
+            #[inline(never)]
+            fn case() {
+                crate::console_println!(
+                    "Usage: container [list|create|delete|rootfs|run|restart|start|stop|kill|pause|unpause|prune|system|exec|cp|export|import|commit|logs|events|volume|network|info|top|stats|update|rename|port|wait|test]"
+                );
+                crate::console_println!(
+                    "  container [list] [-a] [-q] [-n N|-l] [--filter label=K[=V]|name=SUB|status=STATE] — list containers (-a: all, -q: IDs, -n/-l: last N/latest)"
+                );
+                crate::console_println!(
+                    "  container create NAME [cpu=%] [mem=] [uid=] [net=] [restart=POLICY] [rm] — create container"
+                );
+                crate::console_println!(
+                    "  container delete [-f] ID [ID...]         — delete container(s) (-f force-removes a running one)"
+                );
+                crate::console_println!(
+                    "  container rootfs ID <host-path>          — set filesystem root (chroot)"
+                );
+                crate::console_println!(
+                    "  container run ID <elf-path> [args...]    — launch init process in container"
+                );
+                crate::console_println!(
+                    "  container restart ID [ID...]             — re-launch the recorded init command"
+                );
+                crate::console_println!("  container start ID [ID...]               — mark as running");
+                crate::console_println!("  container stop ID [ID...]                — mark as stopped");
+                crate::console_println!(
+                    "  container kill ID [ID...]                — force-kill all container processes"
+                );
+                crate::console_println!(
+                    "  container pause ID [ID...]               — freeze (suspend all threads)"
+                );
+                crate::console_println!(
+                    "  container unpause ID [ID...]             — thaw (resume all threads)"
+                );
+                crate::console_println!(
+                    "  container prune                          — remove all stopped containers"
+                );
+                crate::console_println!(
+                    "  container system <df|prune>              — disk usage summary / reclaim stopped containers+unused networks"
+                );
+                crate::console_println!(
+                    "  container exec ID <kshell-command>       — netns-debug facade: run a kshell builtin in the container's network namespace"
+                );
+                crate::console_println!(
+                    "  container run-in [-d] ID <path> [args]   — run a real process from the container rootfs (docker exec; foreground waits + prints exit status; -d detaches)"
+                );
+                crate::console_println!(
+                    "  container exec --rootfs [-d] ID <path> [args]  — alias for run-in"
+                );
+                crate::console_println!(
+                    "  container cp <src> <dest>                — copy file/dir host<->rootfs (one side ID:/path)"
+                );
+                crate::console_println!(
+                    "  container export ID <host-tar-path>      — pack rootfs into a tar archive"
+                );
+                crate::console_println!(
+                    "  container import <tar> <name> <rootfs-dir> — create container from a tar archive"
+                );
+                crate::console_println!(
+                    "  container commit ID <name> <rootfs-dir>  — snapshot rootfs into a new container"
+                );
+                crate::console_println!(
+                    "  container logs [--tail N] ID             — print captured init stdout/stderr (--tail: last N lines)"
+                );
+                crate::console_println!(
+                    "  container events [-n N] [--id ID]        — recent lifecycle events (create/start/die/stop/kill/pause/restart/destroy)"
+                );
+                crate::console_println!(
+                    "  container volume <create|ls|rm|inspect|prune> NAME — manage named volumes (mount with -v NAME:/path)"
+                );
+                crate::console_println!(
+                    "  container network <create|ls|rm|inspect|prune> NAME [--subnet CIDR] [--gateway IP] — manage user-defined networks (IPAM)"
+                );
+                crate::console_println!(
+                    "  container info [--json] ID               — detailed inspection (--json: machine-readable)"
+                );
+                crate::console_println!(
+                    "  container top ID                         — list processes running in container"
+                );
+                crate::console_println!(
+                    "  container stats [ID]                     — cgroup resource usage (no ID: table of all running)"
+                );
+                crate::console_println!(
+                    "  container update ID [--cpus N] [--memory SIZE] [--restart POLICY] — change live limits/restart policy"
+                );
+                crate::console_println!(
+                    "  container rename ID <new-name>           — rename a container"
+                );
+                crate::console_println!(
+                    "  container port ID                        — list published port mappings"
+                );
+                crate::console_println!(
+                    "  container wait ID                        — block until container stops, print exit code"
+                );
+                crate::console_println!(
+                    "  container diff ID                        — list rootfs changes vs image (A/C/D)"
+                );
+                crate::console_println!("  container test                           — run self-test");
+                crate::console_println!();
+                crate::console_println!("Aliases: ct");
+            }
+            case();
         }
     }
 }
@@ -89902,1686 +90162,1734 @@ fn cmd_oci(args: &str) {
 
     match cmd {
         "inspect" => {
-            let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci inspect <image-dir>");
-                return;
-            };
-            match oci::resolve_image_source(dir) {
-                Ok((_, image)) => {
-                    crate::console_println!("=== OCI Image: {} ===", dir);
-                    crate::console_println!("  Architecture: {}", image.config.architecture);
-                    crate::console_println!("  OS:           {}", image.config.os);
-                    crate::console_println!("  Layers:       {}", image.manifest.layers.len());
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let Some(dir) = parts.get(1) else {
+                    crate::console_println!("Usage: oci inspect <image-dir>");
+                    return;
+                };
+                match oci::resolve_image_source(dir) {
+                    Ok((_, image)) => {
+                        crate::console_println!("=== OCI Image: {} ===", dir);
+                        crate::console_println!("  Architecture: {}", image.config.architecture);
+                        crate::console_println!("  OS:           {}", image.config.os);
+                        crate::console_println!("  Layers:       {}", image.manifest.layers.len());
 
-                    if !image.config.entrypoint.is_empty() {
-                        let ep: alloc::string::String = image.config.entrypoint.join(" ");
-                        crate::console_println!("  Entrypoint:   {}", ep);
-                    }
-                    if !image.config.cmd.is_empty() {
-                        let cmd_str: alloc::string::String = image.config.cmd.join(" ");
-                        crate::console_println!("  Cmd:          {}", cmd_str);
-                    }
-                    if !image.config.working_dir.is_empty() {
-                        crate::console_println!("  WorkingDir:   {}", image.config.working_dir);
-                    }
-                    if !image.config.user.is_empty() {
-                        crate::console_println!("  User:         {}", image.config.user);
-                    }
-                    if !image.config.env.is_empty() {
-                        crate::console_println!("  Environment:");
-                        for e in &image.config.env {
-                            crate::console_println!("    {}", e);
+                        if !image.config.entrypoint.is_empty() {
+                            let ep: alloc::string::String = image.config.entrypoint.join(" ");
+                            crate::console_println!("  Entrypoint:   {}", ep);
+                        }
+                        if !image.config.cmd.is_empty() {
+                            let cmd_str: alloc::string::String = image.config.cmd.join(" ");
+                            crate::console_println!("  Cmd:          {}", cmd_str);
+                        }
+                        if !image.config.working_dir.is_empty() {
+                            crate::console_println!("  WorkingDir:   {}", image.config.working_dir);
+                        }
+                        if !image.config.user.is_empty() {
+                            crate::console_println!("  User:         {}", image.config.user);
+                        }
+                        if !image.config.env.is_empty() {
+                            crate::console_println!("  Environment:");
+                            for e in &image.config.env {
+                                crate::console_println!("    {}", e);
+                            }
+                        }
+                        if !image.config.exposed_ports.is_empty() {
+                            let ports: alloc::string::String = image.config.exposed_ports.join(", ");
+                            crate::console_println!("  Ports:        {}", ports);
+                        }
+                        if !image.config.volumes.is_empty() {
+                            let vols: alloc::string::String = image.config.volumes.join(", ");
+                            crate::console_println!("  Volumes:      {}", vols);
+                        }
+                        if !image.config.stop_signal.is_empty() {
+                            crate::console_println!("  StopSignal:   {}", image.config.stop_signal);
+                        }
+                        if !image.config.shell.is_empty() {
+                            let sh: alloc::string::String = image.config.shell.join(" ");
+                            crate::console_println!("  Shell:        {}", sh);
+                        }
+                        if !image.config.onbuild.is_empty() {
+                            crate::console_println!("  OnBuild:");
+                            for t in &image.config.onbuild {
+                                crate::console_println!("    {}", t);
+                            }
+                        }
+                        if !image.config.labels.is_empty() {
+                            crate::console_println!("  Labels:");
+                            for (k, v) in &image.config.labels {
+                                crate::console_println!("    {}={}", k, v);
+                            }
                         }
                     }
-                    if !image.config.exposed_ports.is_empty() {
-                        let ports: alloc::string::String = image.config.exposed_ports.join(", ");
-                        crate::console_println!("  Ports:        {}", ports);
-                    }
-                    if !image.config.volumes.is_empty() {
-                        let vols: alloc::string::String = image.config.volumes.join(", ");
-                        crate::console_println!("  Volumes:      {}", vols);
-                    }
-                    if !image.config.stop_signal.is_empty() {
-                        crate::console_println!("  StopSignal:   {}", image.config.stop_signal);
-                    }
-                    if !image.config.shell.is_empty() {
-                        let sh: alloc::string::String = image.config.shell.join(" ");
-                        crate::console_println!("  Shell:        {}", sh);
-                    }
-                    if !image.config.onbuild.is_empty() {
-                        crate::console_println!("  OnBuild:");
-                        for t in &image.config.onbuild {
-                            crate::console_println!("    {}", t);
-                        }
-                    }
-                    if !image.config.labels.is_empty() {
-                        crate::console_println!("  Labels:");
-                        for (k, v) in &image.config.labels {
-                            crate::console_println!("    {}={}", k, v);
-                        }
-                    }
+                    Err(e) => crate::console_println!("Error loading image: {:?}", e),
                 }
-                Err(e) => crate::console_println!("Error loading image: {:?}", e),
             }
+            case(&parts);
         }
         "layers" => {
-            let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci layers <image-dir>");
-                return;
-            };
-            match oci::resolve_image_source(dir) {
-                Ok((_, image)) => {
-                    crate::console_println!("=== Layers ({}) ===", image.manifest.layers.len());
-                    for (i, layer) in image.manifest.layers.iter().enumerate() {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let Some(dir) = parts.get(1) else {
+                    crate::console_println!("Usage: oci layers <image-dir>");
+                    return;
+                };
+                match oci::resolve_image_source(dir) {
+                    Ok((_, image)) => {
+                        crate::console_println!("=== Layers ({}) ===", image.manifest.layers.len());
+                        for (i, layer) in image.manifest.layers.iter().enumerate() {
+                            crate::console_println!(
+                                "  [{}] {} ({} bytes, {})",
+                                i,
+                                layer.digest,
+                                layer.size,
+                                layer.media_type
+                            );
+                        }
                         crate::console_println!(
-                            "  [{}] {} ({} bytes, {})",
-                            i,
-                            layer.digest,
-                            layer.size,
-                            layer.media_type
+                            "Config: {} ({} bytes)",
+                            image.manifest.config.digest,
+                            image.manifest.config.size
                         );
                     }
-                    crate::console_println!(
-                        "Config: {} ({} bytes)",
-                        image.manifest.config.digest,
-                        image.manifest.config.size
-                    );
+                    Err(e) => crate::console_println!("Error: {:?}", e),
                 }
-                Err(e) => crate::console_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "history" | "hist" => {
-            let Some(dir) = parts.get(1) else {
-                crate::console_println!("Usage: oci history <image-dir>");
-                return;
-            };
-            match oci::resolve_image_source(dir) {
-                Ok((_, image)) => {
-                    if image.config.history.is_empty() {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let Some(dir) = parts.get(1) else {
+                    crate::console_println!("Usage: oci history <image-dir>");
+                    return;
+                };
+                match oci::resolve_image_source(dir) {
+                    Ok((_, image)) => {
+                        if image.config.history.is_empty() {
+                            crate::console_println!(
+                                "No build history recorded in image config ({} layers)",
+                                image.manifest.layers.len()
+                            );
+                            return;
+                        }
                         crate::console_println!(
-                            "No build history recorded in image config ({} layers)",
-                            image.manifest.layers.len()
+                            "=== History ({} steps) ===",
+                            image.config.history.len()
                         );
-                        return;
+                        crate::console_println!("  {:>12}  CREATED BY", "SIZE");
+                        // Non-empty steps consume layers in order; empty steps are
+                        // metadata-only (0 bytes), matching `docker history`.
+                        let mut layer_idx = 0usize;
+                        for h in &image.config.history {
+                            let size = if h.empty_layer {
+                                0
+                            } else {
+                                let s = image.manifest.layers.get(layer_idx).map_or(0, |l| l.size);
+                                layer_idx = layer_idx.saturating_add(1);
+                                s
+                            };
+                            crate::console_println!("  {:>12}  {}", size, h.created_by);
+                        }
                     }
-                    crate::console_println!(
-                        "=== History ({} steps) ===",
-                        image.config.history.len()
-                    );
-                    crate::console_println!("  {:>12}  CREATED BY", "SIZE");
-                    // Non-empty steps consume layers in order; empty steps are
-                    // metadata-only (0 bytes), matching `docker history`.
-                    let mut layer_idx = 0usize;
-                    for h in &image.config.history {
-                        let size = if h.empty_layer {
-                            0
-                        } else {
-                            let s = image.manifest.layers.get(layer_idx).map_or(0, |l| l.size);
-                            layer_idx = layer_idx.saturating_add(1);
-                            s
-                        };
-                        crate::console_println!("  {:>12}  {}", size, h.created_by);
-                    }
+                    Err(e) => crate::console_println!("Error: {:?}", e),
                 }
-                Err(e) => crate::console_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "run" | "create" => {
-            // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME]
-            //                      [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...]
-            //   where src is an absolute host path (bind mount) or a bare name
-            //   (named volume, created on demand under VOLUMES_ROOT)
-            //                      [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]
-            //
-            // Loads an OCI image, extracts all layers into a merged rootfs
-            // directory, creates a container with the image's configuration,
-            // and reports the container ID for subsequent exec/stop/delete.
-            let Some(dir) = parts.get(1) else {
-                crate::console_println!(
-                    "Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [--tmpfs /guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]"
-                );
-                return;
-            };
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME]
+                //                      [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...]
+                //   where src is an absolute host path (bind mount) or a bare name
+                //   (named volume, created on demand under VOLUMES_ROOT)
+                //                      [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]
+                //
+                // Loads an OCI image, extracts all layers into a merged rootfs
+                // directory, creates a container with the image's configuration,
+                // and reports the container ID for subsequent exec/stop/delete.
+                let Some(dir) = parts.get(1) else {
+                    crate::console_println!(
+                        "Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [--tmpfs /guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]"
+                    );
+                    return;
+                };
 
-            // Parse optional flags.
-            let mut name: Option<&str> = None;
-            let mut net_ip: Option<[u8; 4]> = None;
-            let mut net_gw: Option<[u8; 4]> = None;
-            let mut net_dns: Option<[u8; 4]> = None;
-            let mut net_mask: Option<[u8; 4]> = None;
-            // `--network NAME`: attach to a user-defined network, drawing a
-            // conflict-free IP from its IPAM (Docker `docker run --network`).
-            let mut net_name: Option<&str> = None;
-            // `--network-alias NAME` (repeatable): extra embedded-DNS names the
-            // container answers to on its network, alongside its name/hostname.
-            let mut net_aliases: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-            // Volume mounts as (host_target, guest_prefix, read_only) triples
-            // from `-v host:guest` (Docker order). The host target is either an
-            // absolute host path (bind mount) or a named volume's backing path
-            // (resolved at parse time), so the tuple owns its strings rather
-            // than borrowing the raw argv. Installed after the container is
-            // created (while still in Created state).
-            let mut volumes: alloc::vec::Vec<(PathBuf, PathBuf, bool)> = alloc::vec::Vec::new();
-            // Published ports as (proto, host_port, container_port) from
-            // `-p host:container[/tcp|/udp]` (Docker order, default tcp).
-            // Installed after the container is created (Created state).
-            let mut ports: alloc::vec::Vec<(crate::net::nat::NatProto, u16, u16)> =
-                alloc::vec::Vec::new();
-            // Tmpfs (in-memory) mounts as absolute guest paths from
-            // `--tmpfs /guest`. Installed after the container is created
-            // (Created state); each backs an ephemeral writable memfs.
-            let mut tmpfs: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-            // Extra `KEY=value` environment entries from `-e`/`--env`. These
-            // override the image's declared ENV (Docker semantics) and are
-            // merged at launch (see the env construction below).
-            let mut extra_env: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-            // `KEY=value` entries read from `--env-file FILE`. Stored as raw
-            // bytes (env values may contain non-UTF-8 data, which we must not
-            // corrupt) and owned because they come from file contents, not
-            // from `parts`. Precedence: image ENV < env-file < CLI `-e`.
-            let mut env_file_entries: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
-            // Resource limits from `--memory`/`-m <size>` (bytes, with optional
-            // k/m/g suffix → 16 KiB frames) and `--cpus <N[.M]>` (fractional
-            // cores → percent of one core, e.g. 1.5 → 150%). Applied to the
-            // container cgroup at create time (Step 4 below).
-            let mut mem_frames: Option<u64> = None;
-            let mut cpu_percent: Option<u64> = None;
-            // Docker `--read-only`: mount the container rootfs read-only so
-            // writes that don't land in a writable (`:rw`) volume are denied
-            // with EROFS. Applied to the container at create time (Step 4).
-            let mut read_only_root = false;
-            // Docker `--restart POLICY`: auto-restart policy for the init
-            // process (no|always|unless-stopped|on-failure[:N]). Applied to the
-            // container config at create time.
-            let mut restart_policy: Option<crate::container::RestartPolicy> = None;
-            // Docker `--rm`: auto-delete the container when its init exits.
-            let mut auto_remove = false;
-            // Docker `--workdir`/`-w`: initial working directory of the init
-            // process (a guest path resolved under the container jail). When
-            // unset, the image's `WorkingDir` config is used, else `/`.
-            let mut workdir: Option<&str> = None;
-            // Docker `--user`/`-u uid[:gid]`: numeric user/group the init
-            // process runs as. When unset, the image's `User` config is used,
-            // else root (0:0). Only numeric ids are supported (a name has no
-            // /etc/passwd to resolve against in this minimal runtime).
-            let mut user: Option<&str> = None;
-            // Docker `--entrypoint EXE`: override the image's ENTRYPOINT. An
-            // empty value (`--entrypoint ""`) clears it (CMD then becomes the
-            // whole command line), matching Docker.
-            let mut entrypoint_override: Option<&str> = None;
-            // Docker `--hostname`/`-h NAME`: the UTS hostname the container's
-            // init process sees via uname(2), independent of any rootfs jail.
-            // Truncated to 64 bytes by the container layer.
-            let mut hostname: Option<&str> = None;
-            // Docker `--label`/`-l KEY=VALUE`: arbitrary metadata `(key, value)`
-            // pairs stored on the container (no runtime behavior). A bare KEY
-            // (no `=`) gets an empty value, matching Docker.
-            let mut labels: alloc::vec::Vec<(&str, &str)> = alloc::vec::Vec::new();
-            // Docker `--label-file FILE`: KEY=VALUE lines (same format as
-            // --env-file). Owned because they come from file contents.
-            // Precedence: --label-file < CLI --label (CLI wins).
-            let mut label_file_entries: alloc::vec::Vec<(
-                alloc::string::String,
-                alloc::string::String,
-            )> = alloc::vec::Vec::new();
-            // Docker trailing `IMAGE [COMMAND] [ARG...]`: positional tokens
-            // after the image dir override the image's CMD (the ENTRYPOINT is
-            // kept unless --entrypoint is also given). The first non-option
-            // token starts the command; everything after it is taken literally
-            // (no further option parsing), matching Docker's argument model.
-            let mut cmd_override: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-            let mut i = 2;
-            while i < parts.len() {
-                match parts[i] {
-                    "--memory" | "-m" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            match parse_mem_size_to_frames(spec) {
-                                Some(frames) => mem_frames = Some(frames),
-                                None => crate::console_println!(
-                                    "[oci] Ignoring memory '{}': expected SIZE[k|m|g] (e.g. 512m)",
-                                    spec
-                                ),
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--cpus" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            match parse_cpus_to_percent(spec) {
-                                Some(pct) => cpu_percent = Some(pct),
-                                None => crate::console_println!(
-                                    "[oci] Ignoring cpus '{}': expected a positive number (e.g. 1.5)",
-                                    spec
-                                ),
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--env" | "-e" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            // Require KEY=value: a bare `-e KEY` would mean
-                            // "inherit the host's KEY" in Docker, but a
-                            // container has no host environment to inherit, so
-                            // reject it rather than silently pass an empty var.
-                            if let Some((key, _)) = spec.split_once('=') {
-                                if key.is_empty() {
-                                    crate::console_println!(
-                                        "[oci] Ignoring env '{}': empty key",
-                                        spec
-                                    );
-                                } else {
-                                    extra_env.push(spec);
-                                }
-                            } else {
-                                crate::console_println!(
-                                    "[oci] Ignoring env '{}': expected KEY=value",
-                                    spec
-                                );
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--env-file" => {
-                        if let Some(&path) = parts.get(i.saturating_add(1)) {
-                            match crate::fs::vfs::Vfs::read_file(path) {
-                                Ok(bytes) => {
-                                    // Parse KEY=value lines as raw bytes (see
-                                    // `oci::parse_env_file`). Report rejected
-                                    // lines but keep the valid entries.
-                                    let parsed = oci::parse_env_file(&bytes);
-                                    for n in &parsed.rejected_lines {
-                                        crate::console_println!(
-                                            "[oci] Ignoring env-file '{}' line {}: expected KEY=value",
-                                            path,
-                                            n
-                                        );
-                                    }
-                                    env_file_entries.extend(parsed.entries);
-                                }
-                                Err(e) => crate::console_println!(
-                                    "[oci] Could not read env-file '{}': {:?}",
-                                    path,
-                                    e
-                                ),
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--publish" | "-p" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            // Format: host:container[/proto]. Split the proto
-                            // suffix first, then the host:container pair.
-                            let (pair, proto) = match spec.split_once('/') {
-                                Some((p, "tcp")) => (p, crate::net::nat::NatProto::Tcp),
-                                Some((p, "udp")) => (p, crate::net::nat::NatProto::Udp),
-                                Some((_, other)) => {
-                                    crate::console_println!(
-                                        "[oci] Ignoring port '{}': unknown protocol '{}' (use tcp/udp)",
-                                        spec,
-                                        other
-                                    );
-                                    i = i.saturating_add(2);
-                                    continue;
-                                }
-                                None => (spec, crate::net::nat::NatProto::Tcp),
-                            };
-                            match pair.split_once(':') {
-                                Some((h, c)) => match (h.parse::<u16>(), c.parse::<u16>()) {
-                                    (Ok(hp), Ok(cp)) if hp != 0 && cp != 0 => {
-                                        ports.push((proto, hp, cp));
-                                    }
-                                    _ => crate::console_println!(
-                                        "[oci] Ignoring port '{}': expected host:container with nonzero ports",
+                // Parse optional flags.
+                let mut name: Option<&str> = None;
+                let mut net_ip: Option<[u8; 4]> = None;
+                let mut net_gw: Option<[u8; 4]> = None;
+                let mut net_dns: Option<[u8; 4]> = None;
+                let mut net_mask: Option<[u8; 4]> = None;
+                // `--network NAME`: attach to a user-defined network, drawing a
+                // conflict-free IP from its IPAM (Docker `docker run --network`).
+                let mut net_name: Option<&str> = None;
+                // `--network-alias NAME` (repeatable): extra embedded-DNS names the
+                // container answers to on its network, alongside its name/hostname.
+                let mut net_aliases: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+                // Volume mounts as (host_target, guest_prefix, read_only) triples
+                // from `-v host:guest` (Docker order). The host target is either an
+                // absolute host path (bind mount) or a named volume's backing path
+                // (resolved at parse time), so the tuple owns its strings rather
+                // than borrowing the raw argv. Installed after the container is
+                // created (while still in Created state).
+                let mut volumes: alloc::vec::Vec<(PathBuf, PathBuf, bool)> = alloc::vec::Vec::new();
+                // Published ports as (proto, host_port, container_port) from
+                // `-p host:container[/tcp|/udp]` (Docker order, default tcp).
+                // Installed after the container is created (Created state).
+                let mut ports: alloc::vec::Vec<(crate::net::nat::NatProto, u16, u16)> =
+                    alloc::vec::Vec::new();
+                // Tmpfs (in-memory) mounts as absolute guest paths from
+                // `--tmpfs /guest`. Installed after the container is created
+                // (Created state); each backs an ephemeral writable memfs.
+                let mut tmpfs: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+                // Extra `KEY=value` environment entries from `-e`/`--env`. These
+                // override the image's declared ENV (Docker semantics) and are
+                // merged at launch (see the env construction below).
+                let mut extra_env: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+                // `KEY=value` entries read from `--env-file FILE`. Stored as raw
+                // bytes (env values may contain non-UTF-8 data, which we must not
+                // corrupt) and owned because they come from file contents, not
+                // from `parts`. Precedence: image ENV < env-file < CLI `-e`.
+                let mut env_file_entries: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+                // Resource limits from `--memory`/`-m <size>` (bytes, with optional
+                // k/m/g suffix → 16 KiB frames) and `--cpus <N[.M]>` (fractional
+                // cores → percent of one core, e.g. 1.5 → 150%). Applied to the
+                // container cgroup at create time (Step 4 below).
+                let mut mem_frames: Option<u64> = None;
+                let mut cpu_percent: Option<u64> = None;
+                // Docker `--read-only`: mount the container rootfs read-only so
+                // writes that don't land in a writable (`:rw`) volume are denied
+                // with EROFS. Applied to the container at create time (Step 4).
+                let mut read_only_root = false;
+                // Docker `--restart POLICY`: auto-restart policy for the init
+                // process (no|always|unless-stopped|on-failure[:N]). Applied to the
+                // container config at create time.
+                let mut restart_policy: Option<crate::container::RestartPolicy> = None;
+                // Docker `--rm`: auto-delete the container when its init exits.
+                let mut auto_remove = false;
+                // Docker `--workdir`/`-w`: initial working directory of the init
+                // process (a guest path resolved under the container jail). When
+                // unset, the image's `WorkingDir` config is used, else `/`.
+                let mut workdir: Option<&str> = None;
+                // Docker `--user`/`-u uid[:gid]`: numeric user/group the init
+                // process runs as. When unset, the image's `User` config is used,
+                // else root (0:0). Only numeric ids are supported (a name has no
+                // /etc/passwd to resolve against in this minimal runtime).
+                let mut user: Option<&str> = None;
+                // Docker `--entrypoint EXE`: override the image's ENTRYPOINT. An
+                // empty value (`--entrypoint ""`) clears it (CMD then becomes the
+                // whole command line), matching Docker.
+                let mut entrypoint_override: Option<&str> = None;
+                // Docker `--hostname`/`-h NAME`: the UTS hostname the container's
+                // init process sees via uname(2), independent of any rootfs jail.
+                // Truncated to 64 bytes by the container layer.
+                let mut hostname: Option<&str> = None;
+                // Docker `--label`/`-l KEY=VALUE`: arbitrary metadata `(key, value)`
+                // pairs stored on the container (no runtime behavior). A bare KEY
+                // (no `=`) gets an empty value, matching Docker.
+                let mut labels: alloc::vec::Vec<(&str, &str)> = alloc::vec::Vec::new();
+                // Docker `--label-file FILE`: KEY=VALUE lines (same format as
+                // --env-file). Owned because they come from file contents.
+                // Precedence: --label-file < CLI --label (CLI wins).
+                let mut label_file_entries: alloc::vec::Vec<(
+                    alloc::string::String,
+                    alloc::string::String,
+                )> = alloc::vec::Vec::new();
+                // Docker trailing `IMAGE [COMMAND] [ARG...]`: positional tokens
+                // after the image dir override the image's CMD (the ENTRYPOINT is
+                // kept unless --entrypoint is also given). The first non-option
+                // token starts the command; everything after it is taken literally
+                // (no further option parsing), matching Docker's argument model.
+                let mut cmd_override: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+                let mut i = 2;
+                while i < parts.len() {
+                    match parts[i] {
+                        "--memory" | "-m" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                match parse_mem_size_to_frames(spec) {
+                                    Some(frames) => mem_frames = Some(frames),
+                                    None => crate::console_println!(
+                                        "[oci] Ignoring memory '{}': expected SIZE[k|m|g] (e.g. 512m)",
                                         spec
                                     ),
-                                },
-                                None => crate::console_println!(
-                                    "[oci] Ignoring port '{}': expected host:container",
-                                    spec
-                                ),
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--volume" | "-v" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            // Docker `-v source:guest[:mode]`.  The guest is an
-                            // absolute Unix path; an optional third field is the
-                            // access mode (`ro` = read-only, `rw` = read-write,
-                            // the default).  The source is one of two forms,
-                            // distinguished exactly as Docker does — by whether
-                            // it starts with `/`:
-                            //   * absolute path (`/host/path`)  -> bind mount
-                            //   * bare name    (`myvol`)        -> named volume,
-                            //     created on demand under VOLUMES_ROOT and its
-                            //     backing directory bind-mounted in.
-                            // Split into at most three colon-separated segments.
-                            let mut segs = spec.splitn(3, ':');
-                            let source = segs.next().unwrap_or("");
-                            let guest = segs.next().unwrap_or("");
-                            let mode = segs.next();
-                            let read_only = match mode {
-                                None | Some("rw") => Some(false),
-                                Some("ro") => Some(true),
-                                Some(other) => {
-                                    crate::console_println!(
-                                        "[oci] Ignoring volume '{}': unknown mode '{}' (expected ro or rw)",
-                                        spec,
-                                        other
-                                    );
-                                    None
                                 }
-                            };
-                            if let Some(ro) = read_only {
-                                if !guest.starts_with('/') {
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--cpus" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                match parse_cpus_to_percent(spec) {
+                                    Some(pct) => cpu_percent = Some(pct),
+                                    None => crate::console_println!(
+                                        "[oci] Ignoring cpus '{}': expected a positive number (e.g. 1.5)",
+                                        spec
+                                    ),
+                                }
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--env" | "-e" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                // Require KEY=value: a bare `-e KEY` would mean
+                                // "inherit the host's KEY" in Docker, but a
+                                // container has no host environment to inherit, so
+                                // reject it rather than silently pass an empty var.
+                                if let Some((key, _)) = spec.split_once('=') {
+                                    if key.is_empty() {
+                                        crate::console_println!(
+                                            "[oci] Ignoring env '{}': empty key",
+                                            spec
+                                        );
+                                    } else {
+                                        extra_env.push(spec);
+                                    }
+                                } else {
                                     crate::console_println!(
-                                        "[oci] Ignoring volume '{}': guest path must be absolute (source:/guest[:ro|:rw])",
+                                        "[oci] Ignoring env '{}': expected KEY=value",
                                         spec
                                     );
-                                } else if source.starts_with('/') {
-                                    // Host bind mount: use the absolute host path.
-                                    volumes.push((PathBuf::from(source), PathBuf::from(guest), ro));
-                                } else if source.is_empty() {
+                                }
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--env-file" => {
+                            if let Some(&path) = parts.get(i.saturating_add(1)) {
+                                match crate::fs::vfs::Vfs::read_file(path) {
+                                    Ok(bytes) => {
+                                        // Parse KEY=value lines as raw bytes (see
+                                        // `oci::parse_env_file`). Report rejected
+                                        // lines but keep the valid entries.
+                                        let parsed = oci::parse_env_file(&bytes);
+                                        for n in &parsed.rejected_lines {
+                                            crate::console_println!(
+                                                "[oci] Ignoring env-file '{}' line {}: expected KEY=value",
+                                                path,
+                                                n
+                                            );
+                                        }
+                                        env_file_entries.extend(parsed.entries);
+                                    }
+                                    Err(e) => crate::console_println!(
+                                        "[oci] Could not read env-file '{}': {:?}",
+                                        path,
+                                        e
+                                    ),
+                                }
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--publish" | "-p" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                // Format: host:container[/proto]. Split the proto
+                                // suffix first, then the host:container pair.
+                                let (pair, proto) = match spec.split_once('/') {
+                                    Some((p, "tcp")) => (p, crate::net::nat::NatProto::Tcp),
+                                    Some((p, "udp")) => (p, crate::net::nat::NatProto::Udp),
+                                    Some((_, other)) => {
+                                        crate::console_println!(
+                                            "[oci] Ignoring port '{}': unknown protocol '{}' (use tcp/udp)",
+                                            spec,
+                                            other
+                                        );
+                                        i = i.saturating_add(2);
+                                        continue;
+                                    }
+                                    None => (spec, crate::net::nat::NatProto::Tcp),
+                                };
+                                match pair.split_once(':') {
+                                    Some((h, c)) => match (h.parse::<u16>(), c.parse::<u16>()) {
+                                        (Ok(hp), Ok(cp)) if hp != 0 && cp != 0 => {
+                                            ports.push((proto, hp, cp));
+                                        }
+                                        _ => crate::console_println!(
+                                            "[oci] Ignoring port '{}': expected host:container with nonzero ports",
+                                            spec
+                                        ),
+                                    },
+                                    None => crate::console_println!(
+                                        "[oci] Ignoring port '{}': expected host:container",
+                                        spec
+                                    ),
+                                }
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--volume" | "-v" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                // Docker `-v source:guest[:mode]`.  The guest is an
+                                // absolute Unix path; an optional third field is the
+                                // access mode (`ro` = read-only, `rw` = read-write,
+                                // the default).  The source is one of two forms,
+                                // distinguished exactly as Docker does — by whether
+                                // it starts with `/`:
+                                //   * absolute path (`/host/path`)  -> bind mount
+                                //   * bare name    (`myvol`)        -> named volume,
+                                //     created on demand under VOLUMES_ROOT and its
+                                //     backing directory bind-mounted in.
+                                // Split into at most three colon-separated segments.
+                                let mut segs = spec.splitn(3, ':');
+                                let source = segs.next().unwrap_or("");
+                                let guest = segs.next().unwrap_or("");
+                                let mode = segs.next();
+                                let read_only = match mode {
+                                    None | Some("rw") => Some(false),
+                                    Some("ro") => Some(true),
+                                    Some(other) => {
+                                        crate::console_println!(
+                                            "[oci] Ignoring volume '{}': unknown mode '{}' (expected ro or rw)",
+                                            spec,
+                                            other
+                                        );
+                                        None
+                                    }
+                                };
+                                if let Some(ro) = read_only {
+                                    if !guest.starts_with('/') {
+                                        crate::console_println!(
+                                            "[oci] Ignoring volume '{}': guest path must be absolute (source:/guest[:ro|:rw])",
+                                            spec
+                                        );
+                                    } else if source.starts_with('/') {
+                                        // Host bind mount: use the absolute host path.
+                                        volumes.push((PathBuf::from(source), PathBuf::from(guest), ro));
+                                    } else if source.is_empty() {
+                                        crate::console_println!(
+                                            "[oci] Ignoring volume '{}': empty source (want /host:/guest or name:/guest)",
+                                            spec
+                                        );
+                                    } else {
+                                        // Named volume: create-on-demand and mount
+                                        // its backing directory.
+                                        match crate::volume::ensure(source) {
+                                            Ok(backing) => {
+                                                volumes.push((backing, PathBuf::from(guest), ro));
+                                            }
+                                            Err(e) => {
+                                                crate::console_println!(
+                                                    "[oci] Ignoring volume '{}': cannot create named volume '{}': {:?}",
+                                                    spec,
+                                                    source,
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--tmpfs" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                // Docker `--tmpfs /guest[:options]`. The guest is an
+                                // absolute Unix path; Docker also accepts mount
+                                // options after a `:` (size=, mode=, …). Our memfs
+                                // does not yet enforce size/mode quotas, so rather
+                                // than silently ignore them (an unbounded tmpfs is a
+                                // containment/DoS gap), reject a spec that carries
+                                // options — the honest failure mode until quota
+                                // enforcement lands.
+                                if let Some((path, opts)) = spec.split_once(':') {
                                     crate::console_println!(
-                                        "[oci] Ignoring volume '{}': empty source (want /host:/guest or name:/guest)",
+                                        "[oci] Ignoring tmpfs '{}': mount options ('{}') not yet supported (want --tmpfs /guest)",
+                                        spec,
+                                        opts
+                                    );
+                                    let _ = path;
+                                } else if !spec.starts_with('/') || spec == "/" {
+                                    crate::console_println!(
+                                        "[oci] Ignoring tmpfs '{}': guest path must be absolute and not '/'",
                                         spec
                                     );
                                 } else {
-                                    // Named volume: create-on-demand and mount
-                                    // its backing directory.
-                                    match crate::volume::ensure(source) {
-                                        Ok(backing) => {
-                                            volumes.push((backing, PathBuf::from(guest), ro));
+                                    tmpfs.push(alloc::string::String::from(spec));
+                                }
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--read-only" => {
+                            // Flag (no argument): make the container rootfs RO.
+                            read_only_root = true;
+                            i = i.saturating_add(1);
+                        }
+                        "--rm" => {
+                            // Flag (no argument): auto-remove on init exit.
+                            auto_remove = true;
+                            i = i.saturating_add(1);
+                        }
+                        "--restart" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                match crate::container::parse_restart_policy(spec) {
+                                    Some(p) => restart_policy = Some(p),
+                                    None => crate::console_println!(
+                                        "[oci] Ignoring restart '{}': want no|always|unless-stopped|on-failure[:N]",
+                                        spec
+                                    ),
+                                }
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--workdir" | "-w" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                // Must be an absolute guest path; a relative
+                                // workdir is rejected (Docker requires absolute).
+                                if spec.starts_with('/') {
+                                    workdir = Some(spec);
+                                } else {
+                                    crate::console_println!(
+                                        "[oci] Ignoring workdir '{}': must be an absolute path",
+                                        spec
+                                    );
+                                }
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--user" | "-u" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                user = Some(spec);
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--name" | "-n" => {
+                            if let Some(&n) = parts.get(i.saturating_add(1)) {
+                                name = Some(n);
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--net" => {
+                            if let Some(&net_str) = parts.get(i.saturating_add(1)) {
+                                let net_parts: alloc::vec::Vec<&str> = net_str.split(',').collect();
+                                if let Some(ip) =
+                                    parse_ipv4_octets(net_parts.first().copied().unwrap_or(""))
+                                {
+                                    net_ip = Some(ip);
+                                    for &part in net_parts.iter().skip(1) {
+                                        if let Some(gw) = part.strip_prefix("gw=") {
+                                            net_gw = parse_ipv4_octets(gw);
+                                        } else if let Some(dns) = part.strip_prefix("dns=") {
+                                            net_dns = parse_ipv4_octets(dns);
                                         }
-                                        Err(e) => {
+                                    }
+                                }
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--network" => {
+                            if let Some(&nn) = parts.get(i.saturating_add(1)) {
+                                net_name = Some(nn);
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--network-alias" => {
+                            if let Some(&al) = parts.get(i.saturating_add(1)) {
+                                if !al.is_empty() {
+                                    net_aliases.push(al);
+                                }
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--entrypoint" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                entrypoint_override = Some(spec);
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--hostname" | "-h" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                hostname = Some(spec);
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--label" | "-l" => {
+                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                                // KEY=VALUE; a bare KEY gets an empty value.
+                                let (key, value) = match spec.split_once('=') {
+                                    Some((k, v)) => (k, v),
+                                    None => (spec, ""),
+                                };
+                                if key.is_empty() {
+                                    crate::console_println!(
+                                        "[oci] Ignoring label '{}': empty key",
+                                        spec
+                                    );
+                                } else {
+                                    labels.push((key, value));
+                                }
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
+                            }
+                        }
+                        "--label-file" => {
+                            if let Some(&path) = parts.get(i.saturating_add(1)) {
+                                match crate::fs::vfs::Vfs::read_file(path) {
+                                    Ok(bytes) => {
+                                        // Reuse the env-file line parser (same
+                                        // KEY=VALUE format). Labels must be UTF-8
+                                        // (they are stored as strings), so reject
+                                        // (rather than corrupt) any non-UTF-8 line.
+                                        let parsed = oci::parse_env_file(&bytes);
+                                        for n in &parsed.rejected_lines {
                                             crate::console_println!(
-                                                "[oci] Ignoring volume '{}': cannot create named volume '{}': {:?}",
-                                                spec,
-                                                source,
-                                                e
+                                                "[oci] Ignoring label-file '{}' line {}: expected KEY=VALUE",
+                                                path,
+                                                n
                                             );
                                         }
-                                    }
-                                }
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--tmpfs" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            // Docker `--tmpfs /guest[:options]`. The guest is an
-                            // absolute Unix path; Docker also accepts mount
-                            // options after a `:` (size=, mode=, …). Our memfs
-                            // does not yet enforce size/mode quotas, so rather
-                            // than silently ignore them (an unbounded tmpfs is a
-                            // containment/DoS gap), reject a spec that carries
-                            // options — the honest failure mode until quota
-                            // enforcement lands.
-                            if let Some((path, opts)) = spec.split_once(':') {
-                                crate::console_println!(
-                                    "[oci] Ignoring tmpfs '{}': mount options ('{}') not yet supported (want --tmpfs /guest)",
-                                    spec,
-                                    opts
-                                );
-                                let _ = path;
-                            } else if !spec.starts_with('/') || spec == "/" {
-                                crate::console_println!(
-                                    "[oci] Ignoring tmpfs '{}': guest path must be absolute and not '/'",
-                                    spec
-                                );
-                            } else {
-                                tmpfs.push(alloc::string::String::from(spec));
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--read-only" => {
-                        // Flag (no argument): make the container rootfs RO.
-                        read_only_root = true;
-                        i = i.saturating_add(1);
-                    }
-                    "--rm" => {
-                        // Flag (no argument): auto-remove on init exit.
-                        auto_remove = true;
-                        i = i.saturating_add(1);
-                    }
-                    "--restart" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            match crate::container::parse_restart_policy(spec) {
-                                Some(p) => restart_policy = Some(p),
-                                None => crate::console_println!(
-                                    "[oci] Ignoring restart '{}': want no|always|unless-stopped|on-failure[:N]",
-                                    spec
-                                ),
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--workdir" | "-w" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            // Must be an absolute guest path; a relative
-                            // workdir is rejected (Docker requires absolute).
-                            if spec.starts_with('/') {
-                                workdir = Some(spec);
-                            } else {
-                                crate::console_println!(
-                                    "[oci] Ignoring workdir '{}': must be an absolute path",
-                                    spec
-                                );
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--user" | "-u" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            user = Some(spec);
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--name" | "-n" => {
-                        if let Some(&n) = parts.get(i.saturating_add(1)) {
-                            name = Some(n);
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--net" => {
-                        if let Some(&net_str) = parts.get(i.saturating_add(1)) {
-                            let net_parts: alloc::vec::Vec<&str> = net_str.split(',').collect();
-                            if let Some(ip) =
-                                parse_ipv4_octets(net_parts.first().copied().unwrap_or(""))
-                            {
-                                net_ip = Some(ip);
-                                for &part in net_parts.iter().skip(1) {
-                                    if let Some(gw) = part.strip_prefix("gw=") {
-                                        net_gw = parse_ipv4_octets(gw);
-                                    } else if let Some(dns) = part.strip_prefix("dns=") {
-                                        net_dns = parse_ipv4_octets(dns);
-                                    }
-                                }
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--network" => {
-                        if let Some(&nn) = parts.get(i.saturating_add(1)) {
-                            net_name = Some(nn);
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--network-alias" => {
-                        if let Some(&al) = parts.get(i.saturating_add(1)) {
-                            if !al.is_empty() {
-                                net_aliases.push(al);
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--entrypoint" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            entrypoint_override = Some(spec);
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--hostname" | "-h" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            hostname = Some(spec);
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--label" | "-l" => {
-                        if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                            // KEY=VALUE; a bare KEY gets an empty value.
-                            let (key, value) = match spec.split_once('=') {
-                                Some((k, v)) => (k, v),
-                                None => (spec, ""),
-                            };
-                            if key.is_empty() {
-                                crate::console_println!(
-                                    "[oci] Ignoring label '{}': empty key",
-                                    spec
-                                );
-                            } else {
-                                labels.push((key, value));
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            i = i.saturating_add(1);
-                        }
-                    }
-                    "--label-file" => {
-                        if let Some(&path) = parts.get(i.saturating_add(1)) {
-                            match crate::fs::vfs::Vfs::read_file(path) {
-                                Ok(bytes) => {
-                                    // Reuse the env-file line parser (same
-                                    // KEY=VALUE format). Labels must be UTF-8
-                                    // (they are stored as strings), so reject
-                                    // (rather than corrupt) any non-UTF-8 line.
-                                    let parsed = oci::parse_env_file(&bytes);
-                                    for n in &parsed.rejected_lines {
-                                        crate::console_println!(
-                                            "[oci] Ignoring label-file '{}' line {}: expected KEY=VALUE",
-                                            path,
-                                            n
-                                        );
-                                    }
-                                    for entry in &parsed.entries {
-                                        let key_bytes = oci::env_entry_key(entry);
-                                        let val_bytes = entry
-                                            .get(key_bytes.len().saturating_add(1)..)
-                                            .unwrap_or(&[]);
-                                        match (
-                                            core::str::from_utf8(key_bytes),
-                                            core::str::from_utf8(val_bytes),
-                                        ) {
-                                            (Ok(k), Ok(v)) => label_file_entries.push((
-                                                alloc::string::String::from(k),
-                                                alloc::string::String::from(v),
-                                            )),
-                                            _ => crate::console_println!(
-                                                "[oci] Ignoring label-file '{}': non-UTF-8 label entry",
-                                                path
-                                            ),
+                                        for entry in &parsed.entries {
+                                            let key_bytes = oci::env_entry_key(entry);
+                                            let val_bytes = entry
+                                                .get(key_bytes.len().saturating_add(1)..)
+                                                .unwrap_or(&[]);
+                                            match (
+                                                core::str::from_utf8(key_bytes),
+                                                core::str::from_utf8(val_bytes),
+                                            ) {
+                                                (Ok(k), Ok(v)) => label_file_entries.push((
+                                                    alloc::string::String::from(k),
+                                                    alloc::string::String::from(v),
+                                                )),
+                                                _ => crate::console_println!(
+                                                    "[oci] Ignoring label-file '{}': non-UTF-8 label entry",
+                                                    path
+                                                ),
+                                            }
                                         }
                                     }
+                                    Err(e) => crate::console_println!(
+                                        "[oci] Could not read label-file '{}': {:?}",
+                                        path,
+                                        e
+                                    ),
                                 }
-                                Err(e) => crate::console_println!(
-                                    "[oci] Could not read label-file '{}': {:?}",
-                                    path,
-                                    e
-                                ),
+                                i = i.saturating_add(2);
+                            } else {
+                                i = i.saturating_add(1);
                             }
-                            i = i.saturating_add(2);
-                        } else {
+                        }
+                        tok if tok.starts_with('-') => {
+                            // Unknown option: skip it (and don't consume a value,
+                            // since we don't know its arity).
                             i = i.saturating_add(1);
                         }
-                    }
-                    tok if tok.starts_with('-') => {
-                        // Unknown option: skip it (and don't consume a value,
-                        // since we don't know its arity).
-                        i = i.saturating_add(1);
-                    }
-                    _ => {
-                        // First positional token after the image dir: this and
-                        // every remaining token form the CMD override. Stop
-                        // option parsing (Docker treats the rest literally).
-                        if let Some(rest) = parts.get(i..) {
-                            cmd_override.extend_from_slice(rest);
+                        _ => {
+                            // First positional token after the image dir: this and
+                            // every remaining token form the CMD override. Stop
+                            // option parsing (Docker treats the rest literally).
+                            if let Some(rest) = parts.get(i..) {
+                                cmd_override.extend_from_slice(rest);
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
-            }
 
-            // Step 1: Load OCI image metadata. `dir` may be an on-disk OCI
-            // layout directory or a named-store reference (`name:tag`);
-            // `blob_dir` is where the layer blobs actually live.
-            crate::console_println!("[oci] Loading image from {}...", dir);
-            let (blob_dir, image) = match oci::resolve_image_source(dir) {
-                Ok(pair) => pair,
-                Err(e) => {
-                    crate::console_println!("[oci] Failed to load image: {:?}", e);
-                    return;
-                }
-            };
-
-            let image_name = name.unwrap_or_else(|| {
-                // Try to derive name from directory path.
-                dir.rsplit('/').next().unwrap_or("oci-container")
-            });
-
-            crate::console_println!(
-                "[oci] Image: {} ({}), {} layers",
-                image.config.architecture,
-                image.config.os,
-                image.manifest.layers.len()
-            );
-
-            // Step 2: Create rootfs directory and extract layers.
-            let rootfs_base = alloc::format!("/tmp/oci-{}", image_name);
-            let rootfs_lower = alloc::format!("{}/lower", rootfs_base);
-            let rootfs_upper = alloc::format!("{}/upper", rootfs_base);
-
-            // Create directory structure.
-            if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_base) {
-                // May already exist — ignore AlreadyExists.
-                if !matches!(e, crate::error::KernelError::AlreadyExists) {
-                    crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_base, e);
-                    return;
-                }
-            }
-            if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_lower) {
-                if !matches!(e, crate::error::KernelError::AlreadyExists) {
-                    crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_lower, e);
-                    return;
-                }
-            }
-            if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_upper) {
-                if !matches!(e, crate::error::KernelError::AlreadyExists) {
-                    crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_upper, e);
-                    return;
-                }
-            }
-
-            // Extract each layer into the lower directory (merged — last layer wins).
-            let mut total_files: u64 = 0;
-            for (idx, layer) in image.manifest.layers.iter().enumerate() {
-                crate::console_println!(
-                    "[oci] Extracting layer {}/{} ({} bytes)...",
-                    idx.saturating_add(1),
-                    image.manifest.layers.len(),
-                    layer.size
-                );
-                match oci::extract_layer(&blob_dir, layer, &rootfs_lower) {
-                    Ok(count) => {
-                        total_files = total_files.saturating_add(count);
-                        crate::console_println!(
-                            "[oci]   Layer {}: {} files extracted",
-                            idx.saturating_add(1),
-                            count
-                        );
-                    }
+                // Step 1: Load OCI image metadata. `dir` may be an on-disk OCI
+                // layout directory or a named-store reference (`name:tag`);
+                // `blob_dir` is where the layer blobs actually live.
+                crate::console_println!("[oci] Loading image from {}...", dir);
+                let (blob_dir, image) = match oci::resolve_image_source(dir) {
+                    Ok(pair) => pair,
                     Err(e) => {
-                        crate::console_println!(
-                            "[oci] Failed to extract layer {}: {:?}",
-                            idx.saturating_add(1),
-                            e
-                        );
+                        crate::console_println!("[oci] Failed to load image: {:?}", e);
                         return;
-                    }
-                }
-            }
-            crate::console_println!(
-                "[oci] Rootfs: {} total files in {}",
-                total_files,
-                rootfs_lower
-            );
-
-            // Step 3: Create overlay filesystem (lower = extracted image
-            // layers, upper = writable scratch).  On success we mount it into
-            // the VFS so the container's writes are copy-on-write isolated
-            // from the read-only image.  If overlay creation fails we fall
-            // back to jailing the container directly at the read-only lower
-            // dir (no write isolation, but still runnable).
-            let overlay_name = alloc::format!("oci-{}", image_name);
-            let overlay_id =
-                match crate::fs::overlay::create(&overlay_name, &rootfs_lower, &rootfs_upper) {
-                    Ok(ov_id) => {
-                        crate::console_println!(
-                            "[oci] Overlay created (id={}): lower={}, upper={}",
-                            ov_id,
-                            rootfs_lower,
-                            rootfs_upper
-                        );
-                        Some(ov_id)
-                    }
-                    Err(e) => {
-                        crate::console_println!(
-                            "[oci] Overlay creation failed: {:?} (continuing without overlay)",
-                            e
-                        );
-                        None
                     }
                 };
 
-            // Step 3.5: if `--network NAME` was given (and no explicit `--net`
-            // IP), draw a conflict-free address from that network's IPAM. The
-            // reservation is unowned until the container id exists (below); we
-            // stash `(name, ip)` so ownership can be bound after create and so a
-            // failed create can release the reservation rather than leak it.
-            let mut network_lease: Option<(&str, [u8; 4])> = None;
-            if let Some(nn) = net_name {
-                if net_ip.is_some() {
+                let image_name = name.unwrap_or_else(|| {
+                    // Try to derive name from directory path.
+                    dir.rsplit('/').next().unwrap_or("oci-container")
+                });
+
+                crate::console_println!(
+                    "[oci] Image: {} ({}), {} layers",
+                    image.config.architecture,
+                    image.config.os,
+                    image.manifest.layers.len()
+                );
+
+                // Step 2: Create rootfs directory and extract layers.
+                let rootfs_base = alloc::format!("/tmp/oci-{}", image_name);
+                let rootfs_lower = alloc::format!("{}/lower", rootfs_base);
+                let rootfs_upper = alloc::format!("{}/upper", rootfs_base);
+
+                // Create directory structure.
+                if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_base) {
+                    // May already exist — ignore AlreadyExists.
+                    if !matches!(e, crate::error::KernelError::AlreadyExists) {
+                        crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_base, e);
+                        return;
+                    }
+                }
+                if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_lower) {
+                    if !matches!(e, crate::error::KernelError::AlreadyExists) {
+                        crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_lower, e);
+                        return;
+                    }
+                }
+                if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_upper) {
+                    if !matches!(e, crate::error::KernelError::AlreadyExists) {
+                        crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_upper, e);
+                        return;
+                    }
+                }
+
+                // Extract each layer into the lower directory (merged — last layer wins).
+                let mut total_files: u64 = 0;
+                for (idx, layer) in image.manifest.layers.iter().enumerate() {
                     crate::console_println!(
-                        "[oci] --network {} ignored: explicit --net IP already given",
-                        nn
+                        "[oci] Extracting layer {}/{} ({} bytes)...",
+                        idx.saturating_add(1),
+                        image.manifest.layers.len(),
+                        layer.size
                     );
-                } else {
-                    match crate::cnetwork::allocate(nn, None) {
-                        Ok(lease) => {
-                            net_ip = Some(lease.ip);
-                            net_gw = Some(lease.gateway);
-                            net_mask = Some(lease.netmask);
-                            network_lease = Some((nn, lease.ip));
+                    match oci::extract_layer(&blob_dir, layer, &rootfs_lower) {
+                        Ok(count) => {
+                            total_files = total_files.saturating_add(count);
+                            crate::console_println!(
+                                "[oci]   Layer {}: {} files extracted",
+                                idx.saturating_add(1),
+                                count
+                            );
                         }
                         Err(e) => {
                             crate::console_println!(
-                                "[oci] Cannot allocate IP from network '{}': {:?}",
-                                nn,
+                                "[oci] Failed to extract layer {}: {:?}",
+                                idx.saturating_add(1),
                                 e
                             );
                             return;
                         }
                     }
                 }
-            }
+                crate::console_println!(
+                    "[oci] Rootfs: {} total files in {}",
+                    total_files,
+                    rootfs_lower
+                );
 
-            // Step 4: Create container.
-            let mut cfg = crate::container::ContainerConfig::new(image_name);
-            // Record the image the container came from (dir path or store
-            // `name:tag` ref) so `oci commit` / `docker commit` can later
-            // author a new image layered on this base.
-            cfg.image_source = String::from(*dir);
-            cfg.net_ip = net_ip;
-            cfg.net_gateway = net_gw;
-            cfg.net_dns = net_dns;
-            if net_ip.is_some() {
-                // Prefer the network's mask (from IPAM); fall back to /24 for a
-                // bare `--net IP`.
-                cfg.net_mask = net_mask.or(Some([255, 255, 255, 0]));
-            }
-            // Apply optional resource limits (--memory / --cpus). 0 = unlimited
-            // is the cgroup default, so we only override when a flag was given.
-            if let Some(frames) = mem_frames {
-                cfg.mem_limit = frames;
-            }
-            if let Some(pct) = cpu_percent {
-                cfg.cpu_quota = pct;
-            }
-            // Apply optional UTS hostname (--hostname/-h). The builder
-            // truncates names longer than 64 bytes.
-            if let Some(hn) = hostname {
-                cfg = cfg.hostname(hn);
-            }
-            // Apply metadata labels. --label-file first, then CLI --label, so
-            // the builder's last-write-wins dedup makes CLI labels override
-            // file labels (Docker precedence).
-            for (k, v) in &label_file_entries {
-                cfg = cfg.label(k, v);
-            }
-            for (k, v) in &labels {
-                cfg = cfg.label(k, v);
-            }
-            // Apply optional lifecycle automation (--restart / --rm). Note
-            // --read-only is applied post-create via set_read_only_root below,
-            // not here.
-            if let Some(policy) = restart_policy {
-                cfg.restart_policy = policy;
-            }
-            cfg.auto_remove = auto_remove;
-
-            match crate::container::create(&cfg) {
-                Ok(ct_id) => {
-                    crate::console_println!();
-                    crate::console_println!("=== Container Created ===");
-                    crate::console_println!("  Container ID: {}", ct_id);
-                    crate::console_println!("  Name:         {}", image_name);
-                    if !cfg.hostname.is_empty() {
-                        crate::console_println!("  Hostname:     {}", cfg.hostname);
-                    }
-                    if cfg.restart_policy != crate::container::RestartPolicy::No {
-                        crate::console_println!("  Restart:      {}", cfg.restart_policy);
-                    }
-                    if cfg.auto_remove {
-                        crate::console_println!("  AutoRemove:   yes (--rm)");
-                    }
-                    for (k, v) in &cfg.labels {
-                        crate::console_println!("  Label:        {}={}", k, v);
-                    }
-                    // Bind the reserved network address to this container so its
-                    // lease is reclaimed when the container is deleted. The
-                    // reservation was made unowned above (before the id existed).
-                    if let Some((nn, ip)) = network_lease {
-                        match crate::cnetwork::set_allocation_owner(nn, ip, ct_id) {
-                            Ok(()) => crate::console_println!(
-                                "  Network:      {} (ip {})",
-                                nn,
-                                fmt_ipv4(ip)
-                            ),
-                            Err(e) => crate::console_println!(
-                                "[oci] Warning: could not bind network '{}' owner: {:?}",
-                                nn,
-                                e
-                            ),
+                // Step 3: Create overlay filesystem (lower = extracted image
+                // layers, upper = writable scratch).  On success we mount it into
+                // the VFS so the container's writes are copy-on-write isolated
+                // from the read-only image.  If overlay creation fails we fall
+                // back to jailing the container directly at the read-only lower
+                // dir (no write isolation, but still runnable).
+                let overlay_name = alloc::format!("oci-{}", image_name);
+                let overlay_id =
+                    match crate::fs::overlay::create(&overlay_name, &rootfs_lower, &rootfs_upper) {
+                        Ok(ov_id) => {
+                            crate::console_println!(
+                                "[oci] Overlay created (id={}): lower={}, upper={}",
+                                ov_id,
+                                rootfs_lower,
+                                rootfs_upper
+                            );
+                            Some(ov_id)
                         }
-                        // Register the container's DNS names on the network so
-                        // same-network peers can resolve it by name (Docker
-                        // embedded DNS): the container name plus its hostname
-                        // (when set and distinct). Non-fatal on failure.
-                        if let Some(cinfo) = crate::container::info(ct_id) {
-                            let mut names: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-                            if !cinfo.name.is_empty() {
-                                names.push(cinfo.name.as_str());
+                        Err(e) => {
+                            crate::console_println!(
+                                "[oci] Overlay creation failed: {:?} (continuing without overlay)",
+                                e
+                            );
+                            None
+                        }
+                    };
+
+                // Step 3.5: if `--network NAME` was given (and no explicit `--net`
+                // IP), draw a conflict-free address from that network's IPAM. The
+                // reservation is unowned until the container id exists (below); we
+                // stash `(name, ip)` so ownership can be bound after create and so a
+                // failed create can release the reservation rather than leak it.
+                let mut network_lease: Option<(&str, [u8; 4])> = None;
+                if let Some(nn) = net_name {
+                    if net_ip.is_some() {
+                        crate::console_println!(
+                            "[oci] --network {} ignored: explicit --net IP already given",
+                            nn
+                        );
+                    } else {
+                        match crate::cnetwork::allocate(nn, None) {
+                            Ok(lease) => {
+                                net_ip = Some(lease.ip);
+                                net_gw = Some(lease.gateway);
+                                net_mask = Some(lease.netmask);
+                                network_lease = Some((nn, lease.ip));
                             }
-                            if !cinfo.hostname.is_empty()
-                                && !cinfo.hostname.eq_ignore_ascii_case(&cinfo.name)
-                            {
-                                names.push(cinfo.hostname.as_str());
+                            Err(e) => {
+                                crate::console_println!(
+                                    "[oci] Cannot allocate IP from network '{}': {:?}",
+                                    nn,
+                                    e
+                                );
+                                return;
                             }
-                            // Explicit --network-alias names (register_dns_names
-                            // de-duplicates case-insensitively).
-                            for &al in &net_aliases {
-                                names.push(al);
+                        }
+                    }
+                }
+
+                // Step 4: Create container.
+                let mut cfg = crate::container::ContainerConfig::new(image_name);
+                // Record the image the container came from (dir path or store
+                // `name:tag` ref) so `oci commit` / `docker commit` can later
+                // author a new image layered on this base.
+                cfg.image_source = String::from(*dir);
+                cfg.net_ip = net_ip;
+                cfg.net_gateway = net_gw;
+                cfg.net_dns = net_dns;
+                if net_ip.is_some() {
+                    // Prefer the network's mask (from IPAM); fall back to /24 for a
+                    // bare `--net IP`.
+                    cfg.net_mask = net_mask.or(Some([255, 255, 255, 0]));
+                }
+                // Apply optional resource limits (--memory / --cpus). 0 = unlimited
+                // is the cgroup default, so we only override when a flag was given.
+                if let Some(frames) = mem_frames {
+                    cfg.mem_limit = frames;
+                }
+                if let Some(pct) = cpu_percent {
+                    cfg.cpu_quota = pct;
+                }
+                // Apply optional UTS hostname (--hostname/-h). The builder
+                // truncates names longer than 64 bytes.
+                if let Some(hn) = hostname {
+                    cfg = cfg.hostname(hn);
+                }
+                // Apply metadata labels. --label-file first, then CLI --label, so
+                // the builder's last-write-wins dedup makes CLI labels override
+                // file labels (Docker precedence).
+                for (k, v) in &label_file_entries {
+                    cfg = cfg.label(k, v);
+                }
+                for (k, v) in &labels {
+                    cfg = cfg.label(k, v);
+                }
+                // Apply optional lifecycle automation (--restart / --rm). Note
+                // --read-only is applied post-create via set_read_only_root below,
+                // not here.
+                if let Some(policy) = restart_policy {
+                    cfg.restart_policy = policy;
+                }
+                cfg.auto_remove = auto_remove;
+
+                match crate::container::create(&cfg) {
+                    Ok(ct_id) => {
+                        crate::console_println!();
+                        crate::console_println!("=== Container Created ===");
+                        crate::console_println!("  Container ID: {}", ct_id);
+                        crate::console_println!("  Name:         {}", image_name);
+                        if !cfg.hostname.is_empty() {
+                            crate::console_println!("  Hostname:     {}", cfg.hostname);
+                        }
+                        if cfg.restart_policy != crate::container::RestartPolicy::No {
+                            crate::console_println!("  Restart:      {}", cfg.restart_policy);
+                        }
+                        if cfg.auto_remove {
+                            crate::console_println!("  AutoRemove:   yes (--rm)");
+                        }
+                        for (k, v) in &cfg.labels {
+                            crate::console_println!("  Label:        {}={}", k, v);
+                        }
+                        // Bind the reserved network address to this container so its
+                        // lease is reclaimed when the container is deleted. The
+                        // reservation was made unowned above (before the id existed).
+                        if let Some((nn, ip)) = network_lease {
+                            match crate::cnetwork::set_allocation_owner(nn, ip, ct_id) {
+                                Ok(()) => crate::console_println!(
+                                    "  Network:      {} (ip {})",
+                                    nn,
+                                    fmt_ipv4(ip)
+                                ),
+                                Err(e) => crate::console_println!(
+                                    "[oci] Warning: could not bind network '{}' owner: {:?}",
+                                    nn,
+                                    e
+                                ),
                             }
-                            if !names.is_empty() {
-                                if let Err(e) =
-                                    crate::cnetwork::register_dns_names(nn, ct_id, &names)
+                            // Register the container's DNS names on the network so
+                            // same-network peers can resolve it by name (Docker
+                            // embedded DNS): the container name plus its hostname
+                            // (when set and distinct). Non-fatal on failure.
+                            if let Some(cinfo) = crate::container::info(ct_id) {
+                                let mut names: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+                                if !cinfo.name.is_empty() {
+                                    names.push(cinfo.name.as_str());
+                                }
+                                if !cinfo.hostname.is_empty()
+                                    && !cinfo.hostname.eq_ignore_ascii_case(&cinfo.name)
                                 {
+                                    names.push(cinfo.hostname.as_str());
+                                }
+                                // Explicit --network-alias names (register_dns_names
+                                // de-duplicates case-insensitively).
+                                for &al in &net_aliases {
+                                    names.push(al);
+                                }
+                                if !names.is_empty() {
+                                    if let Err(e) =
+                                        crate::cnetwork::register_dns_names(nn, ct_id, &names)
+                                    {
+                                        crate::console_println!(
+                                            "[oci] Warning: could not register DNS names on '{}': {:?}",
+                                            nn,
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                            // Attach the container's host-side veth to the network's
+                            // shared L2 bridge so same-network peers can reach it
+                            // directly (Docker user-defined bridge semantics). The
+                            // bridge is created lazily on the first attach; a
+                            // single-member network never allocates one. Non-fatal:
+                            // without the bridge the container still has host/NAT
+                            // connectivity, just no direct peer L2 path.
+                            match crate::container::info(ct_id).and_then(|i| i.veth_pair) {
+                                Some(vp) => {
+                                    match crate::cnetwork::attach_container_veth(nn, ct_id, vp) {
+                                        Ok(()) => {
+                                            let peers = crate::cnetwork::inspect(nn)
+                                                .map_or(0, |i| i.allocations.len());
+                                            crate::console_println!(
+                                                "  L2 bridge:    {} ({} member{})",
+                                                nn,
+                                                peers,
+                                                if peers == 1 { "" } else { "s" }
+                                            );
+                                            // Record the create-time primary network as a
+                                            // membership (§60) so `inspect`/`ps` list it
+                                            // alongside any runtime `network connect`s. It
+                                            // reuses the primary veth just attached above.
+                                            if let Some(ni) = crate::cnetwork::inspect(nn) {
+                                                let _ = crate::container::record_primary_membership(
+                                                    ct_id,
+                                                    nn,
+                                                    ip,
+                                                    ni.network_addr,
+                                                    ni.prefix_len,
+                                                );
+                                            }
+                                        }
+                                        Err(e) => crate::console_println!(
+                                            "[oci] Warning: could not attach to network '{}' bridge: {:?}",
+                                            nn,
+                                            e
+                                        ),
+                                    }
+                                }
+                                None => crate::console_println!(
+                                    "[oci] Warning: network '{}' has no veth to bridge (no host link)",
+                                    nn
+                                ),
+                            }
+                        }
+
+                        // Determine the container's jail root.  Prefer the merged
+                        // overlay mount (copy-on-write isolation): mount the
+                        // per-container `OverlayFs` adapter at
+                        // `/containers/<name>/rootfs` so reads see the merged view
+                        // and writes land in the upper layer.  If the overlay was
+                        // not created or the mount fails, fall back to jailing the
+                        // container directly at the read-only lower dir.
+                        let merged_mount = alloc::format!("/containers/{}/rootfs", image_name);
+                        let mut jail_root = rootfs_lower.clone();
+                        let mut mounted_overlay = false;
+                        if let Some(ov_id) = overlay_id {
+                            match crate::fs::overlay::OverlayFs::new(ov_id) {
+                                Ok(ovfs) => {
+                                    match crate::fs::vfs::Vfs::mount(
+                                        &merged_mount,
+                                        alloc::boxed::Box::new(ovfs),
+                                    ) {
+                                        Ok(()) => {
+                                            jail_root = merged_mount.clone();
+                                            mounted_overlay = true;
+                                            crate::console_println!(
+                                                "[oci] Overlay mounted at {} (copy-on-write)",
+                                                merged_mount
+                                            );
+                                        }
+                                        Err(e) => {
+                                            crate::console_println!(
+                                                "[oci] Could not mount overlay at {}: {:?} (using read-only lower)",
+                                                merged_mount,
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => {
                                     crate::console_println!(
-                                        "[oci] Warning: could not register DNS names on '{}': {:?}",
-                                        nn,
+                                        "[oci] Could not open overlay adapter: {:?} (using read-only lower)",
                                         e
                                     );
                                 }
                             }
                         }
-                        // Attach the container's host-side veth to the network's
-                        // shared L2 bridge so same-network peers can reach it
-                        // directly (Docker user-defined bridge semantics). The
-                        // bridge is created lazily on the first attach; a
-                        // single-member network never allocates one. Non-fatal:
-                        // without the bridge the container still has host/NAT
-                        // connectivity, just no direct peer L2 path.
-                        match crate::container::info(ct_id).and_then(|i| i.veth_pair) {
-                            Some(vp) => {
-                                match crate::cnetwork::attach_container_veth(nn, ct_id, vp) {
-                                    Ok(()) => {
-                                        let peers = crate::cnetwork::inspect(nn)
-                                            .map_or(0, |i| i.allocations.len());
-                                        crate::console_println!(
-                                            "  L2 bridge:    {} ({} member{})",
-                                            nn,
-                                            peers,
-                                            if peers == 1 { "" } else { "s" }
-                                        );
-                                        // Record the create-time primary network as a
-                                        // membership (§60) so `inspect`/`ps` list it
-                                        // alongside any runtime `network connect`s. It
-                                        // reuses the primary veth just attached above.
-                                        if let Some(ni) = crate::cnetwork::inspect(nn) {
-                                            let _ = crate::container::record_primary_membership(
-                                                ct_id,
-                                                nn,
-                                                ip,
-                                                ni.network_addr,
-                                                ni.prefix_len,
-                                            );
-                                        }
-                                    }
-                                    Err(e) => crate::console_println!(
-                                        "[oci] Warning: could not attach to network '{}' bridge: {:?}",
-                                        nn,
-                                        e
-                                    ),
-                                }
-                            }
-                            None => crate::console_println!(
-                                "[oci] Warning: network '{}' has no veth to bridge (no host link)",
-                                nn
-                            ),
-                        }
-                    }
+                        crate::console_println!("  Rootfs:       {}", jail_root);
 
-                    // Determine the container's jail root.  Prefer the merged
-                    // overlay mount (copy-on-write isolation): mount the
-                    // per-container `OverlayFs` adapter at
-                    // `/containers/<name>/rootfs` so reads see the merged view
-                    // and writes land in the upper layer.  If the overlay was
-                    // not created or the mount fails, fall back to jailing the
-                    // container directly at the read-only lower dir.
-                    let merged_mount = alloc::format!("/containers/{}/rootfs", image_name);
-                    let mut jail_root = rootfs_lower.clone();
-                    let mut mounted_overlay = false;
-                    if let Some(ov_id) = overlay_id {
-                        match crate::fs::overlay::OverlayFs::new(ov_id) {
-                            Ok(ovfs) => {
-                                match crate::fs::vfs::Vfs::mount(
-                                    &merged_mount,
-                                    alloc::boxed::Box::new(ovfs),
-                                ) {
-                                    Ok(()) => {
-                                        jail_root = merged_mount.clone();
-                                        mounted_overlay = true;
-                                        crate::console_println!(
-                                            "[oci] Overlay mounted at {} (copy-on-write)",
-                                            merged_mount
-                                        );
-                                    }
-                                    Err(e) => {
-                                        crate::console_println!(
-                                            "[oci] Could not mount overlay at {}: {:?} (using read-only lower)",
-                                            merged_mount,
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                crate::console_println!(
-                                    "[oci] Could not open overlay adapter: {:?} (using read-only lower)",
-                                    e
-                                );
+                        // Compute the effective command (what the init process
+                        // actually runs), applying Docker's ENTRYPOINT/CMD override
+                        // rules: `--entrypoint` replaces (or, with "", clears) the
+                        // image ENTRYPOINT and drops its default CMD; trailing
+                        // `IMAGE CMD...` tokens replace the image CMD. See
+                        // `ImageConfig::effective_command`.
+                        let command: alloc::vec::Vec<alloc::string::String> = image
+                            .config
+                            .effective_command(entrypoint_override, &cmd_override);
+
+                        // Show the effective runtime config.
+                        if !command.is_empty() {
+                            let cmd_str: alloc::string::String = command.join(" ");
+                            crate::console_println!("  Command:      {}", cmd_str);
+                        }
+                        if !image.config.working_dir.is_empty() {
+                            crate::console_println!("  WorkingDir:   {}", image.config.working_dir);
+                        }
+                        if !image.config.env.is_empty() {
+                            crate::console_println!("  Environment:");
+                            for e in &image.config.env {
+                                crate::console_println!("    {}", e);
                             }
                         }
-                    }
-                    crate::console_println!("  Rootfs:       {}", jail_root);
 
-                    // Compute the effective command (what the init process
-                    // actually runs), applying Docker's ENTRYPOINT/CMD override
-                    // rules: `--entrypoint` replaces (or, with "", clears) the
-                    // image ENTRYPOINT and drops its default CMD; trailing
-                    // `IMAGE CMD...` tokens replace the image CMD. See
-                    // `ImageConfig::effective_command`.
-                    let command: alloc::vec::Vec<alloc::string::String> = image
-                        .config
-                        .effective_command(entrypoint_override, &cmd_override);
-
-                    // Show the effective runtime config.
-                    if !command.is_empty() {
-                        let cmd_str: alloc::string::String = command.join(" ");
-                        crate::console_println!("  Command:      {}", cmd_str);
-                    }
-                    if !image.config.working_dir.is_empty() {
-                        crate::console_println!("  WorkingDir:   {}", image.config.working_dir);
-                    }
-                    if !image.config.env.is_empty() {
-                        crate::console_println!("  Environment:");
-                        for e in &image.config.env {
-                            crate::console_println!("    {}", e);
+                        if let Some(ns) = crate::container::namespace_ids(ct_id) {
+                            crate::console_println!("  PID NS:       {}", ns.0);
+                            crate::console_println!("  User NS:      {}", ns.1);
+                            crate::console_println!("  Net NS:       {}", ns.2);
                         }
-                    }
 
-                    if let Some(ns) = crate::container::namespace_ids(ct_id) {
-                        crate::console_println!("  PID NS:       {}", ns.0);
-                        crate::console_println!("  User NS:      {}", ns.1);
-                        crate::console_println!("  Net NS:       {}", ns.2);
-                    }
-
-                    // Jail the container to its rootfs (must happen while
-                    // still in Created state, before `run`).  The init process
-                    // then resolves `/bin/sh`, `/lib/...`, etc. against the
-                    // container's filesystem instead of the host.
-                    if let Err(e) = crate::container::set_root_path(ct_id, &jail_root) {
-                        crate::console_println!(
-                            "[oci] Warning: could not set rootfs jail: {:?}",
-                            e
-                        );
-                    }
-                    // Apply Docker `--read-only`: mark the container rootfs
-                    // read-only (Created state). Writable `:rw` volumes below
-                    // still punch writable holes through it.
-                    if read_only_root {
-                        match crate::container::set_read_only_root(ct_id, true) {
-                            Ok(()) => crate::console_println!("  Root FS:      read-only"),
-                            Err(e) => crate::console_println!(
-                                "[oci] Warning: could not set read-only root: {:?}",
-                                e
-                            ),
-                        }
-                    }
-                    // If we mounted an overlay, record it on the container so
-                    // `container delete` unmounts the adapter on teardown.
-                    if mounted_overlay {
-                        if let Err(e) = crate::container::set_rootfs_mount(ct_id, &merged_mount) {
+                        // Jail the container to its rootfs (must happen while
+                        // still in Created state, before `run`).  The init process
+                        // then resolves `/bin/sh`, `/lib/...`, etc. against the
+                        // container's filesystem instead of the host.
+                        if let Err(e) = crate::container::set_root_path(ct_id, &jail_root) {
                             crate::console_println!(
-                                "[oci] Warning: could not record rootfs mount: {:?}",
+                                "[oci] Warning: could not set rootfs jail: {:?}",
                                 e
                             );
                         }
-                    }
-                    // Record the overlay id (independent of whether the adapter
-                    // was mounted) so `container diff` can locate the writable
-                    // scratch layer even when the merged mount fell back to the
-                    // read-only lower dir.
-                    if let Some(ov_id) = overlay_id {
-                        if let Err(e) = crate::container::set_overlay_id(ct_id, Some(ov_id)) {
-                            crate::console_println!(
-                                "[oci] Warning: could not record overlay id: {:?}",
-                                e
-                            );
-                        }
-                    }
-
-                    // Install any `-v host:guest` volume (bind) mounts (also
-                    // while still in Created state).  A volume lets the
-                    // container see a host directory at a guest path, escaping
-                    // the rootfs (e.g. `-v /srv/data:/data`).
-                    for (host, guest, read_only) in &volumes {
-                        match crate::container::add_volume_mount(ct_id, host, guest, *read_only) {
-                            Ok(()) => crate::console_println!(
-                                "  Volume:       {} -> {}{}",
-                                host.display(),
-                                guest.display(),
-                                if *read_only { " (ro)" } else { "" }
-                            ),
-                            Err(e) => crate::console_println!(
-                                "[oci] Warning: could not add volume {}:{}: {:?}",
-                                host.display(),
-                                guest.display(),
-                                e
-                            ),
-                        }
-                    }
-
-                    // Install any `--tmpfs /guest` in-memory mounts (Created
-                    // state).  Each gives the container an ephemeral writable
-                    // filesystem at the guest path, backed by a fresh memfs —
-                    // common for scratch space in a `--read-only` container.
-                    for guest in &tmpfs {
-                        match crate::container::add_tmpfs_mount(ct_id, guest) {
-                            Ok(()) => {
-                                crate::console_println!("  Tmpfs:        {} (in-memory)", guest)
-                            }
-                            Err(e) => crate::console_println!(
-                                "[oci] Warning: could not add tmpfs {}: {:?}",
-                                guest,
-                                e
-                            ),
-                        }
-                    }
-
-                    // Install any `-p host:container` published ports (Created
-                    // state).  The NAT rules forwarding host traffic to the
-                    // container are installed at run() time; this records the
-                    // intent.  Requires the container to have a network IP
-                    // (set via `--net`), which add_port_publish enforces.
-                    for &(proto, hp, cp) in &ports {
-                        match crate::container::add_port_publish(ct_id, proto, hp, cp) {
-                            Ok(()) => crate::console_println!(
-                                "  Publish:      {:?} :{} -> :{}",
-                                proto,
-                                hp,
-                                cp
-                            ),
-                            Err(e) => crate::console_println!(
-                                "[oci] Warning: could not publish {:?} :{} -> :{}: {:?} (need --net IP)",
-                                proto,
-                                hp,
-                                cp,
-                                e
-                            ),
-                        }
-                    }
-
-                    // Launch the image's entrypoint/cmd as the container's
-                    // init process, jailed to the rootfs.  `command[0]` is the
-                    // executable; it is read from the host *inside* the rootfs
-                    // (the kernel loads the image before the jail takes effect),
-                    // then the running process resolves its own syscalls against
-                    // the jail.
-                    let launched = if command.is_empty() {
-                        crate::console_println!(
-                            "[oci] Image declares no entrypoint/cmd; not launching an init process."
-                        );
-                        false
-                    } else {
-                        // Guest-visible exe path (absolute within the rootfs).
-                        let exe_rel = command
-                            .first()
-                            .map(alloc::string::String::as_str)
-                            .unwrap_or("");
-                        let exe_guest = if exe_rel.starts_with('/') {
-                            alloc::string::String::from(exe_rel)
-                        } else {
-                            alloc::format!("/{}", exe_rel)
-                        };
-                        // Host path to read the ELF from (jail root + guest
-                        // path).  When an overlay is mounted this reads through
-                        // the merged view; otherwise it reads the lower dir.
-                        let exe_host = alloc::format!("{}{}", jail_root, exe_guest);
-
-                        match crate::fs::vfs::Vfs::read_file(&exe_host) {
-                            Ok(elf) => {
-                                let argv_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
-                                    command.iter().map(|s| s.as_bytes().to_vec()).collect();
-                                let argv_refs: alloc::vec::Vec<&[u8]> =
-                                    argv_owned.iter().map(alloc::vec::Vec::as_slice).collect();
-                                // Merge environment entries using Docker
-                                // precedence: CLI `-e` > `--env-file` > image
-                                // ENV, with no duplicate keys. Keys are the
-                                // bytes before the first `=` (whole entry if
-                                // none). We add CLI `-e` first, then env-file
-                                // entries whose key isn't already set, then
-                                // image ENV entries whose key isn't already set.
-                                let mut envp_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
-                                    alloc::vec::Vec::new();
-                                for spec in &extra_env {
-                                    envp_owned.push(spec.as_bytes().to_vec());
-                                }
-                                for entry in &env_file_entries {
-                                    let key = oci::env_entry_key(entry);
-                                    let already =
-                                        envp_owned.iter().any(|e| oci::env_entry_key(e) == key);
-                                    if !already {
-                                        envp_owned.push(entry.clone());
-                                    }
-                                }
-                                for entry in &image.config.env {
-                                    let key = oci::env_entry_key(entry.as_bytes());
-                                    let already =
-                                        envp_owned.iter().any(|e| oci::env_entry_key(e) == key);
-                                    if !already {
-                                        envp_owned.push(entry.as_bytes().to_vec());
-                                    }
-                                }
-                                let envp_refs: alloc::vec::Vec<&[u8]> =
-                                    envp_owned.iter().map(alloc::vec::Vec::as_slice).collect();
-                                // Effective working directory: CLI `--workdir`/`-w`
-                                // wins, else the image's `WorkingDir`, else none
-                                // (init starts at `/`). Owned so the bytes outlive
-                                // `opts`, which borrows them via `.cwd()`.
-                                let effective_workdir: Option<alloc::string::String> =
-                                    workdir.map(alloc::string::String::from).or_else(|| {
-                                        let wd = &image.config.working_dir;
-                                        if wd.is_empty() {
-                                            None
-                                        } else {
-                                            Some(wd.clone())
-                                        }
-                                    });
-                                // Effective user identity: CLI `--user`/`-u`
-                                // wins, else the image's `User` config, else
-                                // none (init stays root). Only numeric
-                                // `uid[:gid]` is accepted — a username has no
-                                // /etc/passwd to resolve against here, so it is
-                                // warned and ignored. When `:gid` is omitted the
-                                // gid defaults to 0 (matching Docker's behavior
-                                // for a uid with no passwd entry).
-                                let user_spec: Option<alloc::string::String> =
-                                    user.map(alloc::string::String::from).or_else(|| {
-                                        let u = &image.config.user;
-                                        if u.is_empty() { None } else { Some(u.clone()) }
-                                    });
-                                let effective_uid_gid: Option<(u32, u32)> =
-                                    user_spec.as_deref().and_then(|s| {
-                                        let mut segs = s.splitn(2, ':');
-                                        let uid_s = segs.next().unwrap_or("");
-                                        let gid_s = segs.next();
-                                        match (uid_s.parse::<u32>(), gid_s.map(str::parse::<u32>)) {
-                                            (Ok(uid), None) => Some((uid, 0)),
-                                            (Ok(uid), Some(Ok(gid))) => Some((uid, gid)),
-                                            _ => {
-                                                crate::console_println!(
-                                                    "[oci] Ignoring user '{}': expected numeric uid[:gid]",
-                                                    s
-                                                );
-                                                None
-                                            }
-                                        }
-                                    });
-                                let mut opts = crate::proc::spawn::SpawnOptions::new(&exe_guest)
-                                    .argv(&argv_refs)
-                                    .envp(&envp_refs)
-                                    .exe_path(exe_guest.as_bytes());
-                                if let Some(wd) = effective_workdir.as_deref() {
-                                    opts = opts.cwd(wd.as_bytes());
-                                    crate::console_println!("  WorkDir:      {}", wd);
-                                }
-                                if let Some((uid, gid)) = effective_uid_gid {
-                                    opts = opts.uid_gid(uid, gid);
-                                    crate::console_println!("  User:         {}:{}", uid, gid);
-                                }
-                                match crate::container::run(ct_id, &elf, &opts) {
-                                    Ok(pid) => {
-                                        crate::console_println!(
-                                            "  Init PID:     {} ({})",
-                                            pid,
-                                            exe_guest
-                                        );
-                                        true
-                                    }
-                                    Err(e) => {
-                                        crate::console_println!(
-                                            "[oci] Failed to launch init process: {:?}",
-                                            e
-                                        );
-                                        false
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                crate::console_println!(
-                                    "[oci] Could not read entrypoint '{}' (host {}): {:?}",
-                                    exe_guest,
-                                    exe_host,
-                                    e
-                                );
-                                false
-                            }
-                        }
-                    };
-
-                    crate::console_println!();
-                    if launched {
-                        crate::console_println!(
-                            "Container {} is running. Use 'container info {}' to inspect.",
-                            ct_id,
-                            ct_id
-                        );
-                    } else {
-                        // No init process launched — fall back to the manual
-                        // model so the user can still exec into the container.
-                        let _ = crate::container::start(ct_id);
-                        crate::console_println!(
-                            "Use 'container exec {}' to run commands in this container.",
-                            ct_id
-                        );
-                    }
-                    crate::console_println!(
-                        "Use 'container stop {}' then 'container delete {}' to clean up.",
-                        ct_id,
-                        ct_id
-                    );
-                }
-                Err(e) => {
-                    // Release the network reservation made before create so a
-                    // failed run does not leak an IP.
-                    if let Some((nn, ip)) = network_lease {
-                        let _ = crate::cnetwork::release(nn, ip);
-                    }
-                    crate::console_println!("[oci] Container creation failed: {:?}", e);
-                }
-            }
-        }
-        "save" => {
-            // oci save <image-dir|name:tag> <out-tar>  (Docker `save`): bundle a
-            // complete OCI image *directory tree* (index, manifest, config blob,
-            // layer blobs) into a single ustar archive on the host VFS, so the
-            // image can be moved to another host and restored with `oci load`.
-            // A `name:tag` argument is first exported from the named store into a
-            // temporary single-manifest layout (only that image's blobs), which
-            // is then tarred and removed.  Unlike `container export` (which packs
-            // a *container's* flattened rootfs), `save` preserves the image's
-            // layered on-disk layout verbatim.
-            let (Some(&src), Some(&out_path)) = (parts.get(1), parts.get(2)) else {
-                crate::console_println!("Usage: oci save <image-dir|name:tag> <out-tar>");
-                return;
-            };
-            let is_layout = crate::fs::vfs::Vfs::metadata(alloc::format!(
-                "{}/oci-layout",
-                src.trim_end_matches('/')
-            ))
-            .is_ok();
-            let (pack_dir, temp) = if is_layout {
-                (
-                    alloc::string::String::from(src.trim_end_matches('/')),
-                    false,
-                )
-            } else {
-                let tmp = alloc::string::String::from("/tmp/oci-save-tmp");
-                let _ = crate::fs::vfs::Vfs::remove_recursive(&tmp);
-                match oci::store_export_ref(src, &tmp) {
-                    Ok(()) => (tmp, true),
-                    Err(e) => {
-                        crate::console_println!(
-                            "Not an image dir or store reference '{}': {:?}",
-                            src,
-                            e
-                        );
-                        return;
-                    }
-                }
-            };
-            // Validate that a real OCI image landed before packing, so `save`
-            // fails cleanly instead of producing a tar of arbitrary junk.
-            match oci::load_image(&pack_dir) {
-                Ok(image) => {
-                    let layers = image.manifest.layers.len();
-                    match crate::container::tar_tree(&pack_dir) {
-                        Ok(archive) => match crate::fs::vfs::Vfs::write_file(out_path, &archive) {
-                            Ok(()) => crate::console_println!(
-                                "Saved image {} ({} layers): {} bytes -> {}",
-                                src,
-                                layers,
-                                archive.len(),
-                                out_path
-                            ),
-                            Err(e) => {
-                                crate::console_println!("Failed to write '{}': {:?}", out_path, e)
-                            }
-                        },
-                        Err(e) => {
-                            crate::console_println!("Failed to pack image '{}': {:?}", src, e)
-                        }
-                    }
-                }
-                Err(e) => {
-                    crate::console_println!("Not a valid OCI image at '{}': {:?}", pack_dir, e)
-                }
-            }
-            if temp {
-                let _ = crate::fs::vfs::Vfs::remove_recursive(&pack_dir);
-            }
-        }
-        "load" => {
-            // oci load <in-tar> [dest-dir]  (Docker `load`): restore an image
-            // archive produced by `oci save`.  The tar is extracted via the
-            // shared `untar_tree` primitive (which rejects `..`-escaping member
-            // names before writing) into `dest-dir` if given, else into a temp
-            // dir.  Any `ref.name`-annotated manifests are then imported into the
-            // named store so the image is usable by `name:tag` — matching Docker,
-            // where `load` repopulates the local image store.
-            let Some(&tar_path) = parts.get(1) else {
-                crate::console_println!("Usage: oci load <in-tar> [dest-dir]");
-                return;
-            };
-            let archive = match crate::fs::vfs::Vfs::read_file(tar_path) {
-                Ok(a) => a,
-                Err(e) => {
-                    crate::console_println!("Failed to read '{}': {:?}", tar_path, e);
-                    return;
-                }
-            };
-            let (extract_dir, temp) = match parts.get(2) {
-                Some(&d) => (alloc::string::String::from(d), false),
-                None => {
-                    let tmp = alloc::string::String::from("/tmp/oci-load-tmp");
-                    let _ = crate::fs::vfs::Vfs::remove_recursive(&tmp);
-                    (tmp, true)
-                }
-            };
-            match crate::container::untar_tree(&extract_dir, &archive) {
-                Ok(()) => match oci::load_image(&extract_dir) {
-                    Ok(image) => {
-                        let layers = image.manifest.layers.len();
-                        // Import ref.name-annotated tags into the store.
-                        match oci::store_import_dir(&extract_dir) {
-                            Ok(tags) if !tags.is_empty() => crate::console_println!(
-                                "Loaded {} ({} bytes, {} layers) -> store tags: {}",
-                                tar_path,
-                                archive.len(),
-                                layers,
-                                tags.join(", ")
-                            ),
-                            Ok(_) => crate::console_println!(
-                                "Loaded {} ({} bytes, {} layers){}",
-                                tar_path,
-                                archive.len(),
-                                layers,
-                                if temp {
-                                    " but no ref.name annotation; nothing tagged in store"
-                                } else {
-                                    ""
-                                }
-                            ),
-                            Err(e) => crate::console_println!(
-                                "Loaded {} but store import failed: {:?}",
-                                tar_path,
-                                e
-                            ),
-                        }
-                    }
-                    Err(e) => crate::console_println!(
-                        "Extracted {} but it is not a valid OCI image: {:?}",
-                        tar_path,
-                        e
-                    ),
-                },
-                Err(e) => crate::console_println!("Failed to extract '{}': {:?}", tar_path, e),
-            }
-            if temp {
-                let _ = crate::fs::vfs::Vfs::remove_recursive(&extract_dir);
-            }
-        }
-        "build" => {
-            // oci build <dockerfile> <context-dir> <dest-image-dir>
-            //           [--build-arg KEY=VALUE ...]   (Docker `build`)
-            // Parse a Dockerfile and author an OCI image directory. Every
-            // instruction except RUN is supported (RUN needs the operator-gated
-            // in-container exec — see open-questions.md Q17); build_image
-            // reports a precise diagnostic in that case.
-            let mut positional: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-            let mut build_args: alloc::vec::Vec<(alloc::string::String, alloc::string::String)> =
-                alloc::vec::Vec::new();
-            let mut target: Option<&str> = None;
-            let mut tag: Option<&str> = None;
-            let mut i = 1usize;
-            while let Some(&tok) = parts.get(i) {
-                if tok == "-t" || tok == "--tag" {
-                    if let Some(&t) = parts.get(i.saturating_add(1)) {
-                        tag = Some(t);
-                        i = i.saturating_add(2);
-                    } else {
-                        crate::console_println!("[oci] -t/--tag needs a name:tag");
-                        i = i.saturating_add(1);
-                    }
-                } else if let Some(t) = tok.strip_prefix("--tag=") {
-                    tag = Some(t);
-                    i = i.saturating_add(1);
-                } else if tok == "--build-arg" {
-                    if let Some(&kv) = parts.get(i.saturating_add(1)) {
-                        // KEY=VALUE; a bare KEY takes the ambient value "" here
-                        // (the builder only applies it to a declared ARG).
-                        let (k, v) = match kv.split_once('=') {
-                            Some((k, v)) => (k, v),
-                            None => (kv, ""),
-                        };
-                        if k.is_empty() {
-                            crate::console_println!(
-                                "[oci] Ignoring --build-arg '{}': empty key",
-                                kv
-                            );
-                        } else {
-                            build_args.push((
-                                alloc::string::String::from(k),
-                                alloc::string::String::from(v),
-                            ));
-                        }
-                        i = i.saturating_add(2);
-                    } else {
-                        crate::console_println!("[oci] --build-arg needs KEY=VALUE");
-                        i = i.saturating_add(1);
-                    }
-                } else if tok == "--target" {
-                    if let Some(&t) = parts.get(i.saturating_add(1)) {
-                        target = Some(t);
-                        i = i.saturating_add(2);
-                    } else {
-                        crate::console_println!("[oci] --target needs a stage name or index");
-                        i = i.saturating_add(1);
-                    }
-                } else if let Some(t) = tok.strip_prefix("--target=") {
-                    target = Some(t);
-                    i = i.saturating_add(1);
-                } else {
-                    positional.push(tok);
-                    i = i.saturating_add(1);
-                }
-            }
-            let (Some(&dockerfile), Some(&ctx), Some(&dest)) =
-                (positional.first(), positional.get(1), positional.get(2))
-            else {
-                crate::console_println!(
-                    "Usage: oci build <dockerfile> <context-dir> <dest-image-dir> [-t name:tag] [--build-arg KEY=VALUE ...] [--target STAGE]"
-                );
-                return;
-            };
-            match crate::fs::vfs::Vfs::read_file(dockerfile) {
-                Ok(df) => match oci::build_image_targeted(&df, ctx, dest, &build_args, target) {
-                    Ok(desc) => {
-                        crate::console_println!(
-                            "Built image -> {} (manifest {}, {} bytes)",
-                            dest,
-                            desc.digest,
-                            desc.size
-                        );
-                        // `-t name:tag` imports the freshly-built image into the
-                        // named store so it can be referenced by name.
-                        if let Some(reference) = tag {
-                            match oci::store_tag_from_dir(dest, reference) {
-                                Ok(_) => crate::console_println!("Tagged -> {}", reference),
+                        // Apply Docker `--read-only`: mark the container rootfs
+                        // read-only (Created state). Writable `:rw` volumes below
+                        // still punch writable holes through it.
+                        if read_only_root {
+                            match crate::container::set_read_only_root(ct_id, true) {
+                                Ok(()) => crate::console_println!("  Root FS:      read-only"),
                                 Err(e) => crate::console_println!(
-                                    "build succeeded but tag '{}' failed: {:?}",
-                                    reference,
+                                    "[oci] Warning: could not set read-only root: {:?}",
                                     e
                                 ),
                             }
                         }
+                        // If we mounted an overlay, record it on the container so
+                        // `container delete` unmounts the adapter on teardown.
+                        if mounted_overlay {
+                            if let Err(e) = crate::container::set_rootfs_mount(ct_id, &merged_mount) {
+                                crate::console_println!(
+                                    "[oci] Warning: could not record rootfs mount: {:?}",
+                                    e
+                                );
+                            }
+                        }
+                        // Record the overlay id (independent of whether the adapter
+                        // was mounted) so `container diff` can locate the writable
+                        // scratch layer even when the merged mount fell back to the
+                        // read-only lower dir.
+                        if let Some(ov_id) = overlay_id {
+                            if let Err(e) = crate::container::set_overlay_id(ct_id, Some(ov_id)) {
+                                crate::console_println!(
+                                    "[oci] Warning: could not record overlay id: {:?}",
+                                    e
+                                );
+                            }
+                        }
+
+                        // Install any `-v host:guest` volume (bind) mounts (also
+                        // while still in Created state).  A volume lets the
+                        // container see a host directory at a guest path, escaping
+                        // the rootfs (e.g. `-v /srv/data:/data`).
+                        for (host, guest, read_only) in &volumes {
+                            match crate::container::add_volume_mount(ct_id, host, guest, *read_only) {
+                                Ok(()) => crate::console_println!(
+                                    "  Volume:       {} -> {}{}",
+                                    host.display(),
+                                    guest.display(),
+                                    if *read_only { " (ro)" } else { "" }
+                                ),
+                                Err(e) => crate::console_println!(
+                                    "[oci] Warning: could not add volume {}:{}: {:?}",
+                                    host.display(),
+                                    guest.display(),
+                                    e
+                                ),
+                            }
+                        }
+
+                        // Install any `--tmpfs /guest` in-memory mounts (Created
+                        // state).  Each gives the container an ephemeral writable
+                        // filesystem at the guest path, backed by a fresh memfs —
+                        // common for scratch space in a `--read-only` container.
+                        for guest in &tmpfs {
+                            match crate::container::add_tmpfs_mount(ct_id, guest) {
+                                Ok(()) => {
+                                    crate::console_println!("  Tmpfs:        {} (in-memory)", guest)
+                                }
+                                Err(e) => crate::console_println!(
+                                    "[oci] Warning: could not add tmpfs {}: {:?}",
+                                    guest,
+                                    e
+                                ),
+                            }
+                        }
+
+                        // Install any `-p host:container` published ports (Created
+                        // state).  The NAT rules forwarding host traffic to the
+                        // container are installed at run() time; this records the
+                        // intent.  Requires the container to have a network IP
+                        // (set via `--net`), which add_port_publish enforces.
+                        for &(proto, hp, cp) in &ports {
+                            match crate::container::add_port_publish(ct_id, proto, hp, cp) {
+                                Ok(()) => crate::console_println!(
+                                    "  Publish:      {:?} :{} -> :{}",
+                                    proto,
+                                    hp,
+                                    cp
+                                ),
+                                Err(e) => crate::console_println!(
+                                    "[oci] Warning: could not publish {:?} :{} -> :{}: {:?} (need --net IP)",
+                                    proto,
+                                    hp,
+                                    cp,
+                                    e
+                                ),
+                            }
+                        }
+
+                        // Launch the image's entrypoint/cmd as the container's
+                        // init process, jailed to the rootfs.  `command[0]` is the
+                        // executable; it is read from the host *inside* the rootfs
+                        // (the kernel loads the image before the jail takes effect),
+                        // then the running process resolves its own syscalls against
+                        // the jail.
+                        let launched = if command.is_empty() {
+                            crate::console_println!(
+                                "[oci] Image declares no entrypoint/cmd; not launching an init process."
+                            );
+                            false
+                        } else {
+                            // Guest-visible exe path (absolute within the rootfs).
+                            let exe_rel = command
+                                .first()
+                                .map(alloc::string::String::as_str)
+                                .unwrap_or("");
+                            let exe_guest = if exe_rel.starts_with('/') {
+                                alloc::string::String::from(exe_rel)
+                            } else {
+                                alloc::format!("/{}", exe_rel)
+                            };
+                            // Host path to read the ELF from (jail root + guest
+                            // path).  When an overlay is mounted this reads through
+                            // the merged view; otherwise it reads the lower dir.
+                            let exe_host = alloc::format!("{}{}", jail_root, exe_guest);
+
+                            match crate::fs::vfs::Vfs::read_file(&exe_host) {
+                                Ok(elf) => {
+                                    let argv_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+                                        command.iter().map(|s| s.as_bytes().to_vec()).collect();
+                                    let argv_refs: alloc::vec::Vec<&[u8]> =
+                                        argv_owned.iter().map(alloc::vec::Vec::as_slice).collect();
+                                    // Merge environment entries using Docker
+                                    // precedence: CLI `-e` > `--env-file` > image
+                                    // ENV, with no duplicate keys. Keys are the
+                                    // bytes before the first `=` (whole entry if
+                                    // none). We add CLI `-e` first, then env-file
+                                    // entries whose key isn't already set, then
+                                    // image ENV entries whose key isn't already set.
+                                    let mut envp_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+                                        alloc::vec::Vec::new();
+                                    for spec in &extra_env {
+                                        envp_owned.push(spec.as_bytes().to_vec());
+                                    }
+                                    for entry in &env_file_entries {
+                                        let key = oci::env_entry_key(entry);
+                                        let already =
+                                            envp_owned.iter().any(|e| oci::env_entry_key(e) == key);
+                                        if !already {
+                                            envp_owned.push(entry.clone());
+                                        }
+                                    }
+                                    for entry in &image.config.env {
+                                        let key = oci::env_entry_key(entry.as_bytes());
+                                        let already =
+                                            envp_owned.iter().any(|e| oci::env_entry_key(e) == key);
+                                        if !already {
+                                            envp_owned.push(entry.as_bytes().to_vec());
+                                        }
+                                    }
+                                    let envp_refs: alloc::vec::Vec<&[u8]> =
+                                        envp_owned.iter().map(alloc::vec::Vec::as_slice).collect();
+                                    // Effective working directory: CLI `--workdir`/`-w`
+                                    // wins, else the image's `WorkingDir`, else none
+                                    // (init starts at `/`). Owned so the bytes outlive
+                                    // `opts`, which borrows them via `.cwd()`.
+                                    let effective_workdir: Option<alloc::string::String> =
+                                        workdir.map(alloc::string::String::from).or_else(|| {
+                                            let wd = &image.config.working_dir;
+                                            if wd.is_empty() {
+                                                None
+                                            } else {
+                                                Some(wd.clone())
+                                            }
+                                        });
+                                    // Effective user identity: CLI `--user`/`-u`
+                                    // wins, else the image's `User` config, else
+                                    // none (init stays root). Only numeric
+                                    // `uid[:gid]` is accepted — a username has no
+                                    // /etc/passwd to resolve against here, so it is
+                                    // warned and ignored. When `:gid` is omitted the
+                                    // gid defaults to 0 (matching Docker's behavior
+                                    // for a uid with no passwd entry).
+                                    let user_spec: Option<alloc::string::String> =
+                                        user.map(alloc::string::String::from).or_else(|| {
+                                            let u = &image.config.user;
+                                            if u.is_empty() { None } else { Some(u.clone()) }
+                                        });
+                                    let effective_uid_gid: Option<(u32, u32)> =
+                                        user_spec.as_deref().and_then(|s| {
+                                            let mut segs = s.splitn(2, ':');
+                                            let uid_s = segs.next().unwrap_or("");
+                                            let gid_s = segs.next();
+                                            match (uid_s.parse::<u32>(), gid_s.map(str::parse::<u32>)) {
+                                                (Ok(uid), None) => Some((uid, 0)),
+                                                (Ok(uid), Some(Ok(gid))) => Some((uid, gid)),
+                                                _ => {
+                                                    crate::console_println!(
+                                                        "[oci] Ignoring user '{}': expected numeric uid[:gid]",
+                                                        s
+                                                    );
+                                                    None
+                                                }
+                                            }
+                                        });
+                                    let mut opts = crate::proc::spawn::SpawnOptions::new(&exe_guest)
+                                        .argv(&argv_refs)
+                                        .envp(&envp_refs)
+                                        .exe_path(exe_guest.as_bytes());
+                                    if let Some(wd) = effective_workdir.as_deref() {
+                                        opts = opts.cwd(wd.as_bytes());
+                                        crate::console_println!("  WorkDir:      {}", wd);
+                                    }
+                                    if let Some((uid, gid)) = effective_uid_gid {
+                                        opts = opts.uid_gid(uid, gid);
+                                        crate::console_println!("  User:         {}:{}", uid, gid);
+                                    }
+                                    match crate::container::run(ct_id, &elf, &opts) {
+                                        Ok(pid) => {
+                                            crate::console_println!(
+                                                "  Init PID:     {} ({})",
+                                                pid,
+                                                exe_guest
+                                            );
+                                            true
+                                        }
+                                        Err(e) => {
+                                            crate::console_println!(
+                                                "[oci] Failed to launch init process: {:?}",
+                                                e
+                                            );
+                                            false
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    crate::console_println!(
+                                        "[oci] Could not read entrypoint '{}' (host {}): {:?}",
+                                        exe_guest,
+                                        exe_host,
+                                        e
+                                    );
+                                    false
+                                }
+                            }
+                        };
+
+                        crate::console_println!();
+                        if launched {
+                            crate::console_println!(
+                                "Container {} is running. Use 'container info {}' to inspect.",
+                                ct_id,
+                                ct_id
+                            );
+                        } else {
+                            // No init process launched — fall back to the manual
+                            // model so the user can still exec into the container.
+                            let _ = crate::container::start(ct_id);
+                            crate::console_println!(
+                                "Use 'container exec {}' to run commands in this container.",
+                                ct_id
+                            );
+                        }
+                        crate::console_println!(
+                            "Use 'container stop {}' then 'container delete {}' to clean up.",
+                            ct_id,
+                            ct_id
+                        );
                     }
-                    Err(e) => crate::console_println!("build failed: {}", e.describe()),
-                },
-                Err(e) => {
-                    crate::console_println!("Failed to read Dockerfile '{}': {:?}", dockerfile, e);
+                    Err(e) => {
+                        // Release the network reservation made before create so a
+                        // failed run does not leak an IP.
+                        if let Some((nn, ip)) = network_lease {
+                            let _ = crate::cnetwork::release(nn, ip);
+                        }
+                        crate::console_println!("[oci] Container creation failed: {:?}", e);
+                    }
                 }
             }
+            case(&parts);
+        }
+        "save" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // oci save <image-dir|name:tag> <out-tar>  (Docker `save`): bundle a
+                // complete OCI image *directory tree* (index, manifest, config blob,
+                // layer blobs) into a single ustar archive on the host VFS, so the
+                // image can be moved to another host and restored with `oci load`.
+                // A `name:tag` argument is first exported from the named store into a
+                // temporary single-manifest layout (only that image's blobs), which
+                // is then tarred and removed.  Unlike `container export` (which packs
+                // a *container's* flattened rootfs), `save` preserves the image's
+                // layered on-disk layout verbatim.
+                let (Some(&src), Some(&out_path)) = (parts.get(1), parts.get(2)) else {
+                    crate::console_println!("Usage: oci save <image-dir|name:tag> <out-tar>");
+                    return;
+                };
+                let is_layout = crate::fs::vfs::Vfs::metadata(alloc::format!(
+                    "{}/oci-layout",
+                    src.trim_end_matches('/')
+                ))
+                .is_ok();
+                let (pack_dir, temp) = if is_layout {
+                    (
+                        alloc::string::String::from(src.trim_end_matches('/')),
+                        false,
+                    )
+                } else {
+                    let tmp = alloc::string::String::from("/tmp/oci-save-tmp");
+                    let _ = crate::fs::vfs::Vfs::remove_recursive(&tmp);
+                    match oci::store_export_ref(src, &tmp) {
+                        Ok(()) => (tmp, true),
+                        Err(e) => {
+                            crate::console_println!(
+                                "Not an image dir or store reference '{}': {:?}",
+                                src,
+                                e
+                            );
+                            return;
+                        }
+                    }
+                };
+                // Validate that a real OCI image landed before packing, so `save`
+                // fails cleanly instead of producing a tar of arbitrary junk.
+                match oci::load_image(&pack_dir) {
+                    Ok(image) => {
+                        let layers = image.manifest.layers.len();
+                        match crate::container::tar_tree(&pack_dir) {
+                            Ok(archive) => match crate::fs::vfs::Vfs::write_file(out_path, &archive) {
+                                Ok(()) => crate::console_println!(
+                                    "Saved image {} ({} layers): {} bytes -> {}",
+                                    src,
+                                    layers,
+                                    archive.len(),
+                                    out_path
+                                ),
+                                Err(e) => {
+                                    crate::console_println!("Failed to write '{}': {:?}", out_path, e)
+                                }
+                            },
+                            Err(e) => {
+                                crate::console_println!("Failed to pack image '{}': {:?}", src, e)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        crate::console_println!("Not a valid OCI image at '{}': {:?}", pack_dir, e)
+                    }
+                }
+                if temp {
+                    let _ = crate::fs::vfs::Vfs::remove_recursive(&pack_dir);
+                }
+            }
+            case(&parts);
+        }
+        "load" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // oci load <in-tar> [dest-dir]  (Docker `load`): restore an image
+                // archive produced by `oci save`.  The tar is extracted via the
+                // shared `untar_tree` primitive (which rejects `..`-escaping member
+                // names before writing) into `dest-dir` if given, else into a temp
+                // dir.  Any `ref.name`-annotated manifests are then imported into the
+                // named store so the image is usable by `name:tag` — matching Docker,
+                // where `load` repopulates the local image store.
+                let Some(&tar_path) = parts.get(1) else {
+                    crate::console_println!("Usage: oci load <in-tar> [dest-dir]");
+                    return;
+                };
+                let archive = match crate::fs::vfs::Vfs::read_file(tar_path) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        crate::console_println!("Failed to read '{}': {:?}", tar_path, e);
+                        return;
+                    }
+                };
+                let (extract_dir, temp) = match parts.get(2) {
+                    Some(&d) => (alloc::string::String::from(d), false),
+                    None => {
+                        let tmp = alloc::string::String::from("/tmp/oci-load-tmp");
+                        let _ = crate::fs::vfs::Vfs::remove_recursive(&tmp);
+                        (tmp, true)
+                    }
+                };
+                match crate::container::untar_tree(&extract_dir, &archive) {
+                    Ok(()) => match oci::load_image(&extract_dir) {
+                        Ok(image) => {
+                            let layers = image.manifest.layers.len();
+                            // Import ref.name-annotated tags into the store.
+                            match oci::store_import_dir(&extract_dir) {
+                                Ok(tags) if !tags.is_empty() => crate::console_println!(
+                                    "Loaded {} ({} bytes, {} layers) -> store tags: {}",
+                                    tar_path,
+                                    archive.len(),
+                                    layers,
+                                    tags.join(", ")
+                                ),
+                                Ok(_) => crate::console_println!(
+                                    "Loaded {} ({} bytes, {} layers){}",
+                                    tar_path,
+                                    archive.len(),
+                                    layers,
+                                    if temp {
+                                        " but no ref.name annotation; nothing tagged in store"
+                                    } else {
+                                        ""
+                                    }
+                                ),
+                                Err(e) => crate::console_println!(
+                                    "Loaded {} but store import failed: {:?}",
+                                    tar_path,
+                                    e
+                                ),
+                            }
+                        }
+                        Err(e) => crate::console_println!(
+                            "Extracted {} but it is not a valid OCI image: {:?}",
+                            tar_path,
+                            e
+                        ),
+                    },
+                    Err(e) => crate::console_println!("Failed to extract '{}': {:?}", tar_path, e),
+                }
+                if temp {
+                    let _ = crate::fs::vfs::Vfs::remove_recursive(&extract_dir);
+                }
+            }
+            case(&parts);
+        }
+        "build" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // oci build <dockerfile> <context-dir> <dest-image-dir>
+                //           [--build-arg KEY=VALUE ...]   (Docker `build`)
+                // Parse a Dockerfile and author an OCI image directory. Every
+                // instruction except RUN is supported (RUN needs the operator-gated
+                // in-container exec — see open-questions.md Q17); build_image
+                // reports a precise diagnostic in that case.
+                let mut positional: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+                let mut build_args: alloc::vec::Vec<(alloc::string::String, alloc::string::String)> =
+                    alloc::vec::Vec::new();
+                let mut target: Option<&str> = None;
+                let mut tag: Option<&str> = None;
+                let mut i = 1usize;
+                while let Some(&tok) = parts.get(i) {
+                    if tok == "-t" || tok == "--tag" {
+                        if let Some(&t) = parts.get(i.saturating_add(1)) {
+                            tag = Some(t);
+                            i = i.saturating_add(2);
+                        } else {
+                            crate::console_println!("[oci] -t/--tag needs a name:tag");
+                            i = i.saturating_add(1);
+                        }
+                    } else if let Some(t) = tok.strip_prefix("--tag=") {
+                        tag = Some(t);
+                        i = i.saturating_add(1);
+                    } else if tok == "--build-arg" {
+                        if let Some(&kv) = parts.get(i.saturating_add(1)) {
+                            // KEY=VALUE; a bare KEY takes the ambient value "" here
+                            // (the builder only applies it to a declared ARG).
+                            let (k, v) = match kv.split_once('=') {
+                                Some((k, v)) => (k, v),
+                                None => (kv, ""),
+                            };
+                            if k.is_empty() {
+                                crate::console_println!(
+                                    "[oci] Ignoring --build-arg '{}': empty key",
+                                    kv
+                                );
+                            } else {
+                                build_args.push((
+                                    alloc::string::String::from(k),
+                                    alloc::string::String::from(v),
+                                ));
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            crate::console_println!("[oci] --build-arg needs KEY=VALUE");
+                            i = i.saturating_add(1);
+                        }
+                    } else if tok == "--target" {
+                        if let Some(&t) = parts.get(i.saturating_add(1)) {
+                            target = Some(t);
+                            i = i.saturating_add(2);
+                        } else {
+                            crate::console_println!("[oci] --target needs a stage name or index");
+                            i = i.saturating_add(1);
+                        }
+                    } else if let Some(t) = tok.strip_prefix("--target=") {
+                        target = Some(t);
+                        i = i.saturating_add(1);
+                    } else {
+                        positional.push(tok);
+                        i = i.saturating_add(1);
+                    }
+                }
+                let (Some(&dockerfile), Some(&ctx), Some(&dest)) =
+                    (positional.first(), positional.get(1), positional.get(2))
+                else {
+                    crate::console_println!(
+                        "Usage: oci build <dockerfile> <context-dir> <dest-image-dir> [-t name:tag] [--build-arg KEY=VALUE ...] [--target STAGE]"
+                    );
+                    return;
+                };
+                match crate::fs::vfs::Vfs::read_file(dockerfile) {
+                    Ok(df) => match oci::build_image_targeted(&df, ctx, dest, &build_args, target) {
+                        Ok(desc) => {
+                            crate::console_println!(
+                                "Built image -> {} (manifest {}, {} bytes)",
+                                dest,
+                                desc.digest,
+                                desc.size
+                            );
+                            // `-t name:tag` imports the freshly-built image into the
+                            // named store so it can be referenced by name.
+                            if let Some(reference) = tag {
+                                match oci::store_tag_from_dir(dest, reference) {
+                                    Ok(_) => crate::console_println!("Tagged -> {}", reference),
+                                    Err(e) => crate::console_println!(
+                                        "build succeeded but tag '{}' failed: {:?}",
+                                        reference,
+                                        e
+                                    ),
+                                }
+                            }
+                        }
+                        Err(e) => crate::console_println!("build failed: {}", e.describe()),
+                    },
+                    Err(e) => {
+                        crate::console_println!("Failed to read Dockerfile '{}': {:?}", dockerfile, e);
+                    }
+                }
+            }
+            case(&parts);
         }
         // Named image store — `docker tag`/`images`/`rmi` by name:tag.
         "tag" => {
-            // Two forms:
-            //   oci tag <image-dir> <name:tag>   — import a built dir + tag it
-            //   oci tag <src-ref>   <name:tag>    — add a second tag (both in store)
-            let (Some(&a), Some(&b)) = (parts.get(1), parts.get(2)) else {
-                crate::console_println!("Usage: oci tag <image-dir|src-ref> <name:tag>");
-                return;
-            };
-            // A source that looks like a path (has a `/` or exists as a dir) is
-            // imported; otherwise it is treated as an existing store reference.
-            let is_dir = crate::fs::vfs::Vfs::metadata(a)
-                .map(|m| m.entry_type == crate::fs::vfs::EntryType::Directory)
-                .unwrap_or(false);
-            if is_dir {
-                match oci::store_tag_from_dir(a, b) {
-                    Ok(digest) => crate::console_println!("Tagged {} -> {} ({})", a, b, digest),
-                    Err(e) => crate::console_println!("tag failed: {:?}", e),
-                }
-            } else {
-                match oci::store_add_tag(a, b) {
-                    Ok(()) => crate::console_println!("Tagged {} -> {}", a, b),
-                    Err(e) => crate::console_println!("tag failed: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // Two forms:
+                //   oci tag <image-dir> <name:tag>   — import a built dir + tag it
+                //   oci tag <src-ref>   <name:tag>    — add a second tag (both in store)
+                let (Some(&a), Some(&b)) = (parts.get(1), parts.get(2)) else {
+                    crate::console_println!("Usage: oci tag <image-dir|src-ref> <name:tag>");
+                    return;
+                };
+                // A source that looks like a path (has a `/` or exists as a dir) is
+                // imported; otherwise it is treated as an existing store reference.
+                let is_dir = crate::fs::vfs::Vfs::metadata(a)
+                    .map(|m| m.entry_type == crate::fs::vfs::EntryType::Directory)
+                    .unwrap_or(false);
+                if is_dir {
+                    match oci::store_tag_from_dir(a, b) {
+                        Ok(digest) => crate::console_println!("Tagged {} -> {} ({})", a, b, digest),
+                        Err(e) => crate::console_println!("tag failed: {:?}", e),
+                    }
+                } else {
+                    match oci::store_add_tag(a, b) {
+                        Ok(()) => crate::console_println!("Tagged {} -> {}", a, b),
+                        Err(e) => crate::console_println!("tag failed: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "images" | "image" | "ls" => {
-            match oci::store_list() {
-                Ok(imgs) if imgs.is_empty() => {
-                    crate::console_println!("No images in store ({}).", oci::STORE_DIR);
-                }
-                Ok(imgs) => {
-                    crate::console_println!(
-                        "{:<28} {:<20} {:>10}",
-                        "REPOSITORY:TAG",
-                        "DIGEST",
-                        "SIZE"
-                    );
-                    for im in imgs {
-                        // Show the short (12-hex) digest, Docker-style.
-                        let short = im
-                            .digest
-                            .split_once(':')
-                            .map(|(_, hex)| hex.get(..12).unwrap_or(hex))
-                            .unwrap_or(&im.digest);
+            #[inline(never)]
+            fn case() {
+                match oci::store_list() {
+                    Ok(imgs) if imgs.is_empty() => {
+                        crate::console_println!("No images in store ({}).", oci::STORE_DIR);
+                    }
+                    Ok(imgs) => {
                         crate::console_println!(
                             "{:<28} {:<20} {:>10}",
-                            im.reference,
-                            short,
-                            im.size
+                            "REPOSITORY:TAG",
+                            "DIGEST",
+                            "SIZE"
                         );
-                    }
-                }
-                Err(e) => crate::console_println!("images failed: {:?}", e),
-            }
-        }
-        "rmi" => {
-            let Some(&reference) = parts.get(1) else {
-                crate::console_println!("Usage: oci rmi <name:tag>");
-                return;
-            };
-            match oci::store_remove(reference) {
-                Ok(()) => crate::console_println!("Untagged: {}", reference),
-                Err(e) => crate::console_println!("rmi failed: {:?}", e),
-            }
-        }
-        "commit" => {
-            // oci commit <container-id> <dest-dir> [name:tag]  (Docker
-            // `commit`): author a new OCI image from a container's filesystem
-            // changes (its overlay upper layer + whiteouts), layered on the
-            // base image the container was created from. The image is written
-            // as a standalone OCI layout at <dest-dir>; an optional trailing
-            // `name:tag` also tags it into the image store.
-            let (Some(id_str), Some(&dest_dir)) = (parts.get(1), parts.get(2)) else {
-                crate::console_println!("Usage: oci commit <container-id> <dest-dir> [name:tag]");
-                return;
-            };
-            let Ok(id) = id_str.parse::<u32>() else {
-                crate::console_println!("Invalid container ID");
-                return;
-            };
-            match crate::container::commit_image(id, dest_dir) {
-                Ok(digest) => {
-                    crate::console_println!(
-                        "Committed container {} -> image {} ({})",
-                        id,
-                        dest_dir,
-                        digest
-                    );
-                    if let Some(&reference) = parts.get(3) {
-                        match oci::store_tag_from_dir(dest_dir, reference) {
-                            Ok(d) => crate::console_println!(
-                                "Tagged {} -> {} ({})",
-                                dest_dir,
-                                reference,
-                                d
-                            ),
-                            Err(e) => crate::console_println!("commit tag failed: {:?}", e),
+                        for im in imgs {
+                            // Show the short (12-hex) digest, Docker-style.
+                            let short = im
+                                .digest
+                                .split_once(':')
+                                .map(|(_, hex)| hex.get(..12).unwrap_or(hex))
+                                .unwrap_or(&im.digest);
+                            crate::console_println!(
+                                "{:<28} {:<20} {:>10}",
+                                im.reference,
+                                short,
+                                im.size
+                            );
                         }
                     }
+                    Err(e) => crate::console_println!("images failed: {:?}", e),
                 }
-                Err(e) => crate::console_println!("commit failed: {:?}", e),
             }
+            case();
+        }
+        "rmi" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let Some(&reference) = parts.get(1) else {
+                    crate::console_println!("Usage: oci rmi <name:tag>");
+                    return;
+                };
+                match oci::store_remove(reference) {
+                    Ok(()) => crate::console_println!("Untagged: {}", reference),
+                    Err(e) => crate::console_println!("rmi failed: {:?}", e),
+                }
+            }
+            case(&parts);
+        }
+        "commit" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // oci commit <container-id> <dest-dir> [name:tag]  (Docker
+                // `commit`): author a new OCI image from a container's filesystem
+                // changes (its overlay upper layer + whiteouts), layered on the
+                // base image the container was created from. The image is written
+                // as a standalone OCI layout at <dest-dir>; an optional trailing
+                // `name:tag` also tags it into the image store.
+                let (Some(id_str), Some(&dest_dir)) = (parts.get(1), parts.get(2)) else {
+                    crate::console_println!("Usage: oci commit <container-id> <dest-dir> [name:tag]");
+                    return;
+                };
+                let Ok(id) = id_str.parse::<u32>() else {
+                    crate::console_println!("Invalid container ID");
+                    return;
+                };
+                match crate::container::commit_image(id, dest_dir) {
+                    Ok(digest) => {
+                        crate::console_println!(
+                            "Committed container {} -> image {} ({})",
+                            id,
+                            dest_dir,
+                            digest
+                        );
+                        if let Some(&reference) = parts.get(3) {
+                            match oci::store_tag_from_dir(dest_dir, reference) {
+                                Ok(d) => crate::console_println!(
+                                    "Tagged {} -> {} ({})",
+                                    dest_dir,
+                                    reference,
+                                    d
+                                ),
+                                Err(e) => crate::console_println!("commit tag failed: {:?}", e),
+                            }
+                        }
+                    }
+                    Err(e) => crate::console_println!("commit failed: {:?}", e),
+                }
+            }
+            case(&parts);
         }
         "test" => match oci::self_test() {
             Ok(()) => crate::console_println!("OCI self-test passed."),
             Err(e) => crate::console_println!("OCI self-test failed: {:?}", e),
         },
         _ => {
-            crate::console_println!(
-                "Usage: oci [inspect|layers|history|run|build|commit|tag|images|rmi|save|load|test]"
-            );
-            crate::console_println!("  oci inspect <dir>  — show image metadata and config");
-            crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
-            crate::console_println!(
-                "  oci history <dir>  — show build history (per-step created-by + size)"
-            );
-            crate::console_println!(
-                "  oci build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...] [--target STAGE] — build an OCI image from a Dockerfile (Docker build; RUN deferred, see Q17)"
-            );
-            crate::console_println!(
-                "  oci save <dir> <out-tar>   — bundle an image directory into a tar (Docker save)"
-            );
-            crate::console_println!(
-                "  oci load <in-tar> <dest-dir> — restore a saved image tar into a directory (Docker load)"
-            );
-            crate::console_println!(
-                "  oci commit <container-id> <dest-dir> [name:tag] — author a new image from a container's changes (Docker commit)"
-            );
-            crate::console_println!(
-                "  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [--tmpfs /guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]"
-            );
-            crate::console_println!(
-                "                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)"
-            );
-            crate::console_println!("  oci test           — run parser self-tests");
+            #[inline(never)]
+            fn case() {
+                crate::console_println!(
+                    "Usage: oci [inspect|layers|history|run|build|commit|tag|images|rmi|save|load|test]"
+                );
+                crate::console_println!("  oci inspect <dir>  — show image metadata and config");
+                crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
+                crate::console_println!(
+                    "  oci history <dir>  — show build history (per-step created-by + size)"
+                );
+                crate::console_println!(
+                    "  oci build <dockerfile> <context-dir> <dest-dir> [--build-arg K=V ...] [--target STAGE] — build an OCI image from a Dockerfile (Docker build; RUN deferred, see Q17)"
+                );
+                crate::console_println!(
+                    "  oci save <dir> <out-tar>   — bundle an image directory into a tar (Docker save)"
+                );
+                crate::console_println!(
+                    "  oci load <in-tar> <dest-dir> — restore a saved image tar into a directory (Docker load)"
+                );
+                crate::console_println!(
+                    "  oci commit <container-id> <dest-dir> [name:tag] — author a new image from a container's changes (Docker commit)"
+                );
+                crate::console_println!(
+                    "  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [--tmpfs /guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]"
+                );
+                crate::console_println!(
+                    "                     — create container from OCI image (-v shares a host dir, -p publishes a port, -e sets env, -m/--cpus limit resources, --read-only locks the rootfs, -w sets the workdir, -u sets the numeric user, --entrypoint/trailing COMMAND override the image entrypoint/cmd)"
+                );
+                crate::console_println!("  oci test           — run parser self-tests");
+            }
+            case();
         }
     }
 }

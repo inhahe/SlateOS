@@ -733,7 +733,11 @@ impl super::Present for Window {
                 // buffer is top-down. Without the sign the desktop appears
                 // vertically mirrored — which looks like a rendering bug
                 // anywhere but here.
-                bi_height: -h,
+                //
+                // `saturating_neg` only to keep the arithmetic total: `h` came
+                // from `i32::try_from(height: u32)` above and so is never
+                // `i32::MIN`, the one value plain negation cannot represent.
+                bi_height: h.saturating_neg(),
                 bi_planes: 1,
                 bi_bit_count: 32,
                 bi_compression: ffi::BI_RGB,

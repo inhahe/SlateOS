@@ -1,0 +1,16 @@
+[package]
+name = "sha1"
+version = "0.1.0"
+edition = "2024"
+description = "SHA-1, written once, checked against the FIPS 180-4 vectors."
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` with no `alloc`, like `sha2`: the digest is a `[u8; 20]` and the
+# hex form is a `[u8; 40]` wrapper, so there is nothing to allocate.
+[dependencies]
+blockbuf = { path = "../blockbuf" }
+
+[lints]
+workspace = true

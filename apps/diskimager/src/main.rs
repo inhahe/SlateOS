@@ -34,6 +34,7 @@ use guitk::text;
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 
 use std::collections::VecDeque;
+use std::fmt;
 
 // ============================================================================
 // Catppuccin Mocha color palette
@@ -202,32 +203,65 @@ impl HashAlgorithm {
     }
 }
 
+/// The hasher itself, one variant per algorithm.
+///
+/// An enum rather than a `Box<dyn Digest>` because there are exactly three
+/// and there will not be a fourth: the set is fixed by what image publishers
+/// actually print next to their downloads.
+#[derive(Clone)]
+enum Hasher {
+    Md5(md5::Md5),
+    Sha1(sha1::Sha1),
+    Sha256(sha2::Sha256),
+}
+
 /// State of a hash computation.
-#[derive(Clone, Debug)]
+///
+/// This used to be a stub: it seeded each algorithm's genuine published
+/// initial values and then, for all three alike, computed
+/// `state[i % 8] = state[i % 8] * 31 + byte`. The digest it produced was a
+/// deterministic hex string of the right length that was not MD5, SHA-1 or
+/// SHA-256 and did not depend on which of them you had selected — so
+/// comparing an image against a checksum from its publisher always reported a
+/// mismatch, and verify-after-write compared one non-hash against another.
+/// The work is now delegated to the three real implementations, each of which
+/// is checked against its standard's published vectors.
+#[derive(Clone)]
 pub struct HashState {
     pub algorithm: HashAlgorithm,
-    /// Internal state accumulator (simplified for demonstration).
-    /// In production, this would use a proper crypto implementation.
-    state: [u64; 8],
+    hasher: Hasher,
     bytes_processed: u64,
     finalized: bool,
 }
 
+// Hand-written because the derived form would print the hasher's internal
+// state, and a partial block of it is a verbatim copy of the data being
+// hashed. That is harmless for a disk image and not harmless in general;
+// `sha2`, `sha1` and `md5` all make the same choice, and a `Debug` here that
+// undid theirs would defeat it.
+impl fmt::Debug for HashState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HashState")
+            .field("algorithm", &self.algorithm)
+            .field("bytes_processed", &self.bytes_processed)
+            .field("finalized", &self.finalized)
+            // `finish_non_exhaustive` rather than `finish`: the omission of
+            // `hasher` is the point, and the `..` in the output says so
+            // instead of implying the struct has three fields.
+            .finish_non_exhaustive()
+    }
+}
+
 impl HashState {
     pub fn new(algorithm: HashAlgorithm) -> Self {
-        let state = match algorithm {
-            HashAlgorithm::Md5 => [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0, 0, 0, 0],
-            HashAlgorithm::Sha1 => [
-                0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0, 0, 0, 0,
-            ],
-            HashAlgorithm::Sha256 => [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-                0x5be0cd19,
-            ],
+        let hasher = match algorithm {
+            HashAlgorithm::Md5 => Hasher::Md5(md5::Md5::new()),
+            HashAlgorithm::Sha1 => Hasher::Sha1(sha1::Sha1::new()),
+            HashAlgorithm::Sha256 => Hasher::Sha256(sha2::Sha256::new()),
         };
         Self {
             algorithm,
-            state,
+            hasher,
             bytes_processed: 0,
             finalized: false,
         }
@@ -238,50 +272,26 @@ impl HashState {
         if self.finalized {
             return;
         }
-        // Simplified mixing (real implementation would use proper block
-        // processing for each algorithm). This demonstrates the API shape.
-        for (idx, &byte) in data.iter().enumerate() {
-            let slot = idx % 8;
-            if let Some(s) = self.state.get_mut(slot) {
-                *s = s.wrapping_mul(31).wrapping_add(byte as u64);
-            }
+        match &mut self.hasher {
+            Hasher::Md5(h) => h.update(data),
+            Hasher::Sha1(h) => h.update(data),
+            Hasher::Sha256(h) => h.update(data),
         }
         self.bytes_processed = self.bytes_processed.wrapping_add(data.len() as u64);
     }
 
     /// Finalize and produce the hex digest string.
+    ///
+    /// Calling this more than once is allowed and yields the same digest each
+    /// time; the underlying hashers consume themselves on finalize, so this
+    /// finalizes a clone and leaves `self` intact.
     pub fn finalize(&mut self) -> String {
         self.finalized = true;
-        let expected_len = self.algorithm.digest_hex_len();
-        // One u64 renders as 16 hex chars; round up so we always cover the
-        // requested length before the final truncation.
-        let num_words = expected_len.div_ceil(16);
-
-        // Fold the ENTIRE internal state (all 8 words) plus the processed
-        // length into each output word, so every input byte influences the
-        // final digest regardless of which slot it landed in. The previous
-        // implementation emitted the raw state words and then truncated to the
-        // digest length, which discarded the upper words entirely (words 4-7
-        // for SHA-256). Two short inputs differing only in a byte that mapped
-        // to a discarded word produced identical digests — a real collision.
-        let mut result = String::with_capacity(num_words.saturating_mul(16));
-        use std::fmt::Write;
-        for word_idx in 0..num_words {
-            let mut acc = self
-                .bytes_processed
-                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-                .wrapping_add(word_idx as u64);
-            for &word in self.state.iter() {
-                acc = acc.rotate_left(7) ^ word.wrapping_mul(0x0000_0100_0000_01b3);
-                acc = acc.wrapping_mul(0xff51_afd7_ed55_8ccd);
-            }
-            let _ = write!(result, "{acc:016x}");
+        match &self.hasher {
+            Hasher::Md5(h) => md5::hex(&h.clone().finalize()).as_str().to_string(),
+            Hasher::Sha1(h) => sha1::hex(&h.clone().finalize()).as_str().to_string(),
+            Hasher::Sha256(h) => sha2::hex(&h.clone().finalize()).as_str().to_string(),
         }
-        // Truncate to expected hex length.
-        if result.len() > expected_len {
-            result.truncate(expected_len);
-        }
-        result
     }
 
     pub fn bytes_processed(&self) -> u64 {
@@ -3600,29 +3610,128 @@ mod tests {
         assert_eq!(state.bytes_processed(), 150);
     }
 
+    /// The digest of the empty input and of `"abc"`, for all three algorithms.
+    ///
+    /// This is the test that was missing, and its absence is the whole reason
+    /// the stub survived. Every other test here — length, hex-digit-ness,
+    /// determinism, "different inputs differ" — passes just as happily for
+    /// `state[i % 8] = state[i % 8] * 31 + byte` as it does for SHA-256. Only
+    /// a known answer can tell a hash from a plausible-looking function, so
+    /// any hash added to this app must be pinned here before it is offered in
+    /// the UI.
+    ///
+    /// Values are the published ones: RFC 1321 appendix A.5 for MD5, FIPS
+    /// 180-4 for SHA-1 and SHA-256.
     #[test]
-    fn test_hash_finalize_produces_hex() {
+    fn hashes_match_their_published_vectors() {
+        let cases: [(HashAlgorithm, &[u8], &str); 6] = [
+            (
+                HashAlgorithm::Md5,
+                b"",
+                "d41d8cd98f00b204e9800998ecf8427e",
+            ),
+            (
+                HashAlgorithm::Md5,
+                b"abc",
+                "900150983cd24fb0d6963f7d28e17f72",
+            ),
+            (
+                HashAlgorithm::Sha1,
+                b"",
+                "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            ),
+            (
+                HashAlgorithm::Sha1,
+                b"abc",
+                "a9993e364706816aba3e25717850c26c9cd0d89d",
+            ),
+            (
+                HashAlgorithm::Sha256,
+                b"",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                HashAlgorithm::Sha256,
+                b"abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+        ];
+        for (algorithm, input, expected) in cases {
+            let mut state = HashState::new(algorithm);
+            state.update(input);
+            assert_eq!(
+                state.finalize(),
+                expected,
+                "{} of {:?}",
+                algorithm.name(),
+                std::str::from_utf8(input).unwrap_or("<non-utf8>")
+            );
+        }
+    }
+
+    /// The digest must depend on which algorithm was selected.
+    ///
+    /// The stub seeded a different initial state per algorithm but then ran
+    /// the same mixing over it, so the three digests differed — which is why
+    /// no test caught it. What they could not do is *agree with the standard*,
+    /// and the vector test above is what pins that. This one guards the
+    /// cheaper property directly: that the picker in the UI is wired to
+    /// something.
+    #[test]
+    fn each_algorithm_produces_its_own_length_and_value() {
+        let digest = |algorithm| {
+            let mut state = HashState::new(algorithm);
+            state.update(b"slateos disk image");
+            state.finalize()
+        };
+        let md5 = digest(HashAlgorithm::Md5);
+        let sha1 = digest(HashAlgorithm::Sha1);
+        let sha256 = digest(HashAlgorithm::Sha256);
+        assert_eq!(md5.len(), HashAlgorithm::Md5.digest_hex_len());
+        assert_eq!(sha1.len(), HashAlgorithm::Sha1.digest_hex_len());
+        assert_eq!(sha256.len(), HashAlgorithm::Sha256.digest_hex_len());
+        assert_ne!(md5, sha1[..md5.len()]);
+        assert_ne!(sha1, sha256[..sha1.len()]);
+    }
+
+    /// A file is hashed from a read buffer, so it arrives in pieces whose
+    /// boundaries have nothing to do with the hash's 64-byte blocks. A digest
+    /// that depended on how the reads happened to land would disagree with the
+    /// publisher's for large images and agree for small ones — the worst
+    /// possible failure, because it would look like it worked.
+    #[test]
+    fn splitting_the_input_does_not_change_the_digest() {
+        let data: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        for algorithm in [
+            HashAlgorithm::Md5,
+            HashAlgorithm::Sha1,
+            HashAlgorithm::Sha256,
+        ] {
+            let mut whole = HashState::new(algorithm);
+            whole.update(&data);
+            let expected = whole.finalize();
+            for chunk in [1usize, 7, 55, 56, 63, 64, 65, 128] {
+                let mut streamed = HashState::new(algorithm);
+                for piece in data.chunks(chunk) {
+                    streamed.update(piece);
+                }
+                assert_eq!(
+                    streamed.finalize(),
+                    expected,
+                    "{} in chunks of {chunk}",
+                    algorithm.name()
+                );
+            }
+        }
+    }
+
+    /// Finalizing does not consume the digest: the verify tab reads it more
+    /// than once.
+    #[test]
+    fn finalize_is_repeatable() {
         let mut state = HashState::new(HashAlgorithm::Sha256);
-        state.update(b"test data");
-        let hex = state.finalize();
-        assert_eq!(hex.len(), 64);
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn test_hash_finalize_md5_length() {
-        let mut state = HashState::new(HashAlgorithm::Md5);
-        state.update(b"some data");
-        let hex = state.finalize();
-        assert_eq!(hex.len(), 32);
-    }
-
-    #[test]
-    fn test_hash_finalize_sha1_length() {
-        let mut state = HashState::new(HashAlgorithm::Sha1);
-        state.update(b"some data");
-        let hex = state.finalize();
-        assert_eq!(hex.len(), 40);
+        state.update(b"abc");
+        assert_eq!(state.finalize(), state.finalize());
     }
 
     #[test]

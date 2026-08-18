@@ -652,6 +652,7 @@ name = "backup-app"
 version = "0.1.0"
 dependencies = [
  "safeio",
+ "sha2",
 ]
 
 [[package]]
@@ -896,6 +897,10 @@ version = "0.1.0"
 
 [[package]]
 name = "blkid"
+version = "0.1.0"
+
+[[package]]
+name = "blockbuf"
 version = "0.1.0"
 
 [[package]]
@@ -1922,6 +1927,10 @@ version = "0.1.0"
 [[package]]
 name = "credentials"
 version = "0.1.0"
+dependencies = [
+ "randrange",
+ "sha2",
+]
 
 [[package]]
 name = "credmanager"
@@ -2386,6 +2395,9 @@ name = "diskimager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "md5",
+ "sha1",
+ "sha2",
 ]
 
 [[package]]
@@ -5573,6 +5585,7 @@ name = "lockscreen"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "sha2",
 ]
 
 [[package]]
@@ -6141,6 +6154,13 @@ version = "0.1.0"
 [[package]]
 name = "mcfly-cli"
 version = "0.1.0"
+
+[[package]]
+name = "md5"
+version = "0.1.0"
+dependencies = [
+ "blockbuf",
+]
 
 [[package]]
 name = "mdadm"
@@ -9396,6 +9416,17 @@ version = "0.1.0"
 
 [[package]]
 name = "sfwbar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sha1"
+version = "0.1.0"
+dependencies = [
+ "blockbuf",
+]
+
+[[package]]
+name = "sha2"
 version = "0.1.0"
 
 [[package]]

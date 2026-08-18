@@ -70,9 +70,6 @@
 //! # }
 //! ```
 
-#![deny(clippy::all)]
-#![warn(clippy::pedantic)]
-
 use std::collections::VecDeque;
 
 use guiremote::client::{ClientError, Connection, Transport};
@@ -848,6 +845,19 @@ impl<T: Transport> EventLoop<T> {
 /// assert_eq!(seen, 1, "the close request was delivered");
 /// ```
 pub mod testing {
+    // A test double's contract is to fail loudly the instant the code under
+    // test is wrong, so panicking on bad input is the feature and not the
+    // oversight: a harness that swallowed a malformed frame and returned an
+    // empty `Vec` would turn an encoder bug into a test that passes. The
+    // panics are documented per-function under `# Panics`.
+    //
+    // Note what is *not* allowed here: `indexing_slicing` and
+    // `arithmetic_side_effects` stay on. Those are not the harness reporting a
+    // fault in its subject — they are faults in the harness itself, and one of
+    // them (a decode loop that can spin forever) fails in the single way a
+    // test harness must never fail, by hanging instead of reporting.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -909,20 +919,43 @@ pub mod testing {
 
             let mut at = 0usize;
             let mut requests = Vec::new();
-            while at < wire.len() {
+            // `while let Some(rest)` rather than `while at < wire.len()`: the
+            // slice is taken once, checked once, and then reused, so there is
+            // no second place where `at` has to be independently known to be
+            // in range. A `None` here means `at` ran past the end, which the
+            // arithmetic below makes unreachable — but breaking is the right
+            // answer either way, since there is nothing left to decode.
+            while let Some(rest) = wire.get(at..) {
+                if rest.is_empty() {
+                    break;
+                }
                 // Control requests and submissions share one connection; only
                 // the former want an answer. Each direction has its own magic,
                 // so telling them apart is a four-byte test and not a guess.
-                if wire[at..].starts_with(&guiremote::SUBMIT_MAGIC) {
-                    let (sub, used) = decode_submit(&wire[at..]).unwrap();
+                let used = if rest.starts_with(&guiremote::SUBMIT_MAGIC) {
+                    let (sub, used) = decode_submit(rest).unwrap();
                     self.submitted
                         .push((sub.window, sub.commands.commands.len()));
-                    at += used;
-                    continue;
-                }
-                let (reqs, used) = decode_requests(&wire[at..]).unwrap();
-                at += used;
-                requests.extend(reqs);
+                    used
+                } else {
+                    let (reqs, used) = decode_requests(rest).unwrap();
+                    requests.extend(reqs);
+                    used
+                };
+                // A decoder reporting that it consumed nothing would leave
+                // `at` where it was and spin here forever. That is the one
+                // failure a test harness must not have: a hang reports
+                // nothing, so the suite dies on a timeout naming no test,
+                // whereas this names the byte and the decoder.
+                assert!(
+                    used > 0,
+                    "a decoder consumed no bytes at offset {at} of {} — the \
+                     frame would be re-decoded forever",
+                    wire.len()
+                );
+                at = at
+                    .checked_add(used)
+                    .expect("decoded length ran past the end of the buffer");
             }
             requests
         }
@@ -946,7 +979,14 @@ pub mod testing {
                     match &req.body {
                         RequestBody::CreateWindow(_) => {
                             let window = self.next_window;
-                            self.next_window += 1;
+                            // `checked_add`, not `wrapping_add`: wrapping would
+                            // hand out an id already in use, and a harness that
+                            // silently aliases two windows makes the test it
+                            // breaks look like a bug in the crate under test.
+                            self.next_window = self
+                                .next_window
+                                .checked_add(1)
+                                .expect("ran out of window ids");
                             ResponseBody::WindowCreated { window }
                         }
                         RequestBody::GetDisplayInfo => ResponseBody::Display(DisplayInfo {

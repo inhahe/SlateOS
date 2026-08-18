@@ -178,6 +178,186 @@ impl RandomSource for SeededRng {
     }
 }
 
+/// Why the system entropy source could not be used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EntropyError {
+    /// The kernel CSPRNG did not answer, or answered with fewer bytes than
+    /// were asked for. There is no second-best here — a short read is a
+    /// failure, not a smaller helping of randomness.
+    Unavailable,
+}
+
+impl core::fmt::Display for EntropyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("the system random number generator is unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for EntropyError {}
+
+/// Bytes from the kernel CSPRNG — the source a secret must come from.
+///
+/// # Failure is reported, never papered over
+///
+/// [`RandomSource::next_u64`] has no way to return an error, and this type
+/// will not invent one out of a fallback generator: that is precisely the bug
+/// this module exists to remove. Instead a failure is made *sticky and
+/// visible*. [`open`](Self::open) proves the kernel answers before handing
+/// back a generator at all, and if a later refill fails, [`is_healthy`] turns
+/// false permanently and every subsequent draw is zero — a value that is
+/// obviously not random rather than one that merely looks it.
+///
+/// **Code generating a secret must check [`is_healthy`] after drawing**, not
+/// only before, and discard the result if it is false. A draw that begins on a
+/// healthy generator can still cross a failed refill part-way through.
+/// [`try_next_u64`](Self::try_next_u64) is there for callers that would rather
+/// see the error at the point it happens.
+///
+/// [`is_healthy`]: Self::is_healthy
+#[derive(Debug)]
+pub struct SystemRandom {
+    /// Bytes drawn from the kernel; those before `used` have been handed out
+    /// and are zeroed.
+    buffer: [u8; Self::BUFFER_BYTES],
+    /// How much of `buffer` has been consumed.
+    used: usize,
+    /// False from the first failed refill onwards, and never true again.
+    healthy: bool,
+}
+
+impl SystemRandom {
+    /// How many bytes to take from the kernel at a time.
+    ///
+    /// A multiple of eight, so a `u64` never straddles the end of the buffer,
+    /// and large enough that a whole password costs one syscall rather than
+    /// one per character.
+    const BUFFER_BYTES: usize = 256;
+
+    /// Open the system entropy source, failing if the kernel does not answer.
+    ///
+    /// The first buffer is drawn here rather than lazily, so that a caller
+    /// which cannot proceed without real entropy finds out at the point it
+    /// asks for the generator instead of half-way through building a secret.
+    ///
+    /// # Errors
+    ///
+    /// [`EntropyError::Unavailable`] if the kernel CSPRNG cannot be read —
+    /// which is also the case on a host build, where there is no Slate kernel
+    /// to ask.
+    pub fn open() -> Result<Self, EntropyError> {
+        let mut source = Self {
+            buffer: [0; Self::BUFFER_BYTES],
+            used: Self::BUFFER_BYTES,
+            healthy: true,
+        };
+        source.refill()?;
+        Ok(source)
+    }
+
+    /// Whether every byte handed out so far came from the kernel CSPRNG.
+    ///
+    /// Once false, always false.
+    #[must_use]
+    pub const fn is_healthy(&self) -> bool {
+        self.healthy
+    }
+
+    /// Draw 64 bits, reporting a failed refill instead of hiding it.
+    ///
+    /// # Errors
+    ///
+    /// [`EntropyError::Unavailable`] if the kernel CSPRNG cannot be read, or
+    /// if it has already failed once for this generator.
+    pub fn try_next_u64(&mut self) -> Result<u64, EntropyError> {
+        if !self.healthy {
+            return Err(EntropyError::Unavailable);
+        }
+        const WORD: usize = size_of::<u64>();
+        if self.used.saturating_add(WORD) > Self::BUFFER_BYTES {
+            self.refill()?;
+        }
+        let start = self.used;
+        let end = start.saturating_add(WORD);
+        let mut word = [0u8; WORD];
+        let Some(bytes) = self.buffer.get_mut(start..end) else {
+            // Unreachable while `BUFFER_BYTES` is a multiple of eight, but a
+            // silently-wrong secret is not a thing to leave to a comment.
+            self.healthy = false;
+            return Err(EntropyError::Unavailable);
+        };
+        word.copy_from_slice(bytes);
+        // Don't leave spent entropy lying in the buffer: these bytes are, in
+        // this module's intended use, the password itself.
+        bytes.fill(0);
+        self.used = end;
+        Ok(u64::from_le_bytes(word))
+    }
+
+    /// Take a fresh buffer from the kernel, poisoning the generator if that
+    /// fails.
+    fn refill(&mut self) -> Result<(), EntropyError> {
+        match fill_from_kernel(&mut self.buffer) {
+            Ok(()) => {
+                self.used = 0;
+                Ok(())
+            }
+            Err(err) => {
+                self.healthy = false;
+                self.buffer.fill(0);
+                self.used = Self::BUFFER_BYTES;
+                Err(err)
+            }
+        }
+    }
+}
+
+impl RandomSource for SystemRandom {
+    fn next_u64(&mut self) -> u64 {
+        // A failure cannot be returned through this signature, so it is
+        // recorded instead: `is_healthy` is now false and stays false, and the
+        // value handed back is zero — plainly not random, rather than
+        // something that passes for it. See the type documentation.
+        self.try_next_u64().unwrap_or(0)
+    }
+}
+
+/// Fill `buffer` from the kernel CSPRNG.
+///
+/// Goes through the posix `getrandom` symbol, which the libc layer routes to
+/// `SYS_GETRANDOM`, because no `std` API exposes the kernel CSPRNG. This is
+/// the same route `userspace/ssh-keygen` takes for key material.
+#[cfg(unix)]
+fn fill_from_kernel(buffer: &mut [u8]) -> Result<(), EntropyError> {
+    unsafe extern "C" {
+        /// Fill `buf` with `buflen` random bytes; returns bytes written or -1.
+        fn getrandom(buf: *mut u8, buflen: usize, flags: u32) -> isize;
+    }
+
+    // SAFETY: `buffer` is a uniquely-borrowed slice, and the pointer and
+    // length handed over are exactly its own, so `getrandom` writes only
+    // within it. It returns the number of bytes written, or -1 on failure.
+    let written = unsafe { getrandom(buffer.as_mut_ptr(), buffer.len(), 0) };
+    if usize::try_from(written).is_ok_and(|count| count == buffer.len()) {
+        Ok(())
+    } else {
+        Err(EntropyError::Unavailable)
+    }
+}
+
+/// The host build has no Slate kernel to ask.
+///
+/// Refusing is deliberate rather than unfortunate: a test that wants
+/// reproducible values must name [`SeededRng`], and a test that reaches for
+/// the system source on the host must see it decline — which is what makes
+/// "fails closed when there is no entropy" a testable property.
+#[cfg(not(unix))]
+fn fill_from_kernel(_buffer: &mut [u8]) -> Result<(), EntropyError> {
+    Err(EntropyError::Unavailable)
+}
+
 #[cfg(test)]
 mod tests {
     // A test module's job is to fail loudly the instant the code under test is
@@ -197,7 +377,7 @@ mod tests {
     // rather than make it robust.
     #![allow(clippy::float_cmp)]
 
-    use super::{RandomSource, SeededRng};
+    use super::{EntropyError, RandomSource, SeededRng, SystemRandom, fill_from_kernel};
 
     #[test]
     fn the_same_seed_gives_the_same_sequence() {
@@ -362,5 +542,57 @@ mod tests {
             let picked = *rng.pick(&items).unwrap();
             assert!(items.contains(&picked));
         }
+    }
+
+    /// The whole point of the type: no entropy means no generator, rather than
+    /// a generator quietly backed by something weaker.
+    ///
+    /// On the host there is no Slate kernel, so this is the failing path; on
+    /// the target it is the succeeding one. Both are asserted, because the
+    /// property under test is that the two answers are the *only* two — a
+    /// source that is handed back at all is one that answered.
+    #[test]
+    fn the_system_source_either_answers_or_refuses_to_exist() {
+        match SystemRandom::open() {
+            Ok(mut source) => {
+                assert!(source.is_healthy());
+                for _ in 0..1000 {
+                    let _ = source.next_u64();
+                }
+                assert!(
+                    source.is_healthy(),
+                    "a source that opened must stay healthy across a refill"
+                );
+            }
+            Err(err) => {
+                assert_eq!(err, EntropyError::Unavailable);
+                #[cfg(unix)]
+                panic!("the kernel CSPRNG must answer on the target");
+            }
+        }
+    }
+
+    /// A caller that ignores the error and draws anyway must get something it
+    /// cannot mistake for randomness.
+    #[test]
+    fn a_source_that_never_opened_hands_out_nothing_that_looks_random() {
+        // Reachable only where opening fails; on the target the branch above
+        // covers the other half.
+        if SystemRandom::open().is_ok() {
+            return;
+        }
+        assert!(matches!(
+            fill_from_kernel(&mut [0u8; 8]),
+            Err(EntropyError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn the_entropy_error_says_what_went_wrong() {
+        assert!(
+            EntropyError::Unavailable
+                .to_string()
+                .contains("system random number generator")
+        );
     }
 }

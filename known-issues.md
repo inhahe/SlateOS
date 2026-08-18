@@ -34703,3 +34703,57 @@ Check what `pkg`/the installer writes before deleting.
 differently is how a machine ends up believing an account is an administrator
 in one context and not another, which is the same class of defect as the
 `is_admin`/`admin` field split that §330 fixed one level down.
+
+---
+
+## [C] FIXED — the password generator produced the same passwords for everyone (2026-08-18)
+
+**In short:** `apps/passwordgen` generated passwords, PINs and passphrases
+from a *pseudo*-random generator seeded with the literal number 42. A seed is
+the number a pseudo-random generator starts from; the same seed always gives
+the same sequence. So every user, on every machine, got the same first
+password, the same second one, and so on forever. Anyone who ran the program
+once knew every password it would ever hand out to anybody.
+
+Fixed in this batch. Recorded here rather than merely closed because the shape
+of the mistake is worth keeping: nothing in the code *said* it was a toy
+generator, so a reviewer reading `generate_password(&opts, &mut rng)` saw
+nothing wrong with it.
+
+### What was wrong
+
+- `apps/passwordgen/src/main.rs` carried its own `struct Rng` — Marsaglia
+  xorshift64. Fast, tiny, and trivially invertible: recovering the state from
+  a single 64-bit output is a few lines of algebra, so one generated password
+  reveals every other password of that session.
+- `fn main()` called `PasswordApp::new(42)`.
+- Even reseeded from a clock it would still have been wrong. The defect is the
+  *kind* of generator, not the seed.
+- `Rng::next_usize` reduced with `%`, so characters early in each pool came up
+  slightly more often than late ones.
+
+### The fix
+
+- `guitk::rng` now owns the generator abstraction: `RandomSource` (unbiased
+  `below` by rejection sampling; `next_f32` from 24 bits so it cannot reach
+  1.0; Fisher-Yates `shuffle`), `SeededRng` for variety, and `SystemRandom`
+  for secrets — bytes from the kernel CSPRNG via the posix `getrandom` symbol,
+  the same route `userspace/ssh-keygen` takes for key material.
+- `SystemRandom::open()` proves the kernel answers before returning a
+  generator at all, and `is_healthy()` latches false if a later refill fails.
+- `passwordgen`'s `AppRandom` makes the choice explicit and checkable.
+  `PasswordApp::new()` opens the kernel CSPRNG; `PasswordApp::with_seed()`
+  exists for tests and is named so it cannot be reached by accident.
+- **It fails closed.** With no entropy, every Generate button clears the
+  display, records no history, and shows "Cannot generate: the system random
+  number generator is unavailable" in red where the password would be. A bulk
+  run that loses entropy part-way discards the whole batch rather than return
+  a short list. Six regression tests pin this.
+
+### Still to do
+
+Five more hand-rolled generators remain in lane C and should move onto
+`guitk::rng` — none of them generate secrets, so this is tidying rather than
+security: `gui/desktop/src/power.rs` (three copies of the same xorshift in one
+file), `gui/desktop/src/wallpaper.rs` (an LCG), `apps/paint` (xorshift 13/17/5),
+`apps/netscan`, `apps/spades`.

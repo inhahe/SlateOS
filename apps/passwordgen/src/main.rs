@@ -22,6 +22,7 @@
 
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -362,56 +363,115 @@ impl PassphraseOptions {
 }
 
 // ============================================================================
-// Password generator (deterministic PRNG)
+// Where the randomness comes from
 // ============================================================================
+//
+// This used to be a hand-rolled xorshift64 seeded from a `u64` the caller
+// passed in — and `main` passed the literal `42`. Every user on every machine
+// therefore got the *same* passwords, PINs and passphrases, in the same order,
+// from the first launch onwards. Even seeded from a clock it would have been
+// wrong: xorshift is trivially invertible, so one generated password reveals
+// the state and hence every other password that session.
+//
+// The fix is not a better PRNG, it is the right *kind* of source: a secret
+// comes from the kernel CSPRNG or it does not get generated at all. The
+// generators below are written against `guitk::rng::RandomSource` so that the
+// tests can still drive them from a reproducible `SeededRng`, and `AppRandom`
+// makes which one is in use a fact the app can check before it shows anything
+// to the user.
 
-/// Simple xorshift64 PRNG for deterministic password generation.
+/// The source of randomness behind a running generator.
+///
+/// The variants are deliberately not interchangeable: [`Self::is_trustworthy`]
+/// is what stands between a seeded test generator and a password shown to a
+/// user, and it is consulted both before a secret is drawn and after.
 #[derive(Debug)]
-pub struct Rng {
-    state: u64,
+pub enum AppRandom {
+    /// The kernel CSPRNG — the only source a real secret may come from.
+    ///
+    /// Boxed because its buffer dwarfs the other variants; an app holds one
+    /// of these for its whole life, so the indirection costs nothing that
+    /// matters and keeps the enum pointer-sized.
+    System(Box<SystemRandom>),
+    /// A reproducible generator. Tests only; never shown to a user.
+    Seeded(SeededRng),
+    /// The kernel CSPRNG did not answer. Generation is refused outright
+    /// rather than falling back to something weaker, because a password the
+    /// user believes is random and is not is worse than no password at all.
+    Unavailable,
 }
 
-impl Rng {
-    pub fn new(seed: u64) -> Self {
-        Self {
-            state: if seed == 0 { 0x12345678ABCDEF01 } else { seed },
+impl AppRandom {
+    /// Open the kernel CSPRNG, or record that it could not be opened.
+    #[must_use]
+    pub fn from_system() -> Self {
+        match SystemRandom::open() {
+            Ok(source) => Self::System(Box::new(source)),
+            Err(_) => Self::Unavailable,
         }
     }
 
-    pub fn next_u64(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.state = x;
-        x
+    /// A reproducible source, for tests.
+    #[must_use]
+    pub const fn seeded(seed: u64) -> Self {
+        Self::Seeded(SeededRng::new(seed))
     }
 
-    /// Generate a random index in [0, bound).
-    pub fn next_usize(&mut self, bound: usize) -> usize {
-        let bound_u64 = bound as u64;
-        self.next_u64().checked_rem(bound_u64).unwrap_or(0) as usize
+    /// Whether output from this source may be presented as a secret.
+    ///
+    /// False for [`Self::Unavailable`], and false for a [`Self::System`]
+    /// source whose refill has failed at any point — including part-way
+    /// through the secret currently being built, which is why callers check
+    /// this *after* generating as well as before.
+    #[must_use]
+    pub const fn is_trustworthy(&self) -> bool {
+        match self {
+            Self::System(source) => source.is_healthy(),
+            // A seeded generator always produces what it promises; it is just
+            // not a secret. Callers that must have real entropy check
+            // `is_system` instead.
+            Self::Seeded(_) => true,
+            Self::Unavailable => false,
+        }
     }
 
-    /// Pick a random element from a slice.
-    pub fn pick<'a, T>(&mut self, items: &'a [T]) -> Option<&'a T> {
-        if items.is_empty() {
+    /// Produce a secret with `make`, or `None` if this source is not fit to.
+    ///
+    /// The check happens on both sides of the draw so that a source which
+    /// fails half-way through a password discards the whole thing rather than
+    /// handing back a partly-predictable one.
+    pub fn secret<T>(&mut self, make: impl FnOnce(&mut Self) -> T) -> Option<T> {
+        if !self.is_trustworthy() {
             return None;
         }
-        items.get(self.next_usize(items.len()))
-    }
-
-    /// Pick a random char from a char slice.
-    pub fn pick_char(&mut self, chars: &[char]) -> char {
-        chars
-            .get(self.next_usize(chars.len()))
-            .copied()
-            .unwrap_or('?')
+        let value = make(self);
+        self.is_trustworthy().then_some(value)
     }
 }
 
-/// Generate a password using the given options and PRNG.
-pub fn generate_password(opts: &PasswordOptions, rng: &mut Rng) -> String {
+impl RandomSource for AppRandom {
+    fn next_u64(&mut self) -> u64 {
+        match self {
+            Self::System(source) => source.next_u64(),
+            Self::Seeded(source) => source.next_u64(),
+            // Unreachable through `secret`, which refuses first. Zero is
+            // returned rather than anything that could pass for random.
+            Self::Unavailable => 0,
+        }
+    }
+}
+
+/// One of `chars`, or `'?'` if there are none.
+fn pick_char<R: RandomSource>(rng: &mut R, chars: &[char]) -> char {
+    rng.pick(chars).copied().unwrap_or('?')
+}
+
+// ============================================================================
+// Password generators
+// ============================================================================
+
+/// Generate a password using the given options and randomness.
+pub fn generate_password<R: RandomSource>(opts: &PasswordOptions, rng: &mut R) -> String {
     let pool = opts.build_pool();
     if pool.is_empty() || opts.length == 0 {
         return String::new();
@@ -453,20 +513,20 @@ pub fn generate_password(opts: &PasswordOptions, rng: &mut Rng) -> String {
                 filtered.retain(|c| !AMBIGUOUS.contains(*c));
             }
             if !filtered.is_empty() {
-                password.push(rng.pick_char(&filtered));
+                password.push(pick_char(rng, &filtered));
             }
         }
     }
 
     // Fill remaining with random characters from the full pool
     while password.len() < opts.length {
-        password.push(rng.pick_char(&pool));
+        password.push(pick_char(rng, &pool));
     }
 
     // Shuffle the password (Fisher-Yates)
     let len = password.len();
     for i in (1..len).rev() {
-        let j = rng.next_usize(i.saturating_add(1));
+        let j = rng.below_usize(i.saturating_add(1));
         password.swap(i, j);
     }
 
@@ -474,7 +534,7 @@ pub fn generate_password(opts: &PasswordOptions, rng: &mut Rng) -> String {
 }
 
 /// Generate a passphrase.
-pub fn generate_passphrase(opts: &PassphraseOptions, rng: &mut Rng) -> String {
+pub fn generate_passphrase<R: RandomSource>(opts: &PassphraseOptions, rng: &mut R) -> String {
     let mut words: Vec<String> = Vec::with_capacity(opts.word_count);
 
     for _ in 0..opts.word_count {
@@ -498,33 +558,33 @@ pub fn generate_passphrase(opts: &PassphraseOptions, rng: &mut Rng) -> String {
     let mut result = words.join(&opts.separator);
 
     if opts.add_number {
-        let digit = rng.next_usize(10);
+        let digit = rng.below_usize(10);
         result.push_str(&digit.to_string());
     }
     if opts.add_symbol {
         let sym_chars: Vec<char> = SYMBOLS.chars().collect();
-        result.push(rng.pick_char(&sym_chars));
+        result.push(pick_char(rng, &sym_chars));
     }
 
     result
 }
 
 /// Generate a PIN.
-pub fn generate_pin(length: usize, rng: &mut Rng) -> String {
+pub fn generate_pin<R: RandomSource>(length: usize, rng: &mut R) -> String {
     let digits: Vec<char> = DIGITS.chars().collect();
-    (0..length).map(|_| rng.pick_char(&digits)).collect()
+    (0..length).map(|_| pick_char(rng, &digits)).collect()
 }
 
 /// Generate a pronounceable password (alternating consonant-vowel).
-pub fn generate_pronounceable(length: usize, rng: &mut Rng) -> String {
+pub fn generate_pronounceable<R: RandomSource>(length: usize, rng: &mut R) -> String {
     let consonants: Vec<char> = CONSONANTS.chars().collect();
     let vowels: Vec<char> = VOWELS.chars().collect();
     let mut result = String::with_capacity(length);
     for i in 0..length {
         if i % 2 == 0 {
-            result.push(rng.pick_char(&consonants));
+            result.push(pick_char(rng, &consonants));
         } else {
-            result.push(rng.pick_char(&vowels));
+            result.push(pick_char(rng, &vowels));
         }
     }
     result
@@ -1045,12 +1105,44 @@ pub struct PasswordApp {
     pub bulk_results: Vec<String>,
     pub window_width: f32,
     pub window_height: f32,
-    rng: Rng,
+    /// Set when a generation was refused because the kernel CSPRNG was not
+    /// available. Shown in place of the password, so that the refusal is
+    /// visible rather than looking like a button that did nothing.
+    pub last_error: Option<String>,
+    rng: AppRandom,
     timestamp: u64,
 }
 
+/// What the user is told when there is no entropy to generate from.
+pub const NO_ENTROPY_MESSAGE: &str =
+    "Cannot generate: the system random number generator is unavailable";
+
+impl Default for PasswordApp {
+    /// The same thing [`PasswordApp::new`] builds — note that this opens the
+    /// kernel CSPRNG, and yields an app that refuses to generate if it cannot.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PasswordApp {
-    pub fn new(seed: u64) -> Self {
+    /// The application as the user gets it, drawing from the kernel CSPRNG.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_random(AppRandom::from_system())
+    }
+
+    /// A reproducible instance, for tests.
+    ///
+    /// Kept separate from [`new`](Self::new), and named so that no call site
+    /// can reach it by accident, because the defect this replaces was exactly
+    /// a seeded generator standing in for a real one.
+    #[must_use]
+    pub fn with_seed(seed: u64) -> Self {
+        Self::with_random(AppRandom::seeded(seed))
+    }
+
+    fn with_random(rng: AppRandom) -> Self {
         Self {
             password_opts: PasswordOptions::default(),
             passphrase_opts: PassphraseOptions::default(),
@@ -1065,7 +1157,8 @@ impl PasswordApp {
             bulk_results: Vec::new(),
             window_width: 1100.0,
             window_height: 700.0,
-            rng: Rng::new(seed),
+            last_error: None,
+            rng,
             timestamp: 1000,
         }
     }
@@ -1075,77 +1168,92 @@ impl PasswordApp {
         self.timestamp
     }
 
-    /// Generate a new password.
-    pub fn gen_password(&mut self) {
-        let pw = generate_password(&self.password_opts, &mut self.rng);
-        let analysis = analyze_password(&pw);
+    /// Record a freshly-generated secret as the current one.
+    fn record(&mut self, secret: String, kind: &str) {
+        let analysis = analyze_password(&secret);
         let ts = self.tick();
         self.history.push(HistoryEntry {
-            password: pw.clone(),
+            password: secret.clone(),
             strength: analysis.rating,
             entropy: analysis.entropy_bits,
-            gen_type: "Password".to_owned(),
+            gen_type: kind.to_owned(),
             timestamp: ts,
         });
         self.current_analysis = Some(analysis);
-        self.current_password = pw;
+        self.current_password = secret;
+        self.last_error = None;
+    }
+
+    /// Report that a generation was refused for want of entropy.
+    ///
+    /// Nothing at all is recorded — no history entry, no analysis — and any
+    /// previously shown password is cleared, so there is no way to mistake a
+    /// stale value for the one the button was just pressed for.
+    fn refuse(&mut self) {
+        self.current_password.clear();
+        self.current_analysis = None;
+        self.last_error = Some(NO_ENTROPY_MESSAGE.to_owned());
+    }
+
+    /// Generate a new password.
+    pub fn gen_password(&mut self) {
+        match self
+            .rng
+            .secret(|rng| generate_password(&self.password_opts, rng))
+        {
+            Some(pw) => self.record(pw, "Password"),
+            None => self.refuse(),
+        }
     }
 
     /// Generate a new passphrase.
     pub fn gen_passphrase(&mut self) {
-        let pp = generate_passphrase(&self.passphrase_opts, &mut self.rng);
-        let analysis = analyze_password(&pp);
-        let ts = self.tick();
-        self.history.push(HistoryEntry {
-            password: pp.clone(),
-            strength: analysis.rating,
-            entropy: analysis.entropy_bits,
-            gen_type: "Passphrase".to_owned(),
-            timestamp: ts,
-        });
-        self.current_analysis = Some(analysis);
-        self.current_password = pp;
+        match self
+            .rng
+            .secret(|rng| generate_passphrase(&self.passphrase_opts, rng))
+        {
+            Some(pp) => self.record(pp, "Passphrase"),
+            None => self.refuse(),
+        }
     }
 
     /// Generate a PIN.
     pub fn gen_pin(&mut self) {
-        let pin = generate_pin(self.pin_length, &mut self.rng);
-        let analysis = analyze_password(&pin);
-        let ts = self.tick();
-        self.history.push(HistoryEntry {
-            password: pin.clone(),
-            strength: analysis.rating,
-            entropy: analysis.entropy_bits,
-            gen_type: "PIN".to_owned(),
-            timestamp: ts,
-        });
-        self.current_analysis = Some(analysis);
-        self.current_password = pin;
+        match self.rng.secret(|rng| generate_pin(self.pin_length, rng)) {
+            Some(pin) => self.record(pin, "PIN"),
+            None => self.refuse(),
+        }
     }
 
     /// Generate a pronounceable password.
     pub fn gen_pronounceable(&mut self) {
-        let pw = generate_pronounceable(self.password_opts.length, &mut self.rng);
-        let analysis = analyze_password(&pw);
-        let ts = self.tick();
-        self.history.push(HistoryEntry {
-            password: pw.clone(),
-            strength: analysis.rating,
-            entropy: analysis.entropy_bits,
-            gen_type: "Pronounceable".to_owned(),
-            timestamp: ts,
-        });
-        self.current_analysis = Some(analysis);
-        self.current_password = pw;
+        match self
+            .rng
+            .secret(|rng| generate_pronounceable(self.password_opts.length, rng))
+        {
+            Some(pw) => self.record(pw, "Pronounceable"),
+            None => self.refuse(),
+        }
     }
 
     /// Bulk generate passwords.
     pub fn gen_bulk(&mut self) {
         self.bulk_results.clear();
         for _ in 0..self.bulk_count {
-            let pw = generate_password(&self.password_opts, &mut self.rng);
+            let Some(pw) = self
+                .rng
+                .secret(|rng| generate_password(&self.password_opts, rng))
+            else {
+                // Entropy ran out part-way through the batch. Throw away what
+                // was produced rather than return a short list the user has no
+                // way of telling is short.
+                self.bulk_results.clear();
+                self.refuse();
+                return;
+            };
             self.bulk_results.push(pw);
         }
+        self.last_error = None;
     }
 
     /// Analyze a password from the analyzer input.
@@ -1361,15 +1469,13 @@ impl PasswordApp {
             color: SURFACE0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-        let pw_display = if self.current_password.is_empty() {
-            "Click Generate to create a password".to_owned()
-        } else {
-            self.current_password.clone()
-        };
-        let pw_color = if self.current_password.is_empty() {
-            OVERLAY0
-        } else {
-            TEXT
+        // A refusal takes this slot: the user pressed Generate, so the answer
+        // to "where is my password" belongs where the password would be, not
+        // in a corner they have no reason to look at.
+        let (pw_display, pw_color) = match (&self.last_error, self.current_password.is_empty()) {
+            (Some(message), _) => (message.clone(), RED),
+            (None, true) => ("Click Generate to create a password".to_owned(), OVERLAY0),
+            (None, false) => (self.current_password.clone(), TEXT),
         };
         cmds.push(RenderCommand::Text {
             x: lx + 8.0,
@@ -1779,7 +1885,7 @@ impl PasswordApp {
 // ============================================================================
 
 fn main() {
-    let mut app = PasswordApp::new(42);
+    let mut app = PasswordApp::new();
     app.gen_password();
     app.gen_passphrase();
     app.gen_pin();
@@ -1855,36 +1961,11 @@ mod tests {
         }
     }
 
-    // --- RNG tests ---
-
-    #[test]
-    fn test_rng_deterministic() {
-        let mut r1 = Rng::new(42);
-        let mut r2 = Rng::new(42);
-        assert_eq!(r1.next_u64(), r2.next_u64());
-        assert_eq!(r1.next_u64(), r2.next_u64());
-    }
-
-    #[test]
-    fn test_rng_bounded() {
-        let mut rng = Rng::new(123);
-        for _ in 0..100 {
-            let v = rng.next_usize(10);
-            assert!(v < 10);
-        }
-    }
-
-    #[test]
-    fn test_rng_zero_bound() {
-        let mut rng = Rng::new(1);
-        assert_eq!(rng.next_usize(0), 0);
-    }
-
     // --- Password generation ---
 
     #[test]
     fn test_generate_password_length() {
-        let mut rng = Rng::new(1);
+        let mut rng = SeededRng::new(1);
         let opts = PasswordOptions {
             length: 20,
             ..PasswordOptions::default()
@@ -1895,7 +1976,7 @@ mod tests {
 
     #[test]
     fn test_generate_password_includes_classes() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let opts = PasswordOptions {
             length: 20,
             must_include_each_class: true,
@@ -1909,7 +1990,7 @@ mod tests {
 
     #[test]
     fn test_generate_password_no_symbols() {
-        let mut rng = Rng::new(1);
+        let mut rng = SeededRng::new(1);
         let opts = PasswordOptions {
             length: 50,
             use_symbols: false,
@@ -1922,7 +2003,7 @@ mod tests {
 
     #[test]
     fn test_generate_password_empty_pool() {
-        let mut rng = Rng::new(1);
+        let mut rng = SeededRng::new(1);
         let opts = PasswordOptions {
             length: 10,
             use_lowercase: false,
@@ -1937,7 +2018,7 @@ mod tests {
 
     #[test]
     fn test_generate_password_zero_length() {
-        let mut rng = Rng::new(1);
+        let mut rng = SeededRng::new(1);
         let opts = PasswordOptions {
             length: 0,
             ..PasswordOptions::default()
@@ -1950,7 +2031,7 @@ mod tests {
 
     #[test]
     fn test_generate_passphrase() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let opts = PassphraseOptions::default();
         let pp = generate_passphrase(&opts, &mut rng);
         assert!(!pp.is_empty());
@@ -1960,7 +2041,7 @@ mod tests {
 
     #[test]
     fn test_passphrase_word_count() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let opts = PassphraseOptions {
             word_count: 6,
             capitalize: false,
@@ -1977,7 +2058,7 @@ mod tests {
 
     #[test]
     fn test_generate_pin() {
-        let mut rng = Rng::new(1);
+        let mut rng = SeededRng::new(1);
         let pin = generate_pin(6, &mut rng);
         assert_eq!(pin.len(), 6);
         assert!(pin.chars().all(|c| c.is_ascii_digit()));
@@ -1987,7 +2068,7 @@ mod tests {
 
     #[test]
     fn test_generate_pronounceable() {
-        let mut rng = Rng::new(1);
+        let mut rng = SeededRng::new(1);
         let pw = generate_pronounceable(10, &mut rng);
         assert_eq!(pw.len(), 10);
         // Alternating consonant-vowel pattern
@@ -2158,7 +2239,7 @@ mod tests {
 
     #[test]
     fn test_app_gen_password() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         app.gen_password();
         assert!(!app.current_password.is_empty());
         assert!(app.current_analysis.is_some());
@@ -2167,7 +2248,7 @@ mod tests {
 
     #[test]
     fn test_app_gen_passphrase() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         app.gen_passphrase();
         assert!(!app.current_password.is_empty());
         assert!(app.current_password.contains('-'));
@@ -2175,7 +2256,7 @@ mod tests {
 
     #[test]
     fn test_app_gen_pin() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         app.pin_length = 4;
         app.gen_pin();
         assert_eq!(app.current_password.len(), 4);
@@ -2183,14 +2264,14 @@ mod tests {
 
     #[test]
     fn test_app_gen_pronounceable() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         app.gen_pronounceable();
         assert!(!app.current_password.is_empty());
     }
 
     #[test]
     fn test_app_bulk_generate() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         app.bulk_count = 5;
         app.gen_bulk();
         assert_eq!(app.bulk_results.len(), 5);
@@ -2198,7 +2279,7 @@ mod tests {
 
     #[test]
     fn test_app_clear_history() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         app.gen_password();
         app.gen_passphrase();
         assert_eq!(app.history.len(), 2);
@@ -2208,7 +2289,7 @@ mod tests {
 
     #[test]
     fn test_app_export_history() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         app.gen_password();
         let export = app.export_history();
         assert!(export.contains("Password Generation History"));
@@ -2216,7 +2297,7 @@ mod tests {
 
     #[test]
     fn test_app_render() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         app.gen_password();
         let cmds = app.render(1100.0, 700.0);
         assert!(!cmds.is_empty());
@@ -2247,7 +2328,7 @@ mod tests {
     /// stop at the panel's edge rather than drawing off the bottom of it.
     #[test]
     fn the_pattern_list_stays_inside_its_panel() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         // 40 runs of three identical characters: 40 detected patterns.
         let mut adversarial = String::new();
         for n in 0..40_u8 {
@@ -2290,7 +2371,7 @@ mod tests {
     /// When they all fit, no marker appears and none are dropped.
     #[test]
     fn a_short_pattern_list_is_shown_whole() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         app.active_tab = ActiveTab::Analyzer;
         app.set_analyzer_input("aaa123qwerty");
         app.analyze_input();
@@ -2314,7 +2395,7 @@ mod tests {
     /// The history list is capped, and says how many entries it is not showing.
     #[test]
     fn a_long_history_says_how_much_it_is_not_showing() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         for _ in 0..40 {
             app.gen_password();
         }
@@ -2340,7 +2421,7 @@ mod tests {
     /// clipped password is never mistaken for the whole one.
     #[test]
     fn a_long_history_password_is_marked_where_it_is_cut() {
-        let mut app = PasswordApp::new(42);
+        let mut app = PasswordApp::with_seed(42);
         app.gen_password();
         if let Some(entry) = app.history.first_mut() {
             entry.password = "W".repeat(200);
@@ -2371,6 +2452,118 @@ mod tests {
         assert!(StrengthRating::Weak < StrengthRating::Fair);
         assert!(StrengthRating::Fair < StrengthRating::Strong);
         assert!(StrengthRating::Strong < StrengthRating::VeryStrong);
+    }
+
+    // --- Where the randomness comes from ---
+
+    /// The defect this replaced: `main` built the app from the constant seed
+    /// `42`, so every user on every machine got the same passwords, PINs and
+    /// passphrases, in the same order, from first launch onwards.
+    ///
+    /// Two independently-opened apps must therefore never agree. Where there
+    /// is no kernel CSPRNG to open — the host test toolchain — they must
+    /// agree only in producing nothing at all, which is the other half of the
+    /// same property: never a shared *password*.
+    #[test]
+    fn two_freshly_opened_apps_never_generate_the_same_password() {
+        let mut first = PasswordApp::new();
+        let mut second = PasswordApp::new();
+        first.gen_password();
+        second.gen_password();
+
+        if first.last_error.is_some() {
+            assert_eq!(second.last_error, first.last_error);
+            assert!(first.current_password.is_empty());
+            assert!(first.history.is_empty(), "a refusal records nothing");
+            return;
+        }
+        assert_ne!(first.current_password, second.current_password);
+    }
+
+    /// Every generator must fail closed. A password the user believes is
+    /// random and is not is worse than no password at all, so the button
+    /// produces an explanation rather than a weak secret.
+    #[test]
+    fn every_generator_refuses_when_there_is_no_entropy() {
+        /// One of the app's Generate buttons, named for the failure message.
+        type Generator = (&'static str, fn(&mut PasswordApp));
+
+        let generators: [Generator; 4] = [
+            ("password", PasswordApp::gen_password),
+            ("passphrase", PasswordApp::gen_passphrase),
+            ("pin", PasswordApp::gen_pin),
+            ("pronounceable", PasswordApp::gen_pronounceable),
+        ];
+        for (name, generate) in generators {
+            let mut app = PasswordApp::with_random(AppRandom::Unavailable);
+            generate(&mut app);
+            assert!(app.current_password.is_empty(), "{name} produced a secret");
+            assert!(
+                app.current_analysis.is_none(),
+                "{name} recorded an analysis"
+            );
+            assert!(app.history.is_empty(), "{name} recorded history");
+            assert_eq!(app.last_error.as_deref(), Some(NO_ENTROPY_MESSAGE));
+        }
+    }
+
+    #[test]
+    fn a_bulk_run_with_no_entropy_yields_an_empty_list_not_a_short_one() {
+        let mut app = PasswordApp::with_random(AppRandom::Unavailable);
+        app.bulk_count = 10;
+        app.gen_bulk();
+        assert!(app.bulk_results.is_empty());
+        assert_eq!(app.last_error.as_deref(), Some(NO_ENTROPY_MESSAGE));
+    }
+
+    /// A refusal must not leave the previous password on screen, or the user
+    /// reads a stale secret as the one they just asked for.
+    #[test]
+    fn a_refusal_clears_the_password_that_was_showing() {
+        let mut app = PasswordApp::with_seed(42);
+        app.gen_password();
+        assert!(!app.current_password.is_empty());
+
+        app.rng = AppRandom::Unavailable;
+        app.gen_password();
+        assert!(app.current_password.is_empty());
+        assert!(app.current_analysis.is_none());
+        assert_eq!(app.last_error.as_deref(), Some(NO_ENTROPY_MESSAGE));
+    }
+
+    /// The refusal goes where the password would have gone, so it is seen.
+    #[test]
+    fn the_refusal_is_rendered_in_place_of_the_password() {
+        let mut app = PasswordApp::with_random(AppRandom::Unavailable);
+        app.gen_password();
+        let shown = app.render(1100.0, 700.0).into_iter().any(|cmd| {
+            matches!(cmd, RenderCommand::Text { ref text, color, .. }
+                if text == NO_ENTROPY_MESSAGE && color == RED)
+        });
+        assert!(
+            shown,
+            "the refusal must be drawn where the password would be"
+        );
+    }
+
+    /// A successful generation must clear a refusal left over from an earlier
+    /// one, or the message outlives the condition it describes.
+    #[test]
+    fn a_successful_generation_clears_an_earlier_refusal() {
+        let mut app = PasswordApp::with_random(AppRandom::Unavailable);
+        app.gen_password();
+        assert!(app.last_error.is_some());
+
+        app.rng = AppRandom::seeded(7);
+        app.gen_password();
+        assert!(app.last_error.is_none());
+        assert!(!app.current_password.is_empty());
+    }
+
+    #[test]
+    fn an_unavailable_source_is_never_trustworthy() {
+        assert!(!AppRandom::Unavailable.is_trustworthy());
+        assert!(AppRandom::seeded(1).is_trustworthy());
     }
 
     #[test]

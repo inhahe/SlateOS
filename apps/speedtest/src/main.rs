@@ -21,11 +21,21 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::fold;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
 use std::collections::VecDeque;
 use std::f32::consts::PI;
+use std::num::NonZeroU64;
+
+/// Seed used when the system has no entropy to offer.
+///
+/// A simulated speed test is novelty randomness, not a secret, so losing
+/// entropy must not stop the app from running. The constant is per-crate
+/// ("SPEEDTST") so that two programs falling back on the same boot do not
+/// then agree with each other.
+const FALLBACK_SEED: u64 = 0x5350_4545_4454_5354;
 
 // ============================================================================
 // Catppuccin Mocha Theme Colors
@@ -381,9 +391,10 @@ impl LatencyTester {
         }
         let mut total_diff = 0.0_f64;
         let mut count = 0u64;
-        for pair in self.samples.windows(2) {
-            // windows(2) always yields slices of length 2
-            let (a, b) = (pair[0], pair[1]);
+        // Destructured rather than indexed: `windows(2)` does only yield pairs,
+        // but a slice pattern says so to the compiler instead of to the reader,
+        // so the guarantee is checked rather than commented.
+        for &[a, b] in self.samples.windows(2).filter_map(|w| <&[f64; 2]>::try_from(w).ok()) {
             total_diff += (b - a).abs();
             count = count.saturating_add(1);
         }
@@ -407,12 +418,23 @@ impl LatencyTester {
     }
 
     /// Populate with simulated latency data for development.
-    pub fn simulate(&mut self, base_ms: f64, variance_ms: f64) {
-        // Simple deterministic simulation using a linear congruential pattern.
-        let mut pseudo = 42u64;
+    ///
+    /// The generator is a parameter rather than a field because a tester is a
+    /// collector of measurements, not an owner of randomness: the app holds one
+    /// stream and hands it to each phase in turn, so the three phases of a run
+    /// are three stretches of one sequence instead of three replays of the same
+    /// short one.
+    ///
+    /// The jitter this produces is now two-sided. It was not: the old code
+    /// built its fraction as `(state >> 33) / u32::MAX`, and a 64-bit value
+    /// shifted right by 33 has only 31 bits left, so dividing it by a 32-bit
+    /// maximum yields a number that never reaches 0.5. `frac - 0.5` was
+    /// therefore always negative and every simulated probe came in *under* the
+    /// base latency -- measured, 0 of 20 samples above 12.5 ms with a stated
+    /// variance of 3.0. The graph showed a line that only ever dipped.
+    pub fn simulate(&mut self, rng: &mut impl RandomSource, base_ms: f64, variance_ms: f64) {
         for _ in 0..self.probe_count {
-            pseudo = pseudo.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let frac = ((pseudo >> 33) as f64) / (u32::MAX as f64);
+            let frac = f64::from(rng.unit_f32());
             let rtt = base_ms + (frac - 0.5) * 2.0 * variance_ms;
             if rtt > 0.0 {
                 self.record_sample(rtt);
@@ -538,13 +560,16 @@ impl ThroughputTester {
     }
 
     /// Populate with simulated throughput data for development.
-    pub fn simulate(&mut self, target_mbps: f64) {
+    ///
+    /// Carried the same one-sided-noise defect as [`LatencyTester::simulate`]
+    /// and for the same reason: 0 of 60 steps drew a fraction at or above 0.5,
+    /// so the simulated line never rose above the target rate, only sagged
+    /// below it. See that method for the arithmetic.
+    pub fn simulate(&mut self, rng: &mut impl RandomSource, target_mbps: f64) {
         let steps = 60u32;
         let dt = self.duration_secs / steps as f32;
-        let mut pseudo = 137u64;
         for i in 0..steps {
-            pseudo = pseudo.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let frac = ((pseudo >> 33) as f64) / (u32::MAX as f64);
+            let frac = f64::from(rng.unit_f32());
             // Ramp up over the first 20% of the test, then fluctuate.
             let ramp = ((i as f64 / (steps as f64 * 0.2)).min(1.0)).powi(2);
             let noise = (frac - 0.5) * 0.2 * target_mbps;
@@ -552,9 +577,13 @@ impl ThroughputTester {
             self.tick(dt, mbps);
             // Simulate some bytes transferred.
             let bytes_this_tick = (mbps * 1_000_000.0 / 8.0 * dt as f64) as u64;
+            // `NonZeroU64` rather than an `if conn_count > 0` guard: the guard
+            // convinces a reader but not the compiler, so the division is still
+            // a division by a value that could be zero. This way the type
+            // carries the fact.
             let conn_count = self.num_connections as usize;
-            if conn_count > 0 {
-                let per_conn = bytes_this_tick / conn_count as u64;
+            if let Some(conns) = NonZeroU64::new(self.num_connections.into()) {
+                let per_conn = bytes_this_tick / conns;
                 for c in 0..conn_count {
                     self.record_bytes(c, per_conn);
                 }
@@ -726,7 +755,7 @@ impl SpeedTestHistory {
 
         out.push_str("--- Individual Results ---\n");
         for (i, r) in self.results.iter().enumerate() {
-            out.push_str(&format!("\nTest #{}\n", i + 1));
+            out.push_str(&format!("\nTest #{}\n", i.saturating_add(1)));
             out.push_str(&r.to_text_report());
         }
 
@@ -825,12 +854,30 @@ pub struct SpeedTestUI {
     start_button_hover: bool,
     /// Whether the export button is hovered.
     export_button_hover: bool,
+    /// The stream the simulated runs are drawn from.
+    ///
+    /// One per app rather than one per tester, and seeded once at startup
+    /// rather than per run, so that pressing Start twice gives two different
+    /// results. Both were hardcoded literals before -- 42 and 137 -- which
+    /// made every simulated speed test on every machine byte-identical.
+    rng: SeededRng,
 }
 
 impl SpeedTestUI {
     /// Create a new speed test UI with default configuration.
     pub fn new() -> Self {
+        Self::with_rng(seeded_from_system(FALLBACK_SEED))
+    }
+
+    /// Create a UI whose simulated runs come from a known seed.
+    #[cfg(test)]
+    fn with_seed(seed: u64) -> Self {
+        Self::with_rng(SeededRng::new(seed))
+    }
+
+    fn with_rng(rng: SeededRng) -> Self {
         Self {
+            rng,
             phase: SpeedTestPhase::Idle,
             config: SpeedTestConfig::default(),
             current_speed_mbps: 0.0,
@@ -885,18 +932,18 @@ impl SpeedTestUI {
         }
 
         // Simulate latency phase.
-        self.latency_tester.simulate(12.5, 3.0);
+        self.latency_tester.simulate(&mut self.rng, 12.5, 3.0);
         self.current_latency_ms = self.latency_tester.avg_rtt().unwrap_or(0.0);
 
         // Simulate download phase.
         self.phase = SpeedTestPhase::Testing(TestKind::Download);
-        self.download_tester.simulate(450.0);
+        self.download_tester.simulate(&mut self.rng, 450.0);
         self.current_speed_mbps = self.download_tester.avg_mbps();
         self.graph_points = self.download_tester.samples().to_vec();
 
         // Simulate upload phase.
         self.phase = SpeedTestPhase::Testing(TestKind::Upload);
-        self.upload_tester.simulate(120.0);
+        self.upload_tester.simulate(&mut self.rng, 120.0);
 
         // Complete.
         self.finalize_test();
@@ -1264,7 +1311,7 @@ impl SpeedTestUI {
         // Draw arc background (dark track).
         for seg in 0..GAUGE_ARC_SEGMENTS {
             let frac0 = seg as f32 / GAUGE_ARC_SEGMENTS as f32;
-            let frac1 = (seg + 1) as f32 / GAUGE_ARC_SEGMENTS as f32;
+            let frac1 = seg.saturating_add(1) as f32 / GAUGE_ARC_SEGMENTS as f32;
             let a0 = gauge_fraction_to_angle(frac0);
             let a1 = gauge_fraction_to_angle(frac1);
             let (ox0, oy0) = point_on_circle(cx, cy, outer_r, a0);
@@ -1285,7 +1332,7 @@ impl SpeedTestUI {
             ((fill_frac * GAUGE_ARC_SEGMENTS as f32).ceil() as usize).min(GAUGE_ARC_SEGMENTS);
         for seg in 0..fill_segments {
             let frac0 = seg as f32 / GAUGE_ARC_SEGMENTS as f32;
-            let frac1 = ((seg + 1) as f32 / GAUGE_ARC_SEGMENTS as f32).min(fill_frac);
+            let frac1 = (seg.saturating_add(1) as f32 / GAUGE_ARC_SEGMENTS as f32).min(fill_frac);
             let a0 = gauge_fraction_to_angle(frac0);
             let a1 = gauge_fraction_to_angle(frac1);
             let (ox0, oy0) = point_on_circle(cx, cy, outer_r - 8.0, a0);
@@ -1413,7 +1460,9 @@ impl SpeedTestUI {
             let x = start_x + i as f32 * 120.0;
 
             let (dot_color, text_color) = match &self.phase {
-                SpeedTestPhase::Testing(active) if active == kind => (icons[i], TEXT_COLOR),
+                SpeedTestPhase::Testing(active) if active == kind => {
+                    (icons.get(i).copied().unwrap_or(TEXT_COLOR), TEXT_COLOR)
+                }
                 SpeedTestPhase::Complete => (GREEN, SUBTEXT0),
                 _ => {
                     // Check if this phase has already been completed in the
@@ -1683,9 +1732,11 @@ impl SpeedTestUI {
         if samples.len() >= 2 {
             let max_time = samples.last().map_or(1.0, |s| s.elapsed_secs.max(0.1));
 
-            for pair in samples.windows(2) {
-                let s0 = &pair[0];
-                let s1 = &pair[1];
+            // Slice pattern rather than indexing: see `avg_jitter`.
+            for [s0, s1] in samples
+                .windows(2)
+                .filter_map(|w| <&[ThroughputSample; 2]>::try_from(w).ok())
+            {
                 let x0 = plot_x + (s0.elapsed_secs / max_time) * plot_w;
                 let y0 = plot_y + plot_h - (s0.mbps / max_speed) as f32 * plot_h;
                 let x1 = plot_x + (s1.elapsed_secs / max_time) * plot_w;
@@ -1921,6 +1972,18 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // --- SpeedTestPhase tests ---
@@ -2100,10 +2163,68 @@ mod tests {
     #[test]
     fn latency_tester_simulate() {
         let mut t = LatencyTester::new(50);
-        t.simulate(10.0, 2.0);
+        t.simulate(&mut SeededRng::new(1), 10.0, 2.0);
         assert!(t.is_complete());
         assert!(t.sample_count() > 0);
         assert!(t.avg_rtt().is_some());
+    }
+
+    /// The jitter has to go both ways.
+    ///
+    /// This is the regression test for the `>> 33` fraction: 31 bits over a
+    /// 32-bit maximum can never reach 0.5, so `frac - 0.5` was always negative
+    /// and every probe landed under the base. Measured on the old code with
+    /// its hardcoded seed of 42: 0 of 20 samples above the base. The floor
+    /// below is a quarter of the sample count in each direction, which a fair
+    /// coin clears with room to spare and a one-sided one cannot clear at all.
+    #[test]
+    fn simulated_latency_varies_both_above_and_below_the_base() {
+        const PROBES: u32 = 40;
+        const BASE: f64 = 12.5;
+        let mut t = LatencyTester::new(PROBES);
+        t.simulate(&mut SeededRng::new(0x51EE_D7E5_7A11_C0DE), BASE, 3.0);
+
+        let above = t.samples.iter().filter(|r| **r > BASE).count();
+        let below = t.samples.iter().filter(|r| **r < BASE).count();
+        assert!(
+            above >= 10 && below >= 10,
+            "jitter is one-sided: {above} probes above {BASE} ms and {below} below, of {PROBES}"
+        );
+    }
+
+    /// Two runs of the same app must not produce the same numbers.
+    ///
+    /// The old simulators restarted from the literals 42 and 137 on every
+    /// call, so pressing Start twice redrew an identical graph -- and so did
+    /// every other machine running the app.
+    #[test]
+    fn two_simulated_runs_of_one_app_differ() {
+        let mut app = SpeedTestUI::with_seed(0xA5A5_1234_5678_9ABC);
+        app.simulate_test();
+        let first: Vec<f64> = app.download_tester.samples().iter().map(|s| s.mbps).collect();
+        app.simulate_test();
+        let second: Vec<f64> = app.download_tester.samples().iter().map(|s| s.mbps).collect();
+        assert_ne!(first, second, "the second run replayed the first");
+    }
+
+    /// A fresh app takes its seed from the system, not from a literal.
+    ///
+    /// Host `cargo test` has no SlateOS entropy source, so `seeded_from_system`
+    /// returns the fallback and two fresh apps agree -- which is exactly what a
+    /// hardcoded seed would also do. The test therefore asserts *which* seed:
+    /// equal to a run from `FALLBACK_SEED`, and unequal to one from any other
+    /// literal. Gated off Unix, where the host does have entropy and a fresh
+    /// app is genuinely unpredictable.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_fresh_app_is_seeded_by_the_system_and_not_by_a_literal() {
+        fn first_run(mut app: SpeedTestUI) -> Vec<f64> {
+            app.simulate_test();
+            app.download_tester.samples().iter().map(|s| s.mbps).collect()
+        }
+        let fresh = first_run(SpeedTestUI::new());
+        assert_eq!(fresh, first_run(SpeedTestUI::with_seed(FALLBACK_SEED)));
+        assert_ne!(fresh, first_run(SpeedTestUI::with_seed(42)));
     }
 
     #[test]
@@ -2173,10 +2294,33 @@ mod tests {
     #[test]
     fn throughput_tester_simulate() {
         let mut t = ThroughputTester::new(4, 10.0);
-        t.simulate(500.0);
+        t.simulate(&mut SeededRng::new(2), 500.0);
         assert!(t.is_complete());
         assert!(t.avg_mbps() > 0.0);
         assert!(t.total_bytes() > 0);
+    }
+
+    /// The throughput line has to overshoot the target sometimes.
+    ///
+    /// Same defect, same regression test as
+    /// `simulated_latency_varies_both_above_and_below_the_base`: measured on
+    /// the old code, 0 of 60 steps drew a fraction at or above 0.5, so the
+    /// simulated rate never once exceeded the target. Only the steps after the
+    /// 20% ramp are examined -- during the ramp the rate is legitimately below
+    /// target no matter which way the noise goes.
+    #[test]
+    fn simulated_throughput_overshoots_the_target_sometimes() {
+        const TARGET: f64 = 500.0;
+        let mut t = ThroughputTester::new(4, 10.0);
+        t.simulate(&mut SeededRng::new(0x7B0E_4C11_9D2F_A063), TARGET);
+        let after_ramp: Vec<f64> = t.samples().iter().skip(12).map(|s| s.mbps).collect();
+        let above = after_ramp.iter().filter(|m| **m > TARGET).count();
+        let below = after_ramp.iter().filter(|m| **m < TARGET).count();
+        assert!(
+            above >= 8 && below >= 8,
+            "noise is one-sided: {above} of {} steps above {TARGET} Mbps, {below} below",
+            after_ramp.len()
+        );
     }
 
     #[test]

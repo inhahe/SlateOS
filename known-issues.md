@@ -36243,3 +36243,119 @@ overlay and layout picker appear during drags), which is a larger change than
 the correctness fix it would be riding on, and wants to land as its own commit
 with its own tests. §467 fixes what `snap.rs` *does* on the grounds that the
 cheapest moment for two implementations to agree is before either is wired.
+
+---
+
+## C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC (lane C, 2026-08-18) — PARTIALLY FIXED
+
+**Where:** `apps/calendar` (**fixed**), `apps/reminders`, `apps/habits`,
+`apps/contacts`, `apps/rssreader`, `apps/systray` (**open**), against
+`gui/toolkit/src/date.rs`.
+
+`guitk::date` is the shared civil-date module: `Date`, `Weekday`, `from_ymd`,
+`add_days`, `add_months`, `days_until`, `day_of_year`, `iso_week`,
+`is_leap_year`, `days_in_month`, `month_grid`. **Six apps computed the same
+things themselves instead, and none of the six referenced it.** These are not
+stylistic duplicates; they are six independently-written implementations of
+arithmetic that has exactly one right answer, so they can and do disagree —
+with the shared module and with each other.
+
+### The measured damage in `apps/calendar`
+
+Replicating all three of the calendar's own formulas over every day from
+1900-01-01 to 2100-01-01 (73 049 days) and comparing against the real
+definitions:
+
+| Calculation | Method it used | Mismatches |
+|---|---|---|
+| Weekday | hand-written Zeller's congruence | **0** of 73 049 |
+| Day difference | its own Julian day number, kept *separately* from Zeller | **0** of 73 049 |
+| ISO week number | `day_of_year / 7 + 1`, offset by 1 January's weekday, `.min(53)` | **28 144 of 73 049 — 38.5 %** |
+
+The weekday and difference formulas were correct over the tested range (both
+break below year 1, where `%`/`/` truncate toward zero rather than flooring,
+and nothing stopped a caller constructing such a date). The week number was
+wrong on well over a third of all days, typically by one week.
+
+It could not have been right. ISO week 1 is *the week containing the year's
+first Thursday*, which is frequently not the week containing 1 January — 2027
+begins in week 53 of 2026; 2024 ends in week 1 of 2025. A formula that starts
+counting at 1 January cannot express that, whatever constant is added to it.
+Its own comment said "simple approximation"; nothing said the approximation
+was visible to the user, which it was — the week and month views draw it.
+
+### Why the green suite could not see it
+
+The **only** test covering `week_number` was:
+
+```rust
+#[test]
+fn test_week_number() {
+    let d = Date { year: 2024, month: 1, day: 8 };
+    let wn = d.week_number();
+    assert!((1..=53).contains(&wn));
+}
+```
+
+The implementation ended in `week.min(53)`. It could not return a value
+outside `1..=53` whatever it computed, so the assertion restated the
+implementation's own clamp rather than any requirement a caller has. This is
+the same failure shape as `C-THE-SNAP-SUBSYSTEM-TILED-THE-SCREEN-INSTEAD-OF-THE-WORK-AREA`
+and as the `credmanager`/`lockscreen` hash entries: **a green suite that
+asserts the properties an implementation happens to have, rather than the ones
+its caller depends on.** A test whose assertion the code satisfies by
+construction cannot fail, and a test that cannot fail is not a test.
+
+### What was fixed
+
+`apps/calendar/src/main.rs` now keeps its `Date { year, month, day }` struct —
+75 field accesses and 69 struct literals depend on the shape — and routes every
+*calculation* through `guitk::date` via a private `civil()`/`from_civil()`
+bridge. Deleted: the Zeller congruence, the separate Julian day number
+(`to_day_number`, removed outright), the local leap rule, the month-stepping
+`while` loops in `add_days`, and the week-number approximation.
+
+Two behaviour changes came with it, both improvements, both deliberate:
+
+- `days_in_month`/`month_name`/`month_short` **clamp** an out-of-range month
+  instead of returning `0`/`"Unknown"`/`"???"`. A `0` from `days_in_month` was
+  a live loop-termination hazard.
+- `week_number` returns the real ISO week, and a new `iso_week() -> (i32, u32)`
+  exposes the week-numbering *year* beside it, because a week number without
+  its year is ambiguous at exactly the boundary where it is most likely to be
+  read wrong.
+
+The replacement tests are `week_numbers_match_the_iso_standards_worked_examples`
+(ten cases, every one chosen so week 1 is *not* the week containing 1 January)
+and `a_week_number_is_constant_across_its_own_monday_to_sunday` (an 800-day
+walk comparing each date against the Monday of its own week). Both were
+verified by reintroduction: ten defect variants were restored one at a time
+and each failed a test that named it. The constancy test initially caught
+*nothing* — it exercised only the new `iso_week()` and never `week_number()`,
+the accessor the views actually draw — so it now asserts over both and over
+their agreement.
+
+### What is still open
+
+Five apps still carry their own, in five mutually incompatible shapes:
+
+| App | What it has | Notes |
+|---|---|---|
+| `apps/reminders` | `day_of_week`, `day_of_week_name`, `day_of_week_short`, `is_leap_year`, `days_in_month`, `month_name` | same shape as the calendar's was; the closest to a mechanical rewire |
+| `apps/habits` | `day_of_week`, `day_of_week_short`, `is_leap_year`, `days_in_month` on `i32`/`u32` | |
+| `apps/contacts` | `is_leap_year(u16)`, `days_in_month(u16, u8) -> Option<u8>`, `day_of_year(u8, u8)` | `u16` years; a `day_of_year` that takes no year, so it cannot be leap-correct |
+| `apps/rssreader` | `is_leap_year(u64)`, `days_in_month(month, leap)`, `days_from_civil` | `u64` years, and `days_in_month` takes the leap flag as a *parameter*, so a caller can pass the wrong one |
+| `apps/systray` | `days_in_month(&self) -> u8` | |
+
+**The proper fix** is the same bridge the calendar now uses: keep each app's
+own date struct where its field accesses are load-bearing, and delegate every
+calculation to `guitk::date`, converting integer widths at the boundary. Do
+them one at a time, each with its own reintroduction check — the calendar's
+week-number bug shows that "the tests still pass" says nothing here, because
+the tests were written against the implementation.
+
+**Until then**, treat any date arithmetic in those five as unverified. None of
+them computes a week number, which is where the calendar's real damage was, so
+none is known to be *wrong* today — but none is known to be right either, and
+`rssreader`'s leap-flag parameter and `contacts`' year-less `day_of_year` are
+both shapes that make a wrong answer reachable from a correct call site.

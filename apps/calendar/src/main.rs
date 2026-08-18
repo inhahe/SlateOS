@@ -4,6 +4,13 @@
 //! categories, reminders, ICS import/export, and a mini-calendar sidebar.
 
 use guitk::color::Color;
+// The shared civil-date arithmetic. This app used to carry its own: a Zeller's
+// congruence for the weekday, a *separate* Julian day number for differences,
+// its own leap rule, and an ISO week number its own comment admitted was "a
+// simple approximation". The approximation disagreed with the real ISO week on
+// 38.5% of the days between 1900 and 2100. See `known-issues.md`
+// C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC.
+use guitk::date::{self, Weekday};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -56,6 +63,22 @@ pub struct Date {
 }
 
 impl Date {
+    /// This date as a [`guitk::date::Date`], the one civil-date implementation.
+    ///
+    /// The app keeps its own `{year, month, day}` struct because a hundred and
+    /// forty call sites read those fields directly, but every *calculation*
+    /// goes through here and back. Two representations of a date are only a
+    /// hazard when they are two implementations of the arithmetic as well.
+    fn civil(self) -> date::Date {
+        date::Date::from_ymd(self.year, self.month, self.day)
+    }
+
+    /// The inverse of [`civil`](Self::civil).
+    fn from_civil(d: date::Date) -> Self {
+        let (year, month, day) = d.ymd();
+        Self { year, month, day }
+    }
+
     pub fn new(year: i32, month: u32, day: u32) -> Option<Self> {
         if !(1..=12).contains(&month) {
             return None;
@@ -67,47 +90,29 @@ impl Date {
         Some(Self { year, month, day })
     }
 
-    /// Day of week: 0=Sunday, 1=Monday, ..., 6=Saturday (Zeller's congruence).
+    /// The weekday.
+    pub fn weekday(self) -> Weekday {
+        self.civil().weekday()
+    }
+
+    /// Day of week: 0=Sunday, 1=Monday, ..., 6=Saturday.
+    ///
+    /// Was a hand-written Zeller's congruence. Zeller is correct for years
+    /// ≥ 1 and wrong below that — `y % 100` and `y / 100` truncate toward
+    /// zero in Rust, which is not the flooring the formula assumes — and
+    /// nothing stopped a caller building a year 0. It also gave this struct a
+    /// *second* day-numbering scheme beside `to_day_number`'s Julian one, two
+    /// unrelated formulas that had to agree with each other by coincidence.
     pub fn day_of_week(self) -> u32 {
-        let mut y = self.year;
-        let mut m = self.month as i32;
-        if m < 3 {
-            m += 12;
-            y -= 1;
-        }
-        let q = self.day as i32;
-        let k = y % 100;
-        let j = y / 100;
-        let h = (q + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
-        // Zeller gives 0=Saturday, 1=Sunday, etc. Convert to 0=Sunday
-        
-        ((h + 6) % 7) as u32
+        u32::try_from(self.weekday().index()).unwrap_or(0)
     }
 
     pub fn day_of_week_name(self) -> &'static str {
-        match self.day_of_week() {
-            0 => "Sunday",
-            1 => "Monday",
-            2 => "Tuesday",
-            3 => "Wednesday",
-            4 => "Thursday",
-            5 => "Friday",
-            6 => "Saturday",
-            _ => "Unknown",
-        }
+        self.weekday().name()
     }
 
     pub fn day_of_week_short(self) -> &'static str {
-        match self.day_of_week() {
-            0 => "Sun",
-            1 => "Mon",
-            2 => "Tue",
-            3 => "Wed",
-            4 => "Thu",
-            5 => "Fri",
-            6 => "Sat",
-            _ => "???",
-        }
+        self.weekday().short_name()
     }
 
     pub fn month_name(self) -> &'static str {
@@ -118,28 +123,34 @@ impl Date {
         month_short(self.month)
     }
 
-    /// ISO week number (1-53).
+    /// The ISO 8601 week number, 1..=53.
+    ///
+    /// This was `day_of_year / 7 + 1`, adjusted by the weekday of 1 January
+    /// and clamped to 53 — described in its own comment as "a simple
+    /// approximation", which is what it was. Measured against the real ISO
+    /// week over 1900-01-01..2100-01-01, it was wrong on **28 144 of 73 049
+    /// days — 38.5%**, typically by one week, and the clamp meant it silently
+    /// reported 53 for anything that overshot.
+    ///
+    /// ISO week 1 is the week containing the year's first Thursday, which is
+    /// not in general the week containing 1 January; a formula that starts
+    /// counting at 1 January cannot express that.
     pub fn week_number(self) -> u32 {
-        // Simple approximation: day-of-year / 7 + 1
-        let doy = self.day_of_year();
-        let jan1_dow = Date {
-            year: self.year,
-            month: 1,
-            day: 1,
-        }
-        .day_of_week();
-        // Adjust for weeks starting on Monday
-        let adjusted = doy as i32 + jan1_dow as i32 - 1;
-        let week = (adjusted as u32) / 7 + 1;
-        week.min(53)
+        self.civil().iso_week().1
+    }
+
+    /// The ISO 8601 week-numbering year, which is not always the calendar
+    /// year: 2027-01-01 falls in week 53 of 2026.
+    ///
+    /// A week number without its year is ambiguous at exactly the boundary
+    /// where it is most likely to be wrong, so the pair is available even
+    /// though the current views only draw the number.
+    pub fn iso_week(self) -> (i32, u32) {
+        self.civil().iso_week()
     }
 
     pub fn day_of_year(self) -> u32 {
-        let mut total = 0u32;
-        for m in 1..self.month {
-            total += days_in_month(self.year, m);
-        }
-        total + self.day
+        self.civil().day_of_year()
     }
 
     pub fn is_today(self, today: Date) -> bool {
@@ -152,97 +163,46 @@ impl Date {
     }
 
     /// Add days (positive or negative).
+    ///
+    /// Was a pair of `while` loops that stepped one month at a time, so
+    /// `add_days(3650)` walked a hundred and twenty iterations to move ten
+    /// years, and the backward loop's `if m == 12 { y -= 1 }` was correct only
+    /// because "the new month is December" happens to imply "we just wrapped"
+    /// — a proof that lived in the reader's head. It is now one addition on a
+    /// day number.
     pub fn add_days(self, n: i32) -> Self {
-        let mut y = self.year;
-        let mut m = self.month;
-        let mut d = self.day as i32 + n;
-
-        while d > days_in_month(y, m) as i32 {
-            d -= days_in_month(y, m) as i32;
-            m += 1;
-            if m > 12 {
-                m = 1;
-                y += 1;
-            }
-        }
-        while d < 1 {
-            m = if m == 1 { 12 } else { m - 1 };
-            if m == 12 {
-                y -= 1;
-            }
-            d += days_in_month(y, m) as i32;
-        }
-
-        Self {
-            year: y,
-            month: m,
-            day: d as u32,
-        }
+        Self::from_civil(self.civil().add_days(n))
     }
 
-    /// Next month, same day (clamped to valid).
+    /// Next month, same day, clamped into the target month: 31 January plus a
+    /// month is 28 February. Not reversible, which is inherent to the clamp.
     pub fn next_month(self) -> Self {
-        let (y, m) = if self.month == 12 {
-            (self.year + 1, 1)
-        } else {
-            (self.year, self.month + 1)
-        };
-        let max_d = days_in_month(y, m);
-        Self {
-            year: y,
-            month: m,
-            day: self.day.min(max_d),
-        }
+        Self::from_civil(self.civil().add_months(1))
     }
 
-    /// Previous month, same day (clamped).
+    /// Previous month, same day, clamped as [`next_month`](Self::next_month).
     pub fn prev_month(self) -> Self {
-        let (y, m) = if self.month == 1 {
-            (self.year - 1, 12)
-        } else {
-            (self.year, self.month - 1)
-        };
-        let max_d = days_in_month(y, m);
-        Self {
-            year: y,
-            month: m,
-            day: self.day.min(max_d),
-        }
+        Self::from_civil(self.civil().add_months(-1))
     }
 
+    /// Next year, with 29 February clamped to the 28th in a common year.
     pub fn next_year(self) -> Self {
-        let max_d = days_in_month(self.year + 1, self.month);
-        Self {
-            year: self.year + 1,
-            month: self.month,
-            day: self.day.min(max_d),
-        }
+        Self::from_civil(self.civil().add_years(1))
     }
 
+    /// Previous year, clamped as [`next_year`](Self::next_year).
     pub fn prev_year(self) -> Self {
-        let max_d = days_in_month(self.year - 1, self.month);
-        Self {
-            year: self.year - 1,
-            month: self.month,
-            day: self.day.min(max_d),
-        }
+        Self::from_civil(self.civil().add_years(-1))
     }
 
-    /// Difference in days between two dates (self - other, approximate).
+    /// Difference in days between two dates (`self - other`).
+    ///
+    /// No longer "approximate", and no longer computed from a Julian day
+    /// number that this struct maintained *separately* from the Zeller
+    /// congruence it used for weekdays. Both truncated toward zero on
+    /// negative years, where the formulas need flooring.
     pub fn days_since(self, other: Self) -> i64 {
-        self.to_day_number() - other.to_day_number()
-    }
-
-    fn to_day_number(self) -> i64 {
-        // Simplified Julian day number for comparisons
-        let mut y = self.year as i64;
-        let mut m = self.month as i64;
-        if m <= 2 {
-            y -= 1;
-            m += 12;
-        }
-        let d = self.day as i64;
-        365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + d - 1
+        i64::from(other.civil().days_until(self.civil()))
     }
 
     pub fn format_short(self) -> String {
@@ -341,23 +301,25 @@ impl DateTime {
 // Date helper functions
 // ============================================================================
 
+// These four were each a local copy of a calculation `guitk::date` already
+// owns. They stay as free functions because the app's own call sites read
+// better that way, but they no longer *decide* anything.
+//
+// One behaviour change worth naming: `days_in_month` used to answer **0** for
+// a month outside 1..=12, and `month_name` / `month_short` answered "Unknown"
+// / "???". A zero-length month is not a safer answer than a clamped one — the
+// old `add_days` walked `while d > days_in_month(y, m)`, a loop whose
+// termination depended on the month never leaving range, proved somewhere else
+// entirely. `guitk::date::days_in_month` clamps instead, so the loop that
+// depended on it could not have spun even if the proof had failed. (That loop
+// is gone as well; this is about what the *next* one would inherit.)
+
 pub fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    date::is_leap_year(year)
 }
 
 pub fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            if is_leap_year(year) {
-                29
-            } else {
-                28
-            }
-        }
-        _ => 0,
-    }
+    date::days_in_month(year, month)
 }
 
 pub fn days_in_year(year: i32) -> u32 {
@@ -365,39 +327,11 @@ pub fn days_in_year(year: i32) -> u32 {
 }
 
 pub fn month_name(month: u32) -> &'static str {
-    match month {
-        1 => "January",
-        2 => "February",
-        3 => "March",
-        4 => "April",
-        5 => "May",
-        6 => "June",
-        7 => "July",
-        8 => "August",
-        9 => "September",
-        10 => "October",
-        11 => "November",
-        12 => "December",
-        _ => "Unknown",
-    }
+    date::month_name(month)
 }
 
 pub fn month_short(month: u32) -> &'static str {
-    match month {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        12 => "Dec",
-        _ => "???",
-    }
+    date::month_short_name(month)
 }
 
 /// First day-of-week for a given month (0=Sunday).
@@ -3367,15 +3301,85 @@ mod tests {
     }
 
     // Week number test
+    //
+    // This used to be the whole of it:
+    //
+    //     let wn = Date { year: 2024, month: 1, day: 8 }.week_number();
+    //     assert!((1..=53).contains(&wn));
+    //
+    // and it passed for two years over an implementation that was wrong on
+    // 38.5% of all dates — because the old `week_number` ended in
+    // `week.min(53)` and could not return anything outside 1..=53 whatever it
+    // computed. The assertion restated the implementation's clamp rather than
+    // the caller's requirement, so no arithmetic error could reach it.
     #[test]
-    fn test_week_number() {
-        let d = Date {
-            year: 2024,
-            month: 1,
-            day: 8,
+    fn week_numbers_match_the_iso_standards_worked_examples() {
+        // From ISO 8601 itself and the usual worked examples. Each is a case
+        // where week 1 is *not* the week containing 1 January, which is the
+        // whole content of the rule and the thing a "day-of-year / 7" formula
+        // structurally cannot express.
+        for (y, m, d, want) in [
+            (2026, 12, 31, (2026, 53)),
+            (2027, 1, 1, (2026, 53)), // a Friday: still last year's week 53
+            (2027, 1, 4, (2027, 1)),
+            (2025, 1, 1, (2025, 1)),
+            (2024, 12, 30, (2025, 1)), // a Monday: already next year's week 1
+            (2021, 1, 1, (2020, 53)),
+            (2020, 12, 31, (2020, 53)),
+            (1977, 1, 1, (1976, 53)),
+            (1977, 1, 3, (1977, 1)),
+            (2024, 1, 8, (2024, 2)),
+        ] {
+            let date = Date {
+                year: y,
+                month: m,
+                day: d,
+            };
+            assert_eq!(date.iso_week(), want, "{y}-{m:02}-{d:02}");
+            assert_eq!(date.week_number(), want.1, "{y}-{m:02}-{d:02}");
+        }
+    }
+
+    #[test]
+    fn a_week_number_is_constant_across_its_own_monday_to_sunday() {
+        // The property that makes a week number a week number, and the one the
+        // old formula broke: counting from 1 January means the boundary lands
+        // wherever that day happens to fall, not on a Monday.
+        //
+        // Asserted over `week_number` and not only over `iso_week`, because
+        // `week_number` is what the month and week views actually draw. A
+        // property test that exercises the accessor nobody calls would go
+        // green over a broken one, which is the failure this whole change is
+        // about.
+        let mut date = Date {
+            year: 2023,
+            month: 12,
+            day: 25,
         };
-        let wn = d.week_number();
-        assert!((1..=53).contains(&wn));
+        for _ in 0..800 {
+            // 0..=6 by construction, so the negation below is exact; asserted
+            // rather than papered over with a silent `unwrap_or(0)`, which
+            // would turn an impossible failure into a wrong Monday.
+            let back = date.weekday().days_since(Weekday::Monday);
+            assert!(back <= 6, "{date:?}: {back} days back to Monday");
+            let monday = date.add_days(-(back as i32));
+
+            assert_eq!(
+                date.week_number(),
+                monday.week_number(),
+                "{date:?} disagrees with the Monday of its own week, {monday:?}"
+            );
+            assert_eq!(
+                date.iso_week(),
+                monday.iso_week(),
+                "{date:?} disagrees with the Monday of its own week, {monday:?}"
+            );
+            // The two accessors are separate entry points onto the same fact;
+            // a caller reading one and a caller reading the other must not be
+            // able to disagree.
+            assert_eq!(date.week_number(), date.iso_week().1, "{date:?}");
+            date = date.add_days(1);
+        }
     }
 
     // Event time range label

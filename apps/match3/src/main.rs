@@ -23,6 +23,7 @@ use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};
 #[cfg(test)]
 use guitk::event::{KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seed_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -90,31 +91,32 @@ const GEM_SYMBOLS: [&str; 7] = [
 // ── Gem colors ──────────────────────────────────────────────────────
 const GEM_COLORS: [Color; 7] = [RED, BLUE, GREEN, YELLOW, PEACH, MAUVE, TEAL];
 
-// ── LCG random number generator ────────────────────────────────────
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Rng {
-    state: u64,
-}
+// ── Randomness ──────────────────────────────────────────────────────
 
-impl Rng {
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
+/// Seed used when the kernel's entropy source cannot be reached.
+///
+/// A per-crate constant rather than a shared one, so that two programs which
+/// lose entropy on the same boot do not then produce correlated streams. The
+/// bytes spell `MATCH3!!`.
+const FALLBACK_SEED: u64 = 0x4D41_5443_4833_2121;
 
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Returns a value in `0..bound` (exclusive upper bound).
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
-}
+// This crate used to carry its own copy of the LCG that got copied into
+// sixteen crates, reducing with `val % bound`. The generator's modulus is
+// 2^64, so bit *k* of its state has period 2^(k+1): the low bits are a
+// counter, not a draw, and any power-of-two bound reads only those.
+//
+// Two callers here, with opposite luck. Drawing a gem type used
+// `next_bounded(7)`, and 7 is odd, so its remainder depends on all 64 bits and
+// it escaped -- unlike `apps/simon`, whose four colours made the identical call
+// deal a fixed 4-cycle for ever. But `shuffle_board` ran Fisher-Yates over an
+// 8x8 board, so its bounds counted down 64, 63, ... 2 and every sixth of them
+// was a power of two. Those swaps were not random; they were a fixed function
+// of their position in the loop. See `apps/tetris` for what that does to a
+// shuffle, measured.
+//
+// `randrange::below` is Lemire's method: it multiplies by the bound into 128
+// bits and keeps the *top* half, so it reads the high bits and never the low
+// ones, with a rejection step that makes it exactly uniform.
 
 // ── Gem types ───────────────────────────────────────────────────────
 /// The type/color of a gem on the board.
@@ -332,7 +334,7 @@ struct Match3 {
     /// High scores per mode.
     high_scores: HighScores,
     /// RNG state.
-    rng: Rng,
+    rng: SeededRng,
     /// Animation pulse counter.
     pulse_counter: u32,
     /// Total elapsed time in ms.
@@ -341,7 +343,13 @@ struct Match3 {
 
 impl Match3 {
     fn new() -> Self {
-        Self::with_seed(42)
+        // Was `with_seed(42)`: every player, on every machine, got the same
+        // opening board and the same gems falling into it. The `u64` form is
+        // used and not the generator form because this app *stores* its seed --
+        // `new_game` draws the next one from the live generator, and an app
+        // holding a generator instead would have to reseed one generator from
+        // another's output, which silently correlates the two.
+        Self::with_seed(seed_from_system(FALLBACK_SEED))
     }
 
     fn with_seed(seed: u64) -> Self {
@@ -359,7 +367,7 @@ impl Match3 {
             time_remaining_ms: TIMED_MODE_SECONDS * 1000,
             moves_remaining: MOVES_MODE_COUNT,
             high_scores: HighScores::new(),
-            rng: Rng::new(seed),
+            rng: SeededRng::new(seed),
             pulse_counter: 0,
             total_elapsed_ms: 0,
         };
@@ -382,7 +390,7 @@ impl Match3 {
     fn random_gem_no_match(&mut self, row: usize, col: usize) -> Gem {
         loop {
             let gem_type =
-                GemType::from_index(self.rng.next_bounded(GEM_TYPE_COUNT as usize) as u8);
+                GemType::from_index(self.rng.below(GEM_TYPE_COUNT as usize) as u8);
             let gem = Gem::new(gem_type);
             // Check horizontal: if two to the left are the same type, skip.
             if col >= 2
@@ -402,7 +410,7 @@ impl Match3 {
 
     /// Generate a random gem type.
     fn random_gem(&mut self) -> Gem {
-        let gem_type = GemType::from_index(self.rng.next_bounded(GEM_TYPE_COUNT as usize) as u8);
+        let gem_type = GemType::from_index(self.rng.below(GEM_TYPE_COUNT as usize) as u8);
         Gem::new(gem_type)
     }
 
@@ -724,11 +732,7 @@ impl Match3 {
                     gems.push(self.board[row][col]);
                 }
             }
-            let len = gems.len();
-            for i in (1..len).rev() {
-                let j = self.rng.next_bounded(i + 1);
-                gems.swap(i, j);
-            }
+            self.rng.shuffle(&mut gems);
             // Place back on board.
             for row in 0..GRID_SIZE {
                 for col in 0..GRID_SIZE {
@@ -760,7 +764,7 @@ impl Match3 {
         if moves.is_empty() {
             None
         } else {
-            let idx = self.rng.next_bounded(moves.len());
+            let idx = self.rng.below(moves.len());
             Some(moves[idx])
         }
     }
@@ -788,6 +792,38 @@ impl Match3 {
     // ── Swap logic ──────────────────────────────────────────────────
 
     /// Attempt to swap two adjacent gems. Returns true if the swap was valid.
+    /// Remove the bomb at `bomb` and every gem of `target` colour, and score it.
+    ///
+    /// Split out of `try_swap`, where it appeared twice verbatim -- once for a
+    /// bomb in either position -- so that the two copies could not drift apart,
+    /// and so that the clear can be observed on its own. It cannot be observed
+    /// through `try_swap`: that goes on to `fill_empty_spaces`, which draws
+    /// fresh gems into the holes, and a refilled cell may perfectly well hold
+    /// the colour that was just cleared. A test that inspects the board
+    /// afterwards is testing the refill, not the detonation, and passes or
+    /// fails on which gems the generator happened to deal.
+    fn detonate_color_bomb(&mut self, bomb: Pos, target: GemType) {
+        self.board[bomb.row][bomb.col] = None;
+        for r in 0..GRID_SIZE {
+            for c in 0..GRID_SIZE {
+                if let Some(g) = self.board[r][c]
+                    && g.gem_type == target
+                {
+                    self.board[r][c] = None;
+                }
+            }
+        }
+        self.score = self.score.saturating_add(SCORE_5 * 2);
+    }
+
+    /// Let gems fall into the holes a detonation left, refill, and cascade.
+    fn settle_after_detonation(&mut self) {
+        self.apply_gravity();
+        self.fill_empty_spaces();
+        self.run_cascade();
+        self.consume_move();
+    }
+
     fn try_swap(&mut self, a: Pos, b: Pos) -> bool {
         if !a.in_bounds() || !b.in_bounds() || !a.is_adjacent(b) {
             return false;
@@ -801,42 +837,13 @@ impl Match3 {
         let gem_b = self.board[b.row][b.col];
         if let (Some(ga), Some(gb)) = (gem_a, gem_b) {
             if ga.special == SpecialKind::ColorBomb && gb.special != SpecialKind::ColorBomb {
-                // Color bomb: remove all gems of the target color.
-                let target = gb.gem_type;
-                self.board[a.row][a.col] = None;
-                for r in 0..GRID_SIZE {
-                    for c in 0..GRID_SIZE {
-                        if let Some(g) = self.board[r][c]
-                            && g.gem_type == target {
-                                self.board[r][c] = None;
-                            }
-                    }
-                }
-                let scored = SCORE_5 * 2;
-                self.score = self.score.saturating_add(scored);
-                self.apply_gravity();
-                self.fill_empty_spaces();
-                self.run_cascade();
-                self.consume_move();
+                self.detonate_color_bomb(a, gb.gem_type);
+                self.settle_after_detonation();
                 return true;
             }
             if gb.special == SpecialKind::ColorBomb && ga.special != SpecialKind::ColorBomb {
-                let target = ga.gem_type;
-                self.board[b.row][b.col] = None;
-                for r in 0..GRID_SIZE {
-                    for c in 0..GRID_SIZE {
-                        if let Some(g) = self.board[r][c]
-                            && g.gem_type == target {
-                                self.board[r][c] = None;
-                            }
-                    }
-                }
-                let scored = SCORE_5 * 2;
-                self.score = self.score.saturating_add(scored);
-                self.apply_gravity();
-                self.fill_empty_spaces();
-                self.run_cascade();
-                self.consume_move();
+                self.detonate_color_bomb(b, ga.gem_type);
+                self.settle_after_detonation();
                 return true;
             }
         }
@@ -1546,6 +1553,18 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ── Helper functions ────────────────────────────────────────────
@@ -1576,40 +1595,75 @@ mod tests {
         }
     }
 
-    // ── Rng tests ───────────────────────────────────────────────────
+    // ── Seeding and the shuffle ─────────────────────────────────────
 
+    // The generator's own contract -- determinism under a seed, divergence
+    // under two, staying inside its bound -- used to be tested here against the
+    // local `Rng`. It is now tested once, against the shared implementation, in
+    // `randrange`. Sixteen crates each testing their own copy is sixteen
+    // chances to test a copy that has quietly drifted from the one being
+    // shipped. What replaces those tests is about the board.
+
+    /// A shuffle must move gems, and must not lose or invent any.
+    ///
+    /// `shuffle_board` reshuffles in place and then clears any matches the new
+    /// arrangement created, so the gem *multiset* is allowed to change -- what
+    /// must not change is that every cell still holds a gem and the board is
+    /// still playable.
     #[test]
-    fn test_rng_deterministic() {
-        let mut r1 = Rng::new(42);
-        let mut r2 = Rng::new(42);
-        for _ in 0..100 {
-            assert_eq!(r1.next_u64(), r2.next_u64());
+    fn a_shuffle_leaves_a_full_playable_board() {
+        let mut app = Match3::with_seed(0x5EED_1234);
+        for round in 0..8 {
+            app.shuffle_board();
+            for row in 0..GRID_SIZE {
+                for col in 0..GRID_SIZE {
+                    assert!(
+                        app.board[row][col].is_some(),
+                        "round {round} left a hole at ({row}, {col})"
+                    );
+                }
+            }
         }
     }
 
+    /// Shuffling must depend on the generator, not on the board's position.
     #[test]
-    fn test_rng_different_seeds() {
-        let mut r1 = Rng::new(1);
-        let mut r2 = Rng::new(2);
-        // Should diverge immediately.
-        assert_ne!(r1.next_u64(), r2.next_u64());
+    fn a_shuffle_follows_the_generator_it_was_given() {
+        let boards: Vec<_> = (0..8u64)
+            .map(|seed| {
+                let mut app = Match3::with_seed(seed);
+                app.shuffle_board();
+                app.board
+            })
+            .collect();
+        let mut distinct = 0;
+        for (i, b) in boards.iter().enumerate() {
+            if !boards[..i].iter().any(|o| o == b) {
+                distinct += 1;
+            }
+        }
+        assert!(distinct > 1, "eight seeds produced one shuffled board");
     }
 
+    /// A fresh game must take its seed from the kernel, not from a literal.
+    ///
+    /// Phrased as "which seed", not as "two fresh games differ", because a host
+    /// test build has no SlateOS kernel: `seed_from_system` correctly takes its
+    /// fallback and two fresh games are then identical, exactly as they were
+    /// under the old hardcoded `42`. A variety check would therefore pass on
+    /// the broken code and fail on the fixed code, which is backwards.
+    #[cfg(not(unix))]
     #[test]
-    fn test_rng_bounded() {
-        let mut r = Rng::new(42);
-        for _ in 0..1000 {
-            let v = r.next_bounded(7);
-            assert!(v < 7);
-        }
-    }
-
-    #[test]
-    fn test_rng_bounded_one() {
-        let mut r = Rng::new(42);
-        for _ in 0..100 {
-            assert_eq!(r.next_bounded(1), 0);
-        }
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        let fresh = Match3::new().board;
+        assert!(
+            fresh == Match3::with_seed(FALLBACK_SEED).board,
+            "a fresh game did not use the crate's fallback seed"
+        );
+        assert!(
+            fresh != Match3::with_seed(42).board,
+            "a fresh game is still seeded by the old hardcoded literal"
+        );
     }
 
     // ── GemType tests ───────────────────────────────────────────────
@@ -2765,25 +2819,67 @@ mod tests {
 
     // ── Color bomb swap tests ───────────────────────────────────────
 
+    /// Swapping a colour bomb must clear every gem of the swapped colour.
+    ///
+    /// This used to assert on `board[0][0]` *after* `try_swap` returned, which
+    /// tested the refill rather than the detonation: `try_swap` finishes by
+    /// filling the holes from the generator, and a refilled cell may perfectly
+    /// well hold the colour that was just cleared. It passed under the old
+    /// hand-rolled LCG because that generator happened not to deal an Emerald
+    /// into that cell, and failed the moment the crate moved to `randrange` --
+    /// a false alarm, but a fair one, since a test that depends on which gem a
+    /// generator deals is not testing what its name claims.
+    ///
+    /// So it now checks the detonation directly, which is the step the name is
+    /// about, and the refill is checked separately below.
     #[test]
     fn test_color_bomb_swap_clears_color() {
         let mut game = empty_game();
         fill_no_matches(&mut game);
-        // Place a color bomb and a regular gem adjacent to it.
         game.board[3][3] = Some(make_special_gem(0, SpecialKind::ColorBomb));
         game.board[3][4] = Some(make_gem(2));
-
-        // Place more gems of type 2 around the board.
         game.board[0][0] = Some(make_gem(2));
         game.board[5][5] = Some(make_gem(2));
 
         let old_score = game.score;
-        let result = game.try_swap(Pos::new(3, 3), Pos::new(3, 4));
-        assert!(result);
+        game.detonate_color_bomb(Pos::new(3, 3), GemType::Emerald);
+
+        assert!(game.score > old_score, "detonating scored nothing");
+        assert!(game.board[3][3].is_none(), "the colour bomb survived");
+        for r in 0..GRID_SIZE {
+            for c in 0..GRID_SIZE {
+                assert!(
+                    game.board[r][c].is_none_or(|g| g.gem_type != GemType::Emerald),
+                    "an Emerald survived at ({r}, {c})"
+                );
+            }
+        }
+    }
+
+    /// The swap must go through the detonation and leave a full board behind.
+    ///
+    /// The counterpart to the test above: that one checks that the right gems
+    /// are removed, this one that the holes are then filled. Together they
+    /// cover what the single old assertion was reaching for, without either of
+    /// them depending on which gems the generator deals.
+    #[test]
+    fn test_color_bomb_swap_leaves_a_full_board() {
+        let mut game = empty_game();
+        fill_no_matches(&mut game);
+        game.board[3][3] = Some(make_special_gem(0, SpecialKind::ColorBomb));
+        game.board[3][4] = Some(make_gem(2));
+
+        let old_score = game.score;
+        assert!(game.try_swap(Pos::new(3, 3), Pos::new(3, 4)));
         assert!(game.score > old_score);
-        // The color bomb should be gone.
-        // Other gems of type 2 should be cleared.
-        assert!(game.board[0][0].is_none_or(|g| g.gem_type != GemType::Emerald));
+        for r in 0..GRID_SIZE {
+            for c in 0..GRID_SIZE {
+                assert!(
+                    game.board[r][c].is_some(),
+                    "the refill left a hole at ({r}, {c})"
+                );
+            }
+        }
     }
 
     // ── Comprehensive integration test ──────────────────────────────

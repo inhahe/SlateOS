@@ -5,6 +5,16 @@ edition = "2024"
 description = "SlateOS Disk Imager / ISO Tool — create, write, browse, and verify disk images"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The three checksums this app offers. It used to "support" all three by
+# seeding each one's published initial values and then computing
+# `state[i % 8] = state[i % 8] * 31 + byte` for every one of them, so the
+# algorithm you picked changed the length of the digest string and nothing
+# else. MD5 and SHA-1 are here despite being broken for security because a
+# disk imager's job is to reproduce the checksum a publisher printed, and
+# publishers still print those two.
+md5 = { path = "../../md5" }
+sha1 = { path = "../../sha1" }
+sha2 = { path = "../../sha2" }
 
 [lints]
 workspace = true

@@ -3,3 +3,6 @@ name = "clipboard"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS Clipboard Service — multi-format clipboard with history"
+
+[lints]
+workspace = true

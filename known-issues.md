@@ -31756,6 +31756,125 @@ clearing 1200 warnings in the middle of the transport work would have buried a
 functional change under a formatting one — but it should not wait long, because
 the backlog grows with the crate.
 
+### Correction, 2026-08-17: the "~1200 warnings" figure was wrong, and so was the crate list
+
+Two errors in the original entry, both of which made the job look bigger and
+narrower than it is.
+
+**The count.** `-W clippy::pedantic` on the command line *bypasses the
+workspace's `[workspace.lints.clippy]` table entirely*, including its ~26
+deliberate, documented `allow`s (`doc_markdown`, `format_push_string`,
+`uninlined_format_args`, `single_match_else`, …). So that measurement counted
+warnings the workspace has already decided not to care about — 162
+`doc_markdown` hits, to pick the clearest example, are allowed workspace-wide
+and would never have appeared. **The only honest way to measure this is to add
+`[lints] workspace = true` and build**, which is what the numbers below are.
+The corollary is general: never quote a warning count obtained with `-W` flags
+in a workspace that has a lints table.
+
+**The crate list.** `gui/` has ten crates, not five; the entry's table omitted
+`appearance`, `clipboard`, `credentials`, `desktop` and `notifications`.
+
+**Where it now stands.** Five of ten opt in:
+
+| Crate | `[lints] workspace = true` | Warnings remaining |
+|---|---|---|
+| `gui/appearance` | yes | 0 |
+| `gui/clipboard` | yes | 0 |
+| `gui/compositor` | yes | 0 |
+| `gui/credentials` | yes | 0 |
+| `gui/font` | yes | 0 |
+| `gui/desktop` | no | ~1752 |
+| `gui/toolkit` | no | ~946 |
+| `gui/remote` | no | ~720 |
+| `gui/window` | no | ~660 |
+| `gui/notifications` | no | ~598 |
+
+**What the opt-in has actually found**, which is the reason to keep doing it
+crate by crate rather than by adding `allow`s: every warning family
+investigated so far has contained at least one real defect, not a style
+complaint.
+
+- `gui/clipboard`, `gui/compositor`: logged separately (a negative-spread
+  shadow filling the screen; four security defects).
+- `gui/credentials`: a two-time pad (every encryption reused nonce zero), a
+  key-derivation function that did not stretch, a verifier that made a
+  password guess cost one SHA-256 rather than one unlock, two non-constant-time
+  secret comparisons, a `% bound` modulo reduction in the password generator, a
+  byte/character confusion in the hex decoder, and five copies of a
+  check-then-index whose failure branch was silently wrong. Fixed in
+  `765949194`, `d8ad84f54` and `eb6e77799`.
+
+**One thing the credentials pass changed about the method.** That crate did not
+merely lack the opt-in; it had *its own* lint policy — `#![deny(clippy::all,
+clippy::pedantic)]` plus forty-two `#![allow(...)]` lines — which is worse than
+having none, because it looks compliant. Deleting the private policy outright
+and letting the workspace govern left **eleven** warnings, all fixable, none
+needing an allow: thirty-seven of the forty-two allows were suppressing lints
+that do not fire at all. So for the remaining five crates the first step is
+**delete any inner lint attributes and see what is left**, not translate them.
+
+**Also note** the counts above are pre-fix and will shrink faster than they
+look: 96 of `gui/credentials`'s 97 were in one hand-copied SHA-256, and were
+removed by deleting it rather than by fixing 96 sites (see
+`C-SHA-256-IS-IMPLEMENTED-ELEVEN-TIMES-IN-THIS-TREE`). Expect the same shape
+elsewhere — a large warning count usually means a duplicated *shape*, and the
+cheap fix and the correct fix are the same one.
+
+### Second correction, 2026-08-17: the per-crate counts above are wrong too, and two crates are free
+
+The five figures in the table (`~1752`, `~946`, `~720`, `~660`, `~598`) are
+still not measurements of the crate they name. **`cargo clippy -p X -- <flags>`
+applies those flags to X's *dependencies* as well**, because the flags go to
+the clippy driver through `CLIPPY_ARGS` and the driver applies them to every
+crate it compiles in that invocation. Every one of these crates depends on
+`guitk`, so each figure was mostly a count of `gui/toolkit`'s warnings
+attributed to whichever crate happened to pull it in. That is why the five
+numbers were all the same order of magnitude and all wrong.
+
+The honest measurement filters the JSON diagnostics by the span's file path,
+keeping only those inside the crate's own directory. Doing that:
+
+| Crate | logged above | actually |
+|---|---|---|
+| `gui/desktop` | ~1752 | 1561 |
+| `gui/toolkit` | ~946 | **1488** |
+| `gui/remote` | ~720 | 281 |
+| `gui/notifications` | ~598 | **20** |
+| `gui/window` | ~660 | **0** |
+
+So the job is not five comparable crates. It is two crates that hold 95% of
+the debt (`toolkit` and `desktop`, 3049 between them), one middling one
+(`remote`), and **two that are essentially already done**: `gui/window` is
+clean and needs only the opt-in plus the deletion of its private
+`#![deny(clippy::all)] / #![warn(clippy::pedantic)]` pair, and
+`gui/notifications` has twenty.
+
+The composition is also uniform and worth stating, because it says what the
+work actually is:
+
+| Lint | toolkit | desktop | remote | notifications |
+|---|---|---|---|---|
+| `indexing_slicing` | 772 | 491 | 153 | 11 |
+| `arithmetic_side_effects` | 567 | 785 | 94 | 6 |
+| `unwrap_used` | 52 | 170 | 20 | — |
+| `expect_used` | 35 | 68 | 10 | — |
+| `panic` | 25 | 17 | 4 | 3 |
+| everything else | 37 | 30 | 0 | 0 |
+
+Over 96% of it is the two defensive lints, and — per the note above about
+duplicated shapes — `gui/toolkit`'s 600 worst are concentrated in one file,
+`svg.rs`, whose top repeated source lines are `i += 1;` (74), `*pos += 1;`
+(34) and `while i < tokens.len() && is_number_token(&tokens[i])` (18). That is
+one hand-rolled tokeniser cursor written out several hundred times, not
+several hundred problems. The fix is a cursor type, once.
+
+**Methodological rule, third version.** Measuring clippy against a workspace
+lints table has now been got wrong twice in the same entry. Both times the
+error inflated the number and blurred which code it belonged to. The rule:
+*add `[lints] workspace = true` and build the crate alone*, and if that is not
+possible yet, reproduce the table on the command line **and filter the
+diagnostics by file path**. Never quote a raw total from a `-p` invocation.
 
 ## C-TEXT-WAS-CUT-BY-COUNTING-CHARACTERS-INSTEAD-OF-MEASURING-IT (lane C, 2026-08-17) - **fixed**
 
@@ -32318,3 +32437,473 @@ driver printed the capability mask that contradicted its own constants. Reading
 a value into a log message is not the same as checking it; where a device tells
 you what it accepts, check the request against it rather than printing both and
 trusting the constant.
+
+## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17)
+
+**In short:** the 1-pixel line the compositor draws around a window is drawn
+one pixel higher than the space the layout reserved for it. Nobody sees a
+problem, because the row it lands on is part of the window's drop shadow and
+is repainted anyway. But it means the code that *draws* the frame and the code
+that *measures* the frame disagree by one pixel, and the next person to trust
+the measurement will be wrong by one pixel too.
+
+`Window::frame_insets` returns `(top, side, bottom) = (TITLE_BAR_HEIGHT,
+BORDER_WIDTH, BORDER_WIDTH)`: a border down each side and along the bottom,
+and **no border above the title bar**. Every measurement derives from that —
+`frame_rect`, `outer_rect`, `title_bar_rect`, hit testing, damage tracking.
+
+`Compositor::render_border` (gui/compositor/src/lib.rs) does not. It strokes a
+box whose top edge is `BORDER_WIDTH` above `frame_rect`, so the frame is drawn
+one row taller than it is measured. That row falls inside `outer_rect` (which
+adds `SHADOW_SIZE` = 8 px of shadow beyond the frame) and inside
+`window_drawn_extent`, so it is repainted correctly and is inside the resize
+grab band — hence no visible symptom today.
+
+**Where:** `render_border` carries the discrepancy explicitly now, as a
+`Rect::new` that adds the row to `frame_rect` with a comment, rather than as
+open-coded constants that merely happened not to match. `frame_insets` is at
+`gui/compositor/src/lib.rs`; `nothing_a_window_draws_falls_outside_its_damage_extent`
+pins the containment that keeps it harmless.
+
+**Proper fix:** decide which is right and make both agree.
+- If the border above the title bar is wanted (it is what a real window frame
+  looks like), `frame_insets` should return `top = TITLE_BAR_HEIGHT +
+  BORDER_WIDTH` and `title_bar_rect` should start `BORDER_WIDTH` below the top
+  of the frame box. This shifts every framed window's title bar and the resize
+  grab bands by one pixel, and moves the boundary between "title bar" (drag to
+  move) and "top border" (drag to resize) — so it wants a look at the drag
+  tests, whose grab points are chosen relative to `TITLE_BAR_HEIGHT`.
+- If it is not wanted, `render_border` should stroke `frame_rect` unmodified
+  and the extra row disappears.
+
+Not urgent: nothing is visibly wrong and nothing is unsafe. Logged because a
+one-pixel disagreement between drawing and measurement is exactly the kind of
+thing that becomes a real bug the moment either side is touched.
+
+## C-THE-CREDENTIAL-STORE-ENCRYPTS-EVERY-SECRET-WITH-THE-SAME-KEYSTREAM (lane C, 2026-08-17)
+
+**In short:** the credential manager — the thing that holds the user's saved
+passwords — scrambles every secret in the vault with the *same* repeating
+pattern. Anyone who can read the vault file can recover its contents without
+ever learning the master password, by lining two entries up against each
+other and cancelling the pattern out. This is the single worst defect
+currently known in lane C's tree.
+
+**Where:** `gui/credentials/src/main.rs`, `encrypt` / `decrypt` /
+`generate_keystream`.
+
+`generate_keystream(key, len)` produces `SHA-256(key ‖ 0) ‖ SHA-256(key ‖ 1) ‖
+…`. It takes no nonce (a number used once, mixed in so that encrypting the
+same thing twice gives different output). So it is a pure function of the
+session key, and every credential in a vault is XORed with the identical
+keystream. XOR two ciphertexts together and the keystream cancels, leaving the
+two plaintexts XORed with each other — the classic "two-time pad", which is
+routinely solved by hand for text. No key recovery is needed and no master
+password is needed; read access to the stored ciphertexts is enough.
+
+The doc comment says "this is a demonstration cipher; production use would
+employ AES-256-GCM", which covers *weak* but not *broken*: a demonstration
+cipher is still expected to keep two records from decrypting each other.
+
+**Proper fix (does not need any new primitive):** give every encryption its own
+nonce and mix it into the keystream — `SHA-256(key ‖ nonce ‖ counter)` — then
+store the nonce beside the ciphertext. A per-record sequence number that is
+persisted and never reused under a given key is a sufficient nonce and needs
+no randomness, so this is fixable today with the SHA-256 already in the file.
+That turns the construction into SHA-256 used as a counter-mode PRF, which is
+a defensible stream cipher rather than a broken one.
+
+Still missing after that fix, and requiring things the tree does not yet have:
+authentication (the ciphertext can be flipped bit-for-bit undetected — wants an
+HMAC or a real AEAD) and a vetted AES-256-GCM. See
+`open-questions.md` → "Do we write our own cryptographic primitives?".
+
+**Resolved 2026-08-17, as described.** `encrypt` now takes a nonce and returns
+`nonce ‖ ciphertext`; `decrypt` reads the nonce back off the front and returns
+`Result`, because a blob shorter than the 8-byte nonce never came from
+`encrypt`. `generate_keystream(key, nonce, len)` is
+`SHA-256(key ‖ nonce ‖ counter)`. `CredentialStore` supplies nonces from
+`next_nonce`, a counter that only ever increases; `take_nonces(n)` hands out a
+contiguous base so a caller already holding `&mut credentials` (the re-encrypt
+loop in `set_master_password`) can still get fresh ones. Gaps are harmless —
+nonces must be unique, not contiguous.
+
+Regression test:
+`the_same_plaintext_twice_does_not_produce_the_same_ciphertext` asserts the
+*bodies* differ and not merely the nonce prefixes, plus
+`a_blob_too_short_to_hold_a_nonce_is_rejected_not_misread`.
+
+**One thing a persistence layer must not get wrong**, and there is no
+persistence layer yet: `next_nonce` has to round-trip to disk. A vault
+reloaded with the counter reset to zero re-issues nonces it has already used
+and reintroduces exactly this bug. The field carries a comment saying so.
+
+The authentication half is *not* fixed and remains open under C-Q5.
+
+## C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES (lane C, 2026-08-17)
+
+**In short:** the credential manager turns the user's master password into a
+key with a single pass of SHA-256, mixed with a fixed word that is compiled
+into the program and is therefore identical on every SlateOS machine. Both
+halves of that are wrong in the same direction: a single pass means an
+attacker can try billions of candidate passwords per second on a GPU, and a
+shared fixed word means one precomputed table cracks every user in the world
+rather than having to be rebuilt per user.
+
+**Where:** `gui/credentials/src/main.rs`, `derive_session_key` and the
+`KEY_DERIVATION_SALT` constant.
+
+```rust
+const KEY_DERIVATION_SALT: &str = "slateos_credential_salt";
+
+fn derive_session_key(master_password: &str) -> [u8; 32] {
+    let mut input = master_password.as_bytes().to_vec();
+    input.extend_from_slice(KEY_DERIVATION_SALT.as_bytes());
+    sha256(&input)
+}
+```
+
+A password-to-key function is supposed to be *deliberately slow* (key
+stretching) and *per-user distinct* (a random salt stored with the vault).
+This is neither. `apps/lockscreen` derives its stored hash the same way and
+has the same problem.
+
+**Proper fix:** iterate. Even a plain `for _ in 0..N { h = sha256(h ‖ pw) }`
+with N in the hundreds of thousands is an enormous improvement and needs
+nothing new — that is essentially PBKDF2's structure. The per-vault random
+salt needs a randomness source the crate does not have (see below), but a
+salt that merely varies per *installation* already defeats a shared table, so
+it should not wait for one. The end state wants a memory-hard KDF (scrypt or
+Argon2id), which is gated on the same open question as the cipher.
+
+**Half resolved 2026-08-17 — the stretching. The salt is still shared.**
+
+`derive_session_key(password, rounds)` now runs `rounds` iterations of
+`SHA-256(acc ‖ password ‖ salt)`. The password and salt are folded back in on
+*every* round rather than the accumulator merely being rehashed: a chain of
+the form `h = SHA-256(h)` is the same chain for every password, so an attacker
+could walk it once and test candidates against any point on it. Mixing the
+password in each round is what forces the full cost per guess.
+
+The count was picked by measurement, not by taste: one SHA-256 of a ~70-byte
+input on this machine is **1.278 µs release** (8.564 µs debug), so
+`DEFAULT_KDF_ROUNDS = 100_000` is ~130 ms per unlock.
+
+**A second defect had to be fixed for the first fix to be worth anything.**
+The store kept `master_password_hash = SHA-256(password)` to check unlock
+attempts against. An attacker holding the vault would have tested guesses
+against *that* — one SHA-256 each — and never called `derive_session_key` at
+all, so the stretching would have been decorative. The field is now
+`master_password_verifier`, `SHA-256(stretched key ‖ label)`, so a guess costs
+the full derivation. `IdentityVerifier::verify` had the identical bug on the
+re-verification path and is routed through the same value.
+Both comparisons use `constant_time_eq` rather than `==`, which returns early
+on the first differing byte and so leaks how many leading bytes matched.
+
+**Why the round count is stored rather than compiled in.** `kdf_rounds` is a
+field of `CredentialStore` (`with_kdf_rounds`, default `DEFAULT_KDF_ROUNDS`).
+The right number rises with hardware, and a vault written under the old number
+must keep opening after the default moves — it can only do that if it
+remembers what the old number was. Every real password-hashing format records
+its cost parameters beside the hash for this reason. **This too must
+round-trip through any persistence layer.** It also lets the test module run
+at 4 rounds instead of putting the suite in the minutes;
+`default_kdf_rounds_are_usable` exercises the shipped number once.
+
+**Still open:** the salt. `KEY_DERIVATION_SALT` is still a compile-time
+constant shared by every install, because a per-vault salt needs entropy that
+userspace cannot obtain — see the next entry and
+`requests/c-a-userspace-entropy-syscall.md`. `apps/lockscreen` still derives
+its stored hash with a single SHA-256 pass and has not been touched.
+
+## C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE (lane C, 2026-08-17)
+
+**In short:** nothing in lane C can obtain an unpredictable number. The
+credential manager's password *generator* — the feature whose entire job is
+producing something an attacker cannot guess — runs a 3-line xorshift
+generator seeded by a number its caller passes in, in practice a timestamp.
+An attacker who knows roughly when a password was generated can enumerate the
+possibilities.
+
+**Where:** `gui/credentials/src/main.rs`, `Xorshift64` and
+`generate_password(.., seed: u64)`.
+
+`Xorshift64` is a perfectly good *statistical* generator and a useless
+*cryptographic* one: its entire future output is determined by 64 bits of
+state, and recovering that state from output is trivial. Seeded from a
+second-resolution timestamp, the real entropy is closer to 20 bits.
+
+**Where the fix has to come from:** the kernel. A userspace CSPRNG needs a
+seed from an entropy pool the kernel maintains (RDRAND/RDSEED, interrupt
+timing, etc.), surfaced through a syscall. `kernel/src/crypto.rs` exists
+(lane A) but lane C has no interface to it. Filed as
+`requests/c-a-userspace-entropy-syscall.md`.
+
+Until then the honest thing is for `generate_password` to *say* it is not
+cryptographically strong rather than to look like it is, and for anything that
+needs a real nonce to use a persisted counter instead (see the keystream
+entry above).
+
+## C-SHA-256-IS-IMPLEMENTED-ELEVEN-TIMES-IN-THIS-TREE (lane C, 2026-08-17)
+
+**In short:** eleven separate copies of the same cryptographic hash function
+have been written by hand in this repository. Each one can be independently
+wrong, and each one has to be independently reviewed, tested and fixed. Some
+of them guard logging in and unlocking the screen.
+
+**Where** (found by `grep -rn "fn sha256" --include=*.rs`):
+
+| Copy | Lane | Shape |
+|---|---|---|
+| `kernel/src/crypto.rs` | A | one-shot |
+| `posix/src/sha2.rs` | B | one-shot, has the FIPS million-`a` vector |
+| `posix/src/crypt.rs` | B | via `sha2` |
+| `init/login/src/main.rs` | B | block compression + one-shot |
+| `userspace/coreutils/src/bin/sha256sum.rs` | B | one-shot |
+| `userspace/backup/src/main.rs` | B | streaming |
+| `kernel/src/oci.rs` | A | digest string |
+| `kernel/build.rs` | A | build-time |
+| `gui/credentials/src/main.rs` | **C** | one-shot |
+| `apps/lockscreen/src/main.rs` | **C** | one-shot |
+| `apps/backup/src/main.rs` | **C** | streaming `Sha256` struct |
+
+All three lane-C copies do carry the standard known-answer vectors (empty,
+`"abc"`, the 448-bit message), so none of them is presently *wrong*. That is
+luck holding, not a design.
+
+**Proper fix:** one implementation, one set of test vectors, shared. Lane C
+can extract its three into a small top-level crate alongside the existing
+`byteread` / `textfind` / `textfmt` utility crates and adopt it; lanes A and B
+have to opt in themselves, so the cross-lane half is a request rather than an
+edit. Note `kernel/` is `no_std`, so the shared crate must be `no_std` with an
+`alloc`-free one-shot API to be adoptable by all three lanes.
+
+### Correction and progress, 2026-08-17
+
+**It is twenty-six, not eleven.** The original count came from
+`grep "fn sha256"`, which misses every copy that names its entry point
+something else or exposes only a `Sha256` struct. Two greps are needed to see
+them all, and neither alone is sufficient:
+
+```
+grep -rln "0x6a09e667" --include=*.rs .   # the eight IV words
+grep -rln "fn sha256\|struct Sha256" --include=*.rs .
+```
+
+The union is 26 files. The original entry also missed one of lane C's own:
+**`apps/diskimager`** has a streaming copy, so lane C had four, not three.
+
+**Done.** `sha2/` now exists at the workspace root — `no_std`, no `alloc`, the
+four FIPS 180-4 vectors, a streaming form cross-checked against the one-shot
+one at every length up to three blocks and every split within each length, and
+a `benches/rate.rs` (commit `d8ad84f54`). `gui/credentials` is migrated
+(`eb6e77799`), which is also the first evidence for the claim that the copies
+cost something: it was **22% faster** afterwards (1.20 vs 1.54 µs/iter on a
+70-byte input, both measured in one process), because that copy allocated a
+`Vec` per call for the padded message. That matters concretely — the
+credential KDF runs 100 000 hashes per unlock.
+
+**Remaining, 25 copies.** Lane C's three: `apps/backup` (streaming +
+`sha256_bytes`/`sha256_hex`/`sha256_file`), `apps/diskimager` (streaming),
+`apps/lockscreen` (one-shot). Lanes A and B own the other 22 and must opt in
+themselves; requests are filed rather than edits made.
+
+**What consolidating does and does not buy.** It does not make the primitive
+vetted — a single unvetted SHA-256 is still unvetted, and whether this tree
+should be writing its own crypto at all is `open-questions.md` C-Q5. What it
+buys is that the answer has one place to land, that a mistake is caught once
+rather than needing to be caught 26 times, and — per the measurement above —
+that the duplication was costing performance as well as review budget.
+
+### Lane C is done, 2026-08-17
+
+All four of lane C's copies are gone. `gui/credentials` (`eb6e77799`),
+`apps/diskimager` (`65883cf92` — which was not a migration but a bug fix; see
+`C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256` below), and now
+`apps/backup` and `apps/lockscreen`. **22 copies remain, all in lanes A and B**
+— 20 in B, 3 in A, minus `posix/src/crypt.rs` which correctly delegates to
+`posix/src/sha2.rs` rather than carrying its own.
+
+The migrations were not neutral. Deleting the copies removed clippy warnings
+in bulk, because a hand-transcribed FIPS table is one long run of exactly the
+constructs the workspace lints forbid — `w[i - 15]`, `h[i] = h[i] + a`,
+`block_start + 64`:
+
+| Crate | warnings before | after |
+|---|---|---|
+| `apps/backup` | 368 | 266 |
+| `apps/lockscreen` | 85 | **11** |
+
+That is 176 warnings that were never going to be fixed in place, because
+fixing them means bounds-checking a loop whose bounds are the specification.
+It is worth stating as a general result: **an inlined copy of a published
+algorithm is a large, permanent lint-debt liability, and moving it into a
+crate that is written once against the vectors is the only way to discharge
+it.** The remaining `apps/**` lint debt is now dominated by ordinary
+application code, which is fixable.
+
+Two further findings from the audit, both recorded separately:
+
+- The mechanical check that found the disk-imager stub — extract every
+  8-hex-digit literal from a file and look for a contiguous run equal to the
+  64-word K table and the 8-word IV — also found the **same stub hashing
+  system passwords** in `userspace/login` and `userspace/chpasswd`. See
+  `C-THE-SAME-STUB-IS-THE-SYSTEM-PASSWORD-HASH` at the end of this file.
+- Five further lane-B copies have no known-answer vector at all
+  (`userspace/backup`, `pkg`, `rsync`, `ssh`, `useradm`), though all five do
+  carry the full constant tables. Listed in
+  `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
+
+
+## C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256 (lane C, 2026-08-17)
+
+**In short.** `apps/diskimager` offers to checksum an image with MD5, SHA-1 or
+SHA-256 and shows you a digest of exactly the right length. None of the three
+is the algorithm it claims. All three are the same made-up mixing function, so
+the "SHA-256" it prints for a downloaded `.iso` will never match the SHA-256
+the publisher printed — and its "verify after write" tick box is checking the
+disk against a number that means nothing outside this program.
+
+**Where.** `apps/diskimager/src/main.rs`, `HashState` (~lines 205-290).
+
+**What it actually computes.** `new()` seeds `state` with the genuine
+published initial values for whichever algorithm you picked — the real
+SHA-256 IV (`0x6a09e667, 0xbb67ae85, …`), the real MD5 and SHA-1 ones. That
+is the entire resemblance. `update()` then ignores all of it:
+
+```rust
+for (idx, &byte) in data.iter().enumerate() {
+    let slot = idx % 8;
+    if let Some(s) = self.state.get_mut(slot) {
+        *s = s.wrapping_mul(31).wrapping_add(byte as u64);
+    }
+}
+```
+
+That is eight interleaved `u64` polynomial accumulators — a Rabin-style
+rolling fingerprint with base 31 — and it is identical for all three
+algorithms. `finalize()` then stirs the eight words together and truncates the
+hex to 32, 40 or 64 characters depending on which name you asked for. The
+choice of algorithm affects **only the length of the output string** and the
+eight seed constants.
+
+**How it survived.** Two ways, both worth noting because they generalise.
+
+1. *The tests check shape, not value.* There are eight tests over `HashState`.
+   They assert the digest is 64 characters, that it is all hex digits, that
+   the same input twice gives the same output, and that two different inputs
+   give different outputs. Every one of those passes for `*s = s*31 + byte`.
+   Not one test compares against a known answer — and a known-answer vector is
+   the *only* test that can distinguish a hash from a plausible-looking
+   function, which is precisely why FIPS publishes them.
+
+2. *It has already been "fixed" once, at the wrong level.* There is a
+   nine-line comment in `finalize()` explaining that the previous version
+   emitted the raw state words and truncated, so that bytes landing in
+   discarded words produced identical digests — "a real collision" — and that
+   folding all eight words in fixes it. That diagnosis is correct and the fix
+   works. But it treats the stub as the thing to repair rather than the thing
+   to replace, which is the band-aid accumulation `CLAUDE.md` warns about: the
+   collision was a symptom, and the disease is that this is not a hash.
+
+**Impact.** Two distinct failures, one much worse than the other.
+
+- **Comparing against a published checksum is broken outright, and silently.**
+  This is the headline use of a disk imager: download an install image, paste
+  in the checksum from the download page, confirm it matches. It never will.
+  The user sees `Mismatch`, concludes their download is corrupt, and
+  re-downloads forever. Worse in the other direction: the Verify tab will
+  happily *display* a 64-character "SHA-256" that a user may copy and publish
+  as if it were one.
+- **Verify-after-write is weaker than it looks but not worthless.** It
+  compares the source against the written-back data using the same function on
+  both sides, so it is a self-consistency check, and a base-31 polynomial over
+  `u64` does catch random corruption with high probability. It will not catch
+  deliberate tampering, and it is not what the UI implies.
+
+**Severity.** High. It is a correctness bug in the feature the application
+exists for, it is invisible to the user (the output is well-formed and
+stable), and the tests are green.
+
+**Proper fix.** Not "write the missing rounds into `update()`" — delegate.
+`sha2/` already exists at the workspace root (`d8ad84f54`): `no_std`, no
+`alloc`, checked against all four FIPS 180-4 vectors. SHA-1 and MD5 need the
+same treatment — they are obsolete *for security* but a disk imager needs them
+precisely because publishers still post them, so they should be shared crates
+in the same shape, each with the known-answer vectors from FIPS 180-4 and RFC
+1321 respectively. Then `HashState` becomes a thin enum over three real
+implementations.
+
+**And add value-checking tests**, in `diskimager` as well as in the crates, so
+the next stub cannot pass. The minimum bar for any hash in this tree: the
+digest of the empty input, and the digest of `"abc"`. Both are published for
+all three algorithms.
+
+### FIXED, 2026-08-17 (`cf5ebb13f`, and the commit that follows it)
+
+Done as written above — delegated, not patched.
+
+`blockbuf`, `sha1` and `md5` now sit at the workspace root beside `sha2`.
+Three crates rather than two because SHA-1 and MD5 written standalone would
+have meant a third and fourth copy of Merkle–Damgård partial-block and padding
+logic, which is the half that actually hides bugs: a wrong compression
+function fails the first known-answer vector, whereas a wrong buffer only
+misbehaves in the seam between two `update` calls — so it passes every
+published vector, all of which arrive in a single call. `blockbuf` is that
+logic once, tested over every length up to three blocks at every possible
+split point. MD5's `T` table is generated from its definition
+`floor(2^32 · |sin(i+1)|)` rather than transcribed, which removes that error
+class rather than testing for it.
+
+`HashState` is now a three-variant enum over `md5::Md5` / `sha1::Sha1` /
+`sha2::Sha256`, and `diskimager` carries four new tests:
+
+| Test | What the stub would have failed |
+|---|---|
+| `hashes_match_their_published_vectors` | everything — six vectors, empty and `"abc"`, all three algorithms |
+| `each_algorithm_produces_its_own_length_and_value` | nothing; it guards the picker wiring, not the maths |
+| `splitting_the_input_does_not_change_the_digest` | nothing; it guards the *new* risk, that a file read in chunks hashes differently from a file read whole |
+| `finalize_is_repeatable` | nothing; the real hashers consume themselves on finalize, so `HashState` finalizes a clone |
+
+117 tests pass in `diskimager`; 26 tests and 5 doctests in the three crates.
+The crate's 29 remaining clippy warnings are pre-existing and unchanged —
+measured before and after, identical counts by lint — and are tracked
+separately under the `apps/**` half of the lint debt.
+
+**The generalisable lesson, restated because it is the only one that
+matters:** none of the eight original tests was wrong. They were all true of
+`state[i % 8] = state[i % 8] * 31 + byte`. Shape tests cannot fail on a stub,
+so a subsystem with only shape tests is untested no matter how many it has.
+
+## C-THE-SAME-STUB-IS-THE-SYSTEM-PASSWORD-HASH (found by lane C, owned by lane B, 2026-08-17)
+
+**In short.** The made-up mixing function that `apps/diskimager` was passing
+off as three checksums is also, byte for byte, the function `userspace/login`
+and `userspace/chpasswd` use to hash passwords into `/etc/shadow`. Two
+consequences, both reproduced: a password set with `passwd` cannot be used to
+log in at all, and the entries `chpasswd` writes are labelled `$5$` — the
+standard crypt(3) identifier for SHA-crypt — while containing something that
+is not SHA-crypt, not SHA-256, and not stretched by any number of rounds.
+
+**Not mine to fix.** `userspace/**` is lane B's. Filed in full, with the
+reproduction and the mechanical check that found it, as
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`. Logged here so
+it is not lost if that request is actioned and removed.
+
+**The short form of the fix**, which is lane B's call: `posix/src/crypt.rs` is
+already a correct and complete SHA-crypt — `$5$`/`$6$`/`$1$`, the `rounds=`
+field, the crypt base-64 alphabet, Drepper's published vectors, 29 tests —
+delegating its core to `posix/src/sha2.rs`. Three tools that read and write
+one file should be calling it instead of each hashing differently. The part
+with a genuine tradeoff is what to do with the entries already written in two
+wrong formats.
+
+**Why this is in lane C's tracker at all.** Because the two bugs are the same
+bug, and finding the second one cost nothing once the first was understood.
+The check is mechanical: extract every 8-hex-digit literal from a file that
+claims to implement a published algorithm, and look for a contiguous run
+matching the algorithm's published constant table. `chpasswd` and `login`
+carry the genuine SHA-256 IV and no K table at all — exactly the disk imager's
+shape. It is worth running over any transcribed algorithm in this tree,
+because it costs nothing and, unlike a test that checks the digest's shape, it
+cannot be satisfied by a plausible-looking function.

@@ -1,20 +1,19 @@
 # Build artifacts
 /target/
 **/target/
-# Some crates use `target-test/` as an alternate cargo build dir for the
-# host test profile (separate from the cross-compile `target/`). Same
-# contents — codegen units, rlibs — that we never want to commit.
-**/target-test/
-# Likewise `target-hl/`: a second alternate host build dir. Two cargo
-# invocations must never share one CARGO_TARGET_DIR — they take the same lock,
-# so a foreground build silently blocks behind a background test suite — so a
-# lane running one in the background needs a second dir for the other.
-**/target-hl/
-# And `target-hl2/`, for the third: a long workspace test in the background
-# holds `target-hl`, and the interactive edit-build-test cycle still needs a
-# dir of its own. The count is not principled — it is however many concurrent
-# cargo invocations a lane happens to have — so match any digits after `hl`.
-**/target-hl[0-9]*/
+# Any alternate cargo build dir, whatever it is called. Two cargo invocations
+# must never share one CARGO_TARGET_DIR — they take the same lock, so a
+# foreground build silently blocks behind a background test suite — so a lane
+# running a long workspace test in the background needs a second dir for its
+# interactive edit-build-test cycle, and a third for a probe build that must
+# not disturb either. This line replaces four separate patterns
+# (`target-test/`, `target-hl/`, `target-hl[0-9]*/`, and a `target-probe/` that
+# had to be added when the fourth one appeared). Neither the count nor the
+# names are principled — they are however many concurrent cargo invocations a
+# lane happens to have, named for whatever they were doing — so match the
+# shape instead of enumerating the instances. The contents are the same either
+# way: codegen units and rlibs we never want to commit.
+**/target-*/
 **/*.rs.bk
 # Stray rustc codegen-unit objects written to the Windows `nul` device name
 # (these land in the crate root, not target/, when a build/clippy invocation

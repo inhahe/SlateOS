@@ -1,0 +1,23 @@
+[package]
+name = "sha2"
+version = "0.1.0"
+edition = "2024"
+description = "SHA-256, written once, checked against the FIPS 180-4 vectors."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free, and `no_std` with no `alloc`: the one-shot
+# digest is a `[u8; 32]`, the streaming state is fixed-size, and the hex form
+# is a `[u8; 64]` wrapper, so there is nothing to allocate. That matters more
+# here than for the other shared crates — the kernel, the bootloader's
+# `build.rs` and the bare-metal service binaries all hash things, and none of
+# them have a heap.
+[dependencies]
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "rate"
+harness = false

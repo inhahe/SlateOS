@@ -124,6 +124,22 @@ const DEFAULT_OPACITY: f32 = 1.0;
 /// window on the desktop.
 const MIN_WINDOW_WIDTH: u32 = 100;
 
+/// The frame interval implied by a refresh rate in Hz.
+///
+/// Zero means the display never reported one — an EDID-less panel, a headless
+/// target — and gets ~60 Hz rather than a division by zero. Written as
+/// `checked_div` so the zero case is handled *by the division*: the two call
+/// sites this replaces each guarded it separately and then disagreed about the
+/// answer, one saying `Duration::from_millis(16)` (62.5 Hz) and the other
+/// `Duration::from_micros(16_667)` (60 Hz). That is what a rule kept in two
+/// places does, and it is why the guard now lives with the operation.
+const fn frame_interval_for(refresh_rate: u32) -> Duration {
+    Duration::from_micros(match 1_000_000u64.checked_div(refresh_rate as u64) {
+        Some(interval) => interval,
+        None => 16_667,
+    })
+}
+
 /// Smallest client-area height the compositor will resize a window to. See
 /// [`MIN_WINDOW_WIDTH`].
 const MIN_WINDOW_HEIGHT: u32 = 50;
@@ -258,6 +274,31 @@ pub struct Rect {
     pub height: u32,
 }
 
+/// The distance from `lo` to `hi` as an extent, zero when `hi` is not past `lo`.
+///
+/// `(hi - lo) as u32` is the obvious spelling and it is wrong twice over. Screen
+/// coordinates are `i32` and a client picks them — `CreateWindow` and
+/// `SetPosition` both carry a position straight off the wire — so `hi - lo`
+/// overflows for a pair as far apart as `i32::MIN` and `i32::MAX`, which is a
+/// panic *in the display server*, i.e. every application on the desktop dies
+/// because one of them asked for a silly window position. And the true distance
+/// between those two does not fit in an `i32` at all, so even a checked
+/// subtraction could only fail, never answer.
+///
+/// `wrapping_sub` answers exactly. For `hi > lo` the mathematical difference is
+/// always in `0..=u32::MAX`, and two's-complement subtraction reproduces its low
+/// 32 bits — which, given the value fits, *is* the value. The `hi <= lo` case is
+/// separated out because an empty span is a legitimate result (two rectangles
+/// that merely touch), not an error.
+#[allow(clippy::cast_sign_loss)] // The bit pattern is the answer; see above.
+const fn span(lo: i32, hi: i32) -> u32 {
+    if hi <= lo {
+        0
+    } else {
+        hi.wrapping_sub(lo) as u32
+    }
+}
+
 impl Rect {
     pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
         Self {
@@ -268,12 +309,51 @@ impl Rect {
         }
     }
 
+    /// Grow by `amount` pixels on every side.
+    ///
+    /// Saturating for the same reason [`Window::outer_rect`] is: a rectangle
+    /// already at the coordinate edge stays pinned there rather than wrapping
+    /// to the opposite extreme.
+    pub fn inflate(&self, amount: u32) -> Rect {
+        let signed = i32::try_from(amount).unwrap_or(i32::MAX);
+        Rect::new(
+            self.x.saturating_sub(signed),
+            self.y.saturating_sub(signed),
+            self.width.saturating_add(amount.saturating_mul(2)),
+            self.height.saturating_add(amount.saturating_mul(2)),
+        )
+    }
+
+    /// The same rectangle moved by `(dx, dy)`.
+    pub fn offset(&self, dx: i32, dy: i32) -> Rect {
+        Rect::new(
+            self.x.saturating_add(dx),
+            self.y.saturating_add(dy),
+            self.width,
+            self.height,
+        )
+    }
+
+    /// The exclusive right edge: the first column *past* the rectangle.
+    ///
+    /// `try_from` rather than `as`, because a width above `i32::MAX` would cast
+    /// to a negative number and put the right edge to the *left* of the origin
+    /// — a rectangle that contains nothing at all. Pinning at `i32::MAX`
+    /// instead keeps "very wide" meaning very wide.
+    pub fn right(&self) -> i32 {
+        self.x
+            .saturating_add(i32::try_from(self.width).unwrap_or(i32::MAX))
+    }
+
+    /// The exclusive bottom edge: the first row *past* the rectangle.
+    pub fn bottom(&self) -> i32 {
+        self.y
+            .saturating_add(i32::try_from(self.height).unwrap_or(i32::MAX))
+    }
+
     /// Check if a point is inside this rectangle.
     pub fn contains(&self, px: i32, py: i32) -> bool {
-        px >= self.x
-            && py >= self.y
-            && px < self.x.saturating_add(self.width as i32)
-            && py < self.y.saturating_add(self.height as i32)
+        px >= self.x && py >= self.y && px < self.right() && py < self.bottom()
     }
 
     /// Compute the intersection of two rectangles. Returns None if they don't overlap.
@@ -290,7 +370,7 @@ impl Rect {
             .min(other.y.saturating_add(other.height as i32));
 
         if x2 > x1 && y2 > y1 {
-            Some(Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32))
+            Some(Rect::new(x1, y1, span(x1, x2), span(y1, y2)))
         } else {
             None
         }
@@ -309,7 +389,7 @@ impl Rect {
             .saturating_add(self.height as i32)
             .max(other.y.saturating_add(other.height as i32));
 
-        Rect::new(x1, y1, (x2 - x1) as u32, (y2 - y1) as u32)
+        Rect::new(x1, y1, span(x1, x2), span(y1, y2))
     }
 
     /// The part of `self` not covered by `other`, as up to four **disjoint**
@@ -337,18 +417,18 @@ impl Rect {
         let iy1 = i.y.saturating_add(i.height as i32);
 
         if iy0 > sy0 {
-            out.push(Rect::new(sx0, sy0, self.width, (iy0 - sy0) as u32));
+            out.push(Rect::new(sx0, sy0, self.width, span(sy0, iy0)));
         }
         if sy1 > iy1 {
-            out.push(Rect::new(sx0, iy1, self.width, (sy1 - iy1) as u32));
+            out.push(Rect::new(sx0, iy1, self.width, span(iy1, sy1)));
         }
-        let mid_h = (iy1 - iy0) as u32;
+        let mid_h = span(iy0, iy1);
         if mid_h > 0 {
             if ix0 > sx0 {
-                out.push(Rect::new(sx0, iy0, (ix0 - sx0) as u32, mid_h));
+                out.push(Rect::new(sx0, iy0, span(sx0, ix0), mid_h));
             }
             if sx1 > ix1 {
-                out.push(Rect::new(ix1, iy0, (sx1 - ix1) as u32, mid_h));
+                out.push(Rect::new(ix1, iy0, span(ix1, sx1), mid_h));
             }
         }
         out
@@ -572,20 +652,80 @@ impl Window {
     }
 
     /// Get the total bounds including decorations (title bar, borders, shadow).
+    ///
+    /// Saturating throughout, because the position and size are the client's to
+    /// choose and the frame is added to them: a window at `i32::MIN` grown by a
+    /// border must stay pinned at the edge of the coordinate space. Wrapping
+    /// would teleport it to the opposite extreme and panicking would let one
+    /// client's bad request kill the whole display server.
     pub fn outer_rect(&self) -> Rect {
+        self.frame_rect().inflate(self.shadow_extent())
+    }
+
+    /// The decorated box: client area plus title bar and borders, *without* the
+    /// drop shadow. [`outer_rect`](Self::outer_rect) is this inflated by
+    /// [`shadow_extent`](Self::shadow_extent).
+    ///
+    /// Named once because four places used to spell it out from the constants
+    /// and had begun to disagree — `render_shadow` derived it one way,
+    /// `render_border` another, and `window_drawn_extent` carried a fourth copy
+    /// under a comment admitting it "mirrors the geometry in `render_shadow`".
+    /// A box that four functions each recompute is a box that will be drawn in
+    /// one place and hit-tested in another.
+    pub fn frame_rect(&self) -> Rect {
         let (top, side, bottom) = self.frame_insets();
-        let shadow = self.shadow_extent();
         Rect::new(
-            self.x - shadow as i32 - side as i32,
-            self.y - shadow as i32 - top as i32,
-            self.width + (side * 2) + (shadow * 2),
-            self.height + top + bottom + (shadow * 2),
+            self.x.saturating_sub(side as i32),
+            self.y.saturating_sub(top as i32),
+            self.width.saturating_add(side.saturating_mul(2)),
+            self.height.saturating_add(top).saturating_add(bottom),
         )
     }
 
     /// Get the client area rectangle (where the application draws).
     pub fn client_rect(&self) -> Rect {
         Rect::new(self.x, self.y, self.width, self.height)
+    }
+
+    /// The client geometry `(x, y, width, height)` whose *frame* box is exactly
+    /// `area` — the inverse of [`frame_rect`](Self::frame_rect).
+    ///
+    /// This is what "maximise" means: it is the window's decorations, not its
+    /// client area, that are made flush with the edges of the work area. Stated
+    /// once, as the inverse, because a maximise that insets by its own copy of
+    /// the constants drifts the moment the frame changes — and it is the frame
+    /// that the user sees touching the screen edge.
+    ///
+    /// Saturating in both directions: an `area` smaller than the frame it must
+    /// hold yields a zero-size client area rather than a wrapped enormous one.
+    /// The caller runs the result through [`clamp_size`](Self::clamp_size)
+    /// anyway, which is where a minimum size is reasserted.
+    pub fn client_geometry_for_frame(&self, area: Rect) -> (i32, i32, u32, u32) {
+        let (top, side, bottom) = self.frame_insets();
+        (
+            area.x.saturating_add(i32::try_from(side).unwrap_or(i32::MAX)),
+            area.y.saturating_add(i32::try_from(top).unwrap_or(i32::MAX)),
+            area.width.saturating_sub(side.saturating_mul(2)),
+            area.height
+                .saturating_sub(top)
+                .saturating_sub(bottom),
+        )
+    }
+
+    /// A screen point expressed in this window's client coordinates.
+    ///
+    /// One method rather than the ten copies of `x - win.x` this replaces,
+    /// because the subtraction is not as safe as it looks: the window origin is
+    /// the *client's* to choose, so a window near `i32::MAX` and a pointer near
+    /// `i32::MIN` overflow it — and this sits on the input path, where the
+    /// consequence is the display server dying on a mouse move.
+    ///
+    /// Saturating is the right answer rather than merely the safe one: the
+    /// result says "very far outside this window", which is exactly what a
+    /// point that distant is. Every consumer either hit-tests it (and rejects
+    /// it) or forwards it to a client that does.
+    pub fn local_point(&self, x: i32, y: i32) -> (i32, i32) {
+        (x.saturating_sub(self.x), y.saturating_sub(self.y))
     }
 
     /// Get the title bar rectangle (for drag and button hit testing), or
@@ -599,13 +739,9 @@ impl Window {
         if !self.is_framed() {
             return None;
         }
-        let (top, side, _) = self.frame_insets();
-        Some(Rect::new(
-            self.x - side as i32,
-            self.y - top as i32,
-            self.width + (side * 2),
-            top,
-        ))
+        let top = self.frame_insets().0;
+        let frame = self.frame_rect();
+        Some(Rect::new(frame.x, frame.y, frame.width, top))
     }
 
     /// The rectangle of the title-bar button in the given slot, counting from
@@ -617,12 +753,20 @@ impl Window {
     /// letting minimize move up into the vacated slot.
     fn title_button_rect(&self, slot: u32) -> Option<Rect> {
         let title_rect = self.title_bar_rect()?;
-        let step = (TITLE_BUTTON_SIZE + TITLE_BUTTON_SPACING) as i32;
-        let btn_x = title_rect.x + title_rect.width as i32
-            - TITLE_BUTTON_SIZE as i32
-            - TITLE_BUTTON_SPACING as i32
-            - (slot as i32 * step);
-        let btn_y = title_rect.y + (title_rect.height as i32 - TITLE_BUTTON_SIZE as i32) / 2;
+        // The bar's width and origin are the client's to influence, so the
+        // whole chain is saturating: a button positioned off the coordinate
+        // space is one the user cannot click, where an overflow here is the
+        // display server dying while drawing a title bar.
+        let step = (TITLE_BUTTON_SIZE.saturating_add(TITLE_BUTTON_SPACING)) as i32;
+        let btn_x = title_rect
+            .x
+            .saturating_add(title_rect.width as i32)
+            .saturating_sub(TITLE_BUTTON_SIZE as i32)
+            .saturating_sub(TITLE_BUTTON_SPACING as i32)
+            .saturating_sub((slot as i32).saturating_mul(step));
+        let btn_y = title_rect
+            .y
+            .saturating_add((title_rect.height as i32).saturating_sub(TITLE_BUTTON_SIZE as i32) / 2);
         Some(Rect::new(
             btn_x,
             btn_y,
@@ -665,6 +809,7 @@ impl Window {
     /// `self.windows`.
     pub fn title_bar_layout(&self) -> Option<TitleBarLayout> {
         Some(TitleBarLayout {
+            frame: self.frame_rect(),
             bar: self.title_bar_rect()?,
             close: self.close_button_rect(),
             maximize: self.maximize_button_rect(),
@@ -700,6 +845,10 @@ impl Window {
 /// window's origin and the button constants.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TitleBarLayout {
+    /// The whole decorated box — [`Window::frame_rect`] — that the bar sits at
+    /// the top of. Carried alongside the bar so the shadow, the border and the
+    /// bar are all drawn from one measurement of the window.
+    pub frame: Rect,
     /// The bar itself, spanning the window's full framed width.
     pub bar: Rect,
     /// The close button. Always present on a title bar.
@@ -713,9 +862,9 @@ pub struct TitleBarLayout {
 impl TitleBarLayout {
     /// How many buttons this bar actually carries.
     pub const fn button_count(&self) -> u32 {
-        self.close.is_some() as u32
-            + self.maximize.is_some() as u32
-            + self.minimize.is_some() as u32
+        (self.close.is_some() as u32)
+            .saturating_add(self.maximize.is_some() as u32)
+            .saturating_add(self.minimize.is_some() as u32)
     }
 }
 
@@ -807,7 +956,9 @@ impl Framebuffer {
             return Err(CompositorError::FramebufferTooLarge { width, height });
         }
 
-        let size = width as usize * height as usize;
+        // Bounded by the MAX_FB_* check just above; saturating so the bound is
+        // enforced by the code rather than only by the reader.
+        let size = (width as usize).saturating_mul(height as usize);
         Ok(Self {
             width,
             height,
@@ -862,6 +1013,82 @@ impl Framebuffer {
             Some(c) => c.contains(x as i32, y as i32),
             None => true,
         }
+    }
+
+    /// Index of pixel (`x`, `y`) in a row-major buffer of `stride` pixels/row.
+    ///
+    /// Saturating, and that is not a compromise: **every** index this produces
+    /// is consumed by `get`/`get_mut`, so a saturated one names no pixel and is
+    /// declined — exactly what already happens to an out-of-range one. A
+    /// wrapped one would name a real pixel in the wrong place and silently
+    /// scramble the frame, which is far worse than a dropped write.
+    ///
+    /// In practice it cannot saturate: [`new`](Self::new) and
+    /// [`resize`](Self::resize) cap the dimensions at
+    /// [`MAX_FB_WIDTH`] × [`MAX_FB_HEIGHT`] ≈ 33 Mpx, which fits in a `u32`.
+    /// But that cap is enforced two functions away, so the proof lives here —
+    /// one place to re-check if the cap ever moves — rather than being redone
+    /// at each of the dozen sites that used to compute this inline.
+    #[inline]
+    const fn pixel_index(stride: usize, x: usize, y: usize) -> usize {
+        y.saturating_mul(stride).saturating_add(x)
+    }
+
+    /// The `get`/`get_mut` range covering columns `[x_lo, x_hi)` of row `y`.
+    ///
+    /// Empty when `x_hi <= x_lo`, which slicing handles without a guard.
+    #[inline]
+    const fn row_range(
+        stride: usize,
+        y: usize,
+        x_lo: usize,
+        x_hi: usize,
+    ) -> std::ops::Range<usize> {
+        let lo = Self::pixel_index(stride, x_lo, y);
+        lo..lo.saturating_add(x_hi.saturating_sub(x_lo))
+    }
+
+    /// One channel of a source-over blend: `src` at alpha `a`, over `dst`.
+    ///
+    /// The per-pixel alpha bound lives here, once, instead of being re-assumed
+    /// by the three channel expressions in each of the three blend loops.
+    /// Taking `u8`s is the whole trick: `src*a + dst*(255-a)` is then at most
+    /// 255 × 255 = 65 025 whatever the caller passes, so the saturating forms
+    /// below can never actually saturate. The old `u32` call sites had the same
+    /// bound but only by convention, and a caller that broke it would have
+    /// panicked the display server rather than been rejected by the compiler.
+    #[inline]
+    const fn blend_channel(src: u8, dst: u8, a: u8) -> u32 {
+        let a = a as u32;
+        let inv = 255u32.saturating_sub(a);
+        (src as u32)
+            .saturating_mul(a)
+            .saturating_add((dst as u32).saturating_mul(inv))
+            / 255
+    }
+
+    /// How many whole scanlines of `width` pixels a row-band chunk holds.
+    ///
+    /// `width` is never zero — [`new`](Self::new) and [`resize`](Self::resize)
+    /// both reject a zero dimension — but the division is written total anyway,
+    /// because "the constructor rejects it" is an invariant three call frames
+    /// away and a zero here would take down the display server.
+    #[inline]
+    fn rows_in(chunk: &[u32], width: u32) -> u32 {
+        let rows = chunk.len().checked_div(width as usize).unwrap_or(0);
+        u32::try_from(rows).unwrap_or(u32::MAX)
+    }
+
+    /// The effective source alpha of `color` drawn at `opacity`, as the byte
+    /// the blend math wants.
+    ///
+    /// Returning `u8` rather than `u32` is the point: this is the one place the
+    /// "alpha is a byte" bound is established, so [`blend_channel`] can take it
+    /// from the type instead of from a comment at every call site.
+    #[inline]
+    fn effective_alpha(color: u32, opacity: f32) -> u8 {
+        let raw = ((color >> 24) & 0xFF) as f32;
+        (raw * opacity).clamp(0.0, 255.0) as u8
     }
 
     /// Swap front and back buffers.
@@ -947,9 +1174,9 @@ impl Framebuffer {
                     }
                 }
             }
-            let row_base = r as usize * width_usize;
+            let row = r as usize;
             if spans.is_empty() {
-                if let Some(s) = buf.get_mut(row_base..row_base + width_usize) {
+                if let Some(s) = buf.get_mut(Self::row_range(width_usize, row, 0, width_usize)) {
                     s.fill(color);
                 }
                 continue;
@@ -959,18 +1186,16 @@ impl Framebuffer {
             let mut cursor = 0u32;
             for &(a, b) in &spans {
                 if a > cursor {
-                    let lo = row_base + cursor as usize;
-                    let hi = row_base + a as usize;
-                    if let Some(s) = buf.get_mut(lo..hi) {
+                    let gap = Self::row_range(width_usize, row, cursor as usize, a as usize);
+                    if let Some(s) = buf.get_mut(gap) {
                         s.fill(color);
                     }
                 }
                 cursor = cursor.max(b);
             }
             if cursor < width {
-                let lo = row_base + cursor as usize;
-                let hi = row_base + width_usize;
-                if let Some(s) = buf.get_mut(lo..hi) {
+                let tail = Self::row_range(width_usize, row, cursor as usize, width_usize);
+                if let Some(s) = buf.get_mut(tail) {
                     s.fill(color);
                 }
             }
@@ -984,12 +1209,14 @@ impl Framebuffer {
         let x_end = (rect.x.saturating_add(rect.width as i32) as u32).min(self.width);
         let y_end = (rect.y.saturating_add(rect.height as i32) as u32).min(self.height);
 
+        // Per row rather than per pixel: the span is contiguous, so one `fill`
+        // does what a column loop of bounds-checked single stores did, and
+        // lowers to a memset instead of `width` branches.
+        let stride = self.width as usize;
         for row in y_start..y_end {
-            let row_offset = row as usize * self.width as usize;
-            for col in x_start..x_end {
-                if let Some(pixel) = self.back.get_mut(row_offset + col as usize) {
-                    *pixel = color;
-                }
+            let span = Self::row_range(stride, row as usize, x_start as usize, x_end as usize);
+            if let Some(s) = self.back.get_mut(span) {
+                s.fill(color);
             }
         }
     }
@@ -1029,11 +1256,11 @@ impl Framebuffer {
         // a non-overlapping `&mut [u32]` (via chunks_mut), so the scoped threads
         // never alias — safe parallel fill with no `unsafe`.
         let rows_per_band = height.div_ceil(workers as u32);
-        let band_stride = rows_per_band as usize * width as usize;
+        let band_stride = Self::pixel_index(width as usize, 0, rows_per_band as usize);
         std::thread::scope(|s| {
             for (band_idx, chunk) in self.back.chunks_mut(band_stride).enumerate() {
-                let y0 = band_idx as u32 * rows_per_band;
-                let band_rows = (chunk.len() / width as usize) as u32;
+                let y0 = (band_idx as u32).saturating_mul(rows_per_band);
+                let band_rows = Self::rows_in(chunk, width);
                 s.spawn(move || {
                     Self::fill_uncovered_band(chunk, y0, band_rows, width, color, covered, height);
                 });
@@ -1045,7 +1272,7 @@ impl Framebuffer {
     #[inline]
     pub fn set_pixel(&mut self, x: u32, y: u32, color: u32) {
         if self.clip_allows(x, y) {
-            let idx = y as usize * self.width as usize + x as usize;
+            let idx = Self::pixel_index(self.width as usize, x as usize, y as usize);
             if let Some(pixel) = self.back.get_mut(idx) {
                 *pixel = color;
             }
@@ -1056,7 +1283,7 @@ impl Framebuffer {
     #[inline]
     pub fn get_pixel(&self, x: u32, y: u32) -> Option<u32> {
         if x < self.width && y < self.height {
-            let idx = y as usize * self.width as usize + x as usize;
+            let idx = Self::pixel_index(self.width as usize, x as usize, y as usize);
             self.back.get(idx).copied()
         } else {
             None
@@ -1070,14 +1297,13 @@ impl Framebuffer {
             return;
         }
 
-        let idx = y as usize * self.width as usize + x as usize;
+        let idx = Self::pixel_index(self.width as usize, x as usize, y as usize);
         let dst = match self.back.get(idx) {
             Some(&val) => val,
             None => return,
         };
 
-        let src_a_raw = ((src_color >> 24) & 0xFF) as f32;
-        let src_a = ((src_a_raw * window_opacity) as u32).min(255);
+        let src_a = Self::effective_alpha(src_color, window_opacity);
 
         if src_a == 255 {
             // Fully opaque — just write.
@@ -1090,19 +1316,11 @@ impl Framebuffer {
             return;
         }
 
-        let inv_a = 255 - src_a;
-
-        let src_r = (src_color >> 16) & 0xFF;
-        let src_g = (src_color >> 8) & 0xFF;
-        let src_b = src_color & 0xFF;
-
-        let dst_r = (dst >> 16) & 0xFF;
-        let dst_g = (dst >> 8) & 0xFF;
-        let dst_b = dst & 0xFF;
-
-        let out_r = (src_r * src_a + dst_r * inv_a) / 255;
-        let out_g = (src_g * src_a + dst_g * inv_a) / 255;
-        let out_b = (src_b * src_a + dst_b * inv_a) / 255;
+        // `as u8` is the channel extraction: it keeps the low byte, which is
+        // exactly what the `>> n & 0xFF` pairs used to spell out.
+        let out_r = Self::blend_channel((src_color >> 16) as u8, (dst >> 16) as u8, src_a);
+        let out_g = Self::blend_channel((src_color >> 8) as u8, (dst >> 8) as u8, src_a);
+        let out_b = Self::blend_channel(src_color as u8, dst as u8, src_a);
 
         if let Some(pixel) = self.back.get_mut(idx) {
             *pixel = 0xFF_00_00_00 | (out_r << 16) | (out_g << 8) | out_b;
@@ -1134,7 +1352,12 @@ impl Framebuffer {
         if dst_x >= self.width as usize {
             return;
         }
-        let count = (src.len() - src_off).min(self.width as usize - dst_x);
+        // Both subtractions are guarded above (`skip >= src.len()` and
+        // `dst_x >= width` both returned), so saturating is exact here.
+        let count = src
+            .len()
+            .saturating_sub(src_off)
+            .min((self.width as usize).saturating_sub(dst_x));
         if count == 0 {
             return;
         }
@@ -1142,15 +1365,18 @@ impl Framebuffer {
         // source forward by however much the left edge moved, so the two stay
         // in step (a clip that trimmed only the destination would smear the
         // source sideways).
-        let Some((x_lo, x_hi)) = self.clip_span(y, dst_x as u32, (dst_x + count) as u32) else {
+        let dst_end = u32::try_from(dst_x.saturating_add(count)).unwrap_or(u32::MAX);
+        let Some((x_lo, x_hi)) = self.clip_span(y, dst_x as u32, dst_end) else {
             return;
         };
-        let src_off = src_off + (x_lo as usize - dst_x);
-        let count = (x_hi - x_lo) as usize;
-        let row_off = y as usize * self.width as usize + x_lo as usize;
+        // `clip_span` only ever narrows, so x_lo >= dst_x and x_hi > x_lo; the
+        // saturating forms are exact and merely make that visible.
+        let src_off = src_off.saturating_add((x_lo as usize).saturating_sub(dst_x));
+        let count = (x_hi.saturating_sub(x_lo)) as usize;
+        let row = Self::row_range(self.width as usize, y as usize, x_lo as usize, x_hi as usize);
         if let (Some(dst), Some(s)) = (
-            self.back.get_mut(row_off..row_off + count),
-            src.get(src_off..src_off + count),
+            self.back.get_mut(row),
+            src.get(src_off..src_off.saturating_add(count)),
         ) {
             dst.copy_from_slice(s);
         }
@@ -1178,7 +1404,7 @@ impl Framebuffer {
         let width = self.width;
         let height = self.height;
         // Work proportional to the visible pixel count; reuse the fill heuristic.
-        let workers = Self::fill_worker_count(rows as usize * cols as usize);
+        let workers = Self::fill_worker_count((rows as usize).saturating_mul(cols as usize));
         let clip = self.frame_clip;
         if workers <= 1 {
             Self::blit_opaque_band(
@@ -1196,11 +1422,11 @@ impl Framebuffer {
             return;
         }
         let rows_per_band = height.div_ceil(workers as u32);
-        let band_stride = rows_per_band as usize * width as usize;
+        let band_stride = Self::pixel_index(width as usize, 0, rows_per_band as usize);
         std::thread::scope(|s| {
             for (band_idx, chunk) in self.back.chunks_mut(band_stride).enumerate() {
-                let by0 = band_idx as u32 * rows_per_band;
-                let band_rows = (chunk.len() / width as usize) as u32;
+                let by0 = (band_idx as u32).saturating_mul(rows_per_band);
+                let band_rows = Self::rows_in(chunk, width);
                 s.spawn(move || {
                     Self::blit_opaque_band(
                         chunk, by0, band_rows, width, buf, win_x, win_y, cols, rows, clip,
@@ -1278,7 +1504,11 @@ impl Framebuffer {
             if dst_x >= width_usize {
                 continue;
             }
-            let count = (src.len() - src_off).min(width_usize - dst_x);
+            // Both subtractions are guarded above, so saturating is exact.
+            let count = src
+                .len()
+                .saturating_sub(src_off)
+                .min(width_usize.saturating_sub(dst_x));
             if count == 0 {
                 continue;
             }
@@ -1291,21 +1521,29 @@ impl Framebuffer {
                         continue;
                     }
                     let lo = (dst_x as u32).max(cx0);
-                    let hi = ((dst_x + count) as u32).min(cx1);
+                    let dst_end = u32::try_from(dst_x.saturating_add(count)).unwrap_or(u32::MAX);
+                    let hi = dst_end.min(cx1);
                     if hi <= lo {
                         continue;
                     }
                     (
-                        src_off + (lo as usize - dst_x),
+                        src_off.saturating_add((lo as usize).saturating_sub(dst_x)),
                         lo as usize,
-                        (hi - lo) as usize,
+                        hi.saturating_sub(lo) as usize,
                     )
                 }
             };
-            let row_off = (sy - by0) as usize * width_usize + dst_x;
+            // `sy >= by0` was established above, so the row is band-local.
+            let band_row = sy.saturating_sub(by0) as usize;
+            let dst_span = Self::row_range(
+                width_usize,
+                band_row,
+                dst_x,
+                dst_x.saturating_add(count),
+            );
             if let (Some(dst), Some(s)) = (
-                band.get_mut(row_off..row_off + count),
-                src.get(src_off..src_off + count),
+                band.get_mut(dst_span),
+                src.get(src_off..src_off.saturating_add(count)),
             ) {
                 dst.copy_from_slice(s);
             }
@@ -1328,10 +1566,8 @@ impl Framebuffer {
         let Some((x_lo, x_hi)) = self.clip_span(y, x_start, x_end) else {
             return;
         };
-        let row_base = y as usize * self.width as usize;
-        let lo = row_base + x_lo as usize;
-        let hi = row_base + x_hi as usize;
-        if let Some(span) = self.back.get_mut(lo..hi) {
+        let row = Self::row_range(self.width as usize, y as usize, x_lo as usize, x_hi as usize);
+        if let Some(span) = self.back.get_mut(row) {
             span.fill(color | 0xFF_00_00_00);
         }
     }
@@ -1342,30 +1578,28 @@ impl Framebuffer {
     /// OPT: hoists the alpha computation and per-pixel branch/float conversion out
     /// of the inner loop (versus calling `blend_pixel` per pixel). Only the integer
     /// channel blend runs per pixel. Caller guarantees `0 < src_a < 255`.
+    ///
+    /// The `src * a` products used to be hoisted by hand; they are now inside
+    /// [`blend_channel`](Self::blend_channel), which is a `#[inline] const fn`
+    /// of two loop-invariant arguments, so LLVM hoists them itself. Taking
+    /// `src_a` as a `u8` also puts half the caller's contract into the type.
     #[inline]
-    fn blend_row(&mut self, y: u32, x_start: u32, x_end: u32, src_color: u32, src_a: u32) {
+    fn blend_row(&mut self, y: u32, x_start: u32, x_end: u32, src_color: u32, src_a: u8) {
         let Some((x_lo, x_hi)) = self.clip_span(y, x_start, x_end) else {
             return;
         };
-        let inv_a = 255 - src_a;
-        let src_r = (src_color >> 16) & 0xFF;
-        let src_g = (src_color >> 8) & 0xFF;
-        let src_b = src_color & 0xFF;
-        let sr = src_r * src_a;
-        let sg = src_g * src_a;
-        let sb = src_b * src_a;
-        let row_base = y as usize * self.width as usize;
-        let lo = row_base + x_lo as usize;
-        let hi = row_base + x_hi as usize;
-        if let Some(span) = self.back.get_mut(lo..hi) {
+        let (src_r, src_g, src_b) = (
+            (src_color >> 16) as u8,
+            (src_color >> 8) as u8,
+            src_color as u8,
+        );
+        let row = Self::row_range(self.width as usize, y as usize, x_lo as usize, x_hi as usize);
+        if let Some(span) = self.back.get_mut(row) {
             for pixel in span {
                 let dst = *pixel;
-                let dst_r = (dst >> 16) & 0xFF;
-                let dst_g = (dst >> 8) & 0xFF;
-                let dst_b = dst & 0xFF;
-                let out_r = (sr + dst_r * inv_a) / 255;
-                let out_g = (sg + dst_g * inv_a) / 255;
-                let out_b = (sb + dst_b * inv_a) / 255;
+                let out_r = Self::blend_channel(src_r, (dst >> 16) as u8, src_a);
+                let out_g = Self::blend_channel(src_g, (dst >> 8) as u8, src_a);
+                let out_b = Self::blend_channel(src_b, dst as u8, src_a);
                 *pixel = 0xFF_00_00_00 | (out_r << 16) | (out_g << 8) | out_b;
             }
         }
@@ -1385,7 +1619,9 @@ impl Framebuffer {
             return Err(CompositorError::FramebufferTooLarge { width, height });
         }
 
-        let size = width as usize * height as usize;
+        // Bounded by the MAX_FB_* check just above; saturating so the bound is
+        // enforced by the code rather than only by the reader.
+        let size = (width as usize).saturating_mul(height as usize);
         self.width = width;
         self.height = height;
         self.back = vec![0xFF_00_00_00; size];
@@ -1442,12 +1678,8 @@ impl Display {
     }
 
     /// Get the frame interval for this display's refresh rate.
-    pub fn frame_interval(&self) -> Duration {
-        if self.refresh_rate == 0 {
-            Duration::from_millis(16) // Default to ~60fps
-        } else {
-            Duration::from_micros(1_000_000 / self.refresh_rate as u64)
-        }
+    pub const fn frame_interval(&self) -> Duration {
+        frame_interval_for(self.refresh_rate)
     }
 
     /// Get the display's bounding rectangle in virtual space.
@@ -1484,7 +1716,7 @@ impl DisplayManager {
             let rightmost = self
                 .displays
                 .iter()
-                .map(|d| d.offset_x + d.width as i32)
+                .map(|d| d.bounds().right())
                 .max()
                 .unwrap_or(0);
             display.offset_x = rightmost;
@@ -1494,14 +1726,14 @@ impl DisplayManager {
 
     /// Get the total virtual desktop bounds (union of all displays).
     pub fn virtual_bounds(&self) -> Rect {
-        if self.displays.is_empty() {
+        // Taken from the iterator rather than by `[0]` after an `is_empty()`
+        // guard: the guard and the index are two statements that have to agree
+        // about the same fact, and only one of them is checked by the compiler.
+        let mut rest = self.displays.iter();
+        let Some(first) = rest.next() else {
             return Rect::new(0, 0, 0, 0);
-        }
-        let mut bounds = self.displays[0].bounds();
-        for display in self.displays.iter().skip(1) {
-            bounds = bounds.union(&display.bounds());
-        }
-        bounds
+        };
+        rest.fold(first.bounds(), |bounds, display| bounds.union(&display.bounds()))
     }
 
     /// Get all displays.
@@ -1846,6 +2078,81 @@ enum DragMode {
     ResizeBottomLeft,
     /// Resizing from the bottom-right corner.
     ResizeBottomRight,
+}
+
+impl DragMode {
+    /// Which edge this drag moves on each axis, as `(horizontal, vertical)`.
+    ///
+    /// Splitting the nine modes into two independent axes is what lets one
+    /// piece of arithmetic serve all of them. The eight resize arms it replaces
+    /// each spelled the same sum out again, which is why a single overflow
+    /// appeared in eight places at once, and why two of them had drifted into
+    /// using the literals `100`/`50` where `MIN_WINDOW_WIDTH`/`_HEIGHT` were
+    /// meant.
+    const fn resize_edges(self) -> (Edge, Edge) {
+        match self {
+            // Not a resize; the caller handles it before asking.
+            Self::MoveWindow => (Edge::Fixed, Edge::Fixed),
+            Self::ResizeLeft => (Edge::Near, Edge::Fixed),
+            Self::ResizeRight => (Edge::Far, Edge::Fixed),
+            Self::ResizeTop => (Edge::Fixed, Edge::Near),
+            Self::ResizeBottom => (Edge::Fixed, Edge::Far),
+            Self::ResizeTopLeft => (Edge::Near, Edge::Near),
+            Self::ResizeTopRight => (Edge::Far, Edge::Near),
+            Self::ResizeBottomLeft => (Edge::Near, Edge::Far),
+            Self::ResizeBottomRight => (Edge::Far, Edge::Far),
+        }
+    }
+}
+
+/// How one axis of a window responds to a resize drag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edge {
+    /// This axis is not being dragged: extent and origin both stay put.
+    Fixed,
+    /// The far edge follows the pointer, so only the extent changes.
+    Far,
+    /// The near edge follows the pointer, so the origin moves too — by exactly
+    /// the amount the extent changed, which is not the same as the amount the
+    /// pointer moved.
+    Near,
+}
+
+impl Edge {
+    /// The extent this drag asks for, before the window's own limits apply.
+    ///
+    /// Computed in `i64` because that is the only width in which the sum is
+    /// total: a `u32` extent plus an `i32` delta ranges wider than either type
+    /// holds, so every 32-bit spelling of this must either overflow or pre-clamp
+    /// away the very case it is clamping. The pointer position that produces
+    /// `delta` is not the compositor's to bound — it arrives from a device, or
+    /// from a client injecting one.
+    fn extent(self, start: u32, delta: i32) -> u32 {
+        let delta = match self {
+            Self::Fixed => return start,
+            Self::Far => i64::from(delta),
+            Self::Near => i64::from(delta).saturating_neg(),
+        };
+        i64::from(start).saturating_add(delta).clamp(0, i64::from(u32::MAX)) as u32
+    }
+
+    /// Where the origin ends up, given the extent the window *settled* on.
+    ///
+    /// Taking the settled extent rather than the requested one is what keeps a
+    /// window from drifting out from under the pointer: a client with a
+    /// `min_size` larger than the drag asked for gets its minimum, and the near
+    /// edge has to move by that difference, not by the one the drag wanted.
+    /// Only the window knows which it got, so only it can be asked.
+    fn origin(self, start_origin: i32, start_extent: u32, settled: u32) -> i32 {
+        match self {
+            Self::Fixed | Self::Far => start_origin,
+            Self::Near => {
+                let shift = i64::from(start_extent).saturating_sub(i64::from(settled));
+                start_origin
+                    .saturating_add(shift.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+            }
+        }
+    }
 }
 
 /// Active drag state.
@@ -2307,11 +2614,18 @@ impl RenderEngine {
                 corner_radii: _,
             } => {
                 // Simplified shadow: draw a semi-transparent rectangle expanded by spread+blur.
+                //
+                // `try_from`, not `as`: a negative spread — a shadow the caller
+                // wants drawn *inside* its box, which CSS permits — makes the
+                // expanded extent negative, and `as u32` would reinterpret that
+                // as roughly four billion pixels and fill the whole screen. A
+                // shadow smaller than nothing is nothing.
                 let expand = (*spread + *blur) as i32;
-                let px = (*x + tx + *offset_x) as i32 - expand;
-                let py = (*y + ty + *offset_y) as i32 - expand;
-                let w = (*width as i32 + expand * 2) as u32;
-                let h = (*height as i32 + expand * 2) as u32;
+                let grow = expand.saturating_mul(2);
+                let px = ((*x + tx + *offset_x) as i32).saturating_sub(expand);
+                let py = ((*y + ty + *offset_y) as i32).saturating_sub(expand);
+                let w = u32::try_from((*width as i32).saturating_add(grow)).unwrap_or(0);
+                let h = u32::try_from((*height as i32).saturating_add(grow)).unwrap_or(0);
                 self.fill_rect(fb, px, py, w, h, color_to_argb(color), opacity);
             }
         }
@@ -2336,8 +2650,8 @@ impl RenderEngine {
 
         let x_start = clipped.x.max(0) as u32;
         let y_start = clipped.y.max(0) as u32;
-        let x_end = (clipped.x + clipped.width as i32).max(0) as u32;
-        let y_end = (clipped.y + clipped.height as i32).max(0) as u32;
+        let x_end = clipped.right().max(0) as u32;
+        let y_end = clipped.bottom().max(0) as u32;
         if x_end <= x_start || y_end <= y_start {
             return;
         }
@@ -2346,8 +2660,7 @@ impl RenderEngine {
         // and pick a per-row fast path instead of blending pixel-by-pixel.
         // OPT (BENCH-COMPOSITOR-SLOW): opaque fills become a single slice memset
         // per row; translucent fills hoist the alpha math out of the inner loop.
-        let src_a_raw = ((color >> 24) & 0xFF) as f32;
-        let src_a = ((src_a_raw * opacity) as u32).min(255);
+        let src_a = Framebuffer::effective_alpha(color, opacity);
         if src_a == 0 {
             return;
         }
@@ -2374,13 +2687,15 @@ impl RenderEngine {
         color: u32,
         opacity: f32,
     ) {
+        let rect = Rect::new(x, y, width, height);
+        let line = i32::try_from(line_width).unwrap_or(i32::MAX);
         // Top edge
         self.fill_rect(fb, x, y, width, line_width, color, opacity);
         // Bottom edge
         self.fill_rect(
             fb,
             x,
-            y + height as i32 - line_width as i32,
+            rect.bottom().saturating_sub(line),
             width,
             line_width,
             color,
@@ -2391,7 +2706,7 @@ impl RenderEngine {
         // Right edge
         self.fill_rect(
             fb,
-            x + width as i32 - line_width as i32,
+            rect.right().saturating_sub(line),
             y,
             line_width,
             height,
@@ -2516,7 +2831,60 @@ impl RenderEngine {
         }
     }
 
-    /// Draw a line using Bresenham's algorithm.
+    /// The inclusive pixel bounds a line may land on: the framebuffer, narrowed
+    /// by the active clip rectangle. Deliberately *not* narrowed by the
+    /// framebuffer's own `frame_clip` — `blend_pixel` applies that per pixel,
+    /// and being conservative here only costs a few iterations that were being
+    /// spent anyway.
+    fn line_bounds(fb: &Framebuffer, clip: Option<&Rect>) -> (i64, i64, i64, i64) {
+        let (mut x_lo, mut y_lo) = (0i64, 0i64);
+        let mut x_hi = i64::from(fb.width).saturating_sub(1);
+        let mut y_hi = i64::from(fb.height).saturating_sub(1);
+        if let Some(c) = clip {
+            x_lo = x_lo.max(i64::from(c.x));
+            y_lo = y_lo.max(i64::from(c.y));
+            x_hi = x_hi.min(i64::from(c.x).saturating_add(i64::from(c.width)).saturating_sub(1));
+            y_hi = y_hi.min(i64::from(c.y).saturating_add(i64::from(c.height)).saturating_sub(1));
+        }
+        (x_lo, x_hi, y_lo, y_hi)
+    }
+
+    /// Blend one line pixel, honouring the clip stack. Coordinates are `i64`
+    /// because the caller works in that width; anything outside `u32` is off
+    /// every framebuffer and is dropped here.
+    fn plot_line_pixel(fb: &mut Framebuffer, x: i64, y: i64, clip: Option<&Rect>, c: u32, o: f32) {
+        let (Ok(px), Ok(py)) = (u32::try_from(x), u32::try_from(y)) else {
+            return;
+        };
+        if clip.is_some_and(|r| !r.contains(x as i32, y as i32)) {
+            return;
+        }
+        fb.blend_pixel(px, py, c, o);
+    }
+
+    /// Draw a line using Bresenham's algorithm, clipped along its major axis.
+    ///
+    /// The endpoints arrive from a client's [`RenderCommand::Line`] and are not
+    /// the compositor's to trust. The previous loop stepped one pixel at a time
+    /// from `(x1, y1)` all the way to `(x2, y2)` no matter where the screen
+    /// was, so a line spanning the coordinate space cost four *billion*
+    /// iterations of a display-server thread — a hang any client could ask for
+    /// — and it computed `x2 - x1`, `.abs()` and `2 * err` in `i32`, each of
+    /// which overflows on that same input (`(-2^31).abs()` panics outright).
+    ///
+    /// So the major-axis step range is intersected with the drawable area up
+    /// front, in `i64`, and only the surviving steps are walked — at most one
+    /// per framebuffer column or row. Every pixel the old code could actually
+    /// have made visible is still visited, in the same order and colour; the
+    /// dropped steps are exactly those whose `blend_pixel` was already a no-op.
+    /// `line_matches_the_unclipped_bresenham_walk` pins that equivalence
+    /// against a transcription of the old loop.
+    ///
+    /// The minor axis keeps Bresenham's incremental form, but is *seeded* at
+    /// the first surviving step from the closed form
+    /// `round(k · minor / major)` — computed once in `u128`, since `k · minor`
+    /// can reach 2^64 — so skipping to the visible part costs one division
+    /// rather than one iteration per skipped pixel.
     fn draw_line(
         &self,
         fb: &mut Framebuffer,
@@ -2528,40 +2896,71 @@ impl RenderEngine {
         opacity: f32,
     ) {
         let clip = self.clip_stack.current().copied();
+        let (x1, y1, x2, y2) = (i64::from(x1), i64::from(y1), i64::from(x2), i64::from(y2));
 
-        let dx = (x2 - x1).abs();
-        let dy = -(y2 - y1).abs();
-        let sx: i32 = if x1 < x2 { 1 } else { -1 };
-        let sy: i32 = if y1 < y2 { 1 } else { -1 };
-        let mut err = dx + dy;
+        let (adx, ady) = (x2.abs_diff(x1), y2.abs_diff(y1));
+        let steps = adx.max(ady);
+        if steps == 0 {
+            Self::plot_line_pixel(fb, x1, y1, clip.as_ref(), color, opacity);
+            return;
+        }
+        let sx: i64 = if x2 >= x1 { 1 } else { -1 };
+        let sy: i64 = if y2 >= y1 { 1 } else { -1 };
 
-        let mut cx = x1;
-        let mut cy = y1;
+        // Walk whichever axis moves faster; the other is derived from it.
+        let x_major = adx >= ady;
+        let (bx_lo, bx_hi, by_lo, by_hi) = Self::line_bounds(fb, clip.as_ref());
+        let (major_0, major_dir, minor_0, minor_dir, b_lo, b_hi) = if x_major {
+            (x1, sx, y1, sy, bx_lo, bx_hi)
+        } else {
+            (y1, sy, x1, sx, by_lo, by_hi)
+        };
 
-        loop {
-            // Plot pixel if within clip bounds.
-            if cx >= 0 && cy >= 0 {
-                let in_clip = match &clip {
-                    Some(c) => c.contains(cx, cy),
-                    None => true,
-                };
-                if in_clip {
-                    fb.blend_pixel(cx as u32, cy as u32, color, opacity);
-                }
-            }
+        // Steps whose major coordinate `major_0 + major_dir·k` lands in bounds.
+        // All four operands are within i32 range, so these differences are far
+        // inside i64 and the saturating forms are exact.
+        let (raw_lo, raw_hi) = if major_dir > 0 {
+            (b_lo.saturating_sub(major_0), b_hi.saturating_sub(major_0))
+        } else {
+            (major_0.saturating_sub(b_hi), major_0.saturating_sub(b_lo))
+        };
+        if raw_hi < 0 {
+            return;
+        }
+        let k_lo = raw_lo.max(0) as u64;
+        let k_hi = (raw_hi as u64).min(steps);
+        if k_lo > k_hi {
+            return;
+        }
 
-            if cx == x2 && cy == y2 {
-                break;
-            }
+        // minor(k) = floor((2·k·minor_len + major_len) / (2·major_len)), i.e.
+        // round-half-up of k·minor_len/major_len, which is what the error
+        // accumulator in the classic loop computes.
+        let (minor_len, major_len) = if x_major { (ady, adx) } else { (adx, ady) };
+        let two_major = u128::from(major_len).saturating_mul(2);
+        let num = u128::from(k_lo)
+            .saturating_mul(2)
+            .saturating_mul(u128::from(minor_len))
+            .saturating_add(u128::from(major_len));
+        // `major_len == steps >= 1` here, so `two_major` is never zero; the
+        // fallbacks are unreachable and exist only because the divisor's
+        // nonzero-ness is an argument rather than a type.
+        let mut q = num.checked_div(two_major).unwrap_or(0) as u64;
+        let mut rem = num.checked_rem(two_major).unwrap_or(0) as u64;
+        // `2·minor_len <= 2·major_len`, so a step can push `rem` past
+        // `two_major` at most once — no inner loop is needed.
+        let (step, wrap) = (minor_len.saturating_mul(2), two_major as u64);
 
-            let e2 = 2 * err;
-            if e2 >= dy {
-                err += dy;
-                cx += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                cy += sy;
+        for k in k_lo..=k_hi {
+            let major = major_0.saturating_add(major_dir.saturating_mul(k as i64));
+            let minor = minor_0.saturating_add(minor_dir.saturating_mul(q as i64));
+            let (px, py) = if x_major { (major, minor) } else { (minor, major) };
+            Self::plot_line_pixel(fb, px, py, clip.as_ref(), color, opacity);
+
+            rem = rem.saturating_add(step);
+            if rem >= wrap {
+                rem = rem.saturating_sub(wrap);
+                q = q.saturating_add(1);
             }
         }
     }
@@ -2716,11 +3115,7 @@ impl Compositor {
     pub fn new(width: u32, height: u32, refresh_rate: u32) -> CompositorResult<Self> {
         let framebuffer = Framebuffer::new(width, height)?;
         let display_manager = DisplayManager::new(width, height, refresh_rate);
-        let frame_interval = Duration::from_micros(if refresh_rate == 0 {
-            16_667
-        } else {
-            1_000_000 / refresh_rate as u64
-        });
+        let frame_interval = frame_interval_for(refresh_rate);
 
         Ok(Self {
             windows: Vec::new(),
@@ -2776,8 +3171,15 @@ impl Compositor {
         // Honour a requested position; otherwise place the window at a slightly
         // offset position from existing windows so they don't pile up.
         let (x, y) = spec.position.unwrap_or_else(|| {
-            let offset = (self.windows.len() as i32 * 30) % 300;
-            (100 + offset, 80 + offset)
+            // Cascade in 30px steps, restarting every ten windows. The window
+            // count is reduced modulo the cycle *before* being scaled, so a
+            // client that opens a pathological number of windows shifts the
+            // cascade rather than overflowing the multiply.
+            const CASCADE_STEP: i32 = 30;
+            const CASCADE_CYCLE: usize = 10;
+            let slot = i32::try_from(self.windows.len() % CASCADE_CYCLE).unwrap_or(0);
+            let offset = slot.saturating_mul(CASCADE_STEP);
+            (offset.saturating_add(100), offset.saturating_add(80))
         });
 
         let mut window = Window::from_spec(spec, x, y, client_pid);
@@ -2933,16 +3335,13 @@ impl Compositor {
             // Inset by this window's own frame, not by the constants: an
             // undecorated window has no frame to leave room for and should
             // fill the display exactly rather than being pushed 30px down.
-            let (top, side, bottom) = window.frame_insets();
-            window.x = display_bounds.x + side as i32;
-            window.y = display_bounds.y + top as i32;
+            let (x, y, fit_w, fit_h) = window.client_geometry_for_frame(display_bounds);
+            window.x = x;
+            window.y = y;
             // A `max_size` still binds when maximised — a window that cannot
             // usefully be drawn wider stays at its width and is simply anchored
             // at the top-left of the work area.
-            let (w, h) = window.clamp_size(
-                display_bounds.width.saturating_sub(side * 2),
-                display_bounds.height.saturating_sub(top + bottom),
-            );
+            let (w, h) = window.clamp_size(fit_w, fit_h);
             window.width = w;
             window.height = h;
             window.dirty = true;
@@ -3338,69 +3737,42 @@ impl Compositor {
 
         // Handle active drag.
         if let Some(drag) = self.drag.clone() {
-            let dx = x - drag.start_mouse.x;
-            let dy = y - drag.start_mouse.y;
+            // Saturating: the pointer position arrives from a device or from a
+            // client injecting one, and the drag origin was recorded from an
+            // equally unbounded position, so the difference is not the
+            // compositor's to assume fits.
+            let dx = x.saturating_sub(drag.start_mouse.x);
+            let dy = y.saturating_sub(drag.start_mouse.y);
+            let (start_x, start_y) = (drag.start_window_pos.x, drag.start_window_pos.y);
 
-            match drag.mode {
-                DragMode::MoveWindow => {
-                    let new_x = drag.start_window_pos.x + dx;
-                    let new_y = drag.start_window_pos.y + dy;
-                    let _ = self.move_window(drag.window_id, new_x, new_y);
-                }
-                DragMode::ResizeRight => {
-                    let new_w = (drag.start_window_size.0 as i32 + dx).max(100) as u32;
-                    let _ = self.resize_window(drag.window_id, new_w, drag.start_window_size.1);
-                }
-                DragMode::ResizeBottom => {
-                    let new_h = (drag.start_window_size.1 as i32 + dy).max(50) as u32;
-                    let _ = self.resize_window(drag.window_id, drag.start_window_size.0, new_h);
-                }
-                DragMode::ResizeLeft => {
-                    let new_w = (drag.start_window_size.0 as i32 - dx).max(100) as u32;
-                    let new_x =
-                        drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
-                    let _ = self.move_window(drag.window_id, new_x, drag.start_window_pos.y);
-                    let _ = self.resize_window(drag.window_id, new_w, drag.start_window_size.1);
-                }
-                DragMode::ResizeTop => {
-                    let new_h = (drag.start_window_size.1 as i32 - dy).max(50) as u32;
-                    let new_y =
-                        drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
-                    let _ = self.move_window(drag.window_id, drag.start_window_pos.x, new_y);
-                    let _ = self.resize_window(drag.window_id, drag.start_window_size.0, new_h);
-                }
-                DragMode::ResizeTopLeft => {
-                    let new_w = (drag.start_window_size.0 as i32 - dx).max(100) as u32;
-                    let new_h = (drag.start_window_size.1 as i32 - dy).max(50) as u32;
-                    let new_x =
-                        drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
-                    let new_y =
-                        drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
-                    let _ = self.move_window(drag.window_id, new_x, new_y);
-                    let _ = self.resize_window(drag.window_id, new_w, new_h);
-                }
-                DragMode::ResizeTopRight => {
-                    let new_w = (drag.start_window_size.0 as i32 + dx).max(100) as u32;
-                    let new_h = (drag.start_window_size.1 as i32 - dy).max(50) as u32;
-                    let new_y =
-                        drag.start_window_pos.y + (drag.start_window_size.1 as i32 - new_h as i32);
-                    let _ = self.move_window(drag.window_id, drag.start_window_pos.x, new_y);
-                    let _ = self.resize_window(drag.window_id, new_w, new_h);
-                }
-                DragMode::ResizeBottomLeft => {
-                    let new_w = (drag.start_window_size.0 as i32 - dx).max(100) as u32;
-                    let new_h = (drag.start_window_size.1 as i32 + dy).max(50) as u32;
-                    let new_x =
-                        drag.start_window_pos.x + (drag.start_window_size.0 as i32 - new_w as i32);
-                    let _ = self.move_window(drag.window_id, new_x, drag.start_window_pos.y);
-                    let _ = self.resize_window(drag.window_id, new_w, new_h);
-                }
-                DragMode::ResizeBottomRight => {
-                    let new_w = (drag.start_window_size.0 as i32 + dx).max(100) as u32;
-                    let new_h = (drag.start_window_size.1 as i32 + dy).max(50) as u32;
-                    let _ = self.resize_window(drag.window_id, new_w, new_h);
-                }
+            if drag.mode == DragMode::MoveWindow {
+                let _ = self.move_window(
+                    drag.window_id,
+                    start_x.saturating_add(dx),
+                    start_y.saturating_add(dy),
+                );
+                return;
             }
+
+            let (h_edge, v_edge) = drag.mode.resize_edges();
+            let (start_w, start_h) = drag.start_window_size;
+            // The window is asked what size it will accept *before* the origin
+            // is derived, so a near-edge drag against a client's `min_size`
+            // moves the origin by the size change that actually happened rather
+            // than the one requested — otherwise the window creeps sideways
+            // while its size stays pinned at the minimum.
+            let Some(win) = self.window_ref(drag.window_id) else {
+                return;
+            };
+            let (new_w, new_h) =
+                win.clamp_size(h_edge.extent(start_w, dx), v_edge.extent(start_h, dy));
+            let new_x = h_edge.origin(start_x, start_w, new_w);
+            let new_y = v_edge.origin(start_y, start_h, new_h);
+
+            if (new_x, new_y) != (start_x, start_y) {
+                let _ = self.move_window(drag.window_id, new_x, new_y);
+            }
+            let _ = self.resize_window(drag.window_id, new_w, new_h);
             return;
         }
 
@@ -3411,8 +3783,7 @@ impl Compositor {
         if let Some(window_id) = self.window_at(x, y)
             && let Some(win) = self.window_ref(window_id)
         {
-            let local_x = x - win.x;
-            let local_y = y - win.y;
+            let (local_x, local_y) = win.local_point(x, y);
             self.pending_notifications
                 .push_back(EventNotification::MouseEvent {
                     window_id,
@@ -3438,8 +3809,7 @@ impl Compositor {
             if let Some(window_id) = self.focused_window
                 && let Some(win) = self.window_ref(window_id)
             {
-                let local_x = x - win.x;
-                let local_y = y - win.y;
+                let (local_x, local_y) = win.local_point(x, y);
                 self.pending_notifications
                     .push_back(EventNotification::MouseEvent {
                         window_id,
@@ -3505,8 +3875,7 @@ impl Compositor {
                         return;
                     }
                     // Client area click.
-                    let local_x = x - win.x;
-                    let local_y = y - win.y;
+                    let (local_x, local_y) = win.local_point(x, y);
                     self.pending_notifications
                         .push_back(EventNotification::MouseEvent {
                             window_id,
@@ -3521,8 +3890,7 @@ impl Compositor {
             if let Some(window_id) = self.window_at(x, y)
                 && let Some(win) = self.window_ref(window_id)
             {
-                let local_x = x - win.x;
-                let local_y = y - win.y;
+                let (local_x, local_y) = win.local_point(x, y);
                 self.pending_notifications
                     .push_back(EventNotification::MouseEvent {
                         window_id,
@@ -3538,8 +3906,7 @@ impl Compositor {
         if let Some(window_id) = self.window_at(x, y)
             && let Some(win) = self.window_ref(window_id)
         {
-            let local_x = x - win.x;
-            let local_y = y - win.y;
+            let (local_x, local_y) = win.local_point(x, y);
             self.pending_notifications
                 .push_back(EventNotification::MouseEvent {
                     window_id,
@@ -3640,8 +4007,8 @@ impl Compositor {
         if !win.resizable || !win.is_framed() {
             return None;
         }
-        let (top, side, bottom) = win.frame_insets();
-        let grab_size = side as i32 + win.shadow_extent() as i32;
+        let side = win.frame_insets().1;
+        let grab = i32::try_from(side.saturating_add(win.shadow_extent())).unwrap_or(i32::MAX);
         let outer = win.outer_rect();
 
         // Don't detect border drag if the point is inside the client area or title bar.
@@ -3655,10 +4022,15 @@ impl Compositor {
             return None;
         }
 
-        let at_left = x < win.x - side as i32 + grab_size;
-        let at_right = x >= win.x + win.width as i32 + side as i32 - grab_size;
-        let at_top = y < win.y - top as i32 + grab_size;
-        let at_bottom = y >= win.y + win.height as i32 + bottom as i32 - grab_size;
+        // The grab bands are the outermost `grab` pixels of the frame box — the
+        // same box `render_border` strokes, measured the same way. Written out
+        // longhand this was a fifth derivation of the frame box, and one that
+        // overflowed for a client-chosen origin near the coordinate edge.
+        let frame = win.frame_rect();
+        let at_left = x < frame.x.saturating_add(grab);
+        let at_right = x >= frame.right().saturating_sub(grab);
+        let at_top = y < frame.y.saturating_add(grab);
+        let at_bottom = y >= frame.bottom().saturating_sub(grab);
 
         match (at_left, at_right, at_top, at_bottom) {
             (true, false, true, false) => Some(DragMode::ResizeTopLeft),
@@ -3869,21 +4241,17 @@ impl Compositor {
     /// Deliberately conservative — it is the *outer* bound of the shadow, so it
     /// over-covers rather than under-covers. Under-covering would clip a
     /// decoration off; over-covering only leaves a few culled pixels on the
-    /// table. Mirrors the geometry in [`render_shadow`](Self::render_shadow),
-    /// which expands by one pixel per shadow layer from a base already inset by
-    /// the border and title bar.
+    /// table.
+    ///
+    /// Derived from [`Window::frame_rect`] rather than re-spelled from the
+    /// constants, which is what it used to do under a comment promising it
+    /// "mirrors the geometry in `render_shadow`" — a promise nothing checked.
+    /// The padding covers the furthest anything reaches: the shadow's last
+    /// layer (`SHADOW_SIZE - 1` out, cast 3 px down-right) and the border
+    /// stroke (one out), with room to spare in every direction.
     fn window_drawn_extent(win: &Window) -> Rect {
-        let pad = BORDER_WIDTH + SHADOW_SIZE + 3;
-        let x = win.x.saturating_sub(pad as i32);
-        let y = win
-            .y
-            .saturating_sub((TITLE_BAR_HEIGHT + BORDER_WIDTH + SHADOW_SIZE + 3) as i32);
-        Rect::new(
-            x,
-            y,
-            win.width + pad * 2,
-            win.height + TITLE_BAR_HEIGHT + BORDER_WIDTH * 2 + SHADOW_SIZE * 2 + 6,
-        )
+        win.frame_rect()
+            .inflate(SHADOW_SIZE.saturating_add(BORDER_WIDTH).saturating_add(3))
     }
 
     /// Benchmark/test hook: perform one full recomposite and buffer swap
@@ -3979,7 +4347,7 @@ impl Compositor {
             // would just cost a subtraction that returns the input unchanged.
             let occluders: Vec<Rect> = covers
                 .iter()
-                .skip(idx + 1)
+                .skip(idx.saturating_add(1))
                 .flatten()
                 .filter(|c| c.intersect(&extent).is_some())
                 .copied()
@@ -4102,7 +4470,7 @@ impl Compositor {
         // owns the whole display. Both report it by having no title bar.
         if let Some(bar) = title_bar {
             // 1. Draw window shadow.
-            self.render_shadow(win_x, win_y, win_width, win_height, opacity);
+            self.render_shadow(bar.frame, opacity);
 
             // 2. Draw window border.
             let border_color = if focused {
@@ -4110,7 +4478,7 @@ impl Compositor {
             } else {
                 self.theme.border_unfocused
             };
-            self.render_border(win_x, win_y, win_width, win_height, border_color, opacity);
+            self.render_border(bar.frame, border_color, opacity);
 
             // 3. Draw title bar.
             self.render_title_bar(&bar, focused, &title, opacity);
@@ -4232,50 +4600,57 @@ impl Compositor {
         }
     }
 
-    /// Render the window shadow.
-    fn render_shadow(&mut self, x: i32, y: i32, width: u32, height: u32, opacity: f32) {
-        let shadow_offset = 3_i32;
-        let total_width = width + (BORDER_WIDTH * 2);
-        let total_height = height + TITLE_BAR_HEIGHT + BORDER_WIDTH;
+    /// Render the window shadow: concentric outlines around the frame box,
+    /// offset down-right and fading with distance.
+    fn render_shadow(&mut self, frame: Rect, opacity: f32) {
+        /// How far down and right the shadow is cast from the frame.
+        const SHADOW_OFFSET: i32 = 3;
+        /// Alpha of the innermost shadow layer, falling off per layer.
+        const SHADOW_ALPHA: u32 = 40;
+        const SHADOW_FALLOFF: u32 = 5;
 
-        // Draw shadow layers (progressively more transparent).
+        let base = frame.offset(SHADOW_OFFSET, SHADOW_OFFSET);
         for layer in 0..SHADOW_SIZE {
-            let alpha = (40u32.saturating_sub(layer * 5)).min(255);
-            let shadow_color = alpha << 24;
-            let expand = layer as i32;
-
-            let sx = x - BORDER_WIDTH as i32 - expand + shadow_offset;
-            let sy = y - TITLE_BAR_HEIGHT as i32 - expand + shadow_offset;
-            let sw = total_width + (expand as u32 * 2);
-            let sh = total_height + (expand as u32 * 2);
-
-            // Draw only the outline of each shadow layer for performance.
+            let alpha = SHADOW_ALPHA
+                .saturating_sub(layer.saturating_mul(SHADOW_FALLOFF))
+                .min(255);
+            let ring = base.inflate(layer);
+            // Only the outline of each layer: the interior is covered by the
+            // window itself or by the next layer in.
             self.render_engine.stroke_rect(
                 &mut self.framebuffer,
-                sx,
-                sy,
-                sw,
-                sh,
+                ring.x,
+                ring.y,
+                ring.width,
+                ring.height,
                 1,
-                shadow_color,
+                alpha << 24,
                 opacity,
             );
         }
     }
 
-    /// Render the window border.
-    fn render_border(&mut self, x: i32, y: i32, width: u32, height: u32, color: u32, opacity: f32) {
-        let border_x = x - BORDER_WIDTH as i32;
-        let border_y = y - TITLE_BAR_HEIGHT as i32 - BORDER_WIDTH as i32;
-        let border_w = width + (BORDER_WIDTH * 2);
-        let border_h = height + TITLE_BAR_HEIGHT + (BORDER_WIDTH * 2);
-
+    /// Render the window border: a stroke around the frame box.
+    ///
+    /// The stroke sits one border *above* the frame box, because
+    /// [`Window::frame_insets`] reserves no room above the title bar for it —
+    /// so the top edge is drawn into the shadow band rather than into space the
+    /// layout set aside. Harmless (the band is 8 px of shadow) but a real
+    /// inconsistency; see `known-issues.md`
+    /// `TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS`.
+    fn render_border(&mut self, frame: Rect, color: u32, opacity: f32) {
+        let border = Rect::new(
+            frame.x,
+            frame.y.saturating_sub(BORDER_WIDTH as i32),
+            frame.width,
+            frame.height.saturating_add(BORDER_WIDTH),
+        );
         self.render_engine.stroke_rect(
             &mut self.framebuffer,
-            border_x,
-            border_y,
-            border_w,
-            border_h,
+            border.x,
+            border.y,
+            border.width,
+            border.height,
             BORDER_WIDTH,
             color,
             opacity,
@@ -4316,7 +4691,9 @@ impl Compositor {
         } else {
             self.theme.title_text_unfocused
         };
-        let text_x = tb_x + 8;
+        /// Gap between the left edge of the title bar and the title text.
+        const TITLE_TEXT_INSET: u32 = 8;
+        let text_x = tb_x.saturating_add(TITLE_TEXT_INSET as i32);
         // Centred on the font's own line height rather than a hardcoded cell
         // size, so the title stays centred if the title-bar font ever changes.
         let line_height = self
@@ -4324,12 +4701,16 @@ impl Compositor {
             .fonts
             .get(DEFAULT_FONT_SIZE, Weight::Regular, Family::Ui)
             .line_height();
-        let text_y = tb_y + (bar.bar.height as i32 - line_height as i32) / 2;
+        let text_y =
+            tb_y.saturating_add((bar.bar.height as i32).saturating_sub(line_height as i32) / 2);
         // Reserve exactly the buttons this window actually has, so a window
         // with no maximize button gets that space for its title instead of
         // eliding text to make room for nothing.
-        let max_text_width = tb_width
-            .saturating_sub((TITLE_BUTTON_SIZE + TITLE_BUTTON_SPACING) * bar.button_count() + 16);
+        let buttons = TITLE_BUTTON_SIZE
+            .saturating_add(TITLE_BUTTON_SPACING)
+            .saturating_mul(bar.button_count());
+        let max_text_width =
+            tb_width.saturating_sub(buttons.saturating_add(TITLE_TEXT_INSET.saturating_mul(2)));
         self.render_engine.draw_text(
             &mut self.framebuffer,
             text_x,
@@ -4766,7 +5147,18 @@ impl Compositor {
 // Tests
 // ---------------------------------------------------------------------------
 
+// The five defensive lints the workspace turns on are for production code:
+// a test that indexes a fixed-size fixture, or unwraps a value it just
+// constructed, is *asserting*, and rewriting that assertion as a `let else`
+// only hides which line failed. CLAUDE.md's lint policy says as much.
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::unwrap_used
+)]
 mod tests {
     use super::*;
 
@@ -5144,11 +5536,10 @@ mod tests {
         let events = decode_drained(&mut comp);
         let chord = events
             .iter()
-            .filter_map(|e| match &e.event {
+            .find_map(|e| match &e.event {
                 ClientEvent::Key(k) if k.key == Key::S => Some(k),
                 _ => None,
             })
-            .next()
             .expect("no S key event");
         assert!(chord.modifiers.ctrl, "Ctrl+S must arrive as a chord");
 
@@ -5156,11 +5547,10 @@ mod tests {
         // one event behind.
         let ctrl = events
             .iter()
-            .filter_map(|e| match &e.event {
+            .find_map(|e| match &e.event {
                 ClientEvent::Key(k) if k.key == Key::LeftCtrl => Some(k),
                 _ => None,
             })
-            .next()
             .expect("no Ctrl key event");
         assert!(ctrl.modifiers.ctrl);
     }
@@ -5423,6 +5813,347 @@ mod tests {
     }
 
     #[test]
+    fn nothing_a_window_draws_falls_outside_its_damage_extent() {
+        // `window_drawn_extent` is what damage tracking repaints. A decoration
+        // that paints outside it leaves a smear nothing ever cleans up, and the
+        // old version's only guarantee was a comment saying it "mirrors the
+        // geometry in render_shadow" — which nothing checked, and which had
+        // stopped being true. Render a framed window over a known background
+        // and assert every changed pixel is inside the extent.
+        let mut comp = Compositor::new(400, 300, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Framed", 120, 90);
+        spec.position = Some((140, 120));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        let bg = comp.theme.desktop_background;
+        comp.framebuffer.clear(bg);
+        comp.render_window(id);
+
+        let extent = comp
+            .window_ref(id)
+            .map(Compositor::window_drawn_extent)
+            .expect("window");
+        for y in 0..300u32 {
+            for x in 0..400u32 {
+                if comp.framebuffer.get_pixel(x, y) == Some(bg) {
+                    continue;
+                }
+                assert!(
+                    extent.contains(x as i32, y as i32),
+                    "painted ({x}, {y}), outside the damage extent {extent:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_outer_rect_is_the_frame_rect_plus_the_shadow() {
+        // outer_rect is now defined as frame_rect().inflate(shadow_extent()).
+        // These are the numbers that definition has to keep producing, written
+        // out from the constants so a change to either helper has to be
+        // deliberate rather than merely compile.
+        let win = plain_window(100, 100, 200, 150);
+        assert_eq!(win.frame_rect(), Rect::new(99, 70, 202, 181));
+        assert_eq!(win.outer_rect(), Rect::new(91, 62, 218, 197));
+        assert_eq!(win.frame_rect().inflate(SHADOW_SIZE), win.outer_rect());
+        // The title bar occupies the top inset of the frame box exactly.
+        let bar = win.title_bar_rect().expect("framed");
+        assert_eq!(bar, Rect::new(99, 70, 202, TITLE_BAR_HEIGHT));
+        assert_eq!(bar.x, win.frame_rect().x);
+        assert_eq!(bar.width, win.frame_rect().width);
+    }
+
+    #[test]
+    fn maximising_makes_the_frame_flush_with_the_display_not_the_client_area() {
+        // `client_geometry_for_frame` is the inverse of `frame_rect`, and that
+        // is the property maximise depends on: what the user sees touching the
+        // screen edge is the decorated box, not the client area inside it.
+        // Round-tripping both ways is what stops the two drifting apart.
+        for &(framed, w, h) in &[(true, 200u32, 150u32), (false, 200, 150), (true, 640, 480)] {
+            let mut win = plain_window(37, 91, w, h);
+            win.decorations = framed;
+            let area = Rect::new(-11, 23, 1920, 1080);
+            let (x, y, fw, fh) = win.client_geometry_for_frame(area);
+
+            let mut placed = win.clone();
+            placed.x = x;
+            placed.y = y;
+            placed.width = fw;
+            placed.height = fh;
+            assert_eq!(
+                placed.frame_rect(),
+                area,
+                "a window fitted to {area:?} must have exactly that frame box (framed={framed})"
+            );
+        }
+    }
+
+    #[test]
+    fn maximise_fills_the_display_with_the_frame() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = comp.create_window("Max".to_string(), 200, 150, 1);
+        comp.maximize_window(id).expect("maximize");
+        let bounds = comp.display_manager.virtual_bounds();
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!(
+            win.frame_rect(),
+            bounds,
+            "the decorated box, not the client area, fills the display"
+        );
+    }
+
+    #[test]
+    fn a_shadow_with_negative_spread_draws_nothing_rather_than_everything() {
+        // A spread more negative than the blur shrinks the shadow past nothing.
+        // Cast rather than clamped, the negative extent reappeared as ~4e9
+        // pixels wide, and the "shadow" filled everything from its own origin
+        // to the far corner of the clip.
+        const BG: u32 = 0xFF00_0000;
+        let mut fb = Framebuffer::new(64, 64).expect("framebuffer");
+        fb.clear(BG);
+        let mut engine = RenderEngine::new();
+        engine.execute(
+            &mut fb,
+            &[RenderCommand::BoxShadow {
+                x: 10.0,
+                y: 10.0,
+                width: 20.0,
+                height: 20.0,
+                offset_x: 0.0,
+                offset_y: 0.0,
+                blur: 1.0,
+                spread: -40.0,
+                color: Color::rgba(255, 255, 255, 255),
+                corner_radii: CornerRadii::ZERO,
+            }],
+            0,
+            0,
+            64,
+            64,
+            1.0,
+        );
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                assert_eq!(
+                    fb.get_pixel(x, y),
+                    Some(BG),
+                    "a shadow smaller than nothing must draw nothing, but ({x},{y}) changed"
+                );
+            }
+        }
+    }
+
+    /// The line rasteriser exactly as it stood before it was clipped and
+    /// widened to `i64` — the reference the new one must agree with.
+    ///
+    /// Only called with endpoints small enough that the original could not
+    /// overflow, which is the whole domain on which it had a defined answer.
+    ///
+    /// Deliberately a character-for-character transcription — do not tidy the
+    /// arithmetic here. Its value as a reference is that it *is* the old code;
+    /// an improved reference would prove nothing about what shipped.
+    fn unclipped_bresenham(x1: i32, y1: i32, x2: i32, y2: i32) -> Vec<(i32, i32)> {
+        let dx = (x2 - x1).abs();
+        let dy = -(y2 - y1).abs();
+        let sx: i32 = if x1 < x2 { 1 } else { -1 };
+        let sy: i32 = if y1 < y2 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let (mut cx, mut cy) = (x1, y1);
+        let mut out = Vec::new();
+        loop {
+            out.push((cx, cy));
+            if cx == x2 && cy == y2 {
+                return out;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                cx += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                cy += sy;
+            }
+        }
+    }
+
+    #[test]
+    fn line_matches_the_unclipped_bresenham_walk() {
+        // Clipping a line to the screen is only allowed to drop pixels that
+        // were invisible anyway. Every endpoint pair in a grid that fits
+        // entirely on the framebuffer must therefore light exactly the pixels
+        // the original loop did — every octant, both diagonals, both axes,
+        // and the degenerate single-point case.
+        let engine = RenderEngine::new();
+        for x1 in 0..7i32 {
+            for y1 in 0..7i32 {
+                for x2 in 0..7i32 {
+                    for y2 in 0..7i32 {
+                        let mut fb = Framebuffer::new(7, 7).expect("framebuffer");
+                        fb.clear(0xFF_00_00_00);
+                        engine.draw_line(&mut fb, x1, y1, x2, y2, 0xFF_FF_FF_FF, 1.0);
+
+                        let mut want = vec![vec![false; 7]; 7];
+                        for (px, py) in unclipped_bresenham(x1, y1, x2, y2) {
+                            if let Some(row) = want.get_mut(py as usize) {
+                                if let Some(cell) = row.get_mut(px as usize) {
+                                    *cell = true;
+                                }
+                            }
+                        }
+                        for py in 0..7u32 {
+                            for px in 0..7u32 {
+                                let lit = fb.get_pixel(px, py) == Some(0xFF_FF_FF_FF);
+                                let expect = want[py as usize][px as usize];
+                                assert_eq!(
+                                    lit, expect,
+                                    "({x1},{y1})->({x2},{y2}) at pixel ({px},{py})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_across_the_whole_coordinate_space_neither_hangs_nor_overflows() {
+        // A client can send any f32 endpoints it likes; these are what they
+        // saturate to. The old loop needed 2^32 iterations to reach the screen
+        // and panicked in `.abs()` before it got there.
+        let engine = RenderEngine::new();
+        let mut fb = Framebuffer::new(64, 64).expect("framebuffer");
+        let far = [
+            (i32::MIN, i32::MIN, i32::MAX, i32::MAX),
+            (i32::MIN, 5, i32::MAX, 6),
+            (i32::MAX, i32::MIN, i32::MIN, i32::MAX),
+            (i32::MIN, i32::MAX, 32, 32),
+            // Wholly off-screen: must draw nothing rather than walk there.
+            (-9000, -9000, -8000, -8000),
+        ];
+        for (x1, y1, x2, y2) in far {
+            fb.clear(0xFF_00_00_00);
+            engine.draw_line(&mut fb, x1, y1, x2, y2, 0xFF_FF_FF_FF, 1.0);
+        }
+        // The last case crosses no framebuffer pixel at all.
+        assert!(
+            (0..64).all(|y| (0..64).all(|x| fb.get_pixel(x, y) == Some(0xFF_00_00_00))),
+            "an off-screen line painted something"
+        );
+    }
+
+    /// Start a border drag on `id` at `(x, y)` and move the pointer by
+    /// `(dx, dy)`, as the user would.
+    fn drag_border(comp: &mut Compositor, id: WindowId, x: i32, y: i32, dx: i32, dy: i32) {
+        comp.handle_mouse_button(MouseButton::Left, true, x, y);
+        let Some(drag) = comp.drag.as_ref() else {
+            panic!("no drag started at ({x}, {y})");
+        };
+        assert_eq!(drag.window_id, id, "the drag grabbed the wrong window");
+        comp.handle_mouse_move(x.saturating_add(dx), y.saturating_add(dy));
+    }
+
+    #[test]
+    fn every_resize_edge_moves_the_edge_the_user_grabbed() {
+        // One case per resize mode, checking the pair the old nine-arm match
+        // had to get right nine separate times: which extent changes, and
+        // whether the origin follows.
+        //
+        // The three top grabs sit at `-35`, not `-1`: the title bar occupies
+        // `y ∈ [win.y - TITLE_BAR_HEIGHT, win.y)`, and a point in it starts a
+        // *move*, not a resize. The top resize band is the strip above it,
+        // inside the shadow that `outer_rect` covers.
+        let cases = [
+            // (grab point relative to the window, dx, dy, expected rect)
+            ("right", (200, 75), (50, 0), (100, 100, 250, 150)),
+            ("left", (-1, 75), (-50, 0), (50, 100, 250, 150)),
+            ("bottom", (100, 150), (0, 40), (100, 100, 200, 190)),
+            ("top", (100, -35), (0, -40), (100, 60, 200, 190)),
+            ("top-left", (-5, -35), (-50, -40), (50, 60, 250, 190)),
+            ("top-right", (195, -35), (50, -40), (100, 60, 250, 190)),
+            ("bottom-left", (-1, 150), (-50, 40), (50, 100, 250, 190)),
+            ("bottom-right", (200, 150), (50, 40), (100, 100, 250, 190)),
+        ];
+        for (name, (gx, gy), (dx, dy), want) in cases {
+            let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+            let mut spec = WindowSpec::new("Resizable", 200, 150);
+            spec.position = Some((100, 100));
+            let id = comp.create_window_from_spec(&spec, 1);
+            drag_border(&mut comp, id, 100 + gx, 100 + gy, dx, dy);
+            let win = comp.window_ref(id).expect("window");
+            assert_eq!(
+                (win.x, win.y, win.width, win.height),
+                want,
+                "dragging the {name} edge"
+            );
+        }
+    }
+
+    #[test]
+    fn a_near_edge_drag_stopped_by_a_minimum_size_does_not_walk_the_window_away() {
+        // The near edge must move by the size change that actually happened,
+        // not by the one the pointer asked for. Deriving the origin from the
+        // *requested* width let a window whose `min_size` refused the shrink
+        // keep sliding right under a pointer dragging its left border, growing
+        // no smaller and never stopping.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Bounded", 200, 150);
+        spec.position = Some((300, 100));
+        spec.min_size = Some((180, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        // Ask to shrink the width by 100 from the left; only 20 is available.
+        drag_border(&mut comp, id, 299, 175, 100, 0);
+        let win = comp.window_ref(id).expect("window");
+        assert_eq!(win.width, 180, "the minimum holds");
+        assert_eq!(
+            win.x, 320,
+            "the left edge moved by the 20 px the window actually gave up"
+        );
+        // The right edge — the one the user is not touching — must not move.
+        assert_eq!(win.x.saturating_add(win.width as i32), 500);
+    }
+
+    #[test]
+    fn a_resize_drag_from_the_coordinate_edge_does_not_overflow() {
+        // `start_size as i32 + dx` overflowed for a large window and a distant
+        // pointer, and the pointer position is not the compositor's to bound —
+        // it arrives from a device or from a client injecting one.
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Wide", 200, 150);
+        spec.position = Some((100, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+
+        comp.handle_mouse_button(MouseButton::Left, true, 300, 175);
+        comp.drag = Some(DragState {
+            window_id: id,
+            mode: DragMode::ResizeBottomRight,
+            start_mouse: Point::new(i32::MIN, i32::MIN),
+            start_window_size: (u32::MAX, u32::MAX),
+            start_window_pos: Point::new(0, 0),
+        });
+        comp.handle_mouse_move(i32::MAX, i32::MAX);
+        let win = comp.window_ref(id).expect("window survived");
+        assert_eq!((win.width, win.height), (u32::MAX, u32::MAX));
+
+        // And the same drag run the other way, which shrinks past zero. A near
+        // edge moves *against* the pointer delta — dragging the left border
+        // rightwards is what makes the window narrower — so the shrinking case
+        // is the one where the pointer travels in the positive direction.
+        comp.drag = Some(DragState {
+            window_id: id,
+            mode: DragMode::ResizeTopLeft,
+            start_mouse: Point::new(i32::MIN, i32::MIN),
+            start_window_size: (10, 10),
+            start_window_pos: Point::new(i32::MIN, i32::MIN),
+        });
+        comp.handle_mouse_move(i32::MAX, i32::MAX);
+        let win = comp.window_ref(id).expect("window survived");
+        assert_eq!((win.width, win.height), (MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT));
+    }
+
+    #[test]
     fn a_declared_minimum_size_survives_a_resize_below_it() {
         let mut comp = Compositor::new(800, 600, 60).expect("compositor");
         let mut spec = WindowSpec::new("Bounded", 400, 300);
@@ -5612,6 +6343,11 @@ mod tests {
         assert_eq!(bounds.height, 1440); // Max height
     }
 
+    // Exact equality is the correct assertion here, not a tolerance: 0.0, 0.5
+    // and 1.0 are all exactly representable, and `set_opacity` only clamps —
+    // it does no arithmetic that could round. A tolerance would weaken the
+    // test into passing if clamping ever landed slightly off the endpoint.
+    #[allow(clippy::float_cmp)]
     #[test]
     fn test_opacity() {
         let mut comp = Compositor::new(400, 300, 60).unwrap();
@@ -5944,8 +6680,8 @@ mod tests {
             let parts = base.subtract(&occ);
             // Exhaustive over the base rect and a one-pixel margin, so a part
             // that strayed outside would be caught too.
-            for py in (base.y - 1)..(base.y + base.height as i32 + 1) {
-                for px in (base.x - 1)..(base.x + base.width as i32 + 1) {
+            for py in (base.y - 1)..=base.bottom() {
+                for px in (base.x - 1)..=base.right() {
                     let want = usize::from(base.contains(px, py) && !occ.contains(px, py));
                     let got = coverage_count(base, &parts, px, py);
                     assert_eq!(
@@ -5966,6 +6702,66 @@ mod tests {
                 "area after subtracting {occ:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_union_across_the_whole_coordinate_space_does_not_overflow() {
+        // `(x2 - x1) as u32` used to compute the width here. Both coordinates
+        // come off the wire — `CreateWindow` and `SetPosition` carry a client's
+        // chosen `i32` position — so a client could place one window at each end
+        // of the coordinate space and panic the display server with the damage
+        // union of the two. The distance does not fit in an `i32` at all, which
+        // is why the fix computes the extent directly rather than subtracting.
+        let far_left = Rect::new(i32::MIN, i32::MIN, 10, 10);
+        let far_right = Rect::new(i32::MAX - 10, i32::MAX - 10, 10, 10);
+        let both = far_left.union(&far_right);
+        assert_eq!(both.x, i32::MIN);
+        assert_eq!(both.y, i32::MIN);
+        assert_eq!(both.width, u32::MAX);
+        assert_eq!(both.height, u32::MAX);
+
+        // And the ordinary case still gives the ordinary answer.
+        let a = Rect::new(-3, -2, 20, 14);
+        let b = Rect::new(5, 5, 4, 4);
+        assert_eq!(a.union(&b), Rect::new(-3, -2, 20, 14));
+        assert_eq!(
+            Rect::new(0, 0, 5, 5).union(&Rect::new(10, 10, 5, 5)),
+            Rect::new(0, 0, 15, 15)
+        );
+    }
+
+    #[test]
+    fn span_is_exact_at_the_edges_of_the_coordinate_space() {
+        // The whole coordinate space is `u32::MAX` wide, exactly — which is the
+        // reason the answer cannot be computed by subtracting in `i32`.
+        assert_eq!(span(i32::MIN, i32::MAX), u32::MAX);
+        assert_eq!(span(i32::MIN, 0), 1 << 31);
+        assert_eq!(span(0, i32::MAX), i32::MAX as u32);
+        // Not past `lo` is an empty span, not an error: two rectangles that
+        // merely touch produce one.
+        assert_eq!(span(5, 5), 0);
+        assert_eq!(span(5, 4), 0);
+        assert_eq!(span(i32::MAX, i32::MIN), 0);
+        assert_eq!(span(-7, 3), 10);
+    }
+
+    #[test]
+    fn a_window_at_the_coordinate_edge_keeps_its_frame_on_the_screen() {
+        // The frame is *added* to a client-chosen position and size, so both
+        // ends can overflow. Saturating pins the window at the extreme; the bug
+        // it replaces would have wrapped it to the far side of the desktop.
+        let w = plain_window(i32::MIN, i32::MIN, 100, 100);
+        assert!(w.is_framed(), "the case only arises for a framed window");
+        let outer = w.outer_rect();
+        assert_eq!(outer.x, i32::MIN);
+        assert_eq!(outer.y, i32::MIN);
+
+        let huge = plain_window(0, 0, u32::MAX, u32::MAX);
+        let outer = huge.outer_rect();
+        assert_eq!(outer.width, u32::MAX);
+        assert_eq!(outer.height, u32::MAX);
+        let title = huge.title_bar_rect().expect("a decorated window has one");
+        assert_eq!(title.width, u32::MAX);
     }
 
     #[test]

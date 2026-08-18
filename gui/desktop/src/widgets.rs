@@ -95,6 +95,93 @@ impl GridPos {
     }
 }
 
+/// The block of grid cells a widget covers: a position and a size together.
+///
+/// This type exists because its three questions — does a cell fall inside,
+/// does the block fit the grid, does it overlap another block — were each
+/// answered by recomputing `pos.col + size.cols` at the call site, six times
+/// across five methods, with `overlaps_any` naming the four edges by hand.
+/// Six copies of one formula is six chances to write a different one; and
+/// because `u32` addition is not total, each copy was a bounds check that
+/// could overflow *while computing the value it was about to bounds-check*.
+/// `add_widget(kind, GridPos::new(u32::MAX, 0))` panicked in a debug build,
+/// and in a release build wrapped to a small number that *passed* the check —
+/// admitting a widget at column `u32::MAX`, which `occupies` then answered
+/// about wrongly in turn.
+///
+/// The predicates below are *exact for every input*, because none of them
+/// computes an edge. Each compares a distance against a length instead — see
+/// [`span_starts_within`] — so there is no value they can produce that is
+/// wrong rather than merely `false`. [`Self::right`] and [`Self::bottom`] do
+/// still exist, because rendering and callers want the edge as a number, and
+/// those two saturate; they are reporting, not deciding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridRect {
+    /// Top-left cell.
+    pub pos: GridPos,
+    /// Extent in cells.
+    pub size: WidgetSize,
+}
+
+/// Whether two half-open spans `[a, a + a_len)` and `[b, b + b_len)` share a
+/// value.
+///
+/// Written as "how far past the other does each start, and is that less than
+/// the other's length" rather than the textbook `a < b + b_len && b < a +
+/// a_len`, because the textbook form adds — and the sum is exactly what does
+/// not fit in a `u32` for a span near the end of the range. The comparison
+/// picks the branch in which the subtraction cannot go negative, so the
+/// `saturating_sub` never actually saturates and the result is exact.
+const fn span_starts_within(a: u32, a_len: u32, b: u32, b_len: u32) -> bool {
+    if a >= b {
+        a.saturating_sub(b) < b_len
+    } else {
+        b.saturating_sub(a) < a_len
+    }
+}
+
+impl GridRect {
+    pub const fn new(pos: GridPos, size: WidgetSize) -> Self {
+        Self { pos, size }
+    }
+
+    /// One column past the rightmost cell covered, clamped to `u32::MAX`.
+    pub const fn right(&self) -> u32 {
+        self.pos.col.saturating_add(self.size.cols)
+    }
+
+    /// One row past the bottommost cell covered, clamped to `u32::MAX`.
+    pub const fn bottom(&self) -> u32 {
+        self.pos.row.saturating_add(self.size.rows)
+    }
+
+    /// Whether the cell at `(col, row)` is covered.
+    pub const fn contains(&self, col: u32, row: u32) -> bool {
+        span_starts_within(col, 1, self.pos.col, self.size.cols)
+            && span_starts_within(row, 1, self.pos.row, self.size.rows)
+    }
+
+    /// Whether the block lies wholly inside a `columns` × `rows` grid.
+    pub const fn fits_in(&self, columns: u32, rows: u32) -> bool {
+        // "The grid has room for `cols` more columns starting at `col`" —
+        // `checked_sub` is both the room and the test that the block even
+        // starts inside the grid.
+        let (Some(room_right), Some(room_below)) = (
+            columns.checked_sub(self.pos.col),
+            rows.checked_sub(self.pos.row),
+        ) else {
+            return false;
+        };
+        self.size.cols <= room_right && self.size.rows <= room_below
+    }
+
+    /// Whether two blocks share any cell.
+    pub const fn intersects(&self, other: &Self) -> bool {
+        span_starts_within(self.pos.col, self.size.cols, other.pos.col, other.size.cols)
+            && span_starts_within(self.pos.row, self.size.rows, other.pos.row, other.size.rows)
+    }
+}
+
 /// The type of built-in widget content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WidgetKind {
@@ -280,12 +367,14 @@ impl WidgetInstance {
         now_ms.saturating_sub(self.last_updated) >= self.update_interval_ms
     }
 
+    /// The block of grid cells this widget covers.
+    pub const fn rect(&self) -> GridRect {
+        GridRect::new(self.position, self.size)
+    }
+
     /// Check if a position (in grid cells) overlaps this widget.
-    pub fn occupies(&self, col: u32, row: u32) -> bool {
-        col >= self.position.col
-            && col < self.position.col + self.size.cols
-            && row >= self.position.row
-            && row < self.position.row + self.size.rows
+    pub const fn occupies(&self, col: u32, row: u32) -> bool {
+        self.rect().contains(col, row)
     }
 }
 
@@ -368,21 +457,19 @@ impl DesktopWidgetManager {
             return None;
         }
 
-        let size = kind.default_size();
-
-        // Check bounds.
-        if position.col + size.cols > self.grid.columns || position.row + size.rows > self.grid.rows
-        {
+        let rect = GridRect::new(position, kind.default_size());
+        if !self.fits(rect) || self.overlaps_any(rect, None) {
             return None;
         }
 
-        // Check overlap.
-        if self.overlaps_any(position, size, None) {
+        // Refusing when the ID space is exhausted is the only answer that
+        // keeps IDs unique — wrapping or saturating would alias two widgets,
+        // and every lookup here is by ID.
+        let Some(next) = self.next_id.checked_add(1) else {
             return None;
-        }
-
+        };
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = next;
         self.widgets.push(WidgetInstance::new(id, kind, position));
         Some(id)
     }
@@ -405,13 +492,8 @@ impl DesktopWidgetManager {
             None => return false,
         };
 
-        // Check bounds.
-        if new_pos.col + size.cols > self.grid.columns || new_pos.row + size.rows > self.grid.rows {
-            return false;
-        }
-
-        // Check overlap (excluding self).
-        if self.overlaps_any(new_pos, size, Some(id)) {
+        let rect = GridRect::new(new_pos, size);
+        if !self.fits(rect) || self.overlaps_any(rect, Some(id)) {
             return false;
         }
 
@@ -430,13 +512,8 @@ impl DesktopWidgetManager {
             None => return false,
         };
 
-        // Check bounds.
-        if pos.col + new_size.cols > self.grid.columns || pos.row + new_size.rows > self.grid.rows {
-            return false;
-        }
-
-        // Check overlap.
-        if self.overlaps_any(pos, new_size, Some(id)) {
+        let rect = GridRect::new(pos, new_size);
+        if !self.fits(rect) || self.overlaps_any(rect, Some(id)) {
             return false;
         }
 
@@ -528,12 +605,9 @@ impl DesktopWidgetManager {
     pub fn find_free_position(&self, size: WidgetSize) -> Option<GridPos> {
         for row in 0..self.grid.rows {
             for col in 0..self.grid.columns {
-                let pos = GridPos::new(col, row);
-                if pos.col + size.cols <= self.grid.columns
-                    && pos.row + size.rows <= self.grid.rows
-                    && !self.overlaps_any(pos, size, None)
-                {
-                    return Some(pos);
+                let rect = GridRect::new(GridPos::new(col, row), size);
+                if self.fits(rect) && !self.overlaps_any(rect, None) {
+                    return Some(rect.pos);
                 }
             }
         }
@@ -582,32 +656,17 @@ impl DesktopWidgetManager {
     // Private
     // ========================================================================
 
-    fn overlaps_any(
-        &self,
-        pos: GridPos,
-        size: WidgetSize,
-        exclude: Option<WidgetInstanceId>,
-    ) -> bool {
-        for w in &self.widgets {
-            if exclude == Some(w.id) {
-                continue;
-            }
-            // Check rectangle overlap.
-            let a_left = pos.col;
-            let a_right = pos.col + size.cols;
-            let a_top = pos.row;
-            let a_bottom = pos.row + size.rows;
+    /// Whether a block lies wholly inside this manager's grid.
+    fn fits(&self, rect: GridRect) -> bool {
+        rect.fits_in(self.grid.columns, self.grid.rows)
+    }
 
-            let b_left = w.position.col;
-            let b_right = w.position.col + w.size.cols;
-            let b_top = w.position.row;
-            let b_bottom = w.position.row + w.size.rows;
-
-            if a_left < b_right && a_right > b_left && a_top < b_bottom && a_bottom > b_top {
-                return true;
-            }
-        }
-        false
+    /// Whether a block would land on any widget other than `exclude`.
+    fn overlaps_any(&self, rect: GridRect, exclude: Option<WidgetInstanceId>) -> bool {
+        self.widgets
+            .iter()
+            .filter(|w| exclude != Some(w.id))
+            .any(|w| rect.intersects(&w.rect()))
     }
 
     fn render_grid(&self, commands: &mut Vec<RenderCommand>) {
@@ -1074,6 +1133,106 @@ mod tests {
 
     fn make_mgr() -> DesktopWidgetManager {
         DesktopWidgetManager::new()
+    }
+
+    // ---- GridRect ----
+
+    #[test]
+    fn a_block_near_the_end_of_the_coordinate_space_never_fits_a_grid() {
+        // This is the bug the type was introduced for. `pos.col + size.cols`
+        // at column u32::MAX panics in a debug build and wraps in a release
+        // one -- and the wrapped value is small, so it *passes* the bounds
+        // check it was computed for.
+        let far = GridRect::new(GridPos::new(u32::MAX, u32::MAX), WidgetSize::LARGE);
+        assert!(!far.fits_in(8, 6));
+        assert!(
+            !far.fits_in(u32::MAX, u32::MAX),
+            "not even in the largest grid"
+        );
+        // And it covers no cell, rather than covering a wrapped-around range
+        // near the origin.
+        assert!(!far.contains(0, 0));
+        assert!(!far.contains(1, 1));
+    }
+
+    #[test]
+    fn a_widget_at_the_far_edge_of_the_grid_is_refused_not_wrapped_into_it() {
+        let mut mgr = make_mgr(); // 8x6
+        assert_eq!(
+            mgr.add_widget(WidgetKind::Clock, GridPos::new(u32::MAX, 0)),
+            None
+        );
+        assert_eq!(
+            mgr.add_widget(WidgetKind::Clock, GridPos::new(0, u32::MAX)),
+            None
+        );
+        assert_eq!(mgr.count(), 0, "nothing was admitted");
+
+        // And a real widget cannot be *moved* there either.
+        let id = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
+        assert!(!mgr.move_widget(id, GridPos::new(u32::MAX, u32::MAX)));
+        assert_eq!(mgr.get(id).unwrap().position, GridPos::new(0, 0));
+    }
+
+    #[test]
+    fn a_block_fits_exactly_up_to_the_last_cell_and_no_further() {
+        // 3x2 at (5,4) ends at column 8, row 6 -- flush with an 8x6 grid.
+        let flush = GridRect::new(GridPos::new(5, 4), WidgetSize::LARGE);
+        assert_eq!((flush.right(), flush.bottom()), (8, 6));
+        assert!(flush.fits_in(8, 6));
+        assert!(!GridRect::new(GridPos::new(6, 4), WidgetSize::LARGE).fits_in(8, 6));
+        assert!(!GridRect::new(GridPos::new(5, 5), WidgetSize::LARGE).fits_in(8, 6));
+    }
+
+    #[test]
+    fn a_block_covers_exactly_the_cells_it_overlaps() {
+        // `contains` and `intersects` are two ways of asking one question;
+        // they used to be two formulas. Cross-check them cell by cell.
+        let rect = GridRect::new(GridPos::new(2, 1), WidgetSize::new(3, 2));
+        for col in 0..8 {
+            for row in 0..6 {
+                let cell = GridRect::new(GridPos::new(col, row), WidgetSize::SMALL);
+                assert_eq!(
+                    rect.contains(col, row),
+                    rect.intersects(&cell),
+                    "cell ({col},{row})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blocks_that_only_share_an_edge_do_not_overlap() {
+        let left = GridRect::new(GridPos::new(0, 0), WidgetSize::new(2, 2));
+        for (col, row) in [(2, 0), (0, 2), (2, 2)] {
+            let neighbour = GridRect::new(GridPos::new(col, row), WidgetSize::new(2, 2));
+            assert!(!left.intersects(&neighbour), "abutting at ({col},{row})");
+            assert!(!neighbour.intersects(&left), "overlap is symmetric");
+        }
+        // One cell closer in either axis and they do share cells.
+        let overlapping = GridRect::new(GridPos::new(1, 1), WidgetSize::new(2, 2));
+        assert!(left.intersects(&overlapping));
+        assert!(overlapping.intersects(&left));
+    }
+
+    #[test]
+    fn a_free_position_is_one_that_actually_fits_and_is_actually_free() {
+        let mut mgr = make_mgr();
+        // Fill the grid in a ragged pattern so the search has to work.
+        for (col, row) in [(0, 0), (3, 0), (1, 2), (5, 4)] {
+            mgr.add_widget(WidgetKind::Calendar, GridPos::new(col, row));
+        }
+        let size = WidgetSize::WIDE; // 2x2
+        let pos = mgr.find_free_position(size).expect("the grid is not full");
+        let rect = GridRect::new(pos, size);
+        assert!(rect.fits_in(mgr.grid.columns, mgr.grid.rows));
+        for w in mgr.all_widgets() {
+            assert!(!rect.intersects(&w.rect()), "collides with widget {}", w.id);
+        }
+        // And the position it reports is one `add_widget` will accept.
+        assert!(mgr.add_widget(WidgetKind::Notes, pos).is_some());
     }
 
     // ---- WidgetSize ----

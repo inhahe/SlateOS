@@ -31758,6 +31758,64 @@ error inflated the number and blurred which code it belonged to. The rule:
 possible yet, reproduce the table on the command line **and filter the
 diagnostics by file path**. Never quote a raw total from a `-p` invocation.
 
+### Three crates done, 2026-08-17 — and a third figure that was wrong
+
+`gui/notifications`, `gui/window` and `gui/remote` now opt in and are at **0
+warnings**. Eight of ten `gui/` crates are compliant; `toolkit` and `desktop`
+remain.
+
+| Crate | predicted above | actual, opted in | after |
+|---|---|---|---|
+| `gui/notifications` | 20 | 20 | 0 |
+| `gui/window` | **0** | **16** | 0 |
+| `gui/remote` | 281 | **137** | 0 |
+
+**Two of those three predictions were wrong, in opposite directions, and for
+the same reason.** Both were measured *before* the opt-in, under whatever lint
+set the crate already had. `gui/window` measured 0 because its private
+`#![deny(clippy::all)] #![warn(clippy::pedantic)]` does not include the
+defensive five — they are restriction lints, in neither group — so the
+measurement was of a strictly smaller table than the one being adopted, and
+"0 warnings, a one-commit no-op" was a prediction the measurement could not
+support. `gui/remote` went the other way: 281 double-counted sites appearing
+in both the lib and test builds of the same file, where 137 is the count of
+distinct source locations. **Deduplicate by `(file, line, column, lint)`, and
+never predict a post-opt-in count from a pre-opt-in build.**
+
+**What the three found.** The pattern from `credentials` and `compositor` held
+in two of three: the warnings were not style complaints.
+
+- `gui/notifications` — a real bug. `DndSchedule` was four public `u8`s
+  validated nowhere, so `set_dnd_schedule(25, 0, 7, 0)` was accepted silently,
+  produced a start of 1500 minutes (past the largest time of day, 1439), and
+  compared as an overnight window that then never opened. Quiet hours simply
+  stopped happening with nothing reporting it. Fixed by making the state
+  unrepresentable: private minutes-from-midnight, a checked constructor, and a
+  setter that refuses and keeps the previous schedule.
+- `gui/window` — no user-visible bug, but `pub mod testing` is a test double
+  that *ships in the library*, so nothing had ever held it to production
+  standards though it compiles as production code. Its decode loop could spin
+  forever on a decoder reporting zero bytes consumed: a hang, which is the one
+  failure mode a test harness must not have, because the suite then dies on a
+  timeout naming no test at all.
+- `gui/remote` — 137 warnings that were four shapes, not 137 problems. The
+  largest: `Reader`'s fields carried no `pub`, which reads like encapsulation
+  and is not, because **a field private to the crate root is visible to every
+  descendant module**. All five sibling modules reached past the checked
+  accessors and indexed `buf` directly, with the same four lines each — in a
+  decoder whose module doc promises that all reads are bounds-checked. Moving
+  the type into its own module made the fields private in the sense originally
+  intended, and turned any future reach-around into a compile error.
+
+**The generalisable finding**, which is new and worth carrying to `toolkit`
+and `desktop`: *a lint firing many times in a crate that looks well-factored
+is often reporting a broken abstraction rather than sloppy call sites.* Three
+of the four `guiremote` shapes were an abstraction that existed, was correct,
+and was bypassed everywhere — the cursor, the count back-fill, the capacity
+hint. The fix was never "check the bound at the call site"; it was to make the
+bypass impossible or the mechanism unnecessary. Fixing 137 sites would have
+left the design that produced them intact.
+
 ## C-TEXT-WAS-CUT-BY-COUNTING-CHARACTERS-INSTEAD-OF-MEASURING-IT (lane C, 2026-08-17) - **fixed**
 
 **What.** Twenty-odd places across `gui/` and `apps/` decided how much text

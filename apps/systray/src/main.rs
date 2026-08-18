@@ -15,6 +15,10 @@
 
 #[allow(unused_imports)]
 use guitk::color::Color;
+// The calendar popup's date arithmetic comes from the shared civil-date
+// module rather than a local copy. See known-issues.md
+// C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC.
+use guitk::date;
 #[allow(unused_imports)]
 use guitk::event::{Event, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
@@ -311,59 +315,46 @@ impl DateTime {
         format!("{:02}:{:02}", self.hour, self.minute)
     }
 
+    /// The calendar date this instant falls on, as the shared civil date.
+    ///
+    /// `date::Date::from_ymd` *clamps* an out-of-range month or day rather
+    /// than rejecting it, which is the right contract here: `DateTime` is a
+    /// display struct fed by the clock, and a tray that has to draw
+    /// *something* is better off drawing December than "???".
+    fn civil(&self) -> date::Date {
+        date::Date::from_ymd(i32::from(self.year), u32::from(self.month), u32::from(self.day))
+    }
+
     /// Format date as Month Day, Year.
     pub fn date_str(&self) -> String {
-        let month_name = match self.month {
-            1 => "Jan",
-            2 => "Feb",
-            3 => "Mar",
-            4 => "Apr",
-            5 => "May",
-            6 => "Jun",
-            7 => "Jul",
-            8 => "Aug",
-            9 => "Sep",
-            10 => "Oct",
-            11 => "Nov",
-            12 => "Dec",
-            _ => "???",
-        };
+        // Behaviour change: a month outside 1..=12 used to render "???" and
+        // now renders "Dec". Nothing constructs such a `DateTime` -- the
+        // field is filled from the clock -- and a wrong-but-plausible month
+        // name is no worse than a placeholder that has never been seen.
+        let month_name = date::month_short_name(u32::from(self.month));
         format!("{} {}, {}", month_name, self.day, self.year)
     }
 
     /// Number of days in the current month.
     pub fn days_in_month(&self) -> u8 {
-        match self.month {
-            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-            4 | 6 | 9 | 11 => 30,
-            2 => {
-                let y = self.year as u32;
-                if (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400) {
-                    29
-                } else {
-                    28
-                }
-            }
-            _ => 30,
-        }
+        // Behaviour change: an out-of-range month used to answer 30 and now
+        // answers 31 (December, by the clamp). Both are arbitrary; the
+        // difference is that this one comes from the same table the calendar
+        // popup lays its grid out with.
+        u8::try_from(date::days_in_month(i32::from(self.year), u32::from(self.month))).unwrap_or(31)
     }
 
     /// Day of week for the first day of the current month (0=Sunday).
-    /// Uses Zeller-like calculation.
     pub fn first_weekday_of_month(&self) -> u8 {
-        // Tomohiko Sakamoto's algorithm
-        let y = self.year as i32;
-        let m = self.month as usize;
-        let d = 1_i32;
-        let offsets: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
-        let y_adj = if m < 3 { y - 1 } else { y };
-        let offset = offsets.get(m.wrapping_sub(1)).copied().unwrap_or(0);
-        let result = (y_adj + y_adj / 4 - y_adj / 100 + y_adj / 400 + offset + d) % 7;
-        if result < 0 {
-            (result + 7) as u8
-        } else {
-            result as u8
-        }
+        // Was a local transcription of Sakamoto's algorithm. The calendar
+        // popup indexes its first row by this value, so it has to agree with
+        // the day count above; taking both from `guitk::date` is what makes
+        // that agreement structural rather than a coincidence of two
+        // separately-correct copies.
+        let first = date::Date::from_ymd(i32::from(self.year), u32::from(self.month), 1);
+        // `Weekday::index` is 0..=6 with 0 = Sunday, which is this method's
+        // documented convention.
+        u8::try_from(first.weekday().index()).unwrap_or(0)
     }
 }
 
@@ -1809,6 +1800,61 @@ mod tests {
             weekday: 0,
         };
         assert_eq!(dt.first_weekday_of_month(), 5); // Friday
+    }
+
+    #[test]
+    fn each_month_starts_where_the_previous_one_ran_out() {
+        // The calendar popup indexes the first row of its grid by
+        // `first_weekday_of_month` and fills it with `days_in_month` cells, so
+        // the two have to agree: month n+1 must begin exactly
+        // `days_in_month(n)` days after month n did. The single-month case
+        // above cannot see a disagreement -- a weekday table wrong in eleven
+        // of twelve entries passes it.
+        //
+        // 2024 is a leap year and 2025 is not, so February is checked both
+        // ways, and the year rollover is checked in both directions.
+        for year in [2024_u16, 2025] {
+            for month in 1..=11_u8 {
+                let this = DateTime { year, month, ..DateTime::default() };
+                let next = DateTime { year, month: month + 1, ..DateTime::default() };
+                let expected = (this.first_weekday_of_month() + this.days_in_month()) % 7;
+                assert_eq!(
+                    next.first_weekday_of_month(),
+                    expected,
+                    "{year}-{:02} starts on the wrong day given {year}-{month:02}",
+                    month + 1
+                );
+            }
+            let dec = DateTime { year, month: 12, ..DateTime::default() };
+            let jan = DateTime { year: year + 1, month: 1, ..DateTime::default() };
+            assert_eq!(
+                jan.first_weekday_of_month(),
+                (dec.first_weekday_of_month() + dec.days_in_month()) % 7,
+                "{}-01 starts on the wrong day given {year}-12",
+                year + 1
+            );
+        }
+        // Anchors, so the relation above cannot be satisfied by two functions
+        // that are consistently wrong together.
+        let anchor = |year, month| DateTime { year, month, ..DateTime::default() }.first_weekday_of_month();
+        assert_eq!(anchor(2024, 1), 1, "2024-01-01 was a Monday");
+        assert_eq!(anchor(2024, 2), 4, "2024-02-01 was a Thursday");
+        assert_eq!(anchor(2000, 1), 6, "2000-01-01 was a Saturday");
+        assert_eq!(anchor(1970, 1), 4, "1970-01-01 was a Thursday");
+    }
+
+    #[test]
+    fn every_month_renders_its_own_three_letter_name() {
+        // `date_str` used to carry its own twelve-arm match. The single "Dec"
+        // case above would pass over eleven wrong arms.
+        let want = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        for (i, name) in want.iter().enumerate() {
+            let month = u8::try_from(i + 1).unwrap_or(1);
+            let dt = DateTime { year: 2026, month, day: 9, ..DateTime::default() };
+            assert_eq!(dt.date_str(), format!("{name} 9, 2026"), "month {month}");
+        }
     }
 
     #[test]

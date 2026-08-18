@@ -36246,11 +36246,12 @@ cheapest moment for two implementations to agree is before either is wired.
 
 ---
 
-## C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC (lane C, 2026-08-18) — PARTIALLY FIXED
+## C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC (lane C, 2026-08-18) — FIXED
 
-**Where:** `apps/calendar` (**fixed**), `apps/reminders`, `apps/habits`,
-`apps/contacts`, `apps/rssreader`, `apps/systray` (**open**), against
-`gui/toolkit/src/date.rs`.
+**Where:** `apps/calendar`, `apps/reminders`, `apps/habits`, `apps/contacts`,
+`apps/rssreader`, `apps/systray` — **all six fixed**, against
+`gui/toolkit/src/date.rs`. See `design-decisions.md` §468 for the pattern and
+the alternatives that were rejected.
 
 `guitk::date` is the shared civil-date module: `Date`, `Weekday`, `from_ymd`,
 `add_days`, `add_months`, `days_until`, `day_of_year`, `iso_week`,
@@ -36335,27 +36336,39 @@ and each failed a test that named it. The constancy test initially caught
 the accessor the views actually draw — so it now asserts over both and over
 their agreement.
 
-### What is still open
+### The other five, each rewired the same way
 
-Five apps still carry their own, in five mutually incompatible shapes:
+Each kept its own date struct — the field accesses are load-bearing — and
+routes every *calculation* through `guitk::date` via a private
+`civil()`/`from_civil()` bridge. Each was checked by reintroducing the defects
+it should catch, one at a time, rather than by "the tests still pass".
 
-| App | What it has | Notes |
-|---|---|---|
-| `apps/reminders` | `day_of_week`, `day_of_week_name`, `day_of_week_short`, `is_leap_year`, `days_in_month`, `month_name` | same shape as the calendar's was; the closest to a mechanical rewire |
-| `apps/habits` | `day_of_week`, `day_of_week_short`, `is_leap_year`, `days_in_month` on `i32`/`u32` | |
-| `apps/contacts` | `is_leap_year(u16)`, `days_in_month(u16, u8) -> Option<u8>`, `day_of_year(u8, u8)` | `u16` years; a `day_of_year` that takes no year, so it cannot be leap-correct |
-| `apps/rssreader` | `is_leap_year(u64)`, `days_in_month(month, leap)`, `days_from_civil` | `u64` years, and `days_in_month` takes the leap flag as a *parameter*, so a caller can pass the wrong one |
-| `apps/systray` | `days_in_month(&self) -> u8` | |
+| App | What it had | What the rewire did | Commit |
+|---|---|---|---|
+| `apps/reminders` | `day_of_week`, `day_of_week_name`, `day_of_week_short`, `is_leap_year`, `days_in_month`, `month_name` | all delegated; `to_day_number` deleted outright. Clippy arithmetic warnings 36 → 19 | `28b1703c9` |
+| `apps/habits` | `day_of_week`, `day_of_week_short`, `is_leap_year`, `days_in_month` on `i32`/`u32` | delegated; `to_day_number` kept (6 call sites) but reimplemented as `days_since_epoch`, so the day count and the weekday now come from the same place | `83b407436` |
+| `apps/contacts` | `is_leap_year(u16)`, `days_in_month(u16, u8) -> Option<u8>`, `day_of_year(u8, u8)` | `MONTH_LENGTHS` and `is_leap_year` deleted; `days_in_month` keeps its `None`; `day_of_year` clamps the month *range* before the lookup, since letting 14 through would make the clamp count December twice. Clippy: clean | `1afae95ee` |
+| `apps/rssreader` | `is_leap_year(u64)`, `days_in_month(month, leap)`, `days_from_civil`, `civil_from_days` | two Hinnant transcriptions and both twenty-line `#[expect]` blocks deleted; `days_in_month` re-signatured to take the **year** instead of a leap flag its caller supplied | `d0a7967e2` |
+| `apps/systray` | `days_in_month(&self) -> u8`, `first_weekday_of_month` (Sakamoto), a twelve-arm month-name match | all three delegated. Clippy 7 → 4 | this commit |
 
-**The proper fix** is the same bridge the calendar now uses: keep each app's
-own date struct where its field accesses are load-bearing, and delegate every
-calculation to `guitk::date`, converting integer widths at the boundary. Do
-them one at a time, each with its own reintroduction check — the calendar's
-week-number bug shows that "the tests still pass" says nothing here, because
-the tests were written against the implementation.
+### What the reintroduction checks found
 
-**Until then**, treat any date arithmetic in those five as unverified. None of
-them computes a week number, which is where the calendar's real damage was, so
-none is known to be *wrong* today — but none is known to be right either, and
-`rssreader`'s leap-flag parameter and `contacts`' year-less `day_of_year` are
-both shapes that make a wrong answer reachable from a correct call site.
+Across the six apps, ~46 defect variants were restored one at a time. **Six
+tests caught nothing** and were rewritten:
+
+| Test | Why it could not fail |
+|---|---|
+| `calendar::test_week_number` | asserted `(1..=53).contains(&wn)`; the implementation ended in `.min(53)` |
+| `calendar::a_week_number_is_constant_…` (my own replacement) | exercised only the new `iso_week()`, never `week_number()`, the accessor the views draw |
+| `reminders` / `habits` weekday coverage | asserted `day_of_week` twice over and never the label functions that turn it into text a user reads |
+| `habits::test_to_day_number_monotonic` | asserted only `d2 > d1` for dates a year apart — true of any monotone function, including one that returns the year |
+| `contacts::the_day_of_year_has_no_gaps_…` | accumulated the same `MONTH_LENGTHS` table `day_of_year` summed, so only the closing "sums to 365" check could fail |
+| `rssreader` (no test at all) | `days_to_ymd` saturating to `i32::MIN` instead of `i32::MAX` failed nothing — a documented, user-visible ordering guarantee with nothing behind it |
+
+`systray`'s two surviving date tests were single-case: one month for
+`first_weekday_of_month`, one month name for `date_str`. A weekday table wrong
+in eleven of twelve entries passed both. They are now
+`each_month_starts_where_the_previous_one_ran_out` — which pins the relation
+the calendar popup actually depends on, that month *n+1* begins exactly
+`days_in_month(n)` days after month *n* — and
+`every_month_renders_its_own_three_letter_name`.

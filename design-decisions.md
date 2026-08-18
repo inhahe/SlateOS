@@ -997,9 +997,37 @@ capability list, or does it map to an existing capability?):**
 - **Add CAP_SYS_ADMIN as a native capability** — rejected: ambient-authority
   junk drawer; contradicts the fine-grained capability model.
 
+**2026-08-18 — build status, recorded by the S305 standing audit. The decision
+is unchanged; only this entry's description of the tree was stale.** The prose
+below (and the Decision above) says "until the `/proc/sys/vm/overcommit_memory`
+surface lands, the `vm/` subtree stays omitted (the original option C)" and
+"requires no new code (the `vm/` subtree is already omitted)". Both sentences
+stopped being true some time ago — the audit exists because a stale premise
+reads as a live blocker to the next person. What is actually built:
+
+| Option-5 element | State |
+|---|---|
+| Both commit strategies in the kernel | **Built** — `mmap` genuinely backs on touch under lazy |
+| System-wide native knob (`mm.lazy_default`, strict) | **Built** (`kernel/src/sysctl.rs`) |
+| System-wide Linux knob (`mm.linux_lazy_default`, lazy) | **Built**, independent of the native one |
+| Per-program override | **Built** — `pcb::MmapCommitPolicy` (`Inherit`/`ForceCommitted`/`ForceLazy`), inherited across `fork` |
+| `/proc/sys/vm/overcommit_memory` **read** | **Built** and honest: `1 → "0"`, `0 → "2"`; `vm` is in `SYS_DIRS`, with a procfs self-test asserting it |
+| `/proc/sys/vm/overcommit_memory` **write** | **Not built** — `procfs::write_file` answers `NotSupported` for everything but `oom_score_adj` |
+| `admin.memory_policy` capability | **Not built** — no definition exists under `kernel/src/cap/`; it appears only in doc comments |
+| Settings → Advanced UI | **Not built** (lane C) |
+
+The last three are consistent with each other rather than a gap: the capability
+is absent *because* the write path is absent, so there is **no ungated route to
+the system-wide knob** — the read-only surface cannot be used to change policy.
+`overcommit_ratio`/`overcommit_kbytes` remain deliberately unexposed (§1: never
+advertise an unhonored knob). Whoever implements the write path must land
+`admin.memory_policy` in the same change, not after it.
+
 **Where it lives:**
-- `kernel/src/fs/procfs.rs`: `SYS_FILES`/`SYS_DIRS` (currently no `vm/`; Option 5
-  adds `vm/overcommit_memory` reporting the active mode), `gen_sys`.
+- `kernel/src/fs/procfs.rs`: `SYS_FILES`/`SYS_DIRS` (**`vm/overcommit_memory`
+  has since landed and reports the active mode** — the parenthetical below
+  describing it as absent is superseded by the build-status table above),
+  `gen_sys`.
 - `kernel/src/fs/mmtune.rs`: `OvercommitMode` (exists, advisory-only — Option 5
   wires it into the commit path).
 - `kernel/src/mm/` commit/allocation path + `mm/oom.rs` (must learn to honor the

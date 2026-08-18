@@ -54026,11 +54026,37 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##     1, no primary display) because QEMU's virtio-gpu-gl routes through
 ##     virglrenderer even when we accept no page-0 features. That kernel-side
 ##     fix is LANE A's and is the gate on any harness flip.
-##   STILL TO CHECK in this pass (spotted, not yet audited):
-##   * design-decisions.md line ~2560 -- "fullscreen game/video remoting stays
-##     unsupported until GPU encode exists". Does GPU encode exist now?
-##   * design-decisions.md line ~6164 -- gated on `#[thread_local]` stabilising.
-##     Check against the current nightly.
+##   * S11 (/proc/sys/vm/overcommit_memory + commit policy): PREMISE FIRED, but
+##     benignly -- the work overtook the prose rather than the prose blocking
+##     the work. The entry still said "the vm/ subtree stays omitted (the
+##     original option C)" and "requires no new code (already omitted)"; in
+##     fact vm/overcommit_memory landed, is in SYS_DIRS, reports the live
+##     sysctl honestly (mm.linux_lazy_default 1->"0", 0->"2"), has a procfs
+##     self-test, and is backed by a real per-process MmapCommitPolicy. NOT a
+##     security gap: writes are still NotSupported (procfs::write_file only
+##     accepts oom_score_adj), which is exactly why admin.memory_policy does
+##     not exist yet -- there is no ungated route to the system-wide knob.
+##     ANNOTATED S11 with a build-status table (Operator decision, unchanged --
+##     only its description of the tree was stale). RESIDUAL, for whoever does
+##     the write path: land admin.memory_policy IN THE SAME CHANGE, not after.
+##   CHECKED AND STILL CORRECTLY BLOCKED (premise holds, no action):
+##   * S34 (line ~2560) -- "fullscreen game/video remoting unsupported until
+##     GPU encode exists". No encoder exists: the only hits for vaapi/NVENC are
+##     userspace/{wf-recorder,wl-screenrec,twitchstudio,mpv}-cli, which are
+##     facades that println! a codec name. No `trait Encoder` anywhere.
+##   * S92 (line ~6238) -- gated on `#[thread_local]` stabilising. Still E0658
+##     on stable: verified by compiling a probe with rustc 1.95.0 targeting
+##     x86_64-unknown-none (issue #29594). Sysroot stays on stable.
+##   * S8-ish (line ~351) -- auxv builder "awaiting the Linux compat loader".
+##     posix/src/linux_binfmt_elf.rs is still constants + tests, no stack
+##     builder. Holds. (posix/ is lane B's anyway.)
+##   * S73 (YSH) -- C++ half still has not fired; re-check when C++ cross
+##     compilation lands.
+##   PASS COMPLETE 2026-08-18: swept every "How to reverse"/"revisit if"/
+##   "until X lands|exists|stabilises" clause in design-decisions.md. Two
+##   premises had fired (S59, S11); four checked and still hold. Next pass
+##   should re-run the same sweep -- the regex that found them:
+##     grep -nEi "revisit if|How to reverse|until .{0,60}(exists|lands|stabilis)|once a .{0,40}(exists|lands)" design-decisions.md
 
 ## DONE (2026-08-14, design-decisions.md S306): the shared docs stay per-branch;
 ##   the fix is a fetch/merge CADENCE, now in roadmap.md S5.5 and CLAUDE.md.

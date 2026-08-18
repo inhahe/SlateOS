@@ -143,6 +143,7 @@ mod pointer_tests;
 use appearance::config;
 use appearance::{AppearanceSettings, TaskbarStyle, TransparencyLevel};
 use guitk::color::Color;
+use guitk::cycle;
 use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::RenderTree;
 use guitk::style::{Border, CornerRadii, Shadow};
@@ -1490,6 +1491,50 @@ impl DesktopShell {
     // Window management
     // ======================================================================
 
+    /// The next window id, and never the same one twice.
+    ///
+    /// A repeated id would not merely confuse a caller: `windows` is keyed by
+    /// it, so inserting the second window with a repeated id silently *evicts*
+    /// the first. A `u64` bumped once per window cannot run out — at a billion
+    /// windows a second it would take some six centuries — so this saturates
+    /// rather than refusing, and says so instead of leaving the reader to work
+    /// out whether the addition can wrap.
+    fn take_window_id(&mut self) -> WindowId {
+        let id = WindowId(self.next_window_id);
+        self.next_window_id = self.next_window_id.saturating_add(1);
+        id
+    }
+
+    /// The next z-order, putting its holder above every existing window.
+    ///
+    /// Unlike a window id, this counter really can run out: it is bumped on
+    /// every *focus change*, not every window, and it is only a `u32`. So
+    /// rather than saturate — which would freeze the stacking order the moment
+    /// it topped out, with every later window tied for topmost — it renumbers
+    /// the existing windows and carries on. A z-order is only ever compared
+    /// against another z-order, so renumbering is invisible from outside.
+    fn take_z(&mut self) -> u32 {
+        if self.next_z == u32::MAX {
+            self.compact_z_order();
+        }
+        let z = self.next_z;
+        self.next_z = self.next_z.saturating_add(1);
+        z
+    }
+
+    /// Renumbers every window's z-order to `0..n`, preserving their order.
+    fn compact_z_order(&mut self) {
+        let mut ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        ids.sort_by_key(|id| self.windows.get(id).map_or(0, |w| w.z_order));
+        self.next_z = 0;
+        for id in ids {
+            if let Some(w) = self.windows.get_mut(&id) {
+                w.z_order = self.next_z;
+                self.next_z = self.next_z.saturating_add(1);
+            }
+        }
+    }
+
     /// Register a new window.
     pub fn add_window(
         &mut self,
@@ -1500,8 +1545,8 @@ impl DesktopShell {
         height: u32,
         pid: u32,
     ) -> WindowId {
-        let id = WindowId(self.next_window_id);
-        self.next_window_id += 1;
+        let id = self.take_window_id();
+        let z_order = self.take_z();
 
         let window = ManagedWindow {
             id,
@@ -1516,10 +1561,9 @@ impl DesktopShell {
             visible: true,
             pid,
             icon_id: 0,
-            z_order: self.next_z,
+            z_order,
             restored: None,
         };
-        self.next_z += 1;
 
         self.windows.insert(id, window);
         self.focus_window(id);
@@ -1549,10 +1593,10 @@ impl DesktopShell {
             w.focused = false;
         }
 
+        let z_order = self.take_z();
         if let Some(w) = self.windows.get_mut(&id) {
             w.focused = true;
-            w.z_order = self.next_z;
-            self.next_z += 1;
+            w.z_order = z_order;
             // Restore if minimized
             if w.state == WindowState::Minimized {
                 w.state = WindowState::Normal;
@@ -1648,13 +1692,21 @@ impl DesktopShell {
     }
 
     /// Snap window to left/right half of screen.
+    ///
+    /// The two halves are derived from each other rather than both from
+    /// `ww / 2`: the right one starts where the left one ends and runs to the
+    /// work area's edge, so an odd width leaves its last column to the right
+    /// window instead of leaving a one-pixel strip of desktop between them.
     pub fn snap_window(&mut self, id: WindowId, left: bool) {
         let (wx, wy, ww, wh) = self.work_area();
+        let left_width = ww / 2;
+        let right_width = ww.saturating_sub(left_width);
+        let right_x = wx.saturating_add(i32::try_from(left_width).unwrap_or(i32::MAX));
         if let Some(w) = self.windows.get_mut(&id) {
             w.y = wy;
             w.height = wh;
-            w.width = ww / 2;
-            w.x = if left { wx } else { wx + (ww / 2) as i32 };
+            w.width = if left { left_width } else { right_width };
+            w.x = if left { wx } else { right_x };
             w.state = WindowState::Normal;
             // Snapping is the user placing the window, same as moving it.
             w.restored = None;
@@ -1675,6 +1727,31 @@ impl DesktopShell {
     // ======================================================================
     // Virtual desktops
     // ======================================================================
+
+    /// The desktop one to the left of the current one, if there is one.
+    pub const fn previous_desktop(&self) -> Option<u32> {
+        self.current_desktop.checked_sub(1)
+    }
+
+    /// The desktop one to the right of the current one, if there is one.
+    ///
+    /// `num_desktops` is a public field that nothing clamps, so the obvious
+    /// test — `current_desktop < num_desktops - 1` — underflowed on a shell
+    /// configured with no desktops at all.
+    pub const fn next_desktop(&self) -> Option<u32> {
+        match self.current_desktop.checked_add(1) {
+            Some(next) if next < self.num_desktops => Some(next),
+            _ => None,
+        }
+    }
+
+    /// The current desktop's number as the user sees it, counting from one.
+    ///
+    /// Every place that shows a desktop to a person adds one to the index;
+    /// saying it here means none of them has to.
+    pub const fn current_desktop_number(&self) -> u32 {
+        self.current_desktop.saturating_add(1)
+    }
 
     pub fn switch_desktop(&mut self, desktop: u32) {
         if desktop < self.num_desktops {
@@ -1700,18 +1777,41 @@ impl DesktopShell {
     // Alt+Tab window switcher
     // ======================================================================
 
+    /// Open the window switcher, on the window below the top one.
+    ///
+    /// That is the window the user was in before this one, which is what
+    /// Alt+Tab is for. `visible_windows` is ordered bottom to top, so it is the
+    /// second entry from the *end* — not index 1, which is what this used to
+    /// say. With exactly two windows index 1 *is* the focused window, so
+    /// press-and-release Alt+Tab — much the commonest use there is — re-focused
+    /// the window you were already in and appeared to do nothing at all.
     pub fn start_alt_tab(&mut self) {
-        let windows = self.visible_windows();
-        if windows.len() > 1 {
+        let count = self.visible_windows().len();
+        if count > 1 {
             self.alt_tab_active = true;
-            self.alt_tab_index = 1; // Start at second window
+            self.alt_tab_index = cycle::before(count, count.saturating_sub(1));
         }
     }
 
     pub fn next_alt_tab(&mut self) {
         let count = self.visible_windows().len();
         if count > 0 {
-            self.alt_tab_index = (self.alt_tab_index + 1) % count;
+            // `cycle::after` carries the "the list is not empty" condition
+            // inside the expression that depends on it, and lands on the first
+            // window rather than an arbitrary one if the index has gone stale
+            // because windows closed while the switcher was open.
+            self.alt_tab_index = cycle::after(count, self.alt_tab_index);
+        }
+    }
+
+    /// Step the switcher to the previous window, for Shift+Alt+Tab.
+    pub fn prev_alt_tab(&mut self) {
+        let count = self.visible_windows().len();
+        if let Some(last) = count.checked_sub(1) {
+            // Clamping first matters: a stale index — windows closed while the
+            // switcher was open — would otherwise step from one out-of-range
+            // index to another rather than back into the list.
+            self.alt_tab_index = cycle::before(count, self.alt_tab_index.min(last));
         }
     }
 
@@ -1735,6 +1835,7 @@ impl DesktopShell {
     // ======================================================================
 
     /// Handle a keyboard shortcut at the desktop level.
+    ///
     /// Returns true if the shortcut was consumed.
     pub fn handle_hotkey(&mut self, key: &KeyEvent) -> bool {
         if !key.pressed {
@@ -1746,97 +1847,152 @@ impl DesktopShell {
             return false;
         }
 
-        // Alt+Tab: window switcher
-        if key.modifiers.alt && key.key == Key::Tab {
-            if self.alt_tab_active {
-                self.next_alt_tab();
-            } else {
-                self.start_alt_tab();
+        match DesktopAction::for_chord(key.modifiers, key.key) {
+            Some(action) => {
+                self.run_desktop_action(action);
+                true
             }
-            return true;
+            None => false,
         }
+    }
 
-        // Alt+F4: close focused window
-        if key.modifiers.alt && key.key == Key::F4 {
-            if let Some(id) = self.focused_window {
-                self.remove_window(id);
-            }
-            return true;
-        }
-
-        // Super key: toggle start menu
-        if key.key == Key::LeftSuper || key.key == Key::RightSuper {
-            self.toggle_start_menu();
-            return true;
-        }
-
-        // Super+D: show desktop (minimize all)
-        if key.modifiers.super_key && key.key == Key::D {
-            let ids: Vec<WindowId> = self
-                .windows
-                .values()
-                .filter(|w| w.visible && w.desktop == self.current_desktop)
-                .map(|w| w.id)
-                .collect();
-            for id in ids {
-                self.minimize_window(id);
-            }
-            return true;
-        }
-
-        // Super+Left/Right: snap window
-        if key.modifiers.super_key && key.key == Key::Left {
-            if let Some(id) = self.focused_window {
-                self.snap_window(id, true);
-            }
-            return true;
-        }
-        if key.modifiers.super_key && key.key == Key::Right {
-            if let Some(id) = self.focused_window {
-                self.snap_window(id, false);
-            }
-            return true;
-        }
-
-        // Super+Up: maximize
-        if key.modifiers.super_key && key.key == Key::Up {
-            if let Some(id) = self.focused_window {
-                self.maximize_window(id);
-            }
-            return true;
-        }
-
-        // Super+Down: restore/minimize
-        if key.modifiers.super_key && key.key == Key::Down {
-            if let Some(id) = self.focused_window
-                && let Some(w) = self.windows.get(&id)
-            {
-                if w.state == WindowState::Maximized {
-                    self.restore_window(id);
+    /// Carry out a shortcut that has already been recognised.
+    fn run_desktop_action(&mut self, action: DesktopAction) {
+        match action {
+            DesktopAction::CycleWindows => {
+                if self.alt_tab_active {
+                    self.next_alt_tab();
                 } else {
+                    self.start_alt_tab();
+                }
+            }
+            DesktopAction::CycleWindowsBackwards => {
+                if !self.alt_tab_active {
+                    self.start_alt_tab();
+                }
+                if self.alt_tab_active {
+                    self.prev_alt_tab();
+                }
+            }
+            DesktopAction::CloseFocused => {
+                if let Some(id) = self.focused_window {
+                    self.remove_window(id);
+                }
+            }
+            DesktopAction::ToggleStartMenu => self.toggle_start_menu(),
+            DesktopAction::ShowDesktop => {
+                let ids: Vec<WindowId> = self
+                    .windows
+                    .values()
+                    .filter(|w| w.visible && w.desktop == self.current_desktop)
+                    .map(|w| w.id)
+                    .collect();
+                for id in ids {
                     self.minimize_window(id);
                 }
             }
-            return true;
-        }
-
-        // Ctrl+Super+Left/Right: switch virtual desktop
-        if key.modifiers.ctrl && key.modifiers.super_key && key.key == Key::Left {
-            if self.current_desktop > 0 {
-                self.switch_desktop(self.current_desktop - 1);
+            DesktopAction::SnapLeft | DesktopAction::SnapRight => {
+                if let Some(id) = self.focused_window {
+                    self.snap_window(id, action == DesktopAction::SnapLeft);
+                }
             }
-            return true;
-        }
-        if key.modifiers.ctrl && key.modifiers.super_key && key.key == Key::Right {
-            if self.current_desktop < self.num_desktops - 1 {
-                self.switch_desktop(self.current_desktop + 1);
+            DesktopAction::Maximize => {
+                if let Some(id) = self.focused_window {
+                    self.maximize_window(id);
+                }
             }
-            return true;
+            DesktopAction::RestoreOrMinimize => {
+                if let Some(id) = self.focused_window
+                    && let Some(w) = self.windows.get(&id)
+                {
+                    if w.state == WindowState::Maximized {
+                        self.restore_window(id);
+                    } else {
+                        self.minimize_window(id);
+                    }
+                }
+            }
+            DesktopAction::PreviousDesktop => {
+                if let Some(target) = self.previous_desktop() {
+                    self.switch_desktop(target);
+                }
+            }
+            DesktopAction::NextDesktop => {
+                if let Some(target) = self.next_desktop() {
+                    self.switch_desktop(target);
+                }
+            }
         }
-
-        false
     }
+}
 
+/// A desktop-level keyboard shortcut, named separately from the chord that
+/// invokes it and from the code that carries it out.
+///
+/// The bindings used to be a chain of `if`s, each testing only the modifiers it
+/// happened to care about, so a loose chord earlier in the chain swallowed a
+/// tighter one later on: `Super+Left`/`Super+Right` (snap the focused window)
+/// were tested before `Ctrl+Super+Left`/`Ctrl+Super+Right` (switch virtual
+/// desktop), and matched with Ctrl held as well — so the virtual-desktop
+/// shortcuts were unreachable and had never once fired. Pressing them snapped
+/// a window instead.
+///
+/// Matching the whole modifier set at once makes that class of bug impossible:
+/// every binding states its full chord, a modifier the chord does not list is a
+/// modifier the binding does *not* fire with, and two arms claiming the same
+/// chord are an unreachable-pattern warning rather than a silently dead
+/// shortcut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DesktopAction {
+    CycleWindows,
+    CycleWindowsBackwards,
+    CloseFocused,
+    ToggleStartMenu,
+    ShowDesktop,
+    SnapLeft,
+    SnapRight,
+    Maximize,
+    RestoreOrMinimize,
+    PreviousDesktop,
+    NextDesktop,
+}
+
+impl DesktopAction {
+    /// The action a chord invokes, if it invokes one.
+    ///
+    /// This match is the whole binding table — there is no desktop shortcut
+    /// recognised anywhere else.
+    fn for_chord(modifiers: Modifiers, key: Key) -> Option<Self> {
+        let Modifiers {
+            shift,
+            ctrl,
+            alt,
+            super_key,
+        } = modifiers;
+        match (shift, ctrl, alt, super_key, key) {
+            (false, false, true, false, Key::Tab) => Some(Self::CycleWindows),
+            (true, false, true, false, Key::Tab) => Some(Self::CycleWindowsBackwards),
+            (false, false, true, false, Key::F4) => Some(Self::CloseFocused),
+            // The Super key on its own. It is itself a modifier, so whether the
+            // modifier bit is already set when it is the key being pressed is
+            // the keyboard driver's business, and neither answer should change
+            // what the key does.
+            (false, false, false, _, Key::LeftSuper | Key::RightSuper) => {
+                Some(Self::ToggleStartMenu)
+            }
+            (false, false, false, true, Key::D) => Some(Self::ShowDesktop),
+            (false, false, false, true, Key::Left) => Some(Self::SnapLeft),
+            (false, false, false, true, Key::Right) => Some(Self::SnapRight),
+            (false, false, false, true, Key::Up) => Some(Self::Maximize),
+            (false, false, false, true, Key::Down) => Some(Self::RestoreOrMinimize),
+            (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),
+            (false, true, false, true, Key::Right) => Some(Self::NextDesktop),
+            _ => None,
+        }
+    }
+}
+
+impl DesktopShell {
     // ======================================================================
     // Rendering
     // ======================================================================
@@ -1920,7 +2076,7 @@ impl DesktopShell {
         );
 
         // Desktop indicator
-        let desk_str = format!("Desktop {}", self.current_desktop + 1);
+        let desk_str = format!("Desktop {}", self.current_desktop_number());
         tree.text(
             tray_x + self.scale(8.0),
             bar.y + self.scale(12.0),
@@ -2358,7 +2514,7 @@ fn main() {
     desktop.switch_desktop(1);
     println!(
         "Switched to desktop {}: {} visible windows",
-        desktop.current_desktop + 1,
+        desktop.current_desktop_number(),
         desktop.visible_windows().len()
     );
 
@@ -2672,5 +2828,542 @@ mod theme_tests {
 
         assert_eq!(dark.len(), light.len());
         assert_ne!(format!("{dark:?}"), format!("{light:?}"));
+    }
+}
+
+/// Tests for the window manager itself — window lifecycle, stacking, snapping,
+/// virtual desktops and Alt+Tab.
+///
+/// Until now `main.rs` was covered only by `theme_tests`, so none of this had
+/// any: the code that decides which window is on top, which desktop it lives
+/// on and where a snapped window's edges fall was checked by nothing but the
+/// demo `main`. Each test below pins one rule the rest of the shell relies on,
+/// and several of them exist because rewriting the counters and the desktop
+/// arithmetic turned up a case that used to be wrong — the one-pixel gap
+/// between snapped halves, the underflow on a shell with no desktops, and the
+/// z-order counter running out.
+#[cfg(test)]
+mod window_manager_tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{DesktopShell, Key, KeyEvent, Modifiers, WindowId, WindowState};
+
+    fn shell() -> DesktopShell {
+        DesktopShell::new(1920, 1080)
+    }
+
+    fn open(shell: &mut DesktopShell, title: &str) -> WindowId {
+        shell.add_window(title, 100, 100, 400, 300, 1)
+    }
+
+    fn press(key: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: None,
+        }
+    }
+
+    fn super_only() -> Modifiers {
+        Modifiers {
+            super_key: true,
+            ..Modifiers::NONE
+        }
+    }
+
+    fn ctrl_super() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            super_key: true,
+            ..Modifiers::NONE
+        }
+    }
+
+    fn z_of(shell: &DesktopShell, id: WindowId) -> u32 {
+        shell
+            .windows
+            .get(&id)
+            .expect("window is still open")
+            .z_order
+    }
+
+    // ==================================================================
+    // Identity and stacking
+    // ==================================================================
+
+    /// Two windows must never share an id: the id is the key everything else
+    /// looks a window up by, so a repeat would silently merge two windows.
+    #[test]
+    fn every_window_gets_an_id_of_its_own() {
+        let mut shell = shell();
+        let ids: Vec<WindowId> = (0..200)
+            .map(|i| open(&mut shell, &format!("w{i}")))
+            .collect();
+
+        let mut distinct = ids.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), ids.len());
+        assert_eq!(shell.windows.len(), ids.len());
+    }
+
+    #[test]
+    fn a_new_window_opens_above_the_existing_ones_and_takes_focus() {
+        let mut shell = shell();
+        let first = open(&mut shell, "first");
+        let second = open(&mut shell, "second");
+
+        assert!(z_of(&shell, second) > z_of(&shell, first));
+        assert_eq!(shell.focused_window, Some(second));
+        assert_eq!(shell.visible_windows().last().map(|w| w.id), Some(second));
+    }
+
+    #[test]
+    fn focusing_a_window_raises_it_above_every_other() {
+        let mut shell = shell();
+        let bottom = open(&mut shell, "bottom");
+        let middle = open(&mut shell, "middle");
+        let top = open(&mut shell, "top");
+
+        shell.focus_window(bottom);
+
+        let raised = z_of(&shell, bottom);
+        assert!(raised > z_of(&shell, middle));
+        assert!(raised > z_of(&shell, top));
+        assert_eq!(shell.visible_windows().last().map(|w| w.id), Some(bottom));
+        assert!(shell.windows.get(&middle).unwrap().focused == false);
+    }
+
+    /// The z counter is bumped on every focus change, so a long-running session
+    /// can genuinely exhaust it. Saturating would freeze the stacking order and
+    /// wrapping would invert it; renumbering keeps it working, which is what
+    /// this checks.
+    #[test]
+    fn the_stacking_order_survives_the_z_counter_running_out() {
+        let mut shell = shell();
+        let bottom = open(&mut shell, "bottom");
+        let middle = open(&mut shell, "middle");
+        let top = open(&mut shell, "top");
+
+        shell.next_z = u32::MAX;
+        let raised = open(&mut shell, "raised");
+
+        assert!(shell.next_z < u32::MAX, "the counter must have room again");
+        let order: Vec<WindowId> = shell.visible_windows().iter().map(|w| w.id).collect();
+        assert_eq!(order, vec![bottom, middle, top, raised]);
+
+        // And it must keep working afterwards.
+        shell.focus_window(middle);
+        assert_eq!(shell.visible_windows().last().map(|w| w.id), Some(middle));
+    }
+
+    // ==================================================================
+    // Closing and minimizing
+    // ==================================================================
+
+    #[test]
+    fn closing_the_focused_window_focuses_the_one_below_it() {
+        let mut shell = shell();
+        let below = open(&mut shell, "below");
+        let focused = open(&mut shell, "focused");
+
+        shell.remove_window(focused);
+
+        assert_eq!(shell.focused_window, Some(below));
+        assert!(shell.windows.get(&below).unwrap().focused);
+    }
+
+    #[test]
+    fn closing_the_last_window_leaves_nothing_focused() {
+        let mut shell = shell();
+        let only = open(&mut shell, "only");
+
+        shell.remove_window(only);
+
+        assert_eq!(shell.focused_window, None);
+        assert!(shell.windows.is_empty());
+    }
+
+    #[test]
+    fn a_minimized_window_comes_back_when_it_is_focused() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+
+        shell.minimize_window(id);
+        assert!(!shell.windows.get(&id).unwrap().visible);
+        assert!(shell.visible_windows().is_empty());
+
+        shell.focus_window(id);
+        let window = shell.windows.get(&id).unwrap();
+        assert!(window.visible);
+        assert_eq!(window.state, WindowState::Normal);
+        assert_eq!(shell.focused_window, Some(id));
+    }
+
+    // ==================================================================
+    // Snapping
+    // ==================================================================
+
+    /// Both halves used to be `width / 2`, which left a one-pixel strip of
+    /// desktop down the middle of any odd-width screen. The two halves must
+    /// meet exactly and between them cover the whole work area, at every width
+    /// including the degenerate ones.
+    #[test]
+    fn the_two_snapped_halves_cover_the_work_area_with_no_gap() {
+        for screen_width in [1920_u32, 1921, 2560, 3, 2, 1, 0] {
+            let mut shell = DesktopShell::new(screen_width, 1080);
+            let left = open(&mut shell, "left");
+            let right = open(&mut shell, "right");
+
+            shell.snap_window(left, true);
+            shell.snap_window(right, false);
+
+            let (wx, wy, ww, wh) = shell.work_area();
+            let l = shell.windows.get(&left).unwrap();
+            let r = shell.windows.get(&right).unwrap();
+
+            assert_eq!(l.x, wx, "width={screen_width}");
+            assert_eq!(
+                r.x,
+                wx + i32::try_from(l.width).unwrap(),
+                "the halves must meet, width={screen_width}"
+            );
+            assert_eq!(
+                l.width + r.width,
+                ww,
+                "the halves must cover the work area, width={screen_width}"
+            );
+            for w in [l, r] {
+                assert_eq!(w.y, wy, "width={screen_width}");
+                assert_eq!(w.height, wh, "width={screen_width}");
+                assert_eq!(w.state, WindowState::Normal);
+            }
+        }
+    }
+
+    /// Snapping is the user placing the window, so a later "restore" must not
+    /// yank it back to wherever it was before it was maximized.
+    #[test]
+    fn snapping_forgets_the_pre_maximize_geometry() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+
+        shell.maximize_window(id);
+        assert!(shell.windows.get(&id).unwrap().restored.is_some());
+
+        shell.snap_window(id, true);
+        assert!(shell.windows.get(&id).unwrap().restored.is_none());
+    }
+
+    // ==================================================================
+    // Virtual desktops
+    // ==================================================================
+
+    #[test]
+    fn desktop_navigation_stops_at_both_ends() {
+        let mut shell = shell();
+        let last = shell.num_desktops - 1;
+
+        assert_eq!(shell.previous_desktop(), None);
+        assert!(shell.handle_hotkey(&press(Key::Left, ctrl_super())));
+        assert_eq!(shell.current_desktop, 0);
+
+        for expected in 1..=last {
+            assert!(shell.handle_hotkey(&press(Key::Right, ctrl_super())));
+            assert_eq!(shell.current_desktop, expected);
+        }
+
+        assert_eq!(shell.next_desktop(), None);
+        assert!(shell.handle_hotkey(&press(Key::Right, ctrl_super())));
+        assert_eq!(shell.current_desktop, last);
+    }
+
+    /// `num_desktops` is a public field that nothing clamps. The old bound
+    /// `current_desktop < num_desktops - 1` underflowed when it was zero.
+    #[test]
+    fn a_shell_with_no_desktops_does_not_underflow() {
+        let mut shell = shell();
+        shell.num_desktops = 0;
+
+        assert_eq!(shell.previous_desktop(), None);
+        assert_eq!(shell.next_desktop(), None);
+        assert!(shell.handle_hotkey(&press(Key::Left, ctrl_super())));
+        assert!(shell.handle_hotkey(&press(Key::Right, ctrl_super())));
+        assert_eq!(shell.current_desktop, 0);
+    }
+
+    #[test]
+    fn the_desktop_indicator_counts_from_one() {
+        let mut shell = shell();
+        assert_eq!(shell.current_desktop_number(), 1);
+
+        shell.switch_desktop(2);
+        assert_eq!(shell.current_desktop_number(), 3);
+    }
+
+    #[test]
+    fn a_window_is_only_visible_on_its_own_desktop() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+
+        shell.switch_desktop(1);
+        assert!(shell.visible_windows().is_empty());
+        assert_eq!(shell.focused_window, None);
+
+        shell.move_window_to_desktop(id, 1);
+        assert_eq!(
+            shell
+                .visible_windows()
+                .iter()
+                .map(|w| w.id)
+                .collect::<Vec<_>>(),
+            vec![id]
+        );
+    }
+
+    #[test]
+    fn a_window_cannot_be_moved_to_a_desktop_that_does_not_exist() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+
+        shell.move_window_to_desktop(id, shell.num_desktops);
+        shell.move_window_to_desktop(id, u32::MAX);
+
+        assert_eq!(shell.windows.get(&id).unwrap().desktop, 0);
+    }
+
+    // ==================================================================
+    // Alt+Tab
+    // ==================================================================
+
+    /// Two windows and one press-and-release is what Alt+Tab is mostly used
+    /// for, and it used to be exactly the case that did nothing: the switcher
+    /// opened on the window that already had focus.
+    #[test]
+    fn alt_tab_between_two_windows_swaps_them() {
+        let mut shell = shell();
+        let first = open(&mut shell, "first");
+        let second = open(&mut shell, "second");
+        assert_eq!(shell.focused_window, Some(second));
+
+        shell.start_alt_tab();
+        shell.finish_alt_tab();
+        assert_eq!(shell.focused_window, Some(first));
+
+        shell.start_alt_tab();
+        shell.finish_alt_tab();
+        assert_eq!(shell.focused_window, Some(second), "and back again");
+    }
+
+    #[test]
+    fn alt_tab_visits_every_window_and_comes_back_round() {
+        let mut shell = shell();
+        for i in 0..3 {
+            open(&mut shell, &format!("w{i}"));
+        }
+
+        shell.start_alt_tab();
+        assert!(shell.alt_tab_active);
+        let first = shell.alt_tab_index;
+
+        let mut seen = vec![first];
+        for _ in 0..2 {
+            shell.next_alt_tab();
+            seen.push(shell.alt_tab_index);
+        }
+        let mut distinct = seen.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 3, "every window is offered exactly once");
+
+        shell.next_alt_tab();
+        assert_eq!(shell.alt_tab_index, first, "and then it comes back round");
+    }
+
+    /// The switcher's index is into a list recomputed on every step, so windows
+    /// closing while it is open can leave it past the end. It must land back in
+    /// range rather than picking nothing or panicking.
+    #[test]
+    fn alt_tab_survives_the_windows_closing_underneath_it() {
+        let mut shell = shell();
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+
+        shell.remove_window(ids[1]);
+        shell.remove_window(ids[2]);
+
+        shell.next_alt_tab();
+        assert!(shell.alt_tab_index < shell.visible_windows().len());
+
+        shell.finish_alt_tab();
+        assert!(!shell.alt_tab_active);
+        assert_eq!(shell.focused_window, Some(ids[0]));
+    }
+
+    #[test]
+    fn alt_tab_on_an_empty_desktop_does_nothing() {
+        let mut shell = shell();
+
+        shell.start_alt_tab();
+        assert!(!shell.alt_tab_active);
+
+        shell.next_alt_tab();
+        shell.finish_alt_tab();
+        assert_eq!(shell.focused_window, None);
+    }
+
+    /// A single window is not worth a switcher, but the keystroke must still be
+    /// consumed rather than falling through to the focused app.
+    #[test]
+    fn alt_tab_with_one_window_is_consumed_without_opening_the_switcher() {
+        let mut shell = shell();
+        let id = open(&mut shell, "only");
+
+        assert!(shell.handle_hotkey(&press(Key::Tab, Modifiers::alt())));
+        assert!(!shell.alt_tab_active);
+        assert_eq!(shell.focused_window, Some(id));
+    }
+
+    // ==================================================================
+    // The binding table
+    // ==================================================================
+
+    /// The bug this whole table exists to prevent: `Super+Right` snapped the
+    /// focused window and also swallowed `Ctrl+Super+Right`, so switching
+    /// desktop by keyboard was impossible. The two chords must do two things.
+    #[test]
+    fn snapping_and_switching_desktops_are_different_shortcuts() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+        let (wx, _, ww, _) = shell.work_area();
+
+        assert!(shell.handle_hotkey(&press(Key::Right, super_only())));
+        assert_eq!(
+            shell.current_desktop, 0,
+            "plain Super+Right snaps; it must not switch desktop"
+        );
+        assert_eq!(
+            shell.windows.get(&id).unwrap().x,
+            wx + i32::try_from(ww / 2).unwrap(),
+            "and it must actually have snapped"
+        );
+
+        assert!(shell.handle_hotkey(&press(Key::Right, ctrl_super())));
+        assert_eq!(
+            shell.current_desktop, 1,
+            "Ctrl+Super+Right switches desktop; it must not snap"
+        );
+    }
+
+    /// A chord with a modifier the binding does not name is a different chord,
+    /// and must fall through to the focused application rather than firing a
+    /// shortcut the user did not ask for.
+    #[test]
+    fn an_extra_modifier_makes_it_a_different_chord() {
+        let mut shell = shell();
+        open(&mut shell, "app");
+
+        let shift_super = Modifiers {
+            shift: true,
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        assert!(!shell.handle_hotkey(&press(Key::Left, shift_super)));
+        assert!(!shell.handle_hotkey(&press(Key::Up, ctrl_super())));
+    }
+
+    /// A key release is never a shortcut — except the Alt that ends a window
+    /// switch, which is not a chord at all.
+    #[test]
+    fn a_key_release_only_ends_the_window_switcher() {
+        let mut shell = shell();
+        open(&mut shell, "one");
+        let second = open(&mut shell, "two");
+
+        let release = KeyEvent {
+            key: Key::LeftAlt,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: None,
+        };
+        assert!(!shell.handle_hotkey(&release), "nothing to finish yet");
+
+        shell.start_alt_tab();
+        assert!(shell.handle_hotkey(&release));
+        assert!(!shell.alt_tab_active);
+        assert_ne!(shell.focused_window, Some(second));
+    }
+
+    #[test]
+    fn shift_alt_tab_goes_round_the_other_way() {
+        let mut shell = shell();
+        for i in 0..4 {
+            open(&mut shell, &format!("w{i}"));
+        }
+
+        assert!(shell.handle_hotkey(&press(Key::Tab, Modifiers::alt())));
+        let forwards = shell.alt_tab_index;
+        assert!(shell.handle_hotkey(&press(Key::Tab, Modifiers::alt())));
+        assert_eq!(shell.alt_tab_index, forwards + 1);
+
+        let shift_alt = Modifiers {
+            shift: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        assert!(shell.handle_hotkey(&press(Key::Tab, shift_alt)));
+        assert_eq!(shell.alt_tab_index, forwards);
+    }
+
+    /// Stepping backwards from a stale index must land inside the list, not on
+    /// another index past the end.
+    #[test]
+    fn stepping_backwards_survives_the_windows_closing_underneath_it() {
+        let mut shell = shell();
+        let ids: Vec<WindowId> = (0..4).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+        shell.next_alt_tab();
+
+        for id in &ids[1..] {
+            shell.remove_window(*id);
+        }
+
+        shell.prev_alt_tab();
+        assert!(shell.alt_tab_index < shell.visible_windows().len());
+    }
+
+    #[test]
+    fn super_d_minimizes_everything_on_the_current_desktop() {
+        let mut shell = shell();
+        open(&mut shell, "one");
+        open(&mut shell, "two");
+        let elsewhere = open(&mut shell, "elsewhere");
+        shell.move_window_to_desktop(elsewhere, 1);
+
+        let super_d = Modifiers {
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        assert!(shell.handle_hotkey(&press(Key::D, super_d)));
+
+        assert!(shell.visible_windows().is_empty());
+        assert!(
+            shell.windows.get(&elsewhere).unwrap().visible,
+            "another desktop's windows are not this shortcut's business"
+        );
     }
 }

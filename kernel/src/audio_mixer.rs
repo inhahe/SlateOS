@@ -75,6 +75,42 @@ const MIX_BUFFER_SIZE: usize = 4096;
 // Stream state
 // ---------------------------------------------------------------------------
 
+/// Scratch space for [`mix_output`], deliberately *not* on the stack.
+///
+/// One period of mixing needs an accumulator (32-bit, so summing eight streams
+/// cannot overflow before the clamp) and a staging buffer to read each stream's
+/// ring into. Together that is 12 KiB, and as ordinary `let` arrays it was 12
+/// KiB of a 64 KiB task stack — 19% of the budget consumed by one frame, in a
+/// function whose entire purpose is to be called periodically from a timer or
+/// audio task, i.e. from exactly the contexts with the least stack to spare.
+/// Unlike the oversized frames in this kernel's self-tests, this one is real
+/// data and does not shrink under `-O`.
+///
+/// The sizes derive from [`MIX_BUFFER_SIZE`] rather than repeating 2048/4096:
+/// `MIX_BUFFER_SIZE` bytes of S16 stereo is `MIX_BUFFER_SIZE / 2` samples, one
+/// accumulator each.
+struct MixScratch {
+    /// 32-bit accumulators, L/R interleaved.
+    acc: [i32; MIX_BUFFER_SIZE / 2],
+    /// Per-stream read staging, one period of S16 stereo.
+    stage: [u8; MIX_BUFFER_SIZE],
+}
+
+/// The single scratch area, which also supplies the mutual exclusion
+/// [`mix_output`] always needed and never had: two CPUs mixing at once would
+/// previously each have summed a private accumulator and then both written the
+/// same output slice.
+///
+/// Lock order is `MIX_SCRATCH` -> `StreamSlot::ring`, never the reverse.
+/// `write_pcm` and friends take a ring and nothing else, so no cycle exists.
+static MIX_SCRATCH: PreemptSpinMutex<MixScratch> = PreemptSpinMutex::named(
+    MixScratch {
+        acc: [0; MIX_BUFFER_SIZE / 2],
+        stage: [0; MIX_BUFFER_SIZE],
+    },
+    b"mix-scratch",
+);
+
 /// A stream ID (0..MAX_STREAMS-1).
 pub type StreamId = u8;
 
@@ -232,9 +268,10 @@ pub fn open_stream(name: &str) -> KernelResult<StreamId> {
             }
             let mut name_buf = slot.name.lock();
             name_buf.fill(0);
-            if let (Some(dst), Some(src)) =
-                (name_buf.get_mut(..copy_len), name.as_bytes().get(..copy_len))
-            {
+            if let (Some(dst), Some(src)) = (
+                name_buf.get_mut(..copy_len),
+                name.as_bytes().get(..copy_len),
+            ) {
                 dst.copy_from_slice(src);
             }
             drop(name_buf);
@@ -413,18 +450,34 @@ pub fn mix_output(output: &mut [u8]) -> usize {
 
     let master_vol = u32::from(MASTER_VOLUME.load(Ordering::Relaxed));
     let out_frames = output.len() / FRAME_SIZE_BYTES;
-    let mix_frames = out_frames.min(MIX_BUFFER_SIZE / FRAME_SIZE_BYTES);
+    // One period is the most that can be mixed per call, so a caller asking for
+    // a larger `output` gets a short write and is expected to come back.
+    let actual_frames = out_frames.min(MIX_BUFFER_SIZE / FRAME_SIZE_BYTES);
 
-    // Use a local mixing buffer with 32-bit intermediates.
-    // Stack-allocated: 1024 frames × 2 channels × 4 bytes = 8192 bytes.
-    let mut mix_buf = [0i32; 2048]; // 1024 stereo frames, L/R interleaved.
-    let actual_frames = mix_frames.min(1024);
+    // Split the borrow so the staging buffer can be read while the accumulator
+    // is written; they are disjoint fields, but the compiler needs to be told
+    // so through a single destructure rather than two field accesses under one
+    // `MutexGuard`.
+    let mut scratch = MIX_SCRATCH.lock();
+    let MixScratch { acc, stage } = &mut *scratch;
 
-    // Read from each active stream and sum into mix_buf.
+    // Zero only the region this call will touch. The accumulator is now
+    // persistent storage rather than a fresh `let`, so without this the sums
+    // from the previous period would be mixed into this one -- audible as the
+    // output getting progressively louder and then clipping. Zeroing the used
+    // prefix, not the whole 8 KiB, keeps the cost proportional to the period
+    // actually requested.
+    //
+    // `stage` deliberately needs no such clear: it is only ever read back over
+    // the `bytes_read` prefix that this call's own `read` just wrote, so no
+    // byte of it is live across calls.
+    let used = actual_frames * 2;
+    acc[..used].fill(0);
+
+    // Read from each active stream and sum into the accumulator.
     let mut any_active = false;
-    let mut temp = [0u8; 4096]; // Temporary read buffer.
 
-    for (i, slot) in STREAMS.iter().enumerate() {
+    for slot in &STREAMS {
         if !slot.active.load(Ordering::Acquire) {
             continue;
         }
@@ -433,13 +486,13 @@ pub fn mix_output(output: &mut [u8]) -> usize {
             let _ = slot
                 .ring
                 .lock()
-                .read(&mut temp[..actual_frames * FRAME_SIZE_BYTES]);
+                .read(&mut stage[..actual_frames * FRAME_SIZE_BYTES]);
             continue;
         }
 
         let stream_vol = u32::from(slot.volume.load(Ordering::Relaxed));
         let bytes_needed = actual_frames * FRAME_SIZE_BYTES;
-        let bytes_read = slot.ring.lock().read(&mut temp[..bytes_needed]);
+        let bytes_read = slot.ring.lock().read(&mut stage[..bytes_needed]);
         let frames_read = bytes_read / FRAME_SIZE_BYTES;
 
         if frames_read == 0 {
@@ -450,22 +503,21 @@ pub fn mix_output(output: &mut [u8]) -> usize {
         // Mix: convert S16LE samples to i32, apply volume, sum.
         for f in 0..frames_read {
             let offset = f * 4;
-            let left = i16::from_le_bytes([temp[offset], temp[offset + 1]]) as i32;
-            let right = i16::from_le_bytes([temp[offset + 2], temp[offset + 3]]) as i32;
+            let left = i16::from_le_bytes([stage[offset], stage[offset + 1]]) as i32;
+            let right = i16::from_le_bytes([stage[offset + 2], stage[offset + 3]]) as i32;
 
             // Apply per-stream volume (0-100 → 0.0-1.0 via integer math).
             let left_scaled = (left * stream_vol as i32) / 100;
             let right_scaled = (right * stream_vol as i32) / 100;
 
             let idx = f * 2;
-            if idx + 1 < mix_buf.len() {
-                mix_buf[idx] += left_scaled;
-                mix_buf[idx + 1] += right_scaled;
+            // Bound against the *zeroed* prefix, not the whole accumulator: an
+            // index past `used` would sum into a slot this call never cleared.
+            if idx + 1 < used {
+                acc[idx] += left_scaled;
+                acc[idx + 1] += right_scaled;
             }
         }
-
-        // Suppress unused variable warning
-        let _ = i;
     }
 
     if !any_active {
@@ -479,8 +531,8 @@ pub fn mix_output(output: &mut [u8]) -> usize {
     let out_bytes = actual_frames * FRAME_SIZE_BYTES;
     for f in 0..actual_frames {
         let idx = f * 2;
-        let left = (mix_buf[idx] * master_vol as i32) / 100;
-        let right = (mix_buf[idx + 1] * master_vol as i32) / 100;
+        let left = (acc[idx] * master_vol as i32) / 100;
+        let right = (acc[idx + 1] * master_vol as i32) / 100;
 
         // Clamp to i16 range.
         let left_clamped = left.clamp(-32768, 32767) as i16;

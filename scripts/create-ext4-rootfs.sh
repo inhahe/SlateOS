@@ -882,9 +882,36 @@ fi
 # files.  `|| true` keeps a missing directory from killing the script under
 # `set -e` — see the fixture loop below for what that failure mode costs when
 # it happens silently.
+#
+# Delegated to `ctest-fixtures.py sysroot-check` when python is available,
+# because that is where the check now lives: since the sysroot grew a content
+# stamp (toolchain/sysroot/.sysroot.stamp, written by build-sysroot.ps1), the
+# real question is a hash comparison, not the `find -newer` ordering below.
+# The ordering test remains here as the no-python fallback and is *exactly*
+# what the checker itself falls back to, so the two agree by construction
+# rather than by two people remembering to edit both.
+#
+# Why the stamp had to happen: `Copy-Item` in build-sysroot.ps1 preserves the
+# source timestamp, so libc.a's mtime is cargo's last link time.  If posix has
+# not changed cargo does not relink, the mtime cannot advance, and the remedy
+# printed below — re-run build-sysroot.ps1 — provably does not clear the gate.
+# Meanwhile git writes mtimes on files it never edited, and this project
+# mandates a merge from origin/main at the start of every task.  See
+# known-issues.md A-SYSROOT-STALENESS-GATE-IS-WEDGED-BY-GIT-TOUCHING-A-FILE-*.
 LIBC_A="$ROOT_DIR/toolchain/sysroot/lib/libc.a"
 SYSROOT_STALE=""
-if [ -e "$LIBC_A" ]; then
+SYSROOT_PY=""
+for _cand in python3 python; do
+    if command -v "$_cand" >/dev/null 2>&1; then SYSROOT_PY="$_cand"; break; fi
+done
+if [ -e "$LIBC_A" ] && [ -n "$SYSROOT_PY" ]; then
+    # sysroot-check prints its own diagnosis, including which inputs moved and
+    # whether it used the stamp or the mtime fallback, so this branch records
+    # the verdict and does not restate it.
+    if ! "$SYSROOT_PY" "$ROOT_DIR/scripts/ctest-fixtures.py" sysroot-check; then
+        SYSROOT_STALE="the inputs reported above"
+    fi
+elif [ -e "$LIBC_A" ]; then
     for sysroot_src in "$ROOT_DIR/posix/src" \
                        "$ROOT_DIR/posix/Cargo.toml" \
                        "$ROOT_DIR/toolchain/stubs" \
@@ -895,8 +922,10 @@ if [ -e "$LIBC_A" ]; then
         SYSROOT_STALE="${newer#"$ROOT_DIR/"}"
         break
     done
+    echo "[rootfs] NOTE: no python3/python — the sysroot check is the mtime fallback,"
+    echo "[rootfs]       which git can trip by merely writing a file it did not edit."
 fi
-if [ -n "$SYSROOT_STALE" ]; then
+if [ -n "$SYSROOT_STALE" ] && [ -z "$SYSROOT_PY" ]; then
     echo "[rootfs] WARNING: toolchain/sysroot/lib/libc.a is OLDER than $SYSROOT_STALE."
     echo "[rootfs]          libc.a is a gitignored build artifact, so a merge or checkout that"
     echo "[rootfs]          changes posix/src leaves it behind without saying so. Everything"

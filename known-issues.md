@@ -36269,8 +36269,11 @@ the change that fixes both at once.
 
 ## A-SYSROOT-STALENESS-GATE-IS-WEDGED-BY-GIT-TOUCHING-A-FILE-IT-WATCHES
 
-**Status:** open. Diagnosed 2026-08-18 while verifying a merge; worked around
-locally, not fixed. Lane A (`scripts/`, `toolchain/`).
+**Status:** FIXED 2026-08-18, the same day it was diagnosed. Lane A
+(`scripts/`, `toolchain/`). The diagnosis below is kept in full because the
+*reasoning* it corrects — "mtime answers an ordering question that a hash
+cannot" — is plausible enough that someone will propose it again. See
+"How it was fixed" at the end.
 
 **Symptom.** `scripts/create-ext4-rootfs.sh` and `scripts/ctest-fixtures.py`
 both refuse to proceed with
@@ -36333,3 +36336,45 @@ built from — i.e. the restored mtime asserts something true. Do not reach for
 before the content-stamp gate could run — *was* fixed, in the commit that adds
 this entry. This entry is the remaining half, one level up, in the check the
 fixtures' own stamps cannot reach.
+
+### How it was fixed
+
+As described above: the sysroot now carries a content stamp.
+
+- `toolchain/build-sysroot.ps1` calls `scripts/ctest-fixtures.py sysroot-stamp`
+  after assembling, writing `toolchain/sysroot/.sysroot.stamp` — the SHA-256 of
+  every file under the four input roots, text hashed with CRLF folded to LF per
+  the `version 2` rule the fixture stamps already use.
+- `sysroot_staleness()` returns `(mode, findings)`: hash drift when the stamp is
+  present, the old `find -newer` ordering when it is not, exactly as the fixture
+  gate falls back when python is absent. It reports which mode it used, so a
+  weaker answer never reads as the stronger one.
+- `scripts/create-ext4-rootfs.sh` no longer reimplements the scan; it shells out
+  to `ctest-fixtures.py sysroot-check` and keeps its `find` loop only for the
+  no-python path. The input list and the folding rule now exist once.
+
+**The gate is satisfiable now**, which was the actual complaint: the stamp is
+rewritten on every run of `build-sysroot.ps1` whether or not cargo relinked, so
+following the printed remedy always clears it.
+
+Three things worth keeping in mind:
+
+- **The stamp is gitignored, deliberately** (`/toolchain/sysroot/` already
+  covered it). Unlike the fixture stamps, which sit beside tracked ELFs and must
+  survive a fresh clone, this one describes *this machine's* `libc.a`. A tracked
+  copy would arrive in a checkout asserting a libc you have not built yet was
+  built from those sources — the precise false-green the stamp exists to
+  prevent. A missing stamp truthfully means "nobody has built the sysroot here".
+- **`sysroot-stamp` run by hand is a silencer.** It records the sources as they
+  are now and claims `libc.a` came from them, without verifying it — the same
+  hazard `ctest-fixtures.py stamp` carries for fixtures, and the reason both are
+  separate commands rather than something `check` does implicitly.
+- **`target/` is excluded from the input walk.** It holds the output of building
+  those sources, so including it would make the stamp self-referential and no
+  two consecutive runs could ever agree. The mtime scan this replaces had the
+  same exposure and got away with it only because nobody had run cargo inside
+  `toolchain/stubs`.
+
+**The workaround recorded above is no longer needed** and should not be
+repeated: `touch`ing an input to defeat the check now defeats nothing, because
+the check no longer looks at timestamps when a stamp exists.

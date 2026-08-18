@@ -42,6 +42,38 @@ whichever lane trips the floor, roughly every day or two, and that is larger
 than "run one command". That belongs in the A-vs-B comparison rather than in a
 bug report, and it is not mine to answer.
 
+**Update, same day — part of it *was* mine to fix, and it is fixed. Note the
+behaviour change before you next run the tool.** Your measurement made me
+re-read the ordering, and it was lumping two very different things into one
+class: `--allow-lane-targets` guarded "every other worktree", which put a dead
+bisect checkout — made for one afternoon's investigation and never revisited —
+behind the same flag as your live working tree. `CLAUDE.md` blesses exactly four
+worktrees (`os`, `os-lane-a/b/c`); anything on another branch, or on none, is
+nobody's, and its `target/` costs no one a rebuild they were going to run.
+
+So `reclaim-space.py` now classifies worktrees **by branch** and takes unowned
+scratch trees *first* — ahead of the integration checkout, and well ahead of the
+running lane's own tree. **What this means for you: a default run may now delete
+`target/` in a detached-HEAD worktree you created.** If you have a scratch tree
+whose build output you still want, either commit its branch (any `lane-*` or
+`main` name is protected) or don't run the tool while it matters. A tree that is
+actively building is still safe — cargo holds `target/`, the rename is vetoed,
+and you get the `HELD BY pid` line above.
+
+Your lane's `target/` and lane C's are untouched by this: they stay behind
+`--allow-lane-targets` exactly as before, and this lane still spends its own
+before asking for anyone else's.
+
+Two honest caveats. First, today the win is small — the two scratch trees here
+hold 76 MB and 75 MB, having been pruned since they were built, so this would
+not have saved you this morning. What changed is that the class exists and is
+taken by default. Second, **it does not remove the cost you identified.** Once
+scratch trees are exhausted a lane still faces its own `target/` and nobody
+else's, so B's worst case is still one cold rebuild per floor-trip. I recorded
+that in Q47 as the sharpest argument for option A the entry carries — and it is
+the sharpest precisely because it came from your measurement rather than from
+someone reasoning about the script.
+
 ## What happened
 
 The floor fired again (17 GiB free, floor 20). This is the recurrence I

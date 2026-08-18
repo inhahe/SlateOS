@@ -1106,6 +1106,7 @@ def find_flat_cases(
 
     clusters: list[list[int]] = []
     leading_skipped = 0
+    leading_binds: set[str] = set()
     k = 0
     while k < len(groups):
         end = grow(k)
@@ -1113,6 +1114,15 @@ def find_flat_cases(
             g = groups[0]
             if g[-1][1] - _first_code_line(lines, g[0]) + 1 >= min_lines:
                 leading_skipped += 1
+            # Dropping the group from `clusters` is only half of leaving it
+            # where it is.  Its `let`s are now *outer* locals -- that is what
+            # "left in the outer frame" means -- so they have to join `before`,
+            # or every cluster below is judged as though the fixture paragraph
+            # had never existed and is free to read it.  Skipping that step is
+            # not caught by anything here; it surfaces as a pile of `E0434`s at
+            # the end of a six-minute build.  `self_test_remap_ioprio_futex2`
+            # opens with eleven such `let`s and produced 36 of them.
+            leading_binds |= g_binds[0]
             k = 1
             continue
         clusters.append(list(range(k, end + 1)))
@@ -1120,7 +1130,7 @@ def find_flat_cases(
 
     cases: list[tuple[int, int]] = []
     skipped = leading_skipped
-    before = set(outer) - declared
+    before = (set(outer) | leading_binds) - declared
     for cl in clusters:
         c_binds: set[str] = set()
         c_reads: set[str] = set()
@@ -2244,6 +2254,54 @@ _case(
     loop {
         halt();
     }
+}
+""",
+    flat=3,
+)
+
+_case(
+    # A leading fixture paragraph whose locals reach the bottom of the body is
+    # left in the outer frame rather than merged -- merging would produce one
+    # case containing everything, whose peak is `outer + case`.  Being left
+    # there makes its `let`s *outer* locals, so a paragraph below that reads one
+    # must be refused exactly as if it read a parameter.
+    #
+    # Dropping the paragraph without also recording what it binds is the shape
+    # of the bug this guards: `fixture` would look unbound, the last paragraph
+    # would be cased, and a nested `fn` cannot capture -- `E0434`, 36 of them in
+    # `self_test_remap_ioprio_futex2`, discovered only at the end of a build.
+    # Note the middle paragraph, which reads nothing outer, still splits.
+    "a skipped leading fixture still counts as an outer local",
+    """fn self_test() {
+    let fixture = make();
+    let spare = make_spare();
+
+    step_one();
+    step_two();
+    step_three();
+
+    use_it(fixture);
+    step_five();
+    step_six();
+}
+""",
+    """fn self_test() {
+    let fixture = make();
+    let spare = make_spare();
+
+    {
+        #[inline(never)]
+        fn case() {
+            step_one();
+            step_two();
+            step_three();
+        }
+        case();
+    }
+
+    use_it(fixture);
+    step_five();
+    step_six();
 }
 """,
     flat=3,

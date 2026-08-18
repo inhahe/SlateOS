@@ -157,13 +157,15 @@ impl TabView {
         self.tabs.remove(idx);
 
         if self.active_id == Some(id) {
-            // Activate the next tab, or previous, or none
-            self.active_id = if !self.tabs.is_empty() {
-                let new_idx = idx.min(self.tabs.len() - 1);
-                self.tabs.get(new_idx).map(|t| t.id)
-            } else {
-                None
-            };
+            // The tab that slid down into the removed one's place is the next
+            // one along, so `idx` names it without any arithmetic; if the
+            // removed tab was the last there was nothing to slide, and the new
+            // last takes over. An empty bar has neither, and deactivates.
+            self.active_id = self
+                .tabs
+                .get(idx)
+                .or_else(|| self.tabs.last())
+                .map(|t| t.id);
         }
     }
 
@@ -261,11 +263,11 @@ impl TabView {
         match key.key {
             Key::Tab if key.modifiers.ctrl && !key.modifiers.shift => {
                 // Ctrl+Tab: next tab
-                self.cycle_tab(1)
+                self.cycle_tab(true)
             }
             Key::Tab if key.modifiers.ctrl && key.modifiers.shift => {
                 // Ctrl+Shift+Tab: previous tab
-                self.cycle_tab(-1)
+                self.cycle_tab(false)
             }
             Key::W if key.modifiers.ctrl => {
                 // Ctrl+W: close current tab
@@ -486,26 +488,28 @@ impl TabView {
 
     // --- Private helpers ---
 
-    fn cycle_tab(&mut self, direction: i32) -> Option<TabEvent> {
-        if self.tabs.is_empty() {
-            return None;
-        }
-
-        let current_idx = self
+    /// Activate the tab one place along, wrapping at both ends.
+    ///
+    /// The old form widened the index to `i32` to hold `current - 1` before
+    /// `rem_euclid` brought it back -- a value out of range in between, proved
+    /// back in range by a later statement. `cycle` does the wrap in modular
+    /// arithmetic on `usize`, where it never leaves the range at all, and the
+    /// empty-bar case then needs no guard of its own: index 0 of no tabs is
+    /// `None`, which is the answer.
+    fn cycle_tab(&mut self, forward: bool) -> Option<TabEvent> {
+        let current = self
             .active_id
             .and_then(|aid| self.tabs.iter().position(|t| t.id == aid))
             .unwrap_or(0);
-
-        let count = self.tabs.len() as i32;
-        let new_idx = ((current_idx as i32 + direction).rem_euclid(count)) as usize;
-
-        if let Some(tab) = self.tabs.get(new_idx) {
-            let new_id = tab.id;
-            self.active_id = Some(new_id);
-            Some(TabEvent::Selected(new_id))
+        let next = if forward {
+            crate::cycle::after(self.tabs.len(), current)
         } else {
-            None
-        }
+            crate::cycle::before(self.tabs.len(), current)
+        };
+
+        let new_id = self.tabs.get(next)?.id;
+        self.active_id = Some(new_id);
+        Some(TabEvent::Selected(new_id))
     }
 
     fn compute_tab_width(&self, tab: &Tab) -> f32 {
@@ -827,6 +831,79 @@ mod tests {
         let event = tv.handle_key(&key);
         assert_eq!(event, Some(TabEvent::Selected(2)));
         assert_eq!(tv.active_id(), Some(2));
+    }
+
+    fn ctrl_tab(shift: bool) -> KeyEvent {
+        KeyEvent {
+            key: Key::Tab,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                shift,
+                alt: false,
+                super_key: false,
+            },
+            text: None,
+        }
+    }
+
+    /// Ctrl-Tab all the way round must visit every tab once and come back,
+    /// both ways. The old index widened to `i32` to hold `current - 1` before
+    /// `rem_euclid` pulled it back, so the ends are where a mistake would be.
+    #[test]
+    fn cycling_visits_every_tab_and_wraps_at_both_ends() {
+        for (shift, expected) in [(false, vec![2, 3, 1, 2]), (true, vec![3, 2, 1, 3])] {
+            let mut tv = TabView::new(TabPosition::Top);
+            for (id, label) in [(1, "A"), (2, "B"), (3, "C")] {
+                tv.add_tab(Tab::new(id, label));
+            }
+            tv.set_active(1);
+
+            let seen: Vec<u64> = (0..expected.len())
+                .map(|_| {
+                    tv.handle_key(&ctrl_tab(shift));
+                    tv.active_id().expect("a tab stays active")
+                })
+                .collect();
+            assert_eq!(seen, expected, "shift={shift}");
+        }
+    }
+
+    /// One tab cycles to itself rather than off either end.
+    #[test]
+    fn cycling_a_single_tab_stays_on_it() {
+        let mut tv = TabView::new(TabPosition::Top);
+        tv.add_tab(Tab::new(7, "only"));
+        for shift in [false, true] {
+            assert_eq!(tv.handle_key(&ctrl_tab(shift)), Some(TabEvent::Selected(7)));
+            assert_eq!(tv.active_id(), Some(7));
+        }
+    }
+
+    /// An empty tab bar has nothing to cycle to and must say so rather than
+    /// wrap an index into a list with no entries.
+    #[test]
+    fn cycling_an_empty_tab_bar_selects_nothing() {
+        let mut tv = TabView::new(TabPosition::Top);
+        for shift in [false, true] {
+            assert_eq!(tv.handle_key(&ctrl_tab(shift)), None);
+            assert_eq!(tv.active_id(), None);
+        }
+    }
+
+    /// Closing the active tab hands the front to whichever tab took its place,
+    /// or to the new last if it was itself last.
+    #[test]
+    fn closing_the_active_tab_promotes_its_neighbour_at_every_position() {
+        for (closed, expected) in [(1u64, 2u64), (2, 3), (3, 2)] {
+            let mut tv = TabView::new(TabPosition::Top);
+            for (id, label) in [(1, "A"), (2, "B"), (3, "C")] {
+                tv.add_tab(Tab::new(id, label));
+            }
+            tv.set_active(closed);
+            tv.remove_tab(closed);
+            assert_eq!(tv.active_id(), Some(expected), "closed {closed}");
+        }
     }
 
     #[test]

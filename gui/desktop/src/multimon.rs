@@ -31,6 +31,153 @@ impl fmt::Display for MonitorId {
 }
 
 // ---------------------------------------------------------------------------
+// VirtualRect — a rectangle in virtual desktop space
+// ---------------------------------------------------------------------------
+
+/// Narrow an `i64` to an `i32`, clamping rather than wrapping.
+///
+/// Every rectangle computation in this module widens to `i64` first, so that
+/// the intermediate — a right edge, a union, a snapped position — can never
+/// wrap. This is where the result comes back down. Clamping is the right
+/// failure: a monitor pushed past `i32::MAX` lands at the far edge of the
+/// coordinate space rather than reappearing on the opposite side of it.
+fn narrow(v: i64) -> i32 {
+    i32::try_from(v).unwrap_or(if v.is_negative() { i32::MIN } else { i32::MAX })
+}
+
+/// A rectangle in virtual desktop space: a position in signed pixels and a
+/// size in unsigned ones.
+///
+/// This exists because the four numbers were previously passed around loose,
+/// as `(i32, i32, u32, u32)`, and every geometric question — where is the
+/// right edge, does this contain that point, what box holds both of these —
+/// was re-derived by hand at each call site, in `i32`, with the `w as i32`
+/// cast and the overflow that comes with it written out fresh each time.
+/// Sixteen monitors at 8K would be enough to overflow one of those additions;
+/// so is one monitor placed near `i32::MAX` by a corrupt config file. Here the
+/// widening happens once, inside the accessors, and no caller can forget it.
+///
+/// The rectangle is half-open: it covers `x..x + w` and `y..y + h`, so two
+/// monitors placed edge to edge neither overlap nor leave a seam.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct VirtualRect {
+    /// Left edge in virtual desktop pixels.
+    pub x: i32,
+    /// Top edge in virtual desktop pixels.
+    pub y: i32,
+    /// Width in pixels.
+    pub w: u32,
+    /// Height in pixels.
+    pub h: u32,
+}
+
+impl VirtualRect {
+    /// A rectangle at `(x, y)` measuring `w` by `h`.
+    #[must_use]
+    pub const fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    /// The rectangle spanning `left..right` by `top..bottom`.
+    ///
+    /// Corners are taken as `i64` because they are usually themselves the
+    /// result of arithmetic on other rectangles. A reversed pair yields a
+    /// zero-sized rectangle rather than a wrapped enormous one.
+    #[must_use]
+    pub fn from_corners(left: i64, top: i64, right: i64, bottom: i64) -> Self {
+        let w = u32::try_from(right.saturating_sub(left).max(0)).unwrap_or(u32::MAX);
+        let h = u32::try_from(bottom.saturating_sub(top).max(0)).unwrap_or(u32::MAX);
+        Self::new(narrow(left), narrow(top), w, h)
+    }
+
+    /// Left edge, widened.
+    #[must_use]
+    pub const fn left(self) -> i64 {
+        self.x as i64
+    }
+
+    /// Top edge, widened.
+    #[must_use]
+    pub const fn top(self) -> i64 {
+        self.y as i64
+    }
+
+    /// The first column *past* the rectangle.
+    ///
+    /// Widened, so it is exact for every position and size a rectangle can
+    /// hold: `i32::MAX + u32::MAX` is nowhere near `i64::MAX`. The saturating
+    /// add is therefore unreachable, and is written that way rather than
+    /// commented that way — a proof that lives in a comment is one the next
+    /// change to the type is free to invalidate.
+    #[must_use]
+    pub const fn right(self) -> i64 {
+        (self.x as i64).saturating_add(self.w as i64)
+    }
+
+    /// The first row *past* the rectangle. Exact, as [`right`](Self::right).
+    #[must_use]
+    pub const fn bottom(self) -> i64 {
+        (self.y as i64).saturating_add(self.h as i64)
+    }
+
+    /// Width as a signed value, for mixing with positions. Saturates.
+    #[must_use]
+    pub fn width_i32(self) -> i32 {
+        i32::try_from(self.w).unwrap_or(i32::MAX)
+    }
+
+    /// Height as a signed value. Saturates.
+    #[must_use]
+    pub fn height_i32(self) -> i32 {
+        i32::try_from(self.h).unwrap_or(i32::MAX)
+    }
+
+    /// Whether the rectangle covers no pixels at all.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.w == 0 || self.h == 0
+    }
+
+    /// Whether `(x, y)` lies inside, treating the right and bottom edges as
+    /// exclusive.
+    #[must_use]
+    pub const fn contains(self, x: i32, y: i32) -> bool {
+        let (px, py) = (x as i64, y as i64);
+        px >= self.left() && py >= self.top() && px < self.right() && py < self.bottom()
+    }
+
+    /// The centre point, rounded towards the top-left.
+    #[must_use]
+    pub fn center(self) -> (i32, i32) {
+        (
+            narrow(self.left().saturating_add(self.w as i64 / 2)),
+            narrow(self.top().saturating_add(self.h as i64 / 2)),
+        )
+    }
+
+    /// The smallest rectangle containing both.
+    ///
+    /// Empty rectangles are *not* skipped: a monitor configured with a
+    /// zero-sized mode still has a position, and the desktop's bounding box
+    /// has to reach it or the monitor becomes unreachable by the pointer.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        Self::from_corners(
+            self.left().min(other.left()),
+            self.top().min(other.top()),
+            self.right().max(other.right()),
+            self.bottom().max(other.bottom()),
+        )
+    }
+
+    /// Area in pixels. Widened so a 4-billion-square desktop cannot wrap.
+    #[must_use]
+    pub const fn area(self) -> u64 {
+        (self.w as u64).saturating_mul(self.h as u64)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Rotation
 // ---------------------------------------------------------------------------
 
@@ -122,17 +269,16 @@ impl MonitorInfo {
             .effective_resolution(self.resolution.0, self.resolution.1)
     }
 
-    /// Bounding rectangle in virtual desktop space: `(x, y, w, h)`.
-    pub fn bounds(&self) -> (i32, i32, u32, u32) {
+    /// Bounding rectangle in virtual desktop space, after rotation.
+    pub fn bounds(&self) -> VirtualRect {
         let (w, h) = self.effective_resolution();
-        (self.position.0, self.position.1, w, h)
+        VirtualRect::new(self.position.0, self.position.1, w, h)
     }
 
     /// Whether the point `(x, y)` in virtual desktop space lies within this
     /// monitor's bounds.
     pub fn contains(&self, x: i32, y: i32) -> bool {
-        let (mx, my, mw, mh) = self.bounds();
-        x >= mx && y >= my && x < mx + mw as i32 && y < my + mh as i32
+        self.bounds().contains(x, y)
     }
 
     /// Calculate DPI from physical size and resolution.
@@ -166,6 +312,49 @@ pub enum ArrangeMode {
 }
 
 // ---------------------------------------------------------------------------
+// Snap — the running best edge alignment along one axis
+// ---------------------------------------------------------------------------
+
+/// How near two monitor edges must come, in virtual desktop pixels, before a
+/// drag snaps them together.
+pub const SNAP_THRESHOLD: u32 = 32;
+
+/// The best snap candidate found so far along one axis of a drag.
+struct Snap {
+    /// Gap between the two edges the winning candidate aligns.
+    ///
+    /// Seeded one past the threshold so that "nothing offered" and "nothing
+    /// offered was close enough" are the same state, and neither needs a
+    /// separate test at the end.
+    distance: u64,
+    /// Where the dragged monitor lands if this candidate wins.
+    position: i32,
+}
+
+impl Snap {
+    /// No candidate yet: the monitor stays at `position`.
+    fn new(position: i32) -> Self {
+        Self {
+            distance: (SNAP_THRESHOLD as u64).saturating_add(1),
+            position,
+        }
+    }
+
+    /// Offer to move the monitor — currently at `origin` on this axis — so
+    /// that its `edge` lands on `target`.
+    ///
+    /// Strictly closer wins, so among equally good candidates the first
+    /// offered is kept.
+    fn offer(&mut self, origin: i32, edge: i64, target: i64) {
+        let distance = edge.abs_diff(target);
+        if distance < self.distance {
+            self.distance = distance;
+            self.position = narrow(i64::from(origin).saturating_add(target.saturating_sub(edge)));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MonitorLayout — arrangement of all monitors
 // ---------------------------------------------------------------------------
 
@@ -179,44 +368,16 @@ pub struct MonitorLayout {
 impl MonitorLayout {
     /// Bounding box encompassing every **enabled** monitor.
     ///
-    /// Returns `(x, y, width, height)`. If no monitors are enabled the result
-    /// is `(0, 0, 0, 0)`.
-    pub fn virtual_bounds(&self) -> (i32, i32, u32, u32) {
-        let mut min_x = i32::MAX;
-        let mut min_y = i32::MAX;
-        let mut max_x = i32::MIN;
-        let mut max_y = i32::MIN;
-
-        let mut any = false;
-        for m in &self.monitors {
-            if !m.enabled {
-                continue;
-            }
-            any = true;
-            let (mx, my, mw, mh) = m.bounds();
-            if mx < min_x {
-                min_x = mx;
-            }
-            if my < min_y {
-                min_y = my;
-            }
-            let right = mx.saturating_add(mw as i32);
-            let bottom = my.saturating_add(mh as i32);
-            if right > max_x {
-                max_x = right;
-            }
-            if bottom > max_y {
-                max_y = bottom;
-            }
-        }
-
-        if !any {
-            return (0, 0, 0, 0);
-        }
-
-        let w = (max_x - min_x).max(0) as u32;
-        let h = (max_y - min_y).max(0) as u32;
-        (min_x, min_y, w, h)
+    /// An all-disabled layout has no bounding box at all, and gets the empty
+    /// rectangle at the origin — which `is_empty` reports, so callers that
+    /// must not divide by the desktop's size have one question to ask.
+    pub fn virtual_bounds(&self) -> VirtualRect {
+        self.monitors
+            .iter()
+            .filter(|m| m.enabled)
+            .map(MonitorInfo::bounds)
+            .reduce(VirtualRect::union)
+            .unwrap_or_default()
     }
 
     /// The primary monitor, if any.
@@ -231,85 +392,47 @@ impl MonitorLayout {
 
     /// Snap a monitor's position so its edges align with neighbouring monitors.
     ///
-    /// The snap threshold is 32 pixels. The returned position is the closest
-    /// aligned position to `(x, y)` for the monitor identified by `id`.
+    /// The returned position is the one closest to `(x, y)` that puts one of
+    /// the moving monitor's edges within [`SNAP_THRESHOLD`] pixels of an edge
+    /// of some other enabled monitor. The two axes are decided independently:
+    /// a drag can snap horizontally against one neighbour and vertically
+    /// against another.
+    ///
+    /// Four candidates are offered per neighbour per axis, and they are all
+    /// the same operation — *move so that this edge of mine lands on that edge
+    /// of theirs*. Two of them abut (my left to their right, my right to their
+    /// left) and two align (my left to their left, my right to their right).
+    /// They were previously eight hand-written blocks, each recomputing the
+    /// resulting position from scratch, which is eight chances to write
+    /// `ox + ow - tw` when the case called for `ox + ow`.
     pub fn snap_position(&self, id: MonitorId, x: i32, y: i32) -> (i32, i32) {
-        const SNAP_THRESHOLD: i32 = 32;
-
-        // Find the target monitor to determine its size.
-        let target = match self.monitors.iter().find(|m| m.id == id) {
-            Some(m) => m,
-            None => return (x, y),
+        let Some(target) = self.monitors.iter().find(|m| m.id == id) else {
+            return (x, y);
         };
         let (tw, th) = target.effective_resolution();
-        let tw = tw as i32;
-        let th = th as i32;
+        let moving = VirtualRect::new(x, y, tw, th);
 
-        let mut best_x = x;
-        let mut best_y = y;
-        let mut dx_best = SNAP_THRESHOLD + 1;
-        let mut dy_best = SNAP_THRESHOLD + 1;
+        let mut snap_x = Snap::new(x);
+        let mut snap_y = Snap::new(y);
 
         for other in &self.monitors {
             if other.id == id || !other.enabled {
                 continue;
             }
-            let (ox, oy, ow, oh) = other.bounds();
-            let ow = ow as i32;
-            let oh = oh as i32;
+            let b = other.bounds();
 
-            // Snap target left edge to other right edge.
-            let d = (x - (ox + ow)).abs();
-            if d < dx_best {
-                dx_best = d;
-                best_x = ox + ow;
-            }
-            // Snap target right edge to other left edge.
-            let d = ((x + tw) - ox).abs();
-            if d < dx_best {
-                dx_best = d;
-                best_x = ox - tw;
-            }
-            // Snap target left edge to other left edge (alignment).
-            let d = (x - ox).abs();
-            if d < dx_best {
-                dx_best = d;
-                best_x = ox;
-            }
-            // Snap target right edge to other right edge.
-            let d = ((x + tw) - (ox + ow)).abs();
-            if d < dx_best {
-                dx_best = d;
-                best_x = ox + ow - tw;
-            }
+            snap_x.offer(x, moving.left(), b.right());
+            snap_x.offer(x, moving.right(), b.left());
+            snap_x.offer(x, moving.left(), b.left());
+            snap_x.offer(x, moving.right(), b.right());
 
-            // Snap target top edge to other bottom edge.
-            let d = (y - (oy + oh)).abs();
-            if d < dy_best {
-                dy_best = d;
-                best_y = oy + oh;
-            }
-            // Snap target bottom edge to other top edge.
-            let d = ((y + th) - oy).abs();
-            if d < dy_best {
-                dy_best = d;
-                best_y = oy - th;
-            }
-            // Snap target top edge to other top edge (alignment).
-            let d = (y - oy).abs();
-            if d < dy_best {
-                dy_best = d;
-                best_y = oy;
-            }
-            // Snap target bottom edge to other bottom edge.
-            let d = ((y + th) - (oy + oh)).abs();
-            if d < dy_best {
-                dy_best = d;
-                best_y = oy + oh - th;
-            }
+            snap_y.offer(y, moving.top(), b.bottom());
+            snap_y.offer(y, moving.bottom(), b.top());
+            snap_y.offer(y, moving.top(), b.top());
+            snap_y.offer(y, moving.bottom(), b.bottom());
         }
 
-        (best_x, best_y)
+        (snap_x.position, snap_y.position)
     }
 
     /// Detect axis-aligned rectangular gaps between enabled monitors.
@@ -317,22 +440,29 @@ impl MonitorLayout {
     /// A "gap" is a rectangle inside the virtual bounding box that is not
     /// covered by any monitor. The implementation rasterises a grid defined by
     /// the horizontal and vertical edges of every monitor, then reports
-    /// uncovered cells.
-    pub fn detect_gaps(&self) -> Vec<(i32, i32, u32, u32)> {
-        let enabled: Vec<&MonitorInfo> = self.monitors.iter().filter(|m| m.enabled).collect();
+    /// uncovered cells. Testing the cell's centre suffices: the grid lines are
+    /// exactly the monitor edges, so no monitor boundary can pass through the
+    /// interior of a cell, and a cell is therefore covered either wholly or
+    /// not at all.
+    pub fn detect_gaps(&self) -> Vec<VirtualRect> {
+        let enabled: Vec<VirtualRect> = self
+            .monitors
+            .iter()
+            .filter(|m| m.enabled)
+            .map(MonitorInfo::bounds)
+            .collect();
         if enabled.len() < 2 {
             return Vec::new();
         }
 
-        // Collect unique x and y coordinates (edges of every monitor).
-        let mut xs: Vec<i32> = Vec::new();
-        let mut ys: Vec<i32> = Vec::new();
-        for m in &enabled {
-            let (mx, my, mw, mh) = m.bounds();
-            xs.push(mx);
-            xs.push(mx + mw as i32);
-            ys.push(my);
-            ys.push(my + mh as i32);
+        // The grid lines: every distinct monitor edge, on each axis.
+        let mut xs: Vec<i64> = Vec::new();
+        let mut ys: Vec<i64> = Vec::new();
+        for b in &enabled {
+            xs.push(b.left());
+            xs.push(b.right());
+            ys.push(b.top());
+            ys.push(b.bottom());
         }
         xs.sort_unstable();
         xs.dedup();
@@ -340,25 +470,17 @@ impl MonitorLayout {
         ys.dedup();
 
         let mut gaps = Vec::new();
-
-        // Check every grid cell formed by adjacent x/y boundaries.
-        for xi in 0..xs.len().saturating_sub(1) {
-            for yi in 0..ys.len().saturating_sub(1) {
-                let cx = xs[xi];
-                let cy = ys[yi];
-                let cw = (xs[xi + 1] - cx) as u32;
-                let ch = (ys[yi + 1] - cy) as u32;
-
-                if cw == 0 || ch == 0 {
+        for column in xs.windows(2) {
+            let [left, right] = *column else { continue };
+            for row in ys.windows(2) {
+                let [top, bottom] = *row else { continue };
+                let cell = VirtualRect::from_corners(left, top, right, bottom);
+                if cell.is_empty() {
                     continue;
                 }
-
-                // Check if any monitor covers this cell.
-                let mid_x = cx + (cw as i32) / 2;
-                let mid_y = cy + (ch as i32) / 2;
-                let covered = enabled.iter().any(|m| m.contains(mid_x, mid_y));
-                if !covered {
-                    gaps.push((cx, cy, cw, ch));
+                let (mid_x, mid_y) = cell.center();
+                if !enabled.iter().any(|b| b.contains(mid_x, mid_y)) {
+                    gaps.push(cell);
                 }
             }
         }
@@ -579,14 +701,16 @@ impl MonitorConfig {
     /// key=value pairs, one per line. Sections are separated by blank lines.
     pub fn save_to_string(&self) -> String {
         let mut out = String::new();
-        // Sort connectors for deterministic output.
-        let mut connectors: Vec<&String> = self.configs.keys().collect();
-        connectors.sort();
-        for (i, conn) in connectors.iter().enumerate() {
+        // Sorted for deterministic output. Iterating the pairs rather than the
+        // keys means the value is never looked up a second time — `configs[k]`
+        // panics if the key is absent, which is a panic that only a bug can
+        // cause but which nothing in the type system rules out.
+        let mut entries: Vec<(&String, &PerMonitorConfig)> = self.configs.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (i, (conn, cfg)) in entries.into_iter().enumerate() {
             if i > 0 {
                 out.push('\n');
             }
-            let cfg = &self.configs[*conn];
             out.push('[');
             out.push_str(conn);
             out.push_str("]\n");
@@ -647,8 +771,12 @@ impl MonitorConfig {
                 continue;
             }
 
-            // Section header: [connector]
-            if line.starts_with('[') && line.ends_with(']') {
+            // Section header: [connector]. Stripping both delimiters in one
+            // expression is what makes the name safe to take: the previous
+            // `line[1..line.len() - 1]` was correct only because the
+            // `starts_with`/`ends_with` pair above it had already run, and
+            // `"["` alone satisfies both of those.
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
                 // Flush previous section.
                 flush(
                     &current_connector,
@@ -659,7 +787,7 @@ impl MonitorConfig {
                     &current_enabled,
                     &mut configs,
                 )?;
-                current_connector = Some(line[1..line.len() - 1].to_string());
+                current_connector = Some(name.to_string());
                 current_res = None;
                 current_pos = None;
                 current_rot = None;
@@ -748,89 +876,89 @@ impl MonitorConfig {
 pub struct WindowPlacement;
 
 impl WindowPlacement {
+    /// How much of a window must remain inside the desktop, in pixels on each
+    /// axis, for it to still be reachable with the pointer.
+    pub const MIN_VISIBLE: u32 = 48;
+
     /// Center a window on the given monitor, preserving its size.
-    ///
-    /// Returns `(x, y, w, h)` in virtual desktop coordinates.
-    pub fn place_on_monitor(
-        window_rect: (i32, i32, u32, u32),
-        monitor: &MonitorInfo,
-    ) -> (i32, i32, u32, u32) {
-        let (_, _, ww, wh) = window_rect;
-        let (mx, my, mw, mh) = monitor.bounds();
-        let x = mx + (mw as i32 - ww as i32) / 2;
-        let y = my + (mh as i32 - wh as i32) / 2;
-        (x, y, ww, wh)
+    pub fn place_on_monitor(window: VirtualRect, monitor: &MonitorInfo) -> VirtualRect {
+        let m = monitor.bounds();
+        let slack_x = i64::from(m.w).saturating_sub(i64::from(window.w)) / 2;
+        let slack_y = i64::from(m.h).saturating_sub(i64::from(window.h)) / 2;
+        VirtualRect::new(
+            narrow(m.left().saturating_add(slack_x)),
+            narrow(m.top().saturating_add(slack_y)),
+            window.w,
+            window.h,
+        )
     }
 
     /// Move a window from one monitor to another, preserving proportional
     /// position within the monitor.
-    ///
-    /// Returns the new `(x, y, w, h)` on the target monitor.
     pub fn move_to_monitor(
-        window_rect: (i32, i32, u32, u32),
+        window: VirtualRect,
         from: &MonitorInfo,
         to: &MonitorInfo,
-    ) -> (i32, i32, u32, u32) {
-        let (wx, wy, ww, wh) = window_rect;
-        let (fx, fy, fw, fh) = from.bounds();
-        let (tx, ty, tw, th) = to.bounds();
+    ) -> VirtualRect {
+        let f = from.bounds();
+        let t = to.bounds();
 
-        // Proportional offset within the source monitor.
-        let rel_x = if fw > 0 {
-            (wx - fx) as f64 / fw as f64
-        } else {
-            0.0
+        // Proportional offset within the source monitor. A zero-sized source
+        // has no interior to be proportional to, so the window goes to the
+        // target's origin rather than dividing by nothing.
+        let fraction = |offset: i64, extent: u32| -> f64 {
+            if extent == 0 {
+                0.0
+            } else {
+                offset as f64 / f64::from(extent)
+            }
         };
-        let rel_y = if fh > 0 {
-            (wy - fy) as f64 / fh as f64
-        } else {
-            0.0
-        };
+        let rel_x = fraction(window.left().saturating_sub(f.left()), f.w);
+        let rel_y = fraction(window.top().saturating_sub(f.top()), f.h);
 
-        let new_x = tx + (rel_x * tw as f64) as i32;
-        let new_y = ty + (rel_y * th as f64) as i32;
-
-        (new_x, new_y, ww, wh)
+        VirtualRect::new(
+            narrow(t.left().saturating_add((rel_x * f64::from(t.w)) as i64)),
+            narrow(t.top().saturating_add((rel_y * f64::from(t.h)) as i64)),
+            window.w,
+            window.h,
+        )
     }
 
     /// Clamp a window rectangle so that at least a minimum portion is visible
     /// on some enabled monitor.
     ///
-    /// The window is shifted (not resized) so that at least 48 pixels of width
-    /// and 48 pixels of height are within the virtual bounding box.
-    pub fn clamp_to_visible(
-        rect: (i32, i32, u32, u32),
-        layout: &MonitorLayout,
-    ) -> (i32, i32, u32, u32) {
-        let (bx, by, bw, bh) = layout.virtual_bounds();
-        if bw == 0 || bh == 0 {
-            // No enabled monitors -- return unchanged.
+    /// The window is shifted, never resized, so that at least
+    /// [`MIN_VISIBLE`](Self::MIN_VISIBLE) pixels of it lie within the virtual
+    /// bounding box — or the whole of it, if it is smaller than that.
+    pub fn clamp_to_visible(rect: VirtualRect, layout: &MonitorLayout) -> VirtualRect {
+        let bounds = layout.virtual_bounds();
+        if bounds.is_empty() {
+            // No enabled monitors — there is nowhere to be visible.
             return rect;
         }
-        let (mut x, mut y, w, h) = rect;
 
-        // Minimum overlap that must remain visible.
-        let min_visible: i32 = 48;
+        // How much of the window has to stay on-screen, and how much may hang
+        // off the far side.
+        let keep_x = i64::from(Self::MIN_VISIBLE.min(rect.w));
+        let keep_y = i64::from(Self::MIN_VISIBLE.min(rect.h));
+        let overhang_x = i64::from(rect.w).saturating_sub(keep_x);
+        let overhang_y = i64::from(rect.h).saturating_sub(keep_y);
 
-        let right_limit = bx + bw as i32 - min_visible.min(w as i32);
-        let bottom_limit = by + bh as i32 - min_visible.min(h as i32);
-        let left_limit = bx - (w as i32 - min_visible.min(w as i32));
-        let top_limit = by - (h as i32 - min_visible.min(h as i32));
+        let far_x = bounds.right().saturating_sub(keep_x);
+        let near_x = bounds.left().saturating_sub(overhang_x);
+        let far_y = bounds.bottom().saturating_sub(keep_y);
+        let near_y = bounds.top().saturating_sub(overhang_y);
 
-        if x > right_limit {
-            x = right_limit;
-        }
-        if x < left_limit {
-            x = left_limit;
-        }
-        if y > bottom_limit {
-            y = bottom_limit;
-        }
-        if y < top_limit {
-            y = top_limit;
-        }
-
-        (x, y, w, h)
+        // `.min(far).max(near)`, not `.clamp(near, far)`: a desktop narrower
+        // than `MIN_VISIBLE` puts `near` above `far`, and `clamp` panics on an
+        // inverted range. Written this way the near edge wins, which is the
+        // behaviour the sequential comparisons this replaces already had.
+        VirtualRect::new(
+            narrow(rect.left().min(far_x).max(near_x)),
+            narrow(rect.top().min(far_y).max(near_y)),
+            rect.w,
+            rect.h,
+        )
     }
 
     /// Suggest the best monitor for placing a new window.
@@ -845,10 +973,7 @@ impl WindowPlacement {
             .monitors
             .iter()
             .filter(|m| m.enabled)
-            .max_by_key(|m| {
-                let (w, h) = m.effective_resolution();
-                (w as u64) * (h as u64)
-            })
+            .max_by_key(|m| m.bounds().area())
             .map(|m| m.id)
     }
 }
@@ -917,7 +1042,7 @@ mod tests {
     #[test]
     fn monitor_bounds() {
         let m = make_monitor(1, "DP-1", 1920, 1080, 100, 200, false);
-        assert_eq!(m.bounds(), (100, 200, 1920, 1080));
+        assert_eq!(m.bounds(), VirtualRect::new(100, 200, 1920, 1080));
     }
 
     #[test]
@@ -985,7 +1110,7 @@ mod tests {
         let mut m = make_monitor(1, "DP-1", 1920, 1080, 0, 0, true);
         m.rotation = Rotation::Left;
         assert_eq!(m.effective_resolution(), (1080, 1920));
-        assert_eq!(m.bounds(), (0, 0, 1080, 1920));
+        assert_eq!(m.bounds(), VirtualRect::new(0, 0, 1080, 1920));
     }
 
     #[test]
@@ -1004,7 +1129,7 @@ mod tests {
         let layout = MonitorLayout {
             monitors: vec![make_monitor(1, "DP-1", 1920, 1080, 0, 0, true)],
         };
-        assert_eq!(layout.virtual_bounds(), (0, 0, 1920, 1080));
+        assert_eq!(layout.virtual_bounds(), VirtualRect::new(0, 0, 1920, 1080));
     }
 
     #[test]
@@ -1015,7 +1140,7 @@ mod tests {
                 make_monitor(2, "DP-2", 2560, 1440, 1920, 0, false),
             ],
         };
-        assert_eq!(layout.virtual_bounds(), (0, 0, 4480, 1440));
+        assert_eq!(layout.virtual_bounds(), VirtualRect::new(0, 0, 4480, 1440));
     }
 
     #[test]
@@ -1026,7 +1151,10 @@ mod tests {
                 make_monitor(2, "DP-2", 1920, 1080, 0, 0, true),
             ],
         };
-        assert_eq!(layout.virtual_bounds(), (-1920, 0, 3840, 1080));
+        assert_eq!(
+            layout.virtual_bounds(),
+            VirtualRect::new(-1920, 0, 3840, 1080)
+        );
     }
 
     #[test]
@@ -1036,7 +1164,7 @@ mod tests {
         let layout = MonitorLayout {
             monitors: vec![make_monitor(1, "DP-1", 1920, 1080, 0, 0, true), m2],
         };
-        assert_eq!(layout.virtual_bounds(), (0, 0, 1920, 1080));
+        assert_eq!(layout.virtual_bounds(), VirtualRect::new(0, 0, 1920, 1080));
     }
 
     #[test]
@@ -1044,7 +1172,7 @@ mod tests {
         let mut m1 = make_monitor(1, "DP-1", 1920, 1080, 0, 0, true);
         m1.enabled = false;
         let layout = MonitorLayout { monitors: vec![m1] };
-        assert_eq!(layout.virtual_bounds(), (0, 0, 0, 0));
+        assert_eq!(layout.virtual_bounds(), VirtualRect::new(0, 0, 0, 0));
     }
 
     // -- MonitorLayout primary ---------------------------------------------
@@ -1172,12 +1300,7 @@ mod tests {
         };
         let gaps = layout.detect_gaps();
         // There should be a gap at x=[1920..2000], y=[0..1080].
-        assert!(!gaps.is_empty());
-        let (gx, gy, gw, gh) = gaps[0];
-        assert_eq!(gx, 1920);
-        assert_eq!(gy, 0);
-        assert_eq!(gw, 80);
-        assert_eq!(gh, 1080);
+        assert_eq!(gaps.first(), Some(&VirtualRect::new(1920, 0, 80, 1080)));
     }
 
     #[test]
@@ -1201,7 +1324,7 @@ mod tests {
         let gaps = layout.detect_gaps();
         // Gap should be at x=[1280..1920], y=[1080..1800].
         assert!(!gaps.is_empty());
-        let total_gap_area: u64 = gaps.iter().map(|&(_, _, w, h)| w as u64 * h as u64).sum();
+        let total_gap_area: u64 = gaps.iter().map(|g| g.area()).sum();
         let expected = (1920 - 1280) as u64 * 720;
         assert_eq!(total_gap_area, expected);
     }
@@ -1430,20 +1553,20 @@ mod tests {
     #[test]
     fn place_on_monitor_centers() {
         let m = make_monitor(1, "DP-1", 1920, 1080, 0, 0, true);
-        let (x, y, w, h) = WindowPlacement::place_on_monitor((0, 0, 800, 600), &m);
-        assert_eq!(w, 800);
-        assert_eq!(h, 600);
-        assert_eq!(x, (1920 - 800) / 2);
-        assert_eq!(y, (1080 - 600) / 2);
+        let placed = WindowPlacement::place_on_monitor(VirtualRect::new(0, 0, 800, 600), &m);
+        assert_eq!(
+            placed,
+            VirtualRect::new((1920 - 800) / 2, (1080 - 600) / 2, 800, 600)
+        );
     }
 
     #[test]
     fn place_on_monitor_offset_position() {
         let m = make_monitor(1, "DP-1", 1920, 1080, 1920, 0, true);
-        let (x, y, _, _) = WindowPlacement::place_on_monitor((0, 0, 800, 600), &m);
+        let placed = WindowPlacement::place_on_monitor(VirtualRect::new(0, 0, 800, 600), &m);
         // Should be centered on the second monitor.
-        assert_eq!(x, 1920 + (1920 - 800) / 2);
-        assert_eq!(y, (1080 - 600) / 2);
+        assert_eq!(placed.x, 1920 + (1920 - 800) / 2);
+        assert_eq!(placed.y, (1080 - 600) / 2);
     }
 
     #[test]
@@ -1452,13 +1575,11 @@ mod tests {
         let to = make_monitor(2, "DP-2", 2560, 1440, 1920, 0, false);
 
         // Window at the center of monitor 1.
-        let (x, y, w, h) = WindowPlacement::move_to_monitor((960, 540, 400, 300), &from, &to);
-        assert_eq!(w, 400);
-        assert_eq!(h, 300);
+        let moved =
+            WindowPlacement::move_to_monitor(VirtualRect::new(960, 540, 400, 300), &from, &to);
 
         // Proportional position: 960/1920 = 0.5 of from => 0.5 * 2560 + 1920 = 3200
-        assert_eq!(x, 1920 + 1280);
-        assert_eq!(y, 720);
+        assert_eq!(moved, VirtualRect::new(1920 + 1280, 720, 400, 300));
     }
 
     #[test]
@@ -1466,7 +1587,7 @@ mod tests {
         let layout = MonitorLayout {
             monitors: vec![make_monitor(1, "DP-1", 1920, 1080, 0, 0, true)],
         };
-        let rect = (100, 100, 800, 600);
+        let rect = VirtualRect::new(100, 100, 800, 600);
         assert_eq!(WindowPlacement::clamp_to_visible(rect, &layout), rect);
     }
 
@@ -1475,12 +1596,13 @@ mod tests {
         let layout = MonitorLayout {
             monitors: vec![make_monitor(1, "DP-1", 1920, 1080, 0, 0, true)],
         };
-        let (x, _y, w, h) = WindowPlacement::clamp_to_visible((5000, 500, 800, 600), &layout);
-        assert_eq!(w, 800);
-        assert_eq!(h, 600);
+        let clamped =
+            WindowPlacement::clamp_to_visible(VirtualRect::new(5000, 500, 800, 600), &layout);
+        assert_eq!(clamped.w, 800);
+        assert_eq!(clamped.h, 600);
         // Window should be pulled back so that at least 48px is visible.
-        assert!(x < 5000);
-        assert!(x + 48 <= 1920);
+        assert!(clamped.x < 5000);
+        assert!(clamped.x + 48 <= 1920);
     }
 
     #[test]
@@ -1488,9 +1610,10 @@ mod tests {
         let layout = MonitorLayout {
             monitors: vec![make_monitor(1, "DP-1", 1920, 1080, 0, 0, true)],
         };
-        let (x, _y, w, _h) = WindowPlacement::clamp_to_visible((-5000, 500, 800, 600), &layout);
+        let clamped =
+            WindowPlacement::clamp_to_visible(VirtualRect::new(-5000, 500, 800, 600), &layout);
         // At least 48px must overlap the monitor.
-        assert!(x + w as i32 >= 48);
+        assert!(clamped.right() >= 48);
     }
 
     #[test]
@@ -1498,7 +1621,7 @@ mod tests {
         let mut m = make_monitor(1, "DP-1", 1920, 1080, 0, 0, true);
         m.enabled = false;
         let layout = MonitorLayout { monitors: vec![m] };
-        let rect = (5000, 5000, 800, 600);
+        let rect = VirtualRect::new(5000, 5000, 800, 600);
         // With no enabled monitors, clamping is a no-op.
         assert_eq!(WindowPlacement::clamp_to_visible(rect, &layout), rect);
     }
@@ -1550,7 +1673,7 @@ mod tests {
                 make_monitor(2, "DP-2", 1920, 1080, 0, 1080, false),
             ],
         };
-        assert_eq!(layout.virtual_bounds(), (0, 0, 1920, 2160));
+        assert_eq!(layout.virtual_bounds(), VirtualRect::new(0, 0, 1920, 2160));
         assert_eq!(
             layout.monitor_at(960, 500).map(|m| m.id),
             Some(MonitorId(1))
@@ -1587,5 +1710,172 @@ mod tests {
         mgr.auto_arrange(ArrangeMode::Horizontal);
         assert_eq!(mgr.layout().monitors[0].position, (0, 0));
         assert_eq!(mgr.layout().monitors[1].position, (1920, 0));
+    }
+
+    // -- VirtualRect -------------------------------------------------------
+
+    #[test]
+    fn a_rectangle_at_the_far_edge_of_the_coordinate_space_does_not_wrap() {
+        // The old code answered "where is the right edge?" as `x + w as i32`,
+        // which for a monitor placed here overflows — a debug-build panic, and
+        // in release a right edge to the *left* of the left edge.
+        let r = VirtualRect::new(i32::MAX - 10, 0, 1000, 1000);
+        assert_eq!(r.right(), i64::from(i32::MAX) - 10 + 1000);
+        assert!(r.contains(i32::MAX, 500));
+        assert!(!r.contains(i32::MIN, 500));
+    }
+
+    #[test]
+    fn the_bounding_box_of_two_far_apart_monitors_saturates_rather_than_wrapping() {
+        // `(max_x - min_x)` in i32, which is what this replaces, overflows for
+        // any pair of monitors more than 2^31 pixels apart. A config file that
+        // named such a position was enough to crash the shell at startup.
+        let layout = MonitorLayout {
+            monitors: vec![
+                make_monitor(1, "DP-1", 1920, 1080, i32::MIN, 0, true),
+                make_monitor(2, "DP-2", 1920, 1080, i32::MAX - 1920, 0, false),
+            ],
+        };
+        let b = layout.virtual_bounds();
+        assert_eq!(b.x, i32::MIN);
+        assert_eq!(b.w, u32::MAX);
+    }
+
+    #[test]
+    fn a_rectangle_built_from_reversed_corners_is_empty_not_enormous() {
+        let r = VirtualRect::from_corners(100, 100, 40, 40);
+        assert!(r.is_empty());
+        assert_eq!(r, VirtualRect::new(100, 100, 0, 0));
+    }
+
+    #[test]
+    fn the_union_reaches_a_monitor_even_if_that_monitor_shows_nothing() {
+        // A monitor stuck in a zero-sized mode still has a position, and the
+        // pointer can still be moved to it. Skipping empty rectangles in the
+        // union would put it outside the desktop.
+        let a = VirtualRect::new(0, 0, 100, 100);
+        let b = VirtualRect::new(500, 500, 0, 0);
+        assert_eq!(a.union(b), VirtualRect::new(0, 0, 500, 500));
+    }
+
+    #[test]
+    fn a_rectangles_edges_are_half_open() {
+        let r = VirtualRect::new(10, 20, 5, 5);
+        assert!(r.contains(10, 20));
+        assert!(r.contains(14, 24));
+        // The right and bottom edges belong to whatever is on the other side.
+        assert!(!r.contains(15, 24));
+        assert!(!r.contains(14, 25));
+    }
+
+    // -- snap_position: all four alignments ---------------------------------
+
+    #[test]
+    fn every_snap_case_moves_the_edge_it_names_onto_the_edge_it_names() {
+        // One neighbour at x = 1000..2000, and a 500-wide monitor offered four
+        // positions, each 5px away from a different alignment. The four cases
+        // share one implementation now, so this is the test that the shared
+        // one is right for each of them rather than for the first one only.
+        let layout = MonitorLayout {
+            monitors: vec![
+                make_monitor(1, "DP-1", 1000, 1000, 1000, 0, true),
+                make_monitor(2, "DP-2", 500, 500, 0, 0, false),
+            ],
+        };
+        let snap = |x: i32| layout.snap_position(MonitorId(2), x, 5000).0;
+
+        // My left edge onto their right edge: land at 2000.
+        assert_eq!(snap(2005), 2000);
+        // My right edge onto their left edge: land at 1000 - 500 = 500.
+        assert_eq!(snap(505), 500);
+        // My left edge onto their left edge: land at 1000.
+        assert_eq!(snap(1005), 1000);
+        // My right edge onto their right edge: land at 2000 - 500 = 1500.
+        assert_eq!(snap(1495), 1500);
+    }
+
+    #[test]
+    fn a_snap_exactly_at_the_threshold_still_snaps_and_one_past_it_does_not() {
+        let layout = MonitorLayout {
+            monitors: vec![
+                make_monitor(1, "DP-1", 1000, 1000, 0, 0, true),
+                make_monitor(2, "DP-2", 500, 500, 0, 0, false),
+            ],
+        };
+        let threshold = SNAP_THRESHOLD as i32;
+        assert_eq!(
+            layout.snap_position(MonitorId(2), 1000 + threshold, 0).0,
+            1000
+        );
+        assert_eq!(
+            layout
+                .snap_position(MonitorId(2), 1000 + threshold + 1, 0)
+                .0,
+            1000 + threshold + 1
+        );
+    }
+
+    #[test]
+    fn a_disabled_neighbour_offers_nothing_to_snap_to() {
+        let mut other = make_monitor(1, "DP-1", 1000, 1000, 0, 0, true);
+        other.enabled = false;
+        let layout = MonitorLayout {
+            monitors: vec![other, make_monitor(2, "DP-2", 500, 500, 0, 0, false)],
+        };
+        assert_eq!(layout.snap_position(MonitorId(2), 1005, 1005), (1005, 1005));
+    }
+
+    // -- clamp_to_visible ---------------------------------------------------
+
+    #[test]
+    fn a_desktop_smaller_than_the_visible_minimum_does_not_panic() {
+        // `MIN_VISIBLE` is 48, so a 1x1 desktop asks for more of the window to
+        // stay on-screen than the desktop has room for: the near limit ends up
+        // *past* the far one. Written as `.clamp(near, far)` that is a panic,
+        // not a clamp — and it is reachable from any config file naming a
+        // 1x1 mode.
+        let layout = MonitorLayout {
+            monitors: vec![make_monitor(1, "DP-1", 1, 1, 0, 0, true)],
+        };
+        let clamped =
+            WindowPlacement::clamp_to_visible(VirtualRect::new(5000, 5000, 48, 48), &layout);
+        // The near edge wins, putting the window's top-left on the desktop.
+        assert_eq!(clamped, VirtualRect::new(0, 0, 48, 48));
+    }
+
+    #[test]
+    fn a_window_smaller_than_the_visible_minimum_is_kept_whole_on_screen() {
+        // `MIN_VISIBLE.min(w)` is what stops a 10px window being clamped as if
+        // 48px of it had to remain visible, which would let it sit 38px off
+        // the edge — entirely invisible.
+        let layout = MonitorLayout {
+            monitors: vec![make_monitor(1, "DP-1", 1920, 1080, 0, 0, true)],
+        };
+        let clamped =
+            WindowPlacement::clamp_to_visible(VirtualRect::new(9000, 9000, 10, 10), &layout);
+        assert_eq!(clamped, VirtualRect::new(1910, 1070, 10, 10));
+        assert!(clamped.right() <= 1920);
+        assert!(clamped.bottom() <= 1080);
+    }
+
+    // -- config parsing -----------------------------------------------------
+
+    #[test]
+    fn a_line_that_is_only_an_open_bracket_is_not_a_section_header() {
+        let cfg =
+            MonitorConfig::load_from_string("[\n[DP-1]\nresolution=1920x1080\nposition=0,0\n")
+                .unwrap();
+        assert_eq!(cfg.configs.len(), 1);
+        assert!(cfg.configs.contains_key("DP-1"));
+    }
+
+    #[test]
+    fn an_empty_section_name_round_trips_rather_than_slicing_off_a_bracket() {
+        let cfg =
+            MonitorConfig::load_from_string("[]\nresolution=800x600\nposition=1,2\n").unwrap();
+        assert_eq!(cfg.configs.len(), 1);
+        let entry = cfg.configs.get("").unwrap();
+        assert_eq!(entry.resolution, (800, 600));
+        assert_eq!(entry.position, (1, 2));
     }
 }

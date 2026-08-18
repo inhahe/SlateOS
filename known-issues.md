@@ -36045,3 +36045,39 @@ treated as a confound rather than a curiosity.
 - **Do not switch the kernel to v0 mangling to "fix" it.** That is the same
   luck wearing a respectable hat: it reshuffles every symbol and will land some
   other hot function on the bad address eventually.
+
+### What WAS done about it (2026-08-18, commits df0403e6a and 60e75a32a)
+
+Nothing in the kernel — there is nothing there to fix. Both changes are to the
+measuring apparatus, and both target the same failure: this cost a multi-hour
+bisect because the history recorded *what* the numbers were and nothing about
+*where the code was*.
+
+1. **`hot_symbols` on every benchmark record.** `bench-history.py` now reads
+   the load address of `crypto::compress`, `crypto::sha512_compress` and
+   `net::tcp::tcp_checksum_ip` out of the measured ELF and stores them beside
+   the timings. A repeat of this becomes a one-line observation — the crypto
+   benchmarks jumped *and* `compress` moved in the same run — instead of a
+   bisect. The ELF is parsed directly rather than via `nm`/`objdump`, neither
+   of which is on PATH here by default; a diagnostic that silently records
+   nothing on a machine missing an optional tool is worse than none, because
+   its absence reads as "the addresses did not move". For the same reason the
+   field is *absent* when no ELF was offered but `{}` when one was offered and
+   yielded nothing.
+
+2. **`--experiment` / `BENCH_EXPERIMENT`, so probes stop poisoning baselines.**
+   The five runs above measure kernels no checkout reproduces — three at
+   ~8085 ns for `crypto_sha256_64B`, two at ~1936 for *identical source* under
+   a different mangling scheme, one under non-default QEMU flags. All five went
+   into the history unlabelled, and all five would have entered one 8-run
+   reference window, stretching that benchmark's outlier fence past 4x and
+   blinding the level-shift detector for it for the next eight runs. They are
+   now labelled with what each actually was; labelled records are kept in full
+   but excluded from `comparable_records`. `QEMU_EXTRA` implies the label
+   automatically, since that was the case that slipped through; a hand-modified
+   *guest* cannot be detected from the harness and must still be declared.
+
+**What is still open.** Which QEMU structure produces the effect (TB jump cache
+vs. softmmu TLB) is unknown and needs QEMU source we do not have checked out.
+It is recorded as unknown rather than guessed because the guess would be
+untestable here — and knowing the answer would not change either action above.

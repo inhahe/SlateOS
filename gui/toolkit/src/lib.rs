@@ -44,6 +44,7 @@ pub mod menubar;
 pub mod modal;
 pub mod pathbar;
 pub mod render;
+pub mod rng;
 pub mod scaling;
 pub mod signal;
 pub mod style;

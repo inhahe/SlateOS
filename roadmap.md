@@ -5786,8 +5786,25 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
           makes it a compile error to reach the frame list without saying which
           case you handle, `free_backing` now returns `NotSupported` for VRAM,
           and the self-test asserts the refusal rather than trusting it.
-- [ ] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
-- [ ] `[A]` NVIDIA: defer until open-source driver matures, or use Linux compat layer later
+- [~] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
+      — **blocked by `open-questions.md` Q50** (operator decision), not by effort.
+      There is no device to write it against: `qemu-system-x86_64 -device help`
+      lists sixteen display devices (`ati-vga`, `bochs-display`, `cirrus-vga`,
+      `isa-cirrus-vga`, `isa-vga`, `qxl`, `qxl-vga`, `secondary-vga`, `VGA`,
+      `virtio-gpu-device`, `virtio-gpu-gl-device`, `virtio-gpu-gl-pci`,
+      `virtio-gpu-pci`, `virtio-vga`, `virtio-vga-gl`, `vmware-svga`) and not one
+      of them is an Intel iGPU — re-measured 2026-08-18. That is the difference
+      between this item and the ATI one above, which the boot test exercises
+      every run via `-device ati-vga,model=rv100`. `design-decisions.md` §217
+      already rejected "target Intel instead" for exactly this reason. Writing
+      it anyway is Q50's option B and would tick a box for a driver nobody has
+      ever seen initialise; the unblocking work is Q50's option C or D (bare
+      metal, or a Linux host with GVT-g/VFIO passthrough), both of which are
+      operator calls about hardware and setup, not code.
+- [~] `[A]` NVIDIA: defer until open-source driver matures, or use Linux compat layer later
+      — blocked for the same reason and more so: QEMU emulates no NVIDIA display
+      device either, and the item's own text defers it by design. Nothing to do
+      until Q49/Q50 settle the testability question for GPUs generally.
 
 ### 3.2 Graphics stack
 - [x] DRM/KMS equivalent (kernel mode setting, GPU memory management)

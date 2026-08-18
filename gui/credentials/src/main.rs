@@ -9,9 +9,17 @@
 //! - The session key is derived by iterating SHA-256 [`DEFAULT_KDF_ROUNDS`]
 //!   times over the password and salt, so that testing one guess costs the
 //!   attacker what one unlock costs the user.
+//! - That salt is drawn from the kernel CSPRNG **per vault** ([`KdfParams`])
+//!   and stored beside the verifier, so the cost above is paid once per victim
+//!   rather than once for the world. It used to be a constant compiled into
+//!   every install, which is the opposite of what a salt is for.
 //! - The master password is verified against a value derived from that
 //!   *stretched* key, not from the password directly — otherwise a guess
 //!   would cost one hash and the stretching would be decorative.
+//! - Generated passwords come from the kernel CSPRNG, and generation is refused
+//!   outright when it cannot be reached ([`generate_password`]). There is no
+//!   fallback to a seeded generator: a predictable password is indistinguishable
+//!   from a good one to the person relying on it.
 //! - Encryption is a counter-mode stream cipher keyed on SHA-256, with a
 //!   fresh nonce per encryption. It is **not authenticated**: ciphertext can
 //!   be modified undetectably. See `known-issues.md`.
@@ -44,20 +52,12 @@ use randrange::SeededRng;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Salt mixed into the master password before hashing to derive the session key.
+/// How many bytes of salt each vault gets.
 ///
-/// A salt's job is to be *different for every vault*, so that an attacker who
-/// precomputes a table of hashed passwords has to redo the work for each
-/// victim rather than once for the world. This one is a compile-time constant
-/// and so does exactly the opposite — every SlateOS install shares it.
-///
-/// It is still here because fixing it needs a per-vault random value, and
-/// there is no source of unpredictable numbers in userspace yet; see
-/// `requests/c-a-userspace-entropy-syscall.md`. When that syscall exists, this
-/// constant becomes a per-vault salt generated at `set_master_password` time
-/// and stored beside the verifier. Tracked in `known-issues.md` →
-/// `C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES`.
-const KEY_DERIVATION_SALT: &str = "slateos_credential_salt";
+/// Sixteen is the usual figure (PBKDF2's RFC 8018 calls for at least eight;
+/// Argon2's reference implementation defaults to sixteen). The requirement is
+/// only that two vaults never collide by chance, which 128 bits settles.
+const SALT_LEN: usize = 16;
 
 /// How many hash iterations turn a master password into a key, for a vault
 /// created today.
@@ -125,6 +125,15 @@ pub enum CredentialError {
     CryptoError { detail: String },
     /// Invalid input parameter.
     InvalidInput { detail: String },
+    /// The kernel's random number generator could not be reached, so a value
+    /// that must be unpredictable could not be drawn.
+    ///
+    /// Returned rather than falling back to a predictable value. A vault is
+    /// created once and lives for years: a salt chosen from a clock at creation
+    /// time would weaken it for its whole life, and nothing later would notice.
+    /// Refusing is recoverable -- the user tries again -- and creating a weak
+    /// vault is not.
+    EntropyUnavailable,
 }
 
 impl fmt::Display for CredentialError {
@@ -143,6 +152,10 @@ impl fmt::Display for CredentialError {
             Self::StorageError { detail } => write!(f, "storage error: {detail}"),
             Self::CryptoError { detail } => write!(f, "crypto error: {detail}"),
             Self::InvalidInput { detail } => write!(f, "invalid input: {detail}"),
+            Self::EntropyUnavailable => write!(
+                f,
+                "the system random number generator is unavailable, so no unpredictable value could be drawn"
+            ),
         }
     }
 }
@@ -269,17 +282,97 @@ impl From<&Credential> for CredentialMetadata {
 /// The size of the nonce prefix that [`encrypt`] writes ahead of a ciphertext.
 const NONCE_LEN: usize = 8;
 
-/// Derive a 32-byte session key from the master password at a given cost.
+/// Everything a vault's key derivation is pinned to: its salt and its cost.
 ///
-/// `rounds` comes from the vault ([`CredentialStore::kdf_rounds`]), not from a
-/// constant — see [`DEFAULT_KDF_ROUNDS`] for why, and for why the single
-/// SHA-256 pass this used to be was not a key derivation function at all.
-fn derive_session_key(master_password: &str, rounds: u32) -> [u8; 32] {
-    stretch(
-        master_password.as_bytes(),
-        KEY_DERIVATION_SALT.as_bytes(),
-        rounds,
-    )
+/// These travel together because they are used together and must be *stored*
+/// together. Every real password-hashing format writes its salt and its cost
+/// parameters beside the hash for the same reason: both are properties of the
+/// stored verifier, not of the code that reads it, and a vault that has lost
+/// either one can never be opened again.
+///
+/// # Why the salt is here at all
+///
+/// It used to be a compile-time constant, `"slateos_credential_salt"`, shared
+/// by every SlateOS install — which is precisely backwards. A salt's only job
+/// is to be *different for every vault*, so that an attacker who precomputes a
+/// table of hashed passwords must redo the work per victim instead of once for
+/// the world. A constant salt means one table opens every vault on every
+/// machine, and the [`DEFAULT_KDF_ROUNDS`] stretching that table cost is paid
+/// once by the attacker rather than once per target.
+///
+/// The comment on that constant said the fix was blocked on a userspace entropy
+/// source. It is not: `randrange::SystemRandom` reaches the kernel CSPRNG, and
+/// this crate already depended on `randrange`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KdfParams {
+    /// This vault's salt. **A persistence layer must round-trip it.** A vault
+    /// reloaded with a different salt derives a different key from the same
+    /// password, which is indistinguishable from the password being wrong.
+    salt: [u8; SALT_LEN],
+    /// Iteration count this vault's verifier and session key were derived at.
+    /// **A persistence layer must round-trip this too** — see
+    /// [`DEFAULT_KDF_ROUNDS`] for why a vault written under an older, cheaper
+    /// number still has to open.
+    rounds: u32,
+}
+
+impl KdfParams {
+    /// Parameters for a *new* vault: a fresh salt drawn from the kernel.
+    ///
+    /// Fails with [`CredentialError::EntropyUnavailable`] rather than falling
+    /// back to a clock, a counter, or the old constant. A salt is chosen once
+    /// and then lives as long as the vault does, so a predictable one is a
+    /// permanent weakness that nothing later will notice or repair; refusing to
+    /// create the vault is the recoverable outcome.
+    pub fn fresh(rounds: u32) -> Result<Self, CredentialError> {
+        let mut source = SystemRandom::open().map_err(|_| CredentialError::EntropyUnavailable)?;
+        let salt = source
+            .secret(|rng| {
+                let mut salt = [0u8; SALT_LEN];
+                for chunk in salt.chunks_mut(8) {
+                    let word = rng.next_u64().to_le_bytes();
+                    // `chunk` is at most 8 bytes, so the zip stops at its end.
+                    for (slot, byte) in chunk.iter_mut().zip(word) {
+                        *slot = byte;
+                    }
+                }
+                salt
+            })
+            .ok_or(CredentialError::EntropyUnavailable)?;
+        Ok(Self { salt, rounds })
+    }
+
+    /// Parameters for a vault whose salt was chosen earlier — reconstructing a
+    /// stored vault, or a test naming a salt so its assertions are stable.
+    ///
+    /// This is **not** how a new vault gets its salt. Use [`Self::fresh`].
+    #[must_use]
+    pub const fn new(salt: [u8; SALT_LEN], rounds: u32) -> Self {
+        Self { salt, rounds }
+    }
+
+    /// This vault's salt, for a persistence layer to write down.
+    #[must_use]
+    pub const fn salt(&self) -> [u8; SALT_LEN] {
+        self.salt
+    }
+
+    /// The iteration count this vault's key derivation costs.
+    #[must_use]
+    pub const fn rounds(&self) -> u32 {
+        self.rounds
+    }
+}
+
+/// Derive a 32-byte session key from the master password under `kdf`.
+///
+/// Both the salt and the cost come from the vault ([`CredentialStore::kdf`]),
+/// not from constants — see [`KdfParams`] for why the salt must differ per
+/// vault, and [`DEFAULT_KDF_ROUNDS`] for why the cost must be stored rather
+/// than assumed, and for why the single SHA-256 pass this used to be was not a
+/// key derivation function at all.
+fn derive_session_key(master_password: &str, kdf: &KdfParams) -> [u8; 32] {
+    stretch(master_password.as_bytes(), &kdf.salt, kdf.rounds)
 }
 
 /// Iterated SHA-256 over `password` and `salt` — PBKDF2's shape.
@@ -849,14 +942,18 @@ pub struct CredentialStore {
     /// stretching in `derive_session_key` decorative. Checking a password now
     /// costs the same [`Self::kdf_rounds`] as using it.
     master_password_verifier: Option<[u8; 32]>,
-    /// Iteration count this vault's verifier and session key were derived at.
+    /// This vault's salt and iteration count.
     ///
-    /// **A persistence layer must round-trip this**, for the same reason every
-    /// password-hashing format stores its cost alongside its hash: when
+    /// **A persistence layer must round-trip both**, for the same reason every
+    /// password-hashing format stores them alongside its hash: when
     /// [`DEFAULT_KDF_ROUNDS`] is raised, a vault written under the old number
     /// still has to open, and it can only do that if it remembers what the old
-    /// number was.
-    kdf_rounds: u32,
+    /// number was -- and a vault reloaded with the wrong salt cannot be opened
+    /// by anyone, including its owner.
+    ///
+    /// The salt is meaningless until [`Self::set_master_password`] installs a
+    /// fresh one; until then there is no verifier and nothing can be derived.
+    kdf: KdfParams,
     /// Next nonce to hand to [`encrypt`]. Only ever increases.
     ///
     /// **A persistence layer must round-trip this.** The one rule a stream
@@ -894,12 +991,23 @@ impl CredentialStore {
     /// password, and nothing else.
     #[must_use]
     pub fn with_kdf_rounds(uid: u32, rounds: u32) -> Self {
+        // The salt here is a placeholder, not a shared constant reintroduced by
+        // the back door: `set_master_password` replaces it with a fresh one
+        // before anything is ever derived, and a store with no verifier cannot
+        // unlock. `with_kdf_params` is the entry point for a *stored* salt.
+        Self::with_kdf_params(uid, KdfParams::new([0; SALT_LEN], rounds))
+    }
+
+    /// Reconstruct a store at parameters that were chosen earlier — a vault
+    /// being loaded from disk, at the salt and cost it was written with.
+    #[must_use]
+    pub fn with_kdf_params(uid: u32, kdf: KdfParams) -> Self {
         Self {
             credentials: HashMap::new(),
             next_id: 1,
             uid,
             master_password_verifier: None,
-            kdf_rounds: rounds,
+            kdf,
             next_nonce: 0,
             session_key: None,
             last_activity: current_timestamp(),
@@ -912,7 +1020,14 @@ impl CredentialStore {
     /// The iteration count this vault's master password is stretched by.
     #[must_use]
     pub fn kdf_rounds(&self) -> u32 {
-        self.kdf_rounds
+        self.kdf.rounds
+    }
+
+    /// This vault's salt and cost, for a persistence layer to write down
+    /// alongside the verifier. Both must come back on reload; see [`KdfParams`].
+    #[must_use]
+    pub fn kdf_params(&self) -> KdfParams {
+        self.kdf
     }
 
     /// The stored master-password verifier, or `None` if no master password
@@ -959,17 +1074,62 @@ impl CredentialStore {
     }
 
     /// Set the master password (first time or change).
+    ///
+    /// A fresh salt is drawn from the kernel every time, so this can fail with
+    /// [`CredentialError::EntropyUnavailable`] — see [`KdfParams::fresh`] for
+    /// why that is a refusal rather than a fallback. Nothing is changed when it
+    /// fails: the old password, salt and session key are all still in place.
+    ///
+    /// The salt is replaced on a password *change* too, not only at creation.
+    /// It costs nothing (the credentials are being re-encrypted regardless) and
+    /// it means a user who changes their password after a leak is not still
+    /// salted with a value the attacker may have seen.
     pub fn set_master_password(
         &mut self,
         old_password: Option<&str>,
         new_password: &str,
     ) -> Result<(), CredentialError> {
-        let new_key = derive_session_key(new_password, self.kdf_rounds);
+        let new_kdf = KdfParams::fresh(self.kdf.rounds)?;
+        self.set_master_password_with_kdf(old_password, new_password, new_kdf)
+    }
 
-        // If a master password is already set, verify the old one
+    /// [`Self::set_master_password`], at parameters the caller names.
+    ///
+    /// Private: choosing a salt is not a decision a caller outside this module
+    /// gets to make, because the only correct source for one is
+    /// [`KdfParams::fresh`]. It exists so the tests can name a salt and assert
+    /// on stable values — the host build has no kernel to draw a real one from,
+    /// so without this seam every test here would have to assert that setting a
+    /// password fails.
+    /// [`Self::set_master_password`], keeping the salt this store already has.
+    ///
+    /// Tests only, and it is the *wrong* thing for a live vault: a password
+    /// change should get a fresh salt. It exists because a host build has no
+    /// kernel to draw one from, and nearly every test in this module needs a
+    /// master password set before it can test anything else.
+    #[cfg(test)]
+    fn set_master_password_keeping_salt(
+        &mut self,
+        old_password: Option<&str>,
+        new_password: &str,
+    ) -> Result<(), CredentialError> {
+        self.set_master_password_with_kdf(old_password, new_password, self.kdf)
+    }
+
+    fn set_master_password_with_kdf(
+        &mut self,
+        old_password: Option<&str>,
+        new_password: &str,
+        new_kdf: KdfParams,
+    ) -> Result<(), CredentialError> {
+        let new_key = derive_session_key(new_password, &new_kdf);
+
+        // If a master password is already set, verify the old one -- against the
+        // *old* parameters. The salt is about to change, and a verifier checked
+        // under the new salt would reject the correct password.
         if let Some(existing) = self.master_password_verifier {
             let old_pw = old_password.ok_or(CredentialError::InvalidMasterPassword)?;
-            let old_key = derive_session_key(old_pw, self.kdf_rounds);
+            let old_key = derive_session_key(old_pw, &self.kdf);
             if !eq_constant_time(&verifier_for(&old_key), &existing) {
                 return Err(CredentialError::InvalidMasterPassword);
             }
@@ -1001,6 +1161,7 @@ impl CredentialStore {
             }
         }
 
+        self.kdf = new_kdf;
         self.master_password_verifier = Some(verifier_for(&new_key));
         self.session_key = Some(new_key);
         self.touch();
@@ -1024,7 +1185,7 @@ impl CredentialStore {
         // Derive once and reuse: the derivation is deliberately expensive
         // (~130 ms), so doing it a second time to produce the session key
         // would double the cost of every legitimate unlock for no benefit.
-        let key = derive_session_key(master_password, self.kdf_rounds);
+        let key = derive_session_key(master_password, &self.kdf);
 
         if !eq_constant_time(&verifier_for(&key), &expected) {
             self.failed_attempts = self.failed_attempts.saturating_add(1);
@@ -1680,18 +1841,20 @@ impl IdentityVerifier {
     /// the store's verifier. On success, records the verification with
     /// debounce.
     ///
-    /// `verifier` and `rounds` come from the store
+    /// `verifier` and `kdf` come from the store
     /// ([`CredentialStore::master_password_verifier`] and
-    /// [`CredentialStore::kdf_rounds`]) — the same value `unlock` checks,
-    /// derived the same way and at the same cost. This used to take a bare
-    /// `SHA-256(password)`, which made re-verification a second, far cheaper
-    /// oracle for the master password than the unlock path it was supposed to
-    /// mirror.
+    /// [`CredentialStore::kdf_params`]) — the same value `unlock` checks,
+    /// derived the same way, under the same salt, at the same cost. This used
+    /// to take a bare `SHA-256(password)`, which made re-verification a second,
+    /// far cheaper oracle for the master password than the unlock path it was
+    /// supposed to mirror. The salt travels with the cost for the same reason:
+    /// a re-verification done under different parameters is not the same check,
+    /// and here it would simply reject every correct password.
     pub fn verify(
         &mut self,
         password: &str,
         verifier: &[u8; 32],
-        rounds: u32,
+        kdf: &KdfParams,
         level: SensitivityLevel,
         now: u64,
     ) -> VerificationResult {
@@ -1702,7 +1865,7 @@ impl IdentityVerifier {
             };
         }
 
-        let attempt = verifier_for(&derive_session_key(password, rounds));
+        let attempt = verifier_for(&derive_session_key(password, kdf));
         if eq_constant_time(&attempt, verifier) {
             self.record_success(level, now);
             VerificationResult::Verified
@@ -1852,14 +2015,27 @@ mod tests {
     /// `default_kdf_rounds_are_usable` below covers the real number once.
     const TEST_KDF_ROUNDS: u32 = 4;
 
-    /// A store cheap enough to unlock in a test. See [`TEST_KDF_ROUNDS`].
-    fn test_store() -> CredentialStore {
-        CredentialStore::with_kdf_rounds(1000, TEST_KDF_ROUNDS)
+    /// A salt for tests that need one they can name.
+    ///
+    /// Real vaults draw theirs from the kernel ([`KdfParams::fresh`]), which a
+    /// host build cannot do -- so the tests name one instead. The point of the
+    /// per-vault salt is that two *vaults* differ, and
+    /// `two_vaults_do_not_share_a_salt` pins that against the real path.
+    const TEST_SALT: [u8; SALT_LEN] = *b"a-test-vault-slt";
+
+    /// The parameters the tests derive under: a named salt at a token cost.
+    fn test_kdf() -> KdfParams {
+        KdfParams::new(TEST_SALT, TEST_KDF_ROUNDS)
     }
 
-    /// A key derived at the test cost.
+    /// A store cheap enough to unlock in a test. See [`TEST_KDF_ROUNDS`].
+    fn test_store() -> CredentialStore {
+        CredentialStore::with_kdf_params(1000, test_kdf())
+    }
+
+    /// A key derived at the test cost, under the test salt.
     fn test_key(password: &str) -> [u8; 32] {
-        derive_session_key(password, TEST_KDF_ROUNDS)
+        derive_session_key(password, &test_kdf())
     }
 
     // -- Crypto tests --
@@ -1954,8 +2130,8 @@ mod tests {
         // which would silently reduce every vault to the cost of whatever was
         // hard-coded instead.
         assert_ne!(
-            derive_session_key("pw", 1),
-            derive_session_key("pw", 2),
+            derive_session_key("pw", &KdfParams::new(TEST_SALT, 1)),
+            derive_session_key("pw", &KdfParams::new(TEST_SALT, 2)),
             "the iteration count must actually reach the hash"
         );
     }
@@ -1975,9 +2151,12 @@ mod tests {
         // place the shipped cost is exercised end to end. It is also a crude
         // budget check: if this test ever becomes slow enough to notice, the
         // number is too high for an interactive unlock.
-        let mut store = CredentialStore::new(1000);
+        let mut store =
+            CredentialStore::with_kdf_params(1000, KdfParams::new(TEST_SALT, DEFAULT_KDF_ROUNDS));
         assert_eq!(store.kdf_rounds(), DEFAULT_KDF_ROUNDS);
-        store.set_master_password(None, "real cost").expect("set pw");
+        store
+            .set_master_password_with_kdf(None, "real cost", store.kdf_params())
+            .expect("set pw");
         store.lock();
         store.unlock("real cost").expect("unlock");
     }
@@ -2027,7 +2206,7 @@ mod tests {
     fn test_set_master_password_unlocks() {
         let mut store = test_store();
         store
-            .set_master_password(None, "my_password")
+            .set_master_password_keeping_salt(None, "my_password")
             .expect("should succeed");
         assert!(!store.is_locked());
     }
@@ -2035,7 +2214,7 @@ mod tests {
     #[test]
     fn test_lock_and_unlock() {
         let mut store = test_store();
-        store.set_master_password(None, "pw123").expect("set pw");
+        store.set_master_password_keeping_salt(None, "pw123").expect("set pw");
         assert!(!store.is_locked());
 
         store.lock();
@@ -2048,7 +2227,7 @@ mod tests {
     #[test]
     fn test_unlock_wrong_password() {
         let mut store = test_store();
-        store.set_master_password(None, "correct").expect("set pw");
+        store.set_master_password_keeping_salt(None, "correct").expect("set pw");
         store.lock();
 
         let result = store.unlock("wrong");
@@ -2058,7 +2237,7 @@ mod tests {
     #[test]
     fn test_rate_limiting() {
         let mut store = test_store();
-        store.set_master_password(None, "secure").expect("set pw");
+        store.set_master_password_keeping_salt(None, "secure").expect("set pw");
         store.lock();
 
         // Fail 3 times to trigger lockout
@@ -2074,7 +2253,7 @@ mod tests {
     #[test]
     fn test_store_and_retrieve_credential() {
         let mut store = test_store();
-        store.set_master_password(None, "master").expect("set pw");
+        store.set_master_password_keeping_salt(None, "master").expect("set pw");
 
         let id = store
             .store_credential(
@@ -2097,7 +2276,7 @@ mod tests {
     #[test]
     fn test_retrieve_while_locked() {
         let mut store = test_store();
-        store.set_master_password(None, "master").expect("set pw");
+        store.set_master_password_keeping_salt(None, "master").expect("set pw");
 
         let id = store
             .store_credential(
@@ -2118,7 +2297,7 @@ mod tests {
     #[test]
     fn test_delete_credential() {
         let mut store = test_store();
-        store.set_master_password(None, "master").expect("set pw");
+        store.set_master_password_keeping_salt(None, "master").expect("set pw");
 
         let id = store
             .store_credential(
@@ -2139,7 +2318,7 @@ mod tests {
     #[test]
     fn test_search_credentials() {
         let mut store = test_store();
-        store.set_master_password(None, "master").expect("set pw");
+        store.set_master_password_keeping_salt(None, "master").expect("set pw");
 
         store
             .store_credential(
@@ -2345,7 +2524,7 @@ mod tests {
     #[test]
     fn test_change_master_password_reencrypts() {
         let mut store = test_store();
-        store.set_master_password(None, "old_pw").expect("set pw");
+        store.set_master_password_keeping_salt(None, "old_pw").expect("set pw");
 
         let id = store
             .store_credential(
@@ -2360,7 +2539,7 @@ mod tests {
 
         // Change master password
         store
-            .set_master_password(Some("old_pw"), "new_pw")
+            .set_master_password_keeping_salt(Some("old_pw"), "new_pw")
             .expect("change pw");
 
         // Verify can still retrieve with new key active
@@ -2380,12 +2559,13 @@ mod tests {
     fn test_handle_request_lifecycle() {
         let mut store = test_store();
 
-        // Set master password
-        let resp = store.handle_request(CredentialRequest::SetMasterPassword {
-            old_password: None,
-            new_password: "master123".to_string(),
-        });
-        assert!(matches!(resp, CredentialResponse::Ok));
+        // Set master password. Not through `handle_request`: that path draws a
+        // fresh salt from the kernel, which a host build has none of. The
+        // request path's behaviour without entropy is pinned separately, by
+        // `the_request_path_refuses_to_set_a_password_without_entropy`.
+        store
+            .set_master_password_keeping_salt(None, "master123")
+            .expect("set pw");
 
         // Store credential
         let resp = store.handle_request(CredentialRequest::Store {
@@ -2449,7 +2629,7 @@ mod tests {
     #[test]
     fn test_autofill_query_priority_ordering() {
         let mut store = test_store();
-        store.set_master_password(None, "master").expect("set pw");
+        store.set_master_password_keeping_salt(None, "master").expect("set pw");
 
         // Wildcard match
         store
@@ -2575,7 +2755,7 @@ mod tests {
     fn test_verifier_password_verification_success() {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
-        let result = verifier.verify("correct_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
+        let result = verifier.verify("correct_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
         assert_eq!(result, VerificationResult::Verified);
     }
 
@@ -2583,7 +2763,7 @@ mod tests {
     fn test_verifier_password_verification_failure() {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
-        let result = verifier.verify("wrong_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
+        let result = verifier.verify("wrong_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
         assert_eq!(result, VerificationResult::Failed);
     }
 
@@ -2592,9 +2772,9 @@ mod tests {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
         // 3 failed attempts
-        verifier.verify("wrong1", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
-        let result = verifier.verify("wrong3", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
+        verifier.verify("wrong1", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
+        let result = verifier.verify("wrong3", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
         assert!(matches!(result, VerificationResult::LockedOut { .. }));
     }
 
@@ -2603,9 +2783,9 @@ mod tests {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
         // Trigger lockout
-        verifier.verify("wrong1", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
-        verifier.verify("wrong3", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
+        verifier.verify("wrong1", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
+        verifier.verify("wrong3", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
         // Even check() should report lockout
         let result = verifier.check(SensitivityLevel::Medium, 1005);
         assert!(matches!(result, VerificationResult::LockedOut { .. }));
@@ -2616,11 +2796,11 @@ mod tests {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
         // Trigger lockout (default 30s)
-        verifier.verify("wrong1", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
-        verifier.verify("wrong3", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
+        verifier.verify("wrong1", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
+        verifier.verify("wrong3", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
         // After lockout expires (30s), should be able to verify again
-        let result = verifier.verify("correct_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1035);
+        let result = verifier.verify("correct_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1035);
         assert_eq!(result, VerificationResult::Verified);
     }
 
@@ -2629,12 +2809,12 @@ mod tests {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
         // 2 failed attempts
-        verifier.verify("wrong1", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
+        verifier.verify("wrong1", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
         // Success resets counter
-        verifier.verify("correct_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
+        verifier.verify("correct_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
         // Another failure should not trigger lockout (counter was reset)
-        let result = verifier.verify("wrong3", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1003);
+        let result = verifier.verify("wrong3", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1003);
         assert_eq!(result, VerificationResult::Failed);
     }
 
@@ -2699,9 +2879,9 @@ mod tests {
     fn test_verifier_stats() {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
-        verifier.verify("correct_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
-        verifier.verify("correct_password", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
+        verifier.verify("correct_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
+        verifier.verify("correct_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
         let (successes, failures) = verifier.stats();
         assert_eq!(successes, 2);
         assert_eq!(failures, 1);
@@ -2711,9 +2891,9 @@ mod tests {
     fn test_verifier_lockout_remaining() {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
-        verifier.verify("wrong1", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1001);
-        verifier.verify("wrong3", &master_hash, TEST_KDF_ROUNDS, SensitivityLevel::Medium, 1002);
+        verifier.verify("wrong1", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
+        verifier.verify("wrong3", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
         // Lockout duration is 30s from timestamp 1002
         assert!(verifier.is_locked_out(1010));
         assert_eq!(verifier.lockout_remaining(1010), 22); // 1032 - 1010
@@ -2865,4 +3045,134 @@ mod tests {
             }
         }
     }
+
+    // -- Per-vault salt --
+
+    /// The defect this replaced: one constant salt compiled into every install,
+    /// so one precomputed table of stretched passwords opened every vault in
+    /// the world. Two vaults must not derive the same key from the same
+    /// password.
+    ///
+    /// Asserted against `KdfParams::fresh`, the real path, so it fails if the
+    /// salt ever silently becomes a constant again. On a host build there is no
+    /// kernel, so `fresh` refuses -- and *that* is asserted instead: what must
+    /// never happen is a salt appearing anyway.
+    #[test]
+    fn two_vaults_do_not_share_a_salt() {
+        match (KdfParams::fresh(TEST_KDF_ROUNDS), KdfParams::fresh(TEST_KDF_ROUNDS)) {
+            (Ok(first), Ok(second)) => {
+                assert_ne!(
+                    first.salt(),
+                    second.salt(),
+                    "two vaults drew the same salt -- it is a constant again"
+                );
+                assert_ne!(
+                    derive_session_key("same password", &first),
+                    derive_session_key("same password", &second),
+                    "the salt reached the derivation"
+                );
+            }
+            (Err(first), Err(second)) => {
+                assert_eq!(first, CredentialError::EntropyUnavailable);
+                assert_eq!(second, CredentialError::EntropyUnavailable);
+            }
+            _ => panic!("a salt source that works only sometimes is the worst case of all"),
+        }
+    }
+
+    /// The salt has to reach the derivation for any of this to mean anything.
+    /// Guards against it being stored, round-tripped and then ignored -- which
+    /// would leave every vault behaving exactly as it did with the constant.
+    #[test]
+    fn the_salt_changes_the_key() {
+        let one = KdfParams::new(*b"salt number one!", TEST_KDF_ROUNDS);
+        let two = KdfParams::new(*b"salt number two!", TEST_KDF_ROUNDS);
+        assert_ne!(
+            derive_session_key("identical password", &one),
+            derive_session_key("identical password", &two)
+        );
+    }
+
+    /// A vault reloaded under the wrong salt must not open. Stated as a test
+    /// because the failure mode is silent and total: the owner's own password
+    /// is rejected, and nothing says why.
+    #[test]
+    fn a_vault_reloaded_with_the_wrong_salt_does_not_open() {
+        let mut store = test_store();
+        store
+            .set_master_password_keeping_salt(None, "master")
+            .expect("set pw");
+        let verifier = store.master_password_verifier().expect("verifier");
+
+        let mut wrong =
+            CredentialStore::with_kdf_params(1000, KdfParams::new(*b"the-wrong-salt!!", TEST_KDF_ROUNDS));
+        // The tests live in this module, so the field is reachable: this is a
+        // vault reloaded from disk with its verifier intact and its salt lost.
+        wrong.master_password_verifier = Some(verifier);
+        assert!(matches!(
+            wrong.unlock("master"),
+            Err(CredentialError::InvalidMasterPassword)
+        ));
+    }
+
+    /// Changing the password re-salts the vault. A user who changes their
+    /// password after a leak should not still be salted with a value the
+    /// attacker may already have.
+    #[test]
+    fn changing_the_password_changes_the_salt() {
+        let mut store = test_store();
+        store
+            .set_master_password_keeping_salt(None, "old")
+            .expect("set pw");
+        let before = store.kdf_params().salt();
+
+        let changed = KdfParams::new(*b"a-second-salt!!!", TEST_KDF_ROUNDS);
+        store
+            .set_master_password_with_kdf(Some("old"), "new", changed)
+            .expect("change pw");
+
+        assert_ne!(store.kdf_params().salt(), before);
+        assert_eq!(store.kdf_params().salt(), changed.salt());
+        store.lock();
+        store.unlock("new").expect("the new salt is the one stored");
+    }
+
+    /// A failed re-salt must change nothing. The old password still works, and
+    /// the vault is not left half-converted between two salts.
+    #[test]
+    fn a_rejected_password_change_leaves_the_salt_alone() {
+        let mut store = test_store();
+        store
+            .set_master_password_keeping_salt(None, "old")
+            .expect("set pw");
+        let before = store.kdf_params().salt();
+
+        let attempt = store.set_master_password_with_kdf(
+            Some("not the old password"),
+            "new",
+            KdfParams::new(*b"never-installed!", TEST_KDF_ROUNDS),
+        );
+        assert!(matches!(attempt, Err(CredentialError::InvalidMasterPassword)));
+        assert_eq!(store.kdf_params().salt(), before);
+        store.lock();
+        store.unlock("old").expect("the old password still opens it");
+    }
+
+    /// Setting a password without entropy is refused all the way out to the IPC
+    /// surface, rather than quietly creating a vault salted with a constant.
+    #[test]
+    #[cfg(not(unix))]
+    fn the_request_path_refuses_to_set_a_password_without_entropy() {
+        let mut store = test_store();
+        let resp = store.handle_request(CredentialRequest::SetMasterPassword {
+            old_password: None,
+            new_password: "master123".to_string(),
+        });
+        assert!(matches!(
+            resp,
+            CredentialResponse::Error(CredentialError::EntropyUnavailable)
+        ));
+        assert!(store.master_password_verifier().is_none());
+    }
+
 }

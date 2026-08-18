@@ -55,3 +55,49 @@ bytes that are
 
 A note in `requests/` saying which syscall number and which capability is all
 lane C needs in order to start using it.
+
+---
+
+## Resolved 2026-08-18 — it already existed, and lane C had not looked
+
+**Status: fulfilled.** No work is asked of lane A by the request above. It is
+kept rather than deleted, per `requests/b-a-landed-requests-are-marked-not-deleted.md`.
+
+`SYS_GETRANDOM` (90) has been in `kernel/src/syscall/handlers.rs` the whole
+time, reachable from userspace through the posix `getrandom` symbol, backed by
+a ChaCha20 CSPRNG in `kernel/src/rng.rs` seeded from RDRAND/RDSEED and
+interrupt timing, and deliberately **not** capability-gated — which is the
+"practically every process needs it" answer the request asked for. It even
+validates the user pointer before generating, so a bad pointer cannot consume
+entropy.
+
+Lane C had already been using it in one place (`userspace/ssh-keygen`) while
+writing this request, which is the uncomfortable part: the request was filed
+against an assumption rather than a grep.
+
+What actually blocked `gui/credentials` was not the kernel at all. The wrapper
+for this syscall lived in `guitk::rng`, inside the GUI toolkit, and
+`gui/credentials` is a headless service that must not link a widget library.
+Moving the wrapper into `randrange` — `no_std`, dependency-free, already a
+dependency of that crate — unblocked it. See `design-decisions.md` §463.
+
+Both things the request said a counter could not substitute for are now done:
+
+- per-vault salts: `KdfParams::fresh` draws 16 bytes per vault and refuses to
+  create a vault at all if it cannot (`gui/credentials`);
+- generated passwords: `generate_password` returns `Option<String>` and refuses
+  rather than falling back to a seeded generator.
+
+### One sub-question left, and it is not blocking
+
+The acceptance criteria asked that the source **block or fail distinguishably
+until the pool is actually seeded**, because Linux's `/dev/urandom` handing out
+unseeded bytes during early boot is the classic version of this bug.
+`kernel/src/rng.rs` tracks `seeded: bool` internally, but `sys_getrandom` does
+not appear to surface it — an early-boot caller may not be able to tell.
+
+Nothing lane C ships today runs early enough for this to bite: a credential
+service and a password generator both run long after userspace is up. Filed
+here rather than as a new request because it is lane A's call whether it is
+worth a distinct error code, and because the answer only matters when something
+starts drawing secrets during boot.

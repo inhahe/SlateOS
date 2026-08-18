@@ -1510,6 +1510,9 @@ version = "0.1.0"
 [[package]]
 name = "chpasswd"
 version = "0.1.0"
+dependencies = [
+ "posix",
+]
 
 [[package]]
 name = "chroma-cli"
@@ -5625,6 +5628,9 @@ dependencies = [
 [[package]]
 name = "login-cli"
 version = "0.1.0"
+dependencies = [
+ "posix",
+]
 
 [[package]]
 name = "loginctl"
@@ -7685,6 +7691,9 @@ version = "0.1.0"
 [[package]]
 name = "passwd"
 version = "0.1.0"
+dependencies = [
+ "posix",
+]
 
 [[package]]
 name = "passwd-cli"
@@ -8002,6 +8011,7 @@ name = "pkg"
 version = "0.1.0"
 dependencies = [
  "httpclient",
+ "sha2",
 ]
 
 [[package]]
@@ -11168,6 +11178,16 @@ version = "0.1.0"
 [[package]]
 name = "useradm"
 version = "0.1.0"
+dependencies = [
+ "userdb",
+]
+
+[[package]]
+name = "userdb"
+version = "0.1.0"
+dependencies = [
+ "posix",
+]
 
 [[package]]
 name = "usql"

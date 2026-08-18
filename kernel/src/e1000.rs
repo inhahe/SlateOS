@@ -121,6 +121,22 @@ const REG_RAH0: u32 = 0x5404;
 /// Multicast Table Array (128 entries × 4 bytes).
 const REG_MTA_BASE: u32 = 0x5200;
 
+/// Good Packets Transmitted Count.
+///
+/// Statistics register, **clear-on-read**: reading it returns the count since
+/// the last read and resets it to zero.  That is what makes it usable as a
+/// test instrument — read once to zero it, transmit, read again, and the
+/// difference is unambiguously attributable to the frames sent in between,
+/// with no need to know what the driver did before the test started.
+const REG_GPTC: u32 = 0x4080;
+
+/// Total Packets Transmitted Count.
+///
+/// Like [`REG_GPTC`] but counts *all* transmit attempts including errored
+/// ones, so `TPT > GPTC` after a test means the MAC tried and failed rather
+/// than never having been handed the frame at all.  Also clear-on-read.
+const REG_TPT: u32 = 0x40D4;
+
 // ---------------------------------------------------------------------------
 // Register bits
 // ---------------------------------------------------------------------------
@@ -1002,5 +1018,120 @@ pub fn self_test() {
     assert!(tctl & TCTL_EN != 0, "TCTL.EN should be set after init");
     serial_println!("[e1000]   TCTL: {:#010x} (TX enabled)", tctl);
 
+    // Test 6: the transmit datapath actually works end to end.
+    //
+    // Tests 1-5 read registers the driver itself wrote.  They prove the MMIO
+    // window is mapped and that init ran, and nothing else: a driver whose TX
+    // ring base address is wrong, whose descriptor layout does not match the
+    // hardware's, or whose doorbell write goes to the wrong offset passes all
+    // five of them.  This test is the one that can fail for a real reason.
+    //
+    // It needs no peer on the wire, which is what makes it usable in the boot
+    // test.  The NIC reports completion by DMA-writing the Descriptor Done bit
+    // back into *our* descriptor, so a successful send proves, in one step:
+    //
+    //   * TDBAL/TDBAH point at memory the NIC can reach (physical, not virtual);
+    //   * our `TxDescriptor` layout agrees with the hardware's, since the NIC
+    //     found the buffer address and length where it expected them;
+    //   * the TDT doorbell write reached the right register — without it the
+    //     NIC never looks at the descriptor at all;
+    //   * the NIC's DMA write landed back in the same memory we are polling,
+    //     i.e. the mapping is coherent in both directions.
+    //
+    // The statistics counters then separate "the descriptor was processed"
+    // from "the frame was actually transmitted", which are not the same claim.
+    if !tx_datapath_test(mac) {
+        return;
+    }
+
     serial_println!("[e1000] Self-test PASSED");
+}
+
+/// Transmit one synthetic frame and verify the hardware reported it back.
+///
+/// The frame is addressed **to our own MAC from our own MAC** with an
+/// EtherType from the IEEE 802 local-experimental range (`0x88B5`), so it is
+/// inert by construction: no other station treats it as addressed to itself,
+/// and no protocol on any network claims that EtherType.  Under QEMU's user
+/// networking the frame is discarded by the backend, which is fine — nothing
+/// here depends on the frame arriving anywhere.
+///
+/// Returns `false` (having logged the failure) if the datapath is broken.
+/// A failure is reported rather than panicked because the boot harness already
+/// fails a run containing "self-test failed", so panicking would buy nothing
+/// and would destroy the rest of the log — including whatever else was wrong.
+fn tx_datapath_test(mac: MacAddress) -> bool {
+    /// IEEE Std 802 Local Experimental EtherType 1 — reserved for exactly
+    /// this kind of use, so the frame cannot be mistaken for a real protocol.
+    const ETHERTYPE_LOCAL_EXPERIMENTAL: u16 = 0x88B5;
+
+    // 14-byte header + 46-byte payload = 60 bytes, the minimum Ethernet frame
+    // excluding the FCS that the hardware appends (IFCS is set in the
+    // descriptor command).  Sending a short frame would make the hardware pad
+    // it and muddy what the length field in the descriptor proved.
+    let mut frame = [0u8; 60];
+    frame[0..6].copy_from_slice(&mac.0);
+    frame[6..12].copy_from_slice(&mac.0);
+    frame[12..14].copy_from_slice(&ETHERTYPE_LOCAL_EXPERIMENTAL.to_be_bytes());
+    // A recognisable payload, so a frame captured on the QEMU side (or found
+    // in a DMA buffer during a later debugging session) is identifiable.
+    for (i, b) in frame.iter_mut().enumerate().skip(14) {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            *b = (i as u8).wrapping_mul(0x11);
+        }
+    }
+
+    // Zero the clear-on-read counters so the deltas below belong to this test
+    // alone, whatever the driver transmitted during initialisation.
+    let _ = with_device(|dev| (dev.read_reg(REG_GPTC), dev.read_reg(REG_TPT)));
+
+    let result = with_device(|dev| dev.send(&frame));
+    match result {
+        Some(Ok(())) => {}
+        Some(Err(e)) => {
+            // `send` polls for DD and returns TimedOut if it never appears, so
+            // this is the interesting failure: the descriptor was handed over
+            // and the hardware never acknowledged it.
+            serial_println!(
+                "[e1000] Self-test FAILED: TX of a {}-byte frame returned {:?} \
+                 (TDH={:#x}, TDT={:#x}) — the descriptor was never completed",
+                frame.len(),
+                e,
+                with_device(|d| d.read_reg(REG_TDH)).unwrap_or(0),
+                with_device(|d| d.read_reg(REG_TDT)).unwrap_or(0),
+            );
+            return false;
+        }
+        None => {
+            // Cannot happen — the caller already established a device exists —
+            // but say so rather than silently reporting a pass.
+            serial_println!("[e1000] Self-test FAILED: device vanished mid-test");
+            return false;
+        }
+    }
+
+    let (gptc, tpt) = with_device(|dev| (dev.read_reg(REG_GPTC), dev.read_reg(REG_TPT)))
+        .unwrap_or((0, 0));
+
+    // DD came back, so the descriptor was definitely processed.  If the
+    // counters disagree the fault is downstream of the ring — a MAC that
+    // accepted the descriptor and dropped the frame — which is a different
+    // bug from a broken ring and deserves to be named differently.
+    if tpt == 0 {
+        serial_println!(
+            "[e1000] Self-test FAILED: descriptor completed (DD set) but TPT stayed at 0 — \
+             the ring is fine and the MAC never attempted the frame, so look at TCTL/link, \
+             not at the descriptor layout"
+        );
+        return false;
+    }
+
+    serial_println!(
+        "[e1000]   TX datapath: sent {} bytes, DD written back, GPTC+{}, TPT+{}",
+        frame.len(),
+        gptc,
+        tpt
+    );
+    true
 }

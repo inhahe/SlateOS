@@ -1,46 +1,57 @@
 #!/usr/bin/env bash
-# Differential test: our `seq` against GNU's.
+# Differential test: our `printf` against GNU's.
 #
 # ## Why the reference is inside WSL
 #
-# The host's `/usr/bin` is MSYS2, a Cygwin derivative. Its `seq` *is* GNU
-# coreutils' seq, so pointing this harness at it is a useful positive control
-# (`OURS=/usr/bin/seq ./scripts/seq-diff.sh` should report almost nothing) --
-# but it is not a reference, because seq's answers are printed by the C
-# library's `printf`, and Cygwin's is not glibc's. The two agree on most of
-# what seq prints, which is worse than disagreeing on all of it: it would look
-# like a passing test while diverging on exactly the 80-bit corners that
+# The host's `/usr/bin` is MSYS2, a Cygwin derivative. Its `printf` *is* GNU
+# coreutils' printf, so pointing this harness at it is a useful positive
+# control (`OURS=/usr/bin/printf ./scripts/printf-diff.sh` should report almost
+# nothing) -- but it is not a reference, because the numbers printf prints come
+# from the C library, and Cygwin's is not glibc's. The two agree on most of
+# what printf prints, which is worse than disagreeing on all of it: it would
+# look like a passing test while diverging on exactly the 80-bit corners that
 # `coreutils::extfloat` exists for. So the reference is run in WSL.
+#
+# ## Why the reference is `printf` and not `/usr/bin/printf`
+#
+# Because `printf` is a shell builtin, and because GNU's diagnostics carry
+# `argv[0]`. The probe threads that needle with `env`; the reasoning is in
+# `scripts/printf-probe.sh`.
 #
 # ## Why the cases are a file and not a list of shell lines
 #
 # Both sides have to receive byte-identical argv, and they run under different
 # operating systems -- ours natively on Windows, GNU's under WSL. Anything
 # quoted into a `wsl -e bash -c '...'` command line passes through two shells
-# and a Win32 command-line encoder, and an argument like `%\303\251` or a
-# separator that is a single newline does not survive that intact. Writing the
+# and a Win32 command-line encoder, and a format like `%\303\251` or an
+# argument that is a single backslash does not survive that intact. Writing the
 # cases to a file, copying the file, and having an identical probe script read
-# it on both sides removes every layer that could rewrite an argument.
+# it on both sides removes every layer that could rewrite an argument. printf
+# needs this more than seq did: its first argument is a format string, and the
+# formats worth testing are precisely the ones made of awkward bytes.
 #
 # ## Why `LC_ALL=C`
 #
-# GNU seq takes the decimal point from `LC_NUMERIC`, so under a comma-decimal
-# locale it prints `1,5`. `extfloat` implements the C locale only, which is
-# what the OS's own seq will run under. Pinning both sides to `C` measures that
-# claim instead of the development host's environment.
+# Two of printf's answers are locale-dependent. `%f` takes its decimal point
+# from `LC_NUMERIC`, so under a comma-decimal locale GNU prints `1,500000`;
+# and gnulib's `quote()`, which wraps the offending argument in every numeric
+# diagnostic, prints U+2018/U+2019 under a UTF-8 locale and ASCII apostrophes
+# under C. `extfloat` and `coreutils::quote` implement the C locale, which is
+# what the OS's own printf will run under. Pinning both sides to `C` measures
+# that claim instead of the development host's environment.
 #
 # ## `--help` and `--version` are not cases
 #
 # Both print text that names the implementation, so they can never match GNU
 # byte for byte, and carrying them as permanent expected-differences would only
 # train the reader to skim the report. What they actually have to satisfy --
-# stdout, status 0 -- the unit tests in `seq.rs` check.
+# stdout, status 0 -- the unit tests in `printf.rs` check.
 #
 # Usage:
-#   ./scripts/seq-diff.sh              # the full set
-#   ./scripts/seq-diff.sh --cases 50   # fewer random cases, for a quick pass
-#   ./scripts/seq-diff.sh --flip       # prove the harness discriminates
-#   ./scripts/seq-diff.sh --keep       # leave the case and record files behind
+#   ./scripts/printf-diff.sh              # the full set
+#   ./scripts/printf-diff.sh --cases 50   # fewer random cases, for a quick pass
+#   ./scripts/printf-diff.sh --flip       # prove the harness discriminates
+#   ./scripts/printf-diff.sh --keep       # leave the case and record files behind
 
 set -u
 
@@ -65,26 +76,26 @@ TARGET=x86_64-pc-windows-gnu
 # build. Checked before the default is applied, because after that they look
 # alike.
 OURS_IS_DEFAULT=${OURS+no}
-OURS=${OURS:-target/$TARGET/debug/seq.exe}
-GNU=${GNU:-seq}
+OURS=${OURS:-target/$TARGET/debug/printf.exe}
+GNU=${GNU:-printf}
 
-# Our seq is a native Windows binary, so MSYS would helpfully rewrite any
+# Our printf is a native Windows binary, so MSYS would helpfully rewrite any
 # argument that looks like a path -- turning the format `[%05.2f]` or the
-# operand `-1` into something with a drive letter in it.
+# argument `/` into something with a drive letter in it.
 export MSYS2_ARG_CONV_EXCL='*'
 export LC_ALL=C
 
 # Built every run, not just when the binary is missing. `cargo build` is a
 # no-op on an unchanged tree, so the only thing the "is it there?" version
 # saved was correctness: `cargo test` and `cargo clippy` do not refresh
-# `seq.exe`, so a fix verified by a unit test and then measured here would be
-# measured against the *previous* binary. That is not hypothetical -- it
-# happened in the printf harness, which was a copy of this one.
+# `printf.exe`, so a fix verified by a unit test and then measured here was
+# measured against the *previous* binary. That happened, and it read as a
+# genuine remaining difference in a report that was otherwise clean.
 if [ "${OURS_IS_DEFAULT:-yes}" = yes ]; then
-  cargo build -p coreutils --bin seq --target "$TARGET" || exit 1
+  cargo build -p coreutils --bin printf --target "$TARGET" || exit 1
 fi
 if [ ! -x "$OURS" ]; then
-  echo "no seq at $OURS" >&2
+  echo "no printf at $OURS" >&2
   exit 1
 fi
 
@@ -93,17 +104,17 @@ cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
 trap cleanup EXIT
 [ "$KEEP" = 1 ] && echo "working files in $WORK"
 
-python scripts/seq-cases.py "$RANDOM_CASES" "$SEED" > "$WORK/cases" || exit 1
+python scripts/printf-cases.py "$RANDOM_CASES" "$SEED" > "$WORK/cases" || exit 1
 echo "$(wc -l < "$WORK/cases") cases"
 
 echo "running ours..."
-bash scripts/seq-probe.sh "$OURS" "$WORK/cases" > "$WORK/ours" || exit 1
+bash scripts/printf-probe.sh "$OURS" "$WORK/cases" > "$WORK/ours" || exit 1
 
 echo "running GNU's, in WSL..."
-wsl -e bash -c 'mkdir -p /tmp/seqdiff && cat > /tmp/seqdiff/probe.sh' \
-  < scripts/seq-probe.sh || exit 1
-wsl -e bash -c 'cat > /tmp/seqdiff/cases' < "$WORK/cases" || exit 1
-wsl -e bash -c "cd /tmp/seqdiff && LC_ALL=C bash probe.sh '$GNU' cases" \
+wsl -e bash -c 'mkdir -p /tmp/printfdiff && cat > /tmp/printfdiff/probe.sh' \
+  < scripts/printf-probe.sh || exit 1
+wsl -e bash -c 'cat > /tmp/printfdiff/cases' < "$WORK/cases" || exit 1
+wsl -e bash -c "cd /tmp/printfdiff && LC_ALL=C bash probe.sh '$GNU' cases" \
   > "$WORK/theirs" || exit 1
 
 if [ "$FLIP" = 1 ]; then
@@ -147,14 +158,14 @@ awk -v oursfile="$WORK/ours" \
         if (expected && differs) { xfail++; continue }
         if (expected && !differs) {
           xpass++
-          printf "XPASS  seq %s\n    now agrees with GNU, so the recorded reason is stale\n", c[b]
+          printf "XPASS  printf %s\n    now agrees with GNU, so the recorded reason is stale\n", c[b]
           continue
         }
         if (!differs) { pass++; continue }
         fail++
         if (shown < 25) {
           shown++
-          printf "DIFF   seq %s\n", c[b]
+          printf "DIFF   printf %s\n", c[b]
           for (r = 2; r <= 4; r++)
             if (o[base + r] != t[base + r]) {
               printf "    ours   %s\n", o[base + r]

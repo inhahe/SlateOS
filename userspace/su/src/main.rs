@@ -26,10 +26,11 @@
 //!
 //! # Authentication
 //!
-//! Reads `/etc/users.yaml` for user records. Passwords are stored as
-//! SHA-256(salt + password). Root (uid 0) can switch to any user without
-//! a password. For sudo, members of the `wheel` or `admin` group may
-//! run commands as root.
+//! Reads `/etc/users.yaml` through the shared `userdb` crate. Passwords are
+//! `crypt(3)` entries — SHA-512-crypt — and are checked by re-running `crypt`
+//! on the stored entry, which is a valid setting for itself. Root (uid 0) can
+//! switch to any user without a password. For sudo, members of the `wheel` or
+//! `admin` group may run commands as root.
 //!
 //! # Session tracking
 //!
@@ -44,231 +45,123 @@ use std::process;
 use std::time::SystemTime;
 
 // ============================================================================
-// User data model (shared format with useradm)
+// User database
 // ============================================================================
 
-#[derive(Clone)]
-struct User {
-    uid: u32,
-    username: String,
-    #[allow(dead_code)]
-    display_name: String,
-    password_hash: String,
-    salt: String,
-    shell: String,
-    home: String,
-    groups: Vec<String>,
-    admin: bool,
-    locked: bool,
+// `/etc/users.yaml` is read through `userdb`, the one implementation of the
+// format. This file used to carry its own parser and its own
+// `sha256(salt + password)`, and both disagreed with what the two *writers* of
+// the file produced — most visibly, it looked for `home:` where neither writer
+// has ever written anything but `home_dir:`, so `su -` put every user in a
+// home directory of "". See `design-decisions.md` §330.
+
+use userdb::{Auth, Record, UserDb};
+
+const USER_DB_PATH: &str = userdb::DEFAULT_PATH;
+
+/// Load the user database, or print why it could not be loaded.
+///
+/// `who` is the name the binary was invoked as, `su` or `sudo`.
+///
+/// A missing file and an unreadable one are reported differently on purpose:
+/// this program decides who may become root, so "there is no database" and "I
+/// was not allowed to look" must not collapse into one message that an
+/// administrator reads as the first.
+fn load_users(who: &str) -> Option<UserDb> {
+    match UserDb::load(USER_DB_PATH) {
+        Ok(db) if db.records().is_empty() => {
+            eprintln!("{who}: no user database at {USER_DB_PATH}");
+            None
+        }
+        Ok(db) => Some(db),
+        Err(e) => {
+            eprintln!("{who}: cannot read {USER_DB_PATH}: {e}");
+            None
+        }
+    }
 }
 
-const USER_DB_PATH: &str = "/etc/users.yaml";
+/// The record's login name, or the empty string. Used only in messages.
+fn name_of(record: &Record) -> String {
+    record.username().unwrap_or_default()
+}
 
-/// Read all users from /etc/users.yaml.
+/// The record's home directory, or `/`.
 ///
-/// Format matches what `useradm` writes:
-/// ```yaml
-/// users:
-///   - uid: 0
-///     username: root
-///     password_hash: "..."
-///     salt: "..."
-///     shell: /bin/sh
-///     home: /root
-///     groups: [root, admin, wheel]
-///     admin: true
-///     locked: false
-/// ```
-fn read_users() -> Vec<User> {
-    let content = match fs::read_to_string(USER_DB_PATH) {
-        Ok(c) => c,
+/// The fallback matters: a login shell is started *in* this directory, and
+/// `Command::current_dir("")` fails rather than meaning "wherever we are", so
+/// a record with no home used to make `su -` fail to exec at all.
+fn home_of(record: &Record) -> String {
+    match record.home() {
+        Some(home) if !home.is_empty() => home,
+        _ => "/".to_string(),
+    }
+}
+
+/// The record's login shell, or the system default.
+fn shell_of(record: &Record) -> String {
+    record.shell().unwrap_or_else(|| "/bin/sh".to_string())
+}
+
+/// Whether `record` is a member of a group that confers administrator rights.
+fn in_admin_group(record: &Record) -> bool {
+    record.groups().iter().any(|g| g == "wheel" || g == "admin")
+}
+
+// ============================================================================
+// Authentication
+// ============================================================================
+
+/// Prompt for `record`'s password and check it, printing the reason on
+/// failure. Returns true only on a verified match.
+///
+/// The outcomes are kept distinct because three of the four are an
+/// administrator's problem rather than a typing mistake, and reporting all of
+/// them as "authentication failure" is how an account with an unverifiable
+/// stored hash gets diagnosed as a forgotten password.
+fn authenticate(record: &Record, prompt: &str, who: &str) -> bool {
+    if record.is_locked() {
+        eprintln!("{who}: account '{}' is locked", name_of(record));
+        return false;
+    }
+
+    // Probing with the empty password distinguishes "no password stored" from
+    // "the stored password is the empty string": the first answers
+    // `NoPassword`, the second `Accepted`, and only the first is refused here.
+    if record.check_password("") == Auth::NoPassword {
+        eprintln!("{who}: account '{}' has no password set", name_of(record));
+        return false;
+    }
+
+    if record.has_legacy_password() {
+        let name = name_of(record);
+        eprintln!(
+            "{who}: account '{name}' has a password stored in a format this \
+             system can no longer verify; run `useradm passwd {name}` as root"
+        );
+        return false;
+    }
+
+    let password = match read_password(prompt) {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("su: cannot read {USER_DB_PATH}: {e}");
-            return Vec::new();
+            eprintln!("{who}: {e}");
+            return false;
         }
     };
 
-    let mut users = Vec::new();
-    let mut current: Option<User> = None;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("- uid:") || trimmed.starts_with("-  uid:") {
-            // New user entry -- flush previous.
-            if let Some(user) = current.take() {
-                users.push(user);
-            }
-            let uid: u32 = trimmed
-                .split(':')
-                .nth(1)
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(0);
-            current = Some(User {
-                uid,
-                username: String::new(),
-                display_name: String::new(),
-                password_hash: String::new(),
-                salt: String::new(),
-                shell: "/bin/sh".to_string(),
-                home: String::new(),
-                groups: Vec::new(),
-                admin: false,
-                locked: false,
-            });
-        } else if let Some(ref mut user) = current {
-            if let Some(val) = trimmed.strip_prefix("username:") {
-                user.username = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("display_name:") {
-                user.display_name = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("password_hash:") {
-                user.password_hash = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("salt:") {
-                user.salt = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("shell:") {
-                user.shell = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("home:") {
-                user.home = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("groups:") {
-                let val = val.trim().trim_matches(|c: char| c == '[' || c == ']');
-                user.groups = val
-                    .split(',')
-                    .map(|g| g.trim().trim_matches('"').to_string())
-                    .filter(|g| !g.is_empty())
-                    .collect();
-            } else if let Some(val) = trimmed.strip_prefix("admin:") {
-                user.admin = val.trim() == "true";
-            } else if let Some(val) = trimmed.strip_prefix("locked:") {
-                user.locked = val.trim() == "true";
-            }
+    match record.check_password(&password) {
+        Auth::Accepted => true,
+        Auth::Locked | Auth::Unusable | Auth::NoPassword | Auth::Rejected => {
+            // The three non-`Rejected` cases were ruled out above and can only
+            // arise from a change under our feet; they get the same message
+            // because at this point the password has already been typed and a
+            // detailed answer would say something about the account to whoever
+            // typed it.
+            eprintln!("{who}: authentication failure");
+            false
         }
     }
-
-    if let Some(user) = current {
-        users.push(user);
-    }
-
-    users
-}
-
-/// Look up a user by name.
-fn find_user<'a>(users: &'a [User], name: &str) -> Option<&'a User> {
-    users.iter().find(|u| u.username == name)
-}
-
-/// Look up a user by uid.
-fn find_user_by_uid(users: &[User], uid: u32) -> Option<&User> {
-    users.iter().find(|u| u.uid == uid)
-}
-
-// ============================================================================
-// Password hashing -- must match useradm's SHA-256(salt + password) scheme
-// ============================================================================
-
-/// SHA-256 hash, returning a lowercase hex string.
-fn sha256_hex(data: &[u8]) -> String {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-
-    // Padding.
-    let bit_len = (data.len() as u64) * 8;
-    let mut padded = data.to_vec();
-    padded.push(0x80);
-    while (padded.len() % 64) != 56 {
-        padded.push(0);
-    }
-    padded.extend_from_slice(&bit_len.to_be_bytes());
-
-    // Process 64-byte blocks.
-    for chunk in padded.chunks(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    h.iter().map(|v| format!("{v:08x}")).collect()
-}
-
-/// Hash a password with the given salt, matching useradm's scheme.
-fn hash_password(password: &str, salt: &str) -> String {
-    let input = format!("{salt}{password}");
-    sha256_hex(input.as_bytes())
-}
-
-/// Verify a password against a stored hash and salt.
-fn verify_password(password: &str, stored_hash: &str, salt: &str) -> bool {
-    let computed = hash_password(password, salt);
-    // Constant-time comparison to prevent timing attacks.
-    if computed.len() != stored_hash.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (a, b) in computed.bytes().zip(stored_hash.bytes()) {
-        diff |= a ^ b;
-    }
-    diff == 0
 }
 
 // ============================================================================
@@ -279,23 +172,26 @@ fn verify_password(password: &str, stored_hash: &str, salt: &str) -> bool {
 ///
 /// Tries /proc/self/status first, then falls back to the USER env var
 /// matched against the user database, then defaults to u32::MAX (nobody).
-fn get_caller_uid(users: &[User]) -> u32 {
+fn get_caller_uid(users: &UserDb) -> u32 {
     // Try /proc/self/status for the real UID.
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
         for line in content.lines() {
             if let Some(rest) = line.strip_prefix("Uid:")
                 && let Some(uid_str) = rest.split_whitespace().next()
-                    && let Ok(uid) = uid_str.parse::<u32>() {
-                        return uid;
-                    }
+                && let Ok(uid) = uid_str.parse::<u32>()
+            {
+                return uid;
+            }
         }
     }
 
     // Fallback: resolve USER env var against the database.
     if let Ok(name) = env::var("USER")
-        && let Some(user) = find_user(users, &name) {
-            return user.uid;
-        }
+        && let Some(user) = users.find(&name)
+        && let Some(uid) = user.uid()
+    {
+        return uid;
+    }
 
     // Unknown caller.
     u32::MAX
@@ -378,13 +274,17 @@ fn remove_session(username: &str) {
 ///
 /// Returns the exit code of the child process.
 fn exec_as_user(
-    target: &User,
+    target: &Record,
     shell_override: Option<&str>,
     command: Option<&str>,
     login_mode: bool,
     preserve_env: bool,
 ) -> i32 {
-    let shell = shell_override.unwrap_or(&target.shell);
+    let target_shell = shell_of(target);
+    let target_home = home_of(target);
+    let target_name = name_of(target);
+    let target_uid = target.uid().unwrap_or(u32::MAX);
+    let shell = shell_override.unwrap_or(&target_shell);
 
     // Determine the program and arguments.
     let (program, args): (String, Vec<String>) = if let Some(cmd) = command {
@@ -423,11 +323,11 @@ fn exec_as_user(
     if login_mode && !preserve_env {
         // Clean environment: only set what a login shell expects.
         cmd.env_clear();
-        cmd.env("HOME", &target.home);
+        cmd.env("HOME", &target_home);
         cmd.env("SHELL", shell);
-        cmd.env("USER", &target.username);
-        cmd.env("LOGNAME", &target.username);
-        cmd.env("PATH", default_path_for_uid(target.uid));
+        cmd.env("USER", &target_name);
+        cmd.env("LOGNAME", &target_name);
+        cmd.env("PATH", default_path_for_uid(target_uid));
 
         // Propagate TERM if set -- shells need it for line editing.
         if let Ok(term) = env::var("TERM") {
@@ -437,24 +337,25 @@ fn exec_as_user(
         // Set supplementary groups as a comma-separated list in an env var.
         // The kernel would normally set these at exec time via setgroups();
         // we expose them here for user-space awareness.
-        if !target.groups.is_empty() {
-            cmd.env("GROUPS", target.groups.join(","));
+        let groups = target.groups();
+        if !groups.is_empty() {
+            cmd.env("GROUPS", groups.join(","));
         }
     } else if preserve_env {
         // Keep the caller's entire environment, only override USER/LOGNAME.
-        cmd.env("USER", &target.username);
-        cmd.env("LOGNAME", &target.username);
+        cmd.env("USER", &target_name);
+        cmd.env("LOGNAME", &target_name);
     } else {
         // Non-login, non-preserve: update key variables.
-        cmd.env("HOME", &target.home);
+        cmd.env("HOME", &target_home);
         cmd.env("SHELL", shell);
-        cmd.env("USER", &target.username);
-        cmd.env("LOGNAME", &target.username);
+        cmd.env("USER", &target_name);
+        cmd.env("LOGNAME", &target_name);
     }
 
     // Set working directory for login shells.
     if login_mode {
-        cmd.current_dir(&target.home);
+        cmd.current_dir(&target_home);
     }
 
     match cmd.status() {
@@ -531,32 +432,32 @@ fn parse_su_args(args: &[String]) -> Result<SuOptions, i32> {
     };
 
     let mut positional: Vec<String> = Vec::new();
-    let mut i = 1; // skip argv[0]
+    // Driven by the iterator rather than an index, so that "this option takes
+    // a value" is expressed by consuming the next item and cannot run off the
+    // end of the slice.
+    let mut rest = args.iter().skip(1);
 
-    while i < args.len() {
-        let arg = args[i].as_str();
-        match arg {
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
             "-" | "-l" | "--login" => {
                 opts.login = true;
             }
             "-c" | "--command" => {
-                i += 1;
-                if i >= args.len() {
+                let Some(value) = rest.next() else {
                     eprintln!("su: option '{arg}' requires an argument");
                     return Err(1);
-                }
-                opts.command = Some(args[i].clone());
+                };
+                opts.command = Some(value.clone());
             }
             "-m" | "-p" | "--preserve-environment" => {
                 opts.preserve_env = true;
             }
             "-s" | "--shell" => {
-                i += 1;
-                if i >= args.len() {
+                let Some(value) = rest.next() else {
                     eprintln!("su: option '{arg}' requires an argument");
                     return Err(1);
-                }
-                opts.shell = Some(args[i].clone());
+                };
+                opts.shell = Some(value.clone());
             }
             "-h" | "--help" => {
                 print_su_help();
@@ -575,7 +476,6 @@ fn parse_su_args(args: &[String]) -> Result<SuOptions, i32> {
                 positional.push(other.to_string());
             }
         }
-        i += 1;
     }
 
     // The last positional argument (if any) is the target username.
@@ -615,52 +515,33 @@ fn run_su(args: &[String]) -> i32 {
         Err(code) => return code,
     };
 
-    let users = read_users();
-    if users.is_empty() {
-        eprintln!("su: no user database found at {USER_DB_PATH}");
+    let Some(users) = load_users("su") else {
         return 1;
-    }
-
-    let target = match find_user(&users, &opts.target_user) {
-        Some(u) => u,
-        None => {
-            eprintln!("su: unknown user: {}", opts.target_user);
-            return 1;
-        }
     };
 
-    if target.locked {
-        eprintln!("su: account '{}' is locked", target.username);
+    let Some(target) = users.find(&opts.target_user) else {
+        eprintln!("su: unknown user: {}", opts.target_user);
+        return 1;
+    };
+
+    if target.is_locked() {
+        eprintln!("su: account '{}' is locked", name_of(target));
         return 1;
     }
 
     // Authenticate unless the caller is root.
     let caller_uid = get_caller_uid(&users);
-    if caller_uid != 0 {
-        if target.password_hash.is_empty() {
-            eprintln!("su: account '{}' has no password set", target.username);
-            return 1;
-        }
-
-        let password = match read_password("Password: ") {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("su: {e}");
-                return 1;
-            }
-        };
-
-        if !verify_password(&password, &target.password_hash, &target.salt) {
-            eprintln!("su: authentication failure");
-            return 1;
-        }
+    if caller_uid != 0 && !authenticate(target, "Password: ", "su") {
+        return 1;
     }
+
+    let target_name = name_of(target);
 
     // Session tracking for login shells.
     let is_login = opts.login && opts.command.is_none();
     if is_login {
         let tty = detect_tty();
-        record_session(&target.username, &tty);
+        record_session(&target_name, &tty);
     }
 
     let exit_code = exec_as_user(
@@ -672,7 +553,7 @@ fn run_su(args: &[String]) -> i32 {
     );
 
     if is_login {
-        remove_session(&target.username);
+        remove_session(&target_name);
     }
 
     exit_code
@@ -706,18 +587,18 @@ fn parse_sudo_args(args: &[String]) -> Result<SudoOptions, i32> {
         list_mode: false,
     };
 
-    let mut i = 1; // skip argv[0]
+    // See `parse_su_args`: driven by the iterator so that an option needing a
+    // value cannot read past the end of the slice.
+    let mut rest = args.iter().skip(1);
 
-    while i < args.len() {
-        let arg = args[i].as_str();
-        match arg {
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
             "-u" | "--user" => {
-                i += 1;
-                if i >= args.len() {
+                let Some(value) = rest.next() else {
                     eprintln!("sudo: option '{arg}' requires an argument");
                     return Err(1);
-                }
-                opts.target_user = args[i].clone();
+                };
+                opts.target_user = value.clone();
             }
             "-l" | "--list" => {
                 opts.list_mode = true;
@@ -731,12 +612,12 @@ fn parse_sudo_args(args: &[String]) -> Result<SudoOptions, i32> {
                 return Err(0);
             }
             _ => {
-                // Everything from here on is the command and its args.
-                opts.command = args[i..].to_vec();
+                // Everything from here on is the command and its args. The
+                // first word is the one already taken from the iterator.
+                opts.command = std::iter::once(arg).chain(rest).cloned().collect();
                 break;
             }
         }
-        i += 1;
     }
 
     if !opts.list_mode && opts.command.is_empty() {
@@ -771,28 +652,24 @@ fn print_sudo_help() {
 ///
 /// Policy: root (uid 0) can do anything. Members of `wheel` or `admin`
 /// groups can sudo to root. Other combinations are denied.
-fn sudo_authorised(caller: &User, target_uid: u32) -> bool {
+/// `_target_uid` is unused: the policy grants an administrator the right to
+/// become *anyone*, so sudo-to-root and sudo-to-alice take the same test. The
+/// parameter is kept because that is a policy choice rather than an oversight,
+/// and a future policy that does distinguish them needs it back.
+fn sudo_authorised(caller: &Record, _target_uid: u32) -> bool {
     // Root can always sudo.
-    if caller.uid == 0 {
+    if caller.uid() == Some(0) {
         return true;
     }
-
-    // For non-root targets, the caller must be root.
-    if target_uid != 0 {
-        // Allow wheel/admin members to sudo to any user.
-        return caller.groups.iter().any(|g| g == "wheel" || g == "admin") || caller.admin;
-    }
-
-    // Wheel/admin members can sudo to root.
-    caller.groups.iter().any(|g| g == "wheel" || g == "admin") || caller.admin
+    in_admin_group(caller) || caller.is_admin()
 }
 
 /// Print the caller's sudo permissions.
-fn sudo_list_permissions(caller: &User) {
-    println!("User {} may run the following commands:", caller.username);
-    if caller.uid == 0 {
+fn sudo_list_permissions(caller: &Record) {
+    println!("User {} may run the following commands:", name_of(caller));
+    if caller.uid() == Some(0) {
         println!("    (ALL) ALL");
-    } else if caller.admin || caller.groups.iter().any(|g| g == "wheel" || g == "admin") {
+    } else if caller.is_admin() || in_admin_group(caller) {
         println!("    (ALL) ALL  [via wheel/admin group membership]");
     } else {
         println!("    (NONE)");
@@ -806,22 +683,17 @@ fn run_sudo(args: &[String]) -> i32 {
         Err(code) => return code,
     };
 
-    let users = read_users();
-    if users.is_empty() {
-        eprintln!("sudo: no user database found at {USER_DB_PATH}");
+    let Some(users) = load_users("sudo") else {
         return 1;
-    }
+    };
 
     let caller_uid = get_caller_uid(&users);
-    let caller = match find_user_by_uid(&users, caller_uid) {
-        Some(u) => u,
-        None => {
-            eprintln!(
-                "sudo: unknown calling user (uid {caller_uid}); \
-                 cannot determine permissions"
-            );
-            return 1;
-        }
+    let Some(caller) = users.find_uid(caller_uid) else {
+        eprintln!(
+            "sudo: unknown calling user (uid {caller_uid}); \
+             cannot determine permissions"
+        );
+        return 1;
     };
 
     if opts.list_mode {
@@ -829,56 +701,39 @@ fn run_sudo(args: &[String]) -> i32 {
         return 0;
     }
 
-    let target = match find_user(&users, &opts.target_user) {
-        Some(u) => u,
-        None => {
-            eprintln!("sudo: unknown user: {}", opts.target_user);
-            return 1;
-        }
+    let Some(target) = users.find(&opts.target_user) else {
+        eprintln!("sudo: unknown user: {}", opts.target_user);
+        return 1;
     };
 
-    if target.locked {
-        eprintln!("sudo: account '{}' is locked", target.username);
+    if target.is_locked() {
+        eprintln!("sudo: account '{}' is locked", name_of(target));
         return 1;
     }
 
     // Authorisation check.
-    if !sudo_authorised(caller, target.uid) {
+    if !sudo_authorised(caller, target.uid().unwrap_or(u32::MAX)) {
+        let caller_name = name_of(caller);
         eprintln!(
-            "sudo: user '{}' is not in the sudoers file. \
-             This incident will be reported.",
-            caller.username
+            "sudo: user '{caller_name}' is not in the sudoers file. \
+             This incident will be reported."
         );
         // Log the failed attempt.
-        log_sudo_failure(&caller.username, &opts.command);
+        log_sudo_failure(&caller_name, &opts.command);
         return 1;
     }
 
     // Authenticate: require the caller's own password (sudo convention),
     // unless the caller is root.
-    if caller.uid != 0 {
-        if caller.password_hash.is_empty() {
-            eprintln!("sudo: your account has no password set");
-            return 1;
-        }
-
-        let password = match read_password(&format!("[sudo] password for {}: ", caller.username)) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("sudo: {e}");
-                return 1;
-            }
-        };
-
-        if !verify_password(&password, &caller.password_hash, &caller.salt) {
-            eprintln!("sudo: authentication failure");
+    if caller_uid != 0 {
+        let prompt = format!("[sudo] password for {}: ", name_of(caller));
+        if !authenticate(caller, &prompt, "sudo") {
             return 1;
         }
     }
 
     // Execute the command as the target user.
     let command_str = opts.command.join(" ");
-    
 
     exec_as_user(
         target,
@@ -932,101 +787,50 @@ fn main() {
 // Tests
 // ============================================================================
 
+// The workspace's defensive lints are for production code; a test that indexes
+// a fixture it just built is asserting, and an assertion that fails by
+// panicking is a test doing its job.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // --- SHA-256 ---
-
-    #[test]
-    fn test_sha256_empty() {
-        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-    }
-
-    #[test]
-    fn test_sha256_hello() {
-        // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-        assert_eq!(
-            sha256_hex(b"hello"),
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        );
-    }
-
-    #[test]
-    fn test_sha256_known_vector() {
-        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-        assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-
-    #[test]
-    fn test_sha256_long_input() {
-        // SHA-256 of 64 'a' bytes (spans exactly one block after padding).
-        let input = vec![b'a'; 64];
-        let result = sha256_hex(&input);
-        // Known hash for "aaaa...a" (64 a's):
-        // ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb
-        assert_eq!(
-            result,
-            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
-        );
-    }
-
-    // --- Password hashing ---
-
-    #[test]
-    fn test_hash_password_matches_verify() {
-        let salt = "abcdef1234567890";
-        let password = "secret123";
-        let hash = hash_password(password, salt);
-        assert!(verify_password(password, &hash, salt));
-    }
-
-    #[test]
-    fn test_hash_password_wrong_password_fails() {
-        let salt = "abcdef1234567890";
-        let hash = hash_password("correct_password", salt);
-        assert!(!verify_password("wrong_password", &hash, salt));
-    }
-
-    #[test]
-    fn test_hash_password_wrong_salt_fails() {
-        let salt = "salt_a";
-        let hash = hash_password("password", salt);
-        assert!(!verify_password("password", &hash, "salt_b"));
-    }
-
-    #[test]
-    fn test_verify_password_length_mismatch() {
-        assert!(!verify_password("x", "short", "s"));
-    }
-
     // --- User database parsing ---
+    //
+    // The SHA-256 and `hash_password`/`verify_password` tests that used to
+    // stand here are deleted rather than ported. They asserted that hashing was
+    // deterministic, that different inputs hashed differently, and that the
+    // output was the right length — all of which are true of any function
+    // written by accident, which is what the thing under test turned out to be.
+    // The hash now comes from `posix::crypt`, which is checked against
+    // Drepper's published vectors, and what is worth testing here is that this
+    // program agrees with the programs that *write* the file.
 
     fn sample_users_yaml() -> &'static str {
+        // Deliberately mixed spelling: `root` uses the login manager's
+        // `home_dir`, `alice` uses `useradm`'s `home`. Both must read back,
+        // because both spellings exist in files this tree has written.
         r#"# Slate OS user database
 users:
   - uid: 0
     username: "root"
     display_name: "System Administrator"
-    password_hash: "abc123"
-    salt: "salt0"
+    password_hash: "$6$rootsalt$dummy"
     shell: "/bin/sh"
-    home: "/root"
+    home_dir: "/root"
     groups: [root, admin, wheel]
-    admin: true
+    is_admin: true
     locked: false
   - uid: 1000
     username: "alice"
     display_name: "Alice"
-    password_hash: "def456"
-    salt: "salt1"
+    password_hash: "$6$alicesalt$dummy"
     shell: "/bin/bash"
     home: "/home/alice"
     groups: [users, wheel]
@@ -1036,7 +840,6 @@ users:
     username: "bob"
     display_name: "Bob"
     password_hash: ""
-    salt: ""
     shell: "/bin/sh"
     home: "/home/bob"
     groups: [users]
@@ -1045,121 +848,133 @@ users:
 "#
     }
 
-    /// Helper: parse sample YAML directly (bypasses file I/O).
-    fn parse_sample_users() -> Vec<User> {
-        let content = sample_users_yaml();
-        let mut users = Vec::new();
-        let mut current: Option<User> = None;
-
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("- uid:") || trimmed.starts_with("-  uid:") {
-                if let Some(user) = current.take() {
-                    users.push(user);
-                }
-                let uid: u32 = trimmed
-                    .split(':')
-                    .nth(1)
-                    .and_then(|s| s.trim().parse().ok())
-                    .unwrap_or(0);
-                current = Some(User {
-                    uid,
-                    username: String::new(),
-                    display_name: String::new(),
-                    password_hash: String::new(),
-                    salt: String::new(),
-                    shell: "/bin/sh".to_string(),
-                    home: String::new(),
-                    groups: Vec::new(),
-                    admin: false,
-                    locked: false,
-                });
-            } else if let Some(ref mut user) = current {
-                if let Some(val) = trimmed.strip_prefix("username:") {
-                    user.username = val.trim().trim_matches('"').to_string();
-                } else if let Some(val) = trimmed.strip_prefix("display_name:") {
-                    user.display_name = val.trim().trim_matches('"').to_string();
-                } else if let Some(val) = trimmed.strip_prefix("password_hash:") {
-                    user.password_hash = val.trim().trim_matches('"').to_string();
-                } else if let Some(val) = trimmed.strip_prefix("salt:") {
-                    user.salt = val.trim().trim_matches('"').to_string();
-                } else if let Some(val) = trimmed.strip_prefix("shell:") {
-                    user.shell = val.trim().trim_matches('"').to_string();
-                } else if let Some(val) = trimmed.strip_prefix("home:") {
-                    user.home = val.trim().trim_matches('"').to_string();
-                } else if let Some(val) = trimmed.strip_prefix("groups:") {
-                    let val = val.trim().trim_matches(|c: char| c == '[' || c == ']');
-                    user.groups = val
-                        .split(',')
-                        .map(|g| g.trim().trim_matches('"').to_string())
-                        .filter(|g| !g.is_empty())
-                        .collect();
-                } else if let Some(val) = trimmed.strip_prefix("admin:") {
-                    user.admin = val.trim() == "true";
-                } else if let Some(val) = trimmed.strip_prefix("locked:") {
-                    user.locked = val.trim() == "true";
-                }
-            }
-        }
-        if let Some(user) = current {
-            users.push(user);
-        }
-        users
+    /// Parse the sample directly, bypassing file I/O.
+    fn parse_sample_users() -> UserDb {
+        UserDb::parse(sample_users_yaml())
     }
 
     #[test]
     fn test_parse_user_count() {
         let users = parse_sample_users();
-        assert_eq!(users.len(), 3);
+        assert_eq!(users.records().len(), 3);
     }
 
     #[test]
     fn test_parse_root_user() {
         let users = parse_sample_users();
-        let root = find_user(&users, "root").expect("root should exist");
-        assert_eq!(root.uid, 0);
-        assert_eq!(root.home, "/root");
-        assert_eq!(root.shell, "/bin/sh");
-        assert!(root.admin);
-        assert!(!root.locked);
-        assert!(root.groups.contains(&"wheel".to_string()));
+        let root = users.find("root").expect("root should exist");
+        assert_eq!(root.uid(), Some(0));
+        assert_eq!(home_of(root), "/root");
+        assert_eq!(shell_of(root), "/bin/sh");
+        assert!(root.is_admin());
+        assert!(!root.is_locked());
+        assert!(root.groups().contains(&"wheel".to_string()));
     }
 
     #[test]
     fn test_parse_normal_user() {
         let users = parse_sample_users();
-        let alice = find_user(&users, "alice").expect("alice should exist");
-        assert_eq!(alice.uid, 1000);
-        assert_eq!(alice.home, "/home/alice");
-        assert_eq!(alice.shell, "/bin/bash");
-        assert!(!alice.admin);
-        assert!(!alice.locked);
-        assert!(alice.groups.contains(&"wheel".to_string()));
+        let alice = users.find("alice").expect("alice should exist");
+        assert_eq!(alice.uid(), Some(1000));
+        assert_eq!(home_of(alice), "/home/alice");
+        assert_eq!(shell_of(alice), "/bin/bash");
+        assert!(!alice.is_admin());
+        assert!(!alice.is_locked());
+        assert!(alice.groups().contains(&"wheel".to_string()));
+    }
+
+    /// Both writers' spellings of the home directory are read.
+    ///
+    /// This is the regression test for the bug that prompted the migration:
+    /// this program read only `home:`, and *neither* writer of the file has
+    /// ever written anything but `home_dir:`, so `su - root` started a login
+    /// shell with `HOME` unset in every real database.
+    #[test]
+    fn test_both_spellings_of_home_are_read() {
+        let users = parse_sample_users();
+        let root = users.find("root").expect("root should exist");
+        let alice = users.find("alice").expect("alice should exist");
+        assert_eq!(home_of(root), "/root", "home_dir: must be read");
+        assert_eq!(home_of(alice), "/home/alice", "home: must be read");
+    }
+
+    /// Likewise for the administrator flag, where `root` carries `is_admin`.
+    #[test]
+    fn test_both_spellings_of_the_admin_flag_are_read() {
+        let users = parse_sample_users();
+        assert!(users.find("root").expect("root").is_admin());
+        assert!(!users.find("alice").expect("alice").is_admin());
     }
 
     #[test]
     fn test_parse_locked_user() {
         let users = parse_sample_users();
-        let bob = find_user(&users, "bob").expect("bob should exist");
-        assert_eq!(bob.uid, 1001);
-        assert!(bob.locked);
-        assert!(bob.password_hash.is_empty());
+        let bob = users.find("bob").expect("bob should exist");
+        assert_eq!(bob.uid(), Some(1001));
+        assert!(bob.is_locked());
     }
 
     #[test]
     fn test_find_user_nonexistent() {
         let users = parse_sample_users();
-        assert!(find_user(&users, "nonexistent").is_none());
+        assert!(users.find("nonexistent").is_none());
     }
 
     #[test]
     fn test_find_user_by_uid() {
         let users = parse_sample_users();
-        let root = find_user_by_uid(&users, 0).expect("uid 0 should exist");
-        assert_eq!(root.username, "root");
-        let alice = find_user_by_uid(&users, 1000).expect("uid 1000 should exist");
-        assert_eq!(alice.username, "alice");
-        assert!(find_user_by_uid(&users, 9999).is_none());
+        let root = users.find_uid(0).expect("uid 0 should exist");
+        assert_eq!(root.username().as_deref(), Some("root"));
+        let alice = users.find_uid(1000).expect("uid 1000 should exist");
+        assert_eq!(alice.username().as_deref(), Some("alice"));
+        assert!(users.find_uid(9999).is_none());
+    }
+
+    // --- Authentication ---
+
+    /// A password set the way `useradm` and the login manager set it is
+    /// accepted here. This is the property that was broken: three programs,
+    /// three constructions, and no test that compared any two of them.
+    #[test]
+    fn test_a_password_set_through_userdb_is_accepted() {
+        let mut record = Record::new();
+        record.set("username", "carol");
+        record
+            .set_password_with_salt("correct horse", "0123456789abcdef")
+            .expect("a 16-character salt is storable");
+
+        assert_eq!(record.check_password("correct horse"), Auth::Accepted);
+        assert_eq!(record.check_password("Correct horse"), Auth::Rejected);
+        assert_eq!(record.check_password(""), Auth::Rejected);
+    }
+
+    /// An entry in either of the two formats this tree used to write reports
+    /// itself unverifiable rather than wrong, so that an administrator is told
+    /// to run `useradm passwd` instead of hunting a forgotten password.
+    #[test]
+    fn test_a_legacy_entry_is_unusable_not_wrong() {
+        let mut record = Record::new();
+        record.set("username", "dave");
+        // 64 hex digits: what both of the replaced constructions produced.
+        record.set(
+            "password_hash",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        );
+        assert!(record.has_legacy_password());
+        assert_eq!(record.check_password("anything"), Auth::Unusable);
+    }
+
+    /// A locked account reports itself locked whatever is typed, and does so
+    /// before the stored hash is consulted at all.
+    #[test]
+    fn test_a_locked_account_refuses_its_own_password() {
+        let mut record = Record::new();
+        record.set("username", "erin");
+        record
+            .set_password_with_salt("hunter2", "0123456789abcdef")
+            .expect("a 16-character salt is storable");
+        record.set_locked(true);
+        assert_eq!(record.check_password("hunter2"), Auth::Locked);
     }
 
     // --- sudo authorisation ---
@@ -1167,7 +982,7 @@ users:
     #[test]
     fn test_sudo_root_always_authorised() {
         let users = parse_sample_users();
-        let root = find_user(&users, "root").unwrap();
+        let root = users.find("root").unwrap();
         assert!(sudo_authorised(root, 0));
         assert!(sudo_authorised(root, 1000));
         assert!(sudo_authorised(root, 1001));
@@ -1176,7 +991,7 @@ users:
     #[test]
     fn test_sudo_wheel_member_authorised_for_root() {
         let users = parse_sample_users();
-        let alice = find_user(&users, "alice").unwrap();
+        let alice = users.find("alice").unwrap();
         // Alice is in wheel group -> can sudo to root.
         assert!(sudo_authorised(alice, 0));
     }
@@ -1184,7 +999,7 @@ users:
     #[test]
     fn test_sudo_wheel_member_authorised_for_other() {
         let users = parse_sample_users();
-        let alice = find_user(&users, "alice").unwrap();
+        let alice = users.find("alice").unwrap();
         // Wheel members can sudo to any user.
         assert!(sudo_authorised(alice, 1001));
     }
@@ -1192,7 +1007,7 @@ users:
     #[test]
     fn test_sudo_non_wheel_denied() {
         let users = parse_sample_users();
-        let bob = find_user(&users, "bob").unwrap();
+        let bob = users.find("bob").unwrap();
         // Bob is only in 'users' group -- no sudo.
         assert!(!sudo_authorised(bob, 0));
     }
@@ -1402,21 +1217,30 @@ users:
 
     // --- Combined su + password flow ---
 
+    /// A password written to the file by one program is read back out of the
+    /// file and accepted by this one.
+    ///
+    /// The test this replaces *simulated* `useradm` by re-implementing what it
+    /// was believed to do, which is why it passed for as long as the belief was
+    /// wrong. This one goes through the serialiser and the parser, so the only
+    /// way it can pass is if the bytes on disk are the bytes both programs
+    /// agree on.
     #[test]
-    fn test_full_auth_flow() {
-        // Simulate: useradm hashes "secret" with salt "testsalt".
-        let salt = "testsalt";
-        let password = "secret";
-        let stored_hash = hash_password(password, salt);
+    fn test_full_auth_flow_through_the_file() {
+        let mut db = UserDb::parse(sample_users_yaml());
+        db.find_mut("alice")
+            .expect("alice should exist")
+            .set_password_with_salt("secret", "0123456789abcdef")
+            .expect("a 16-character salt is storable");
 
-        // Correct password verifies.
-        assert!(verify_password(password, &stored_hash, salt));
+        let round_tripped = UserDb::parse(&db.to_text());
+        let alice = round_tripped.find("alice").expect("alice survives a save");
 
-        // Wrong password fails.
-        assert!(!verify_password("wrong", &stored_hash, salt));
-
-        // Different salt fails.
-        assert!(!verify_password(password, &stored_hash, "othersalt"));
+        assert_eq!(alice.check_password("secret"), Auth::Accepted);
+        assert_eq!(alice.check_password("wrong"), Auth::Rejected);
+        // And the fields this program does not set are still there.
+        assert_eq!(home_of(alice), "/home/alice");
+        assert!(alice.groups().contains(&"wheel".to_string()));
     }
 
     // --- Edge cases ---

@@ -130,11 +130,31 @@ const RX_CFG_8K: u32 = 0b00 << 11;
 // TX status bits
 // ---------------------------------------------------------------------------
 
-/// Own: set by software to start TX, cleared by hardware on completion.
+/// Own: **cleared by software** to hand the descriptor to the NIC, **set by
+/// hardware** when it has finished DMA-ing the buffer out.
+///
+/// Note the polarity, which is inverted from the convention most other NICs
+/// use (and from what the name suggests): `OWN == 1` means *the host* owns the
+/// descriptor and may refill it; `OWN == 0` means the NIC is still reading it.
+/// Linux names the same bit `TxHostOwns` (`drivers/net/ethernet/realtek/
+/// 8139too.c`), which is the unambiguous way to say it.  Writing the byte
+/// count to TSD is what clears the bit, so software never sets it explicitly.
 const TX_STATUS_OWN: u32 = 1 << 13;
 /// TX OK: set by hardware on successful transmission.
-#[allow(dead_code)]
 const TX_STATUS_TOK: u32 = 1 << 15;
+
+/// Transmit FIFO underrun — the DMA engine could not keep the FIFO fed.
+///
+/// Worth naming separately from "not finished yet" because it means the
+/// descriptor *was* picked up and the fault lies in the memory path, not in
+/// the ring setup.
+const TX_STATUS_TUN: u32 = 1 << 14;
+
+/// Transmit aborted (excessive collisions).
+const TX_STATUS_TABT: u32 = 1 << 30;
+
+/// Carrier sense lost during transmission.
+const TX_STATUS_CRS: u32 = 1 << 31;
 
 // ---------------------------------------------------------------------------
 // Buffer sizes
@@ -148,6 +168,13 @@ const TX_BUF_SIZE: usize = 1536;
 
 /// Number of TX descriptors.
 const NUM_TX_DESC: usize = 4;
+
+/// Minimum Ethernet frame length excluding the FCS, which the NIC appends.
+///
+/// Frames shorter than this are illegal on the wire; the driver pads rather
+/// than relying on the hardware, so that the padding bytes are known to be
+/// zero (see [`Rtl8139Device::send`]).
+const ETH_MIN_FRAME_LEN: usize = 60;
 
 // ---------------------------------------------------------------------------
 // Driver state
@@ -171,6 +198,15 @@ pub struct Rtl8139Device {
     tx_buf_virt: [u64; NUM_TX_DESC],
     /// Which TX descriptor to use next (0-3).
     tx_cur: usize,
+    /// Whether each TX descriptor has been handed to the hardware and not yet
+    /// observed complete.
+    ///
+    /// Needed because the OWN bit alone cannot distinguish "the NIC is still
+    /// working on this" from "this descriptor has never been used": both read
+    /// `OWN == 0`.  Without the distinction, the first `NUM_TX_DESC` sends of
+    /// every boot would each burn the full completion timeout waiting for a
+    /// bit the hardware was never asked to set.
+    tx_inflight: [bool; NUM_TX_DESC],
     /// Physical frame backing the RX buffer.
     _rx_frame: Option<PhysFrame>,
     /// Physical frame backing the TX buffers.
@@ -184,7 +220,7 @@ pub struct Rtl8139Device {
 /// `lock_irqsave`, never the plain `lock()`. With a plain acquire the driver
 /// deadlocks by construction rather than by race: `Rtl8139Device::send`
 /// holds this lock while spinning up to 100 000 times for the TX descriptor's
-/// OWN bit to clear, and the hardware event that clears OWN is the very one
+/// OWN bit to be set, and the hardware event that sets OWN is the very one
 /// that raises the TX-complete interrupt whose handler blocks on this lock.
 /// See `known-issues.md →
 /// B-RTL8139-SEND-SPINS-FOR-THE-EVENT-WHOSE-HANDLER-WANTS-THE-LOCK-IT-HOLDS`.
@@ -364,6 +400,7 @@ pub fn init(hhdm_offset: u64) {
         tx_buf_phys,
         tx_buf_virt,
         tx_cur: 0,
+        tx_inflight: [false; NUM_TX_DESC],
         _rx_frame: Some(rx_frame),
         _tx_frame: Some(tx_frame),
     };
@@ -408,16 +445,41 @@ impl Rtl8139Device {
         }
 
         let desc = self.tx_cur;
-
-        // Wait for the descriptor to become available (OWN bit clear
-        // means hardware finished with it).
+        #[allow(clippy::cast_possible_truncation)]
         let status_reg = REG_TX_STATUS0 + (desc as u16) * 4;
-        for _ in 0..100_000u32 {
-            // SAFETY: Reading TX status register.
-            let status = unsafe { port::inl(self.io_base + status_reg) };
-            if status & TX_STATUS_OWN == 0 {
-                break;
+
+        // Wait for the NIC to be done with this descriptor before overwriting
+        // the buffer underneath it.
+        //
+        // Only wait if we actually handed this descriptor over at some point:
+        // a descriptor that has never been used has no meaningful OWN bit, and
+        // waiting for hardware to set a bit it was never asked to touch would
+        // burn the whole timeout on each of the first NUM_TX_DESC sends.
+        if self.tx_inflight[desc] {
+            let mut done = false;
+            for _ in 0..100_000u32 {
+                // SAFETY: Reading a TX status register inside this device's
+                // I/O port window; `desc` < NUM_TX_DESC bounds the offset.
+                let status = unsafe { port::inl(self.io_base + status_reg) };
+                // OWN set means the host owns it again.  TABT and TUN are the
+                // terminal error states — the NIC has stopped working on the
+                // descriptor, so the buffer is ours again even though the
+                // frame did not go out.  Linux's tx interrupt handler uses the
+                // same three-way test.
+                if status & (TX_STATUS_OWN | TX_STATUS_TABT | TX_STATUS_TUN) != 0 {
+                    done = true;
+                    break;
+                }
+                core::hint::spin_loop();
             }
+            if !done {
+                // Returning here rather than pressing on is the point of the
+                // check: `copy_nonoverlapping` below would otherwise rewrite a
+                // buffer the NIC is actively DMA-ing out, which corrupts the
+                // frame on the wire and is invisible from this end.
+                return Err(KernelError::TimedOut);
+            }
+            self.tx_inflight[desc] = false;
         }
 
         // Copy frame data to the TX buffer.
@@ -427,7 +489,25 @@ impl Rtl8139Device {
             core::ptr::copy_nonoverlapping(frame.as_ptr(), dst, frame.len());
         }
 
+        // Pad up to the 60-byte Ethernet minimum (the hardware appends the
+        // 4-byte FCS on top of that).  The padding must be *written*, not just
+        // accounted for in the length: the TX buffers are recycled, so
+        // whatever the previous frame left in those bytes would otherwise be
+        // DMA-ed onto the wire — kernel memory disclosed to the network, and
+        // silent from this end.  Linux does the same via
+        // `max(len, ETH_ZLEN)` plus a zeroed buffer tail in `8139too.c`.
+        let tx_len = frame.len().max(ETH_MIN_FRAME_LEN);
+        if tx_len > frame.len() {
+            // SAFETY: `tx_len <= ETH_MIN_FRAME_LEN <= TX_BUF_SIZE` and
+            // `frame.len() < tx_len`, so the written range stays inside this
+            // descriptor's 1536-byte buffer.
+            unsafe {
+                core::ptr::write_bytes(dst.add(frame.len()), 0, tx_len - frame.len());
+            }
+        }
+
         // Set the TX start address for this descriptor.
+        #[allow(clippy::cast_possible_truncation)]
         let addr_reg = REG_TX_ADDR0 + (desc as u16) * 4;
         #[allow(clippy::cast_possible_truncation)]
         // SAFETY: Standard register writes.
@@ -438,16 +518,60 @@ impl Rtl8139Device {
         // Write the TX status: size in bits [12:0], clear OWN (bit 13),
         // set threshold to 8 (bits [16:21] = 0, so early TX threshold).
         #[allow(clippy::cast_possible_truncation)]
-        let size = frame.len() as u32;
+        let size = tx_len as u32;
         // SAFETY: Initiates transmission.
         unsafe {
             port::outl(self.io_base + status_reg, size);
         }
+        // The descriptor is now the hardware's until it sets OWN back.
+        self.tx_inflight[desc] = true;
 
         // Advance to next descriptor.
         self.tx_cur = (self.tx_cur + 1) % NUM_TX_DESC;
 
         Ok(())
+    }
+
+    /// Send a frame and wait for the hardware to report it complete,
+    /// returning the final contents of the descriptor's TX status register.
+    ///
+    /// [`send`](Self::send) deliberately does not wait: on the datapath the
+    /// caller has no use for the completion, and blocking there would serialise
+    /// transmission on hardware latency.  A *test*, on the other hand, has
+    /// nothing to check unless it waits — the whole claim being verified is
+    /// that the hardware picked the descriptor up.
+    ///
+    /// Waiting inside the device lock is safe here for the same reason
+    /// `send`'s own pre-send poll is (see [`DEVICE`]): completion is visible by
+    /// polling the status register, so the TX-complete interrupt — whose
+    /// handler wants this very lock — never needs to be delivered for the loop
+    /// to terminate.
+    ///
+    /// Returns [`KernelError::TimedOut`] if the descriptor never comes back,
+    /// which is the diagnosis "the hardware never processed it at all" — as
+    /// distinct from an error status, which is returned as `Ok(status)` for the
+    /// caller to decode.
+    pub fn send_sync(&mut self, frame: &[u8]) -> KernelResult<u32> {
+        self.send(frame)?;
+
+        // `send` already advanced tx_cur past the descriptor it used.
+        let desc = (self.tx_cur + NUM_TX_DESC - 1) % NUM_TX_DESC;
+        #[allow(clippy::cast_possible_truncation)]
+        let status_reg = REG_TX_STATUS0 + (desc as u16) * 4;
+
+        for _ in 0..100_000u32 {
+            // SAFETY: Reading a TX status register within this device's I/O
+            // port window; `desc` < NUM_TX_DESC so the offset is in range.
+            let status = unsafe { port::inl(self.io_base + status_reg) };
+            if status & (TX_STATUS_OWN | TX_STATUS_TABT | TX_STATUS_TUN) != 0 {
+                // The descriptor is the host's again, successfully or not.
+                self.tx_inflight[desc] = false;
+                return Ok(status);
+            }
+            core::hint::spin_loop();
+        }
+
+        Err(KernelError::TimedOut)
     }
 
     /// Advance the RX read pointer past an entry of `raw_length` bytes and
@@ -613,36 +737,129 @@ fn find_rtl8139() -> Option<pci::PciDevice> {
 // Self-test
 // ---------------------------------------------------------------------------
 
-/// Verify driver initialization.
+/// Verify driver initialization and that the transmit datapath works.
 pub fn self_test() {
-    let guard = DEVICE.lock_irqsave();
-    if guard.is_none() {
-        crate::serial_println!("[rtl8139] Self-test: no device (skipped)");
-        return;
-    }
-    let dev = guard.as_ref().unwrap();
+    // Scoped so the device lock is released before the datapath test, which
+    // re-acquires it: `Mutex` here is a spinlock, so holding it across the
+    // second acquire would deadlock outright rather than merely block.
+    let mac = {
+        let guard = DEVICE.lock_irqsave();
+        let Some(dev) = guard.as_ref() else {
+            crate::serial_println!("[rtl8139] Self-test: no device (skipped)");
+            return;
+        };
 
-    // Verify MAC is not all-zeros or all-ones.
-    let all_zero = dev.mac.iter().all(|&b| b == 0);
-    let all_ones = dev.mac.iter().all(|&b| b == 0xFF);
-    if all_zero || all_ones {
-        crate::serial_println!("[rtl8139] Self-test FAILED: invalid MAC address");
-        return;
-    }
+        // Verify MAC is not all-zeros or all-ones.
+        let all_zero = dev.mac.iter().all(|&b| b == 0);
+        let all_ones = dev.mac.iter().all(|&b| b == 0xFF);
+        if all_zero || all_ones {
+            crate::serial_println!("[rtl8139] Self-test FAILED: invalid MAC address");
+            return;
+        }
 
-    // Verify TX/RX buffers are valid.
-    if dev.rx_buf_phys == 0 || dev.tx_buf_phys[0] == 0 {
-        crate::serial_println!("[rtl8139] Self-test FAILED: buffer addresses are zero");
+        // Verify TX/RX buffers are valid.
+        if dev.rx_buf_phys == 0 || dev.tx_buf_phys[0] == 0 {
+            crate::serial_println!("[rtl8139] Self-test FAILED: buffer addresses are zero");
+            return;
+        }
+        dev.mac
+    };
+
+    if !tx_datapath_test(mac) {
         return;
     }
 
     crate::serial_println!(
         "[rtl8139] Self-test PASSED (MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-        dev.mac[0],
-        dev.mac[1],
-        dev.mac[2],
-        dev.mac[3],
-        dev.mac[4],
-        dev.mac[5]
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5]
     );
+}
+
+/// Transmit one inert frame and confirm the NIC reported it complete.
+///
+/// The checks above this one all read back state the driver itself wrote, so
+/// they pass on a driver whose TX buffer physical addresses are wrong, whose
+/// descriptor indexing is off, or whose doorbell write lands on the wrong
+/// register.  This is the check that can fail for a real reason: the RTL8139
+/// DMAs the frame out of the physical address *we* programmed and then sets
+/// OWN in the status register *we* poll, so a completion proves the address
+/// programming, the register offsets and the descriptor bookkeeping in one
+/// step — with no peer needed on the wire, which is what makes it usable in
+/// an automated boot test.
+///
+/// Returns `false` (having logged the failure) if the datapath is broken.
+fn tx_datapath_test(mac: [u8; 6]) -> bool {
+    /// IEEE Std 802 Local Experimental EtherType 1 — reserved for exactly this
+    /// kind of use, so the frame cannot be confused with a real protocol.
+    const ETHERTYPE_LOCAL_EXPERIMENTAL: u16 = 0x88B5;
+
+    // Addressed to ourselves, from ourselves: inert by construction. Under
+    // QEMU's user networking the backend discards it, which is fine — nothing
+    // here depends on the frame arriving anywhere.
+    let mut frame = [0u8; ETH_MIN_FRAME_LEN];
+    frame[0..6].copy_from_slice(&mac);
+    frame[6..12].copy_from_slice(&mac);
+    frame[12..14].copy_from_slice(&ETHERTYPE_LOCAL_EXPERIMENTAL.to_be_bytes());
+    for (i, b) in frame.iter_mut().enumerate().skip(14) {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            *b = (i as u8).wrapping_mul(0x11);
+        }
+    }
+
+    let Some(result) = with_device(|dev| dev.send_sync(&frame)) else {
+        crate::serial_println!("[rtl8139] Self-test FAILED: device vanished mid-test");
+        return false;
+    };
+
+    match result {
+        Ok(status) if status & TX_STATUS_TOK != 0 => {
+            crate::serial_println!(
+                "[rtl8139]   TX datapath: sent {} bytes, TSD={:#010x} (TOK)",
+                frame.len(),
+                status
+            );
+            true
+        }
+        Ok(status) => {
+            // The descriptor came back but the frame did not go out.  Name the
+            // reason: each of these points at a different subsystem, and
+            // reporting only "TX failed" would send the next reader to the
+            // wrong one.
+            crate::serial_println!(
+                "[rtl8139] Self-test FAILED: TX completed without TOK, TSD={status:#010x}{}{}{}",
+                if status & TX_STATUS_TUN != 0 {
+                    " [TUN: FIFO underrun — DMA could not keep up]"
+                } else {
+                    ""
+                },
+                if status & TX_STATUS_TABT != 0 {
+                    " [TABT: aborted, excessive collisions]"
+                } else {
+                    ""
+                },
+                if status & TX_STATUS_CRS != 0 {
+                    " [CRS: carrier lost]"
+                } else {
+                    ""
+                },
+            );
+            false
+        }
+        Err(e) => {
+            crate::serial_println!(
+                "[rtl8139] Self-test FAILED: TX of {} bytes never completed ({:?}) — the NIC \
+                 never took the descriptor, so the buffer address, the ring index or the TSD \
+                 offset is wrong",
+                frame.len(),
+                e
+            );
+            false
+        }
+    }
 }

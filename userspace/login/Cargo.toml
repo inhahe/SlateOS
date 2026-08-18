@@ -3,4 +3,12 @@ name = "login-cli"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS login - user login program"
+
+# The libc's `crypt(3)`. `login`, `passwd` and `chpasswd` read and write the
+# same `/etc/shadow`, and while each implemented the hash format itself they
+# disagreed: a password set with `passwd` could not be used to log in. The
+# format now has exactly one implementation, and this dependency is what
+# makes that true rather than aspirational. See
+# `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
 [dependencies]
+posix = { path = "../../posix" }

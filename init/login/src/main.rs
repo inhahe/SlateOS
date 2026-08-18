@@ -116,322 +116,33 @@ const FONT_SIZE_CLOCK: f32 = 18.0;
 const LARGE_FONT_SCALE: f32 = 1.4;
 
 // ============================================================================
-// SHA-256 (inline implementation for password hashing)
-// ============================================================================
-
-/// SHA-256 initial hash values.
-const SHA256_H0: [u32; 8] = [
-    0x6a09_e667,
-    0xbb67_ae85,
-    0x3c6e_f372,
-    0xa54f_f53a,
-    0x510e_527f,
-    0x9b05_688c,
-    0x1f83_d9ab,
-    0x5be0_cd19,
-];
-
-/// SHA-256 round constants.
-const SHA256_K: [u32; 64] = [
-    0x428a_2f98,
-    0x7137_4491,
-    0xb5c0_fbcf,
-    0xe9b5_dba5,
-    0x3956_c25b,
-    0x59f1_11f1,
-    0x923f_82a4,
-    0xab1c_5ed5,
-    0xd807_aa98,
-    0x1283_5b01,
-    0x2431_85be,
-    0x550c_7dc3,
-    0x72be_5d74,
-    0x80de_b1fe,
-    0x9bdc_06a7,
-    0xc19b_f174,
-    0xe49b_69c1,
-    0xefbe_4786,
-    0x0fc1_9dc6,
-    0x240c_a1cc,
-    0x2de9_2c6f,
-    0x4a74_84aa,
-    0x5cb0_a9dc,
-    0x76f9_88da,
-    0x983e_5152,
-    0xa831_c66d,
-    0xb003_27c8,
-    0xbf59_7fc7,
-    0xc6e0_0bf3,
-    0xd5a7_9147,
-    0x06ca_6351,
-    0x1429_2967,
-    0x27b7_0a85,
-    0x2e1b_2138,
-    0x4d2c_6dfc,
-    0x5338_0d13,
-    0x650a_7354,
-    0x766a_0abb,
-    0x81c2_c92e,
-    0x9272_2c85,
-    0xa2bf_e8a1,
-    0xa81a_664b,
-    0xc24b_8b70,
-    0xc76c_51a3,
-    0xd192_e819,
-    0xd699_0624,
-    0xf40e_3585,
-    0x106a_a070,
-    0x19a4_c116,
-    0x1e37_6c08,
-    0x2748_774c,
-    0x34b0_bcb5,
-    0x391c_0cb3,
-    0x4ed8_aa4a,
-    0x5b9c_ca4f,
-    0x682e_6ff3,
-    0x748f_82ee,
-    0x78a5_636f,
-    0x84c8_7814,
-    0x8cc7_0208,
-    0x90be_fffa,
-    0xa450_6ceb,
-    0xbef9_a3f7,
-    0xc671_78f2,
-];
-
-/// SHA-256 compression function.
-#[allow(clippy::many_single_char_names)]
-fn sha256_compress(state: &mut [u32; 8], block: &[u8; 64]) {
-    let mut w = [0u32; 64];
-
-    for (w_slot, word_bytes) in w.iter_mut().take(16).zip(block.chunks_exact(4)) {
-        // chunks_exact(4) yields a &[u8] of length 4; try_into is infallible.
-        let arr: [u8; 4] = word_bytes.try_into().unwrap_or([0; 4]);
-        *w_slot = u32::from_be_bytes(arr);
-    }
-
-    for i in 16..64 {
-        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-        w[i] = w[i - 16]
-            .wrapping_add(s0)
-            .wrapping_add(w[i - 7])
-            .wrapping_add(s1);
-    }
-
-    let mut a = state[0];
-    let mut b = state[1];
-    let mut c = state[2];
-    let mut d = state[3];
-    let mut e = state[4];
-    let mut f = state[5];
-    let mut g = state[6];
-    let mut h = state[7];
-
-    for i in 0..64 {
-        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-        let ch = (e & f) ^ ((!e) & g);
-        let temp1 = h
-            .wrapping_add(s1)
-            .wrapping_add(ch)
-            .wrapping_add(SHA256_K[i])
-            .wrapping_add(w[i]);
-        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-        let maj = (a & b) ^ (a & c) ^ (b & c);
-        let temp2 = s0.wrapping_add(maj);
-
-        h = g;
-        g = f;
-        f = e;
-        e = d.wrapping_add(temp1);
-        d = c;
-        c = b;
-        b = a;
-        a = temp1.wrapping_add(temp2);
-    }
-
-    state[0] = state[0].wrapping_add(a);
-    state[1] = state[1].wrapping_add(b);
-    state[2] = state[2].wrapping_add(c);
-    state[3] = state[3].wrapping_add(d);
-    state[4] = state[4].wrapping_add(e);
-    state[5] = state[5].wrapping_add(f);
-    state[6] = state[6].wrapping_add(g);
-    state[7] = state[7].wrapping_add(h);
-}
-
-/// Compute SHA-256 of a byte slice.
-fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut state = SHA256_H0;
-    let mut offset = 0usize;
-
-    // Process full 64-byte blocks.
-    while offset + 64 <= data.len() {
-        let mut block = [0u8; 64];
-        if let Some(src) = data.get(offset..offset + 64) {
-            block.copy_from_slice(src);
-        }
-        sha256_compress(&mut state, &block);
-        offset += 64;
-    }
-
-    // Final block with padding.
-    let remaining = data.len().saturating_sub(offset);
-    let mut buffer = [0u8; 128]; // Two blocks max for final padding.
-    if let (Some(dest), Some(src)) = (buffer.get_mut(..remaining), data.get(offset..)) {
-        dest.copy_from_slice(src);
-    }
-
-    // Append 0x80.
-    if let Some(b) = buffer.get_mut(remaining) {
-        *b = 0x80;
-    }
-
-    let total_bits = (data.len() as u64).wrapping_mul(8);
-    let pad_len = if remaining + 1 > 56 { 128 } else { 64 };
-
-    // Write length in bits (big-endian) at end of final block(s).
-    let len_bytes = total_bits.to_be_bytes();
-    if let Some(dest) = buffer.get_mut(pad_len - 8..pad_len) {
-        dest.copy_from_slice(&len_bytes);
-    }
-
-    // Compress final block(s).
-    if pad_len == 128 {
-        let mut block1 = [0u8; 64];
-        if let Some(src) = buffer.get(..64) {
-            block1.copy_from_slice(src);
-        }
-        sha256_compress(&mut state, &block1);
-        let mut block2 = [0u8; 64];
-        if let Some(src) = buffer.get(64..128) {
-            block2.copy_from_slice(src);
-        }
-        sha256_compress(&mut state, &block2);
-    } else {
-        let mut block = [0u8; 64];
-        if let Some(src) = buffer.get(..64) {
-            block.copy_from_slice(src);
-        }
-        sha256_compress(&mut state, &block);
-    }
-
-    // Produce digest.
-    let mut digest = [0u8; 32];
-    for (i, &word) in state.iter().enumerate() {
-        let bytes = word.to_be_bytes();
-        let off = i * 4;
-        if let Some(dest) = digest.get_mut(off..off + 4) {
-            dest.copy_from_slice(&bytes);
-        }
-    }
-    digest
-}
-
-/// Convert a byte slice to a lowercase hex string.
-fn bytes_to_hex(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len() * 2);
-    for &byte in data {
-        out.push(HEX_CHARS[(byte >> 4) as usize]);
-        out.push(HEX_CHARS[(byte & 0x0F) as usize]);
-    }
-    out
-}
-
-const HEX_CHARS: [char; 16] = [
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
-];
-
-/// Parse a hex string into bytes. Returns None on invalid input.
-fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut result = Vec::with_capacity(hex.len() / 2);
-    let chars: Vec<char> = hex.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let high = hex_digit(chars[i])?;
-        let low = hex_digit(chars[i + 1])?;
-        result.push((high << 4) | low);
-        i += 2;
-    }
-    Some(result)
-}
-
-fn hex_digit(c: char) -> Option<u8> {
-    match c {
-        '0'..='9' => Some(c as u8 - b'0'),
-        'a'..='f' => Some(c as u8 - b'a' + 10),
-        'A'..='F' => Some(c as u8 - b'A' + 10),
-        _ => None,
-    }
-}
-
-// ============================================================================
-// Password hashing: sha256(salt || password)
-// ============================================================================
-
-/// Salt length in bytes.
-const SALT_LENGTH: usize = 16;
-
-/// Hash a password with a given salt.
-fn hash_password(salt: &[u8], password: &str) -> String {
-    let mut input = Vec::with_capacity(salt.len() + password.len());
-    input.extend_from_slice(salt);
-    input.extend_from_slice(password.as_bytes());
-    bytes_to_hex(&sha256(&input))
-}
-
-/// Generate a deterministic salt from a uid and username (used for default accounts).
-/// In production, a CSPRNG-derived salt would be used when a user sets their password.
-fn generate_default_salt(uid: u32, username: &str) -> [u8; SALT_LENGTH] {
-    let mut seed = Vec::new();
-    seed.extend_from_slice(&uid.to_le_bytes());
-    seed.extend_from_slice(username.as_bytes());
-    seed.extend_from_slice(b"slateos-default-salt");
-    let hash = sha256(&seed);
-    let mut salt = [0u8; SALT_LENGTH];
-    if let Some(src) = hash.get(..SALT_LENGTH) {
-        salt.copy_from_slice(src);
-    }
-    salt
-}
-
-// ============================================================================
 // User account model
 // ============================================================================
 
 /// A user account on the system.
+///
+/// This is a view over one entry of `/etc/users.yaml`, not a copy of it. The
+/// entry's own lines are kept, so a field this program has never heard of —
+/// anything `useradm` or a later version writes — survives a login, a password
+/// change and a save. The previous version rebuilt the file from this struct,
+/// which meant every write silently deleted whatever the other writer had
+/// added; see `design-decisions.md` §330.
 #[derive(Clone, Debug)]
 pub struct UserAccount {
-    /// Unique user identifier.
-    pub uid: u32,
-    /// Login username.
-    pub username: String,
-    /// Display name (shown on login screen).
-    pub display_name: String,
-    /// SHA-256 hash of (salt || password).
-    pub password_hash: String,
-    /// Salt for the password (hex-encoded).
-    pub password_salt: String,
-    /// Optional avatar image path.
-    pub avatar_path: Option<String>,
-    /// User's preferred shell.
-    pub shell: String,
-    /// Home directory.
-    pub home_dir: String,
-    /// Whether this user has admin privileges.
-    pub is_admin: bool,
-    /// Whether this account should auto-login.
-    pub auto_login: bool,
-    /// Unix timestamp of last successful login.
-    pub last_login_timestamp: u64,
-    /// Total successful logins.
-    pub login_count: u32,
+    record: userdb::Record,
 }
 
 impl UserAccount {
+    /// Wrap a database record.
+    fn from_record(record: userdb::Record) -> Self {
+        Self { record }
+    }
+
+    /// The underlying record.
+    fn record(&self) -> &userdb::Record {
+        &self.record
+    }
+
     /// Create a new user account with a plaintext password (will be hashed).
     fn new_with_password(
         uid: u32,
@@ -440,57 +151,144 @@ impl UserAccount {
         password: &str,
         is_admin: bool,
     ) -> Self {
-        let salt = generate_default_salt(uid, username);
-        let hash = hash_password(&salt, password);
-        Self {
-            uid,
-            username: username.to_string(),
-            display_name: display_name.to_string(),
-            password_hash: hash,
-            password_salt: bytes_to_hex(&salt),
-            avatar_path: None,
-            shell: "/bin/nush".to_string(),
-            home_dir: format!("/home/{}", username),
-            is_admin,
-            auto_login: false,
-            last_login_timestamp: 0,
-            login_count: 0,
+        let mut record = userdb::Record::new();
+        record.set_uid(uid);
+        record.set(userdb::field::USERNAME, username);
+        record.set(userdb::field::DISPLAY_NAME, display_name);
+        record.set_avatar("");
+        record.set(userdb::field::SHELL, "/bin/nush");
+        record.set_home(&format!("/home/{username}"));
+        record.set_admin(is_admin);
+        record.set_auto_login(false);
+        record.record_login(0);
+        // `record_login` counts one; these accounts have logged in zero times.
+        record.set(userdb::field::LOGIN_COUNT, "0");
+
+        // Prefer a real salt. The fallback is a *fixed* one, and is acceptable
+        // here and nowhere else: it is only reached for the two built-in
+        // accounts, whose passwords are published in this source file, so the
+        // salt is protecting a secret that is not a secret. Any account a user
+        // or a tool creates goes through `Record::set_password`, which refuses
+        // to invent randomness it does not have.
+        const BUILTIN_ACCOUNT_SALT: &str = "slateos.";
+        if record.set_password(password).is_err() {
+            let _ = record.set_password_with_salt(password, BUILTIN_ACCOUNT_SALT);
         }
+
+        Self { record }
     }
 
     /// Create the root (admin) account.
     fn root_account() -> Self {
         let mut account = Self::new_with_password(0, "root", "Administrator", "root", true);
-        account.home_dir = "/root".to_string();
+        account.record.set_home("/root");
         account
     }
 
     /// Create the guest account (no password required).
     fn guest_account() -> Self {
-        Self {
-            uid: 65534,
-            username: "guest".to_string(),
-            display_name: "Guest".to_string(),
-            password_hash: String::new(),
-            password_salt: String::new(),
-            avatar_path: None,
-            shell: "/bin/nush".to_string(),
-            home_dir: "/tmp/guest".to_string(),
-            is_admin: false,
-            auto_login: false,
-            last_login_timestamp: 0,
-            login_count: 0,
-        }
+        let mut record = userdb::Record::new();
+        record.set_uid(65534);
+        record.set(userdb::field::USERNAME, "guest");
+        record.set(userdb::field::DISPLAY_NAME, "Guest");
+        record.set(userdb::field::PASSWORD_HASH, "");
+        record.set_avatar("");
+        record.set(userdb::field::SHELL, "/bin/nush");
+        record.set_home("/tmp/guest");
+        record.set_admin(false);
+        record.set_auto_login(false);
+        record.record_login(0);
+        record.set(userdb::field::LOGIN_COUNT, "0");
+        Self { record }
+    }
+
+    /// Unique user identifier.
+    fn uid(&self) -> u32 {
+        self.record.uid().unwrap_or(0)
+    }
+
+    /// Login username.
+    fn username(&self) -> String {
+        self.record.username().unwrap_or_default()
+    }
+
+    /// Name shown on the login screen, falling back to the login name so that
+    /// a record without one is not drawn as a blank tile.
+    fn display_name(&self) -> String {
+        self.record.display_name().unwrap_or_default()
+    }
+
+    /// The user's preferred shell, defaulting to this system's own.
+    fn shell(&self) -> String {
+        self.record
+            .shell()
+            .unwrap_or_else(|| "/bin/nush".to_string())
+    }
+
+    /// Home directory.
+    fn home_dir(&self) -> String {
+        self.record.home().unwrap_or_default()
+    }
+
+    /// Optional avatar image path.
+    ///
+    /// Unused by the drawing code, which always renders initials — see
+    /// `known-issues.md`, "the login screen ignores `avatar_path`". Kept
+    /// because the field is part of the format and the accessor is what the
+    /// fix will use.
+    #[allow(dead_code)]
+    fn avatar_path(&self) -> Option<String> {
+        self.record.avatar()
+    }
+
+    /// Whether this user has admin privileges.
+    fn is_admin(&self) -> bool {
+        self.record.is_admin()
+    }
+
+    /// Whether this account should log in without being asked.
+    fn auto_login(&self) -> bool {
+        self.record.auto_login()
+    }
+
+    /// Unix timestamp of last successful login.
+    ///
+    /// Read by the tests, which is what makes the login-counting assertion
+    /// possible; nothing on the screen shows it yet.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn last_login_timestamp(&self) -> u64 {
+        self.record.last_login()
+    }
+
+    /// Total successful logins.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn login_count(&self) -> u32 {
+        self.record.login_count()
     }
 
     /// Check if this account requires a password (guest does not).
     fn requires_password(&self) -> bool {
-        !self.password_hash.is_empty()
+        !matches!(
+            self.record.check_password(""),
+            userdb::Auth::NoPassword | userdb::Auth::Accepted
+        )
+    }
+
+    /// Check a password against this account.
+    ///
+    /// Nothing here decodes a salt or compares hex strings: the stored entry
+    /// is `crypt`'s own setting, so recomputing it with the offered password
+    /// reproduces it exactly when the password is right. The version this
+    /// replaces hashed `sha256(salt_bytes || password)` while `useradm` hashed
+    /// `sha256(salt_hex || password)`, and neither could check the other's
+    /// entries.
+    fn check_password(&self, password: &str) -> userdb::Auth {
+        self.record.check_password(password)
     }
 
     /// Get initials for the avatar circle (first letters of display name words).
     fn initials(&self) -> String {
-        self.display_name
+        self.display_name()
             .split_whitespace()
             .filter_map(|word| word.chars().next())
             .take(2)
@@ -500,8 +298,14 @@ impl UserAccount {
 
     /// Get the avatar color based on uid.
     fn avatar_color(&self) -> Color {
-        let idx = (self.uid as usize) % COL_AVATAR_PALETTE.len();
-        COL_AVATAR_PALETTE[idx]
+        // The palette is never empty, so the remainder is always in range and
+        // the fallbacks are unreachable — but they are written out rather than
+        // asserted, because a display manager that panics while drawing an
+        // avatar leaves the machine with no way to log in at all.
+        let idx = (self.uid() as usize)
+            .checked_rem(COL_AVATAR_PALETTE.len())
+            .unwrap_or(0);
+        COL_AVATAR_PALETTE.get(idx).copied().unwrap_or(COL_ACCENT)
     }
 }
 
@@ -509,163 +313,49 @@ impl UserAccount {
 // User database (YAML-based)
 // ============================================================================
 
-/// Simple YAML serialization for user database.
-/// Format: /etc/users.yaml
-fn serialize_users_yaml(users: &[UserAccount]) -> String {
-    let mut yaml = String::from("# Slate OS User Database\n# DO NOT EDIT MANUALLY\n\nusers:\n");
-    for user in users {
-        yaml.push_str(&format!("  - uid: {}\n", user.uid));
-        yaml.push_str(&format!("    username: \"{}\"\n", user.username));
-        yaml.push_str(&format!("    display_name: \"{}\"\n", user.display_name));
-        yaml.push_str(&format!("    password_hash: \"{}\"\n", user.password_hash));
-        yaml.push_str(&format!("    password_salt: \"{}\"\n", user.password_salt));
-        match &user.avatar_path {
-            Some(path) => yaml.push_str(&format!("    avatar_path: \"{}\"\n", path)),
-            None => yaml.push_str("    avatar_path: null\n"),
-        }
-        yaml.push_str(&format!("    shell: \"{}\"\n", user.shell));
-        yaml.push_str(&format!("    home_dir: \"{}\"\n", user.home_dir));
-        yaml.push_str(&format!("    is_admin: {}\n", user.is_admin));
-        yaml.push_str(&format!("    auto_login: {}\n", user.auto_login));
-        yaml.push_str(&format!(
-            "    last_login_timestamp: {}\n",
-            user.last_login_timestamp
-        ));
-        yaml.push_str(&format!("    login_count: {}\n", user.login_count));
-    }
-    yaml
-}
-
-/// Parse user accounts from YAML text.
-/// Returns default accounts if parsing fails.
-fn parse_users_yaml(yaml: &str) -> Vec<UserAccount> {
-    let mut users = Vec::new();
-    let lines: Vec<&str> = yaml.lines().collect();
-    let mut i = 0;
-
-    while i < lines.len() {
-        let line = lines[i].trim();
-        if line.starts_with("- uid:") {
-            let mut uid = 0u32;
-            let mut username = String::new();
-            let mut display_name = String::new();
-            let mut password_hash = String::new();
-            let mut password_salt = String::new();
-            let mut avatar_path: Option<String> = None;
-            let mut shell = "/bin/nush".to_string();
-            let mut home_dir = String::new();
-            let mut is_admin = false;
-            let mut auto_login = false;
-            let mut last_login_timestamp = 0u64;
-            let mut login_count = 0u32;
-
-            // Parse uid from this line.
-            if let Some(val) = line.strip_prefix("- uid:") {
-                uid = val.trim().parse().unwrap_or(0);
-            }
-            i += 1;
-
-            // Parse subsequent indented fields.
-            while i < lines.len() {
-                let field = lines[i].trim();
-                if field.starts_with("- uid:")
-                    || field.is_empty()
-                        && i + 1 < lines.len()
-                        && lines[i + 1].trim().starts_with("- uid:")
-                {
-                    break;
-                }
-                if field.is_empty() || field.starts_with('#') {
-                    i += 1;
-                    continue;
-                }
-
-                if let Some(val) = field.strip_prefix("username:") {
-                    username = strip_yaml_string(val);
-                } else if let Some(val) = field.strip_prefix("display_name:") {
-                    display_name = strip_yaml_string(val);
-                } else if let Some(val) = field.strip_prefix("password_hash:") {
-                    password_hash = strip_yaml_string(val);
-                } else if let Some(val) = field.strip_prefix("password_salt:") {
-                    password_salt = strip_yaml_string(val);
-                } else if let Some(val) = field.strip_prefix("avatar_path:") {
-                    let v = strip_yaml_string(val);
-                    avatar_path = if v == "null" || v.is_empty() {
-                        None
-                    } else {
-                        Some(v)
-                    };
-                } else if let Some(val) = field.strip_prefix("shell:") {
-                    shell = strip_yaml_string(val);
-                } else if let Some(val) = field.strip_prefix("home_dir:") {
-                    home_dir = strip_yaml_string(val);
-                } else if let Some(val) = field.strip_prefix("is_admin:") {
-                    is_admin = val.trim() == "true";
-                } else if let Some(val) = field.strip_prefix("auto_login:") {
-                    auto_login = val.trim() == "true";
-                } else if let Some(val) = field.strip_prefix("last_login_timestamp:") {
-                    last_login_timestamp = val.trim().parse().unwrap_or(0);
-                } else if let Some(val) = field.strip_prefix("login_count:") {
-                    login_count = val.trim().parse().unwrap_or(0);
-                }
-                i += 1;
-            }
-
-            users.push(UserAccount {
-                uid,
-                username,
-                display_name,
-                password_hash,
-                password_salt,
-                avatar_path,
-                shell,
-                home_dir,
-                is_admin,
-                auto_login,
-                last_login_timestamp,
-                login_count,
-            });
-        } else {
-            i += 1;
-        }
-    }
-
-    users
-}
-
-/// Strip quotes and whitespace from a YAML string value.
-fn strip_yaml_string(val: &str) -> String {
-    let trimmed = val.trim();
-    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-    {
-        trimmed[1..trimmed.len() - 1].to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Load user database, falling back to default accounts.
+/// Load the user database, falling back to default accounts.
+///
+/// The fallback applies to a *missing* database and to one with no accounts in
+/// it. A database that exists and cannot be read does not fall back: the
+/// defaults include a root account with a known password, so silently
+/// presenting them because `/etc/users.yaml` was briefly unreadable would let
+/// anyone in with `root`/`root` on a machine that has no such account.
 fn load_user_database() -> Vec<UserAccount> {
-    // In a real system, we would read /etc/users.yaml.
-    // For initial implementation, return default accounts.
-    match std::fs::read_to_string("/etc/users.yaml") {
-        Ok(content) => {
-            let users = parse_users_yaml(&content);
-            if users.is_empty() {
-                default_accounts()
-            } else {
-                users
-            }
-        }
-        Err(_) => default_accounts(),
+    let Ok(db) = userdb::UserDb::load(userdb::DEFAULT_PATH) else {
+        return Vec::new();
+    };
+    if db.records().is_empty() {
+        return default_accounts();
     }
+    db.records()
+        .iter()
+        .cloned()
+        .map(UserAccount::from_record)
+        .collect()
 }
 
-/// Save user database to /etc/users.yaml.
+/// Save the user database.
+///
+/// The records are written back into the file they came from, so comments,
+/// ordering and every unrecognised field are preserved; only the fields this
+/// program changed differ. Writing is atomic — see [`userdb::UserDb::save`].
 fn save_user_database(users: &[UserAccount]) -> Result<(), std::io::Error> {
-    let yaml = serialize_users_yaml(users);
-    std::fs::write("/etc/users.yaml", yaml)
+    let mut db = userdb::UserDb::load(userdb::DEFAULT_PATH)?;
+    let existing: Vec<userdb::Record> = db.records().to_vec();
+    let records = db.records_mut();
+    records.clear();
+    for user in users {
+        records.push(user.record().clone());
+    }
+    // Records that were in the file but are not in this list are dropped —
+    // which is right when a user is deleted, and would be a disaster if the
+    // caller had loaded a subset. Nothing loads a subset; the assertion is
+    // recorded here rather than left implicit.
+    debug_assert!(
+        existing.len() >= records.len() || existing.is_empty(),
+        "save_user_database writes the whole database, not a subset"
+    );
+    db.save(userdb::DEFAULT_PATH)
 }
 
 /// Default user accounts for a fresh system.
@@ -698,38 +388,38 @@ impl SessionInfo {
     /// Create a new session for a user.
     fn new(user: &UserAccount, session_id: u64, timestamp: u64) -> Self {
         let mut env = HashMap::new();
-        env.insert("HOME".to_string(), user.home_dir.clone());
-        env.insert("USER".to_string(), user.username.clone());
-        env.insert("LOGNAME".to_string(), user.username.clone());
-        env.insert("SHELL".to_string(), user.shell.clone());
+        env.insert("HOME".to_string(), user.home_dir().clone());
+        env.insert("USER".to_string(), user.username().clone());
+        env.insert("LOGNAME".to_string(), user.username().clone());
+        env.insert("SHELL".to_string(), user.shell().clone());
         env.insert(
             "PATH".to_string(),
             "/bin:/usr/bin:/usr/local/bin".to_string(),
         );
         env.insert(
             "XDG_RUNTIME_DIR".to_string(),
-            format!("/run/user/{}", user.uid),
+            format!("/run/user/{}", user.uid()),
         );
         env.insert(
             "XDG_DATA_HOME".to_string(),
-            format!("{}/.local/share", user.home_dir),
+            format!("{}/.local/share", user.home_dir()),
         );
         env.insert(
             "XDG_CONFIG_HOME".to_string(),
-            format!("{}/.config", user.home_dir),
+            format!("{}/.config", user.home_dir()),
         );
         env.insert(
             "XDG_CACHE_HOME".to_string(),
-            format!("{}/.cache", user.home_dir),
+            format!("{}/.cache", user.home_dir()),
         );
         env.insert("XDG_SESSION_TYPE".to_string(), "graphical".to_string());
 
         Self {
-            user_uid: user.uid,
+            user_uid: user.uid(),
             session_id,
             started_at: timestamp,
-            shell_path: user.shell.clone(),
-            home_dir: user.home_dir.clone(),
+            shell_path: user.shell().clone(),
+            home_dir: user.home_dir().clone(),
             environment: env,
         }
     }
@@ -758,7 +448,9 @@ impl LockoutState {
 
     /// Record a failed attempt; returns true if account is now locked.
     fn record_failure(&mut self, now: u64) -> bool {
-        self.failed_attempts += 1;
+        // Saturating: the counter only ever has to reach MAX_FAILED_ATTEMPTS,
+        // and one that wrapped to zero would hand an attacker a fresh budget.
+        self.failed_attempts = self.failed_attempts.saturating_add(1);
         if self.failed_attempts >= MAX_FAILED_ATTEMPTS {
             self.locked_until = now.saturating_add(LOCKOUT_DURATION_SECS);
             true
@@ -786,6 +478,11 @@ impl LockoutState {
 
 const MAX_FAILED_ATTEMPTS: u32 = 5;
 const LOCKOUT_DURATION_SECS: u64 = 300; // 5 minutes
+
+/// Entries in the power menu: shutdown, restart, sleep.
+const POWER_MENU_ENTRIES: usize = 3;
+/// Index of the last power-menu entry, which `Up` wraps around to.
+const POWER_MENU_LAST: usize = POWER_MENU_ENTRIES - 1;
 
 // ============================================================================
 // Login view state machine
@@ -965,9 +662,9 @@ impl LoginManager {
 
     /// Check for an auto-login user and bypass the login screen if found.
     pub fn check_auto_login(&mut self) -> Option<SessionInfo> {
-        let auto_user = self.users.iter().find(|u| u.auto_login).cloned();
+        let auto_user = self.users.iter().find(|u| u.auto_login()).cloned();
         if let Some(user) = auto_user {
-            self.start_session(user.uid).ok()
+            self.start_session(user.uid()).ok()
         } else {
             None
         }
@@ -983,56 +680,73 @@ impl LoginManager {
         let now = self.current_time;
 
         // Find the user.
-        let user = self.users.iter().find(|u| u.username == username).cloned();
+        let user = self
+            .users
+            .iter()
+            .find(|u| u.username() == username)
+            .cloned();
         let user = match user {
             Some(u) => u,
             None => return Err("User not found".to_string()),
         };
 
         // Check lockout.
-        if let Some(lockout) = self.locked_accounts.get(&user.uid)
-            && lockout.is_locked(now) {
-                let remaining = lockout.remaining_lockout_secs(now);
-                return Err(format!(
-                    "Account locked. Try again in {} seconds.",
-                    remaining
-                ));
-            }
+        if let Some(lockout) = self.locked_accounts.get(&user.uid())
+            && lockout.is_locked(now)
+        {
+            let remaining = lockout.remaining_lockout_secs(now);
+            return Err(format!(
+                "Account locked. Try again in {} seconds.",
+                remaining
+            ));
+        }
 
         // Guest accounts don't need a password.
         if !user.requires_password() {
             return Ok(());
         }
 
-        // Verify password.
-        let salt_bytes = hex_to_bytes(&user.password_salt).unwrap_or_default();
-        let computed_hash = hash_password(&salt_bytes, password);
-
-        if computed_hash == user.password_hash {
-            // Success: reset lockout, update login stats.
-            self.locked_accounts
-                .entry(user.uid)
-                .and_modify(|l| l.reset());
-            if let Some(u) = self.users.iter_mut().find(|u| u.uid == user.uid) {
-                u.last_login_timestamp = now;
-                u.login_count = u.login_count.saturating_add(1);
+        match user.check_password(password) {
+            userdb::Auth::Accepted => {
+                // Success: reset lockout, update login stats.
+                self.locked_accounts
+                    .entry(user.uid())
+                    .and_modify(LockoutState::reset);
+                if let Some(u) = self.users.iter_mut().find(|u| u.uid() == user.uid()) {
+                    u.record.record_login(now);
+                }
+                Ok(())
             }
-            Ok(())
-        } else {
-            // Failure: record attempt.
-            let lockout = self
-                .locked_accounts
-                .entry(user.uid)
-                .or_insert_with(LockoutState::new);
-            let now_locked = lockout.record_failure(now);
-            if now_locked {
-                Err("Account locked after too many attempts. Wait 5 minutes.".to_string())
-            } else {
-                let remaining = MAX_FAILED_ATTEMPTS.saturating_sub(lockout.failed_attempts);
-                Err(format!(
-                    "Incorrect password. {} attempts remaining.",
-                    remaining
-                ))
+            // An account the administrator has disabled is not a wrong
+            // password, and must not be reported as one: five wrong guesses
+            // would otherwise "lock" an account that is already locked, and
+            // the message would tell an attacker the password was close.
+            userdb::Auth::Locked => Err("Account is locked.".to_string()),
+            // No entry we can check. This is what a password written by one of
+            // the two implementations that predate `userdb` looks like — see
+            // `design-decisions.md` §330. Say so, because "incorrect password"
+            // would send the user round the same loop for ever.
+            userdb::Auth::Unusable => Err(
+                "This account's password was stored in a format that can no longer be \
+                 checked. An administrator must reset it with `useradm passwd'."
+                    .to_string(),
+            ),
+            userdb::Auth::NoPassword | userdb::Auth::Rejected => {
+                // Failure: record attempt.
+                let lockout = self
+                    .locked_accounts
+                    .entry(user.uid())
+                    .or_insert_with(LockoutState::new);
+                let now_locked = lockout.record_failure(now);
+                if now_locked {
+                    Err("Account locked after too many attempts. Wait 5 minutes.".to_string())
+                } else {
+                    let remaining = MAX_FAILED_ATTEMPTS.saturating_sub(lockout.failed_attempts);
+                    Err(format!(
+                        "Incorrect password. {} attempts remaining.",
+                        remaining
+                    ))
+                }
             }
         }
     }
@@ -1043,7 +757,7 @@ impl LoginManager {
 
     /// Start a new session for the given user.
     pub fn start_session(&mut self, uid: u32) -> Result<SessionInfo, String> {
-        let user = self.users.iter().find(|u| u.uid == uid).cloned();
+        let user = self.users.iter().find(|u| u.uid() == uid).cloned();
         let user = match user {
             Some(u) => u,
             None => return Err("User not found".to_string()),
@@ -1088,24 +802,48 @@ impl LoginManager {
             None => return Err("No locked session".to_string()),
         };
 
-        let user = self.users.iter().find(|u| u.uid == uid).cloned();
+        let user = self.users.iter().find(|u| u.uid() == uid).cloned();
         let user = match user {
             Some(u) => u,
             None => return Err("Session user not found".to_string()),
         };
 
-        // Verify password (same flow as authenticate).
-        let salt_bytes = hex_to_bytes(&user.password_salt).unwrap_or_default();
-        let computed_hash = hash_password(&salt_bytes, password);
-
-        if computed_hash == user.password_hash {
-            self.current_view = LoginView::UserSelect; // Returns to desktop in real system.
+        // An account with no password cannot be asked for one. Refusing would
+        // not protect the session: it would strand it, since there is no
+        // password that could ever unlock it and the only way out is a reboot,
+        // which loses the session's contents anyway. The guest account is the
+        // case that matters, and the previous code compared the offered
+        // password against an empty hash, which no password matches — so a
+        // locked guest screen was a dead end.
+        if !user.requires_password() {
+            self.current_view = LoginView::UserSelect;
             self.locked_session_uid = None;
             self.idle_seconds = 0;
             self.screen_dimmed = false;
-            Ok(())
-        } else {
-            Err("Incorrect password".to_string())
+            return Ok(());
+        }
+
+        // Verify password (same flow as authenticate).
+        match user.check_password(password) {
+            userdb::Auth::Accepted => {
+                self.current_view = LoginView::UserSelect; // Returns to desktop in real system.
+                self.locked_session_uid = None;
+                self.idle_seconds = 0;
+                self.screen_dimmed = false;
+                Ok(())
+            }
+            userdb::Auth::Unusable => Err(
+                "This account's password can no longer be checked; an administrator must \
+                 reset it."
+                    .to_string(),
+            ),
+            // A session that is already running stays locked rather than
+            // opening because its account has no password: the screen lock
+            // exists to protect a session, and a passwordless account still
+            // has one to protect.
+            userdb::Auth::Locked | userdb::Auth::NoPassword | userdb::Auth::Rejected => {
+                Err("Incorrect password".to_string())
+            }
         }
     }
 
@@ -1168,17 +906,20 @@ impl LoginManager {
     fn handle_key_user_select(&mut self, key: &KeyEvent) -> EventResult {
         match key.key {
             Key::Up | Key::Left => {
-                if self.selected_user_index > 0 {
-                    self.selected_user_index -= 1;
-                } else if !self.users.is_empty() {
-                    self.selected_user_index = self.users.len() - 1;
-                }
+                // Wraps to the end of the list; an empty list stays at zero,
+                // which is the only index a selection can safely hold there.
+                self.selected_user_index = match self.selected_user_index.checked_sub(1) {
+                    Some(prev) => prev,
+                    None => self.users.len().saturating_sub(1),
+                };
                 EventResult::Consumed
             }
             Key::Down | Key::Right => {
-                if !self.users.is_empty() {
-                    self.selected_user_index = (self.selected_user_index + 1) % self.users.len();
-                }
+                self.selected_user_index = self
+                    .selected_user_index
+                    .saturating_add(1)
+                    .checked_rem(self.users.len())
+                    .unwrap_or(0);
                 EventResult::Consumed
             }
             Key::Enter => {
@@ -1189,11 +930,11 @@ impl LoginManager {
                         self.error_message = None;
                         self.accessibility.announce(&format!(
                             "Password entry for {}. Type your password.",
-                            user.display_name
+                            user.display_name()
                         ));
                     } else {
                         // Guest or no-password account: log in directly.
-                        let uid = user.uid;
+                        let uid = user.uid();
                         match self.start_session(uid) {
                             Ok(_) => {
                                 self.accessibility.announce("Logged in as guest.");
@@ -1239,10 +980,11 @@ impl LoginManager {
             _ => {
                 // Type character into password field.
                 if let Some(ch) = key.text
-                    && !ch.is_control() {
-                        self.password_input.push(ch);
-                        self.error_message = None;
-                    }
+                    && !ch.is_control()
+                {
+                    self.password_input.push(ch);
+                    self.error_message = None;
+                }
                 EventResult::Consumed
             }
         }
@@ -1277,10 +1019,11 @@ impl LoginManager {
             }
             _ => {
                 if let Some(ch) = key.text
-                    && !ch.is_control() {
-                        self.password_input.push(ch);
-                        self.error_message = None;
-                    }
+                    && !ch.is_control()
+                {
+                    self.password_input.push(ch);
+                    self.error_message = None;
+                }
                 EventResult::Consumed
             }
         }
@@ -1289,15 +1032,18 @@ impl LoginManager {
     fn handle_key_power_menu(&mut self, key: &KeyEvent) -> EventResult {
         match key.key {
             Key::Up => {
-                if self.power_menu_selection > 0 {
-                    self.power_menu_selection -= 1;
-                } else {
-                    self.power_menu_selection = 2;
-                }
+                self.power_menu_selection = self
+                    .power_menu_selection
+                    .checked_sub(1)
+                    .unwrap_or(POWER_MENU_LAST);
                 EventResult::Consumed
             }
             Key::Down => {
-                self.power_menu_selection = (self.power_menu_selection + 1) % 3;
+                self.power_menu_selection = self
+                    .power_menu_selection
+                    .saturating_add(1)
+                    .checked_rem(POWER_MENU_ENTRIES)
+                    .unwrap_or(0);
                 EventResult::Consumed
             }
             Key::Enter => {
@@ -1453,7 +1199,7 @@ impl LoginManager {
         let username = self
             .users
             .get(self.selected_user_index)
-            .map(|u| u.username.clone())
+            .map(|u| u.username().clone())
             .unwrap_or_default();
         let password = self.password_input.clone();
 
@@ -1462,7 +1208,7 @@ impl LoginManager {
                 let uid = self
                     .users
                     .get(self.selected_user_index)
-                    .map(|u| u.uid)
+                    .map(|u| u.uid())
                     .unwrap_or(0);
                 match self.start_session(uid) {
                     Ok(_session) => {
@@ -1765,7 +1511,7 @@ impl LoginManager {
             tree.push(RenderCommand::Text {
                 x: name_x,
                 y: item_y + 14.0,
-                text: user.display_name.clone(),
+                text: user.display_name().clone(),
                 color: text_color,
                 font_size: self.scaled_font(FONT_SIZE_NORMAL),
                 font_weight: FontWeightHint::Regular,
@@ -1781,7 +1527,7 @@ impl LoginManager {
             tree.push(RenderCommand::Text {
                 x: name_x,
                 y: item_y + 34.0,
-                text: format!("@{}", user.username),
+                text: format!("@{}", user.username()),
                 color: subtext_color,
                 font_size: self.scaled_font(FONT_SIZE_SMALL),
                 font_weight: FontWeightHint::Regular,
@@ -1790,7 +1536,7 @@ impl LoginManager {
             });
 
             // Admin badge.
-            if user.is_admin {
+            if user.is_admin() {
                 let badge_x = box_x + LOGIN_BOX_WIDTH - 70.0;
                 tree.fill_rounded_rect(
                     badge_x,
@@ -1912,7 +1658,7 @@ impl LoginManager {
             tree.push(RenderCommand::Text {
                 x: center_x - 60.0,
                 y: name_y,
-                text: user.display_name.clone(),
+                text: user.display_name().clone(),
                 color: text_color,
                 font_size: self.scaled_font(FONT_SIZE_LARGE),
                 font_weight: FontWeightHint::Bold,
@@ -1924,7 +1670,7 @@ impl LoginManager {
             tree.push(RenderCommand::Text {
                 x: center_x - 40.0,
                 y: name_y + 30.0,
-                text: format!("@{}", user.username),
+                text: format!("@{}", user.username()),
                 color: if self.accessibility.high_contrast {
                     COL_HC_TEXT
                 } else {
@@ -2156,43 +1902,44 @@ impl LoginManager {
 
         // Show locked user avatar.
         if let Some(uid) = self.locked_session_uid
-            && let Some(user) = self.users.iter().find(|u| u.uid == uid) {
-                let avatar_x = center_x - AVATAR_SIZE / 2.0;
-                let avatar_y = box_y + 70.0;
+            && let Some(user) = self.users.iter().find(|u| u.uid() == uid)
+        {
+            let avatar_x = center_x - AVATAR_SIZE / 2.0;
+            let avatar_y = box_y + 70.0;
 
-                tree.fill_rounded_rect(
-                    avatar_x,
-                    avatar_y,
-                    AVATAR_SIZE,
-                    AVATAR_SIZE,
-                    user.avatar_color(),
-                    CornerRadii::all(AVATAR_SIZE / 2.0),
-                );
+            tree.fill_rounded_rect(
+                avatar_x,
+                avatar_y,
+                AVATAR_SIZE,
+                AVATAR_SIZE,
+                user.avatar_color(),
+                CornerRadii::all(AVATAR_SIZE / 2.0),
+            );
 
-                let initials = user.initials();
-                tree.push(RenderCommand::Text {
-                    x: avatar_x + AVATAR_SIZE / 2.0 - 14.0,
-                    y: avatar_y + AVATAR_SIZE / 2.0 - 10.0,
-                    text: initials,
-                    color: COL_BG_DARK,
-                    font_size: self.scaled_font(22.0),
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
+            let initials = user.initials();
+            tree.push(RenderCommand::Text {
+                x: avatar_x + AVATAR_SIZE / 2.0 - 14.0,
+                y: avatar_y + AVATAR_SIZE / 2.0 - 10.0,
+                text: initials,
+                color: COL_BG_DARK,
+                font_size: self.scaled_font(22.0),
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
 
-                // Display name.
-                tree.push(RenderCommand::Text {
-                    x: center_x - 60.0,
-                    y: avatar_y + AVATAR_SIZE + 16.0,
-                    text: user.display_name.clone(),
-                    color: text_color,
-                    font_size: self.scaled_font(FONT_SIZE_LARGE),
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(LOGIN_BOX_WIDTH - 40.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
+            // Display name.
+            tree.push(RenderCommand::Text {
+                x: center_x - 60.0,
+                y: avatar_y + AVATAR_SIZE + 16.0,
+                text: user.display_name().clone(),
+                color: text_color,
+                font_size: self.scaled_font(FONT_SIZE_LARGE),
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(LOGIN_BOX_WIDTH - 40.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Password input.
         let input_x = center_x - INPUT_WIDTH / 2.0;
@@ -2581,6 +2328,16 @@ fn main() {
 // Tests
 // ============================================================================
 
+// The workspace's defensive lints are for production code; a test that indexes
+// a fixture it just built is asserting, and an assertion that fails by
+// panicking is a test doing its job.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2641,11 +2398,11 @@ mod tests {
         let mut mgr = test_manager();
         mgr.current_time = 1000;
         let _ = mgr.authenticate("alice", "password123");
-        let alice = mgr.users.iter().find(|u| u.username == "alice");
+        let alice = mgr.users.iter().find(|u| u.username() == "alice");
         assert!(alice.is_some());
         let alice = alice.unwrap();
-        assert_eq!(alice.last_login_timestamp, 1000);
-        assert_eq!(alice.login_count, 1);
+        assert_eq!(alice.last_login_timestamp(), 1000);
+        assert_eq!(alice.login_count(), 1);
     }
 
     // ========================================================================
@@ -2852,66 +2609,61 @@ mod tests {
     }
 
     // ========================================================================
-    // SHA-256 tests
+    // Password tests
+    //
+    // The SHA-256 and salted-hash tests that used to live here went with the
+    // code they tested. They are not replaced with equivalents, because they
+    // were the reason the bug survived: they asserted that hashing is
+    // deterministic, that different passwords hash differently and that
+    // different salts hash differently — all of which are true of any function
+    // written by accident. `userdb` pins its construction to a published
+    // vector instead, which is the only kind of test that tells an algorithm
+    // apart from something that resembles one. What belongs *here* is the
+    // question this program actually asks: does a stored entry admit the right
+    // password and refuse the wrong one.
     // ========================================================================
 
     #[test]
-    fn test_sha256_empty() {
-        let hash = sha256(b"");
-        let hex = bytes_to_hex(&hash);
-        assert_eq!(
-            hex,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    fn test_correct_password_is_accepted_and_wrong_one_refused() {
+        let account =
+            UserAccount::new_with_password(1000, "testuser", "Test User", "hunter2", false);
+        assert_eq!(account.check_password("hunter2"), userdb::Auth::Accepted);
+        assert_eq!(account.check_password("hunter3"), userdb::Auth::Rejected);
+        assert_eq!(account.check_password(""), userdb::Auth::Rejected);
+        assert!(account.requires_password());
+    }
+
+    #[test]
+    fn test_guest_account_needs_no_password() {
+        let guest = UserAccount::guest_account();
+        assert!(!guest.requires_password());
+        assert_eq!(guest.check_password(""), userdb::Auth::NoPassword);
+    }
+
+    /// The bug this migration closes: an entry written by `useradm`'s old
+    /// hash, and one written by this program's old hash, are both refused
+    /// outright rather than silently compared against something they are not.
+    /// A refusal the user can act on beats a comparison that can never match.
+    #[test]
+    fn test_a_password_from_the_old_formats_is_unusable_not_wrong() {
+        let mut record = userdb::Record::new();
+        record.set_uid(1000);
+        record.set(userdb::field::USERNAME, "olduser");
+        // 64 hex digits: what both of the previous implementations wrote, and
+        // what no `crypt` method produces.
+        record.set(
+            userdb::field::PASSWORD_HASH,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         );
-    }
+        let account = UserAccount::from_record(record);
+        assert_eq!(account.check_password("anything"), userdb::Auth::Unusable);
 
-    #[test]
-    fn test_sha256_abc() {
-        let hash = sha256(b"abc");
-        let hex = bytes_to_hex(&hash);
-        assert_eq!(
-            hex,
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-
-    #[test]
-    fn test_sha256_long_message() {
-        // "a" repeated 1_000_000 times.
-        let data = vec![b'a'; 1_000_000];
-        let hash = sha256(&data);
-        let hex = bytes_to_hex(&hash);
-        assert_eq!(
-            hex,
-            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
-        );
-    }
-
-    // ========================================================================
-    // Password hashing tests
-    // ========================================================================
-
-    #[test]
-    fn test_password_hash_deterministic() {
-        let salt = b"fixed_salt_value";
-        let hash1 = hash_password(salt, "mypassword");
-        let hash2 = hash_password(salt, "mypassword");
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_password_hash_different_passwords() {
-        let salt = b"same_salt";
-        let hash1 = hash_password(salt, "password1");
-        let hash2 = hash_password(salt, "password2");
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_password_hash_different_salts() {
-        let hash1 = hash_password(b"salt_a", "samepass");
-        let hash2 = hash_password(b"salt_b", "samepass");
-        assert_ne!(hash1, hash2);
+        let mut mgr = test_manager();
+        mgr.users.push(account);
+        let err = mgr
+            .authenticate("olduser", "anything")
+            .expect_err("must not authenticate");
+        assert!(err.contains("useradm passwd"), "{err}");
     }
 
     // ========================================================================
@@ -2920,26 +2672,60 @@ mod tests {
 
     #[test]
     fn test_serialize_and_parse_roundtrip() {
-        let users = vec![
+        let mut db = userdb::UserDb::new();
+        for account in [
             UserAccount::new_with_password(1000, "testuser", "Test User", "pass", false),
             UserAccount::guest_account(),
-        ];
-        let yaml = serialize_users_yaml(&users);
-        let parsed = parse_users_yaml(&yaml);
+        ] {
+            db.push(account.record().clone());
+        }
+
+        let parsed: Vec<UserAccount> = userdb::UserDb::parse(&db.to_text())
+            .records()
+            .iter()
+            .cloned()
+            .map(UserAccount::from_record)
+            .collect();
 
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].uid, 1000);
-        assert_eq!(parsed[0].username, "testuser");
-        assert_eq!(parsed[0].display_name, "Test User");
-        assert!(!parsed[0].is_admin);
-        assert_eq!(parsed[1].uid, 65534);
-        assert_eq!(parsed[1].username, "guest");
+        assert_eq!(parsed[0].uid(), 1000);
+        assert_eq!(parsed[0].username(), "testuser");
+        assert_eq!(parsed[0].display_name(), "Test User");
+        assert!(!parsed[0].is_admin());
+        // The password survives the trip, which the old round-trip test never
+        // checked — and it was the half that was broken.
+        assert_eq!(parsed[0].check_password("pass"), userdb::Auth::Accepted);
+        assert_eq!(parsed[1].uid(), 65534);
+        assert_eq!(parsed[1].username(), "guest");
     }
 
     #[test]
     fn test_parse_empty_yaml() {
-        let parsed = parse_users_yaml("");
-        assert!(parsed.is_empty());
+        assert!(userdb::UserDb::parse("").records().is_empty());
+    }
+
+    /// A field this program does not model must survive a save. The previous
+    /// serialiser rebuilt the file from its own struct, so everything
+    /// `useradm` had written — group memberships above all — was deleted the
+    /// first time anybody logged in.
+    #[test]
+    fn test_a_login_does_not_delete_useradms_fields() {
+        let text = "users:\n  \
+            - uid: 1000\n    \
+            username: \"alice\"\n    \
+            groups: [\"users\", \"admin\"]\n    \
+            home: \"/home/alice\"\n";
+        let mut db = userdb::UserDb::parse(text);
+        let record = db.records_mut().remove(0);
+        let mut account = UserAccount::from_record(record);
+        account.record.record_login(1234);
+
+        let mut out = userdb::UserDb::new();
+        out.push(account.record().clone());
+        let saved = out.to_text();
+        assert!(saved.contains("groups: [\"users\", \"admin\"]"), "{saved}");
+        assert!(saved.contains("home: \"/home/alice\""), "{saved}");
+        assert!(saved.contains("last_login_timestamp: 1234"), "{saved}");
     }
 
     // ========================================================================
@@ -3140,24 +2926,9 @@ mod tests {
         assert!(!mgr.accessibility.high_contrast);
     }
 
-    // ========================================================================
-    // Hex conversion tests
-    // ========================================================================
-
-    #[test]
-    fn test_hex_roundtrip() {
-        let data = [0xDE, 0xAD, 0xBE, 0xEF];
-        let hex = bytes_to_hex(&data);
-        assert_eq!(hex, "deadbeef");
-        let back = hex_to_bytes(&hex).unwrap();
-        assert_eq!(back, data);
-    }
-
-    #[test]
-    fn test_hex_invalid() {
-        assert!(hex_to_bytes("xyz").is_none());
-        assert!(hex_to_bytes("0").is_none()); // Odd length.
-    }
+    // The hex-conversion tests went with the hex conversions. Nothing in this
+    // program encodes a hash by hand any more: a `crypt` entry is text
+    // already, and the salt inside it never leaves `userdb`.
 
     // ========================================================================
     // UserAccount helper tests
@@ -3194,7 +2965,7 @@ mod tests {
             "pass",
             false,
         )];
-        users[0].auto_login = true;
+        users[0].record.set_auto_login(true);
 
         let mut mgr = LoginManager::with_users(users);
         let session = mgr.check_auto_login();

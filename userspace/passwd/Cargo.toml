@@ -3,4 +3,12 @@ name = "passwd"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS password management utility"
+
+# The libc's `crypt(3)`. `passwd`, `login` and `chpasswd` read and write the
+# same `/etc/shadow`, and while each implemented the hash format itself they
+# disagreed: a password set here could not be used to log in. The format now
+# has exactly one implementation, and this dependency is what makes that true
+# rather than aspirational. See
+# `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
 [dependencies]
+posix = { path = "../../posix" }

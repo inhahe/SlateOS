@@ -69,6 +69,9 @@
 //! because it only writes the x87+SSE header (modified bits tracking).
 
 use crate::serial_println;
+use alloc::alloc::{alloc_zeroed, handle_alloc_error};
+use alloc::boxed::Box;
+use core::alloc::Layout;
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -188,40 +191,106 @@ impl FpuState {
     ///
     /// This is the state a new task starts with — equivalent to the
     /// hardware state after FNINIT + LDMXCSR(0x1F80).
+    /// Prefer [`new_default_boxed`](Self::new_default_boxed) on any path that
+    /// is going to store the result on the heap: this one returns 4096 bytes
+    /// by value, and in an unoptimised build every move of that value is a
+    /// real 4 KiB stack copy.
+    ///
+    /// Its remaining callers are the round-trip self-tests below, which
+    /// genuinely want a stack-local save area to compare against — that is the
+    /// case this constructor is still the right one for.
     #[must_use]
     pub fn new_default() -> Self {
         let mut state = Self {
             data: [0u8; MAX_XSAVE_AREA as usize],
         };
+        state.write_defaults();
+        state
+    }
 
+    /// Create a clean initial FPU state **directly on the heap**, without ever
+    /// materialising one on the stack.
+    ///
+    /// This exists because [`new_default`](Self::new_default) returns 4096
+    /// bytes *by value*, and at `opt-level = 0` — the profile
+    /// `scripts/boot-test.sh` builds by default — none of the moves that
+    /// follow are elided.  Measured on the debug kernel with
+    /// `build/stackframes.py`, the spawn path cost:
+    ///
+    /// | Frame | Bytes |
+    /// |---|---|
+    /// | `FpuState::new_default` | 8320 |
+    /// | `Task::new_kernel` | 9600 |
+    /// | `sched::spawn_inner::{{closure}}` | 22720 |
+    /// | **total** | **40640** |
+    ///
+    /// — against a 64 KiB task stack, which is what drove the intermittent
+    /// stack-canary halts (`known-issues.md`,
+    /// `A-INTERMITTENT-STACK-CANARY-HALT-AT-REAP-TIME`).  `Box::new(
+    /// FpuState::new_default())` does **not** fix that: it still builds the
+    /// value in the caller's frame and then copies it to the heap.  Allocating
+    /// zeroed memory and patching it in place is the only form that keeps the
+    /// 4 KiB off the stack entirely.
+    ///
+    /// `alloc_zeroed` is also the right primitive on its own merits — the
+    /// default state is 4096 zero bytes with 14 non-zero ones patched over it,
+    /// so the allocator can hand back an already-zeroed page and skip the
+    /// memset.
+    #[must_use]
+    pub fn new_default_boxed() -> Box<Self> {
+        let layout = Layout::new::<Self>();
+        // SAFETY: `Layout::new::<Self>()` has non-zero size (4096) and an
+        // alignment of 64 that the global allocator honours, so `alloc_zeroed`
+        // is being called with a valid layout.
+        let ptr = unsafe { alloc_zeroed(layout) }.cast::<Self>();
+        if ptr.is_null() {
+            handle_alloc_error(layout);
+        }
+        // SAFETY: `ptr` is non-null, freshly allocated with exactly `Self`'s
+        // layout, and zeroed.  An all-zero `FpuState` is a valid `FpuState` —
+        // the type is a plain `[u8; 4096]` — so the value is initialised
+        // before this reference is created, and nothing else aliases it.
+        let state = unsafe { &mut *ptr };
+        state.write_defaults();
+        // SAFETY: `ptr` came from the global allocator with `Self`'s layout and
+        // is now a fully initialised, uniquely-owned `Self`, which is exactly
+        // `Box::from_raw`'s requirement.
+        unsafe { Box::from_raw(ptr) }
+    }
+
+    /// Patch the non-zero fields of an otherwise-zeroed save area.
+    ///
+    /// Shared by [`new_default`](Self::new_default) and
+    /// [`new_default_boxed`](Self::new_default_boxed) so the two cannot drift
+    /// apart — a task whose initial FPU state depended on which constructor
+    /// built it would be a genuinely horrible bug to track down.
+    fn write_defaults(&mut self) {
         // Set FCW at offset 0 (16-bit little-endian).
         let fcw_bytes = DEFAULT_FCW.to_le_bytes();
-        state.data[FCW_OFFSET] = fcw_bytes[0];
-        state.data[FCW_OFFSET + 1] = fcw_bytes[1];
+        self.data[FCW_OFFSET] = fcw_bytes[0];
+        self.data[FCW_OFFSET + 1] = fcw_bytes[1];
 
         // Set MXCSR at offset 24 (32-bit little-endian).
         let mxcsr_bytes = DEFAULT_MXCSR.to_le_bytes();
-        state.data[MXCSR_OFFSET] = mxcsr_bytes[0];
-        state.data[MXCSR_OFFSET + 1] = mxcsr_bytes[1];
-        state.data[MXCSR_OFFSET + 2] = mxcsr_bytes[2];
-        state.data[MXCSR_OFFSET + 3] = mxcsr_bytes[3];
+        self.data[MXCSR_OFFSET] = mxcsr_bytes[0];
+        self.data[MXCSR_OFFSET + 1] = mxcsr_bytes[1];
+        self.data[MXCSR_OFFSET + 2] = mxcsr_bytes[2];
+        self.data[MXCSR_OFFSET + 3] = mxcsr_bytes[3];
 
         // For XSAVE: set XSTATE_BV in the XSAVE header (offset 512, 8 bytes).
         // This tells XRSTOR which state components are valid in this image.
         // We mark x87 + SSE as initialized (the minimum valid set).
         if strategy() != SaveStrategy::Fxsave {
             let xstate_bv = (XCR0_X87 | XCR0_SSE).to_le_bytes();
-            state.data[512] = xstate_bv[0];
-            state.data[513] = xstate_bv[1];
-            state.data[514] = xstate_bv[2];
-            state.data[515] = xstate_bv[3];
-            state.data[516] = xstate_bv[4];
-            state.data[517] = xstate_bv[5];
-            state.data[518] = xstate_bv[6];
-            state.data[519] = xstate_bv[7];
+            self.data[512] = xstate_bv[0];
+            self.data[513] = xstate_bv[1];
+            self.data[514] = xstate_bv[2];
+            self.data[515] = xstate_bv[3];
+            self.data[516] = xstate_bv[4];
+            self.data[517] = xstate_bv[5];
+            self.data[518] = xstate_bv[6];
+            self.data[519] = xstate_bv[7];
         }
-
-        state
     }
 
     /// Get a raw pointer to the save area.

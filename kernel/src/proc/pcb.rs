@@ -1626,13 +1626,18 @@ pub fn fork_create(
     ) = {
         let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
         let cloned_fd_table = parent.linux_fd_table.as_ref().map(|t| {
-            let mut copy = super::linux_fd::KernelFdTable::new();
+            // `new_boxed` rather than `Box::new(KernelFdTable::new())`: the
+            // table is 8192 bytes, and the by-value form materialises all of
+            // it in this frame before copying it to the heap.  fork runs on a
+            // 64 KiB task stack and this closure was already measured at
+            // 16624 bytes -- see `KernelFdTable::new_boxed`.
+            let mut copy = super::linux_fd::KernelFdTable::new_boxed();
             for (fd, entry) in t.open_entries() {
                 // install_at on a fresh table cannot fail for fds in
                 // range [0, MAX_FDS); the iterator only yields those.
                 let _ = copy.install_at(fd, entry);
             }
-            alloc::boxed::Box::new(copy)
+            copy
         });
         // SCHED_RESET_ON_FORK (Linux v6.6 `__sched_fork`): a child never
         // inherits the flag, and a parent that had it set forces the
@@ -6115,11 +6120,16 @@ pub fn set_abi_mode(pid: ProcessId, mode: AbiMode) -> KernelResult<()> {
 /// - [`KernelError::NoSuchProcess`] if `pid` does not refer to a
 ///   live process.
 pub fn linux_fd_install_stdio(pid: ProcessId) -> KernelResult<()> {
+    // Built before the lock, and built *on the heap*, for two separate
+    // reasons.  Before: PROCESS_TABLE is a spinlock, and allocating under one
+    // holds it across the heap lock (and, on growth, the frame allocator and
+    // page tables).  On the heap: the table is 8192 bytes, so the by-value
+    // `Box::new(KernelFdTable::with_stdio())` put all of it in this frame
+    // first -- measured at 8336 bytes.
+    let fds = super::linux_fd::KernelFdTable::with_stdio_boxed();
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
-    proc.linux_fd_table = Some(alloc::boxed::Box::new(
-        super::linux_fd::KernelFdTable::with_stdio(),
-    ));
+    proc.linux_fd_table = Some(fds);
     Ok(())
 }
 

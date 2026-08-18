@@ -85682,8 +85682,8 @@ fn cmd_firewall(args: &str) {
                         "Matches"
                     );
                     for rs in rule_stats.iter().take(count) {
-                        let src =
-                            core::str::from_utf8(&rs.source[..rs.source_len as usize]).unwrap_or("?");
+                        let src = core::str::from_utf8(&rs.source[..rs.source_len as usize])
+                            .unwrap_or("?");
                         let port_str = if rs.dst_port == 0 {
                             alloc::string::String::from("any")
                         } else {
@@ -85725,8 +85725,8 @@ fn cmd_firewall(args: &str) {
                         "Matches"
                     );
                     for rs in rule_stats.iter().take(count) {
-                        let src =
-                            core::str::from_utf8(&rs.source[..rs.source_len as usize]).unwrap_or("?");
+                        let src = core::str::from_utf8(&rs.source[..rs.source_len as usize])
+                            .unwrap_or("?");
                         let port_str = if rs.dst_port == 0 {
                             alloc::string::String::from("any")
                         } else {
@@ -87537,7 +87537,8 @@ fn cmd_container(args: &str) {
                 // A container must satisfy ALL given filters (AND semantics). Note
                 // this is slightly stricter than Docker for repeated same-key
                 // filters (Docker ORs those), but it is simple and predictable.
-                let mut label_filters: alloc::vec::Vec<(&str, Option<&str>)> = alloc::vec::Vec::new();
+                let mut label_filters: alloc::vec::Vec<(&str, Option<&str>)> =
+                    alloc::vec::Vec::new();
                 let mut name_filters: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
                 let mut status_filters: alloc::vec::Vec<container::ContainerState> =
                     alloc::vec::Vec::new();
@@ -87667,10 +87668,14 @@ fn cmd_container(args: &str) {
                     container::labels_match(&ci.labels, &label_filters)
                 };
 
-                let mut shown: alloc::vec::Vec<&(container::ContainerId, alloc::string::String, _)> =
-                    all.iter()
-                        .filter(|(id, name, state)| matches(*id, name, *state))
-                        .collect();
+                let mut shown: alloc::vec::Vec<&(
+                    container::ContainerId,
+                    alloc::string::String,
+                    _,
+                )> = all
+                    .iter()
+                    .filter(|(id, name, state)| matches(*id, name, *state))
+                    .collect();
                 // Order newest-first by creation sequence (Docker `ps` lists the
                 // most recently created container at the top). `-n N`/`-l` then
                 // keeps only the first N of that order.
@@ -87777,7 +87782,9 @@ fn cmd_container(args: &str) {
                     } else if let Some(val) = arg.strip_prefix("net=") {
                         // net=10.88.0.2 or net=10.88.0.2,gw=10.88.0.1,dns=8.8.8.8
                         let net_parts: alloc::vec::Vec<&str> = val.split(',').collect();
-                        if let Some(ip) = parse_ipv4_octets(net_parts.first().copied().unwrap_or("")) {
+                        if let Some(ip) =
+                            parse_ipv4_octets(net_parts.first().copied().unwrap_or(""))
+                        {
                             cfg.net_ip = Some(ip);
                             cfg.net_mask = Some([255, 255, 255, 0]); // default /24
                             for &part in net_parts.iter().skip(1) {
@@ -88489,9 +88496,14 @@ fn cmd_container(args: &str) {
                     };
                     match container::kill(id) {
                         Ok(0) => {
-                            crate::console_println!("Container {}: no running processes to kill", id)
+                            crate::console_println!(
+                                "Container {}: no running processes to kill",
+                                id
+                            )
                         }
-                        Ok(n) => crate::console_println!("Container {}: killed {} process(es)", id, n),
+                        Ok(n) => {
+                            crate::console_println!("Container {}: killed {} process(es)", id, n)
+                        }
                         Err(e) => crate::console_println!("Container {}: Error: {:?}", id, e),
                     }
                 }
@@ -88757,7 +88769,9 @@ fn cmd_container(args: &str) {
                 // is a container reference of the form `ID:/path`; the other is a
                 // plain host VFS path.
                 let (Some(&src), Some(&dst)) = (parts.get(1), parts.get(2)) else {
-                    crate::console_println!("Usage: container cp <src> <dest>  (one side is ID:/path)");
+                    crate::console_println!(
+                        "Usage: container cp <src> <dest>  (one side is ID:/path)"
+                    );
                     return;
                 };
                 // Parse "ID:/path" into (id, path); a plain host path yields None.
@@ -88801,7 +88815,11 @@ fn cmd_container(args: &str) {
                                         dst
                                     ),
                                     Err(e) => {
-                                        crate::console_println!("Failed to write '{}': {:?}", dst, e)
+                                        crate::console_println!(
+                                            "Failed to write '{}': {:?}",
+                                            dst,
+                                            e
+                                        )
                                     }
                                 },
                                 Err(e) => crate::console_println!("Error: {:?}", e),
@@ -88816,7 +88834,8 @@ fn cmd_container(args: &str) {
                             Ok(meta) if meta.entry_type == EntryType::Directory => {
                                 match container::tar_tree(src) {
                                     Ok(archive) => {
-                                        match container::copy_dir_to_container(id, &cpath, &archive) {
+                                        match container::copy_dir_to_container(id, &cpath, &archive)
+                                        {
                                             Ok(()) => crate::console_println!(
                                                 "Copied directory {} -> {}:{} ({} bytes archived)",
                                                 src,
@@ -88828,7 +88847,11 @@ fn cmd_container(args: &str) {
                                         }
                                     }
                                     Err(e) => {
-                                        crate::console_println!("Failed to archive '{}': {:?}", src, e)
+                                        crate::console_println!(
+                                            "Failed to archive '{}': {:?}",
+                                            src,
+                                            e
+                                        )
                                     }
                                 }
                             }
@@ -88843,7 +88866,9 @@ fn cmd_container(args: &str) {
                                     ),
                                     Err(e) => crate::console_println!("Error: {:?}", e),
                                 },
-                                Err(e) => crate::console_println!("Failed to read '{}': {:?}", src, e),
+                                Err(e) => {
+                                    crate::console_println!("Failed to read '{}': {:?}", src, e)
+                                }
                             },
                             Err(e) => crate::console_println!("Failed to stat '{}': {:?}", src, e),
                         }
@@ -88912,7 +88937,11 @@ fn cmd_container(args: &str) {
                     return;
                 };
                 if !matches!(ci.state, container::ContainerState::Running) {
-                    crate::console_println!("Container {} is not running (state: {:?})", id, ci.state);
+                    crate::console_println!(
+                        "Container {} is not running (state: {:?})",
+                        id,
+                        ci.state
+                    );
                     return;
                 }
 
@@ -88987,7 +89016,11 @@ fn cmd_container(args: &str) {
                             .filter(|n| !n.allocations.is_empty())
                             .count();
                         crate::console_println!("TYPE            TOTAL     ACTIVE    SIZE");
-                        crate::console_println!("Containers      {:<9} {:<9} -", total_ct, running_ct);
+                        crate::console_println!(
+                            "Containers      {:<9} {:<9} -",
+                            total_ct,
+                            running_ct
+                        );
                         crate::console_println!(
                             "Volumes         {:<9} {:<9} {}",
                             vols.len(),
@@ -89047,7 +89080,9 @@ fn cmd_container(args: &str) {
                             archive.len(),
                             out_path
                         ),
-                        Err(e) => crate::console_println!("Failed to write '{}': {:?}", out_path, e),
+                        Err(e) => {
+                            crate::console_println!("Failed to write '{}': {:?}", out_path, e)
+                        }
                     },
                     Err(e) => crate::console_println!("Error: {:?}", e),
                 }
@@ -89093,7 +89128,9 @@ fn cmd_container(args: &str) {
                 let (Some(id_str), Some(&new_name), Some(&dest_dir)) =
                     (parts.get(1), parts.get(2), parts.get(3))
                 else {
-                    crate::console_println!("Usage: container commit <src-id> <new-name> <rootfs-dir>");
+                    crate::console_println!(
+                        "Usage: container commit <src-id> <new-name> <rootfs-dir>"
+                    );
                     return;
                 };
                 let Ok(src) = id_str.parse::<u32>() else {
@@ -89172,13 +89209,14 @@ fn cmd_container(args: &str) {
                                     // final line; trim it before splitting, then
                                     // keep the last N lines.
                                     let trimmed = text.strip_suffix('\n').unwrap_or(text);
-                                    let lines: alloc::vec::Vec<&str> = trimmed.split('\n').collect();
+                                    let lines: alloc::vec::Vec<&str> =
+                                        trimmed.split('\n').collect();
                                     let start = lines.len().saturating_sub(n);
                                     lines.get(start..).unwrap_or(&[]).join("\n")
                                 }
-                                None => {
-                                    alloc::string::String::from(text.strip_suffix('\n').unwrap_or(text))
-                                }
+                                None => alloc::string::String::from(
+                                    text.strip_suffix('\n').unwrap_or(text),
+                                ),
                             };
                             if !out.is_empty() {
                                 crate::console::write_str(&out);
@@ -89401,8 +89439,12 @@ fn cmd_container(args: &str) {
                 crate::console_println!(
                     "  container restart ID [ID...]             — re-launch the recorded init command"
                 );
-                crate::console_println!("  container start ID [ID...]               — mark as running");
-                crate::console_println!("  container stop ID [ID...]                — mark as stopped");
+                crate::console_println!(
+                    "  container start ID [ID...]               — mark as running"
+                );
+                crate::console_println!(
+                    "  container stop ID [ID...]                — mark as stopped"
+                );
                 crate::console_println!(
                     "  container kill ID [ID...]                — force-kill all container processes"
                 );
@@ -89475,7 +89517,9 @@ fn cmd_container(args: &str) {
                 crate::console_println!(
                     "  container diff ID                        — list rootfs changes vs image (A/C/D)"
                 );
-                crate::console_println!("  container test                           — run self-test");
+                crate::console_println!(
+                    "  container test                           — run self-test"
+                );
                 crate::console_println!();
                 crate::console_println!("Aliases: ct");
             }
@@ -90330,10 +90374,7 @@ impl<'a> OciRunFlags<'a> {
                         // reject it rather than silently pass an empty var.
                         if let Some((key, _)) = spec.split_once('=') {
                             if key.is_empty() {
-                                crate::console_println!(
-                                    "[oci] Ignoring env '{}': empty key",
-                                    spec
-                                );
+                                crate::console_println!("[oci] Ignoring env '{}': empty key", spec);
                             } else {
                                 extra_env.push(spec);
                             }
@@ -90629,10 +90670,7 @@ impl<'a> OciRunFlags<'a> {
                             None => (spec, ""),
                         };
                         if key.is_empty() {
-                            crate::console_println!(
-                                "[oci] Ignoring label '{}': empty key",
-                                spec
-                            );
+                            crate::console_println!("[oci] Ignoring label '{}': empty key", spec);
                         } else {
                             labels.push((key, value));
                         }
@@ -90781,7 +90819,8 @@ fn cmd_oci(args: &str) {
                             }
                         }
                         if !image.config.exposed_ports.is_empty() {
-                            let ports: alloc::string::String = image.config.exposed_ports.join(", ");
+                            let ports: alloc::string::String =
+                                image.config.exposed_ports.join(", ");
                             crate::console_println!("  Ports:        {}", ports);
                         }
                         if !image.config.volumes.is_empty() {
@@ -91332,7 +91371,8 @@ fn cmd_oci(args: &str) {
                         // If we mounted an overlay, record it on the container so
                         // `container delete` unmounts the adapter on teardown.
                         if mounted_overlay {
-                            if let Err(e) = crate::container::set_rootfs_mount(ct_id, &merged_mount) {
+                            if let Err(e) = crate::container::set_rootfs_mount(ct_id, &merged_mount)
+                            {
                                 crate::console_println!(
                                     "[oci] Warning: could not record rootfs mount: {:?}",
                                     e
@@ -91357,7 +91397,8 @@ fn cmd_oci(args: &str) {
                         // container see a host directory at a guest path, escaping
                         // the rootfs (e.g. `-v /srv/data:/data`).
                         for (host, guest, read_only) in &volumes {
-                            match crate::container::add_volume_mount(ct_id, host, guest, *read_only) {
+                            match crate::container::add_volume_mount(ct_id, host, guest, *read_only)
+                            {
                                 Ok(()) => crate::console_println!(
                                     "  Volume:       {} -> {}{}",
                                     host.display(),
@@ -91519,10 +91560,11 @@ fn cmd_oci(args: &str) {
                                                 }
                                             }
                                         });
-                                    let mut opts = crate::proc::spawn::SpawnOptions::new(&exe_guest)
-                                        .argv(&argv_refs)
-                                        .envp(&envp_refs)
-                                        .exe_path(exe_guest.as_bytes());
+                                    let mut opts =
+                                        crate::proc::spawn::SpawnOptions::new(&exe_guest)
+                                            .argv(&argv_refs)
+                                            .envp(&envp_refs)
+                                            .exe_path(exe_guest.as_bytes());
                                     if let Some(wd) = effective_workdir.as_deref() {
                                         opts = opts.cwd(wd.as_bytes());
                                         crate::console_println!("  WorkDir:      {}", wd);
@@ -91642,18 +91684,24 @@ fn cmd_oci(args: &str) {
                     Ok(image) => {
                         let layers = image.manifest.layers.len();
                         match crate::container::tar_tree(&pack_dir) {
-                            Ok(archive) => match crate::fs::vfs::Vfs::write_file(out_path, &archive) {
-                                Ok(()) => crate::console_println!(
-                                    "Saved image {} ({} layers): {} bytes -> {}",
-                                    src,
-                                    layers,
-                                    archive.len(),
-                                    out_path
-                                ),
-                                Err(e) => {
-                                    crate::console_println!("Failed to write '{}': {:?}", out_path, e)
+                            Ok(archive) => {
+                                match crate::fs::vfs::Vfs::write_file(out_path, &archive) {
+                                    Ok(()) => crate::console_println!(
+                                        "Saved image {} ({} layers): {} bytes -> {}",
+                                        src,
+                                        layers,
+                                        archive.len(),
+                                        out_path
+                                    ),
+                                    Err(e) => {
+                                        crate::console_println!(
+                                            "Failed to write '{}': {:?}",
+                                            out_path,
+                                            e
+                                        )
+                                    }
                                 }
-                            },
+                            }
                             Err(e) => {
                                 crate::console_println!("Failed to pack image '{}': {:?}", src, e)
                             }
@@ -91753,8 +91801,10 @@ fn cmd_oci(args: &str) {
                 // in-container exec — see open-questions.md Q17); build_image
                 // reports a precise diagnostic in that case.
                 let mut positional: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-                let mut build_args: alloc::vec::Vec<(alloc::string::String, alloc::string::String)> =
-                    alloc::vec::Vec::new();
+                let mut build_args: alloc::vec::Vec<(
+                    alloc::string::String,
+                    alloc::string::String,
+                )> = alloc::vec::Vec::new();
                 let mut target: Option<&str> = None;
                 let mut tag: Option<&str> = None;
                 let mut i = 1usize;
@@ -91819,31 +91869,37 @@ fn cmd_oci(args: &str) {
                     return;
                 };
                 match crate::fs::vfs::Vfs::read_file(dockerfile) {
-                    Ok(df) => match oci::build_image_targeted(&df, ctx, dest, &build_args, target) {
-                        Ok(desc) => {
-                            crate::console_println!(
-                                "Built image -> {} (manifest {}, {} bytes)",
-                                dest,
-                                desc.digest,
-                                desc.size
-                            );
-                            // `-t name:tag` imports the freshly-built image into the
-                            // named store so it can be referenced by name.
-                            if let Some(reference) = tag {
-                                match oci::store_tag_from_dir(dest, reference) {
-                                    Ok(_) => crate::console_println!("Tagged -> {}", reference),
-                                    Err(e) => crate::console_println!(
-                                        "build succeeded but tag '{}' failed: {:?}",
-                                        reference,
-                                        e
-                                    ),
+                    Ok(df) => {
+                        match oci::build_image_targeted(&df, ctx, dest, &build_args, target) {
+                            Ok(desc) => {
+                                crate::console_println!(
+                                    "Built image -> {} (manifest {}, {} bytes)",
+                                    dest,
+                                    desc.digest,
+                                    desc.size
+                                );
+                                // `-t name:tag` imports the freshly-built image into the
+                                // named store so it can be referenced by name.
+                                if let Some(reference) = tag {
+                                    match oci::store_tag_from_dir(dest, reference) {
+                                        Ok(_) => crate::console_println!("Tagged -> {}", reference),
+                                        Err(e) => crate::console_println!(
+                                            "build succeeded but tag '{}' failed: {:?}",
+                                            reference,
+                                            e
+                                        ),
+                                    }
                                 }
                             }
+                            Err(e) => crate::console_println!("build failed: {}", e.describe()),
                         }
-                        Err(e) => crate::console_println!("build failed: {}", e.describe()),
-                    },
+                    }
                     Err(e) => {
-                        crate::console_println!("Failed to read Dockerfile '{}': {:?}", dockerfile, e);
+                        crate::console_println!(
+                            "Failed to read Dockerfile '{}': {:?}",
+                            dockerfile,
+                            e
+                        );
                     }
                 }
             }
@@ -91937,7 +91993,9 @@ fn cmd_oci(args: &str) {
                 // as a standalone OCI layout at <dest-dir>; an optional trailing
                 // `name:tag` also tags it into the image store.
                 let (Some(id_str), Some(&dest_dir)) = (parts.get(1), parts.get(2)) else {
-                    crate::console_println!("Usage: oci commit <container-id> <dest-dir> [name:tag]");
+                    crate::console_println!(
+                        "Usage: oci commit <container-id> <dest-dir> [name:tag]"
+                    );
                     return;
                 };
                 let Ok(id) = id_str.parse::<u32>() else {

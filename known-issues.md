@@ -34721,6 +34721,9 @@ in one context and not another, which is the same class of defect as the
 
 ## [B] The sudoers parser cannot reject a malformed `Defaults` or command list (2026-08-18)
 
+**Status:** FIXED 2026-08-18 — see "Fixed" at the foot of this entry. Held here
+rather than archived until the fix has survived a boot test on `main`.
+
 **Where:** `userspace/sudo/src/main.rs` — `parse_defaults` and
 `parse_cmnd_list`.
 
@@ -34755,3 +34758,33 @@ fail.
 **Severity:** medium. Nothing is misgranted by it directly — an unparsed
 `Defaults` setting keeps its default — but it defeats the one tool the
 administrator has for catching their own mistake.
+
+**Fixed 2026-08-18** in `334ae409d` (lane B). Both functions now return `Err`
+for real, both `#[allow(clippy::unnecessary_wraps)]` are gone, and
+`validate_sudoers_line` validates a `Defaults` line by *running the parser*
+rather than by a separate check that would have to agree with it. The
+error-versus-warning split, and the `=`-replaces-rather-than-adds behaviour
+change, are recorded in `design-decisions.md` §332.
+
+Writing the fix turned up four further defects the original entry did not know
+about, all now fixed in the same commit:
+
+| Defect | Consequence |
+|---|---|
+| The setting name was everything before the first `=`, so `env_keep += "X"` was stored under the name `env_keep +` | Two consumers compensated with triple key matches; `get_default` had no workaround and never saw a `+=` line, so `timestamp_timeout` and `env_reset` silently ignored one |
+| `=` on a list setting *added* rather than replaced | A file that deliberately narrowed the kept environment did not narrow it — the unsafe direction |
+| `get_default` returned the *first* match | A file that overrode a setting further down kept the earlier value |
+| `Defaults:alice` with nothing after it | Silently discarded |
+
+The first of those is the band-aid shape this tree keeps producing: one defect
+in the parser, paid for separately at each consumer, with the consumer that
+*didn't* get a band-aid simply broken. The fix went into the parser and the
+band-aids came out.
+
+The pre-existing test `env_keep_extended` asserted the old add-on-`=`
+behaviour — the test encoded the bug — and was rewritten with a dated in-test
+note saying so. ~25 tests were added; `cargo test -p sudo` is 234 passed, 0
+failed. The precondition this entry set for making the behaviour change —
+"a look at whether the installer ships a `/etc/sudoers` that would newly fail"
+— was checked: `git grep -ln "etc/sudoers"` finds no shipped file, so no
+existing configuration can newly be rejected.

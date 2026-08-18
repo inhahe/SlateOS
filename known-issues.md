@@ -32862,10 +32862,67 @@ phenomenon:
 | A | ~65k-68k | **normal** (3502-3734) | `602fc62e0`, `9ecef3188`, `e3ae7bae1` |
 | B | ~131k-135k | **elevated** (5114-6652) | `d542299e2`, `37d1a4bb1`, `e5a6b2183` |
 
-So a run can have a 17x mean with a perfectly ordinary reported figure. Any
-future work here should treat `mean_ns` as diagnostic only. The mean of a
-heavy-tailed sample is the wrong estimator, which is exactly why
-`ab_interleaved` takes a **minimum** over 500 rounds elsewhere in `bench.rs`.
+So a run can have a 17x mean with a perfectly ordinary reported figure, and
+`mean_ns` should be treated as diagnostic only.
+
+### The reported number is ALREADY a minimum - which makes this worse, not better
+
+I first wrote here that the fix was "report a minimum or median rather than a
+mean". **That was wrong, and checking `bench.rs` rather than assuming is what
+caught it.** `record()` publishes
+
+```rust
+measured_ns: result.min_ns,
+```
+
+so the `entries` figure this whole entry is about is the **minimum over 500
+iterations** already. There is no mean-to-min fix available; it has been the
+min all along.
+
+That inverts the conclusion. A *mean* swinging 1.5x is unremarkable - a handful
+of multi-millisecond stalls will do it. A **minimum over 500 iterations**
+swinging 1.5x on an unchanged binary is a much stronger claim: for the floor to
+rise 50%, essentially *every one* of the 500 iterations had to get slower. That
+is not occasional interference, it is a sustained condition lasting the entire
+measurement window.
+
+And `bench.rs` says exactly what that condition is, in the comment right above
+the benchmark:
+
+> Tracked, not scored: this is the cold path, whose cost is dominated by a
+> 16 KiB memset and therefore by host memory bandwidth, so a published
+> per-allocation figure is not the right yardstick.
+
+So `page_alloc_zeroed_free` is, by its own author's description, largely a
+**host memory-bandwidth gauge**. When something else on this desktop is moving
+memory for a sustained period, the floor for a memset-bound loop genuinely
+rises, for every iteration, and the min moves with it. The benchmark is
+behaving correctly; it is measuring the host, and the host is a workstation.
+
+### Does the existing SplitCheck already catch it? Weakly - below its threshold
+
+`bench.rs` already has machinery for precisely "the achievable floor moved
+during the window": `SplitCheck` compares the min over the first half of the
+iterations against the second half, and `min_cycles` is not a stable property
+of the code when they diverge. Checking it against the five elevated runs:
+
+| `entries` | split | |
+|---:|---:|---|
+| 5114 | 3 | elevated |
+| 5230 | 2 | elevated |
+| 5117 | 9 | elevated |
+| 5125 | 6 | elevated |
+| 6652 | 0 | elevated |
+
+Non-zero split on **4 of 5** elevated runs, against **4 of 24** normal runs -
+an association, but at magnitudes (2-9%) far below the level that prints a `!`.
+Meanwhile the two runs that *were* loudly flagged (`44!` and `57!`) had entirely
+ordinary values of 3473 and 3680.
+
+So the split check carries some signal here and is not firing on it, while
+firing on runs that were fine. With n=5 that is a lead, not a conclusion, and
+it should not be "fixed" by lowering a threshold until there is more data -
+the flagged-but-fine cases say a lower threshold would mostly add false alarms.
 
 ### The orphaned QEMU spinner - a real factor, but NOT the explanation
 
@@ -32906,9 +32963,14 @@ advance so the result cannot be read backwards into whichever story fits.
 * **Do not cite this benchmark as evidence for or against any commit**,
     including the `FpuState` / `KernelFdTable` boxing. It cannot carry that
     weight.
-* The proper fix is in the instrument: report a **minimum or median** over
-    rounds rather than a mean, matching `ab_interleaved`. Until then its
-    verdicts should be treated as advisory.
+* **Do not "fix" it by changing the estimator** - it is already a minimum over
+    500 iterations. The earlier version of this entry recommended exactly that,
+    from an assumption about the code rather than a reading of it.
+* The honest options are (a) leave it tracked-but-unscored, which is what it
+    already is and what its own comment argues for, or (b) normalise it against
+    a deliberate host-memory-bandwidth reference measured in the same boot, so
+    the number reports the allocator rather than whatever else the desktop was
+    doing. (b) is the only one that would make it diffable boot-over-boot.
 * If someone does want to settle whether the elevated mode is real, the
     experiment is alternating runs of two commits, three each, comparing
     medians - not consecutive runs of successive commits.

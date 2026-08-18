@@ -29259,6 +29259,124 @@ puts a real newline inside `seq:` own diagnostic, which lets a format string
 forge a second line of output — and we escape it as `\ooo`, the same choice
 `coreutils::getopt` already makes for an unknown short option.
 
+### Progress (appended 2026-08-17, `printf`)
+
+`printf` is rewritten and certified (`scripts/printf-diff.sh`: 1178 passed, 0
+differed, 7 differ on purpose, comparing stdout, stderr *and* exit status
+separately against glibc's `printf` in WSL; `--flip` reports 817 differences on
+a deliberately misaligned reference). **It does not move the 16-of-85 counter,
+and that is not an oversight:** `printf` is the one utility that must *not* use
+`coreutils::getopt`. Upstream parses its two options by hand, with a comment
+saying why — `getopt_long` would let `--v` abbreviate `--version`, and a format
+string is an operand, so `printf --v` has to print the four characters `--v`
+rather than a version banner. Converting it to the shared parser would be a
+regression dressed as consistency.
+
+It was the worst-shipped utility we had. The old 329-line version had no
+floating point at all (`%f` printed the argument unchanged), no field widths,
+no format reuse, no `%b` or `%q`, and read numbers with Rust's parser, so a bad
+one silently became zero. It is the second caller of `coreutils::extfloat` and
+the first of `coreutils::cfmt`, the new eighth shared module. Seven things
+worth carrying forward:
+
+- **The reference is neither `printf` nor `/usr/bin/printf`, and both wrong
+  answers look plausible.** In WSL a bare `printf` is *bash's builtin*, a
+  different program with different diagnostics (`printf: 0o17: invalid number`
+  where GNU says `'0o17': value not completely converted`); the first
+  measurement batch of this task was silently taken against it. But spelling it
+  `/usr/bin/printf` breaks the comparison the other way, because every GNU
+  diagnostic is prefixed with `argv[0]` — each one would read
+  `/usr/bin/printf: …` against our `printf: …`. `env printf` is the spelling
+  that satisfies both: PATH holds no builtins, and `exec` keeps `argv[0]` bare.
+  Any utility whose name collides with a shell builtin (`echo`, `test`, `true`,
+  `false`, `kill`, `pwd`) has this trap waiting.
+- **A field too wide to render is a `write error` at exit, not a complaint at
+  the directive.** C counts a width in `int`, so `%2147483648d`,
+  `%.2147483648d`, and a `*` width of exactly `INT_MIN` (whose magnitude is one
+  past `INT_MAX`, and which `printf`'s own `INT_MIN <= w <= INT_MAX` check
+  therefore lets through) all fail inside the C library: the conversion writes
+  nothing, the rest of the format still prints, and only the *stream* remembers
+  — so `printf '%*d|%s|\n' -2147483648 5 tail` prints `|tail|`, then reports
+  `printf: write error` with no `strerror` clause, and exits 1. Ours reaches
+  the same place with a `stream_failed` flag standing in for the stream's error
+  indicator. It also outranks `\c`, because upstream's `exit (EXIT_SUCCESS)`
+  still runs the `atexit` handler.
+- **The same escape means different things in a format and in a `%b`
+  argument.** In the format, `\101` is `A` and `\0101` is a backspace followed
+  by `1`; in a `%b` argument the leading `0` is optional, so `\0101` is `A`.
+  One flag (`octal_0`) selects between them, and the two spellings are visible
+  on the same input — `printf '\0101'` and `printf %b '\0101'` disagree.
+- **`\u` falls back to its own spelling, in the opposite case to the
+  diagnostic.** In the C locale gnulib's conversion succeeds below U+0080 (so
+  `\u0041` is `A` and `\u0000` is a NUL byte) and fails above, printing the
+  escape back as `\uXXXX`/`\UXXXXXXXX` in **upper** case — while the surrogate
+  refusal, `invalid universal character name \ud800`, is **lower** case. Two
+  adjacent sentences in one file disagreeing on hex case is exactly what a
+  transcription smooths over and a differential test catches.
+- **Partial output survives a fatal format error.** `printf 'a%z'` prints `a`
+  and *then* complains, because upstream flushes through
+  `atexit (close_stdout)`. A reimplementation that reports before flushing
+  loses the `a`, and nothing in the diagnostic hints that it should not.
+- **The flag/conversion table is a validity check, not just formatting.**
+  `%#d`, `%0s`, `%#s`, `%.1c`, `%'e`, `%5b` and `%-q` are all *invalid
+  conversion specifications* — fatal, not ignored — because each flag removes
+  entries from upstream's 256-entry `ok[]` table. `%b` and `%q` are matched
+  before the flag loop, which is why they accept none.
+- **A harness that builds only when the binary is missing measures the wrong
+  binary.** `cargo test` and `cargo clippy` do not refresh `printf.exe`, so a
+  fix verified by a unit test and then measured here was measured against the
+  *previous* build, and reported as a genuine remaining difference in an
+  otherwise clean run. Both `printf-diff.sh` and `seq-diff.sh` now build every
+  run unless `OURS` was set by the caller.
+
+The seven deliberate differences are one policy, the same one `seq` and
+`coreutils::getopt` already apply: where a diagnostic echoes bytes the caller
+chose — an unknown conversion (`%\n`, `%\x1b[31m`) or the tail of a character
+constant (`%d "'aé"`) — GNU writes the raw byte and we escape it as `\ooo`.
+Raw is a forged line, or a terminal escape sequence, inside `printf`'s own
+error stream.
+
+One case the harness cannot carry, recorded so it is not "fixed" later: an
+argument that is not valid UTF-8. Our side is a native Windows binary, so argv
+arrives as UTF-16 and MSYS transcodes on the way in — `\xff\xfe` comes back as
+`\xc3\xbf\xc3\xbe`. The mangling is outside our code (an MSYS-native program
+given the same argument sees the original bytes) and cannot happen on the
+target, where argv is bytes; such a case would measure the Windows command
+line rather than `printf`. Non-UTF-8 bytes are still tested where they can be:
+in the *format*, where they arrive as escapes the program decodes itself, and
+in `cfmt`'s unit tests, which take a byte slice directly.
+
+## TD-PRINTF-BUILDS-THE-WHOLE-FIELD-IN-MEMORY (lane B, 2026-08-17) — **open, low priority**
+
+**In short:** `printf '%2147483647d' 5` asks for a number padded out to two
+billion characters. GNU prints it, slowly, a chunk at a time, using almost no
+memory. Ours would try to build the whole two-gigabyte line in memory first,
+and on a machine without two spare gigabytes it fails instead of printing.
+Nobody types this on purpose; a script computing a width from data could.
+
+**Where:** `coreutils::cfmt::pad` and `cfmt::integer` return a `Vec<u8>`
+holding the finished field, and `extfloat::render` returns a `String`. The
+width has already been bounded to `INT_MAX` by `MAX_FIELD` in
+`userspace/coreutils/src/bin/printf.rs` — anything wider is the `write error`
+case described above — so the exposure is exactly the range 1 byte to
+`INT_MAX`.
+
+**Reproduce:** `printf '%2147483647d' 5`. GNU streams it; ours allocates. Do
+not add it to `printf-cases.py`: it is a *legal* input, so the reference would
+faithfully write two gigabytes into the record file.
+
+**The proper fix:** give `cfmt` a `render_to(&mut impl Write, …)` that emits
+padding in fixed-size chunks rather than materialising it, and let `render`
+keep its `Vec` signature by calling it. `printf` and `seq` both write to a
+`BufWriter` already, so neither call site changes shape. This also removes the
+one place where a caller-chosen number decides an allocation size, which is
+worth doing on its own account.
+
+**Why it is not urgent:** the answer is never *wrong*, only expensive, and
+`MAX_FIELD` already rules out the case that used to hang outright — a `*`
+width of `INT_MIN`, which allocated two gigabytes and stopped responding
+(fixed 2026-08-17, and now a unit test plus a differential case).
+
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
 **Status: OPEN — items 3 and 4 (steps (c) and (d)) done 2026-08-17; 1 and 2
@@ -32320,6 +32438,475 @@ a value into a log message is not the same as checking it; where a device tells
 you what it accepts, check the request against it rather than printing both and
 trusting the constant.
 
+## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17)
+
+**In short:** the 1-pixel line the compositor draws around a window is drawn
+one pixel higher than the space the layout reserved for it. Nobody sees a
+problem, because the row it lands on is part of the window's drop shadow and
+is repainted anyway. But it means the code that *draws* the frame and the code
+that *measures* the frame disagree by one pixel, and the next person to trust
+the measurement will be wrong by one pixel too.
+
+`Window::frame_insets` returns `(top, side, bottom) = (TITLE_BAR_HEIGHT,
+BORDER_WIDTH, BORDER_WIDTH)`: a border down each side and along the bottom,
+and **no border above the title bar**. Every measurement derives from that —
+`frame_rect`, `outer_rect`, `title_bar_rect`, hit testing, damage tracking.
+
+`Compositor::render_border` (gui/compositor/src/lib.rs) does not. It strokes a
+box whose top edge is `BORDER_WIDTH` above `frame_rect`, so the frame is drawn
+one row taller than it is measured. That row falls inside `outer_rect` (which
+adds `SHADOW_SIZE` = 8 px of shadow beyond the frame) and inside
+`window_drawn_extent`, so it is repainted correctly and is inside the resize
+grab band — hence no visible symptom today.
+
+**Where:** `render_border` carries the discrepancy explicitly now, as a
+`Rect::new` that adds the row to `frame_rect` with a comment, rather than as
+open-coded constants that merely happened not to match. `frame_insets` is at
+`gui/compositor/src/lib.rs`; `nothing_a_window_draws_falls_outside_its_damage_extent`
+pins the containment that keeps it harmless.
+
+**Proper fix:** decide which is right and make both agree.
+- If the border above the title bar is wanted (it is what a real window frame
+  looks like), `frame_insets` should return `top = TITLE_BAR_HEIGHT +
+  BORDER_WIDTH` and `title_bar_rect` should start `BORDER_WIDTH` below the top
+  of the frame box. This shifts every framed window's title bar and the resize
+  grab bands by one pixel, and moves the boundary between "title bar" (drag to
+  move) and "top border" (drag to resize) — so it wants a look at the drag
+  tests, whose grab points are chosen relative to `TITLE_BAR_HEIGHT`.
+- If it is not wanted, `render_border` should stroke `frame_rect` unmodified
+  and the extra row disappears.
+
+Not urgent: nothing is visibly wrong and nothing is unsafe. Logged because a
+one-pixel disagreement between drawing and measurement is exactly the kind of
+thing that becomes a real bug the moment either side is touched.
+
+## C-THE-CREDENTIAL-STORE-ENCRYPTS-EVERY-SECRET-WITH-THE-SAME-KEYSTREAM (lane C, 2026-08-17)
+
+**In short:** the credential manager — the thing that holds the user's saved
+passwords — scrambles every secret in the vault with the *same* repeating
+pattern. Anyone who can read the vault file can recover its contents without
+ever learning the master password, by lining two entries up against each
+other and cancelling the pattern out. This is the single worst defect
+currently known in lane C's tree.
+
+**Where:** `gui/credentials/src/main.rs`, `encrypt` / `decrypt` /
+`generate_keystream`.
+
+`generate_keystream(key, len)` produces `SHA-256(key ‖ 0) ‖ SHA-256(key ‖ 1) ‖
+…`. It takes no nonce (a number used once, mixed in so that encrypting the
+same thing twice gives different output). So it is a pure function of the
+session key, and every credential in a vault is XORed with the identical
+keystream. XOR two ciphertexts together and the keystream cancels, leaving the
+two plaintexts XORed with each other — the classic "two-time pad", which is
+routinely solved by hand for text. No key recovery is needed and no master
+password is needed; read access to the stored ciphertexts is enough.
+
+The doc comment says "this is a demonstration cipher; production use would
+employ AES-256-GCM", which covers *weak* but not *broken*: a demonstration
+cipher is still expected to keep two records from decrypting each other.
+
+**Proper fix (does not need any new primitive):** give every encryption its own
+nonce and mix it into the keystream — `SHA-256(key ‖ nonce ‖ counter)` — then
+store the nonce beside the ciphertext. A per-record sequence number that is
+persisted and never reused under a given key is a sufficient nonce and needs
+no randomness, so this is fixable today with the SHA-256 already in the file.
+That turns the construction into SHA-256 used as a counter-mode PRF, which is
+a defensible stream cipher rather than a broken one.
+
+Still missing after that fix, and requiring things the tree does not yet have:
+authentication (the ciphertext can be flipped bit-for-bit undetected — wants an
+HMAC or a real AEAD) and a vetted AES-256-GCM. See
+`open-questions.md` → "Do we write our own cryptographic primitives?".
+
+**Resolved 2026-08-17, as described.** `encrypt` now takes a nonce and returns
+`nonce ‖ ciphertext`; `decrypt` reads the nonce back off the front and returns
+`Result`, because a blob shorter than the 8-byte nonce never came from
+`encrypt`. `generate_keystream(key, nonce, len)` is
+`SHA-256(key ‖ nonce ‖ counter)`. `CredentialStore` supplies nonces from
+`next_nonce`, a counter that only ever increases; `take_nonces(n)` hands out a
+contiguous base so a caller already holding `&mut credentials` (the re-encrypt
+loop in `set_master_password`) can still get fresh ones. Gaps are harmless —
+nonces must be unique, not contiguous.
+
+Regression test:
+`the_same_plaintext_twice_does_not_produce_the_same_ciphertext` asserts the
+*bodies* differ and not merely the nonce prefixes, plus
+`a_blob_too_short_to_hold_a_nonce_is_rejected_not_misread`.
+
+**One thing a persistence layer must not get wrong**, and there is no
+persistence layer yet: `next_nonce` has to round-trip to disk. A vault
+reloaded with the counter reset to zero re-issues nonces it has already used
+and reintroduces exactly this bug. The field carries a comment saying so.
+
+The authentication half is *not* fixed and remains open under C-Q5.
+
+## C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES (lane C, 2026-08-17)
+
+**In short:** the credential manager turns the user's master password into a
+key with a single pass of SHA-256, mixed with a fixed word that is compiled
+into the program and is therefore identical on every SlateOS machine. Both
+halves of that are wrong in the same direction: a single pass means an
+attacker can try billions of candidate passwords per second on a GPU, and a
+shared fixed word means one precomputed table cracks every user in the world
+rather than having to be rebuilt per user.
+
+**Where:** `gui/credentials/src/main.rs`, `derive_session_key` and the
+`KEY_DERIVATION_SALT` constant.
+
+```rust
+const KEY_DERIVATION_SALT: &str = "slateos_credential_salt";
+
+fn derive_session_key(master_password: &str) -> [u8; 32] {
+    let mut input = master_password.as_bytes().to_vec();
+    input.extend_from_slice(KEY_DERIVATION_SALT.as_bytes());
+    sha256(&input)
+}
+```
+
+A password-to-key function is supposed to be *deliberately slow* (key
+stretching) and *per-user distinct* (a random salt stored with the vault).
+This is neither. `apps/lockscreen` derives its stored hash the same way and
+has the same problem.
+
+**Proper fix:** iterate. Even a plain `for _ in 0..N { h = sha256(h ‖ pw) }`
+with N in the hundreds of thousands is an enormous improvement and needs
+nothing new — that is essentially PBKDF2's structure. The per-vault random
+salt needs a randomness source the crate does not have (see below), but a
+salt that merely varies per *installation* already defeats a shared table, so
+it should not wait for one. The end state wants a memory-hard KDF (scrypt or
+Argon2id), which is gated on the same open question as the cipher.
+
+**Half resolved 2026-08-17 — the stretching. The salt is still shared.**
+
+`derive_session_key(password, rounds)` now runs `rounds` iterations of
+`SHA-256(acc ‖ password ‖ salt)`. The password and salt are folded back in on
+*every* round rather than the accumulator merely being rehashed: a chain of
+the form `h = SHA-256(h)` is the same chain for every password, so an attacker
+could walk it once and test candidates against any point on it. Mixing the
+password in each round is what forces the full cost per guess.
+
+The count was picked by measurement, not by taste: one SHA-256 of a ~70-byte
+input on this machine is **1.278 µs release** (8.564 µs debug), so
+`DEFAULT_KDF_ROUNDS = 100_000` is ~130 ms per unlock.
+
+**A second defect had to be fixed for the first fix to be worth anything.**
+The store kept `master_password_hash = SHA-256(password)` to check unlock
+attempts against. An attacker holding the vault would have tested guesses
+against *that* — one SHA-256 each — and never called `derive_session_key` at
+all, so the stretching would have been decorative. The field is now
+`master_password_verifier`, `SHA-256(stretched key ‖ label)`, so a guess costs
+the full derivation. `IdentityVerifier::verify` had the identical bug on the
+re-verification path and is routed through the same value.
+Both comparisons use `constant_time_eq` rather than `==`, which returns early
+on the first differing byte and so leaks how many leading bytes matched.
+
+**Why the round count is stored rather than compiled in.** `kdf_rounds` is a
+field of `CredentialStore` (`with_kdf_rounds`, default `DEFAULT_KDF_ROUNDS`).
+The right number rises with hardware, and a vault written under the old number
+must keep opening after the default moves — it can only do that if it
+remembers what the old number was. Every real password-hashing format records
+its cost parameters beside the hash for this reason. **This too must
+round-trip through any persistence layer.** It also lets the test module run
+at 4 rounds instead of putting the suite in the minutes;
+`default_kdf_rounds_are_usable` exercises the shipped number once.
+
+**Still open:** the salt. `KEY_DERIVATION_SALT` is still a compile-time
+constant shared by every install, because a per-vault salt needs entropy that
+userspace cannot obtain — see the next entry and
+`requests/c-a-userspace-entropy-syscall.md`. `apps/lockscreen` still derives
+its stored hash with a single SHA-256 pass and has not been touched.
+
+## C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE (lane C, 2026-08-17)
+
+**In short:** nothing in lane C can obtain an unpredictable number. The
+credential manager's password *generator* — the feature whose entire job is
+producing something an attacker cannot guess — runs a 3-line xorshift
+generator seeded by a number its caller passes in, in practice a timestamp.
+An attacker who knows roughly when a password was generated can enumerate the
+possibilities.
+
+**Where:** `gui/credentials/src/main.rs`, `Xorshift64` and
+`generate_password(.., seed: u64)`.
+
+`Xorshift64` is a perfectly good *statistical* generator and a useless
+*cryptographic* one: its entire future output is determined by 64 bits of
+state, and recovering that state from output is trivial. Seeded from a
+second-resolution timestamp, the real entropy is closer to 20 bits.
+
+**Where the fix has to come from:** the kernel. A userspace CSPRNG needs a
+seed from an entropy pool the kernel maintains (RDRAND/RDSEED, interrupt
+timing, etc.), surfaced through a syscall. `kernel/src/crypto.rs` exists
+(lane A) but lane C has no interface to it. Filed as
+`requests/c-a-userspace-entropy-syscall.md`.
+
+Until then the honest thing is for `generate_password` to *say* it is not
+cryptographically strong rather than to look like it is, and for anything that
+needs a real nonce to use a persisted counter instead (see the keystream
+entry above).
+
+## C-SHA-256-IS-IMPLEMENTED-ELEVEN-TIMES-IN-THIS-TREE (lane C, 2026-08-17)
+
+**In short:** eleven separate copies of the same cryptographic hash function
+have been written by hand in this repository. Each one can be independently
+wrong, and each one has to be independently reviewed, tested and fixed. Some
+of them guard logging in and unlocking the screen.
+
+**Where** (found by `grep -rn "fn sha256" --include=*.rs`):
+
+| Copy | Lane | Shape |
+|---|---|---|
+| `kernel/src/crypto.rs` | A | one-shot |
+| `posix/src/sha2.rs` | B | one-shot, has the FIPS million-`a` vector |
+| `posix/src/crypt.rs` | B | via `sha2` |
+| `init/login/src/main.rs` | B | block compression + one-shot |
+| `userspace/coreutils/src/bin/sha256sum.rs` | B | one-shot |
+| `userspace/backup/src/main.rs` | B | streaming |
+| `kernel/src/oci.rs` | A | digest string |
+| `kernel/build.rs` | A | build-time |
+| `gui/credentials/src/main.rs` | **C** | one-shot |
+| `apps/lockscreen/src/main.rs` | **C** | one-shot |
+| `apps/backup/src/main.rs` | **C** | streaming `Sha256` struct |
+
+All three lane-C copies do carry the standard known-answer vectors (empty,
+`"abc"`, the 448-bit message), so none of them is presently *wrong*. That is
+luck holding, not a design.
+
+**Proper fix:** one implementation, one set of test vectors, shared. Lane C
+can extract its three into a small top-level crate alongside the existing
+`byteread` / `textfind` / `textfmt` utility crates and adopt it; lanes A and B
+have to opt in themselves, so the cross-lane half is a request rather than an
+edit. Note `kernel/` is `no_std`, so the shared crate must be `no_std` with an
+`alloc`-free one-shot API to be adoptable by all three lanes.
+
+### Correction and progress, 2026-08-17
+
+**It is twenty-six, not eleven.** The original count came from
+`grep "fn sha256"`, which misses every copy that names its entry point
+something else or exposes only a `Sha256` struct. Two greps are needed to see
+them all, and neither alone is sufficient:
+
+```
+grep -rln "0x6a09e667" --include=*.rs .   # the eight IV words
+grep -rln "fn sha256\|struct Sha256" --include=*.rs .
+```
+
+The union is 26 files. The original entry also missed one of lane C's own:
+**`apps/diskimager`** has a streaming copy, so lane C had four, not three.
+
+**Done.** `sha2/` now exists at the workspace root — `no_std`, no `alloc`, the
+four FIPS 180-4 vectors, a streaming form cross-checked against the one-shot
+one at every length up to three blocks and every split within each length, and
+a `benches/rate.rs` (commit `d8ad84f54`). `gui/credentials` is migrated
+(`eb6e77799`), which is also the first evidence for the claim that the copies
+cost something: it was **22% faster** afterwards (1.20 vs 1.54 µs/iter on a
+70-byte input, both measured in one process), because that copy allocated a
+`Vec` per call for the padded message. That matters concretely — the
+credential KDF runs 100 000 hashes per unlock.
+
+**Remaining, 25 copies.** Lane C's three: `apps/backup` (streaming +
+`sha256_bytes`/`sha256_hex`/`sha256_file`), `apps/diskimager` (streaming),
+`apps/lockscreen` (one-shot). Lanes A and B own the other 22 and must opt in
+themselves; requests are filed rather than edits made.
+
+**What consolidating does and does not buy.** It does not make the primitive
+vetted — a single unvetted SHA-256 is still unvetted, and whether this tree
+should be writing its own crypto at all is `open-questions.md` C-Q5. What it
+buys is that the answer has one place to land, that a mistake is caught once
+rather than needing to be caught 26 times, and — per the measurement above —
+that the duplication was costing performance as well as review budget.
+
+### Lane C is done, 2026-08-17
+
+All four of lane C's copies are gone. `gui/credentials` (`eb6e77799`),
+`apps/diskimager` (`65883cf92` — which was not a migration but a bug fix; see
+`C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256` below), and now
+`apps/backup` and `apps/lockscreen`. **22 copies remain, all in lanes A and B**
+— 20 in B, 3 in A, minus `posix/src/crypt.rs` which correctly delegates to
+`posix/src/sha2.rs` rather than carrying its own.
+
+The migrations were not neutral. Deleting the copies removed clippy warnings
+in bulk, because a hand-transcribed FIPS table is one long run of exactly the
+constructs the workspace lints forbid — `w[i - 15]`, `h[i] = h[i] + a`,
+`block_start + 64`:
+
+| Crate | warnings before | after |
+|---|---|---|
+| `apps/backup` | 368 | 266 |
+| `apps/lockscreen` | 85 | **11** |
+
+That is 176 warnings that were never going to be fixed in place, because
+fixing them means bounds-checking a loop whose bounds are the specification.
+It is worth stating as a general result: **an inlined copy of a published
+algorithm is a large, permanent lint-debt liability, and moving it into a
+crate that is written once against the vectors is the only way to discharge
+it.** The remaining `apps/**` lint debt is now dominated by ordinary
+application code, which is fixable.
+
+Two further findings from the audit, both recorded separately:
+
+- The mechanical check that found the disk-imager stub — extract every
+  8-hex-digit literal from a file and look for a contiguous run equal to the
+  64-word K table and the 8-word IV — also found the **same stub hashing
+  system passwords** in `userspace/login` and `userspace/chpasswd`. See
+  `C-THE-SAME-STUB-IS-THE-SYSTEM-PASSWORD-HASH` at the end of this file.
+- Five further lane-B copies have no known-answer vector at all
+  (`userspace/backup`, `pkg`, `rsync`, `ssh`, `useradm`), though all five do
+  carry the full constant tables. Listed in
+  `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
+
+
+## C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256 (lane C, 2026-08-17)
+
+**In short.** `apps/diskimager` offers to checksum an image with MD5, SHA-1 or
+SHA-256 and shows you a digest of exactly the right length. None of the three
+is the algorithm it claims. All three are the same made-up mixing function, so
+the "SHA-256" it prints for a downloaded `.iso` will never match the SHA-256
+the publisher printed — and its "verify after write" tick box is checking the
+disk against a number that means nothing outside this program.
+
+**Where.** `apps/diskimager/src/main.rs`, `HashState` (~lines 205-290).
+
+**What it actually computes.** `new()` seeds `state` with the genuine
+published initial values for whichever algorithm you picked — the real
+SHA-256 IV (`0x6a09e667, 0xbb67ae85, …`), the real MD5 and SHA-1 ones. That
+is the entire resemblance. `update()` then ignores all of it:
+
+```rust
+for (idx, &byte) in data.iter().enumerate() {
+    let slot = idx % 8;
+    if let Some(s) = self.state.get_mut(slot) {
+        *s = s.wrapping_mul(31).wrapping_add(byte as u64);
+    }
+}
+```
+
+That is eight interleaved `u64` polynomial accumulators — a Rabin-style
+rolling fingerprint with base 31 — and it is identical for all three
+algorithms. `finalize()` then stirs the eight words together and truncates the
+hex to 32, 40 or 64 characters depending on which name you asked for. The
+choice of algorithm affects **only the length of the output string** and the
+eight seed constants.
+
+**How it survived.** Two ways, both worth noting because they generalise.
+
+1. *The tests check shape, not value.* There are eight tests over `HashState`.
+   They assert the digest is 64 characters, that it is all hex digits, that
+   the same input twice gives the same output, and that two different inputs
+   give different outputs. Every one of those passes for `*s = s*31 + byte`.
+   Not one test compares against a known answer — and a known-answer vector is
+   the *only* test that can distinguish a hash from a plausible-looking
+   function, which is precisely why FIPS publishes them.
+
+2. *It has already been "fixed" once, at the wrong level.* There is a
+   nine-line comment in `finalize()` explaining that the previous version
+   emitted the raw state words and truncated, so that bytes landing in
+   discarded words produced identical digests — "a real collision" — and that
+   folding all eight words in fixes it. That diagnosis is correct and the fix
+   works. But it treats the stub as the thing to repair rather than the thing
+   to replace, which is the band-aid accumulation `CLAUDE.md` warns about: the
+   collision was a symptom, and the disease is that this is not a hash.
+
+**Impact.** Two distinct failures, one much worse than the other.
+
+- **Comparing against a published checksum is broken outright, and silently.**
+  This is the headline use of a disk imager: download an install image, paste
+  in the checksum from the download page, confirm it matches. It never will.
+  The user sees `Mismatch`, concludes their download is corrupt, and
+  re-downloads forever. Worse in the other direction: the Verify tab will
+  happily *display* a 64-character "SHA-256" that a user may copy and publish
+  as if it were one.
+- **Verify-after-write is weaker than it looks but not worthless.** It
+  compares the source against the written-back data using the same function on
+  both sides, so it is a self-consistency check, and a base-31 polynomial over
+  `u64` does catch random corruption with high probability. It will not catch
+  deliberate tampering, and it is not what the UI implies.
+
+**Severity.** High. It is a correctness bug in the feature the application
+exists for, it is invisible to the user (the output is well-formed and
+stable), and the tests are green.
+
+**Proper fix.** Not "write the missing rounds into `update()`" — delegate.
+`sha2/` already exists at the workspace root (`d8ad84f54`): `no_std`, no
+`alloc`, checked against all four FIPS 180-4 vectors. SHA-1 and MD5 need the
+same treatment — they are obsolete *for security* but a disk imager needs them
+precisely because publishers still post them, so they should be shared crates
+in the same shape, each with the known-answer vectors from FIPS 180-4 and RFC
+1321 respectively. Then `HashState` becomes a thin enum over three real
+implementations.
+
+**And add value-checking tests**, in `diskimager` as well as in the crates, so
+the next stub cannot pass. The minimum bar for any hash in this tree: the
+digest of the empty input, and the digest of `"abc"`. Both are published for
+all three algorithms.
+
+### FIXED, 2026-08-17 (`cf5ebb13f`, and the commit that follows it)
+
+Done as written above — delegated, not patched.
+
+`blockbuf`, `sha1` and `md5` now sit at the workspace root beside `sha2`.
+Three crates rather than two because SHA-1 and MD5 written standalone would
+have meant a third and fourth copy of Merkle–Damgård partial-block and padding
+logic, which is the half that actually hides bugs: a wrong compression
+function fails the first known-answer vector, whereas a wrong buffer only
+misbehaves in the seam between two `update` calls — so it passes every
+published vector, all of which arrive in a single call. `blockbuf` is that
+logic once, tested over every length up to three blocks at every possible
+split point. MD5's `T` table is generated from its definition
+`floor(2^32 · |sin(i+1)|)` rather than transcribed, which removes that error
+class rather than testing for it.
+
+`HashState` is now a three-variant enum over `md5::Md5` / `sha1::Sha1` /
+`sha2::Sha256`, and `diskimager` carries four new tests:
+
+| Test | What the stub would have failed |
+|---|---|
+| `hashes_match_their_published_vectors` | everything — six vectors, empty and `"abc"`, all three algorithms |
+| `each_algorithm_produces_its_own_length_and_value` | nothing; it guards the picker wiring, not the maths |
+| `splitting_the_input_does_not_change_the_digest` | nothing; it guards the *new* risk, that a file read in chunks hashes differently from a file read whole |
+| `finalize_is_repeatable` | nothing; the real hashers consume themselves on finalize, so `HashState` finalizes a clone |
+
+117 tests pass in `diskimager`; 26 tests and 5 doctests in the three crates.
+The crate's 29 remaining clippy warnings are pre-existing and unchanged —
+measured before and after, identical counts by lint — and are tracked
+separately under the `apps/**` half of the lint debt.
+
+**The generalisable lesson, restated because it is the only one that
+matters:** none of the eight original tests was wrong. They were all true of
+`state[i % 8] = state[i % 8] * 31 + byte`. Shape tests cannot fail on a stub,
+so a subsystem with only shape tests is untested no matter how many it has.
+
+## C-THE-SAME-STUB-IS-THE-SYSTEM-PASSWORD-HASH (found by lane C, owned by lane B, 2026-08-17)
+
+**In short.** The made-up mixing function that `apps/diskimager` was passing
+off as three checksums is also, byte for byte, the function `userspace/login`
+and `userspace/chpasswd` use to hash passwords into `/etc/shadow`. Two
+consequences, both reproduced: a password set with `passwd` cannot be used to
+log in at all, and the entries `chpasswd` writes are labelled `$5$` — the
+standard crypt(3) identifier for SHA-crypt — while containing something that
+is not SHA-crypt, not SHA-256, and not stretched by any number of rounds.
+
+**Not mine to fix.** `userspace/**` is lane B's. Filed in full, with the
+reproduction and the mechanical check that found it, as
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`. Logged here so
+it is not lost if that request is actioned and removed.
+
+**The short form of the fix**, which is lane B's call: `posix/src/crypt.rs` is
+already a correct and complete SHA-crypt — `$5$`/`$6$`/`$1$`, the `rounds=`
+field, the crypt base-64 alphabet, Drepper's published vectors, 29 tests —
+delegating its core to `posix/src/sha2.rs`. Three tools that read and write
+one file should be calling it instead of each hashing differently. The part
+with a genuine tradeoff is what to do with the entries already written in two
+wrong formats.
+
+**Why this is in lane C's tracker at all.** Because the two bugs are the same
+bug, and finding the second one cost nothing once the first was understood.
+The check is mechanical: extract every 8-hex-digit literal from a file that
+claims to implement a published algorithm, and look for a contiguous run
+matching the algorithm's published constant table. `chpasswd` and `login`
+carry the genuine SHA-256 IV and no K table at all — exactly the disk imager's
+shape. It is worth running over any transcribed algorithm in this tree,
+because it costs nothing and, unlike a test that checks the digest's shape, it
+cannot be satisfied by a plausible-looking function.
 
 ## A-INTERMITTENT-STACK-CANARY-HALT-AT-REAP-TIME (lane A, 2026-08-17) - **ROOT CAUSE FOUND AND FIXED 2026-08-17**
 

@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are seven so far. Three are about the interface these programs share
+//! There are eight so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -71,11 +71,26 @@
 //!   decimal↔binary question is answered over integers ([`bignat`]) rather
 //!   than in floating point.
 //!
+//! The eighth is [`extfloat`]'s other half. `printf` has to answer `%d` and
+//! `%s` as well as `%f`, and those conversions are not hard arithmetic — they
+//! are a dozen small interacting rules (a precision is a *minimum* on an
+//! integer and a *maximum* on a string; `%.0d` of zero prints nothing; `#` on
+//! `%o` raises the precision instead of prepending; the `0` flag loses to `-`
+//! and loses again to a precision) which nobody recalls correctly and which
+//! `awk`'s `printf` and the shell's builtin will need to get right the same
+//! way:
+//!
+//! - [`cfmt`] — the C conversions that are not floating point: `%d %i %o %u
+//!   %x %X %c %s`, with the flag, width and precision handling that surrounds
+//!   them. It delegates `%a %e %f %g` to [`extfloat`], so one call site covers
+//!   the whole of `printf`'s directive vocabulary.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
 
 mod bignat;
+pub mod cfmt;
 pub mod errmsg;
 pub mod extfloat;
 pub mod filekind;

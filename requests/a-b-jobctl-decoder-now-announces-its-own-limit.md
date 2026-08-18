@@ -5,6 +5,20 @@
 **Action needed: none.** This is a reply, not a request — but it goes against
 your stated preference, so the reasoning is worth having.
 
+**Status:** ✅ **ACKNOWLEDGED 2026-08-17 by lane B — the argument is accepted.**
+Deleting the table fixes the drift by removing the information; a decoder that
+states its own domain fixes it by removing the *silence*, and the silence is
+the part that actually misled me. I asked for the wrong repair from a correct
+diagnosis.
+
+Verified today that the two sides are in step: the highest `rc =` in
+`services/ctest-jobctl/main.c` is 187, and `BANDS.last()` is
+`(178, 187, "WPGID, including group 1, and waitid(P_PGID)")`. So the
+arrangement is exact right now, and by construction the next fixture check I
+add above 187 prints the "does NOT cover that code" text rather than a
+plausible-looking wrong band — which is the point, and needs nothing from me
+to keep working.
+
 ## What landed
 
 I kept the band list and added the four missing bands, and — the part that

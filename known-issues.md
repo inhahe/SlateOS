@@ -28492,7 +28492,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 15 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 16 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -29191,6 +29191,73 @@ rather than diagnostics. Five things worth carrying forward:
   nothing, every argument reaching the operand check is an operand. Worth
   recording because ~15 other utilities use the same helper, and this is their
   whole parser.
+
+### Progress (appended 2026-08-17, `seq`)
+
+`seq` is the sixteenth (`scripts/seq-diff.sh`: 2303 passed, 0 differed, 3 differ
+on purpose, comparing stdout, stderr *and* exit status separately against
+glibc's `seq` in WSL; `--flip` reports 307 differences on a deliberately
+misaligned reference, which is the harness proving it discriminates). It is the
+first utility whose *output* was wrong rather than its command line — it
+accumulated `val += increment` in `f64` and stopped at `val <= last + EPSILON`,
+so it drifted, printed Rust's `Display` instead of a precision taken from the
+operand's spelling, and had no `-w` at all. It is also the first caller of
+`coreutils::extfloat` (the x87 80-bit float certified the day before). Six
+things worth carrying forward:
+
+- **A leading `+` in the optstring is a whole parsing mode, and it is
+  observable.** `seq`'s optstring is `"+f:s:w"`; the `+` makes `getopt_long`
+  stop at the first non-option, so `seq 1 --version` prints
+  `invalid floating point argument: '--version'` rather than the version, and
+  `seq 1 -w 3` is an operand error. Utilities that permute and utilities that
+  stop are not distinguishable from their `--help` text; check the optstring.
+  `seq` additionally re-checks argv *before each* `getopt_long` call and breaks
+  out if the next argument is `-` followed by `.` or a digit, which is what
+  makes `seq -3` a bare operand instead of three unknown options.
+- **Which diagnostics carry `Try 'seq --help'` is per-message and splits along
+  a line the output does not explain.** `seq`'s four *format* complaints (no `%`
+  directive, ends in `%`, unknown `%X` directive, too many `%` directives) print
+  one line and stop; every other refusal — bad operand, missing operand, extra
+  operand, zero increment, `-w` with `-f` — prints the sentence *and* the
+  referral. Upstream that is `error (EXIT_FAILURE, …)` versus
+  `error (0, …)` + `usage (EXIT_FAILURE)`; from the outside it is unguessable.
+- **Width and precision come from how the operand was *written*, not from its
+  value.** `seq 1 1 1.0` prints `1.0`, and `seq -w -1 1 3` prints
+  `-1 00 01 02 03` — the `-` is counted in the first operand's width but the
+  padding is computed from the widest, so the widths are deliberately unequal.
+  Upstream's `scan_arg` does this with `size_t` arithmetic that *wraps*
+  (`width--` on a bare `1.`), and the wrapped value is then compared with `max`,
+  so it is load-bearing rather than a latent bug: transcribed with
+  `wrapping_sub`/`wrapping_add`, not `saturating_*`.
+- **`seq` prints one number past the end, sometimes.** When `first + i*step`
+  overshoots `last`, upstream formats it anyway, strips the format's suffix,
+  re-parses from past its prefix, and prints it if the value read back equals
+  `last` and its text differs from the previous line's. That is the only reason
+  `seq 0 0.000001 0.000003` reaches `0.000003`. A reimplementation that stops at
+  the first overshoot is wrong on a whole family of ordinary inputs.
+- **Two integer fast paths, both counting in decimal digit strings.** One runs
+  on the operands as typed, one after conversion (so `seq 1e3 1 1005` and an
+  `inf` endpoint also qualify). Both are exact past 2^64 — `seq
+  18446744073709551615 18446744073709551625` counts correctly — and both are
+  gated on no `-w`, no `-f`, a one-byte separator, and a step in `(0, 200]`.
+  The 200 is quoted in the GNU manual, so `seq 1 200 2001` and `seq 1 201 2001`
+  taking different code paths is observable and is a test case.
+- **The harness passes argv through a file, not a command line.** Ours is a
+  native Windows binary and the reference runs in WSL, so anything quoted into
+  `wsl -e bash -c '…'` crosses two shells and a Win32 command-line encoder —
+  which an argument like `%\303\251`, or a separator that is one newline, does
+  not survive. `scripts/seq-cases.py` writes one case per line with US (0x1f)
+  between arguments (a tab would not do: `read -a` collapses runs of
+  *whitespace* separators and would lose `-s ''`), and `scripts/seq-probe.sh`
+  is run unchanged on both sides. Any future harness for an argv-only utility
+  with awkward arguments should copy this shape rather than `expr-diff.sh`'s
+  inline `run_case`.
+
+The three deliberate differences are one policy: for an unknown directive whose
+byte is not printable, GNU writes the raw byte — measured, `seq -f $'%\n' 1 3`
+puts a real newline inside `seq:` own diagnostic, which lets a format string
+forge a second line of output — and we escape it as `\ooo`, the same choice
+`coreutils::getopt` already makes for an unknown short option.
 
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 

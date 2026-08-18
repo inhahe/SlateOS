@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are six so far. Three are about the interface these programs share
+//! There are seven so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -54,11 +54,30 @@
 //!   had each already written a partial copy, disagreeing in exactly the places
 //!   two partial copies would.
 //!
+//! The seventh is the same argument one layer further down still — past the
+//! option, past its argument's grammar, to the *arithmetic* the argument names:
+//!
+//! - [`extfloat`] — the real number. `seq`, and after it `printf %f` and the
+//!   numeric side of `sort` and `factor`, read and write reals through libc's
+//!   `strtold` and `printf("%Lf")`, which on x86-64 glibc are 80-bit extended
+//!   precision — 64 significand bits, not 53. Rust has no `long double`, so
+//!   every utility that needed one would otherwise reach for `f64` and each be
+//!   wrong in its own way. It is not a small wrongness: over 4000 random
+//!   `seq FIRST INCREMENT LAST` ranges printed to 10–20 decimal places, `f64`
+//!   disagreed with GNU on 1355 of them, and the disagreement was already
+//!   present in the *first* line — before any arithmetic, in the round trip
+//!   through the decimal literal alone. This module is that type, in software:
+//!   parse, arithmetic, compare, and `printf` conversions, exact because the
+//!   decimal↔binary question is answered over integers ([`bignat`]) rather
+//!   than in floating point.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
 
+mod bignat;
 pub mod errmsg;
+pub mod extfloat;
 pub mod filekind;
 pub mod getopt;
 pub mod quote;

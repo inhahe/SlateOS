@@ -28,6 +28,7 @@ pub mod color;
 pub mod colorpicker;
 pub mod context_ext;
 pub mod cycle;
+pub mod date;
 pub mod dialog;
 pub mod disabled;
 pub mod dnd;

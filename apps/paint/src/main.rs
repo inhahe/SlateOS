@@ -23,6 +23,7 @@
 use guitk::canvas::Canvas;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -608,33 +609,46 @@ pub fn flood_fill(buf: &mut Canvas, start_x: u32, start_y: u32, fill_color: Colo
     }
 }
 
-/// Spray paint effect: randomly scatter dots within a radius.
-pub fn spray_paint(
+/// Spray paint effect: scatter `density` dots uniformly over the disc of
+/// `radius` centred on `(cx, cy)`.
+///
+/// `rng` is borrowed rather than reseeded per call. The spray can used to take
+/// a `u32` seed that the caller bumped by one between mouse events, which meant
+/// every puff restarted a 32-bit generator from a state adjacent to the last
+/// one — and, at `u32::MAX`, from the all-zero state that a xorshift can never
+/// leave, piling every dot of that puff on the centre pixel. A generator that
+/// is held and drawn from has neither problem, and gives one continuous stream
+/// across a drag instead of a fresh short one per event.
+///
+/// The radius is sampled as `sqrt(u) * radius` rather than `u * radius`: dots
+/// spread over a disc must go as the square root of a uniform draw, or they
+/// bunch towards the middle.
+pub fn spray_paint<R: RandomSource>(
     buf: &mut Canvas,
     cx: i32,
     cy: i32,
     radius: i32,
     color: Color,
     density: u32,
-    seed: u32,
+    rng: &mut R,
 ) {
-    // Simple pseudo-random number generator (xorshift)
-    let mut rng_state = seed.wrapping_add(1);
+    let radius = f64::from(radius);
     for _ in 0..density {
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 17;
-        rng_state ^= rng_state << 5;
-        let angle = (rng_state as f64 / u32::MAX as f64) * 2.0 * std::f64::consts::PI;
+        let angle = f64::from(rng.next_f32()) * core::f64::consts::TAU;
+        let dist = f64::from(rng.next_f32()).sqrt() * radius;
 
-        rng_state ^= rng_state << 13;
-        rng_state ^= rng_state >> 17;
-        rng_state ^= rng_state << 5;
-        let dist = (rng_state as f64 / u32::MAX as f64).sqrt() * radius as f64;
-
-        let px = cx + (dist * angle.cos()) as i32;
-        let py = cy + (dist * angle.sin()) as i32;
-        if px >= 0 && py >= 0 {
-            buf.blend(px as u32, py as u32, color);
+        // `as` on a float saturates at the integer bounds in Rust, so a wild
+        // centre cannot wrap the offset around; the sum still has to be
+        // checked, and an off-canvas dot is simply not painted.
+        let (Some(px), Some(py)) = (
+            cx.checked_add((dist * angle.cos()) as i32),
+            cy.checked_add((dist * angle.sin()) as i32),
+        ) else {
+            continue;
+        };
+        // `blend` clips the far edges itself; these two are the near ones.
+        if let (Ok(px), Ok(py)) = (u32::try_from(px), u32::try_from(py)) {
+            buf.blend(px, py, color);
         }
     }
 }
@@ -1524,8 +1538,11 @@ pub struct PaintApp {
     pub mouse_down: bool,
     /// Whether the selection is being moved.
     pub moving_selection: bool,
-    /// Spray can RNG seed state.
-    pub spray_seed: u32,
+    /// The spray can's generator, held across a drag so that one continuous
+    /// stream feeds every puff rather than a fresh generator per mouse event.
+    /// Seeded rather than drawn from the kernel: nothing here is a secret, and
+    /// a fixed start makes the tests reproducible.
+    pub spray_rng: SeededRng,
     /// Whether the app should quit.
     pub should_quit: bool,
     /// Rounded rectangle corner radius.
@@ -1580,7 +1597,7 @@ impl PaintApp {
             mouse_window_y: 0.0,
             mouse_down: false,
             moving_selection: false,
-            spray_seed: 42,
+            spray_rng: SeededRng::new(0x5350_5241_5920_4341),
             should_quit: false,
             rounded_rect_radius: 12,
             text_font_size: 16.0,
@@ -2133,7 +2150,15 @@ impl PaintApp {
                 let color = self.drawing_color();
                 let radius = (self.brush.size as i32) / 2;
                 let density = self.brush.size.max(10);
-                if let Some(layer) = self.layers.get_mut(self.active_layer) {
+                // Disjoint field borrow: the target layer and the generator
+                // live in different fields, so both can be held at once.
+                let Self {
+                    layers,
+                    active_layer,
+                    spray_rng,
+                    ..
+                } = self;
+                if let Some(layer) = layers.get_mut(*active_layer) {
                     spray_paint(
                         &mut layer.pixels,
                         canvas_x,
@@ -2141,10 +2166,9 @@ impl PaintApp {
                         radius.max(1),
                         color,
                         density,
-                        self.spray_seed,
+                        spray_rng,
                     );
                 }
-                self.spray_seed = self.spray_seed.wrapping_add(1);
             }
             Tool::Polygon => {
                 if self.polygon_builder.vertex_count() == 0 {
@@ -2217,7 +2241,15 @@ impl PaintApp {
                 let color = self.drawing_color();
                 let radius = (self.brush.size as i32) / 2;
                 let density = self.brush.size.max(10);
-                if let Some(layer) = self.layers.get_mut(self.active_layer) {
+                // Disjoint field borrow: the target layer and the generator
+                // live in different fields, so both can be held at once.
+                let Self {
+                    layers,
+                    active_layer,
+                    spray_rng,
+                    ..
+                } = self;
+                if let Some(layer) = layers.get_mut(*active_layer) {
                     spray_paint(
                         &mut layer.pixels,
                         canvas_x,
@@ -2225,10 +2257,9 @@ impl PaintApp {
                         radius.max(1),
                         color,
                         density,
-                        self.spray_seed,
+                        spray_rng,
                     );
                 }
-                self.spray_seed = self.spray_seed.wrapping_add(1);
             }
             Tool::Select if self.moving_selection => {
                 if let Some(sel) = &mut self.selection {
@@ -4434,20 +4465,114 @@ mod tests {
         assert_eq!(buf.get(1, 1).unwrap(), Color::RED);
     }
 
+    /// Every painted pixel of `buf`, as `(x, y)`.
+    fn painted(buf: &Canvas) -> Vec<(u32, u32)> {
+        (0..buf.height())
+            .flat_map(|y| (0..buf.width()).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf.get(x, y).unwrap() != Color::TRANSPARENT)
+            .collect()
+    }
+
     #[test]
     fn test_spray_paint() {
         let mut buf = Canvas::transparent(20, 20);
-        spray_paint(&mut buf, 10, 10, 5, Color::RED, 50, 42);
-        // At least some pixels should be colored
-        let mut colored = 0;
-        for y in 0..20 {
-            for x in 0..20 {
-                if buf.get(x, y).unwrap() != Color::TRANSPARENT {
-                    colored += 1;
-                }
+        let mut rng = SeededRng::new(42);
+        spray_paint(&mut buf, 10, 10, 5, Color::RED, 50, &mut rng);
+        assert!(!painted(&buf).is_empty());
+    }
+
+    #[test]
+    fn a_puff_stays_inside_its_radius() {
+        // The dot offset is `sqrt(u) * radius` in each of x and y, so no dot
+        // can land further than `radius` from the centre — plus the one pixel
+        // that truncating the offset to an integer can cost.
+        const R: i32 = 8;
+        let mut buf = Canvas::transparent(64, 64);
+        let mut rng = SeededRng::new(1);
+        for _ in 0..40 {
+            spray_paint(&mut buf, 32, 32, R, Color::RED, 60, &mut rng);
+        }
+        for (x, y) in painted(&buf) {
+            let dx = f64::from(x) - 32.0;
+            let dy = f64::from(y) - 32.0;
+            let dist = dx.hypot(dy);
+            assert!(
+                dist <= f64::from(R) + 1.5,
+                "dot at ({x}, {y}) is {dist} from the centre, outside radius {R}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_puff_does_not_pile_every_dot_on_the_centre() {
+        // The generator this replaced was a 32-bit xorshift restarted from
+        // `seed + 1` on every mouse event. At `seed == u32::MAX` that start is
+        // the all-zero state, which a xorshift can never leave: every draw came
+        // back zero, so every dot of the puff landed on the centre pixel. The
+        // generator now holds its state in a non-zero integer by construction,
+        // so no starting seed can reproduce that — this sweeps a wide set to
+        // confirm it.
+        for seed in [
+            0u64,
+            1,
+            u64::from(u32::MAX),
+            u64::MAX,
+            0x5555_5555_5555_5555,
+        ] {
+            let mut buf = Canvas::transparent(41, 41);
+            let mut rng = SeededRng::new(seed);
+            spray_paint(&mut buf, 20, 20, 10, Color::RED, 200, &mut rng);
+            let dots = painted(&buf);
+            assert!(
+                dots.len() > 20,
+                "seed {seed} painted only {} distinct pixels — the generator is stuck",
+                dots.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_spray_can_does_not_repeat_itself_between_puffs() {
+        // The seed used to be bumped by one per mouse event, so a drag was a
+        // chain of short sequences from adjacent starting states rather than
+        // one stream. Holding the generator makes consecutive puffs genuinely
+        // different draws; if the app ever went back to reseeding per event,
+        // two puffs from one generator would start looking alike.
+        let mut rng = SeededRng::new(7);
+        let mut first = Canvas::transparent(41, 41);
+        spray_paint(&mut first, 20, 20, 10, Color::RED, 120, &mut rng);
+        let mut second = Canvas::transparent(41, 41);
+        spray_paint(&mut second, 20, 20, 10, Color::RED, 120, &mut rng);
+        assert_ne!(painted(&first), painted(&second));
+    }
+
+    #[test]
+    fn a_spray_off_the_edge_of_the_world_paints_what_it_can_and_panics_at_nothing() {
+        // Three ways the centre can be hostile: negative (the offset must not
+        // be cast to a huge u32), at the integer maximum (the offset must not
+        // overflow the add), and at the minimum (likewise, downwards).
+        let mut rng = SeededRng::new(3);
+        for centre in [(-4, -4), (i32::MAX, i32::MAX), (i32::MIN, i32::MIN)] {
+            let mut buf = Canvas::transparent(16, 16);
+            spray_paint(&mut buf, centre.0, centre.1, 6, Color::RED, 80, &mut rng);
+            // Whatever landed on the canvas is fine; the point is that nothing
+            // wrapped around into the middle of it from i32::MIN.
+            for (x, y) in painted(&buf) {
+                assert!(x < 16 && y < 16, "dot at ({x}, {y}) is off-canvas");
             }
         }
-        assert!(colored > 0);
+    }
+
+    #[test]
+    fn a_zero_density_spray_paints_nothing_and_a_zero_radius_paints_one_dot() {
+        let mut rng = SeededRng::new(11);
+        let mut none = Canvas::transparent(9, 9);
+        spray_paint(&mut none, 4, 4, 5, Color::RED, 0, &mut rng);
+        assert!(painted(&none).is_empty(), "no dots were asked for");
+
+        let mut point = Canvas::transparent(9, 9);
+        spray_paint(&mut point, 4, 4, 0, Color::RED, 30, &mut rng);
+        assert_eq!(painted(&point), vec![(4, 4)], "a radius of zero is a dot");
     }
 
     // ---- BMP tests ----

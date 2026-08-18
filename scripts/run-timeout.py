@@ -20,6 +20,15 @@ While the child runs, the runner prints a heartbeat line every
 `--poll` seconds ("[run-timeout] still running, Ns elapsed") so a long
 build never looks like a silent hang, and it reports a clear final status.
 
+**Do not pipe this into `tail`, `head`, `grep` or anything else when you are
+backgrounding it.** Those buffer, so nothing reaches the output file until the
+command *finishes* -- which turns the heartbeat into exactly the silence it
+exists to prevent, and makes a perfectly healthy 20-minute build look wedged.
+The temptation is then to kill and restart it, throwing away the real work it
+had done. Redirect the whole stream and narrow it when you *read* it, not as it
+is produced. (Observed: a `--bench` boot test backgrounded through `| tail -40`
+sat at zero bytes for five minutes with `rustc` visibly alive at 2.4 GB.)
+
 Usage:
     python run-timeout.py [--poll SECS] <timeout_secs> <command> [args...]
 

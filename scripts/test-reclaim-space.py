@@ -129,6 +129,47 @@ def test_in_use_is_skipped_not_forced(mod, tmp):
         held.close()
 
 
+def test_veto_names_the_holder(mod, tmp):
+    """A veto must say *who*, not just that it was vetoed.
+
+    `known-issues.md` -> `A-RECLAIM-SPACE-CANNOT-FREE-A-LANE'S-OWN-TARGET` went
+    unresolved precisely because "SKIP (in use)" stated a conclusion and threw
+    away the evidence; by the time anyone read the log the holder had exited.
+    So the attribution is a feature with a bug history, and it gets asserted.
+
+    The holder here is *this* process, which is deliberate and is the case that
+    caught the first version: the scan skipped its own pid, so a file held by
+    the caller -- the one holder a caller can actually do something about --
+    was the one holder it could never report.
+
+    Windows-only: elsewhere the rename succeeds and there is no veto to
+    attribute.
+    """
+    if sys.platform != "win32":
+        print("  skip  veto names the holder (POSIX allows the rename)")
+        return
+    path = make_tree(tmp, "target-attributed")
+    victim = os.path.join(path, "debug", "artifact.bin")
+    held = open(victim, "rb")
+    lines = []
+    try:
+        freed = mod.reclaim_dir(path, dry_run=False, sizes=False,
+                                log=lines.append)
+        check("attributed veto still frees nothing", freed == 0.0,
+              "got %r" % (freed,))
+        blob = "\n".join(lines)
+        check("veto names the holding pid", ("pid %d" % os.getpid()) in blob,
+              blob)
+        check("veto names the held file",
+              os.path.basename(victim).lower() in blob.lower(), blob)
+        # The distinction the whole tool turns on: an empty result must never
+        # be dressed up as "nothing holds it".
+        check("veto does not claim the directory is free",
+              "no holder visible" not in blob, blob)
+    finally:
+        held.close()
+
+
 def main():
     mod = load_module()
     tmp = tempfile.mkdtemp(prefix="reclaim-test-")
@@ -138,6 +179,7 @@ def main():
         test_dry_run_puts_it_back,
         test_missing_path_is_not_an_error,
         test_in_use_is_skipped_not_forced,
+        test_veto_names_the_holder,
     )
     try:
         for test in tests:

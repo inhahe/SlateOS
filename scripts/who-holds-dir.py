@@ -291,10 +291,16 @@ def _windows_file_handles(timeout_s: float = 30.0):
     # once, share it among its holders" optimisation is simply unavailable
     # here.  Measured: 333342 handles, 22267 of them files, one distinct
     # `Object` value.  Each handle must therefore be named on its own.
+    # This process is *included*, not skipped.  When the scan is called as a
+    # library -- `reclaim-space.py` calls it on its own rename-veto path -- the
+    # caller is a perfectly ordinary candidate for holding the directory open,
+    # and excluding it would make the one case a caller can actually fix the
+    # one case that reports nothing.  Our own handles need no duplicating: they
+    # are already ours.
     wanted: dict[int, list[tuple[int, int]]] = {}
     for i in range(count):
         e = entries[i]
-        if e.ObjectTypeIndex == file_type and e.UniqueProcessId != me:
+        if e.ObjectTypeIndex == file_type:
             wanted.setdefault(e.UniqueProcessId, []).append((e.HandleValue, e.GrantedAccess))
 
     paths_by_pid: dict[int, set[str]] = {}
@@ -315,13 +321,16 @@ def _windows_file_handles(timeout_s: float = 30.0):
                     return
                 cursor[0] = i + 1
             pid, handles = todo[i]
-            src = k32.OpenProcess(PROCESS_DUP_HANDLE, False, pid)
-            if not src:
-                # The table showed this process holds files; their names are
-                # out of reach.  Recorded, not dropped.
-                with lock:
-                    unnamed.add(pid)
-                continue
+            mine = pid == me
+            src = None
+            if not mine:
+                src = k32.OpenProcess(PROCESS_DUP_HANDLE, False, pid)
+                if not src:
+                    # The table showed this process holds files; their names are
+                    # out of reach.  Recorded, not dropped.
+                    with lock:
+                        unnamed.add(pid)
+                    continue
             found: set[str] = set()
             local_skipped = 0
             try:
@@ -329,12 +338,19 @@ def _windows_file_handles(timeout_s: float = 30.0):
                     if access == HANG_PRONE_ACCESS:
                         local_skipped += 1
                         continue
-                    dup = wt.HANDLE()
-                    if not k32.DuplicateHandle(
-                        src, wt.HANDLE(value), self_proc, ctypes.byref(dup),
-                        0, False, DUPLICATE_SAME_ACCESS,
-                    ):
-                        continue
+                    if mine:
+                        # Already ours: duplicating would be pointless, and
+                        # closing the duplicate is the only reason the `finally`
+                        # below exists -- closing one of *our own* handles here
+                        # would shut a file the caller is still using.
+                        dup = wt.HANDLE(value)
+                    else:
+                        dup = wt.HANDLE()
+                        if not k32.DuplicateHandle(
+                            src, wt.HANDLE(value), self_proc, ctypes.byref(dup),
+                            0, False, DUPLICATE_SAME_ACCESS,
+                        ):
+                            continue
                     try:
                         # The real wedge filter.  `NtQueryObject`'s name query
                         # blocks forever on a synchronous pipe with I/O
@@ -365,9 +381,11 @@ def _windows_file_handles(timeout_s: float = 30.0):
                         if dosified:
                             found.add(dosified)
                     finally:
-                        k32.CloseHandle(dup)
+                        if not mine:
+                            k32.CloseHandle(dup)
             finally:
-                k32.CloseHandle(src)
+                if src:
+                    k32.CloseHandle(src)
             # Published per process, so a later wedge does not discard the
             # processes already finished.
             with lock:

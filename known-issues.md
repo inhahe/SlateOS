@@ -31816,6 +31816,82 @@ hint. The fix was never "check the bound at the call site"; it was to make the
 bypass impossible or the mechanism unnecessary. Fixing 137 sites would have
 left the design that produced them intact.
 
+### Nine of ten done, 2026-08-18: `gui/toolkit` is at 0, from 1488
+
+`gui/toolkit` (`guitk`) opted in at **1488** distinct sites and is now at
+**zero**, with the crate's test count up from 660 to 865 over the sweep. Only
+`gui/desktop` (1561) remains.
+
+**The generalisable finding from `gui/remote` held for all 1488.** Not one of
+the ~35 files in the sweep was fixed by adding a bounds check at a call site.
+Every file was fixed by finding the abstraction that should have existed, and
+in about a third of cases the abstraction *already existed in the same crate*
+and was simply not reached for. Reusing what was there:
+
+| Written once | Files that had re-derived it |
+|---|---|
+| `cycle::before` / `after` / `indices` | `menubar`, `tree`, `pathbar`, `textview`, `modal`, `menu`, `tabs` |
+| `TextCursor::prev_in` / `next_in` | `pathbar`, `modal` |
+| `Canvas` | `svg`, `screenshot`, `colorpicker` |
+| `tzrules` (the whole-tree TZ engine) | `dialog` |
+
+The new abstractions the sweep had to write, each replacing a shape repeated
+many times: a lexer cursor type in `svg` (the single largest group in the
+crate — `i += 1;` seventy-four times was one cursor, not seventy-four
+problems), a non-backtracking glob matcher in `context_ext`, `Color::mean`,
+and a `NonZeroU32`/`NonZeroU64` divisor wherever a computed denominator had
+been guarded by an `if` two statements away.
+
+**The recurring fault, stated once.** Almost every one of the 1488 was the same
+sentence: *a proof that lives in a different statement from the code it
+justifies.* `if slot <= MAX` then `TABLE[slot]`; `if out_a == 0 { return }`
+then `/ out_a`; `if len > 1` then `len - 1`; `if header.len() >= end` then
+`&header[..end]`; a signed cursor stepped off the end and pushed back by the
+next iteration's first `if`. The lint is not asking for the proof to be
+repeated. It is pointing out that the proof and the use can drift apart,
+and in this crate they had — see the defects below, every one of which is an
+instance of exactly that drift.
+
+**What it found.** Eleven defects that were live, not hypothetical:
+
+- `svg::parse_transform` **panicked** on a malformed `transform` attribute —
+  reachable from any SVG file the user opens.
+- `Canvas`/`SvgRenderer::new` computed `width * height` and let `Vec` abort on
+  the byte count; an image header can claim any dimensions it likes.
+- `scaling::set_monitor_scale(usize::MAX, ..)` wrapped past an upper-bound-only
+  check onto slot 0 — which was the **global** scale factor. One bad monitor id
+  rescaled the whole desktop.
+- `dialog`'s Modified column showed **a date that does not exist**: no leap
+  years and twelve 30-day months, so by 2026 it was about two weeks early, with
+  the year advancing early and the day-of-month almost never right. It now
+  reads through `tzrules`, the same engine as the libc, the shell's `%(…)T` and
+  the taskbar clock.
+- `Color::lerp` returned **transparent black** for a NaN factor, which is what
+  an animation produces the instant it divides elapsed time by a zero duration.
+  `f32::clamp` passes NaN through; `NaN as u8` is 0.
+- `Color::over`'s `out_a == 0` guard was dead code given the `sa == 0` early
+  return, and stood apart from the four divisions it was supposed to protect.
+- `textview::scroll_by` overflowed on `i32::MIN`.
+- `colorpicker` measured its palette grid in the drawing code and again in the
+  hit-test, and the two had drifted — clicks landed on the wrong swatch. The
+  hue readout truncated through `u8` besides.
+- `context_ext`'s glob matcher was exponential on a pattern with several `*`s.
+- `tree::items_in_rect` walked rows without an upper bound.
+- `FormValidator` (`disabled`) kept two parallel `Vec`s that had to agree about
+  which fields exist, and did not: a query for an unregistered widget *pushed*
+  a state entry so it had something to return a reference to, after which the
+  form counted a field nobody had registered as part of its own validity. Its
+  `label` was also stored, documented as "for error messages", and never read —
+  so the disabled submit button's tooltip said "Required" and named none of the
+  five boxes the user had to go back to.
+
+**One methodological note to carry into `gui/desktop`.** The largest single win
+in the crate came from *deleting* code, not fixing it: `svg.rs`'s ~600 sites
+were one hand-rolled tokeniser cursor, and `textview`'s ANSI parser was
+hand-decoding UTF-8 it had already been handed decoded. Before fixing a group,
+check whether the group is one shape — the repeated *source line* is the tell,
+and `scripts/clippy-sites.py --sites` prints it.
+
 ## C-TEXT-WAS-CUT-BY-COUNTING-CHARACTERS-INSTEAD-OF-MEASURING-IT (lane C, 2026-08-17) - **fixed**
 
 **What.** Twenty-odd places across `gui/` and `apps/` decided how much text

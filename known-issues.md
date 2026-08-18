@@ -34362,13 +34362,28 @@ substituted the built-in defaults, which include a root account whose password
 is in the source, so a permission error opened the machine up rather than
 closing it.
 
-**Still open — the five read-only parsers.** `su`, `sudo`, `polkit`, `chown`
-and `chroot` have not been migrated and still carry their own copies. `su` and
-`sudo` read `home:`, which *neither* writer has ever written, so they are
-reading a field that is not there on every file this tree has produced;
-migrating them is a bug fix, not housekeeping. Tracked as the remainder of
-this entry rather than a new one, because it is the same defect with the same
-fix.
+**The five read-only parsers are also done** (`c49964b56`, `65dca4eba`,
+`da340eb15`, `e101e6d04`). Not one of them was reading a file any writer of
+this tree has produced:
+
+| Crate | What its own parser did | Consequence |
+|---|---|---|
+| `su` | read `home:`; writers write `home_dir:` | every `su -` landed in the wrong directory |
+| `sudo` | never looked at the password at all | **total authentication bypass** — see the entry above |
+| `polkit` | read `admin:`; writers write `is_admin:` | every machine looked to it like one with no administrators, so `auth_admin` refused before prompting |
+| `chown` | read no admin field | `chgrp wheel` → "unknown group" |
+| `chroot` | read no admin field | `--userspec root:wheel` → "unknown group" |
+
+All four crates now fold the `is_admin` flag into the group list, because the
+database records administrator-ness as a flag while every policy file in the
+wild — sudoers, polkit rules, `chgrp` — names the group. `polkit` additionally
+stopped composing `/home/<name>` for `pkexec`'s HOME, which gave a command run
+as root `/home/root`.
+
+Test counts after: `su` 46, `sudo` 198, `polkit` 82, `chown` 41, `chroot` 46.
+Each now has at least one test that serialises a database and reads it back —
+the only step at which a reader and a writer that disagree about the format
+can be seen to disagree, and the step none of the replaced tests took.
 
 ---
 

@@ -20883,11 +20883,34 @@ an account with an unverifiable stale hash both as "Invalid password", which
 meant repeated attempts against an already-locked account extended its
 lockout. The four outcomes are now distinct.
 
-**Still to do,** tracked in `known-issues.md`: the five read-only parsers
-listed above still carry their own copies. `su` and `sudo` read `home:` while
-both writers write `home_dir:`, so they are already reading the wrong field on
-any file this tree has written — the migration is a bug fix for them, not
-housekeeping.
+**Done, 2026-08-17/18.** All five readers now go through the crate:
+`init/login` (`3a3321a76`), `userspace/su` and `userspace/sudo`
+(`c49964b56`, `65dca4eba`), `userspace/polkit` (`da340eb15`),
+`userspace/chown` and `userspace/chroot` (`e101e6d04`). Every one of them was
+a bug fix rather than housekeeping — none was reading a file any writer of
+this tree had ever produced:
+
+| Crate | What its own parser did |
+|---|---|
+| `su` | read `home:`; both writers write `home_dir:` |
+| `sudo` | discarded the password entirely, and admitted *everyone* when the file was absent |
+| `polkit` | read `admin:`; both writers write `is_admin:`, so it saw a machine with no administrators |
+| `chown`, `chroot` | read only `uid`/`username`/`groups`, so `is_admin` never became group membership |
+
+Three defects were common to more than one of them and are now fixed once, in
+the crate or in the callers:
+
+1. **An administrator is a member of `wheel`.** The database records
+   administrator-ness as a flag; every policy file in the wild — sudoers,
+   polkit rules, `chgrp wheel` — is written against the group. `sudo`,
+   `polkit`, `chown` and `chroot` now fold the flag into the group list.
+2. **`home_dir` is the home directory.** `polkit`'s `pkexec` composed
+   `/home/<name>`, so a command run as root got `/home/root`.
+3. **A password test that never serialises proves nothing.** `polkit`'s six
+   password tests all passed against a hash function no writer used. Each
+   migrated crate now has at least one test that writes the database out and
+   reads it back, which is the only step at which a reader and a writer that
+   disagree can be seen to disagree.
 
 **Revisit if** `yamldoc` gains addressing for sequence elements, at which
 point `userdb`'s line-level record editing could sit on top of it and inherit

@@ -1571,13 +1571,13 @@ type SimRng = SeededRng;
 
 /// A whole number in `min..=max`, for the simulation's discrete choices.
 fn sim_range(rng: &mut SimRng, min: u32, max: u32) -> u32 {
-    let drawn = rng.in_range(u64::from(min), u64::from(max));
+    let drawn = rng.between(i64::from(min), i64::from(max));
     u32::try_from(drawn).unwrap_or(min)
 }
 
 /// One address octet in `min..=max`.
 fn sim_octet(rng: &mut SimRng, min: u8, max: u8) -> u8 {
-    let drawn = rng.in_range(u64::from(min), u64::from(max));
+    let drawn = rng.between(i64::from(min), i64::from(max));
     u8::try_from(drawn).unwrap_or(min)
 }
 
@@ -1588,7 +1588,7 @@ fn simulated_hostname(ip: Ipv4Addr, rng: &mut SimRng) -> Option<String> {
         "tablet", "tv", "iot",
     ];
     if rng.chance(0.7) {
-        let prefix = rng.pick(&prefixes).copied().unwrap_or("host");
+        let prefix = rng.choose(&prefixes).copied().unwrap_or("host");
         Some(format!("{}-{}", prefix, ip.octets[3]))
     } else {
         None
@@ -1651,7 +1651,7 @@ fn simulate_host_scan(ip: Ipv4Addr, scan_ports: &[u16], rng: &mut SimRng) -> Opt
         return None;
     }
 
-    let latency = 0.5 + rng.next_f32() * 50.0;
+    let latency = 0.5 + rng.unit_f32() * 50.0;
     let mac = MacAddr::from_ip_simulated(ip);
     let hostname = simulated_hostname(ip, rng);
     let ttl_val = if rng.chance(0.5) { 64u8 } else { 128u8 };
@@ -1685,7 +1685,7 @@ fn simulate_host_scan(ip: Ipv4Addr, scan_ports: &[u16], rng: &mut SimRng) -> Opt
             } else {
                 None
             };
-            let response = latency + rng.next_f32() * 10.0;
+            let response = latency + rng.unit_f32() * 10.0;
             ports.push(PortResult {
                 port: port_val,
                 state,
@@ -1757,7 +1757,7 @@ fn simulate_traceroute(dest: Ipv4Addr) -> Vec<TracerouteHop> {
                 sim_octet(&mut rng, 0, 255),
                 sim_octet(&mut rng, 1, 254),
             );
-            let rtt = f32::from(hop_num) * 2.5 + rng.next_f32() * 15.0;
+            let rtt = f32::from(hop_num) * 2.5 + rng.unit_f32() * 15.0;
             let hostname = if rng.chance(0.5) {
                 Some(format!("hop-{}.isp.net", hop_num))
             } else {
@@ -1782,7 +1782,7 @@ fn simulate_traceroute(dest: Ipv4Addr) -> Vec<TracerouteHop> {
         hop_number: hop_num,
         ip: Some(dest),
         hostname: None,
-        rtt_ms: f32::from(hop_count) * 3.0 + rng.next_f32() * 20.0,
+        rtt_ms: f32::from(hop_count) * 3.0 + rng.unit_f32() * 20.0,
         timed_out: false,
     });
 

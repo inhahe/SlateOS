@@ -53,7 +53,7 @@ const TILE_COLORS: [Color; 8] = [BLUE, GREEN, PEACH, MAUVE, TEAL, YELLOW, RED, L
 // Up, Down, Left, Right, Up, Down, Left, Right … for ever, at every seed.
 // Measured before the fix: 499 different seeds produced **two** distinct 4×4
 // boards between them. See `known-issues.md` and `design-decisions.md` §447.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 // ── Direction ──
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -183,7 +183,7 @@ impl Board {
     }
 
     /// Shuffle by making random valid moves (guarantees solvability).
-    fn shuffle(&mut self, rng: &mut Rng, move_count: usize) {
+    fn shuffle(&mut self, rng: &mut SeededRng, move_count: usize) {
         let dirs = [
             Direction::Up,
             Direction::Down,
@@ -234,7 +234,7 @@ struct SlidingPuzzle {
     moves: u32,
     size: usize,                  // 3, 4, or 5
     best_moves: [Option<u32>; 3], // best for 3x3, 4x4, 5x5
-    rng: Rng,
+    rng: SeededRng,
     timer_ticks: u64,   // rough frame counter for animation
     show_numbers: bool, // show tile numbers
     show_help: bool,
@@ -243,7 +243,7 @@ struct SlidingPuzzle {
 impl SlidingPuzzle {
     fn new() -> Self {
         let size = 4;
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let mut board = Board::new(size);
         board.shuffle(&mut rng, 200);
 
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn test_shuffle_changes_board() {
-        let mut rng = Rng::new(12345);
+        let mut rng = SeededRng::new(12345);
         let mut b = Board::new(4);
         b.shuffle(&mut rng, 100);
         assert!(!b.is_solved());
@@ -833,7 +833,7 @@ mod tests {
 
     #[test]
     fn test_shuffle_preserves_tiles() {
-        let mut rng = Rng::new(99);
+        let mut rng = SeededRng::new(99);
         let mut b = Board::new(4);
         b.shuffle(&mut rng, 200);
         // All values 0..16 should still be present
@@ -845,11 +845,11 @@ mod tests {
 
     #[test]
     fn test_shuffle_deterministic() {
-        let mut rng1 = Rng::new(42);
+        let mut rng1 = SeededRng::new(42);
         let mut b1 = Board::new(4);
         b1.shuffle(&mut rng1, 100);
 
-        let mut rng2 = Rng::new(42);
+        let mut rng2 = SeededRng::new(42);
         let mut b2 = Board::new(4);
         b2.shuffle(&mut rng2, 100);
 
@@ -869,7 +869,7 @@ mod tests {
     fn test_shuffle_different_seeds() {
         let mut boards = std::collections::BTreeSet::new();
         for seed in 1..=100_u64 {
-            let mut rng = Rng::new(seed);
+            let mut rng = SeededRng::new(seed);
             let mut b = Board::new(4);
             b.shuffle(&mut rng, 100);
             boards.insert(b.tiles.clone());
@@ -922,7 +922,7 @@ mod tests {
     /// would time out rather than fail.
     #[test]
     fn shuffling_a_board_with_no_legal_move_terminates() {
-        let mut rng = Rng::new(1);
+        let mut rng = SeededRng::new(1);
         let mut b = Board::new(1);
         b.shuffle(&mut rng, 100);
         assert_eq!(b.tiles, vec![0]);
@@ -1296,7 +1296,7 @@ mod tests {
 
     #[test]
     fn test_5x5_shuffle() {
-        let mut rng = Rng::new(7);
+        let mut rng = SeededRng::new(7);
         let mut b = Board::new(5);
         b.shuffle(&mut rng, 400);
         assert!(!b.is_solved());

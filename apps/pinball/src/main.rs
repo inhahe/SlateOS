@@ -25,6 +25,7 @@
 //! ball launching.
 
 use guitk::color::Color;
+use randrange::{RandomSource, SeededRng, SystemRandom};
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Event, Key, KeyEvent};
@@ -138,36 +139,22 @@ const LABEL_FONT_SIZE: f32 = 12.0;
 const FOOTER_FONT_SIZE: f32 = 11.0;
 const OVERLAY_FONT_SIZE: f32 = 18.0;
 
-// ── LCG random number generator ────────────────────────────────────
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Rng {
-    state: u64,
-}
+// ── Randomness ─────────────────────────────────────────────────────
 
-impl Rng {
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
+/// The seed a table falls back to when the kernel has no entropy to give.
+///
+/// Unlike a password, a pinball table may be predictable: the worst outcome is
+/// that multiball throws its extra balls the same way it did last time. A
+/// machine that refused to start because the entropy source was down would be
+/// the worse failure, so this is a deliberate exception to the fail-closed rule
+/// [`SystemRandom`] exists to enforce. "PINBALL!" in ASCII.
+const FALLBACK_SEED: u64 = 0x5049_4E42_414C_4C21;
 
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Returns a value in `0..bound` (exclusive upper bound).
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
-
-    /// Returns a float in [0.0, 1.0).
-    fn next_f32(&mut self) -> f32 {
-        let val = self.next_u64();
-        // Use the upper 24 bits for mantissa precision.
-        (val >> 40) as f32 / (1u64 << 24) as f32
+/// A generator for one session's tables, from the kernel where possible.
+fn session_rng() -> SeededRng {
+    match SystemRandom::open() {
+        Ok(mut kernel) => SeededRng::new(kernel.next_u64()),
+        Err(_) => SeededRng::new(FALLBACK_SEED),
     }
 }
 
@@ -572,7 +559,7 @@ struct Pinball {
     /// Extra balls earned counter (to track milestones).
     extra_balls_earned: u32,
     /// RNG.
-    rng: Rng,
+    rng: SeededRng,
     /// Time of ball lost event for pause before next ball.
     ball_lost_ms: u64,
     /// Phase before pausing (to restore on unpause).
@@ -587,10 +574,18 @@ struct Pinball {
 
 impl Pinball {
     fn new() -> Self {
-        Self::with_seed(42)
+        // Not a fixed seed: with one, every session's first table threw its
+        // multiball the same way, and only the *second* game of a session --
+        // which reseeds from the first -- ever differed.
+        Self::with_rng(session_rng())
     }
 
-    fn with_seed(seed: u64) -> Self {
+    /// A table driven by `rng`.
+    ///
+    /// Taking the generator rather than a seed is what lets [`new`](Self::new)
+    /// draw from the kernel while a test drives the same table from a seed it
+    /// chose. Neither has to know where the other's bits came from.
+    fn with_rng(rng: SeededRng) -> Self {
         let bumpers = vec![
             Bumper::new(100.0, 160.0, BUMPER_RADIUS),
             Bumper::new(170.0, 130.0, BUMPER_RADIUS),
@@ -632,7 +627,7 @@ impl Pinball {
             multi_ball_active: false,
             tilt: TiltTracker::new(),
             extra_balls_earned: 0,
-            rng: Rng::new(seed),
+            rng,
             ball_lost_ms: 0,
             phase_before_pause: GamePhase::ReadyToLaunch,
             total_bumper_hits: 0,
@@ -667,8 +662,11 @@ impl Pinball {
     /// Start a new game, preserving high scores.
     fn new_game(&mut self) {
         let high_scores = self.high_scores.clone();
-        let seed = self.rng.next_u64();
-        *self = Self::with_seed(seed);
+        // Carry the generator into the next table rather than reseeding one
+        // from the other's output. Same effect on the stream, and it cannot
+        // accidentally hand two tables in a session the same seed.
+        let rng = self.rng.clone();
+        *self = Self::with_rng(rng);
         self.high_scores = high_scores;
     }
 
@@ -721,11 +719,7 @@ impl Pinball {
         for &pos in &positions {
             let mut ball = Ball::new(pos);
             ball.active = true;
-            let vx = if self.rng.next_f32() > 0.5 {
-                80.0
-            } else {
-                -80.0
-            };
+            let vx = if self.rng.flip() { 80.0 } else { -80.0 };
             ball.vel = Vec2::new(vx, -200.0);
             self.balls.push(ball);
         }
@@ -1993,7 +1987,16 @@ mod tests {
 
     /// Helper to create a game with a fixed seed.
     fn test_app() -> Pinball {
-        Pinball::with_seed(12345)
+        with_seed(12345)
+    }
+
+    /// A table whose randomness is reproducible, for tests that need it.
+    ///
+    /// The production constructor draws its seed from the kernel, which is
+    /// exactly what a test must not do; this is the seam that lets the same
+    /// table be driven from a seed the test chose.
+    fn with_seed(seed: u64) -> Pinball {
+        Pinball::with_rng(SeededRng::new(seed))
     }
 
     /// Helper to create a key press event.
@@ -2273,40 +2276,69 @@ mod tests {
         assert!((a.distance_to(b) - 5.0).abs() < 0.001);
     }
 
-    // ── RNG ─────────────────────────────────────────────────────────
+    // ── Randomness ──────────────────────────────────────────────────
+    //
+    // The generator itself belongs to `randrange` and is tested there. What
+    // belongs here is what this table asks of it: that multiball can throw a
+    // ball either way, and that a seeded table replays exactly.
 
+    /// The one thing pinball draws for: which way multiball's extra balls go.
+    ///
+    /// A generator that always answered the same way would send every extra
+    /// ball right, every game — which is what the local `next_f32() > 0.5`
+    /// this replaced would have done had its stream ever been degenerate, and
+    /// it is invisible in a single game.
     #[test]
-    fn test_rng_deterministic() {
-        let mut rng1 = Rng::new(42);
-        let mut rng2 = Rng::new(42);
-        for _ in 0..10 {
-            assert_eq!(rng1.next_u64(), rng2.next_u64());
+    fn multi_ball_throws_extra_balls_both_ways_across_tables() {
+        let mut saw_left = false;
+        let mut saw_right = false;
+        for seed in 0..40_u64 {
+            let mut app = with_seed(seed);
+            app.activate_multi_ball();
+            for ball in app.balls.iter().filter(|ball| ball.active) {
+                if ball.vel.x > 0.0 {
+                    saw_right = true;
+                } else if ball.vel.x < 0.0 {
+                    saw_left = true;
+                }
+            }
         }
+        assert!(
+            saw_left && saw_right,
+            "multiball never threw a ball one of the two ways"
+        );
     }
 
+    /// Two tables built from one seed must play identically — that is what
+    /// makes every other test in this module reproducible.
     #[test]
-    fn test_rng_different_seeds() {
-        let mut rng1 = Rng::new(42);
-        let mut rng2 = Rng::new(99);
-        assert_ne!(rng1.next_u64(), rng2.next_u64());
+    fn the_same_seed_builds_the_same_table() {
+        let mut a = with_seed(2024);
+        let mut b = with_seed(2024);
+        a.activate_multi_ball();
+        b.activate_multi_ball();
+        let velocities = |app: &Pinball| -> Vec<(f32, f32)> {
+            app.balls.iter().map(|ball| (ball.vel.x, ball.vel.y)).collect()
+        };
+        assert_eq!(velocities(&a), velocities(&b));
     }
 
+    /// …and two seeds must give two tables, so that "reproducible" has not
+    /// quietly become "identical".
     #[test]
-    fn test_rng_bounded() {
-        let mut rng = Rng::new(42);
-        for _ in 0..100 {
-            let val = rng.next_bounded(10);
-            assert!(val < 10);
-        }
-    }
-
-    #[test]
-    fn test_rng_f32_range() {
-        let mut rng = Rng::new(42);
-        for _ in 0..100 {
-            let val = rng.next_f32();
-            assert!(val >= 0.0 && val < 1.0);
-        }
+    fn different_seeds_eventually_build_different_tables() {
+        let throws = |seed: u64| -> Vec<bool> {
+            let mut app = with_seed(seed);
+            let mut going_right = Vec::new();
+            for _ in 0..8 {
+                app.multi_ball_active = false;
+                app.balls.clear();
+                app.activate_multi_ball();
+                going_right.extend(app.balls.iter().map(|ball| ball.vel.x > 0.0));
+            }
+            going_right
+        };
+        assert_ne!(throws(1), throws(2));
     }
 
     // ── Ball ────────────────────────────────────────────────────────

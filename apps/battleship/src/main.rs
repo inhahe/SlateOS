@@ -82,7 +82,7 @@ const SHIP_DEFS: [(ShipKind, usize); 5] = [
 // and `row + col` was *always odd*. The AI's entire fleet was anchored to one
 // colour of the checkerboard, at every seed, and half the board could not hold
 // the bow of a ship. See `known-issues.md` and `design-decisions.md` §447.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 // ── Ship types ──────────────────────────────────────────────────────
 
@@ -218,7 +218,7 @@ impl AiState {
     }
 
     /// Pick the next cell to fire at.
-    fn choose_target(&mut self, rng: &mut Rng) -> (usize, usize) {
+    fn choose_target(&mut self, rng: &mut SeededRng) -> (usize, usize) {
         match &self.mode {
             AiMode::Target { targets } if !targets.is_empty() => {
                 // Pick the first valid unfired target from the list.
@@ -240,7 +240,7 @@ impl AiState {
     }
 
     /// Pick a random unfired cell.
-    fn pick_random(&self, rng: &mut Rng) -> (usize, usize) {
+    fn pick_random(&self, rng: &mut SeededRng) -> (usize, usize) {
         // Count unfired cells.
         let mut unfired = Vec::new();
         for r in 0..GRID_SIZE {
@@ -447,7 +447,7 @@ struct BattleshipApp {
     player_fleet: Fleet,
     opponent_fleet: Fleet,
     ai_state: AiState,
-    rng: Rng,
+    rng: SeededRng,
 
     // Placement state
     placement_index: usize,
@@ -478,7 +478,7 @@ impl BattleshipApp {
             player_fleet: Fleet::new(),
             opponent_fleet: Fleet::new(),
             ai_state: AiState::new(),
-            rng: Rng::new(0xDEAD_BEEF_CAFE_1234),
+            rng: SeededRng::new(0xDEAD_BEEF_CAFE_1234),
             placement_index: 0,
             placement_row: 0,
             placement_col: 0,
@@ -1287,7 +1287,7 @@ mod tests {
         let mut odd = 0_u32;
         for seed in 1..200_u64 {
             let mut app = BattleshipApp::new();
-            app.rng = Rng::new(seed);
+            app.rng = SeededRng::new(seed);
             app.place_ai_ships();
             for ship in &app.opponent_fleet.ships {
                 if (ship.row + ship.col) % 2 == 0 {
@@ -1811,7 +1811,7 @@ mod tests {
     #[test]
     fn test_ai_choose_target_hunt() {
         let mut ai = AiState::new();
-        let mut rng = Rng::new(99);
+        let mut rng = SeededRng::new(99);
         let (r, c) = ai.choose_target(&mut rng);
         assert!(r < GRID_SIZE);
         assert!(c < GRID_SIZE);
@@ -1821,7 +1821,7 @@ mod tests {
     fn test_ai_choose_target_from_targets() {
         let mut ai = AiState::new();
         ai.record_shot(5, 5, true);
-        let mut rng = Rng::new(99);
+        let mut rng = SeededRng::new(99);
         let (r, c) = ai.choose_target(&mut rng);
         // Should pick from adjacents of (5,5)
         let expected = [(4, 5), (6, 5), (5, 4), (5, 6)];
@@ -1849,7 +1849,7 @@ mod tests {
     #[test]
     fn test_ai_pick_random_avoids_fired() {
         let mut ai = AiState::new();
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         // Fire at most cells
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
@@ -2213,11 +2213,11 @@ mod tests {
     fn test_ai_placement_with_different_seeds() {
         // Different seeds should produce different layouts.
         let mut app1 = BattleshipApp::new();
-        app1.rng = Rng::new(111);
+        app1.rng = SeededRng::new(111);
         app1.place_ai_ships();
 
         let mut app2 = BattleshipApp::new();
-        app2.rng = Rng::new(999);
+        app2.rng = SeededRng::new(999);
         app2.place_ai_ships();
 
         // It's possible (but unlikely) for two seeds to produce the same layout.

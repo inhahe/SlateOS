@@ -907,7 +907,7 @@ impl PasswordGenerator {
     /// user has switched every character class off.
     fn draw_random(rng: &mut CredRandom, charset: &[char], length: usize) -> String {
         (0..length)
-            .filter_map(|_| rng.pick(charset).copied())
+            .filter_map(|_| rng.choose(charset).copied())
             .collect()
     }
 
@@ -919,7 +919,7 @@ impl PasswordGenerator {
             .map(|i| {
                 let pool = if i % 2 == 0 { CONSONANTS } else { VOWELS };
                 // Both pools are non-empty constants, so `pick` always answers.
-                char::from(rng.pick(pool).copied().unwrap_or(b'?'))
+                char::from(rng.choose(pool).copied().unwrap_or(b'?'))
             })
             .collect()
     }
@@ -927,7 +927,7 @@ impl PasswordGenerator {
     /// `words` words from the list, joined by `separator`.
     fn draw_passphrase(rng: &mut CredRandom, words: usize, separator: &str) -> String {
         (0..words)
-            .filter_map(|_| rng.pick(WORDLIST).copied())
+            .filter_map(|_| rng.choose(WORDLIST).copied())
             .collect::<Vec<_>>()
             .join(separator)
     }

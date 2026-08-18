@@ -463,7 +463,7 @@ impl RandomSource for AppRandom {
 
 /// One of `chars`, or `'?'` if there are none.
 fn pick_char<R: RandomSource>(rng: &mut R, chars: &[char]) -> char {
-    rng.pick(chars).copied().unwrap_or('?')
+    rng.choose(chars).copied().unwrap_or('?')
 }
 
 // ============================================================================
@@ -526,7 +526,7 @@ pub fn generate_password<R: RandomSource>(opts: &PasswordOptions, rng: &mut R) -
     // Shuffle the password (Fisher-Yates)
     let len = password.len();
     for i in (1..len).rev() {
-        let j = rng.below_usize(i.saturating_add(1));
+        let j = rng.below(i.saturating_add(1));
         password.swap(i, j);
     }
 
@@ -538,7 +538,7 @@ pub fn generate_passphrase<R: RandomSource>(opts: &PassphraseOptions, rng: &mut 
     let mut words: Vec<String> = Vec::with_capacity(opts.word_count);
 
     for _ in 0..opts.word_count {
-        let word = rng.pick(WORD_LIST).copied().unwrap_or("unknown").to_owned();
+        let word = rng.choose(WORD_LIST).copied().unwrap_or("unknown").to_owned();
         if opts.capitalize {
             let mut chars = word.chars();
             let capitalized = match chars.next() {
@@ -558,7 +558,7 @@ pub fn generate_passphrase<R: RandomSource>(opts: &PassphraseOptions, rng: &mut 
     let mut result = words.join(&opts.separator);
 
     if opts.add_number {
-        let digit = rng.below_usize(10);
+        let digit = rng.below(10);
         result.push_str(&digit.to_string());
     }
     if opts.add_symbol {

@@ -76,7 +76,7 @@ const TITLE_FONT_SIZE: f32 = 14.0;
 //
 // Beginner (81 cells) and Expert (480) were spared, because neither bound is a
 // power of two -- which is exactly why this survived so long.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 // ── Difficulty presets ──────────────────────────────────────────────
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,7 +254,7 @@ impl MinesweeperApp {
     /// Place mines randomly, avoiding the first-click cell and its neighbors.
     /// This ensures the first click is always safe and reveals a region.
     fn place_mines(&mut self, safe_row: usize, safe_col: usize) {
-        let mut rng = Rng::new(self.rng_seed);
+        let mut rng = SeededRng::new(self.rng_seed);
 
         // Collect the safe zone: the clicked cell + its neighbors.
         let mut safe_zone = vec![(safe_row, safe_col)];

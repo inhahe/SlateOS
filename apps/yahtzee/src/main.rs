@@ -197,13 +197,13 @@ enum GamePhase {
 // seeds, where about twelve are expected. The game's own name was unreachable
 // and its Yahtzee-bonus branch was dead code. See `known-issues.md` and
 // `design-decisions.md` §447.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 /// Roll one die: a value in `1..=6`.
 ///
 /// A free function rather than a method, because a six-sided die is this
 /// game's unit and not the generator's.
-fn roll_die(rng: &mut Rng) -> u8 {
+fn roll_die(rng: &mut SeededRng) -> u8 {
     // `below` reduces with the high bits, so nothing carries from one call to
     // the next. The cast cannot truncate: the result is 0..=5.
     (rng.below(6) as u8).saturating_add(1)
@@ -368,7 +368,7 @@ struct Yahtzee {
     /// Highest score achieved across games.
     high_score: u16,
     /// RNG for dice rolls.
-    rng: Rng,
+    rng: SeededRng,
 }
 
 impl Yahtzee {
@@ -389,7 +389,7 @@ impl Yahtzee {
             selected_die: 0,
             selected_category: 0,
             high_score: 0,
-            rng: Rng::new(seed),
+            rng: SeededRng::new(seed),
         }
     }
 
@@ -2565,7 +2565,7 @@ mod tests {
 
     #[test]
     fn test_rng_die_range() {
-        let mut rng = Rng::new(9999);
+        let mut rng = SeededRng::new(9999);
         for _ in 0..1000 {
             let val = roll_die(&mut rng);
             assert!((1..=6).contains(&val), "Die out of range: {val}");
@@ -2574,7 +2574,7 @@ mod tests {
 
     #[test]
     fn test_rng_produces_all_values() {
-        let mut rng = Rng::new(7777);
+        let mut rng = SeededRng::new(7777);
         let mut seen = [false; 7];
         for _ in 0..10000 {
             let val = roll_die(&mut rng);
@@ -2606,7 +2606,7 @@ mod tests {
         // entirely with probability below 1e-13. Four alike is counted too: it
         // was equally impossible and is 25 times more common, so it fails
         // loudly rather than marginally.
-        let mut rng = Rng::new(2024);
+        let mut rng = SeededRng::new(2024);
         let mut yahtzees = 0_u32;
         let mut four_alike = 0_u32;
         for _ in 0..40_000 {
@@ -2634,7 +2634,7 @@ mod tests {
     /// `(even, even)`, at any seed. All four combinations must be reachable.
     #[test]
     fn adjacent_dice_are_not_locked_to_opposite_parity() {
-        let mut rng = Rng::new(31);
+        let mut rng = SeededRng::new(31);
         let mut seen = std::collections::BTreeSet::new();
         for _ in 0..2000 {
             let dice: [u8; NUM_DICE] = core::array::from_fn(|_| roll_die(&mut rng));

@@ -634,8 +634,8 @@ pub fn spray_paint<R: RandomSource>(
 ) {
     let radius = f64::from(radius);
     for _ in 0..density {
-        let angle = f64::from(rng.next_f32()) * core::f64::consts::TAU;
-        let dist = f64::from(rng.next_f32()).sqrt() * radius;
+        let angle = f64::from(rng.unit_f32()) * core::f64::consts::TAU;
+        let dist = f64::from(rng.unit_f32()).sqrt() * radius;
 
         // `as` on a float saturates at the integer bounds in Rust, so a wild
         // centre cannot wrap the offset around; the sum still has to be

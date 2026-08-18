@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The shared random source. Was a local LCG reduced with `% bound` -- the
+# copy-pasted one randrange's module docs dissect.
+randrange = { path = "../../randrange" }
 
 [lints]
 workspace = true

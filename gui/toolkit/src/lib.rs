@@ -44,7 +44,16 @@ pub mod menubar;
 pub mod modal;
 pub mod pathbar;
 pub mod render;
-pub mod rng;
+/// Random numbers — see [`randrange`] for the whole story.
+///
+/// This was a module here, written to end the hand-rolled generators the
+/// desktop and its applications had each grown. It turned out the games had
+/// grown their own answer to the same problem at the same time, in a `no_std`,
+/// dependency-free crate; the two are merged into that crate, because the
+/// entropy source in this half is needed by headless components which cannot
+/// reasonably depend on a GUI toolkit. The name stays so that
+/// `guitk::rng::SeededRng` keeps meaning what it meant.
+pub use randrange as rng;
 pub mod scaling;
 pub mod signal;
 pub mod style;

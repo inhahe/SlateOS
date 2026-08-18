@@ -270,7 +270,7 @@ fn new_deck() -> Vec<Card> {
 //
 // The shuffle itself was already the correct downward Fisher-Yates. Only the
 // reduction was wrong, which is why nothing about the code looked suspect.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 // -- Pass direction ----------------------------------------------------------
 
@@ -411,7 +411,7 @@ struct Hearts {
     /// Status message shown at bottom.
     status: String,
     /// RNG for shuffling.
-    rng: Rng,
+    rng: SeededRng,
     /// Player names.
     names: [&'static str; 4],
     /// The last completed trick (for display).
@@ -437,7 +437,7 @@ impl Hearts {
             round_number: 0,
             selected_index: 0,
             status: String::new(),
-            rng: Rng::new(42),
+            rng: SeededRng::new(42),
             names: ["You", "West", "North", "East"],
             last_trick: None,
             winner: None,
@@ -1659,7 +1659,7 @@ mod tests {
         // One generator across all deals, because that is how the game runs:
         // `start_round` reshuffles with the same `rng` every round. A defect
         // that depends on the draw counter therefore has to survive here.
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let mut seats = [[0_u32; 4]; 52];
         for _ in 0..DEALS {
             let mut deck = new_deck();
@@ -1690,7 +1690,7 @@ mod tests {
         // deal shows up directly as a biased opening move. The old generator
         // gave seat 0 the lead 33.6% of the time.
         const DEALS: u32 = 20_000;
-        let mut rng = Rng::new(7);
+        let mut rng = SeededRng::new(7);
         let mut leads = [0_u32; 4];
         for _ in 0..DEALS {
             let mut deck = new_deck();
@@ -2903,7 +2903,7 @@ mod tests {
         let mut hands = std::collections::BTreeSet::new();
         for seed in 0..200 {
             let mut game = Hearts::new();
-            game.rng = Rng::new(seed);
+            game.rng = SeededRng::new(seed);
             game.start_round();
             hands.insert(game.hands[0].clone());
         }

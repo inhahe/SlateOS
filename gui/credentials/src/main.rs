@@ -33,7 +33,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{eq_constant_time, sha256};
 
 // Likewise the password generator's xorshift, which reduced with `% bound`.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -509,7 +509,7 @@ pub fn generate_password(
         return String::new();
     }
 
-    let mut rng = Rng::new(seed);
+    let mut rng = SeededRng::new(seed);
     (0..length)
         .map(|_| {
             // `choose` reduces by taking the high half of a widening

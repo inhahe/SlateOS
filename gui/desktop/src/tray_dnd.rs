@@ -644,6 +644,17 @@ impl TrayContextMenu {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
     use guitk::dnd::DragEvent;
 
@@ -1085,7 +1096,7 @@ mod tests {
         config.set_start_in_tray("app_c", true);
 
         let mut enabled = config.enabled_apps();
-        enabled.sort();
+        enabled.sort_unstable();
         assert_eq!(enabled, vec!["app_a", "app_c"]);
     }
 

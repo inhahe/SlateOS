@@ -34,6 +34,11 @@ use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEve
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+// The candidate ranking is shared with both launchers. It used to be a third
+// copy of the same routine here, under a comment saying it "uses the same
+// algorithm as the application launcher for consistency" — a promise with no
+// mechanism behind it.
+use guitk::textfind::fuzzy_score;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -158,11 +163,7 @@ impl TextInput {
     /// Returns (start, end) byte offsets of the selection, or (cursor, cursor).
     fn selection_range(&self) -> (usize, usize) {
         match self.selection_anchor {
-            Some(anchor) => {
-                let start = anchor.min(self.cursor);
-                let end = anchor.max(self.cursor);
-                (start, end)
-            }
+            Some(anchor) => (anchor.min(self.cursor), anchor.max(self.cursor)),
             None => (self.cursor, self.cursor),
         }
     }
@@ -173,7 +174,57 @@ impl TextInput {
 
     fn selected_text(&self) -> &str {
         let (start, end) = self.selection_range();
-        &self.text[start..end]
+        self.text.get(start..end).unwrap_or("")
+    }
+
+    /// The largest character boundary at or before `at`, and never past the
+    /// end of the text.
+    ///
+    /// Every offset this type holds is supposed to be on a boundary already.
+    /// This is what makes that a *property* rather than an assumption: the
+    /// primitives below all pass their offsets through here, so a stale or
+    /// mid-character offset shortens an edit instead of panicking inside
+    /// `String::replace_range`.
+    fn floor_boundary(&self, at: usize) -> usize {
+        let mut at = at.min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at = at.saturating_sub(1);
+        }
+        at
+    }
+
+    /// The byte offset of the character before `at`, or `at` at the start.
+    fn prev_boundary(&self, at: usize) -> usize {
+        let at = self.floor_boundary(at);
+        self.text
+            .get(..at)
+            .and_then(|before| before.chars().next_back())
+            .map_or(at, |ch| at.saturating_sub(ch.len_utf8()))
+    }
+
+    /// The byte offset just past the character at `at`, or `at` at the end.
+    fn next_boundary(&self, at: usize) -> usize {
+        let at = self.floor_boundary(at);
+        self.text
+            .get(at..)
+            .and_then(|after| after.chars().next())
+            .map_or(at, |ch| at.saturating_add(ch.len_utf8()))
+    }
+
+    /// Replace the bytes in `start..end` with `with`, leaving the cursor just
+    /// past the inserted text and nothing selected.
+    ///
+    /// The single place `text` is mutated. Insert, paste, delete, backspace
+    /// and delete-selection are all this operation with different arguments,
+    /// and each used to spell out its own `drain`/`insert` plus its own cursor
+    /// adjustment — five chances to move the cursor to somewhere the text no
+    /// longer has a character.
+    fn replace_range(&mut self, start: usize, end: usize, with: &str) {
+        let start = self.floor_boundary(start);
+        let end = self.floor_boundary(end).max(start);
+        self.text.replace_range(start..end, with);
+        self.cursor = start.saturating_add(with.len());
+        self.selection_anchor = None;
     }
 
     fn delete_selection(&mut self) {
@@ -181,9 +232,7 @@ impl TextInput {
             return;
         }
         let (start, end) = self.selection_range();
-        self.text.drain(start..end);
-        self.cursor = start;
-        self.selection_anchor = None;
+        self.replace_range(start, end, "");
     }
 
     fn select_all(&mut self) {
@@ -191,74 +240,55 @@ impl TextInput {
         self.cursor = self.text.len();
     }
 
-    fn move_cursor_left(&mut self, shift: bool) {
-        if shift && self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cursor);
-        } else if !shift {
-            if self.has_selection() {
-                let (start, _) = self.selection_range();
-                self.cursor = start;
-                self.selection_anchor = None;
-                return;
-            }
+    /// Update the selection anchor for a cursor move: holding shift starts (or
+    /// keeps) a selection, releasing it drops one.
+    fn anchor_for_move(&mut self, shift: bool) {
+        if shift {
+            self.selection_anchor.get_or_insert(self.cursor);
+        } else {
             self.selection_anchor = None;
         }
+    }
 
-        if self.cursor > 0 {
-            // Move to previous char boundary.
-            let mut pos = self.cursor - 1;
-            while pos > 0 && !self.text.is_char_boundary(pos) {
-                pos -= 1;
-            }
-            self.cursor = pos;
+    fn move_cursor_left(&mut self, shift: bool) {
+        // An unshifted arrow against a selection collapses it to that end
+        // rather than moving — the cursor lands where the selection was, not
+        // one character further.
+        if !shift && self.has_selection() {
+            let (start, _) = self.selection_range();
+            self.cursor = start;
+            self.selection_anchor = None;
+            return;
         }
+        self.anchor_for_move(shift);
+        self.cursor = self.prev_boundary(self.cursor);
     }
 
     fn move_cursor_right(&mut self, shift: bool) {
-        if shift && self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cursor);
-        } else if !shift {
-            if self.has_selection() {
-                let (_, end) = self.selection_range();
-                self.cursor = end;
-                self.selection_anchor = None;
-                return;
-            }
+        if !shift && self.has_selection() {
+            let (_, end) = self.selection_range();
+            self.cursor = end;
             self.selection_anchor = None;
+            return;
         }
-
-        if self.cursor < self.text.len() {
-            // Move to next char boundary.
-            let mut pos = self.cursor + 1;
-            while pos < self.text.len() && !self.text.is_char_boundary(pos) {
-                pos += 1;
-            }
-            self.cursor = pos;
-        }
+        self.anchor_for_move(shift);
+        self.cursor = self.next_boundary(self.cursor);
     }
 
     fn move_home(&mut self, shift: bool) {
-        if shift && self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cursor);
-        } else if !shift {
-            self.selection_anchor = None;
-        }
+        self.anchor_for_move(shift);
         self.cursor = 0;
     }
 
     fn move_end(&mut self, shift: bool) {
-        if shift && self.selection_anchor.is_none() {
-            self.selection_anchor = Some(self.cursor);
-        } else if !shift {
-            self.selection_anchor = None;
-        }
+        self.anchor_for_move(shift);
         self.cursor = self.text.len();
     }
 
     fn insert_char(&mut self, ch: char) {
-        self.delete_selection();
-        self.text.insert(self.cursor, ch);
-        self.cursor += ch.len_utf8();
+        let (start, end) = self.selection_range();
+        let mut buf = [0u8; 4];
+        self.replace_range(start, end, ch.encode_utf8(&mut buf));
     }
 
     fn backspace(&mut self) {
@@ -266,14 +296,8 @@ impl TextInput {
             self.delete_selection();
             return;
         }
-        if self.cursor > 0 {
-            let mut pos = self.cursor - 1;
-            while pos > 0 && !self.text.is_char_boundary(pos) {
-                pos -= 1;
-            }
-            self.text.drain(pos..self.cursor);
-            self.cursor = pos;
-        }
+        let start = self.prev_boundary(self.cursor);
+        self.replace_range(start, self.cursor, "");
     }
 
     fn delete(&mut self) {
@@ -281,13 +305,8 @@ impl TextInput {
             self.delete_selection();
             return;
         }
-        if self.cursor < self.text.len() {
-            let mut end = self.cursor + 1;
-            while end < self.text.len() && !self.text.is_char_boundary(end) {
-                end += 1;
-            }
-            self.text.drain(self.cursor..end);
-        }
+        let end = self.next_boundary(self.cursor);
+        self.replace_range(self.cursor, end, "");
     }
 
     fn cut(&mut self) {
@@ -307,10 +326,10 @@ impl TextInput {
         if self.clipboard.is_empty() {
             return;
         }
-        self.delete_selection();
-        let clip = self.clipboard.clone();
-        self.text.insert_str(self.cursor, &clip);
-        self.cursor += clip.len();
+        let (start, end) = self.selection_range();
+        let clip = core::mem::take(&mut self.clipboard);
+        self.replace_range(start, end, &clip);
+        self.clipboard = clip;
     }
 }
 
@@ -441,22 +460,27 @@ impl RunDialog {
 
     /// Add a command to history (called after successful execution).
     pub fn add_to_history(&mut self, command: &str) {
-        // Remove duplicate if present.
+        // Remove duplicate if present, so re-running a command moves it to the
+        // front rather than filling the list with one entry.
         self.history.retain(|h| h != command);
         self.history.push(command.to_string());
-        // Cap at MAX_HISTORY.
-        if self.history.len() > MAX_HISTORY {
-            self.history.remove(0);
-        }
+        self.trim_history();
     }
 
     /// Load history from a list of strings (e.g., read from file).
     pub fn load_history(&mut self, commands: Vec<String>) {
         self.history = commands;
-        if self.history.len() > MAX_HISTORY {
-            let excess = self.history.len() - MAX_HISTORY;
-            self.history.drain(0..excess);
-        }
+        self.trim_history();
+    }
+
+    /// Drop the oldest entries until at most `MAX_HISTORY` remain.
+    ///
+    /// One rule in one place: `add_to_history` used to cap by removing a
+    /// single entry (correct only because it is called after a single push)
+    /// and `load_history` by draining a difference it computed itself.
+    fn trim_history(&mut self) {
+        let excess = self.history.len().saturating_sub(MAX_HISTORY);
+        self.history.drain(0..excess);
     }
 
     /// Get current history for persistence.
@@ -516,28 +540,19 @@ impl RunDialog {
                 self.update_suggestions();
             }
 
-            // Arrow keys — history cycling
+            // Arrow keys steer whichever list is open: the autocomplete
+            // popup if one is showing, otherwise the command history.
             Key::Up => {
-                if self.show_autocomplete && self.suggestion_index.is_some() {
-                    // Navigate autocomplete up
-                    if let Some(idx) = self.suggestion_index
-                        && idx > 0
-                    {
-                        self.suggestion_index = Some(idx - 1);
-                    }
+                if self.browsing_suggestions() {
+                    self.select_prev_suggestion();
                 } else {
                     self.history_prev();
                 }
             }
 
             Key::Down => {
-                if self.show_autocomplete && self.suggestion_index.is_some() {
-                    // Navigate autocomplete down
-                    if let Some(idx) = self.suggestion_index
-                        && idx + 1 < self.suggestions.len()
-                    {
-                        self.suggestion_index = Some(idx + 1);
-                    }
+                if self.browsing_suggestions() {
+                    self.select_next_suggestion();
                 } else {
                     self.history_next();
                 }
@@ -1029,49 +1044,82 @@ impl RunDialog {
         false
     }
 
+    /// Step one entry towards the *older* end of the history, entering browse
+    /// mode from the newest entry if not already in it.
+    ///
+    /// Both directions read the entry through `get` and step with checked
+    /// arithmetic. They used to index `self.history[idx]` after deciding the
+    /// index was in range in the statement before — which held, but only
+    /// because `history_index` was maintained correctly by the two methods
+    /// that write it, at a distance of eighty lines from the index expression.
     fn history_prev(&mut self) {
-        if self.history.is_empty() {
+        let entering = self.history_index.is_none();
+        let target = match self.history_index {
+            // Not browsing yet: start at the newest entry. `checked_sub` is
+            // also the empty-history test — there is no newest entry.
+            None => self.history.len().checked_sub(1),
+            // Already at the oldest: stay there rather than wrapping.
+            Some(idx) => Some(idx.saturating_sub(1)),
+        };
+        let Some(entry) = target.and_then(|idx| self.history.get(idx).cloned()) else {
             return;
+        };
+        if entering {
+            self.pre_history_text = self.input.text.clone();
         }
+        self.history_index = target;
+        self.input.set_text(&entry);
+        self.update_suggestions();
+    }
 
-        match self.history_index {
-            None => {
-                // Enter history browse mode.
-                self.pre_history_text = self.input.text.clone();
-                let idx = self.history.len() - 1;
-                self.history_index = Some(idx);
-                self.input.set_text(&self.history[idx]);
-            }
-            Some(idx) => {
-                if idx > 0 {
-                    let new_idx = idx - 1;
-                    self.history_index = Some(new_idx);
-                    self.input.set_text(&self.history[new_idx]);
+    /// Step one entry towards the *newer* end, leaving browse mode and
+    /// restoring the user's own text when stepping past the newest.
+    fn history_next(&mut self) {
+        if let Some(idx) = self.history_index {
+            match idx
+                .checked_add(1)
+                .filter(|&newer| newer < self.history.len())
+                .and_then(|newer| Some((newer, self.history.get(newer)?.clone())))
+            {
+                Some((newer, entry)) => {
+                    self.history_index = Some(newer);
+                    self.input.set_text(&entry);
+                }
+                None => {
+                    // Past the newest entry: back to whatever was typed before
+                    // browsing started.
+                    self.history_index = None;
+                    let saved = core::mem::take(&mut self.pre_history_text);
+                    self.input.set_text(&saved);
+                    self.pre_history_text = saved;
                 }
             }
         }
         self.update_suggestions();
     }
 
-    fn history_next(&mut self) {
-        match self.history_index {
-            None => {
-                // Not in history mode — nothing to do.
-            }
-            Some(idx) => {
-                if idx + 1 < self.history.len() {
-                    let new_idx = idx + 1;
-                    self.history_index = Some(new_idx);
-                    self.input.set_text(&self.history[new_idx]);
-                } else {
-                    // Past the end → restore original text.
-                    self.history_index = None;
-                    let saved = self.pre_history_text.clone();
-                    self.input.set_text(&saved);
-                }
-            }
+    /// Whether the arrow keys are steering the autocomplete popup rather than
+    /// the history.
+    fn browsing_suggestions(&self) -> bool {
+        self.show_autocomplete && self.suggestion_index.is_some()
+    }
+
+    /// Highlight the previous suggestion, stopping at the first.
+    fn select_prev_suggestion(&mut self) {
+        if let Some(idx) = self.suggestion_index {
+            self.suggestion_index = Some(idx.saturating_sub(1));
         }
-        self.update_suggestions();
+    }
+
+    /// Highlight the next suggestion, stopping at the last.
+    fn select_next_suggestion(&mut self) {
+        if let Some(idx) = self.suggestion_index
+            && let Some(next) = idx
+                .checked_add(1)
+                .filter(|&next| next < self.suggestions.len())
+        {
+            self.suggestion_index = Some(next);
+        }
     }
 
     fn accept_suggestion(&mut self) {
@@ -1137,91 +1185,6 @@ impl RunDialog {
 }
 
 // ============================================================================
-// Fuzzy matching (same algorithm style as the launcher)
-// ============================================================================
-
-/// Score how well `query` fuzzy-matches `target`.
-///
-/// Returns `None` if the query does not match. Higher scores are better.
-/// Uses the same algorithm as the application launcher for consistency.
-fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
-    if query.is_empty() {
-        return Some(0);
-    }
-
-    let query_lower: Vec<char> = query.chars().map(|c| c.to_ascii_lowercase()).collect();
-    let target_lower: Vec<char> = target.chars().map(|c| c.to_ascii_lowercase()).collect();
-
-    if query_lower.len() > target_lower.len() {
-        return None;
-    }
-
-    // Check prefix match for bonus.
-    let is_prefix = target_lower
-        .iter()
-        .zip(query_lower.iter())
-        .all(|(t, q)| t == q);
-
-    let mut score: u32 = 0;
-    let mut qi = 0;
-    let mut prev_match_idx: Option<usize> = None;
-    let mut first_match_idx: Option<usize> = None;
-
-    for (ti, &tc) in target_lower.iter().enumerate() {
-        if qi >= query_lower.len() {
-            break;
-        }
-        if tc == query_lower[qi] {
-            if first_match_idx.is_none() {
-                first_match_idx = Some(ti);
-            }
-
-            // Bonus for matching at word boundaries.
-            let at_boundary = ti == 0
-                || target_lower
-                    .get(ti.saturating_sub(1))
-                    .is_some_and(|&prev| prev == ' ' || prev == '-' || prev == '_');
-            if at_boundary {
-                score = score.saturating_add(10);
-            }
-
-            // Bonus for consecutive matches.
-            if let Some(prev) = prev_match_idx
-                && ti == prev + 1
-            {
-                score = score.saturating_add(5);
-            }
-
-            prev_match_idx = Some(ti);
-            qi += 1;
-        }
-    }
-
-    // All query chars must match.
-    if qi < query_lower.len() {
-        return None;
-    }
-
-    // Prefix bonus.
-    if is_prefix {
-        score = score.saturating_add(50);
-    }
-
-    // Early match bonus.
-    if let Some(idx) = first_match_idx {
-        let early_bonus = 20u32.saturating_sub(idx as u32);
-        score = score.saturating_add(early_bonus);
-    }
-
-    // Shorter targets score higher (more specific match).
-    let length_diff = target_lower.len().saturating_sub(query_lower.len());
-    let length_bonus = 10u32.saturating_sub(length_diff.min(10) as u32);
-    score = score.saturating_add(length_bonus);
-
-    Some(score)
-}
-
-// ============================================================================
 // Default data
 // ============================================================================
 
@@ -1260,6 +1223,17 @@ fn default_path_dirs() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     fn make_key(key: Key, ctrl: bool, shift: bool, text: Option<char>) -> KeyEvent {
@@ -1373,6 +1347,124 @@ mod tests {
         assert_eq!(input.cursor, 0);
     }
 
+    // ------------------------------------------------------------------
+    // Multi-byte text, which is where the byte offsets are load-bearing
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn a_cursor_step_crosses_a_whole_character_not_a_byte() {
+        // "é" is two bytes, "→" three, "😀" four: one of each, so a step that
+        // moved by a fixed amount would land inside a character and the next
+        // edit would panic.
+        let mut input = TextInput::new();
+        input.set_text("aé→😀b");
+        input.move_home(false);
+        let mut offsets = vec![input.cursor];
+        for _ in 0..5 {
+            input.move_cursor_right(false);
+            offsets.push(input.cursor);
+        }
+        assert_eq!(offsets, vec![0, 1, 3, 6, 10, 11]);
+
+        // And back, landing on the same boundaries in reverse.
+        let mut back = vec![input.cursor];
+        for _ in 0..5 {
+            input.move_cursor_left(false);
+            back.push(input.cursor);
+        }
+        back.reverse();
+        assert_eq!(back, offsets);
+    }
+
+    #[test]
+    fn backspace_and_delete_remove_one_whole_character() {
+        let mut input = TextInput::new();
+        input.set_text("a😀b");
+        input.move_end(false);
+        input.move_cursor_left(false); // before 'b'
+        input.backspace();
+        assert_eq!(input.text, "ab");
+        assert_eq!(input.cursor, 1);
+
+        let mut input = TextInput::new();
+        input.set_text("a😀b");
+        input.move_home(false);
+        input.move_cursor_right(false); // after 'a'
+        input.delete();
+        assert_eq!(input.text, "ab");
+        assert_eq!(input.cursor, 1);
+    }
+
+    #[test]
+    fn typing_or_pasting_over_a_selection_replaces_it() {
+        let mut input = TextInput::new();
+        input.set_text("hello world");
+        input.selection_anchor = Some(0);
+        input.cursor = 5;
+        input.insert_char('X');
+        assert_eq!(input.text, "X world");
+        assert_eq!(input.cursor, 1);
+        assert!(!input.has_selection());
+
+        let mut input = TextInput::new();
+        input.set_text("hello world");
+        input.clipboard = "bye".to_string();
+        input.selection_anchor = Some(0);
+        input.cursor = 5;
+        input.paste();
+        assert_eq!(input.text, "bye world");
+        assert_eq!(input.cursor, 3);
+        // Pasting does not consume the clipboard.
+        assert_eq!(input.clipboard, "bye");
+    }
+
+    #[test]
+    fn an_offset_left_inside_a_character_shortens_the_edit_rather_than_panicking() {
+        // Nothing in the type is supposed to produce a mid-character offset,
+        // but "supposed to" is what a panic in `String::replace_range` is made
+        // of. Every entry point clamps to a boundary instead.
+        let mut input = TextInput::new();
+        input.set_text("a😀b");
+        input.cursor = 3; // inside the four-byte character, which spans 1..5
+        input.selection_anchor = None;
+        input.backspace();
+        // The offset floors to the start of the character it was inside, so
+        // backspace takes the `a` before that. *Which* character goes is not
+        // the claim — the claim is that an offset the type cannot legitimately
+        // hold produces a smaller edit and a cursor still on a boundary,
+        // rather than a panic inside `String::replace_range`.
+        assert_eq!(input.text, "😀b");
+        assert!(input.text.is_char_boundary(input.cursor));
+
+        let mut input = TextInput::new();
+        input.set_text("a😀b");
+        input.cursor = 99; // past the end
+        input.delete();
+        assert_eq!(input.text, "a😀b");
+        assert!(input.text.is_char_boundary(input.cursor));
+    }
+
+    #[test]
+    fn a_shifted_arrow_extends_the_selection_and_an_unshifted_one_collapses_it() {
+        let mut input = TextInput::new();
+        input.set_text("abcdef");
+        input.move_home(false);
+        input.move_cursor_right(true);
+        input.move_cursor_right(true);
+        assert_eq!(input.selected_text(), "ab");
+
+        // Unshifted Left collapses to the near end without moving further.
+        input.move_cursor_left(false);
+        assert_eq!(input.cursor, 0);
+        assert!(!input.has_selection());
+
+        input.move_cursor_right(true);
+        input.move_cursor_right(true);
+        input.move_cursor_right(false);
+        assert_eq!(input.cursor, 2);
+        assert!(!input.has_selection());
+    }
+
     // ====================================================================
     // History cycling tests
     // ====================================================================
@@ -1443,6 +1535,45 @@ mod tests {
         // "ls" should be at the end (most recent).
         assert_eq!(dialog.history[0], "pwd");
         assert_eq!(dialog.history[1], "ls");
+    }
+
+    #[test]
+    fn stepping_past_either_end_of_the_history_stops_rather_than_wrapping() {
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog.add_to_history("one");
+        dialog.add_to_history("two");
+
+        // Older, older, and once more past the oldest.
+        dialog.history_prev();
+        assert_eq!(dialog.input.text, "two");
+        dialog.history_prev();
+        assert_eq!(dialog.input.text, "one");
+        dialog.history_prev();
+        assert_eq!(dialog.input.text, "one");
+
+        // Back down, and one step past the newest returns the typed text.
+        dialog.history_next();
+        assert_eq!(dialog.input.text, "two");
+        dialog.history_next();
+        assert_eq!(dialog.input.text, "");
+        assert!(dialog.history_index.is_none());
+        // Already out of browse mode: another step changes nothing.
+        dialog.history_next();
+        assert_eq!(dialog.input.text, "");
+    }
+
+    #[test]
+    fn browsing_an_empty_history_does_nothing() {
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        for ch in "typed".chars() {
+            dialog.input.insert_char(ch);
+        }
+        dialog.history_prev();
+        dialog.history_next();
+        assert_eq!(dialog.input.text, "typed");
+        assert!(dialog.history_index.is_none());
     }
 
     // ====================================================================

@@ -201,78 +201,76 @@ impl DynamicTheme {
         }
     }
 
-    /// Phase boundaries in hours (24h clock). Each element is the start hour
-    /// of that phase.
-    ///
-    /// Layout:  night [0..5)  dawn [5..8)  morning [8..12)
-    ///          afternoon [12..17)  evening [17..20)  night [20..24)
-    const PHASE_HOURS: [f32; PHASE_COUNT] = [5.0, 8.0, 12.0, 17.0, 20.0];
-
     /// Duration of the transition ramp in hours.
     const TRANSITION_HOURS: f32 = 1.5;
+
+    /// The day's phases as `(start hour, colour)`, in clock order.
+    ///
+    /// One table rather than the two parallel arrays this used to be — a
+    /// `[f32; PHASE_COUNT]` of boundaries and a separately-built `[Color; 5]`
+    /// of colours, joined only by both being subscripted with the same index.
+    /// Two arrays that must stay in the same order is a correspondence
+    /// nothing enforces; a reordering of one is a silent recolouring of the
+    /// whole day.
+    ///
+    /// Layout: night [0..5)  dawn [5..8)  morning [8..12)
+    ///         afternoon [12..17)  evening [17..20)  night [20..24)
+    fn schedule(&self) -> [(f32, Color); PHASE_COUNT] {
+        [
+            (5.0, self.dawn),
+            (8.0, self.morning),
+            (12.0, self.afternoon),
+            (17.0, self.evening),
+            (20.0, self.night),
+        ]
+    }
 
     /// Compute the background color for a given time of day.
     ///
     /// `time_secs` is seconds since midnight (0..86400). Values outside this
     /// range are wrapped.
     pub fn color_at(&self, time_secs: u64) -> Color {
-        let secs_in_day = (time_secs % 86400) as f32;
-        let hour = secs_in_day / 3600.0;
+        let hour = time_secs.checked_rem(86400).unwrap_or(0) as f32 / 3600.0;
+        let schedule = self.schedule();
 
-        let phases = [
-            self.dawn,
-            self.morning,
-            self.afternoon,
-            self.evening,
-            self.night,
-        ];
-        let starts = Self::PHASE_HOURS;
+        // The phase in progress is the last one whose start hour has passed.
+        // Before the first start of the day there is none, and the phase in
+        // progress is the final one — it began yesterday evening.
+        let idx = schedule
+            .iter()
+            .rposition(|&(start, _)| hour >= start)
+            .unwrap_or(PHASE_COUNT.saturating_sub(1));
 
-        // Determine which phase we are in or transitioning between.
-        // The order wraps: night < dawn < morning < afternoon < evening < night.
-        // Index 0=dawn, 1=morning, 2=afternoon, 3=evening, 4=night.
-        // Before dawn (hour < 5) or after evening end (hour >= 20) is night.
-
-        // Find the current phase index.
-        let phase_idx = if hour < starts[0] {
-            // Before dawn -- night phase.
-            4
-        } else {
-            let mut idx = 4usize;
-            for (i, &start) in starts.iter().enumerate() {
-                if hour >= start {
-                    idx = i;
-                }
-            }
-            idx
+        let Some(&(start, color)) = schedule.get(idx) else {
+            // Unreachable while PHASE_COUNT > 0, but the fallback is a colour
+            // rather than a panic in the shell's paint path.
+            return self.night;
         };
 
-        let phase_start = starts[phase_idx];
-        let next_idx = (phase_idx + 1) % PHASE_COUNT;
-        let next_start = if next_idx == 0 {
-            // Wrapping from night back to dawn. Dawn starts at hour 5,
-            // so from the perspective of hour >= 20, that is 24 + 5 = 29.
-            starts[0] + 24.0
-        } else {
-            starts[next_idx]
+        // Wrapping off the end of the table returns to the first phase, one
+        // day later — which is why the next start can exceed 24.
+        let (next_start, next_color) = match idx.checked_add(1).and_then(|n| schedule.get(n)) {
+            Some(&(s, c)) => (s, c),
+            None => match schedule.first() {
+                Some(&(s, c)) => (s + 24.0, c),
+                None => return color,
+            },
         };
 
-        // How far into this phase are we (normalized)?
-        let phase_duration = next_start - phase_start;
-        let adjusted_hour = if hour < phase_start {
-            hour + 24.0
-        } else {
-            hour
-        };
-        let elapsed = adjusted_hour - phase_start;
+        // Re-express the hour on a timeline where this phase has already
+        // started: for the phase that began at 20:00 yesterday, 01:00 is 25.
+        let adjusted_hour = if hour < start { hour + 24.0 } else { hour };
+        let elapsed = adjusted_hour - start;
+        let duration = next_start - start;
 
-        // Transition occupies the last TRANSITION_HOURS of each phase.
-        let transition_start = phase_duration - Self::TRANSITION_HOURS;
-        if elapsed >= transition_start && phase_duration > 0.0 {
+        // The blend into the next phase occupies the phase's last
+        // TRANSITION_HOURS.
+        let transition_start = duration - Self::TRANSITION_HOURS;
+        if duration > 0.0 && elapsed >= transition_start {
             let t = ((elapsed - transition_start) / Self::TRANSITION_HOURS).clamp(0.0, 1.0);
-            phases[phase_idx].lerp(phases[next_idx], t)
+            color.lerp(next_color, t)
         } else {
-            phases[phase_idx]
+            color
         }
     }
 }
@@ -285,14 +283,27 @@ impl DynamicTheme {
 const HISTORY_CAPACITY: usize = 20;
 
 /// Runtime state for slideshow mode.
+///
+/// The three index-bearing fields used to be public and independently
+/// settable, and the class of bug that invites is the one that was here:
+/// `effective_index` read `shuffle_order[current_index % shuffle_order.len()
+/// .max(1)]` and then `paths[that]` — three fallible steps, because any of the
+/// three could disagree — while `WallpaperManager::random_wallpaper` re-derived
+/// the same answer inline with a *different* fallback for the disagreement.
+/// Two implementations of "which image is showing" is one too many, and the
+/// second only existed because the invariant was not the type's to keep.
+///
+/// Now `order` is a permutation of `0..paths.len()` and `position` indexes
+/// `order`, both maintained here, so "which image is showing" is one `get`.
 #[derive(Clone, Debug)]
 pub struct SlideshowState {
     /// Ordered list of image paths in the slideshow directory.
-    pub paths: Vec<String>,
-    /// Current index into `paths` (or `shuffle_order` if shuffled).
-    pub current_index: usize,
-    /// Permuted indices when shuffle is enabled.
-    pub shuffle_order: Vec<usize>,
+    paths: Vec<String>,
+    /// A permutation of `0..paths.len()`: the order images are shown in.
+    /// The identity permutation until `shuffle_with_seed` is called.
+    order: Vec<usize>,
+    /// Position within `order`. Always in range while `order` is non-empty.
+    position: usize,
     /// Timestamp (seconds) when the last image change occurred.
     pub last_change_secs: u64,
 }
@@ -300,51 +311,86 @@ pub struct SlideshowState {
 impl SlideshowState {
     /// Create a new slideshow state from a list of image paths.
     pub fn new(paths: Vec<String>) -> Self {
-        let len = paths.len();
+        let order = (0..paths.len()).collect();
         Self {
             paths,
-            current_index: 0,
-            shuffle_order: (0..len).collect(),
+            order,
+            position: 0,
             last_change_secs: 0,
         }
     }
 
-    /// The effective index into `paths` accounting for shuffle order.
+    /// The image paths, in directory order.
+    pub fn paths(&self) -> &[String] {
+        &self.paths
+    }
+
+    /// The order images are shown in, as indices into [`Self::paths`].
+    pub fn order(&self) -> &[usize] {
+        &self.order
+    }
+
+    /// Position within the show order.
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// Whether there are any images to show.
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    /// Number of images in the slideshow.
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    /// The index into [`Self::paths`] of the image now showing.
     pub fn effective_index(&self) -> Option<usize> {
-        if self.paths.is_empty() {
-            return None;
-        }
-        let pos = self.current_index % self.shuffle_order.len().max(1);
-        self.shuffle_order.get(pos).copied()
+        self.order.get(self.position).copied()
     }
 
     /// Current image path, if any.
     pub fn current_path(&self) -> Option<&str> {
-        let idx = self.effective_index()?;
-        self.paths.get(idx).map(String::as_str)
+        self.paths.get(self.effective_index()?).map(String::as_str)
     }
 
     /// Advance to the next image. Returns `true` if the image changed.
     pub fn advance(&mut self) -> bool {
-        if self.paths.is_empty() {
-            return false;
-        }
-        let max = self.shuffle_order.len().max(1);
-        self.current_index = (self.current_index + 1) % max;
-        true
+        self.step(true)
     }
 
     /// Go back to the previous image. Returns `true` if the image changed.
     pub fn go_back(&mut self) -> bool {
-        if self.paths.is_empty() {
+        self.step(false)
+    }
+
+    /// Move one position round the show order, wrapping at either end.
+    fn step(&mut self, forward: bool) -> bool {
+        let len = self.order.len();
+        if len == 0 {
             return false;
         }
-        let max = self.shuffle_order.len().max(1);
-        if self.current_index == 0 {
-            self.current_index = max.saturating_sub(1);
+        self.position = if forward {
+            let next = self.position.saturating_add(1);
+            if next < len { next } else { 0 }
         } else {
-            self.current_index -= 1;
+            // `checked_sub` is also the wrap test: before the first image is
+            // the last one.
+            self.position
+                .checked_sub(1)
+                .unwrap_or_else(|| len.saturating_sub(1))
+        };
+        true
+    }
+
+    /// Jump to `position` in the show order. Returns `false`, changing
+    /// nothing, if there is no such position.
+    pub fn seek(&mut self, position: usize) -> bool {
+        if position >= self.order.len() {
+            return false;
         }
+        self.position = position;
         true
     }
 
@@ -355,7 +401,7 @@ impl SlideshowState {
     /// a full RNG crate.
     pub fn shuffle_with_seed(&mut self, seed: u64) {
         let n = self.paths.len();
-        self.shuffle_order = (0..n).collect();
+        self.order = (0..n).collect();
 
         if n <= 1 {
             return;
@@ -367,8 +413,18 @@ impl SlideshowState {
             rng_state = rng_state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            let j = (rng_state >> 33) as usize % (i + 1);
-            self.shuffle_order.swap(i, j);
+            // `i + 1` is at most `n`, but the checked form makes the divisor's
+            // non-zeroness a fact of this line rather than of the loop bound.
+            let j = ((rng_state >> 33) as usize)
+                .checked_rem(i.saturating_add(1))
+                .unwrap_or(0);
+            self.order.swap(i, j);
+        }
+
+        // The permutation is the same length, so the position stays in range;
+        // re-establish it anyway rather than reasoning about it.
+        if self.position >= self.order.len() {
+            self.position = 0;
         }
     }
 }
@@ -382,8 +438,16 @@ impl SlideshowState {
 pub struct WallpaperHistory {
     /// Ring buffer of recent wallpaper descriptions (path or color hex).
     entries: Vec<String>,
-    /// Index of the "current" entry in the history for back/forward.
-    position: usize,
+    /// Index into `entries` of the current wallpaper, or `None` before
+    /// anything has been recorded.
+    ///
+    /// This used to be a `usize` holding one *past* the current entry, so
+    /// every read spelled `entries.get(cursor - 1)` — three times, each under
+    /// a differently-worded guard (`> 1`, `< len`, `> 0 && <= len`) chosen to
+    /// keep that subtraction from underflowing. The off-by-one was a
+    /// convention of the type that lived only in the reader's head, and three
+    /// readers had to hold it at once.
+    cursor: Option<usize>,
 }
 
 impl WallpaperHistory {
@@ -391,55 +455,44 @@ impl WallpaperHistory {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            position: 0,
+            cursor: None,
         }
     }
 
     /// Record a new wallpaper. Truncates any forward history.
     pub fn push(&mut self, entry: String) {
-        // If we are not at the end (user went back then changed),
-        // truncate the forward entries.
-        if self.position < self.entries.len() {
-            self.entries.truncate(self.position);
-        }
-
+        // Anything past the cursor is a branch the user navigated away from.
+        self.entries
+            .truncate(self.cursor.map_or(0, |i| i.saturating_add(1)));
         self.entries.push(entry);
 
-        // Enforce capacity limit.
-        if self.entries.len() > HISTORY_CAPACITY {
-            let excess = self.entries.len() - HISTORY_CAPACITY;
-            self.entries.drain(..excess);
-        }
-        self.position = self.entries.len();
+        // Enforce capacity limit by dropping the oldest entries.
+        let excess = self.entries.len().saturating_sub(HISTORY_CAPACITY);
+        self.entries.drain(..excess);
+
+        self.cursor = self.entries.len().checked_sub(1);
     }
 
     /// Navigate back. Returns the previous entry, if any.
     pub fn go_back(&mut self) -> Option<&str> {
-        if self.position > 1 {
-            self.position -= 1;
-            self.entries.get(self.position - 1).map(String::as_str)
-        } else {
-            None
-        }
+        let previous = self.cursor?.checked_sub(1)?;
+        self.cursor = Some(previous);
+        self.entries.get(previous).map(String::as_str)
     }
 
     /// Navigate forward. Returns the next entry, if any.
     pub fn go_forward(&mut self) -> Option<&str> {
-        if self.position < self.entries.len() {
-            self.position += 1;
-            self.entries.get(self.position - 1).map(String::as_str)
-        } else {
-            None
+        let next = self.cursor?.checked_add(1)?;
+        if next >= self.entries.len() {
+            return None;
         }
+        self.cursor = Some(next);
+        self.entries.get(next).map(String::as_str)
     }
 
     /// Current entry, if any.
     pub fn current(&self) -> Option<&str> {
-        if self.position > 0 && self.position <= self.entries.len() {
-            self.entries.get(self.position - 1).map(String::as_str)
-        } else {
-            None
-        }
+        self.entries.get(self.cursor?).map(String::as_str)
     }
 
     /// Number of entries in the history.
@@ -637,7 +690,7 @@ impl WallpaperManager {
                 return false;
             };
 
-            if state.paths.is_empty() {
+            if state.is_empty() {
                 return false;
             }
 
@@ -710,22 +763,22 @@ impl WallpaperManager {
             let Some(ref mut state) = self.slideshow else {
                 return;
             };
-            if state.paths.is_empty() {
+            if state.is_empty() {
                 return;
             }
-            // Simple hash of the seed to pick an index.
+            // Simple hash of the seed to pick a position in the show order.
             let mixed = seed
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            let idx = (mixed >> 33) as usize % state.paths.len();
-            let effective = if idx < state.shuffle_order.len() {
-                state.shuffle_order[idx]
-            } else {
-                idx % state.paths.len()
-            };
-            state.current_index = idx;
+            let position = ((mixed >> 33) as usize)
+                .checked_rem(state.len())
+                .unwrap_or(0);
+            state.seek(position);
             state.last_change_secs = 0;
-            state.paths.get(effective).cloned()
+            // Asking the state which image is showing, rather than working it
+            // out a second way here — the inline version fell back to
+            // `idx % paths.len()` where `effective_index` falls back to `None`.
+            state.current_path().map(str::to_string)
         };
 
         self.current_image_id = self.alloc_image_id();
@@ -1132,6 +1185,17 @@ fn compute_image_rect(
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ------------------------------------------------------------------
@@ -1230,6 +1294,72 @@ mod tests {
     }
 
     #[test]
+    fn every_phase_shows_its_own_colour_in_its_own_stable_part() {
+        // The schedule used to be two arrays -- boundary hours and colours --
+        // joined only by both being subscripted with the same index. This is
+        // the test that a reordering of one is a recolouring of the day: give
+        // each phase a colour nothing else has, and read the day back.
+        let theme = DynamicTheme::from_palette([
+            Color::rgb(1, 0, 0),
+            Color::rgb(2, 0, 0),
+            Color::rgb(3, 0, 0),
+            Color::rgb(4, 0, 0),
+            Color::rgb(5, 0, 0),
+        ]);
+        // (hour well inside the phase, expected colour). "Well inside" means
+        // after the start and before the transition ramp begins.
+        let probes = [
+            (2.0, theme.night),
+            (6.0, theme.dawn),
+            (9.0, theme.morning),
+            (13.0, theme.afternoon),
+            (18.0, theme.evening),
+            (21.0, theme.night),
+        ];
+        for (hour, expected) in probes {
+            let secs = (hour * 3600.0) as u64;
+            assert_eq!(theme.color_at(secs), expected, "at {hour}:00");
+        }
+    }
+
+    #[test]
+    fn the_last_phase_of_the_day_blends_into_the_first_across_midnight() {
+        // Night starts at 20:00 and the next start is dawn at 05:00 -- a
+        // boundary the schedule only reaches by wrapping off the end of the
+        // table and adding 24 hours. Getting that wrap wrong makes the ramp
+        // either never fire or fire for the whole night.
+        let theme = DynamicTheme::default();
+        // The ramp is the phase's last TRANSITION_HOURS: 03:30..05:00.
+        assert_eq!(
+            theme.color_at(3 * 3600),
+            theme.night,
+            "03:00 is still night"
+        );
+        assert_eq!(
+            theme.color_at(4 * 3600 + 15 * 60),
+            theme.night.lerp(theme.dawn, 0.5),
+            "04:15 is halfway through the ramp"
+        );
+        // And the ramp arrives exactly at the phase change.
+        assert_eq!(theme.color_at(5 * 3600), theme.dawn, "05:00 is dawn");
+    }
+
+    #[test]
+    fn a_time_beyond_one_day_reads_as_the_same_time_of_day() {
+        let theme = DynamicTheme::default();
+        for hour in 0..24u64 {
+            let secs = hour * 3600;
+            assert_eq!(
+                theme.color_at(secs),
+                theme.color_at(secs + 86400 * 3),
+                "hour {hour}"
+            );
+            // And the largest representable timestamp is a colour, not a panic.
+            let _ = theme.color_at(u64::MAX);
+        }
+    }
+
+    #[test]
     fn dynamic_theme_from_palette() {
         let colors = [
             Color::rgb(10, 20, 30),
@@ -1276,9 +1406,9 @@ mod tests {
     #[test]
     fn slideshow_go_back_wraps() {
         let mut state = SlideshowState::new(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
-        assert_eq!(state.current_index, 0);
+        assert_eq!(state.position(), 0);
         assert!(state.go_back()); // wraps to last
-        assert_eq!(state.current_index, 2);
+        assert_eq!(state.position(), 2);
         assert_eq!(state.current_path(), Some("c.png"));
     }
 
@@ -1291,14 +1421,14 @@ mod tests {
             "d.png".into(),
             "e.png".into(),
         ]);
-        let original_order = state.shuffle_order.clone();
+        let original_order = state.order().to_vec();
         state.shuffle_with_seed(42);
         // Shuffled order should differ from sequential (with high probability
         // for 5 elements and a non-trivial seed).
-        assert_ne!(state.shuffle_order, original_order);
+        assert_ne!(state.order(), original_order);
         // All indices should still be present.
-        let mut sorted = state.shuffle_order.clone();
-        sorted.sort();
+        let mut sorted = state.order().to_vec();
+        sorted.sort_unstable();
         assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
     }
 
@@ -1306,7 +1436,7 @@ mod tests {
     fn slideshow_shuffle_single_element() {
         let mut state = SlideshowState::new(vec!["only.png".into()]);
         state.shuffle_with_seed(99);
-        assert_eq!(state.shuffle_order, vec![0]);
+        assert_eq!(state.order(), vec![0]);
         assert_eq!(state.current_path(), Some("only.png"));
     }
 
@@ -1314,6 +1444,87 @@ mod tests {
     fn slideshow_advance_empty_returns_false() {
         let mut state = SlideshowState::new(Vec::new());
         assert!(!state.advance());
+    }
+
+    #[test]
+    fn the_show_order_is_what_decides_which_image_is_showing() {
+        // The point of the rewrite: `position` indexes `order`, and `order`
+        // indexes `paths`. Walking forward from the start must visit the
+        // shuffled sequence, not the directory sequence.
+        let mut state = SlideshowState::new(vec![
+            "a.png".into(),
+            "b.png".into(),
+            "c.png".into(),
+            "d.png".into(),
+        ]);
+        state.shuffle_with_seed(7);
+
+        let order = state.order().to_vec();
+        for (step, &image) in order.iter().enumerate() {
+            assert_eq!(state.position(), step, "position tracks the walk");
+            assert_eq!(state.effective_index(), Some(image));
+            assert_eq!(
+                state.current_path(),
+                state.paths().get(image).map(String::as_str)
+            );
+            state.advance();
+        }
+        // One more step is a full lap.
+        assert_eq!(state.position(), 0);
+    }
+
+    #[test]
+    fn a_shuffle_is_a_permutation_so_every_image_is_shown_exactly_once() {
+        // A "shuffle" that repeated or dropped an image would still pass the
+        // old `assert_ne!(shuffle_order, sequential)` test.
+        let paths: Vec<String> = (0..24).map(|i| format!("{i}.png")).collect();
+        for seed in 0..16u64 {
+            let mut state = SlideshowState::new(paths.clone());
+            state.shuffle_with_seed(seed);
+            let mut seen: Vec<usize> = (0..paths.len())
+                .map(|_| {
+                    let idx = state.effective_index().expect("order is non-empty");
+                    state.advance();
+                    idx
+                })
+                .collect();
+            seen.sort_unstable();
+            assert_eq!(seen, (0..paths.len()).collect::<Vec<_>>(), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn a_shuffle_leaves_the_position_inside_the_new_order() {
+        let mut state = SlideshowState::new(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
+        assert!(state.advance());
+        assert!(state.advance());
+        assert_eq!(state.position(), 2);
+        state.shuffle_with_seed(5);
+        assert!(state.current_path().is_some(), "still showing something");
+    }
+
+    #[test]
+    fn seeking_outside_the_show_order_changes_nothing() {
+        let mut state = SlideshowState::new(vec!["a.png".into(), "b.png".into()]);
+        assert!(state.seek(1));
+        assert_eq!(state.current_path(), Some("b.png"));
+        assert!(!state.seek(2), "one past the end is not a position");
+        assert_eq!(state.position(), 1, "the failed seek left the position");
+        assert_eq!(state.current_path(), Some("b.png"));
+    }
+
+    #[test]
+    fn an_empty_slideshow_is_showing_nothing_rather_than_image_zero() {
+        let mut state = SlideshowState::new(Vec::new());
+        assert!(state.is_empty());
+        assert_eq!(state.len(), 0);
+        assert_eq!(state.effective_index(), None);
+        assert_eq!(state.current_path(), None);
+        assert!(!state.advance());
+        assert!(!state.go_back());
+        assert!(!state.seek(0));
+        state.shuffle_with_seed(3);
+        assert_eq!(state.current_path(), None);
     }
 
     // ------------------------------------------------------------------
@@ -1394,6 +1605,64 @@ mod tests {
         assert_eq!(history.len(), HISTORY_CAPACITY);
         // The oldest entries should have been evicted.
         assert_eq!(history.entries[0], "wp_10.png");
+    }
+
+    #[test]
+    fn navigating_off_either_end_of_the_history_stops_rather_than_wrapping() {
+        // The cursor used to be a 1-based `usize` whose every read subtracted
+        // one under a differently-worded guard; walking off either end is
+        // where those guards had to agree and did not.
+        let mut history = WallpaperHistory::new();
+        for name in ["a.png", "b.png", "c.png"] {
+            history.push(name.into());
+        }
+
+        // Back to the oldest, then no further.
+        assert_eq!(history.go_back(), Some("b.png"));
+        assert_eq!(history.go_back(), Some("a.png"));
+        assert_eq!(history.go_back(), None);
+        assert_eq!(history.go_back(), None, "still pinned at the oldest");
+        assert_eq!(history.current(), Some("a.png"));
+
+        // Forward to the newest, then no further.
+        assert_eq!(history.go_forward(), Some("b.png"));
+        assert_eq!(history.go_forward(), Some("c.png"));
+        assert_eq!(history.go_forward(), None);
+        assert_eq!(history.go_forward(), None, "still pinned at the newest");
+        assert_eq!(history.current(), Some("c.png"));
+    }
+
+    #[test]
+    fn an_empty_history_is_showing_nothing_and_navigates_nowhere() {
+        let mut history = WallpaperHistory::new();
+        assert!(history.is_empty());
+        assert_eq!(history.current(), None);
+        assert_eq!(history.go_back(), None);
+        assert_eq!(history.go_forward(), None);
+        // A first push lands on the entry, not one past it.
+        history.push("first.png".into());
+        assert_eq!(history.current(), Some("first.png"));
+        assert_eq!(history.go_back(), None);
+        assert_eq!(history.go_forward(), None);
+    }
+
+    #[test]
+    fn evicting_the_oldest_entries_keeps_the_cursor_on_the_newest() {
+        // `push` truncates forward history, appends, then drains the excess
+        // from the front. Every one of those steps moves the cursor's
+        // meaning; the invariant is that afterwards it names the entry just
+        // pushed.
+        let mut history = WallpaperHistory::new();
+        for i in 0..(HISTORY_CAPACITY * 2) {
+            history.push(format!("wp_{i}.png"));
+            assert_eq!(
+                history.current(),
+                Some(format!("wp_{i}.png").as_str()),
+                "after push {i}"
+            );
+        }
+        assert_eq!(history.len(), HISTORY_CAPACITY);
+        assert_eq!(history.go_forward(), None);
     }
 
     // ------------------------------------------------------------------
@@ -1517,6 +1786,43 @@ mod tests {
         mgr.random_wallpaper(42);
         // The image ID should have changed (new allocation).
         assert_ne!(mgr.current_image_id(), id_before);
+    }
+
+    #[test]
+    fn a_random_jump_records_the_image_it_actually_landed_on() {
+        // `random_wallpaper` used to re-derive "which image is showing"
+        // inline, with a different fallback from `effective_index`, so the
+        // history could name an image other than the one on screen.
+        let paths: Vec<String> = (0..7).map(|i| format!("{i}.png")).collect();
+        for seed in 0..24u64 {
+            let mut mgr = WallpaperManager::new();
+            mgr.set_slideshow("/wp", 300, true);
+            mgr.populate_slideshow_paths(paths.clone(), seed);
+            mgr.random_wallpaper(seed);
+
+            let showing = mgr
+                .slideshow
+                .as_ref()
+                .and_then(SlideshowState::current_path)
+                .expect("a non-empty slideshow is always showing something");
+            assert_eq!(
+                mgr.history.current(),
+                Some(format!("slideshow:{showing}").as_str()),
+                "seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_random_jump_on_an_empty_slideshow_changes_nothing() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_slideshow("/wp", 300, false);
+        mgr.populate_slideshow_paths(Vec::new(), 0);
+        let id_before = mgr.current_image_id();
+        let history_before = mgr.history.len();
+        mgr.random_wallpaper(42);
+        assert_eq!(mgr.current_image_id(), id_before);
+        assert_eq!(mgr.history.len(), history_before);
     }
 
     // ------------------------------------------------------------------

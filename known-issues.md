@@ -31876,6 +31876,140 @@ error inflated the number and blurred which code it belonged to. The rule:
 possible yet, reproduce the table on the command line **and filter the
 diagnostics by file path**. Never quote a raw total from a `-p` invocation.
 
+### Three crates done, 2026-08-17 — and a third figure that was wrong
+
+`gui/notifications`, `gui/window` and `gui/remote` now opt in and are at **0
+warnings**. Eight of ten `gui/` crates are compliant; `toolkit` and `desktop`
+remain.
+
+| Crate | predicted above | actual, opted in | after |
+|---|---|---|---|
+| `gui/notifications` | 20 | 20 | 0 |
+| `gui/window` | **0** | **16** | 0 |
+| `gui/remote` | 281 | **137** | 0 |
+
+**Two of those three predictions were wrong, in opposite directions, and for
+the same reason.** Both were measured *before* the opt-in, under whatever lint
+set the crate already had. `gui/window` measured 0 because its private
+`#![deny(clippy::all)] #![warn(clippy::pedantic)]` does not include the
+defensive five — they are restriction lints, in neither group — so the
+measurement was of a strictly smaller table than the one being adopted, and
+"0 warnings, a one-commit no-op" was a prediction the measurement could not
+support. `gui/remote` went the other way: 281 double-counted sites appearing
+in both the lib and test builds of the same file, where 137 is the count of
+distinct source locations. **Deduplicate by `(file, line, column, lint)`, and
+never predict a post-opt-in count from a pre-opt-in build.**
+
+**What the three found.** The pattern from `credentials` and `compositor` held
+in two of three: the warnings were not style complaints.
+
+- `gui/notifications` — a real bug. `DndSchedule` was four public `u8`s
+  validated nowhere, so `set_dnd_schedule(25, 0, 7, 0)` was accepted silently,
+  produced a start of 1500 minutes (past the largest time of day, 1439), and
+  compared as an overnight window that then never opened. Quiet hours simply
+  stopped happening with nothing reporting it. Fixed by making the state
+  unrepresentable: private minutes-from-midnight, a checked constructor, and a
+  setter that refuses and keeps the previous schedule.
+- `gui/window` — no user-visible bug, but `pub mod testing` is a test double
+  that *ships in the library*, so nothing had ever held it to production
+  standards though it compiles as production code. Its decode loop could spin
+  forever on a decoder reporting zero bytes consumed: a hang, which is the one
+  failure mode a test harness must not have, because the suite then dies on a
+  timeout naming no test at all.
+- `gui/remote` — 137 warnings that were four shapes, not 137 problems. The
+  largest: `Reader`'s fields carried no `pub`, which reads like encapsulation
+  and is not, because **a field private to the crate root is visible to every
+  descendant module**. All five sibling modules reached past the checked
+  accessors and indexed `buf` directly, with the same four lines each — in a
+  decoder whose module doc promises that all reads are bounds-checked. Moving
+  the type into its own module made the fields private in the sense originally
+  intended, and turned any future reach-around into a compile error.
+
+**The generalisable finding**, which is new and worth carrying to `toolkit`
+and `desktop`: *a lint firing many times in a crate that looks well-factored
+is often reporting a broken abstraction rather than sloppy call sites.* Three
+of the four `guiremote` shapes were an abstraction that existed, was correct,
+and was bypassed everywhere — the cursor, the count back-fill, the capacity
+hint. The fix was never "check the bound at the call site"; it was to make the
+bypass impossible or the mechanism unnecessary. Fixing 137 sites would have
+left the design that produced them intact.
+
+### Nine of ten done, 2026-08-18: `gui/toolkit` is at 0, from 1488
+
+`gui/toolkit` (`guitk`) opted in at **1488** distinct sites and is now at
+**zero**, with the crate's test count up from 660 to 865 over the sweep. Only
+`gui/desktop` (1561) remains.
+
+**The generalisable finding from `gui/remote` held for all 1488.** Not one of
+the ~35 files in the sweep was fixed by adding a bounds check at a call site.
+Every file was fixed by finding the abstraction that should have existed, and
+in about a third of cases the abstraction *already existed in the same crate*
+and was simply not reached for. Reusing what was there:
+
+| Written once | Files that had re-derived it |
+|---|---|
+| `cycle::before` / `after` / `indices` | `menubar`, `tree`, `pathbar`, `textview`, `modal`, `menu`, `tabs` |
+| `TextCursor::prev_in` / `next_in` | `pathbar`, `modal` |
+| `Canvas` | `svg`, `screenshot`, `colorpicker` |
+| `tzrules` (the whole-tree TZ engine) | `dialog` |
+
+The new abstractions the sweep had to write, each replacing a shape repeated
+many times: a lexer cursor type in `svg` (the single largest group in the
+crate — `i += 1;` seventy-four times was one cursor, not seventy-four
+problems), a non-backtracking glob matcher in `context_ext`, `Color::mean`,
+and a `NonZeroU32`/`NonZeroU64` divisor wherever a computed denominator had
+been guarded by an `if` two statements away.
+
+**The recurring fault, stated once.** Almost every one of the 1488 was the same
+sentence: *a proof that lives in a different statement from the code it
+justifies.* `if slot <= MAX` then `TABLE[slot]`; `if out_a == 0 { return }`
+then `/ out_a`; `if len > 1` then `len - 1`; `if header.len() >= end` then
+`&header[..end]`; a signed cursor stepped off the end and pushed back by the
+next iteration's first `if`. The lint is not asking for the proof to be
+repeated. It is pointing out that the proof and the use can drift apart,
+and in this crate they had — see the defects below, every one of which is an
+instance of exactly that drift.
+
+**What it found.** Eleven defects that were live, not hypothetical:
+
+- `svg::parse_transform` **panicked** on a malformed `transform` attribute —
+  reachable from any SVG file the user opens.
+- `Canvas`/`SvgRenderer::new` computed `width * height` and let `Vec` abort on
+  the byte count; an image header can claim any dimensions it likes.
+- `scaling::set_monitor_scale(usize::MAX, ..)` wrapped past an upper-bound-only
+  check onto slot 0 — which was the **global** scale factor. One bad monitor id
+  rescaled the whole desktop.
+- `dialog`'s Modified column showed **a date that does not exist**: no leap
+  years and twelve 30-day months, so by 2026 it was about two weeks early, with
+  the year advancing early and the day-of-month almost never right. It now
+  reads through `tzrules`, the same engine as the libc, the shell's `%(…)T` and
+  the taskbar clock.
+- `Color::lerp` returned **transparent black** for a NaN factor, which is what
+  an animation produces the instant it divides elapsed time by a zero duration.
+  `f32::clamp` passes NaN through; `NaN as u8` is 0.
+- `Color::over`'s `out_a == 0` guard was dead code given the `sa == 0` early
+  return, and stood apart from the four divisions it was supposed to protect.
+- `textview::scroll_by` overflowed on `i32::MIN`.
+- `colorpicker` measured its palette grid in the drawing code and again in the
+  hit-test, and the two had drifted — clicks landed on the wrong swatch. The
+  hue readout truncated through `u8` besides.
+- `context_ext`'s glob matcher was exponential on a pattern with several `*`s.
+- `tree::items_in_rect` walked rows without an upper bound.
+- `FormValidator` (`disabled`) kept two parallel `Vec`s that had to agree about
+  which fields exist, and did not: a query for an unregistered widget *pushed*
+  a state entry so it had something to return a reference to, after which the
+  form counted a field nobody had registered as part of its own validity. Its
+  `label` was also stored, documented as "for error messages", and never read —
+  so the disabled submit button's tooltip said "Required" and named none of the
+  five boxes the user had to go back to.
+
+**One methodological note to carry into `gui/desktop`.** The largest single win
+in the crate came from *deleting* code, not fixing it: `svg.rs`'s ~600 sites
+were one hand-rolled tokeniser cursor, and `textview`'s ANSI parser was
+hand-decoding UTF-8 it had already been handed decoded. Before fixing a group,
+check whether the group is one shape — the repeated *source line* is the tell,
+and `scripts/clippy-sites.py --sites` prints it.
+
 ## C-TEXT-WAS-CUT-BY-COUNTING-CHARACTERS-INSTEAD-OF-MEASURING-IT (lane C, 2026-08-17) - **fixed**
 
 **What.** Twenty-odd places across `gui/` and `apps/` decided how much text
@@ -34904,3 +35038,95 @@ Practical consequence: **do not bisect on a pre-2026-08-18 row's commit without
 checking that the commit plausibly touched kernel code.** For longitudinal
 questions ("is this benchmark drifting?") the rows are still fine; it is only
 the attribution of a number to a *specific commit* that is unreliable.
+
+---
+
+## [B] FIXED — `sudo` never checked the password, and admitted everyone when the user database was absent (2026-08-17, `65dca4eba`)
+
+**In short:** `sudo` is the program that decides who is allowed to become the
+machine's administrator. It asked for a password, and then threw it away
+without looking at it. Anyone with an account could type anything and get root.
+If the file listing the machine's accounts did not exist yet, it gave root to
+*any* name typed at the prompt, account or not. Found while migrating the
+readers of `/etc/users.yaml` onto the shared `userdb` crate; fixed in the same
+commit that found it.
+
+### What the code did
+
+`userspace/sudo/src/main.rs`, `fn authenticate(username, _password)` — note the
+underscore, which is Rust for "this argument is deliberately unused":
+
+1. If `/etc/users.yaml` does not exist, `return Ok(())`. The comment read
+   "If no user database, allow (development/single-user mode)". This is
+   unconditional root for anyone on a machine that has not yet created an
+   account.
+2. Otherwise, return `Ok(())` if the file's *text* contains the substring
+   `name: <username>`. Never a hash comparison; the password was not read.
+3. The substring is a substring of `username: "alice"`, which is why it
+   appeared to work at all. It is equally a substring of a `display_name`, a
+   `home_dir`, or a comment — so a string that was never an account could
+   authenticate as one.
+
+### Why 191 tests missed it
+
+The decision was welded to a hard-coded filesystem path. No test could
+construct a database to decide against, so no test decided anything. The fix
+splits the decision into `authenticate_against(db, username, password)`, which
+is pure, and seven tests now cover it — including "an empty database admits
+nobody" and "a username is not matched by substring".
+
+**This is the shape to look for elsewhere:** a security decision whose inputs
+can only come from a path only root can write is a decision that will never be
+tested, and the untestedness is not an accident of effort — it is a
+consequence of the signature.
+
+### Two more dead comparisons in the same crate, also fixed
+
+`get_user_groups` and `get_user_info` compared each line to `name: <user>` with
+`==` rather than a substring test, so unlike `authenticate` they matched
+nothing at all. Consequences: every user was reported as belonging only to
+their own group, so **every sudoers rule written against a group silently
+denied**; and `get_user_info` special-cased root's home and shell ahead of the
+database, so an administrator who set root's shell had it ignored.
+
+---
+
+## [B] Two different `sudo` binaries are built from this workspace (2026-08-17)
+
+**In short:** The build produces two separate programs both called `sudo`,
+from two crates that do not know about each other, implementing different
+policies. Whichever the installer copies last is the one the machine gets, and
+nothing in the tree says which that should be.
+
+| | `userspace/sudo` | `userspace/su` |
+|---|---|---|
+| Size | ~4400 lines | ~1300 lines |
+| Personalities | `sudo`, `sudoedit`, `visudo`, `sudoreplay` | `su`, `sudo` (by `argv[0]`) |
+| Policy source | `/etc/sudoers` — full parser, aliases, `NOPASSWD`, host and runas matching | hard-coded: root, or membership of `wheel`/`admin` |
+| Timestamps | yes (`-v`, `-k`, `-K`, configurable timeout) | none |
+| Session logging | yes (`sudoreplay`) | a line appended to `/var/log/auth.log` on denial |
+
+Both are workspace members (`members = [… "userspace/*" …]`), so both are
+built. Both were separately migrated onto `userdb` in this batch, which is
+precisely the duplicated-effort tax that having two of them imposes.
+
+### Proper fix
+
+`userspace/sudo` is the real one: it implements the sudoers file, which is the
+interface administrators expect and the one `design.txt` implies. `su`'s sudo
+personality should be deleted, leaving `su` as `su` alone — its `argv[0]`
+dispatch, `SudoOptions`, `parse_sudo_args`, `sudo_authorised`,
+`sudo_list_permissions`, `run_sudo` and `log_sudo_failure` all go.
+
+Not done in this batch because deleting a program is a user-visible change on
+a different footing from fixing one, and because the two policies genuinely
+differ: `su`'s sudo authorises on `wheel`/`admin` membership *without* a
+sudoers file, so a machine with no `/etc/sudoers` can currently still
+administer itself. Removing it means the installer must ship a default
+`/etc/sudoers`, and that is a change to the installed system, not to a crate.
+Check what `pkg`/the installer writes before deleting.
+
+**Severity:** high while it lasts — two programs answering the same question
+differently is how a machine ends up believing an account is an administrator
+in one context and not another, which is the same class of defect as the
+`is_admin`/`admin` field split that §330 fixed one level down.

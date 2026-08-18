@@ -284,8 +284,8 @@ impl<T: Transport> Connection<T> {
             if used == 0 {
                 break;
             }
-            consumed += used;
-            frames += 1;
+            consumed = consumed.saturating_add(used);
+            frames = frames.saturating_add(1);
             self.file(frame);
         }
         // Drained from the front rather than reallocated, so a steady stream
@@ -638,7 +638,13 @@ impl<T: Transport> Client<T> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
 
     use guitk::color::Color;
     use guitk::event::{Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};

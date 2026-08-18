@@ -224,76 +224,107 @@ pub enum IconEvent {
 }
 
 /// Grid configuration for icon placement.
-#[derive(Clone, Copy, Debug)]
+///
+/// The cell size is held privately and is never zero. It used to be two public
+/// `u32`s, and half the methods here defended against a zero — `columns_in` and
+/// `rows_in` returned 0 — while the other half divided by it and panicked.
+/// There was even a test for the zero grid, which called only the two guarded
+/// methods. Making the state unrepresentable is what removes the question:
+/// there is one place a cell size is admitted, and it clamps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridConfig {
-    pub cell_width: u32,
-    pub cell_height: u32,
+    cell_width: u32,
+    cell_height: u32,
 }
 
 impl Default for GridConfig {
     fn default() -> Self {
-        Self {
-            cell_width: DEFAULT_GRID_WIDTH,
-            cell_height: DEFAULT_GRID_HEIGHT,
-        }
+        Self::new(DEFAULT_GRID_WIDTH, DEFAULT_GRID_HEIGHT)
     }
 }
 
 impl GridConfig {
-    /// Snap a position to the nearest grid cell origin.
+    /// A grid of `cell_width` by `cell_height` pixel cells.
+    ///
+    /// A zero in either dimension is raised to one. A grid of zero-sized cells
+    /// has no meaning — every position would be in every cell — so there is
+    /// nothing to preserve by honouring it, and a one-pixel cell is the
+    /// degenerate case that still answers every question consistently.
+    #[must_use]
+    pub const fn new(cell_width: u32, cell_height: u32) -> Self {
+        Self {
+            cell_width: if cell_width == 0 { 1 } else { cell_width },
+            cell_height: if cell_height == 0 { 1 } else { cell_height },
+        }
+    }
+
+    /// Cell width in pixels. Never zero.
+    #[must_use]
+    pub const fn cell_width(&self) -> u32 {
+        self.cell_width
+    }
+
+    /// Cell height in pixels. Never zero.
+    #[must_use]
+    pub const fn cell_height(&self) -> u32 {
+        self.cell_height
+    }
+
+    /// Cell width as a signed value, for mixing with pixel positions.
+    fn cell_width_i32(&self) -> i32 {
+        i32::try_from(self.cell_width).unwrap_or(i32::MAX)
+    }
+
+    /// Cell height as a signed value.
+    fn cell_height_i32(&self) -> i32 {
+        i32::try_from(self.cell_height).unwrap_or(i32::MAX)
+    }
+
+    /// Snap a position to the origin of the cell containing it.
+    #[must_use]
     pub fn snap(&self, x: i32, y: i32) -> (i32, i32) {
-        let col = if x >= 0 {
-            x / self.cell_width as i32
-        } else {
-            (x - self.cell_width as i32 + 1) / self.cell_width as i32
-        };
-        let row = if y >= 0 {
-            y / self.cell_height as i32
-        } else {
-            (y - self.cell_height as i32 + 1) / self.cell_height as i32
-        };
-        (col * self.cell_width as i32, row * self.cell_height as i32)
+        let (col, row) = self.to_cell(x, y);
+        self.from_cell(col, row)
     }
 
     /// Convert pixel position to grid column/row.
+    ///
+    /// `div_euclid` is floor division, which is what a grid coordinate needs:
+    /// pixel -1 belongs to cell -1, not to cell 0. The hand-rolled
+    /// `(x - w + 1) / w` this replaces computed the same thing for ordinary
+    /// inputs and overflowed near `i32::MIN`, where the subtraction wraps.
     // Kept as &self for symmetry with the sibling Grid methods
     // (snap, columns_in, rows_in) — all take &self for a consistent API.
     #[allow(clippy::wrong_self_convention)]
+    #[must_use]
     pub fn to_cell(&self, x: i32, y: i32) -> (i32, i32) {
-        let col = if x >= 0 {
-            x / self.cell_width as i32
-        } else {
-            (x - self.cell_width as i32 + 1) / self.cell_width as i32
-        };
-        let row = if y >= 0 {
-            y / self.cell_height as i32
-        } else {
-            (y - self.cell_height as i32 + 1) / self.cell_height as i32
-        };
-        (col, row)
+        (
+            x.div_euclid(self.cell_width_i32()),
+            y.div_euclid(self.cell_height_i32()),
+        )
     }
 
-    /// Convert grid column/row to pixel position.
+    /// Convert grid column/row to the pixel position of that cell's top-left.
     // Despite the `from_*` name this is an inverse of `to_cell` that needs
     // the grid's cell dimensions, so it stays as a method.
     #[allow(clippy::wrong_self_convention)]
+    #[must_use]
     pub fn from_cell(&self, col: i32, row: i32) -> (i32, i32) {
-        (col * self.cell_width as i32, row * self.cell_height as i32)
+        (
+            col.saturating_mul(self.cell_width_i32()),
+            row.saturating_mul(self.cell_height_i32()),
+        )
     }
 
-    /// Number of columns that fit within a given width.
-    pub fn columns_in(&self, width: u32) -> u32 {
-        if self.cell_width == 0 {
-            return 0;
-        }
+    /// Number of whole columns that fit within a given width.
+    #[must_use]
+    pub const fn columns_in(&self, width: u32) -> u32 {
         width / self.cell_width
     }
 
-    /// Number of rows that fit within a given height.
-    pub fn rows_in(&self, height: u32) -> u32 {
-        if self.cell_height == 0 {
-            return 0;
-        }
+    /// Number of whole rows that fit within a given height.
+    #[must_use]
+    pub const fn rows_in(&self, height: u32) -> u32 {
         height / self.cell_height
     }
 }
@@ -399,44 +430,39 @@ impl DesktopIconLayer {
     }
 
     /// Populate default desktop icons (This PC, Recycle Bin, Documents, Home).
+    ///
+    /// Stacked down the first column. Written as a list rather than four calls
+    /// each spelling out its own row offset, because `y_start + cell_height *
+    /// 3` is a row number encoded in arithmetic, and the fourth one is where a
+    /// typo hides.
     pub fn populate_defaults(&mut self) {
-        let cw = self.grid.cell_width as i32;
-        let y_start = EDGE_PADDING as i32;
+        let defaults = [
+            (
+                "This PC",
+                IconType::Computer,
+                IconAction::LaunchSystem("explorer --computer".to_string()),
+            ),
+            (
+                "Recycle Bin",
+                IconType::RecycleBin,
+                IconAction::LaunchSystem("explorer --recycle-bin".to_string()),
+            ),
+            (
+                "Documents",
+                IconType::Folder,
+                IconAction::OpenPath("/home/user/Documents".to_string()),
+            ),
+            (
+                "Home",
+                IconType::Folder,
+                IconAction::OpenPath("/home/user".to_string()),
+            ),
+        ];
 
-        self.add_icon(
-            "This PC",
-            IconType::Computer,
-            IconAction::LaunchSystem("explorer --computer".to_string()),
-            EDGE_PADDING as i32,
-            y_start,
-        );
-
-        self.add_icon(
-            "Recycle Bin",
-            IconType::RecycleBin,
-            IconAction::LaunchSystem("explorer --recycle-bin".to_string()),
-            EDGE_PADDING as i32,
-            y_start + self.grid.cell_height as i32,
-        );
-
-        self.add_icon(
-            "Documents",
-            IconType::Folder,
-            IconAction::OpenPath("/home/user/Documents".to_string()),
-            EDGE_PADDING as i32,
-            y_start + self.grid.cell_height as i32 * 2,
-        );
-
-        self.add_icon(
-            "Home",
-            IconType::Folder,
-            IconAction::OpenPath("/home/user".to_string()),
-            EDGE_PADDING as i32,
-            y_start + self.grid.cell_height as i32 * 3,
-        );
-
-        // Suppress unused variable warning — cw reserved for multi-column layouts.
-        let _ = cw;
+        for (row, (label, icon_type, action)) in defaults.into_iter().enumerate() {
+            let (x, y) = self.cell_origin(0, i32::try_from(row).unwrap_or(i32::MAX));
+            self.add_icon(label, icon_type, action, x, y);
+        }
     }
 
     // ======================================================================
@@ -479,8 +505,8 @@ impl DesktopIconLayer {
         let max_y = y1.max(y2);
 
         for icon in &mut self.icons {
-            let icon_cx = icon.x as f32 + self.grid.cell_width as f32 / 2.0;
-            let icon_cy = icon.y as f32 + self.grid.cell_height as f32 / 2.0;
+            let icon_cx = icon.x as f32 + self.grid.cell_width() as f32 / 2.0;
+            let icon_cy = icon.y as f32 + self.grid.cell_height() as f32 / 2.0;
 
             let in_rect =
                 icon_cx >= min_x && icon_cx <= max_x && icon_cy >= min_y && icon_cy <= max_y;
@@ -514,8 +540,8 @@ impl DesktopIconLayer {
         for icon in self.icons.iter().rev() {
             let ix = icon.x as f32;
             let iy = icon.y as f32;
-            let iw = self.grid.cell_width as f32;
-            let ih = self.grid.cell_height as f32;
+            let iw = self.grid.cell_width() as f32;
+            let ih = self.grid.cell_height() as f32;
 
             if x >= ix && x < ix + iw && y >= iy && y < iy + ih {
                 return Some(icon.id);
@@ -528,14 +554,36 @@ impl DesktopIconLayer {
     // Arrangement
     // ======================================================================
 
+    /// Pixel position of the top-left of grid cell `(col, row)`, offset by the
+    /// desktop's edge padding.
+    ///
+    /// Every icon placed by the shell goes through here, so that "where does
+    /// cell (2, 3) start" has one answer. It did not: `auto_arrange` measured
+    /// the desktop with `self.grid` and then placed with
+    /// `GridConfig::default()`, so on any layer with a non-default cell size
+    /// the icons were laid out at the wrong pitch — overlapping if the real
+    /// cells were larger, gapped if smaller. No test caught it because they
+    /// all used the default grid.
+    fn cell_origin(&self, col: i32, row: i32) -> (i32, i32) {
+        let (px, py) = self.grid.from_cell(col, row);
+        let pad = i32::try_from(EDGE_PADDING).unwrap_or(i32::MAX);
+        (px.saturating_add(pad), py.saturating_add(pad))
+    }
+
+    /// How many columns and rows of icons fit on the usable desktop.
+    fn grid_extent(&self) -> (u32, u32) {
+        let margin = EDGE_PADDING.saturating_mul(2);
+        (
+            self.grid
+                .columns_in(self.screen_width.saturating_sub(margin)),
+            self.grid
+                .rows_in(self.usable_height().saturating_sub(margin)),
+        )
+    }
+
     /// Find the next free grid cell (scanning top-to-bottom, left-to-right).
     pub fn next_free_cell(&self) -> (i32, i32) {
-        let cols = self
-            .grid
-            .columns_in(self.screen_width.saturating_sub(EDGE_PADDING * 2));
-        let rows = self
-            .grid
-            .rows_in(self.usable_height().saturating_sub(EDGE_PADDING * 2));
+        let (cols, rows) = self.grid_extent();
 
         // Map each icon's stored top-left back to its grid cell.  Icons
         // placed via `add_icon` are snapped (no padding added), and icons
@@ -549,17 +597,16 @@ impl DesktopIconLayer {
             .collect();
 
         // Scan columns first (top to bottom within each column, then next column).
-        for col in 0..cols as i32 {
-            for row in 0..rows as i32 {
+        for col in 0..i32::try_from(cols).unwrap_or(i32::MAX) {
+            for row in 0..i32::try_from(rows).unwrap_or(i32::MAX) {
                 if !occupied.contains(&(col, row)) {
-                    let (px, py) = self.grid.from_cell(col, row);
-                    return (px + EDGE_PADDING as i32, py + EDGE_PADDING as i32);
+                    return self.cell_origin(col, row);
                 }
             }
         }
 
         // Fallback: just place at origin.
-        (EDGE_PADDING as i32, EDGE_PADDING as i32)
+        self.cell_origin(0, 0)
     }
 
     /// Auto-arrange all icons into a grid, sorted alphabetically.
@@ -567,29 +614,33 @@ impl DesktopIconLayer {
         // Sort by label (case-insensitive).
         self.icons.sort_by_key(|i| i.label.to_lowercase());
 
-        let cols = self
-            .grid
-            .columns_in(self.screen_width.saturating_sub(EDGE_PADDING * 2));
-        let rows = self
-            .grid
-            .rows_in(self.usable_height().saturating_sub(EDGE_PADDING * 2));
+        let (cols, rows) = self.grid_extent();
 
-        for (idx, icon) in self.icons.iter_mut().enumerate() {
-            // Fill column-first (top to bottom, then next column).
-            let col = (idx as u32).checked_div(rows).unwrap_or(idx as u32);
-            let row = (idx as u32).checked_rem(rows).unwrap_or(0);
+        // Cell positions are computed up front because `cell_origin` reads
+        // `self` and the loop below holds the icons mutably.
+        let placements: Vec<(i32, i32)> = (0..self.icons.len())
+            .map(|idx| {
+                let idx = u32::try_from(idx).unwrap_or(u32::MAX);
+                // Fill column-first (top to bottom, then next column).
+                let col = idx.checked_div(rows).unwrap_or(idx);
+                let row = idx.checked_rem(rows).unwrap_or(0);
+                // Past the last column, wrap round and start overlapping
+                // rather than drawing icons off the edge of the screen.
+                let col = if col >= cols {
+                    col.checked_rem(cols).unwrap_or(0)
+                } else {
+                    col
+                };
+                self.cell_origin(
+                    i32::try_from(col).unwrap_or(i32::MAX),
+                    i32::try_from(row).unwrap_or(i32::MAX),
+                )
+            })
+            .collect();
 
-            if col >= cols {
-                // Overflow — wrap or leave at last valid column.
-                let wrapped_col = col % cols.max(1);
-                let (px, py) = GridConfig::default().from_cell(wrapped_col as i32, row as i32);
-                icon.x = px + EDGE_PADDING as i32;
-                icon.y = py + EDGE_PADDING as i32;
-            } else {
-                let (px, py) = GridConfig::default().from_cell(col as i32, row as i32);
-                icon.x = px + EDGE_PADDING as i32;
-                icon.y = py + EDGE_PADDING as i32;
-            }
+        for (icon, (x, y)) in self.icons.iter_mut().zip(placements) {
+            icon.x = x;
+            icon.y = y;
         }
     }
 
@@ -744,8 +795,8 @@ impl DesktopIconLayer {
                 self.interaction = InteractionState::Idle;
 
                 for (id, orig_x, orig_y) in &originals_snapshot {
-                    let new_x = *orig_x + dx as i32;
-                    let new_y = *orig_y + dy as i32;
+                    let new_x = orig_x.saturating_add(dx as i32);
+                    let new_y = orig_y.saturating_add(dy as i32);
                     let (snapped_x, snapped_y) = self.grid.snap(new_x, new_y);
 
                     if let Some(icon) = self.icons.iter_mut().find(|i| i.id == *id) {
@@ -789,19 +840,19 @@ impl DesktopIconLayer {
                 IconEvent::Delete(selected)
             }
             DesktopKey::F2 => {
-                let selected = self.selected_ids();
-                if selected.len() == 1 {
-                    IconEvent::BeginRename(selected[0])
+                // The slice pattern is both halves of the old test at once:
+                // exactly one selection, and a name bound to it.
+                if let [only] = self.selected_ids().as_slice() {
+                    IconEvent::BeginRename(*only)
                 } else {
                     IconEvent::None
                 }
             }
             DesktopKey::Enter => {
-                let selected = self.selected_ids();
-                if selected.len() == 1
-                    && let Some(icon) = self.icons.iter().find(|i| i.id == selected[0])
+                if let [only] = self.selected_ids().as_slice()
+                    && let Some(icon) = self.icons.iter().find(|i| i.id == *only)
                 {
-                    return IconEvent::Activate(selected[0], icon.action.clone());
+                    return IconEvent::Activate(*only, icon.action.clone());
                 }
                 IconEvent::None
             }
@@ -843,14 +894,14 @@ impl DesktopIconLayer {
                     cmds.push(RenderCommand::FillRect {
                         x: ghost_x,
                         y: ghost_y,
-                        width: self.grid.cell_width as f32,
-                        height: self.grid.cell_height as f32,
+                        width: self.grid.cell_width() as f32,
+                        height: self.grid.cell_height() as f32,
                         color: Color::rgba(137, 180, 250, 30),
                         corner_radii: CornerRadii::all(4.0),
                     });
 
                     // Ghost glyph.
-                    let glyph_x = ghost_x + (self.grid.cell_width as f32 - ICON_GLYPH_SIZE) / 2.0;
+                    let glyph_x = ghost_x + (self.grid.cell_width() as f32 - ICON_GLYPH_SIZE) / 2.0;
                     let glyph_y = ghost_y + ICON_TOP_PADDING;
                     cmds.push(RenderCommand::Text {
                         x: glyph_x,
@@ -879,8 +930,8 @@ impl DesktopIconLayer {
                 cmds.push(RenderCommand::StrokeRect {
                     x: snap_x as f32,
                     y: snap_y as f32,
-                    width: self.grid.cell_width as f32,
-                    height: self.grid.cell_height as f32,
+                    width: self.grid.cell_width() as f32,
+                    height: self.grid.cell_height() as f32,
                     color: theme::DROP_TARGET,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(4.0),
@@ -927,8 +978,8 @@ impl DesktopIconLayer {
     fn render_icon(&self, icon: &DesktopIcon, cmds: &mut Vec<RenderCommand>) {
         let ix = icon.x as f32;
         let iy = icon.y as f32;
-        let cw = self.grid.cell_width as f32;
-        let ch = self.grid.cell_height as f32;
+        let cw = self.grid.cell_width() as f32;
+        let ch = self.grid.cell_height() as f32;
 
         // Selection highlight.
         if icon.selected {
@@ -1107,6 +1158,17 @@ fn wrap_label(text: &str, max_width: f32, max_lines: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ------------------------------------------------------------------
@@ -1115,10 +1177,7 @@ mod tests {
 
     #[test]
     fn grid_snap_positive_aligned() {
-        let grid = GridConfig {
-            cell_width: 80,
-            cell_height: 90,
-        };
+        let grid = GridConfig::new(80, 90);
         assert_eq!(grid.snap(0, 0), (0, 0));
         assert_eq!(grid.snap(80, 90), (80, 90));
         assert_eq!(grid.snap(160, 180), (160, 180));
@@ -1126,10 +1185,7 @@ mod tests {
 
     #[test]
     fn grid_snap_positive_unaligned() {
-        let grid = GridConfig {
-            cell_width: 80,
-            cell_height: 90,
-        };
+        let grid = GridConfig::new(80, 90);
         // Should snap to nearest lower-left cell origin.
         assert_eq!(grid.snap(10, 10), (0, 0));
         assert_eq!(grid.snap(79, 89), (0, 0));
@@ -1140,10 +1196,7 @@ mod tests {
 
     #[test]
     fn grid_snap_negative_coords() {
-        let grid = GridConfig {
-            cell_width: 80,
-            cell_height: 90,
-        };
+        let grid = GridConfig::new(80, 90);
         assert_eq!(grid.snap(-1, -1), (-80, -90));
         assert_eq!(grid.snap(-80, -90), (-80, -90));
         assert_eq!(grid.snap(-81, -91), (-160, -180));
@@ -1151,10 +1204,7 @@ mod tests {
 
     #[test]
     fn grid_to_cell_and_back() {
-        let grid = GridConfig {
-            cell_width: 80,
-            cell_height: 90,
-        };
+        let grid = GridConfig::new(80, 90);
         assert_eq!(grid.to_cell(0, 0), (0, 0));
         assert_eq!(grid.to_cell(80, 90), (1, 1));
         assert_eq!(grid.to_cell(160, 270), (2, 3));
@@ -1163,10 +1213,7 @@ mod tests {
 
     #[test]
     fn grid_columns_and_rows() {
-        let grid = GridConfig {
-            cell_width: 80,
-            cell_height: 90,
-        };
+        let grid = GridConfig::new(80, 90);
         assert_eq!(grid.columns_in(1920), 24);
         assert_eq!(grid.rows_in(1040), 11); // 1080 - 40 taskbar
         assert_eq!(grid.columns_in(0), 0);
@@ -1174,13 +1221,18 @@ mod tests {
     }
 
     #[test]
-    fn grid_zero_cell_size() {
-        let grid = GridConfig {
-            cell_width: 0,
-            cell_height: 0,
-        };
-        assert_eq!(grid.columns_in(1920), 0);
-        assert_eq!(grid.rows_in(1080), 0);
+    fn a_zero_cell_size_is_raised_to_one_rather_than_dividing_by_it() {
+        // This used to build a grid of zero-sized cells and check the two
+        // methods that guarded against it. The other two — `snap` and
+        // `to_cell` — divided by the same zero and panicked; the test simply
+        // did not call them. Now the state cannot be built.
+        let grid = GridConfig::new(0, 0);
+        assert_eq!(grid.cell_width(), 1);
+        assert_eq!(grid.cell_height(), 1);
+        assert_eq!(grid.snap(37, -12), (37, -12));
+        assert_eq!(grid.to_cell(37, -12), (37, -12));
+        assert_eq!(grid.columns_in(1920), 1920);
+        assert_eq!(grid.rows_in(1080), 1080);
     }
 
     // ------------------------------------------------------------------
@@ -1343,6 +1395,81 @@ mod tests {
             assert_eq!(icon.x, ex + EDGE_PADDING as i32, "icon {idx} x mismatch");
             assert_eq!(icon.y, ey + EDGE_PADDING as i32, "icon {idx} y mismatch");
         }
+    }
+
+    #[test]
+    fn auto_arrange_lays_icons_out_at_the_layers_own_pitch() {
+        // The bug this covers: `auto_arrange` counted the rows that fit using
+        // `self.grid` and then placed each icon with `GridConfig::default()`.
+        // Every existing test used a layer whose grid *was* the default, so
+        // the two agreed by accident and the mismatch was invisible.
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.grid = GridConfig::new(120, 140);
+        for i in 0..3 {
+            layer.add_icon(
+                &format!("Icon{i}"),
+                IconType::File,
+                IconAction::OpenPath(format!("/{i}")),
+                999,
+                999,
+            );
+        }
+
+        layer.auto_arrange();
+
+        // Three icons fit in the first column at this pitch, so the row index
+        // is the icon index and the spacing is the layer's cell height.
+        for (row, icon) in layer.icons.iter().enumerate() {
+            let (ex, ey) = layer.grid.from_cell(0, row as i32);
+            assert_eq!(icon.x, ex + EDGE_PADDING as i32, "icon {row} x");
+            assert_eq!(icon.y, ey + EDGE_PADDING as i32, "icon {row} y");
+        }
+        // And spelled out, so the assertion above cannot pass by comparing the
+        // wrong grid against itself: 140, not the default 90.
+        assert_eq!(layer.icons[1].y - layer.icons[0].y, 140);
+    }
+
+    #[test]
+    fn the_default_icons_are_stacked_at_the_layers_own_pitch() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.grid = GridConfig::new(120, 140);
+        layer.populate_defaults();
+
+        assert_eq!(layer.icons.len(), 4);
+        // No `EDGE_PADDING` in the expectation: `add_icon` snaps whatever it
+        // is given to a cell origin, so the padding is folded away on entry.
+        // (`auto_arrange` writes `icon.x` directly and so keeps it — the two
+        // paths disagree by 8px, which is far inside one cell and therefore
+        // invisible to `to_cell`. See the note on `next_free_cell`.)
+        for (row, icon) in layer.icons.iter().enumerate() {
+            let (ex, ey) = layer.grid.from_cell(0, row as i32);
+            assert_eq!(icon.x, ex, "icon {row} x");
+            assert_eq!(icon.y, ey, "icon {row} y");
+        }
+        assert_eq!(layer.icons[1].y - layer.icons[0].y, 140);
+    }
+
+    #[test]
+    fn auto_arrange_on_a_grid_coarser_than_the_screen_still_places_every_icon() {
+        // One cell taller and wider than the usable desktop: `grid_extent`
+        // reports zero columns and zero rows, so every division by it has to
+        // be the checked one.
+        let mut layer = DesktopIconLayer::new(200, 200, 40);
+        layer.grid = GridConfig::new(4096, 4096);
+        for i in 0..3 {
+            layer.add_icon(
+                &format!("Icon{i}"),
+                IconType::File,
+                IconAction::OpenPath(format!("/{i}")),
+                0,
+                0,
+            );
+        }
+
+        layer.auto_arrange();
+        layer.next_free_cell();
+
+        assert_eq!(layer.icons.len(), 3);
     }
 
     #[test]

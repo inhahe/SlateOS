@@ -22,9 +22,11 @@
 //! ```
 
 use crate::color::Color;
+use crate::date::Date;
 use crate::event::{Key, KeyEvent};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
+pub use tzrules::Tz;
 
 // --- Catppuccin Mocha palette ---
 
@@ -150,6 +152,14 @@ pub struct FileDialog {
     history_forward: Vec<String>,
     quick_access: Vec<QuickAccess>,
     cancelled: bool,
+    /// The zone the Modified column is rendered in.
+    ///
+    /// Defaults to UTC because a toolkit has no business reading `TZ` behind
+    /// its embedder's back — the shell resolves the zone once (through
+    /// zoneinfo, which a bare `TZ` string cannot express) and hands the same
+    /// [`Tz`] to everything that shows a time, so the dialog and the taskbar
+    /// clock cannot disagree.
+    timezone: Tz,
 }
 
 impl FileDialog {
@@ -202,6 +212,28 @@ impl FileDialog {
         self
     }
 
+    /// Render the Modified column in `zone` rather than UTC.
+    #[must_use]
+    pub fn with_timezone(mut self, zone: Tz) -> Self {
+        self.timezone = zone;
+        self
+    }
+
+    /// Change the zone the Modified column is rendered in.
+    ///
+    /// Separate from [`with_timezone`](Self::with_timezone) because the zone
+    /// can change while a dialog is open — the user can edit it in Settings —
+    /// and a dialog consumed by a builder cannot be told.
+    pub fn set_timezone(&mut self, zone: Tz) {
+        self.timezone = zone;
+    }
+
+    /// The zone the Modified column is rendered in.
+    #[must_use]
+    pub fn timezone(&self) -> Tz {
+        self.timezone
+    }
+
     // --- Navigation ---
 
     /// Navigate into the given directory path. Pushes the current path onto the
@@ -220,7 +252,7 @@ impl FileDialog {
     pub fn navigate_up(&mut self) {
         let parent = parent_path(&self.current_path);
         if parent != self.current_path {
-            self.navigate_to(&parent.to_string());
+            self.navigate_to(&parent);
         }
     }
 
@@ -560,6 +592,7 @@ impl FileDialog {
             history_forward: Vec::new(),
             quick_access: default_quick_access(),
             cancelled: false,
+            timezone: Tz::UTC,
         }
     }
 
@@ -616,14 +649,26 @@ impl FileDialog {
         name.clone()
     }
 
+    /// Move the selection `delta` rows, stopping at either end of the list.
+    ///
+    /// Done entirely in `usize` with saturating steps. The old version cast
+    /// the index to `isize` to add a signed delta and clamped against
+    /// `len as isize - 1`, which is two conversions and a subtraction that are
+    /// each only safe because of something proven elsewhere — a non-empty
+    /// list, a delta small enough not to overflow. Saturating in the index's
+    /// own type needs none of those proofs, and `checked_sub` on the length
+    /// *is* the emptiness check.
     fn move_selection(&mut self, delta: isize) {
-        if self.entries.is_empty() {
+        let Some(last) = self.entries.len().checked_sub(1) else {
             return;
-        }
-        let len = self.entries.len();
-        let current = self.selected_index.unwrap_or(0) as isize;
-        let next = (current + delta).clamp(0, (len as isize) - 1) as usize;
-        self.selected_index = Some(next);
+        };
+        let current = self.selected_index.unwrap_or(0);
+        let next = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            current.saturating_add(delta.unsigned_abs())
+        };
+        self.selected_index = Some(next.min(last));
     }
 
     // --- Render sub-methods ---
@@ -902,7 +947,7 @@ impl FileDialog {
             cmds.push(RenderCommand::Text {
                 x: date_col_x,
                 y: row_y + 6.0,
-                text: format_timestamp(entry.modified_timestamp),
+                text: format_timestamp(entry.modified_timestamp, &self.timezone),
                 color: COLOR_SUBTEXT,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
@@ -1103,21 +1148,29 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Format a Unix timestamp into a simplified date string.
-/// Full date formatting would depend on a time library; this provides
-/// a basic representation suitable for display.
-fn format_timestamp(epoch_secs: u64) -> String {
+/// Format a Unix timestamp as a `YYYY-MM-DD` date in `zone`, or `--` if unset.
+///
+/// The old implementation divided the epoch day count by 365 and then by 30,
+/// which is a calendar with no leap years and twelve 30-day months. It was
+/// wrong in three compounding ways: the missing leap days put the date about
+/// two weeks early by 2026, the 360-day year advanced the year number early
+/// on top of that, and the 30-day months meant the day-of-month was very
+/// nearly never right. A "simplified display" of a file's modification date
+/// that names the wrong day is not simplified, it is false, and the user has
+/// no way to tell — which is worse than showing nothing.
+fn format_timestamp(epoch_secs: u64, zone: &Tz) -> String {
     if epoch_secs == 0 {
         return String::from("--");
     }
-    // Simple epoch-days calculation (no timezone, no leap-second precision).
-    let days = epoch_secs / 86400;
-    let years_approx = days / 365;
-    let year = 1970 + years_approx;
-    let remaining_days = days - (years_approx * 365);
-    let month = (remaining_days / 30).min(11) + 1;
-    let day = (remaining_days % 30) + 1;
-    format!("{year:04}-{month:02}-{day:02}")
+    let utc = i64::try_from(epoch_secs).unwrap_or(i64::MAX);
+    // Timestamps are UTC; the column is read as local time. `lookup` picks the
+    // offset in force *at that instant*, so a file written in summer keeps its
+    // summer date when read in winter.
+    let local = utc.saturating_add(i64::from(zone.lookup(utc).gmtoff));
+    // `Date`'s `Display` is ISO 8601, which is what this column has always
+    // shown; the day-from-instant conversion now happens in one place for the
+    // whole toolkit rather than here.
+    Date::from_unix_utc(local).to_string()
 }
 
 /// Check whether a filename matches any of the given glob patterns.
@@ -1144,6 +1197,18 @@ fn matches_any_pattern(filename: &str, patterns: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     #[test]
@@ -1505,6 +1570,139 @@ mod tests {
         assert_eq!(format_size(1536), "1.5 KiB");
         assert_eq!(format_size(1048576), "1.0 MiB");
         assert_eq!(format_size(1073741824), "1.0 GiB");
+    }
+
+    #[test]
+    fn a_timestamp_names_the_day_it_actually_falls_on() {
+        // Dates picked because the arithmetic that used to be here got each of
+        // them wrong: a leap day in a leap year, a leap day in a leap year the
+        // "divisible by 4" rule alone gets right, the last day of a century
+        // that is *not* a leap year, and a plain modern date.
+        let utc = Tz::UTC;
+        assert_eq!(format_timestamp(0, &utc), "--", "unset stays unset");
+        assert_eq!(format_timestamp(1, &utc), "1970-01-01");
+        assert_eq!(format_timestamp(86_399, &utc), "1970-01-01");
+        assert_eq!(format_timestamp(86_400, &utc), "1970-01-02");
+        assert_eq!(format_timestamp(951_782_400, &utc), "2000-02-29");
+        assert_eq!(format_timestamp(1_709_164_800, &utc), "2024-02-29");
+        assert_eq!(format_timestamp(4_102_444_800, &utc), "2100-01-01");
+        assert_eq!(format_timestamp(1_700_000_000, &utc), "2023-11-14");
+    }
+
+    #[test]
+    fn the_modified_column_agrees_with_the_libc_for_a_century_of_days() {
+        // The column must name the same day the shell and `ls -l` would. Both
+        // render through `tzrules::days_from_civil`, so walking every day from
+        // 1970 to 2079 and requiring the dialog's rendering to invert back to
+        // the same day number is the check that they cannot drift apart. A
+        // leap year missed or a month length wrong anywhere in that range
+        // shows up immediately — the implementation before `Date` would have
+        // failed on its 59th day.
+        for days in 0..40_000i64 {
+            // Midday, not midnight: timestamp 0 is the column's "unset"
+            // sentinel, and a mid-day instant also shows the time of day is
+            // discarded rather than rounded.
+            let rendered = format_timestamp(
+                u64::try_from(days * 86_400 + 43_200).expect("non-negative"),
+                &Tz::UTC,
+            );
+            let date = Date::from_days_since_epoch(i32::try_from(days).expect("in range"));
+            assert_eq!(rendered, date.to_string(), "day {days}");
+            let (year, month, day) = date.ymd();
+            assert!((1..=12).contains(&month), "month {month} at day {days}");
+            assert!((1..=31).contains(&day), "day {day} at day {days}");
+            assert_eq!(
+                tzrules::days_from_civil(i64::from(year), month, day),
+                days,
+                "{rendered} did not round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn the_modified_column_is_read_in_the_dialogs_zone() {
+        // Midnight UTC on 2023-11-14. Five hours west of Greenwich it is still
+        // the evening of the 13th, and an hour east it is already the 14th.
+        let midnight_utc = 19_675 * 86_400;
+        let est = Tz::parse(b"EST5").expect("a POSIX TZ string");
+        let cet = Tz::parse(b"CET-1").expect("a POSIX TZ string");
+        assert_eq!(format_timestamp(midnight_utc, &Tz::UTC), "2023-11-14");
+        assert_eq!(format_timestamp(midnight_utc, &est), "2023-11-13");
+        assert_eq!(format_timestamp(midnight_utc, &cet), "2023-11-14");
+
+        // And the dialog renders through its own zone, not a hard-wired one.
+        let dialog = FileDialog::open().with_timezone(est);
+        assert_eq!(dialog.timezone(), est);
+    }
+
+    #[test]
+    fn a_dialog_renders_the_modified_column_in_its_own_zone() {
+        let est = Tz::parse(b"EST5").expect("a POSIX TZ string");
+        let entry = DirEntry {
+            name: String::from("notes.txt"),
+            is_dir: false,
+            size: 10,
+            modified_timestamp: 19_675 * 86_400,
+            extension: String::from("txt"),
+        };
+        let dated = |zone: Option<Tz>| {
+            let mut dialog = FileDialog::open();
+            if let Some(zone) = zone {
+                dialog.set_timezone(zone);
+            }
+            dialog.set_entries(vec![entry.clone()]);
+            dialog
+                .render(800.0, 600.0)
+                .into_iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .find(|text| text.starts_with("2023-"))
+                .expect("the Modified column should be drawn")
+        };
+        assert_eq!(dated(None), "2023-11-14");
+        assert_eq!(dated(Some(est)), "2023-11-13");
+    }
+
+    #[test]
+    fn moving_the_selection_stops_at_both_ends() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(vec![
+            DirEntry {
+                name: String::from("a"),
+                is_dir: false,
+                size: 0,
+                modified_timestamp: 1,
+                extension: String::new(),
+            },
+            DirEntry {
+                name: String::from("b"),
+                is_dir: false,
+                size: 0,
+                modified_timestamp: 1,
+                extension: String::new(),
+            },
+        ]);
+        dialog.move_selection(1);
+        assert_eq!(dialog.selected_index, Some(1));
+        // Far past either end, including a delta that would overflow the
+        // signed arithmetic the old implementation used.
+        dialog.move_selection(isize::MAX);
+        assert_eq!(dialog.selected_index, Some(1));
+        dialog.move_selection(isize::MIN);
+        assert_eq!(dialog.selected_index, Some(0));
+        dialog.move_selection(-1);
+        assert_eq!(dialog.selected_index, Some(0));
+    }
+
+    #[test]
+    fn moving_the_selection_in_an_empty_list_selects_nothing() {
+        let mut dialog = FileDialog::open();
+        dialog.move_selection(1);
+        assert_eq!(dialog.selected_index, None);
+        dialog.move_selection(-1);
+        assert_eq!(dialog.selected_index, None);
     }
 
     #[test]

@@ -316,6 +316,139 @@ pub fn compare(a: &str, b: &str, case: Case) -> Ordering {
         .cmp(b.chars().flat_map(char::to_lowercase))
 }
 
+/// Rank how well `query` fuzzy-matches `target`, or `None` if it does not
+/// match at all. Higher is better; the number is meaningful only against other
+/// scores from this same function.
+///
+/// A match means every character of `query` appears in `target`, in order,
+/// ignoring case, but not necessarily next to each other — so `"fx"` matches
+/// `"Firefox"`. The score rewards, in descending weight:
+///
+/// | Situation | Bonus |
+/// |---|---|
+/// | `query` is a prefix of `target` | 50 |
+/// | each character matched at a word boundary (string start, or after a space, `-` or `_`) | 10 |
+/// | each character matched immediately after the previous match | 5 |
+/// | matching early in `target` | 20 minus the index of the first match |
+/// | `target` being little longer than `query` | 10 minus the surplus characters, floored at 0 |
+///
+/// # Why this is here
+///
+/// It was written three times — the desktop launcher, the Run dialog and the
+/// standalone launcher application — with the second copy carrying the comment
+/// "uses the same algorithm as the application launcher for consistency". A
+/// comment is not a mechanism: it states the invariant that the code is
+/// supposed to maintain while doing nothing to maintain it, so the first time
+/// one copy's weights are tuned, the same query silently ranks two lists in two
+/// different orders and the comment still reads true.
+///
+/// It lives in this crate rather than the toolkit for the same reason
+/// everything else here does: ranking a list of candidates against typed text
+/// is not a widget's job, and the headless components search too.
+///
+/// # Case, and what changed by moving here
+///
+/// Characters are compared by [`char::to_lowercase`], the same rule as
+/// [`match_at`] and [`compare`] — not the `to_ascii_lowercase` the three copies
+/// used. That is a behaviour change in exactly one direction: `"É"` now matches
+/// `"éclair"`, where before a non-ASCII query character only matched itself.
+/// Every ASCII score is unchanged, and no copy had a test that a non-ASCII
+/// query *failed*.
+///
+/// Nothing is allocated. The copies built two `Vec<char>` per candidate, which
+/// for a launcher is two allocations per installed application per keystroke.
+///
+/// # Examples
+///
+/// ```
+/// use textfind::fuzzy_score;
+///
+/// // Characters must appear in order, but need not be adjacent.
+/// assert!(fuzzy_score("fx", "Firefox").is_some());
+/// assert_eq!(fuzzy_score("xf", "Firefox"), None);
+///
+/// // An empty query matches everything, at the lowest score.
+/// assert_eq!(fuzzy_score("", "anything"), Some(0));
+///
+/// // A prefix beats the same characters found in the middle.
+/// let prefix = fuzzy_score("fi", "file").unwrap();
+/// let middle = fuzzy_score("fi", "wifi").unwrap();
+/// assert!(prefix > middle);
+/// ```
+#[must_use]
+pub fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+
+    let query_len = query.chars().count();
+    if query_len > target.chars().count() {
+        return None;
+    }
+
+    // `zip` stops at the shorter side, and `query` is no longer than `target`,
+    // so this asks "is query a prefix of target".
+    let is_prefix = target
+        .chars()
+        .zip(query.chars())
+        .all(|(t, q)| eq_folded(t, q));
+
+    let mut score: u32 = 0;
+    let mut matched: usize = 0;
+    let mut wanted = query.chars().peekable();
+    let mut prev_match_idx: Option<usize> = None;
+    let mut first_match_idx: Option<usize> = None;
+    let mut prev_char: Option<char> = None;
+
+    for (ti, tc) in target.chars().enumerate() {
+        let Some(&qc) = wanted.peek() else { break };
+        if eq_folded(tc, qc) {
+            wanted.next();
+            if first_match_idx.is_none() {
+                first_match_idx = Some(ti);
+            }
+
+            let at_boundary = prev_char.is_none_or(|p| p == ' ' || p == '-' || p == '_');
+            if at_boundary {
+                score = score.saturating_add(10);
+            }
+
+            if prev_match_idx.is_some_and(|p| p.saturating_add(1) == ti) {
+                score = score.saturating_add(5);
+            }
+
+            prev_match_idx = Some(ti);
+            matched = matched.saturating_add(1);
+        }
+        prev_char = Some(tc);
+    }
+
+    // Every query character has to have been consumed. Anything less is a
+    // candidate the user did not type towards.
+    if matched < query_len {
+        return None;
+    }
+
+    if is_prefix {
+        score = score.saturating_add(50);
+    }
+
+    if let Some(idx) = first_match_idx {
+        score = score.saturating_add(20u32.saturating_sub(u32::try_from(idx).unwrap_or(u32::MAX)));
+    }
+
+    // A shorter target is a more specific answer to the same query.
+    let surplus = target.chars().count().saturating_sub(query_len);
+    score = score.saturating_add(10u32.saturating_sub(u32::try_from(surplus).unwrap_or(u32::MAX)));
+
+    Some(score)
+}
+
+/// Whether two characters are the same under simple lowercase mapping.
+fn eq_folded(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
+}
+
 /// Iterator over the non-overlapping matches of a needle. See [`matches`].
 #[derive(Debug, Clone)]
 pub struct Matches<'h, 'n> {
@@ -362,7 +495,7 @@ mod tests {
     #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
 
     extern crate alloc;
-    use super::{Case, Ordering, compare, contains, find_from, match_at, matches};
+    use super::{Case, Ordering, compare, contains, find_from, fuzzy_score, match_at, matches};
     use alloc::vec::Vec;
 
     /// The Turkish capital I with a dot above: two bytes, but three once
@@ -615,5 +748,82 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // fuzzy_score
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn a_fuzzy_match_needs_every_query_character_in_order() {
+        assert!(fuzzy_score("fx", "Firefox").is_some());
+        assert!(fuzzy_score("frfx", "Firefox").is_some());
+        // Present, but in the wrong order.
+        assert_eq!(fuzzy_score("xf", "Firefox"), None);
+        // Absent.
+        assert_eq!(fuzzy_score("z", "Firefox"), None);
+        // Longer than the target can supply.
+        assert_eq!(fuzzy_score("abcdef", "abc"), None);
+    }
+
+    #[test]
+    fn an_empty_query_matches_everything_at_the_bottom_of_the_ranking() {
+        assert_eq!(fuzzy_score("", "anything"), Some(0));
+        assert_eq!(fuzzy_score("", ""), Some(0));
+    }
+
+    #[test]
+    fn the_ranking_prefers_prefix_then_boundary_then_early_then_short() {
+        let prefix = fuzzy_score("fi", "file").unwrap();
+        let middle = fuzzy_score("fi", "wifi").unwrap();
+        assert!(prefix > middle, "prefix {prefix} vs middle {middle}");
+
+        let boundary = fuzzy_score("c", "ab_cd").unwrap();
+        let inner = fuzzy_score("c", "abxcd").unwrap();
+        assert!(boundary > inner, "boundary {boundary} vs inner {inner}");
+
+        let early = fuzzy_score("x", "xaaaa").unwrap();
+        let late = fuzzy_score("x", "aaaax").unwrap();
+        assert!(early > late, "early {early} vs late {late}");
+
+        let tight = fuzzy_score("abc", "abcd").unwrap();
+        let loose = fuzzy_score("abc", "abcdefghijkl").unwrap();
+        assert!(tight > loose, "tight {tight} vs loose {loose}");
+    }
+
+    #[test]
+    fn adjacent_matches_score_above_scattered_ones() {
+        // Same characters, same first-match index, same target length: the
+        // only difference is that one run is contiguous.
+        let run = fuzzy_score("ab", "zzabzz").unwrap();
+        let split = fuzzy_score("ab", "zzazb").unwrap();
+        assert!(run > split, "run {run} vs split {split}");
+    }
+
+    #[test]
+    fn fuzzy_matching_ignores_case_the_same_way_the_rest_of_the_crate_does() {
+        assert_eq!(fuzzy_score("ABC", "abcdef"), fuzzy_score("abc", "ABCDEF"));
+        // The three copies this replaces folded only ASCII, so a non-ASCII
+        // query character matched nothing but itself.
+        assert!(fuzzy_score("\u{c9}", "\u{e9}clair").is_some());
+        assert!(fuzzy_score("\u{c9}", "eclair").is_none());
+    }
+
+    #[test]
+    fn a_score_never_overflows_on_a_long_target() {
+        // 10 per boundary match on a target that is nothing but boundaries.
+        let mut target = alloc::string::String::new();
+        for _ in 0..5000 {
+            target.push_str("a ");
+        }
+        let query: alloc::string::String = core::iter::repeat_n('a', 5000).collect();
+        assert!(fuzzy_score(&query, &target).is_some());
+    }
+
+    #[test]
+    fn a_query_that_runs_out_stops_scanning_the_rest_of_the_target() {
+        // Nothing after the last matched character may contribute: these two
+        // differ only past the match, so they must score alike.
+        assert_eq!(fuzzy_score("ab", "ab!!"), fuzzy_score("ab", "ab??"));
     }
 }

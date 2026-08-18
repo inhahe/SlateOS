@@ -76,13 +76,6 @@
 //! reads are bounds-checked; invalid tag bytes, oversized lengths, and
 //! malformed UTF-8 are reported as [`DecodeError`].
 
-#![deny(clippy::all)]
-#![warn(clippy::pedantic)]
-#![allow(
-    clippy::missing_errors_doc,
-    clippy::module_name_repetitions,
-    clippy::doc_markdown
-)]
 
 use guitk::color::Color;
 use guitk::render::{
@@ -126,6 +119,13 @@ pub use loopback::{Pipe, pipe};
 
 pub mod socket;
 pub use socket::{DEFAULT_DISPLAY, DISPLAY_VAR, Listener, Socket, display_addr};
+
+// Private: the decode cursor is an implementation detail of this crate's
+// decoders, and a *private module* is what makes its fields unreachable from
+// the sibling modules that used to index them directly. Fields left without
+// `pub` in the crate root were not private from those modules at all.
+mod reader;
+pub(crate) use reader::Reader;
 
 // ============================================================================
 // Protocol constants
@@ -448,32 +448,49 @@ impl std::error::Error for DecodeError {}
 /// then back-fills the command count. This avoids a pre-pass to count
 /// commands and keeps allocations to a single growable buffer.
 pub fn encode_frame(tree: &RenderTree, out: &mut Vec<u8>) {
-    let header_pos = out.len();
-    // Reserve header.
+    // The count goes straight into the header rather than being back-filled.
+    // The previous version reserved four zero bytes, encoded the commands
+    // while tallying them, then computed `header_pos + 4 + 1 + 1` and wrote
+    // the tally back one byte at a time. Its stated reason was to avoid a
+    // pre-pass over the commands to count them — but `tree.commands` is a
+    // `Vec`, so there was never a pre-pass to avoid: the length is known here,
+    // in O(1), before a byte is written. Removing the mechanism removes the
+    // offset arithmetic and the four indexed writes with it, and with them the
+    // possibility of the placeholder and the back-fill drifting apart.
+    //
+    // Saturating matches the old `saturating_add`: a tree with more than 4
+    // billion commands would encode a count of `u32::MAX`, and the decoder
+    // rejects anything over `MAX_COMMANDS_PER_FRAME` long before that.
+    let count = u32::try_from(tree.commands.len()).unwrap_or(u32::MAX);
     out.extend_from_slice(&MAGIC);
     out.push(PROTOCOL_VERSION);
     out.push(0); // flags
-    out.extend_from_slice(&0u32.to_le_bytes()); // n_cmds placeholder
+    out.extend_from_slice(&count.to_le_bytes());
 
-    let mut count: u32 = 0;
     for cmd in &tree.commands {
         encode_command(cmd, out);
-        count = count.saturating_add(1);
     }
+}
 
-    // Back-fill n_cmds at header_pos + 6.
-    let count_offset = header_pos + 4 + 1 + 1;
-    let bytes = count.to_le_bytes();
-    out[count_offset] = bytes[0];
-    out[count_offset + 1] = bytes[1];
-    out[count_offset + 2] = bytes[2];
-    out[count_offset + 3] = bytes[3];
+/// A starting capacity for an encode buffer: `header + count * per_item`.
+///
+/// Saturating, because this is only a hint. `header + n * per_item` overflows
+/// for a large enough `n`, and the wrapped result would be a *smaller*
+/// capacity than the true one — so the failure mode is not a panic in release
+/// but a buffer that silently reallocates its way to the right size, which is
+/// slower than no hint at all and impossible to notice. Saturating at
+/// `usize::MAX` is equally wrong as a number but wrong in the harmless
+/// direction: `Vec::with_capacity` would abort on an impossible request, and
+/// no encoder can be asked for one without first having been handed a
+/// collection of that length, which cannot fit in memory either.
+fn capacity_hint(header: usize, count: usize, per_item: usize) -> usize {
+    header.saturating_add(count.saturating_mul(per_item))
 }
 
 /// Convenience: encode a frame and return the bytes.
 #[must_use]
 pub fn encode_frame_to_vec(tree: &RenderTree) -> Vec<u8> {
-    let mut v = Vec::with_capacity(HEADER_LEN + tree.len() * 32);
+    let mut v = Vec::with_capacity(capacity_hint(HEADER_LEN, tree.len(), 32));
     encode_frame(tree, &mut v);
     v
 }
@@ -778,118 +795,6 @@ fn write_optional_f32(out: &mut Vec<u8>, v: Option<f32>) {
 // Decoding
 // ============================================================================
 
-/// Reader cursor over a byte slice, with bounds-checked primitive reads.
-struct Reader<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
-    }
-
-    fn remaining(&self) -> usize {
-        self.buf.len() - self.pos
-    }
-
-    fn need(&self, n: usize) -> Result<(), DecodeError> {
-        if self.remaining() < n {
-            Err(DecodeError::UnexpectedEof)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn read_u8(&mut self) -> Result<u8, DecodeError> {
-        self.need(1)?;
-        let v = self.buf[self.pos];
-        self.pos += 1;
-        Ok(v)
-    }
-
-    fn read_u32(&mut self) -> Result<u32, DecodeError> {
-        self.need(4)?;
-        let v = u32::from_le_bytes([
-            self.buf[self.pos],
-            self.buf[self.pos + 1],
-            self.buf[self.pos + 2],
-            self.buf[self.pos + 3],
-        ]);
-        self.pos += 4;
-        Ok(v)
-    }
-
-    fn read_u64(&mut self) -> Result<u64, DecodeError> {
-        self.need(8)?;
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&self.buf[self.pos..self.pos + 8]);
-        self.pos += 8;
-        Ok(u64::from_le_bytes(bytes))
-    }
-
-    fn read_f32(&mut self) -> Result<f32, DecodeError> {
-        self.need(4)?;
-        let bits = u32::from_le_bytes([
-            self.buf[self.pos],
-            self.buf[self.pos + 1],
-            self.buf[self.pos + 2],
-            self.buf[self.pos + 3],
-        ]);
-        self.pos += 4;
-        Ok(f32::from_bits(bits))
-    }
-
-    fn read_color(&mut self) -> Result<Color, DecodeError> {
-        self.need(4)?;
-        let c = Color {
-            r: self.buf[self.pos],
-            g: self.buf[self.pos + 1],
-            b: self.buf[self.pos + 2],
-            a: self.buf[self.pos + 3],
-        };
-        self.pos += 4;
-        Ok(c)
-    }
-
-    fn read_radii(&mut self) -> Result<CornerRadii, DecodeError> {
-        let tl = self.read_f32()?;
-        let tr = self.read_f32()?;
-        let br = self.read_f32()?;
-        let bl = self.read_f32()?;
-        Ok(CornerRadii {
-            top_left: tl,
-            top_right: tr,
-            bottom_right: br,
-            bottom_left: bl,
-        })
-    }
-
-    fn read_string(&mut self) -> Result<String, DecodeError> {
-        let len = self.read_u32()?;
-        if len > MAX_STRING_LEN {
-            return Err(DecodeError::StringTooLarge(len));
-        }
-        let len_usize = len as usize;
-        self.need(len_usize)?;
-        let slice = &self.buf[self.pos..self.pos + len_usize];
-        let s = core::str::from_utf8(slice)
-            .map_err(|_| DecodeError::BadUtf8)?
-            .to_string();
-        self.pos += len_usize;
-        Ok(s)
-    }
-
-    fn read_optional_f32(&mut self) -> Result<Option<f32>, DecodeError> {
-        let tag = self.read_u8()?;
-        match tag {
-            0 => Ok(None),
-            1 => Ok(Some(self.read_f32()?)),
-            other => Err(DecodeError::BadTag(other)),
-        }
-    }
-}
-
 /// Decode exactly one frame from `input`. Returns the decoded tree and the
 /// number of bytes consumed.
 pub fn decode_frame(input: &[u8]) -> Result<(RenderTree, usize), DecodeError> {
@@ -911,13 +816,12 @@ pub fn try_decode_frame(input: &[u8]) -> Result<Option<(RenderTree, usize)>, Dec
 
 fn decode_internal(input: &[u8]) -> Result<(RenderTree, usize), DecodeError> {
     let mut r = Reader::new(input);
-    // Header.
+    // Header. The `need` covers the whole header before any of it is read, so
+    // a buffer holding only part of one reports `UnexpectedEof` — which
+    // `try_decode_frame` turns into "incomplete, read more" — rather than
+    // failing on whichever field the truncation happened to land in.
     r.need(HEADER_LEN)?;
-    let magic = [r.buf[0], r.buf[1], r.buf[2], r.buf[3]];
-    if magic != MAGIC {
-        return Err(DecodeError::BadMagic);
-    }
-    r.pos = 4;
+    r.expect_magic(MAGIC)?;
     let ver = r.read_u8()?;
     if ver != PROTOCOL_VERSION {
         return Err(DecodeError::UnsupportedVersion(ver));
@@ -935,7 +839,7 @@ fn decode_internal(input: &[u8]) -> Result<(RenderTree, usize), DecodeError> {
         let cmd = decode_command(&mut r)?;
         tree.push(cmd);
     }
-    Ok((tree, r.pos))
+    Ok((tree, r.position()))
 }
 
 // Long for the same reason `encode_command` is, and must stay its mirror image.
@@ -1067,6 +971,14 @@ impl RenderTreeWithCapacity for RenderTree {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
     use guitk::color::Color;
     use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextSpan};

@@ -1063,6 +1063,50 @@ impl TextCursor {
     pub fn byte(self) -> usize {
         self.byte
     }
+
+    /// The cursor one character earlier in `text`, or `None` at the start.
+    ///
+    /// *Logical* motion — backwards through the string, which on text that runs
+    /// right to left is not backwards on the screen. [`caret_left`] is the
+    /// visual counterpart; which one an arrow key should call is `C-Q2` in
+    /// `open-questions.md`.
+    ///
+    /// Callers wrote this as "slice the text before me, take the last character,
+    /// subtract its UTF-8 length" — three steps, of which the slice can panic on
+    /// a cursor that has drifted off a boundary and the subtraction is only safe
+    /// because of a `> 0` test in a different statement. Asking the text for its
+    /// caret stops instead has neither hazard, and repairs a cursor that is off
+    /// a boundary by moving it to a real one.
+    #[must_use]
+    pub fn prev_in(self, text: &str) -> Option<Self> {
+        caret_offsets(text)
+            .rev()
+            .find(|offset| *offset < self.byte)
+            .map(Self::from)
+    }
+
+    /// The cursor one character later in `text`, or `None` at the end.
+    ///
+    /// Logical motion, as [`TextCursor::prev_in`].
+    #[must_use]
+    pub fn next_in(self, text: &str) -> Option<Self> {
+        caret_offsets(text)
+            .find(|offset| *offset > self.byte)
+            .map(Self::from)
+    }
+}
+
+/// Every byte offset in `text` at which a caret may sit: the start of each
+/// character, and the end of the string.
+///
+/// Deliberately a scan rather than index arithmetic. It is linear in the text
+/// where stepping an offset is constant, which for the single-line fields this
+/// serves — a path, a filename, a search box — is not a cost worth one more
+/// place that can produce an offset inside a character.
+fn caret_offsets(text: &str) -> impl DoubleEndedIterator<Item = usize> + '_ {
+    text.char_indices()
+        .map(|(offset, _)| offset)
+        .chain(core::iter::once(text.len()))
 }
 
 /// Where to draw the caret for `at`, in pixels from the start of `text`.
@@ -1678,6 +1722,18 @@ mod shaping_cost {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     /// A surface pre-filled with an obvious background, so any changed pixel

@@ -65,17 +65,44 @@ const DEFAULT_PROMPT: &str = "[sudo] password for %u: ";
 
 /// Environment variables preserved by default when env_reset is active.
 const DEFAULT_ENV_KEEP: &[&str] = &[
-    "TERM", "PATH", "HOME", "SHELL", "LOGNAME", "USER", "DISPLAY",
-    "XAUTHORITY", "LANG", "LC_ALL", "LC_COLLATE", "LC_CTYPE",
-    "LC_MESSAGES", "LC_MONETARY", "LC_NUMERIC", "LC_TIME", "TZ",
+    "TERM",
+    "PATH",
+    "HOME",
+    "SHELL",
+    "LOGNAME",
+    "USER",
+    "DISPLAY",
+    "XAUTHORITY",
+    "LANG",
+    "LC_ALL",
+    "LC_COLLATE",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LC_MONETARY",
+    "LC_NUMERIC",
+    "LC_TIME",
+    "TZ",
 ];
 
 /// Environment variables that are always removed for security.
 const ENV_BLACKLIST: &[&str] = &[
-    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "LD_BIND_NOW",
-    "LD_DEBUG", "LD_DYNAMIC_WEAK", "LD_ORIGIN_PATH", "LD_PROFILE",
-    "LD_SHOW_AUXV", "LD_USE_LOAD_BIAS", "LOCALDOMAIN", "RES_OPTIONS",
-    "HOSTALIASES", "NLSPATH", "PATH_LOCALE", "TERMINFO", "TERMINFO_DIRS",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "LD_BIND_NOW",
+    "LD_DEBUG",
+    "LD_DYNAMIC_WEAK",
+    "LD_ORIGIN_PATH",
+    "LD_PROFILE",
+    "LD_SHOW_AUXV",
+    "LD_USE_LOAD_BIAS",
+    "LOCALDOMAIN",
+    "RES_OPTIONS",
+    "HOSTALIASES",
+    "NLSPATH",
+    "PATH_LOCALE",
+    "TERMINFO",
+    "TERMINFO_DIRS",
     "TERMPATH",
 ];
 
@@ -263,7 +290,8 @@ impl SudoersConfig {
 
     /// Check if a Defaults flag is set (boolean setting).
     fn is_default_set(&self, key: &str) -> bool {
-        self.get_default(key).is_some_and(|v| v != "false" && v != "0")
+        self.get_default(key)
+            .is_some_and(|v| v != "false" && v != "0")
     }
 
     /// Get env_keep list from Defaults.
@@ -410,10 +438,7 @@ fn parse_sudoers_line(line: &str, config: &mut SudoersConfig) -> Result<(), Sudo
 }
 
 /// Parse an alias definition: `NAME = member1, member2, ...`
-fn parse_alias(
-    text: &str,
-    aliases: &mut HashMap<String, Vec<String>>,
-) -> Result<(), SudoError> {
+fn parse_alias(text: &str, aliases: &mut HashMap<String, Vec<String>>) -> Result<(), SudoError> {
     // Multiple aliases can be on one line, separated by `:`.
     for alias_part in text.split(':') {
         let alias_part = alias_part.trim();
@@ -720,12 +745,7 @@ fn validate_sudoers(content: &str, strict: bool) -> Vec<SyntaxError> {
 }
 
 /// Validate a single sudoers line.
-fn validate_sudoers_line(
-    line: &str,
-    line_num: usize,
-    strict: bool,
-    errors: &mut Vec<SyntaxError>,
-) {
+fn validate_sudoers_line(line: &str, line_num: usize, strict: bool, errors: &mut Vec<SyntaxError>) {
     // Validate alias definitions.
     for prefix in &["User_Alias", "Host_Alias", "Cmnd_Alias", "Runas_Alias"] {
         if let Some(rest) = line.strip_prefix(prefix) {
@@ -819,13 +839,23 @@ fn check_authorization(
 ) -> Option<CmndSpec> {
     // Iterate privileges in reverse order (last match wins, like real sudo).
     for priv_spec in config.privileges.iter().rev() {
-        if !user_matches(&priv_spec.users, username, user_groups, &config.user_aliases) {
+        if !user_matches(
+            &priv_spec.users,
+            username,
+            user_groups,
+            &config.user_aliases,
+        ) {
             continue;
         }
         if !host_matches(&priv_spec.hosts, hostname, &config.host_aliases) {
             continue;
         }
-        if !runas_matches(&priv_spec.runas, target_user, target_group, &config.runas_aliases) {
+        if !runas_matches(
+            &priv_spec.runas,
+            target_user,
+            target_group,
+            &config.runas_aliases,
+        ) {
             continue;
         }
 
@@ -854,9 +884,10 @@ fn user_matches(
         }
         // %group syntax.
         if let Some(group) = spec.strip_prefix('%')
-            && user_groups.iter().any(|g| g == group) {
-                return true;
-            }
+            && user_groups.iter().any(|g| g == group)
+        {
+            return true;
+        }
         // Alias reference.
         if let Some(members) = aliases.get(spec.as_str()) {
             if members.iter().any(|m| m == username || m == "ALL") {
@@ -865,26 +896,24 @@ fn user_matches(
             // Check group members in alias.
             for m in members {
                 if let Some(group) = m.strip_prefix('%')
-                    && user_groups.iter().any(|g| g == group) {
-                        return true;
-                    }
+                    && user_groups.iter().any(|g| g == group)
+                {
+                    return true;
+                }
             }
         }
         // Negation.
         if let Some(negated) = spec.strip_prefix('!')
-            && negated == username {
-                return false;
-            }
+            && negated == username
+        {
+            return false;
+        }
     }
     false
 }
 
 /// Check if a hostname matches a host specification list.
-fn host_matches(
-    specs: &[String],
-    hostname: &str,
-    aliases: &HashMap<String, Vec<String>>,
-) -> bool {
+fn host_matches(specs: &[String], hostname: &str, aliases: &HashMap<String, Vec<String>>) -> bool {
     for spec in specs {
         if spec == "ALL" {
             return true;
@@ -893,13 +922,15 @@ fn host_matches(
             return true;
         }
         if let Some(members) = aliases.get(spec.as_str())
-            && members.iter().any(|m| m == hostname || m == "ALL") {
-                return true;
-            }
+            && members.iter().any(|m| m == hostname || m == "ALL")
+        {
+            return true;
+        }
         if let Some(negated) = spec.strip_prefix('!')
-            && negated == hostname {
-                return false;
-            }
+            && negated == hostname
+        {
+            return false;
+        }
     }
     false
 }
@@ -958,9 +989,7 @@ fn command_matches(
             } else {
                 (member.as_str(), "")
             };
-            if command_path_matches(cmd, actual_cmd)
-                && (args.is_empty() || args == "*")
-            {
+            if command_path_matches(cmd, actual_cmd) && (args.is_empty() || args == "*") {
                 return true;
             }
         }
@@ -998,9 +1027,10 @@ fn command_path_matches(spec: &str, actual: &str) -> bool {
     }
     // Basename match: if spec has no path separator, match basename of actual.
     if !spec.contains('/')
-        && let Some(base) = actual.rsplit('/').next() {
-            return base == spec;
-        }
+        && let Some(base) = actual.rsplit('/').next()
+    {
+        return base == spec;
+    }
     false
 }
 
@@ -1022,7 +1052,12 @@ fn list_privileges(
 
     let mut found_any = false;
     for priv_spec in &config.privileges {
-        if !user_matches(&priv_spec.users, username, user_groups, &config.user_aliases) {
+        if !user_matches(
+            &priv_spec.users,
+            username,
+            user_groups,
+            &config.user_aliases,
+        ) {
             continue;
         }
         if !host_matches(&priv_spec.hosts, hostname, &config.host_aliases) {
@@ -1090,14 +1125,15 @@ fn check_timestamp(username: &str, timeout: u64) -> bool {
     match fs::read_to_string(&path) {
         Ok(content) => {
             if let Some(ts_str) = content.lines().next()
-                && let Ok(ts) = ts_str.trim().parse::<u64>() {
-                    let now = current_epoch();
-                    if timeout == u64::MAX {
-                        // Never expires.
-                        return true;
-                    }
-                    return now.saturating_sub(ts) < timeout;
+                && let Ok(ts) = ts_str.trim().parse::<u64>()
+            {
+                let now = current_epoch();
+                if timeout == u64::MAX {
+                    // Never expires.
+                    return true;
                 }
+                return now.saturating_sub(ts) < timeout;
+            }
             false
         }
         Err(_) => false,
@@ -1113,9 +1149,8 @@ fn update_timestamp(username: &str) -> Result<(), SudoError> {
         })?;
     }
     let now = current_epoch();
-    fs::write(&path, format!("{now}\n")).map_err(|e| {
-        SudoError::TimestampError(format!("cannot write timestamp: {e}"))
-    })?;
+    fs::write(&path, format!("{now}\n"))
+        .map_err(|e| SudoError::TimestampError(format!("cannot write timestamp: {e}")))?;
     Ok(())
 }
 
@@ -1124,9 +1159,8 @@ fn invalidate_timestamp(username: &str) -> Result<(), SudoError> {
     let path = timestamp_path(username);
     if path.exists() {
         // Write epoch 0 to invalidate without removing.
-        fs::write(&path, "0\n").map_err(|e| {
-            SudoError::TimestampError(format!("cannot invalidate timestamp: {e}"))
-        })?;
+        fs::write(&path, "0\n")
+            .map_err(|e| SudoError::TimestampError(format!("cannot invalidate timestamp: {e}")))?;
     }
     Ok(())
 }
@@ -1135,9 +1169,8 @@ fn invalidate_timestamp(username: &str) -> Result<(), SudoError> {
 fn remove_timestamp(username: &str) -> Result<(), SudoError> {
     let path = timestamp_path(username);
     if path.exists() {
-        fs::remove_file(&path).map_err(|e| {
-            SudoError::TimestampError(format!("cannot remove timestamp: {e}"))
-        })?;
+        fs::remove_file(&path)
+            .map_err(|e| SudoError::TimestampError(format!("cannot remove timestamp: {e}")))?;
     }
     Ok(())
 }
@@ -1163,8 +1196,7 @@ fn build_environment(
     target_shell: &str,
     login_shell: bool,
 ) -> Vec<(String, String)> {
-    let env_reset = config.is_default_set("env_reset")
-        || config.get_default("env_reset").is_none();
+    let env_reset = config.is_default_set("env_reset") || config.get_default("env_reset").is_none();
     let keep_list = config.env_keep_list();
     let check_list = config.env_check_list();
 
@@ -1182,10 +1214,10 @@ fn build_environment(
         for (key, val) in std::env::vars() {
             if keep_list.iter().any(|k| k == &key) {
                 // Check for dangerous values in env_check vars.
-                if check_list.iter().any(|k| k == &key)
-                    && (val.contains('/') || val.contains('%')) {
-                        continue; // Skip suspicious values.
-                    }
+                if check_list.iter().any(|k| k == &key) && (val.contains('/') || val.contains('%'))
+                {
+                    continue; // Skip suspicious values.
+                }
                 if !ENV_BLACKLIST.iter().any(|&b| b == key) {
                     env.push((key, val));
                 }
@@ -1208,7 +1240,11 @@ fn build_environment(
     if login_shell {
         set_or_replace(&mut env, "HOME", target_home);
         set_or_replace(&mut env, "SHELL", target_shell);
-        set_or_replace(&mut env, "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        set_or_replace(
+            &mut env,
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        );
     } else {
         // Preserve HOME and SHELL from current env or set to target.
         if !env.iter().any(|(k, _)| k == "HOME") {
@@ -1222,16 +1258,8 @@ fn build_environment(
     // Record original command info.
     if let Ok(pwd) = std::env::current_dir() {
         set_or_replace(&mut env, "SUDO_COMMAND", "");
-        set_or_replace(
-            &mut env,
-            "SUDO_GID",
-            &format!("{}", current_gid()),
-        );
-        set_or_replace(
-            &mut env,
-            "SUDO_UID",
-            &format!("{}", current_uid()),
-        );
+        set_or_replace(&mut env, "SUDO_GID", &format!("{}", current_gid()));
+        set_or_replace(&mut env, "SUDO_UID", &format!("{}", current_uid()));
         let _ = pwd; // Acknowledged: we set SUDO_COMMAND to empty initially.
     }
 
@@ -1296,9 +1324,7 @@ fn format_timestamp(epoch: u64) -> String {
     // Approximate date from days since epoch (1970-01-01).
     let (year, month, day) = days_to_date(days);
 
-    format!(
-        "{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02}"
-    )
+    format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02}")
 }
 
 /// Convert days since epoch to (year, month, day).
@@ -1318,7 +1344,16 @@ fn days_to_date(mut days: u64) -> (u64, u64, u64) {
     let month_days: [u64; 12] = [
         31,
         if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
 
     let mut month = 1u64;
@@ -1423,11 +1458,7 @@ fn list_sessions(io_dir: &str) -> Vec<SessionEntry> {
 }
 
 /// Replay a recorded session.
-fn replay_session(
-    io_dir: &str,
-    session_id: &str,
-    speed_factor: f64,
-) -> Result<(), SudoError> {
+fn replay_session(io_dir: &str, session_id: &str, speed_factor: f64) -> Result<(), SudoError> {
     let session_dir = Path::new(io_dir).join(session_id);
     if !session_dir.is_dir() {
         return Err(SudoError::IoError(format!(
@@ -1438,15 +1469,13 @@ fn replay_session(
 
     // Read timing file.
     let timing_path = session_dir.join("timing");
-    let timing_content = fs::read_to_string(&timing_path).map_err(|e| {
-        SudoError::IoError(format!("cannot read timing file: {e}"))
-    })?;
+    let timing_content = fs::read_to_string(&timing_path)
+        .map_err(|e| SudoError::IoError(format!("cannot read timing file: {e}")))?;
 
     // Read stdout data.
     let stdout_path = session_dir.join("stdout");
-    let stdout_data = fs::read(&stdout_path).map_err(|e| {
-        SudoError::IoError(format!("cannot read stdout file: {e}"))
-    })?;
+    let stdout_data = fs::read(&stdout_path)
+        .map_err(|e| SudoError::IoError(format!("cannot read stdout file: {e}")))?;
 
     // Read log info.
     let log_path = session_dir.join("log");
@@ -1490,7 +1519,8 @@ fn replay_session(
             // Sleep for the adjusted delay.
             // On Slate OS, this would use the real sleep syscall.
             // For now, spin-wait approximation.
-            let target = current_epoch_nanos().saturating_add((adjusted_delay * 1_000_000_000.0) as u64);
+            let target =
+                current_epoch_nanos().saturating_add((adjusted_delay * 1_000_000_000.0) as u64);
             while current_epoch_nanos() < target {
                 std::hint::spin_loop();
             }
@@ -1568,33 +1598,54 @@ fn prompt_password(prompt: &str) -> Result<String, SudoError> {
     }
 }
 
-/// Authenticate the user. Returns Ok(()) on success.
+/// Authenticate `username` with `password`. Returns `Ok(())` only on a
+/// verified match.
 ///
-/// On Slate OS, this would use the PAM equivalent or shadow password file.
-/// For now, this checks against `/etc/shadow` (simplified).
-fn authenticate(username: &str, _password: &str) -> Result<(), SudoError> {
-    // In Slate OS, authentication will be handled by the auth service via IPC.
-    // This stub checks if the user exists in the user database.
-    let user_db = Path::new("/etc/users.yaml");
-    if !user_db.exists() {
-        // If no user database, allow (development/single-user mode).
-        return Ok(());
-    }
+/// This used to ignore `password` entirely and return `Ok(())` for any
+/// username that appeared anywhere in `/etc/users.yaml` — and, if the file did
+/// not exist, for *every* username, on the reasoning that a machine with no
+/// database is in single-user development mode. Both halves were a complete
+/// authentication bypass in the program whose only job is to grant root, so
+/// both are gone: the password is checked against the stored `crypt(3)` entry,
+/// and a database that cannot be read refuses everyone.
+fn authenticate(username: &str, password: &str) -> Result<(), SudoError> {
+    let db = userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .map_err(|e| SudoError::AuthError(format!("cannot read {}: {e}", userdb::DEFAULT_PATH)))?;
+    authenticate_against(&db, username, password)
+}
 
-    let content = fs::read_to_string(user_db).map_err(|e| {
-        SudoError::AuthError(format!("cannot read user database: {e}"))
-    })?;
-
-    // Simple check: see if the username appears in the database.
-    if content.contains(&format!("name: {username}"))
-        || content.contains(&format!("name: \"{username}\""))
-    {
-        // In a real implementation, we would verify the password hash.
-        Ok(())
-    } else {
-        Err(SudoError::AuthError(format!(
+/// The decision `authenticate` makes, separated from reading the file so that
+/// it can be tested. The bypass this replaced survived 191 passing tests
+/// precisely because the decision was welded to a path only root can write.
+fn authenticate_against(
+    db: &userdb::UserDb,
+    username: &str,
+    password: &str,
+) -> Result<(), SudoError> {
+    let Some(record) = db.find(username) else {
+        return Err(SudoError::AuthError(format!(
             "user {username} not found in user database"
-        )))
+        )));
+    };
+
+    match record.check_password(password) {
+        userdb::Auth::Accepted => Ok(()),
+        userdb::Auth::Locked => Err(SudoError::AuthError(format!(
+            "account {username} is locked"
+        ))),
+        userdb::Auth::NoPassword => Err(SudoError::AuthError(format!(
+            "account {username} has no password set"
+        ))),
+        // Named separately from a wrong password so that an administrator is
+        // sent to `useradm` rather than made to hunt a password the user has
+        // not in fact forgotten.
+        userdb::Auth::Unusable => Err(SudoError::AuthError(format!(
+            "account {username} has a password stored in a format this system \
+             can no longer verify; run `useradm passwd {username}` as root"
+        ))),
+        userdb::Auth::Rejected => Err(SudoError::AuthError(
+            "incorrect password attempt".to_string(),
+        )),
     }
 }
 
@@ -1621,20 +1672,37 @@ fn current_hostname() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string())
 }
 
-/// Get the current uid (stub — reads from env or returns 1000).
-fn current_uid() -> u32 {
-    std::env::var("UID")
+/// The real id of the calling process, read from `/proc/self/status`.
+///
+/// `field` is `Uid:` or `Gid:`; the first number on that line is the real id.
+/// Falls back to the matching environment variable and then to 1000. The
+/// fallback is deliberately *not* zero: an unknown caller must be treated as
+/// unprivileged, because this value decides whether a password is demanded.
+fn current_id_from_proc(field: &str, env_var: &str) -> u32 {
+    if let Ok(content) = fs::read_to_string("/proc/self/status") {
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix(field)
+                && let Some(first) = rest.split_whitespace().next()
+                && let Ok(id) = first.parse::<u32>()
+            {
+                return id;
+            }
+        }
+    }
+    std::env::var(env_var)
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1000)
 }
 
-/// Get the current gid (stub — reads from env or returns 1000).
+/// Get the current uid.
+fn current_uid() -> u32 {
+    current_id_from_proc("Uid:", "UID")
+}
+
+/// Get the current gid.
 fn current_gid() -> u32 {
-    std::env::var("GID")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1000)
+    current_id_from_proc("Gid:", "GID")
 }
 
 /// Get the current tty name.
@@ -1642,85 +1710,68 @@ fn current_tty() -> String {
     std::env::var("TTY").unwrap_or_else(|_| "unknown".to_string())
 }
 
-/// Get user groups for a username (stub).
+/// The groups `username` belongs to, including the per-user group.
+///
+/// The previous version compared each line against `name: <user>`, a key no
+/// writer of this file has ever emitted — it is `username:` — so the match
+/// never fired and every user was reported as belonging to their own group and
+/// nothing else. Since group membership is what the sudoers file authorises
+/// on, that silently denied every rule written against a group.
 fn get_user_groups(username: &str) -> Vec<String> {
-    // In Slate OS, read from /etc/users.yaml.
     let mut groups = vec![username.to_string()];
-    if let Ok(content) = fs::read_to_string("/etc/users.yaml") {
-        // Simple parser: find the user's groups line.
-        let mut in_user = false;
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed == format!("name: {username}")
-                || trimmed == format!("name: \"{username}\"")
-            {
-                in_user = true;
-                continue;
-            }
-            if in_user && trimmed.starts_with("groups:") {
-                // Parse YAML list: groups: [wheel, admin]
-                if let Some(list_start) = trimmed.find('[')
-                    && let Some(list_end) = trimmed.find(']') {
-                        let list = &trimmed[list_start + 1..list_end];
-                        for g in list.split(',') {
-                            let g = g.trim().trim_matches('"').trim_matches('\'');
-                            if !g.is_empty() && !groups.contains(&g.to_string()) {
-                                groups.push(g.to_string());
-                            }
-                        }
-                    }
-                break;
-            }
-            if in_user && !trimmed.is_empty() && !trimmed.starts_with('-') && !trimmed.starts_with(' ') {
-                break; // Moved to next user entry.
+
+    if let Ok(db) = userdb::UserDb::load(userdb::DEFAULT_PATH)
+        && let Some(record) = db.find(username)
+    {
+        for g in record.groups() {
+            if !g.is_empty() && !groups.contains(&g) {
+                groups.push(g);
             }
         }
+        // The administrator flag and the `wheel`/`admin` groups are two
+        // spellings of one fact, and a record can carry either. Reconciling
+        // them here rather than at each sudoers rule is what stops an account
+        // being an administrator to the settings app and not to sudo.
+        if record.is_admin() && !groups.iter().any(|g| g == "wheel") {
+            groups.push("wheel".to_string());
+        }
     }
-    // Common default groups.
-    if username == "root" && !groups.contains(&"wheel".to_string()) {
+
+    // Root is in wheel whether or not the database says so; the alternative is
+    // that a damaged database locks everyone out of administering the machine.
+    if username == "root" && !groups.iter().any(|g| g == "wheel") {
         groups.push("wheel".to_string());
     }
+
     groups
 }
 
-/// Get target user info (home, shell).
+/// The target user's home directory and login shell.
+///
+/// Root's values are not special-cased away from the database any more: an
+/// administrator who set root's shell had it ignored.
 fn get_user_info(username: &str) -> (String, String) {
-    if username == "root" {
-        return ("/root".to_string(), "/bin/sh".to_string());
-    }
-    // Try to read from /etc/users.yaml.
-    if let Ok(content) = fs::read_to_string("/etc/users.yaml") {
-        let mut in_user = false;
-        let mut home = format!("/home/{username}");
-        let mut shell = "/bin/sh".to_string();
+    let default_home = if username == "root" {
+        "/root".to_string()
+    } else {
+        format!("/home/{username}")
+    };
+    let default_shell = "/bin/sh".to_string();
 
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed == format!("name: {username}")
-                || trimmed == format!("name: \"{username}\"")
-            {
-                in_user = true;
-                continue;
-            }
-            if in_user {
-                if let Some(val) = trimmed.strip_prefix("home:") {
-                    home = val.trim().trim_matches('"').to_string();
-                } else if let Some(val) = trimmed.strip_prefix("shell:") {
-                    shell = val.trim().trim_matches('"').to_string();
-                } else if !trimmed.is_empty()
-                    && !trimmed.starts_with('-')
-                    && !trimmed.starts_with(' ')
-                    && !trimmed.starts_with("uid:")
-                    && !trimmed.starts_with("gid:")
-                    && !trimmed.starts_with("groups:")
-                {
-                    break;
-                }
-            }
-        }
-        return (home, shell);
-    }
-    (format!("/home/{username}"), "/bin/sh".to_string())
+    let Ok(db) = userdb::UserDb::load(userdb::DEFAULT_PATH) else {
+        return (default_home, default_shell);
+    };
+    let Some(record) = db.find(username) else {
+        return (default_home, default_shell);
+    };
+
+    (
+        record
+            .home()
+            .filter(|h| !h.is_empty())
+            .unwrap_or(default_home),
+        record.shell().unwrap_or(default_shell),
+    )
 }
 
 // ============================================================================
@@ -1734,20 +1785,20 @@ fn acquire_lock(path: &Path) -> Result<PathBuf, SudoError> {
         // Check if the lock is stale (older than 5 minutes).
         if let Ok(meta) = fs::metadata(&lock_path)
             && let Ok(modified) = meta.modified()
-                && let Ok(elapsed) = modified.elapsed()
-                    && elapsed.as_secs() < 300 {
-                        return Err(SudoError::LockError(format!(
-                            "{} is locked by another process",
-                            path.display()
-                        )));
-                    }
-                    // Stale lock — remove it.
+            && let Ok(elapsed) = modified.elapsed()
+            && elapsed.as_secs() < 300
+        {
+            return Err(SudoError::LockError(format!(
+                "{} is locked by another process",
+                path.display()
+            )));
+        }
+        // Stale lock — remove it.
     }
 
     // Create the lock file with our PID.
-    fs::write(&lock_path, format!("{}\n", std::process::id())).map_err(|e| {
-        SudoError::LockError(format!("cannot create lock file: {e}"))
-    })?;
+    fs::write(&lock_path, format!("{}\n", std::process::id()))
+        .map_err(|e| SudoError::LockError(format!("cannot create lock file: {e}")))?;
 
     Ok(lock_path)
 }
@@ -1907,19 +1958,50 @@ fn parse_sudo_args(args: &[String]) -> Result<SudoOpts, SudoError> {
                         }
                         j = flag_bytes.len();
                     }
-                    b'i' => { opts.login_shell = true; j += 1; }
-                    b's' => { opts.shell = true; j += 1; }
-                    b'l' => { opts.list = true; j += 1; }
-                    b'v' => { opts.validate = true; j += 1; }
-                    b'k' => { opts.invalidate = true; j += 1; }
-                    b'K' => { opts.remove_timestamp = true; j += 1; }
-                    b'n' => { opts.non_interactive = true; j += 1; }
-                    b'b' => { opts.background = true; j += 1; }
-                    b'e' => { opts.edit_mode = true; j += 1; }
-                    b'E' => { opts.preserve_env = true; j += 1; }
+                    b'i' => {
+                        opts.login_shell = true;
+                        j += 1;
+                    }
+                    b's' => {
+                        opts.shell = true;
+                        j += 1;
+                    }
+                    b'l' => {
+                        opts.list = true;
+                        j += 1;
+                    }
+                    b'v' => {
+                        opts.validate = true;
+                        j += 1;
+                    }
+                    b'k' => {
+                        opts.invalidate = true;
+                        j += 1;
+                    }
+                    b'K' => {
+                        opts.remove_timestamp = true;
+                        j += 1;
+                    }
+                    b'n' => {
+                        opts.non_interactive = true;
+                        j += 1;
+                    }
+                    b'b' => {
+                        opts.background = true;
+                        j += 1;
+                    }
+                    b'e' => {
+                        opts.edit_mode = true;
+                        j += 1;
+                    }
+                    b'E' => {
+                        opts.preserve_env = true;
+                        j += 1;
+                    }
                     _ => {
                         return Err(SudoError::UsageError(format!(
-                            "unknown option: -{}", flags.chars().nth(j).unwrap_or('?')
+                            "unknown option: -{}",
+                            flags.chars().nth(j).unwrap_or('?')
                         )));
                     }
                 }
@@ -2010,9 +2092,7 @@ fn parse_visudo_args(args: &[String]) -> Result<VisudoOpts, SudoError> {
                 opts.file = args[i].clone();
             }
             other if other.starts_with('-') => {
-                return Err(SudoError::UsageError(format!(
-                    "unknown option: {other}"
-                )));
+                return Err(SudoError::UsageError(format!("unknown option: {other}")));
             }
             _ => {
                 return Err(SudoError::UsageError(format!(
@@ -2071,9 +2151,9 @@ fn parse_sudoreplay_args(args: &[String]) -> Result<SudoreplayOpts, SudoError> {
                 if i >= args.len() {
                     return Err(SudoError::UsageError("-s requires an argument".to_string()));
                 }
-                opts.speed_factor = args[i].parse::<f64>().map_err(|_| {
-                    SudoError::UsageError("invalid speed factor".to_string())
-                })?;
+                opts.speed_factor = args[i]
+                    .parse::<f64>()
+                    .map_err(|_| SudoError::UsageError("invalid speed factor".to_string()))?;
                 if opts.speed_factor <= 0.0 {
                     return Err(SudoError::UsageError(
                         "speed factor must be positive".to_string(),
@@ -2081,9 +2161,7 @@ fn parse_sudoreplay_args(args: &[String]) -> Result<SudoreplayOpts, SudoError> {
                 }
             }
             other if other.starts_with('-') => {
-                return Err(SudoError::UsageError(format!(
-                    "unknown option: {other}"
-                )));
+                return Err(SudoError::UsageError(format!("unknown option: {other}")));
             }
             other => {
                 opts.session_id = Some(other.to_string());
@@ -2100,7 +2178,9 @@ fn parse_sudoreplay_args(args: &[String]) -> Result<SudoreplayOpts, SudoError> {
 // ============================================================================
 
 fn print_sudo_usage() {
-    eprintln!("usage: sudo [-u user] [-g group] [-i] [-s] [-b] [-n] [-E] [-p prompt] [--] command [args...]");
+    eprintln!(
+        "usage: sudo [-u user] [-g group] [-i] [-s] [-b] [-n] [-E] [-p prompt] [--] command [args...]"
+    );
     eprintln!("       sudo -l               List user's privileges");
     eprintln!("       sudo -v               Validate / extend timestamp");
     eprintln!("       sudo -k               Invalidate timestamp");
@@ -2292,8 +2372,7 @@ fn run_sudo(args: &[String]) -> i32 {
                 return 1;
             }
 
-            let prompt_str =
-                expand_prompt(&opts.prompt, &username, &hostname, &opts.target_user);
+            let prompt_str = expand_prompt(&opts.prompt, &username, &hostname, &opts.target_user);
             match prompt_password(&prompt_str) {
                 Ok(pw) => {
                     if let Err(e) = authenticate(&username, &pw) {
@@ -2395,9 +2474,8 @@ fn run_sudo(args: &[String]) -> i32 {
 
 /// Load and parse the sudoers file.
 fn load_sudoers() -> Result<SudoersConfig, SudoError> {
-    let content = fs::read_to_string(SUDOERS_PATH).map_err(|e| {
-        SudoError::InvalidConfig(format!("cannot read {SUDOERS_PATH}: {e}"))
-    })?;
+    let content = fs::read_to_string(SUDOERS_PATH)
+        .map_err(|e| SudoError::InvalidConfig(format!("cannot read {SUDOERS_PATH}: {e}")))?;
     parse_sudoers(&content)
 }
 
@@ -2446,9 +2524,7 @@ fn run_sudoedit(files: &[String]) -> i32 {
                 &user_groups,
             );
             if result.is_none() {
-                eprintln!(
-                    "sudoedit: {username} is not allowed to edit {file} on {hostname}"
-                );
+                eprintln!("sudoedit: {username} is not allowed to edit {file} on {hostname}");
                 return 1;
             }
         }
@@ -2795,6 +2871,85 @@ fn main() {
 mod tests {
     use super::*;
 
+    // -- Authentication --
+    //
+    // The bug these cover was a total bypass: `authenticate` discarded the
+    // password it was handed, admitted anyone whose name appeared anywhere in
+    // `/etc/users.yaml`, and admitted *everyone* when that file was absent. It
+    // survived every one of the tests below it because the decision was welded
+    // to a filesystem path, which no test could supply.
+
+    /// A database with one account whose password is `hunter2`.
+    fn auth_fixture() -> userdb::UserDb {
+        let mut db = userdb::UserDb::parse(
+            "users:\n  - uid: 1000\n    username: \"alice\"\n    groups: [users, wheel]\n",
+        );
+        db.find_mut("alice")
+            .expect("alice was just parsed")
+            .set_password_with_salt("hunter2", "0123456789abcdef")
+            .expect("a 16-character salt is storable");
+        db
+    }
+
+    #[test]
+    fn auth_accepts_the_right_password() {
+        let db = auth_fixture();
+        assert!(authenticate_against(&db, "alice", "hunter2").is_ok());
+    }
+
+    #[test]
+    fn auth_refuses_the_wrong_password() {
+        let db = auth_fixture();
+        assert!(authenticate_against(&db, "alice", "Hunter2").is_err());
+        assert!(authenticate_against(&db, "alice", "").is_err());
+    }
+
+    /// The heart of the bypass: existing in the file was treated as proof of
+    /// identity.
+    #[test]
+    fn auth_refuses_a_known_user_with_no_password_offered() {
+        let db = auth_fixture();
+        assert!(authenticate_against(&db, "alice", "anything at all").is_err());
+    }
+
+    #[test]
+    fn auth_refuses_an_unknown_user() {
+        let db = auth_fixture();
+        assert!(authenticate_against(&db, "mallory", "hunter2").is_err());
+    }
+
+    /// The other half of the bypass: an empty database admitted everyone.
+    #[test]
+    fn auth_refuses_everyone_when_the_database_is_empty() {
+        let db = userdb::UserDb::new();
+        assert!(authenticate_against(&db, "root", "").is_err());
+        assert!(authenticate_against(&db, "alice", "hunter2").is_err());
+    }
+
+    #[test]
+    fn auth_refuses_a_locked_account_that_knows_its_password() {
+        let mut db = auth_fixture();
+        db.find_mut("alice").expect("alice exists").set_locked(true);
+        assert!(authenticate_against(&db, "alice", "hunter2").is_err());
+    }
+
+    /// A username that is a substring of another must not authenticate as it.
+    /// The replaced code searched the file text for `name: <user>`, which
+    /// matched the tail of `username: <user>` — and would equally have matched
+    /// a display name, a home directory or a comment.
+    #[test]
+    fn auth_does_not_match_a_username_by_substring() {
+        let mut db = userdb::UserDb::parse(
+            "users:\n  - uid: 1000\n    username: \"alice\"\n    \
+             display_name: \"al\"\n    home_dir: \"/home/al\"\n",
+        );
+        db.find_mut("alice")
+            .expect("alice was just parsed")
+            .set_password_with_salt("hunter2", "0123456789abcdef")
+            .expect("a 16-character salt is storable");
+        assert!(authenticate_against(&db, "al", "hunter2").is_err());
+    }
+
     // -- Personality detection tests --
 
     #[test]
@@ -2809,10 +2964,7 @@ mod tests {
 
     #[test]
     fn personality_detect_sudo_windows_path() {
-        assert_eq!(
-            detect_personality("C:\\Windows\\sudo"),
-            Personality::Sudo
-        );
+        assert_eq!(detect_personality("C:\\Windows\\sudo"), Personality::Sudo);
     }
 
     #[test]
@@ -2835,10 +2987,7 @@ mod tests {
 
     #[test]
     fn personality_detect_sudoedit_exe() {
-        assert_eq!(
-            detect_personality("sudoedit.exe"),
-            Personality::Sudoedit
-        );
+        assert_eq!(detect_personality("sudoedit.exe"), Personality::Sudoedit);
     }
 
     #[test]
@@ -2848,10 +2997,7 @@ mod tests {
 
     #[test]
     fn personality_detect_visudo_path() {
-        assert_eq!(
-            detect_personality("/usr/sbin/visudo"),
-            Personality::Visudo
-        );
+        assert_eq!(detect_personality("/usr/sbin/visudo"), Personality::Visudo);
     }
 
     #[test]
@@ -2861,10 +3007,7 @@ mod tests {
 
     #[test]
     fn personality_detect_sudoreplay() {
-        assert_eq!(
-            detect_personality("sudoreplay"),
-            Personality::Sudoreplay
-        );
+        assert_eq!(detect_personality("sudoreplay"), Personality::Sudoreplay);
     }
 
     #[test]
@@ -2913,14 +3056,17 @@ mod tests {
         let config = parse_sudoers("User_Alias ADMINS = alice, bob, charlie\n").unwrap();
         assert_eq!(
             config.user_aliases.get("ADMINS").unwrap(),
-            &vec!["alice".to_string(), "bob".to_string(), "charlie".to_string()]
+            &vec![
+                "alice".to_string(),
+                "bob".to_string(),
+                "charlie".to_string()
+            ]
         );
     }
 
     #[test]
     fn parse_host_alias() {
-        let config =
-            parse_sudoers("Host_Alias SERVERS = web1, web2, db1\n").unwrap();
+        let config = parse_sudoers("Host_Alias SERVERS = web1, web2, db1\n").unwrap();
         assert_eq!(
             config.host_aliases.get("SERVERS").unwrap(),
             &vec!["web1".to_string(), "web2".to_string(), "db1".to_string()]
@@ -2929,10 +3075,9 @@ mod tests {
 
     #[test]
     fn parse_cmnd_alias() {
-        let config = parse_sudoers(
-            "Cmnd_Alias NETWORKING = /sbin/ifconfig, /sbin/route, /sbin/iptables\n",
-        )
-        .unwrap();
+        let config =
+            parse_sudoers("Cmnd_Alias NETWORKING = /sbin/ifconfig, /sbin/route, /sbin/iptables\n")
+                .unwrap();
         let members = config.cmnd_aliases.get("NETWORKING").unwrap();
         assert_eq!(members.len(), 3);
         assert_eq!(members[0], "/sbin/ifconfig");
@@ -2950,8 +3095,7 @@ mod tests {
     #[test]
     fn parse_multiple_aliases_on_one_line() {
         let config =
-            parse_sudoers("User_Alias ADMINS = alice, bob : DEVS = charlie, dave\n")
-                .unwrap();
+            parse_sudoers("User_Alias ADMINS = alice, bob : DEVS = charlie, dave\n").unwrap();
         assert_eq!(config.user_aliases.get("ADMINS").unwrap().len(), 2);
         assert_eq!(config.user_aliases.get("DEVS").unwrap().len(), 2);
     }
@@ -2976,8 +3120,7 @@ mod tests {
 
     #[test]
     fn parse_defaults_env_keep() {
-        let config =
-            parse_sudoers("Defaults env_keep=\"SSH_AUTH_SOCK DISPLAY\"\n").unwrap();
+        let config = parse_sudoers("Defaults env_keep=\"SSH_AUTH_SOCK DISPLAY\"\n").unwrap();
         let keep = config.env_keep_list();
         assert!(keep.contains(&"SSH_AUTH_SOCK".to_string()));
         assert!(keep.contains(&"DISPLAY".to_string()));
@@ -3003,8 +3146,7 @@ mod tests {
 
     #[test]
     fn parse_privilege_nopasswd() {
-        let config =
-            parse_sudoers("alice ALL = (root) NOPASSWD: /usr/bin/apt\n").unwrap();
+        let config = parse_sudoers("alice ALL = (root) NOPASSWD: /usr/bin/apt\n").unwrap();
         assert!(config.privileges[0].commands[0].nopasswd);
         assert_eq!(config.privileges[0].commands[0].command, "/usr/bin/apt");
     }
@@ -3020,10 +3162,9 @@ mod tests {
 
     #[test]
     fn parse_privilege_mixed_tags() {
-        let config = parse_sudoers(
-            "alice ALL = (root) NOPASSWD: /usr/bin/apt, PASSWD: /usr/bin/rm\n",
-        )
-        .unwrap();
+        let config =
+            parse_sudoers("alice ALL = (root) NOPASSWD: /usr/bin/apt, PASSWD: /usr/bin/rm\n")
+                .unwrap();
         assert!(config.privileges[0].commands[0].nopasswd);
         assert!(!config.privileges[0].commands[1].nopasswd);
     }
@@ -3036,8 +3177,7 @@ mod tests {
 
     #[test]
     fn parse_privilege_runas_with_group() {
-        let config =
-            parse_sudoers("alice ALL = (bob : www-data) /usr/bin/service\n").unwrap();
+        let config = parse_sudoers("alice ALL = (bob : www-data) /usr/bin/service\n").unwrap();
         assert_eq!(config.privileges[0].runas.users, vec!["bob"]);
         assert_eq!(config.privileges[0].runas.groups, vec!["www-data"]);
     }
@@ -3050,24 +3190,19 @@ mod tests {
 
     #[test]
     fn parse_line_continuation() {
-        let config = parse_sudoers(
-            "User_Alias ADMINS = alice, \\\n    bob, charlie\n",
-        )
-        .unwrap();
+        let config = parse_sudoers("User_Alias ADMINS = alice, \\\n    bob, charlie\n").unwrap();
         assert_eq!(config.user_aliases.get("ADMINS").unwrap().len(), 3);
     }
 
     #[test]
     fn parse_noexec_tag() {
-        let config =
-            parse_sudoers("alice ALL = (root) NOEXEC: /usr/bin/vi\n").unwrap();
+        let config = parse_sudoers("alice ALL = (root) NOEXEC: /usr/bin/vi\n").unwrap();
         assert!(config.privileges[0].commands[0].noexec);
     }
 
     #[test]
     fn parse_setenv_tag() {
-        let config =
-            parse_sudoers("alice ALL = (root) SETENV: /usr/bin/env\n").unwrap();
+        let config = parse_sudoers("alice ALL = (root) SETENV: /usr/bin/env\n").unwrap();
         assert!(config.privileges[0].commands[0].setenv);
     }
 
@@ -3158,7 +3293,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn auth_root_all() {
         let config = parse_sudoers("root ALL = (ALL) ALL\n").unwrap();
         let result = check_authorization(
-            &config, "root", "localhost", "root", "", "/usr/bin/ls",
+            &config,
+            "root",
+            "localhost",
+            "root",
+            "",
+            "/usr/bin/ls",
             &["root".to_string()],
         );
         assert!(result.is_some());
@@ -3168,7 +3308,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn auth_user_not_authorized() {
         let config = parse_sudoers("root ALL = (ALL) ALL\n").unwrap();
         let result = check_authorization(
-            &config, "alice", "localhost", "root", "", "/usr/bin/ls",
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            "/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -3178,7 +3323,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn auth_user_specific_command() {
         let config = parse_sudoers("alice ALL = (root) /usr/bin/apt\n").unwrap();
         let result = check_authorization(
-            &config, "alice", "localhost", "root", "", "/usr/bin/apt",
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            "/usr/bin/apt",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -3188,7 +3338,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn auth_user_wrong_command() {
         let config = parse_sudoers("alice ALL = (root) /usr/bin/apt\n").unwrap();
         let result = check_authorization(
-            &config, "alice", "localhost", "root", "", "/usr/bin/rm",
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            "/usr/bin/rm",
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -3226,12 +3381,15 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn auth_user_alias() {
-        let config = parse_sudoers(
-            "User_Alias ADMINS = alice, bob\nADMINS ALL = (ALL) ALL\n",
-        )
-        .unwrap();
+        let config =
+            parse_sudoers("User_Alias ADMINS = alice, bob\nADMINS ALL = (ALL) ALL\n").unwrap();
         let result = check_authorization(
-            &config, "alice", "localhost", "root", "", "/usr/bin/ls",
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            "/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -3241,7 +3399,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn auth_host_mismatch() {
         let config = parse_sudoers("alice web1 = (root) ALL\n").unwrap();
         let result = check_authorization(
-            &config, "alice", "db1", "root", "", "/usr/bin/ls",
+            &config,
+            "alice",
+            "db1",
+            "root",
+            "",
+            "/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -3251,7 +3414,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn auth_host_match() {
         let config = parse_sudoers("alice web1 = (root) ALL\n").unwrap();
         let result = check_authorization(
-            &config, "alice", "web1", "root", "", "/usr/bin/ls",
+            &config,
+            "alice",
+            "web1",
+            "root",
+            "",
+            "/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -3259,12 +3427,15 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn auth_host_alias() {
-        let config = parse_sudoers(
-            "Host_Alias SERVERS = web1, web2\nalice SERVERS = (root) ALL\n",
-        )
-        .unwrap();
+        let config =
+            parse_sudoers("Host_Alias SERVERS = web1, web2\nalice SERVERS = (root) ALL\n").unwrap();
         let result = check_authorization(
-            &config, "alice", "web2", "root", "", "/usr/bin/ls",
+            &config,
+            "alice",
+            "web2",
+            "root",
+            "",
+            "/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -3274,7 +3445,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn auth_runas_mismatch() {
         let config = parse_sudoers("alice ALL = (bob) ALL\n").unwrap();
         let result = check_authorization(
-            &config, "alice", "localhost", "root", "", "/usr/bin/ls",
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            "/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -3282,12 +3458,16 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn auth_cmnd_alias() {
-        let config = parse_sudoers(
-            "Cmnd_Alias NET = /sbin/ifconfig, /sbin/route\nalice ALL = (root) NET\n",
-        )
-        .unwrap();
+        let config =
+            parse_sudoers("Cmnd_Alias NET = /sbin/ifconfig, /sbin/route\nalice ALL = (root) NET\n")
+                .unwrap();
         let result = check_authorization(
-            &config, "alice", "localhost", "root", "", "/sbin/ifconfig",
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            "/sbin/ifconfig",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -3295,10 +3475,14 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn auth_nopasswd_flag() {
-        let config =
-            parse_sudoers("alice ALL = (root) NOPASSWD: /usr/bin/apt\n").unwrap();
+        let config = parse_sudoers("alice ALL = (root) NOPASSWD: /usr/bin/apt\n").unwrap();
         let spec = check_authorization(
-            &config, "alice", "localhost", "root", "", "/usr/bin/apt",
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            "/usr/bin/apt",
             &["alice".to_string()],
         );
         assert!(spec.is_some());
@@ -3312,7 +3496,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
         )
         .unwrap();
         let spec = check_authorization(
-            &config, "alice", "localhost", "root", "", "/usr/bin/ls",
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            "/usr/bin/ls",
             &["alice".to_string()],
         );
         assert!(spec.is_some());
@@ -3323,7 +3512,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn auth_wildcard_command() {
         let config = parse_sudoers("alice ALL = (root) /usr/bin/*\n").unwrap();
         let result = check_authorization(
-            &config, "alice", "localhost", "root", "", "/usr/bin/anything",
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            "/usr/bin/anything",
             &["alice".to_string()],
         );
         assert!(result.is_some());
@@ -3333,7 +3527,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn auth_wildcard_no_match_different_dir() {
         let config = parse_sudoers("alice ALL = (root) /usr/bin/*\n").unwrap();
         let result = check_authorization(
-            &config, "alice", "localhost", "root", "", "/usr/sbin/something",
+            &config,
+            "alice",
+            "localhost",
+            "root",
+            "",
+            "/usr/sbin/something",
             &["alice".to_string()],
         );
         assert!(result.is_none());
@@ -3368,7 +3567,12 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     #[test]
     fn command_match_negation() {
         let aliases = HashMap::new();
-        assert!(!command_matches("!/usr/bin/rm", "", "/usr/bin/rm", &aliases));
+        assert!(!command_matches(
+            "!/usr/bin/rm",
+            "",
+            "/usr/bin/rm",
+            &aliases
+        ));
     }
 
     #[test]
@@ -3397,23 +3601,13 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     #[test]
     fn user_match_exact() {
         let aliases = HashMap::new();
-        assert!(user_matches(
-            &["alice".to_string()],
-            "alice",
-            &[],
-            &aliases,
-        ));
+        assert!(user_matches(&["alice".to_string()], "alice", &[], &aliases,));
     }
 
     #[test]
     fn user_match_all() {
         let aliases = HashMap::new();
-        assert!(user_matches(
-            &["ALL".to_string()],
-            "anyone",
-            &[],
-            &aliases,
-        ));
+        assert!(user_matches(&["ALL".to_string()], "anyone", &[], &aliases,));
     }
 
     #[test]
@@ -3430,12 +3624,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     #[test]
     fn user_no_match() {
         let aliases = HashMap::new();
-        assert!(!user_matches(
-            &["bob".to_string()],
-            "alice",
-            &[],
-            &aliases,
-        ));
+        assert!(!user_matches(&["bob".to_string()], "alice", &[], &aliases,));
     }
 
     #[test]
@@ -3458,31 +3647,19 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     #[test]
     fn host_match_exact() {
         let aliases = HashMap::new();
-        assert!(host_matches(
-            &["web1".to_string()],
-            "web1",
-            &aliases,
-        ));
+        assert!(host_matches(&["web1".to_string()], "web1", &aliases,));
     }
 
     #[test]
     fn host_match_all() {
         let aliases = HashMap::new();
-        assert!(host_matches(
-            &["ALL".to_string()],
-            "anything",
-            &aliases,
-        ));
+        assert!(host_matches(&["ALL".to_string()], "anything", &aliases,));
     }
 
     #[test]
     fn host_no_match() {
         let aliases = HashMap::new();
-        assert!(!host_matches(
-            &["web1".to_string()],
-            "db1",
-            &aliases,
-        ));
+        assert!(!host_matches(&["web1".to_string()], "db1", &aliases,));
     }
 
     #[test]
@@ -3492,11 +3669,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             "SERVERS".to_string(),
             vec!["web1".to_string(), "web2".to_string()],
         );
-        assert!(host_matches(
-            &["SERVERS".to_string()],
-            "web2",
-            &aliases,
-        ));
+        assert!(host_matches(&["SERVERS".to_string()], "web2", &aliases,));
     }
 
     // -- Runas matching tests --
@@ -3729,8 +3902,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn env_check_parsed() {
-        let config =
-            parse_sudoers("Defaults env_check=\"LD_LIBRARY_PATH\"\n").unwrap();
+        let config = parse_sudoers("Defaults env_check=\"LD_LIBRARY_PATH\"\n").unwrap();
         let check = config.env_check_list();
         assert!(check.contains(&"LD_LIBRARY_PATH".to_string()));
     }
@@ -3755,11 +3927,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_sudo_args_target_group() {
-        let args = vec![
-            "-g".to_string(),
-            "staff".to_string(),
-            "ls".to_string(),
-        ];
+        let args = vec!["-g".to_string(), "staff".to_string(), "ls".to_string()];
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.target_group, "staff");
     }
@@ -3837,11 +4005,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn parse_sudo_args_custom_prompt() {
-        let args = vec![
-            "-p".to_string(),
-            "Enter: ".to_string(),
-            "ls".to_string(),
-        ];
+        let args = vec!["-p".to_string(), "Enter: ".to_string(), "ls".to_string()];
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.prompt, "Enter: ");
     }
@@ -4069,8 +4233,7 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn list_privs_nopasswd() {
-        let config =
-            parse_sudoers("alice ALL = (root) NOPASSWD: /usr/bin/apt\n").unwrap();
+        let config = parse_sudoers("alice ALL = (root) NOPASSWD: /usr/bin/apt\n").unwrap();
         let output = list_privileges(&config, "alice", "localhost", &["alice".to_string()]);
         assert!(output.contains("NOPASSWD:"));
     }

@@ -4110,6 +4110,7 @@ dependencies = [
  "osfont",
  "textfind",
  "textfmt",
+ "tzrules",
 ]
 
 [[package]]
@@ -10202,6 +10203,9 @@ version = "0.1.0"
 [[package]]
 name = "su"
 version = "0.1.0"
+dependencies = [
+ "userdb",
+]
 
 [[package]]
 name = "subfinder-cli"
@@ -10214,6 +10218,9 @@ version = "0.1.0"
 [[package]]
 name = "sudo"
 version = "0.1.0"
+dependencies = [
+ "userdb",
+]
 
 [[package]]
 name = "sudoku"

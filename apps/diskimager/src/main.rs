@@ -2127,8 +2127,11 @@ impl DiskImagerApp {
                 // path gets whatever room is left after them rather than a
                 // flat character budget that ignored the rest of the string.
                 let room = width - PANEL_PADDING * 2.0 - 16.0;
-                let suffix =
-                    format!(" ({} - {})", recent.format.name(), format_bytes(recent.size_bytes));
+                let suffix = format!(
+                    " ({} - {})",
+                    recent.format.name(),
+                    format_bytes(recent.size_bytes)
+                );
                 let suffix_w = text::measure(&suffix, SMALL_FONT_SIZE, FontWeightHint::Regular);
                 rt.push(RenderCommand::Text {
                     x: px + 8.0,
@@ -3251,12 +3254,9 @@ impl DiskImagerApp {
         // message leaves the dialog looking exactly as it did.
         let message_block = message(0.0, 0.0).height().max(CONFIRM_MESSAGE_MIN_HEIGHT);
         let detail_h = detail(0.0, 0.0).height();
-        let dialog_h = (PANEL_PADDING
-            + CONFIRM_TITLE_BLOCK
-            + message_block
-            + detail_h
-            + CONFIRM_BUTTON_BLOCK)
-            .max(CONFIRM_MIN_HEIGHT);
+        let dialog_h =
+            (PANEL_PADDING + CONFIRM_TITLE_BLOCK + message_block + detail_h + CONFIRM_BUTTON_BLOCK)
+                .max(CONFIRM_MIN_HEIGHT);
         let dialog_x = (self.window_width - dialog_w) / 2.0;
         let dialog_y = (self.window_height - dialog_h) / 2.0;
 
@@ -3625,11 +3625,7 @@ mod tests {
     #[test]
     fn hashes_match_their_published_vectors() {
         let cases: [(HashAlgorithm, &[u8], &str); 6] = [
-            (
-                HashAlgorithm::Md5,
-                b"",
-                "d41d8cd98f00b204e9800998ecf8427e",
-            ),
+            (HashAlgorithm::Md5, b"", "d41d8cd98f00b204e9800998ecf8427e"),
             (
                 HashAlgorithm::Md5,
                 b"abc",
@@ -4229,7 +4225,10 @@ mod tests {
 
     #[test]
     fn a_path_that_fits_is_left_alone() {
-        assert_eq!(truncate_path("/tmp/a.img", 400.0, SMALL_FONT_SIZE), "/tmp/a.img");
+        assert_eq!(
+            truncate_path("/tmp/a.img", 400.0, SMALL_FONT_SIZE),
+            "/tmp/a.img"
+        );
     }
 
     /// A cut path keeps its filename — that is the whole point of cutting it
@@ -4657,11 +4656,7 @@ mod tests {
             .map(|(_, t)| t.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        for phrase in [
-            "permanently destroyed",
-            "cannot be undone",
-            "USB Drive",
-        ] {
+        for phrase in ["permanently destroyed", "cannot be undone", "USB Drive"] {
             assert!(
                 drawn.contains(phrase),
                 "the confirmation must show {phrase:?}; it drew: {drawn}"

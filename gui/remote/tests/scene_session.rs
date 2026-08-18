@@ -13,6 +13,20 @@
 //! (delta suppression), content changes, geometry-only moves, window removal, and
 //! a viewer reconnect (`reset` → full resend).
 
+// An integration test is all test code, so the allows that a `#[cfg(test)]`
+// module carries inside a source file belong at the top of the file here. A
+// test that indexes a window it has just asserted exists, or unwraps a decode
+// whose success is the thing under test, is saying "this must hold" in the
+// shortest way there is; making it recover instead would turn a failure into a
+// silently skipped assertion.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 use std::collections::BTreeMap;
 
 use guiremote::scene::{

@@ -158,93 +158,11 @@ struct LaunchRecord {
 // Fuzzy matcher
 // ============================================================================
 
-/// Scores how well `query` matches `target` using fuzzy matching.
+/// Rank how well `query` fuzzy-matches `target`; `None` if it does not match.
 ///
-/// Characters in `query` must appear in order within `target`, but need
-/// not be contiguous. Scoring rewards:
-/// - Exact prefix match (highest)
-/// - Matches at word boundaries (start of words after space/underscore/dash)
-/// - Consecutive matched characters
-/// - Earlier matches in the string
-///
-/// Returns `None` if the query does not match at all.
-pub fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
-    if query.is_empty() {
-        return Some(0);
-    }
-
-    let query_lower: Vec<char> = query.chars().map(|c| c.to_ascii_lowercase()).collect();
-    let target_lower: Vec<char> = target.chars().map(|c| c.to_ascii_lowercase()).collect();
-
-    if query_lower.len() > target_lower.len() {
-        return None;
-    }
-
-    // Check if prefix match
-    let is_prefix = target_lower
-        .iter()
-        .zip(query_lower.iter())
-        .all(|(t, q)| t == q);
-
-    // Try to match all query characters in order within target
-    let mut score: u32 = 0;
-    let mut qi = 0; // query index
-    let mut prev_match_idx: Option<usize> = None;
-    let mut first_match_idx: Option<usize> = None;
-
-    for (ti, &tc) in target_lower.iter().enumerate() {
-        if qi >= query_lower.len() {
-            break;
-        }
-        if tc == query_lower[qi] {
-            if first_match_idx.is_none() {
-                first_match_idx = Some(ti);
-            }
-
-            // Bonus for word boundary match (start, after space/dash/underscore)
-            let at_boundary = ti == 0
-                || target_lower
-                    .get(ti.saturating_sub(1))
-                    .is_some_and(|&prev| prev == ' ' || prev == '-' || prev == '_');
-            if at_boundary {
-                score = score.saturating_add(10);
-            }
-
-            // Bonus for consecutive matches
-            if let Some(prev) = prev_match_idx
-                && ti == prev + 1
-            {
-                score = score.saturating_add(5);
-            }
-
-            prev_match_idx = Some(ti);
-            qi += 1;
-        }
-    }
-
-    // All query characters must have been matched
-    if qi < query_lower.len() {
-        return None;
-    }
-
-    // Prefix bonus (strongest signal)
-    if is_prefix {
-        score = score.saturating_add(50);
-    }
-
-    // Bonus for early first match
-    if let Some(idx) = first_match_idx {
-        let early_bonus = 20u32.saturating_sub(idx as u32);
-        score = score.saturating_add(early_bonus);
-    }
-
-    // Slight bonus for shorter targets (closer length match)
-    let length_diff = target_lower.len().saturating_sub(query_lower.len());
-    let length_bonus = 10u32.saturating_sub(length_diff.min(10) as u32);
-    score = score.saturating_add(length_bonus);
-
-    Some(score)
-}
+/// Re-exported rather than implemented: the identical routine was written out
+/// three times across this tree. See `textfind::fuzzy_score`.
+pub use guitk::textfind::fuzzy_score;
 
 /// Compute a combined score searching across name, description, and keywords.
 fn search_score(query: &str, entry: &AppEntry) -> Option<u32> {

@@ -90,11 +90,7 @@ pub fn encode_submit(window: u64, tree: &RenderTree) -> Vec<u8> {
 pub fn decode_submit(input: &[u8]) -> Result<(Submission, usize), DecodeError> {
     let mut r = Reader::new(input);
     r.need(SUBMIT_HEADER_LEN)?;
-    let magic = [r.buf[0], r.buf[1], r.buf[2], r.buf[3]];
-    if magic != SUBMIT_MAGIC {
-        return Err(DecodeError::BadMagic);
-    }
-    r.pos = 4;
+    r.expect_magic(SUBMIT_MAGIC)?;
     let ver = r.read_u8()?;
     if ver != SUBMIT_VERSION {
         return Err(DecodeError::UnsupportedVersion(ver));
@@ -105,11 +101,10 @@ pub fn decode_submit(input: &[u8]) -> Result<(Submission, usize), DecodeError> {
     }
     let window = r.read_u64()?;
 
-    let rest = r.buf.get(r.pos..).ok_or(DecodeError::UnexpectedEof)?;
-    let (commands, used) = crate::decode_frame(rest)?;
-    r.pos += used;
+    let (commands, used) = crate::decode_frame(r.rest())?;
+    r.advance(used)?;
 
-    Ok((Submission { window, commands }, r.pos))
+    Ok((Submission { window, commands }, r.position()))
 }
 
 /// Streaming form of [`decode_submit`]: `Ok(None)` when the buffer holds only

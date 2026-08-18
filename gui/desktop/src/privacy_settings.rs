@@ -506,7 +506,7 @@ impl PrivacySettingsUI {
             1 => self.render_activity_tab(&mut cmds, x + pad, cy, inner),
             2 => self.render_general_tab(&mut cmds, x + pad, cy, inner),
             _ => {}
-        };
+        }
 
         cmds
     }
@@ -853,6 +853,17 @@ impl PrivacySettingsUI {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     #[test]

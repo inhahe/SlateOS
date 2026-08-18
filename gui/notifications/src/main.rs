@@ -19,17 +19,14 @@
 //! ```
 
 #[allow(unused_imports)]
-use guitk::{
-    Color, Event, KeyEvent, MouseButton, MouseEvent,
-    RenderCommand, RenderTree,
-};
-#[allow(unused_imports)]
 use guitk::event::{EventResult, Modifiers, MouseEventKind};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+#[allow(unused_imports)]
+use guitk::{Color, Event, KeyEvent, MouseButton, MouseEvent, RenderCommand, RenderTree};
 
 use std::collections::HashMap;
 
@@ -350,13 +347,29 @@ impl Default for AppSettings {
 #[derive(Clone, Debug)]
 pub enum NotificationRequest {
     Send(Notification),
-    Update { id: u64, title: Option<String>, body: Option<String>, progress: Option<u8> },
-    Dismiss { id: u64 },
-    DismissAll { app_name: String },
+    Update {
+        id: u64,
+        title: Option<String>,
+        body: Option<String>,
+        progress: Option<u8>,
+    },
+    Dismiss {
+        id: u64,
+    },
+    DismissAll {
+        app_name: String,
+    },
     GetActive,
-    GetHistory { limit: usize },
-    SetDnd { enabled: bool },
-    SetAppSettings { app_name: String, settings: AppSettings },
+    GetHistory {
+        limit: usize,
+    },
+    SetDnd {
+        enabled: bool,
+    },
+    SetAppSettings {
+        app_name: String,
+        settings: AppSettings,
+    },
 }
 
 /// Responses returned to applications.
@@ -458,7 +471,12 @@ impl NotificationDaemon {
                 self.add_notification(notif);
                 NotificationResponse::Created { id }
             }
-            NotificationRequest::Update { id, title, body, progress } => {
+            NotificationRequest::Update {
+                id,
+                title,
+                body,
+                progress,
+            } => {
                 self.update_notification(id, title, body, progress);
                 NotificationResponse::Ok
             }
@@ -471,16 +489,11 @@ impl NotificationDaemon {
                 NotificationResponse::Ok
             }
             NotificationRequest::GetActive => {
-                let ids: Vec<u64> = self.toasts.iter()
-                    .map(|t| t.notification_id)
-                    .collect();
+                let ids: Vec<u64> = self.toasts.iter().map(|t| t.notification_id).collect();
                 NotificationResponse::ActiveList(ids)
             }
             NotificationRequest::GetHistory { limit } => {
-                let entries: Vec<Notification> = self.history.iter()
-                    .take(limit)
-                    .cloned()
-                    .collect();
+                let entries: Vec<Notification> = self.history.iter().take(limit).cloned().collect();
                 NotificationResponse::HistoryList(entries)
             }
             NotificationRequest::SetDnd { enabled } => {
@@ -613,7 +626,9 @@ impl NotificationDaemon {
     }
 
     fn dismiss_all_for_app(&mut self, app_name: &str) {
-        let ids_to_dismiss: Vec<u64> = self.history.iter()
+        let ids_to_dismiss: Vec<u64> = self
+            .history
+            .iter()
             .filter(|n| n.app_name == app_name)
             .map(|n| n.id)
             .collect();
@@ -654,7 +669,8 @@ impl NotificationDaemon {
     }
 
     fn find_history_by_group_key(&self, key: &str) -> Option<u64> {
-        self.history.iter()
+        self.history
+            .iter()
             .find(|n| n.group_key.as_deref() == Some(key))
             .map(|n| n.id)
     }
@@ -740,10 +756,11 @@ impl NotificationDaemon {
                     continue;
                 }
                 if let Some(timeout) = notif.priority.timeout_ms()
-                    && toast.age_ms >= timeout {
-                        toast.dismissing = true;
-                        toast.dismiss_age_ms = 0;
-                    }
+                    && toast.age_ms >= timeout
+                {
+                    toast.dismissing = true;
+                    toast.dismiss_age_ms = 0;
+                }
             }
         }
 
@@ -789,8 +806,7 @@ impl NotificationDaemon {
             }
             MouseEventKind::Scroll { dy, .. } => {
                 if self.center.visible {
-                    self.center.scroll_offset =
-                        (self.center.scroll_offset - dy).max(0.0);
+                    self.center.scroll_offset = (self.center.scroll_offset - dy).max(0.0);
                 }
                 None
             }
@@ -803,11 +819,10 @@ impl NotificationDaemon {
             return None;
         }
         // Ctrl+Shift+N toggles notification center.
-        if key.modifiers.ctrl && key.modifiers.shift
-            && key.key == guitk::event::Key::N {
-                self.toggle_center();
-                return Some(DaemonAction::CenterToggled(self.center.visible));
-            }
+        if key.modifiers.ctrl && key.modifiers.shift && key.key == guitk::event::Key::N {
+            self.toggle_center();
+            return Some(DaemonAction::CenterToggled(self.center.visible));
+        }
         // Escape closes notification center.
         if key.key == guitk::event::Key::Escape && self.center.visible {
             self.center.visible = false;
@@ -834,14 +849,14 @@ impl NotificationDaemon {
             let h = self.toast_height(notif);
 
             // Is the click within this toast's bounds?
-            if mx >= toast_x && mx <= toast_x + TOAST_WIDTH
-                && my >= y && my <= y + h
-            {
+            if mx >= toast_x && mx <= toast_x + TOAST_WIDTH && my >= y && my <= y + h {
                 // Check close button (top-right corner of toast).
                 let close_x = toast_x + TOAST_WIDTH - TOAST_PADDING - CLOSE_BTN_SIZE;
                 let close_y = y + TOAST_PADDING;
-                if mx >= close_x && mx <= close_x + CLOSE_BTN_SIZE
-                    && my >= close_y && my <= close_y + CLOSE_BTN_SIZE
+                if mx >= close_x
+                    && mx <= close_x + CLOSE_BTN_SIZE
+                    && my >= close_y
+                    && my <= close_y + CLOSE_BTN_SIZE
                 {
                     let id = toast.notification_id;
                     self.dismiss(id);
@@ -876,8 +891,10 @@ impl NotificationDaemon {
         // "Clear all" button in header.
         let clear_all_x = center_x + CENTER_WIDTH - 80.0;
         let clear_all_y = center_y + 8.0;
-        if mx >= clear_all_x && mx <= clear_all_x + 72.0
-            && my >= clear_all_y && my <= clear_all_y + 32.0
+        if mx >= clear_all_x
+            && mx <= clear_all_x + 72.0
+            && my >= clear_all_y
+            && my <= clear_all_y + 32.0
         {
             self.clear_all_history();
             return Some(DaemonAction::AllCleared);
@@ -961,7 +978,9 @@ impl NotificationDaemon {
         let base_x = self.viewport_width - TOAST_WIDTH - TOAST_RIGHT_MARGIN;
         let mut y = TOAST_TOP_MARGIN;
 
-        let visible_count = self.toasts.iter()
+        let visible_count = self
+            .toasts
+            .iter()
             .filter(|t| !t.dismissing || t.exit_progress() < 1.0)
             .count()
             .min(MAX_VISIBLE_TOASTS);
@@ -1632,7 +1651,10 @@ mod tests {
         // The pill is drawn with a radius of half its height, so a width below
         // that height renders as a squashed oval rather than a circle.
         let w = text::padded_width("3", 6.0, 11.0, FontWeightHint::Bold).max(BADGE_HEIGHT);
-        assert!((w - BADGE_HEIGHT).abs() < 0.01, "one-digit badge is {w} wide");
+        assert!(
+            (w - BADGE_HEIGHT).abs() < 0.01,
+            "one-digit badge is {w} wide"
+        );
     }
 
     #[test]
@@ -1754,7 +1776,10 @@ mod tests {
 
         assert_eq!(lines.len(), TOAST_BODY_MAX_LINES);
         let last = &lines[TOAST_BODY_MAX_LINES - 1].1;
-        assert!(last.ends_with('…'), "{last:?} does not show that it was cut");
+        assert!(
+            last.ends_with('…'),
+            "{last:?} does not show that it was cut"
+        );
         assert!(
             text::measure(last, TOAST_BODY_FONT_SIZE, FontWeightHint::Regular)
                 <= TOAST_WIDTH - TOAST_PADDING * 2.0 - 16.0,
@@ -1896,9 +1921,7 @@ mod tests {
             daemon.handle_request(NotificationRequest::Send(notif));
         }
         // Should trigger dismissal of oldest when over MAX_VISIBLE_TOASTS.
-        let non_dismissing = daemon.toasts.iter()
-            .filter(|t| !t.dismissing)
-            .count();
+        let non_dismissing = daemon.toasts.iter().filter(|t| !t.dismissing).count();
         assert!(non_dismissing <= MAX_VISIBLE_TOASTS);
     }
 

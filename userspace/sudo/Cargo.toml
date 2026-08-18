@@ -3,4 +3,9 @@ name = "sudo"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS sudo utility"
+
+# `userdb` for `/etc/users.yaml`. This crate's `authenticate` ignored the
+# password it was given and admitted anyone named anywhere in the file — and
+# admitted *everyone* if the file was absent. See `design-decisions.md` §330.
 [dependencies]
+userdb = { path = "../userdb" }

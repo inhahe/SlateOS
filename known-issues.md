@@ -35078,6 +35078,65 @@ more visible bug of the two, and it has been shipping in fourteen games.
 rest — the same reduction `randrange`'s module docs exist to explain, in
 crates that were never told the crate exists.
 
+#### All fourteen struct-carrying crates are done (2026-08-18)
+
+Every crate that carried a private `struct Lcg` / `struct Rng` now uses
+`guitk::rng` (`= randrange`), seeds from the system with a per-crate fallback
+constant, and has tests for the hazard its own draw pattern was exposed to:
+`apps/{dots,game2048,hangman,life,lightsout,mahjong,match3,maze,memory,pipes,
+simon,sudoku,tetris,wordle}`. A constant grep across `apps/ gui/ net*/ pkg/`
+now returns only the inlined sites listed below plus `apps/breakout:2129`,
+which is the deliberate historical reproduction inside its own tests.
+
+**What the sweep actually found, measured rather than assumed.** Each rewrite
+was checked by putting the old reduction back into `randrange` and re-running
+the new tests against it, and the results were not uniform:
+
+| Crate | Draw pattern | Old reduction's effect |
+|---|---|---|
+| `apps/maze` | 4-element shuffle + 1 neighbour draw = 4 draws/step | **3 of 24** orderings, all ending on the same direction |
+| `apps/hangman` | 1–2 draws per round | free reveal ran a fixed 4-cycle at Medium |
+| `apps/tetris` | 7-element bag shuffle | 6 dead cells in the 7×7 piece/slot table |
+| `apps/sudoku` | 9-digit shuffle inside the solver | corner-digit histogram `[19,17,11,3,9,5,15,2,9]` where fair is 10 each |
+| `apps/mahjong` | 144-tile shuffle | **none measurable** — 143 draws at mostly odd bounds wash the counter out |
+| `apps/game2048`, `apps/pipes` | — | **none** — these copies shifted (`>> 33`) before reducing |
+
+The bottom two rows are the point of the whole entry rather than an
+embarrassment to it. Three of the sixteen copies were harmless, and there was
+no way to know *which* three without reading all sixteen and measuring each.
+The copy is the defect; a good copy is still a copy.
+
+Two lessons worth keeping, both learned by first writing a test that passed on
+broken code:
+
+1. **Sample along one generator's stream, never across fresh seeds.** A
+   low-bit defect is a counter *within* a stream; different seeds have
+   different low bits, so re-seeding between samples hides it completely. A
+   hangman test that sampled 200 freshly-seeded generators found zero missing
+   letters under the broken reduction.
+2. **Reproduce the caller's whole draw pattern, not just the shuffle.**
+   `apps/maze`'s shuffle in isolation reaches 12 of 24 orderings; add the one
+   extra neighbour draw the caller makes each step and it collapses to 3. A
+   test of the shuffle alone would have missed the bug entirely, which is how
+   it survived.
+
+Seeding is tested by asserting **which** seed, not that two games differ: a
+host `cargo test` has no SlateOS kernel, so `seed_from_system` takes the
+fallback and two fresh games *are* identical — exactly as they were under the
+old hardcoded `42`. A variety check therefore passes on the broken code and
+fails on the fix. Those tests are `#[cfg(not(unix))]` for that reason.
+
+**Still open**, all with the arithmetic inlined and no type at all — the ones
+a name-based grep could never find:
+
+- `apps/flashcards:356` (`1_664_525` / `1_013_904_223`, so even the
+  constant grep recommended above misses it — a *third* set of constants)
+- `apps/radio:553` (`1103515245` / `12345`)
+- `apps/speedtest:414,546`
+- `apps/videoplayer:1291,1295`
+- `gui/toolkit/src/listview.rs:427`
+- `gui/desktop/src/wallpaper.rs:758`
+
 ---
 
 ## The build volume runs out of space, and nothing reclaims it (lane A)

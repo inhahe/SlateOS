@@ -14,13 +14,15 @@
 //! Features three difficulty levels (Easy, Medium, Hard), a backtracking
 //! solver for puzzle generation and hint delivery, pencil marks / notes mode,
 //! undo / redo history, a game timer, conflict highlighting, and statistics
-//! tracking (games completed, best times). Uses a deterministic seeded LCG
-//! random number generator (no external `rand` crate). The Catppuccin Mocha
-//! color palette provides a pleasant dark theme.
+//! tracking (games completed, best times). The puzzle is seeded from the
+//! system and re-generated from a stored, incrementing seed, so a game can be
+//! repeated on request but is not the same for every player. The Catppuccin
+//! Mocha color palette provides a pleasant dark theme.
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seed_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -64,49 +66,36 @@ const LABEL_FONT_SIZE: f32 = 13.0;
 const MAX_HINTS: usize = 5;
 const MAX_UNDO: usize = 500;
 
-// ── LCG random number generator ────────────────────────────────────
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Lcg {
-    state: u64,
-}
+// ── Randomness ──────────────────────────────────────────────────────
 
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        // Ensure the seed is nonzero so the generator is not stuck at 0.
-        Self {
-            state: if seed == 0 { 1 } else { seed },
-        }
-    }
+/// Seed used when the kernel's entropy source cannot be reached.
+///
+/// A per-crate constant rather than a shared one, so that two programs which
+/// lose entropy on the same boot do not then produce correlated streams. The
+/// bytes spell `SUDOKU!!`.
+const FALLBACK_SEED: u64 = 0x5355_444F_4B55_2121;
 
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Returns a value in `0..bound` (exclusive upper bound).
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        if bound == 0 {
-            return 0;
-        }
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
-
-    /// Fisher-Yates shuffle of a mutable slice.
-    fn shuffle<T>(&mut self, slice: &mut [T]) {
-        let len = slice.len();
-        if len <= 1 {
-            return;
-        }
-        for i in (1..len).rev() {
-            let j = self.next_bounded(i + 1);
-            slice.swap(i, j);
-        }
-    }
-}
+// This crate used to carry its own copy of the LCG that got copied into
+// sixteen crates, together with its own Fisher-Yates over it, reducing with
+// `val % bound`. That is the broken reduction: the generator's modulus is 2^64,
+// so bit *k* of its state has period 2^(k+1) and the low bits are a counter
+// rather than a draw. Any power-of-two bound reads only those.
+//
+// A shuffle is the worst possible caller for it, because its bound counts all
+// the way down to 2 and so passes through every power of two on the way, and
+// both of this crate's shuffles are long ones: the candidate digits at each
+// cell of the solver (1 to 9 of them, so often 2, 4 or 8) and the 81 cell
+// indices whose order decides which givens get removed (through 64, 32, 16, 8,
+// 4 and 2). Those swaps were not draws; they were a fixed function of their
+// position in the loop. `apps/maze` shows the same hand-rolled shuffle over
+// four elements reaching 3 of the 24 possible orderings, measured.
+//
+// The old `new` also mapped seed 0 to 1, to avoid a generator "stuck at 0".
+// That guard was never needed -- the increment is non-zero, so the all-zero
+// state is not a fixed point of this recurrence -- and it is not carried over:
+// `randrange::SeededRng` documents zero as an ordinary seed and puts
+// SplitMix64's finaliser over the LCG, so there are no weak low bits left to
+// read even by accident.
 
 // ── Difficulty ──────────────────────────────────────────────────────
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -528,7 +517,7 @@ fn count_solutions_inner(
 }
 
 /// Solve with a shuffled digit order (for generation). Returns true if solved.
-fn solve_shuffled(grid: &mut [u8; TOTAL_CELLS], rng: &mut Lcg) -> bool {
+fn solve_shuffled(grid: &mut [u8; TOTAL_CELLS], rng: &mut SeededRng) -> bool {
     let cell = find_empty(grid);
     let (row, col) = match cell {
         Some(rc) => rc,
@@ -555,7 +544,7 @@ fn solve_shuffled(grid: &mut [u8; TOTAL_CELLS], rng: &mut Lcg) -> bool {
 // ── Puzzle generation ───────────────────────────────────────────────
 
 /// Generate a complete valid Sudoku grid.
-fn generate_full_grid(rng: &mut Lcg) -> [u8; TOTAL_CELLS] {
+fn generate_full_grid(rng: &mut SeededRng) -> [u8; TOTAL_CELLS] {
     let mut grid = [0u8; TOTAL_CELLS];
     let solved = solve_shuffled(&mut grid, rng);
     // The solver should always succeed on an empty grid.
@@ -575,13 +564,13 @@ fn generate_full_grid(rng: &mut Lcg) -> [u8; TOTAL_CELLS] {
 /// Generate a puzzle by removing cells from a complete grid while ensuring a
 /// unique solution. Returns (puzzle, solution).
 fn generate_puzzle(
-    rng: &mut Lcg,
+    rng: &mut SeededRng,
     difficulty: Difficulty,
 ) -> ([Cell; TOTAL_CELLS], [u8; TOTAL_CELLS]) {
     let solution = generate_full_grid(rng);
 
     let (min_givens, max_givens) = difficulty.givens_range();
-    let target_givens = min_givens + rng.next_bounded(max_givens - min_givens + 1);
+    let target_givens = min_givens + rng.below(max_givens - min_givens + 1);
     let target_removals = TOTAL_CELLS - target_givens;
 
     // Build a shuffled list of cell indices to try removing.
@@ -661,11 +650,19 @@ struct SudokuApp {
 
 impl SudokuApp {
     fn new() -> Self {
-        Self::with_seed_and_difficulty(42, Difficulty::Easy)
+        // Was `with_seed_and_difficulty(42, ...)`: every player, on every
+        // machine, got the same puzzle. Predicting a sudoku costs the user
+        // nothing but the puzzle, so this asks the kernel and falls back rather
+        // than refusing -- see `randrange::seeded_from_system`. The `u64` form
+        // is used and not the generator form because this app *stores* its
+        // seed: `seed_counter` is incremented to make the next puzzle, and an
+        // app holding a generator instead would have to reseed one generator
+        // from another's output, which silently correlates the two.
+        Self::with_seed_and_difficulty(seed_from_system(FALLBACK_SEED), Difficulty::Easy)
     }
 
     fn with_seed_and_difficulty(seed: u64, difficulty: Difficulty) -> Self {
-        let mut rng = Lcg::new(seed);
+        let mut rng = SeededRng::new(seed);
         let (cells, solution) = generate_puzzle(&mut rng, difficulty);
 
         Self {
@@ -688,7 +685,7 @@ impl SudokuApp {
     /// Start a new game, preserving stats.
     fn new_game(&mut self, difficulty: Difficulty) {
         self.seed_counter = self.seed_counter.wrapping_add(1);
-        let mut rng = Lcg::new(self.seed_counter);
+        let mut rng = SeededRng::new(self.seed_counter);
         let (cells, solution) = generate_puzzle(&mut rng, difficulty);
 
         self.cells = cells;
@@ -1519,6 +1516,18 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ── Helper: create a known valid complete grid ──────────────────
@@ -1753,7 +1762,7 @@ mod tests {
 
     #[test]
     fn test_solve_shuffled_produces_valid() {
-        let mut rng = Lcg::new(12345);
+        let mut rng = SeededRng::new(12345);
         let mut grid = [0u8; TOTAL_CELLS];
         assert!(solve_shuffled(&mut grid, &mut rng));
         assert!(is_grid_complete(&grid));
@@ -1809,28 +1818,28 @@ mod tests {
 
     #[test]
     fn test_generate_full_grid_valid() {
-        let mut rng = Lcg::new(999);
+        let mut rng = SeededRng::new(999);
         let grid = generate_full_grid(&mut rng);
         assert!(is_grid_complete(&grid));
     }
 
     #[test]
     fn test_generate_full_grid_deterministic() {
-        let grid1 = generate_full_grid(&mut Lcg::new(42));
-        let grid2 = generate_full_grid(&mut Lcg::new(42));
+        let grid1 = generate_full_grid(&mut SeededRng::new(42));
+        let grid2 = generate_full_grid(&mut SeededRng::new(42));
         assert_eq!(grid1, grid2, "Same seed should produce same grid");
     }
 
     #[test]
     fn test_generate_full_grid_different_seeds() {
-        let grid1 = generate_full_grid(&mut Lcg::new(1));
-        let grid2 = generate_full_grid(&mut Lcg::new(2));
+        let grid1 = generate_full_grid(&mut SeededRng::new(1));
+        let grid2 = generate_full_grid(&mut SeededRng::new(2));
         assert_ne!(grid1, grid2, "Different seeds should produce different grids");
     }
 
     #[test]
     fn test_generate_puzzle_easy_givens() {
-        let mut rng = Lcg::new(100);
+        let mut rng = SeededRng::new(100);
         let (cells, _solution) = generate_puzzle(&mut rng, Difficulty::Easy);
         let given_count: usize = cells.iter().filter(|c| c.given).count();
         assert!(
@@ -1841,7 +1850,7 @@ mod tests {
 
     #[test]
     fn test_generate_puzzle_medium_givens() {
-        let mut rng = Lcg::new(200);
+        let mut rng = SeededRng::new(200);
         let (cells, _solution) = generate_puzzle(&mut rng, Difficulty::Medium);
         let given_count: usize = cells.iter().filter(|c| c.given).count();
         assert!(
@@ -1852,7 +1861,7 @@ mod tests {
 
     #[test]
     fn test_generate_puzzle_hard_givens() {
-        let mut rng = Lcg::new(300);
+        let mut rng = SeededRng::new(300);
         let (cells, _solution) = generate_puzzle(&mut rng, Difficulty::Hard);
         let given_count: usize = cells.iter().filter(|c| c.given).count();
         // Hard may have more givens than target if uniqueness constraint prevents removal
@@ -1864,7 +1873,7 @@ mod tests {
 
     #[test]
     fn test_generate_puzzle_unique_solution() {
-        let mut rng = Lcg::new(500);
+        let mut rng = SeededRng::new(500);
         let (cells, _solution) = generate_puzzle(&mut rng, Difficulty::Medium);
         let mut puzzle_vals = values_array(&cells);
         let count = count_solutions(&mut puzzle_vals, 2);
@@ -1873,7 +1882,7 @@ mod tests {
 
     #[test]
     fn test_generate_puzzle_solution_matches() {
-        let mut rng = Lcg::new(600);
+        let mut rng = SeededRng::new(600);
         let (cells, solution) = generate_puzzle(&mut rng, Difficulty::Easy);
         // Every given cell must match the solution
         for i in 0..TOTAL_CELLS {
@@ -1981,64 +1990,137 @@ mod tests {
         assert_ne!(Difficulty::Medium.color(), Difficulty::Hard.color());
     }
 
-    // ── LCG RNG ────────────────────────────────────────────────────
+    // ── Puzzle variety ─────────────────────────────────────────────
+    //
+    // The generator is `randrange`'s now, and its own properties -- range,
+    // determinism, zero as an ordinary seed, that a shuffle is a permutation
+    // of its input -- are tested there, once, instead of here in each of
+    // sixteen copies. What belongs here is the two shuffles this crate
+    // drives: the candidate digits inside the solver, and the 81 cell indices
+    // that decide which givens come out.
+    //
+    // All of these walk *one* generator across consecutive puzzles rather
+    // than seeding a fresh one per puzzle. A low-bit defect is a counter
+    // along one stream: different seeds have different low bits, so
+    // re-seeding between samples hides the counter behind the variety of the
+    // seeds themselves, and the test then passes on the exact code it exists
+    // to catch.
 
     #[test]
-    fn test_lcg_deterministic() {
-        let mut rng1 = Lcg::new(42);
-        let mut rng2 = Lcg::new(42);
-        for _ in 0..100 {
-            assert_eq!(rng1.next_u64(), rng2.next_u64());
+    fn the_digit_shuffle_spreads_the_corner_across_all_nine_digits() {
+        // `solve_shuffled` shuffles the nine candidate digits at each cell,
+        // so its bound counts 9, 8, 7 ... 2 and passes through 8, 4 and 2. A
+        // reduction reading the low bits of a power-of-two-modulus generator
+        // turns those swaps into a fixed function of the loop index, and the
+        // solver then fills the first empty cell from a skewed handful of
+        // digits instead of evenly from all nine.
+        //
+        // Measured: put the old `state % bound` reduction back (and drop the
+        // SplitMix finaliser with it) and the histogram for digits 1..=9 over
+        // 90 grids comes out
+        //   [19, 17, 11, 3, 9, 5, 15, 2, 9]
+        // -- digit 1 nearly ten times as often as digit 8, where a fair
+        // shuffle would give 10 each. An earlier version of this test asked
+        // only whether every digit appeared *at all*; that also failed on the
+        // old code, but only just, by a single missing digit at 40 grids, and
+        // a different seed could easily have hidden it. It is the shape of
+        // the histogram that is unambiguous, so the assertion is a floor per
+        // digit rather than mere presence.
+        const GRIDS: usize = 90;
+        let mut rng = SeededRng::new(31337);
+        let mut counts = [0usize; 10];
+        for _ in 0..GRIDS {
+            let grid = generate_full_grid(&mut rng);
+            counts[grid[0] as usize] += 1;
+        }
+        // 90 grids over 9 digits is 10 each if the shuffle is fair. A floor
+        // of 4 is comfortably below the honest sampling spread and far above
+        // what the broken reduction manages.
+        let starved: Vec<usize> = (1..=9).filter(|d| counts[*d] < 4).collect();
+        assert!(
+            starved.is_empty(),
+            "over {GRIDS} grids off one generator the top-left cell held {starved:?} \
+             fewer than 4 times each; full histogram for 1..=9 is {:?}",
+            &counts[1..=9]
+        );
+    }
+
+    #[test]
+    fn the_removal_shuffle_reaches_every_cell() {
+        // The 81 cell indices are shuffled to decide removal order, so that
+        // bound passes through 64, 32, 16, 8, 4 and 2. Every cell should be
+        // a given in some puzzles and blank in others; a cell that is always
+        // one or the other is a cell the shuffle never really moved.
+        //
+        // Honesty about what this one is worth: it passes on the old broken
+        // reduction too, measured. 81 is not a power of two and the solver
+        // draws a varying number of times between one removal shuffle and
+        // the next, so the counter never lines up into a pattern that
+        // survives all the way out to which cells end up blank. It is kept
+        // as an invariant -- no cell may be permanently a given, which would
+        // be a real bug however it arose -- not as a regression test for the
+        // reduction. `the_digit_shuffle_spreads_the_corner_across_all_nine_digits`
+        // is the one that discriminates.
+        //
+        // 24 puzzles, not 12: a Medium board keeps roughly half its cells, so
+        // at 12 samples a *working* shuffle still leaves each cell about a
+        // 1-in-1200 chance of landing the same way every time -- across 81
+        // cells that is a flaky test, and it was, failing on cell 29. The
+        // sample size has to make the honest tail smaller than the defect
+        // being looked for, not merely smaller than one.
+        let mut rng = SeededRng::new(31337);
+        let mut ever_given = [false; TOTAL_CELLS];
+        let mut ever_blank = [false; TOTAL_CELLS];
+        for _ in 0..24 {
+            let (cells, _) = generate_puzzle(&mut rng, Difficulty::Medium);
+            for i in 0..TOTAL_CELLS {
+                if cells[i].given {
+                    ever_given[i] = true;
+                } else {
+                    ever_blank[i] = true;
+                }
+            }
+        }
+        let stuck: Vec<usize> = (0..TOTAL_CELLS)
+            .filter(|i| !ever_given[*i] || !ever_blank[*i])
+            .collect();
+        assert!(
+            stuck.is_empty(),
+            "across 24 puzzles these cells were always given or always blank: {stuck:?}"
+        );
+    }
+
+    #[test]
+    fn consecutive_puzzles_differ_from_one_another() {
+        let mut rng = SeededRng::new(31337);
+        let puzzles: Vec<[u8; TOTAL_CELLS]> = (0..6)
+            .map(|_| {
+                let (cells, _) = generate_puzzle(&mut rng, Difficulty::Easy);
+                core::array::from_fn(|i| if cells[i].given { cells[i].value } else { 0 })
+            })
+            .collect();
+        for (i, a) in puzzles.iter().enumerate() {
+            for b in puzzles.iter().skip(i + 1) {
+                assert_ne!(a, b, "two puzzles off one generator came out identical");
+            }
         }
     }
 
+    #[cfg(not(unix))]
     #[test]
-    fn test_lcg_different_seeds() {
-        let mut rng1 = Lcg::new(1);
-        let mut rng2 = Lcg::new(2);
-        let v1 = rng1.next_u64();
-        let v2 = rng2.next_u64();
-        assert_ne!(v1, v2);
-    }
-
-    #[test]
-    fn test_lcg_bounded() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..1000 {
-            let val = rng.next_bounded(10);
-            assert!(val < 10);
-        }
-    }
-
-    #[test]
-    fn test_lcg_shuffle_preserves_elements() {
-        let mut rng = Lcg::new(42);
-        let mut arr = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-        rng.shuffle(&mut arr);
-        arr.sort();
-        assert_eq!(arr, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
-    }
-
-    #[test]
-    fn test_lcg_shuffle_changes_order() {
-        let mut rng = Lcg::new(42);
-        let original = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-        let mut arr = original;
-        rng.shuffle(&mut arr);
-        assert_ne!(arr, original, "Shuffle should change the order");
-    }
-
-    #[test]
-    fn test_lcg_zero_seed_handled() {
-        let mut rng = Lcg::new(0);
-        let val = rng.next_u64();
-        assert_ne!(val, 0, "Zero seed should still produce non-zero output");
-    }
-
-    #[test]
-    fn test_lcg_bounded_zero() {
-        let mut rng = Lcg::new(42);
-        assert_eq!(rng.next_bounded(0), 0);
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        // A host `cargo test` has no SlateOS kernel to ask, so
+        // `seed_from_system` takes the fallback -- and two fresh games really
+        // are identical here, exactly as they were under the old hardcoded
+        // 42. That is why this asserts *which* seed rather than checking that
+        // two games differ: a variety check would pass on the broken code and
+        // fail on the fix.
+        let app = SudokuApp::new();
+        assert_eq!(
+            app.seed_counter, FALLBACK_SEED,
+            "a fresh game did not ask the system for its seed"
+        );
+        assert_ne!(app.seed_counter, 42, "a fresh puzzle still comes from a literal");
     }
 
     // ── SudokuApp construction ─────────────────────────────────────

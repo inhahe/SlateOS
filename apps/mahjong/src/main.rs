@@ -18,12 +18,14 @@
 //! right). Click or keyboard-select two matching free tiles to remove them.
 //! Seasons match any season; flowers match any flower; all other tiles must
 //! match exactly. Supports undo (Z), hints (H), shuffle (S), and new game (N).
-//! Uses a deterministic seeded LCG random number generator with Catppuccin
-//! Mocha color palette.
+//! The deal is seeded from the system and re-dealt from a stored seed, so a
+//! game can be repeated on request but is not the same for every player.
+//! Catppuccin Mocha color palette.
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seed_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -82,40 +84,30 @@ const LAYOUT_SIZE: usize = 144;
 
 // ── LCG random number generator ────────────────────────────────────
 
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Rng {
-    state: u64,
-}
+// ── Randomness ──────────────────────────────────────────────────────
 
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
+/// Seed used when the kernel's entropy source cannot be reached.
+///
+/// A per-crate constant rather than a shared one, so that two programs which
+/// lose entropy on the same boot do not then produce correlated streams. The
+/// bytes spell `MAHJONG!`.
+const FALLBACK_SEED: u64 = 0x4D41_484A_4F4E_4721;
 
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 {
-            return 0;
-        }
-        (self.next() >> 33) as usize % max
-    }
-
-    /// Fisher-Yates shuffle.
-    fn shuffle<T>(&mut self, slice: &mut [T]) {
-        let len = slice.len();
-        for i in (1..len).rev() {
-            let j = self.next_range(i + 1);
-            slice.swap(i, j);
-        }
-    }
-}
+// This crate used to carry its own copy of the LCG that got copied into
+// sixteen crates, together with its own Fisher-Yates over it. Its reduction was
+// `(next() >> 33) % max`, which discards the low 31 bits before taking the
+// remainder, so unlike most of the copies it never read the counter-like low
+// bits of a power-of-two-modulus LCG.
+//
+// That was luck worth recording rather than a design: a shuffle is the worst
+// possible caller for the broken reduction, because its bound counts all the
+// way down to 2 and so passes through every power of two on the way. In
+// `apps/maze`, where the same hand-rolled shuffle ran over four elements
+// against the un-shifted reduction, it produced 3 of the 24 possible orderings.
+// A 144-tile deal would have had a comparable hole in it.
+//
+// It is replaced anyway. The copy is the defect; this one happened to be a good
+// copy, and the only way to know that was to read all sixteen and check.
 
 // ── Tile types ──────────────────────────────────────────────────────
 
@@ -423,7 +415,7 @@ struct Board {
 
 impl Board {
     /// Create a new board by placing shuffled tiles on the turtle layout.
-    fn new(rng: &mut Rng) -> Self {
+    fn new(rng: &mut SeededRng) -> Self {
         let positions = turtle_layout();
         let mut tile_kinds = full_tile_set();
 
@@ -573,7 +565,7 @@ impl Board {
 
     /// Shuffle the remaining (non-removed) tiles' kinds while keeping
     /// their positions fixed.
-    fn shuffle_remaining(&mut self, rng: &mut Rng) {
+    fn shuffle_remaining(&mut self, rng: &mut SeededRng) {
         let active_indices: Vec<usize> = self
             .tiles
             .iter()
@@ -647,7 +639,7 @@ impl Cursor {
 
 struct Mahjong {
     board: Board,
-    rng: Rng,
+    rng: SeededRng,
     seed: u64,
     selected: Option<usize>,
     cursor: Cursor,
@@ -661,11 +653,17 @@ struct Mahjong {
 
 impl Mahjong {
     fn new() -> Self {
-        Self::with_seed(42)
+        // Was `with_seed(42)`: every player, on every machine, got the
+        // same 144-tile layout. Predicting a mahjong deal costs the user
+        // nothing but the puzzle, so this asks the kernel and falls back
+        // rather than refusing -- see `randrange::seeded_from_system`.
+        // The `u64` form is used and not the generator form because this
+        // app *stores* its seed: `self.seed` is read back to re-deal.
+        Self::with_seed(seed_from_system(FALLBACK_SEED))
     }
 
     fn with_seed(seed: u64) -> Self {
-        let mut rng = Rng::new(seed);
+        let mut rng = SeededRng::new(seed);
         let board = Board::new(&mut rng);
 
         // Initialize cursor to the first free tile, if any.
@@ -691,7 +689,7 @@ impl Mahjong {
     /// Start a new game with a fresh seed.
     fn new_game(&mut self) {
         self.seed = self.seed.wrapping_add(1);
-        let mut rng = Rng::new(self.seed);
+        let mut rng = SeededRng::new(self.seed);
         self.board = Board::new(&mut rng);
         self.rng = rng;
         self.selected = None;
@@ -1197,6 +1195,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ── Helper ──────────────────────────────────────────────────────
@@ -1227,57 +1237,107 @@ mod tests {
         }
     }
 
-    // ── RNG tests ───────────────────────────────────────────────────
+    // ── Deal tests ──────────────────────────────────────────────────
+    //
+    // The generator is `randrange`'s now, and its own properties -- range,
+    // determinism, that a shuffle is a permutation of its input -- are tested
+    // there, once, instead of here in each of sixteen copies. What belongs
+    // here is the deal that the generator drives.
+
+    /// The tile kinds, in layout order, for each of `deals` consecutive deals
+    /// taken off a *single* generator.
+    ///
+    /// Consecutive deals off one stream, rather than one deal each off `deals`
+    /// fresh seeds. A low-bit defect in a generator is a counter *along* one
+    /// stream: different seeds have different low bits, so re-seeding between
+    /// samples hides the counter behind the variety of the seeds themselves,
+    /// and the test then passes on exactly the code it exists to catch.
+    fn consecutive_deals(seed: u64, deals: usize) -> Vec<Vec<TileKind>> {
+        let mut rng = SeededRng::new(seed);
+        (0..deals)
+            .map(|_| Board::new(&mut rng).tiles.iter().map(|t| t.kind).collect())
+            .collect()
+    }
 
     #[test]
-    fn rng_deterministic() {
-        let mut r1 = Rng::new(123);
-        let mut r2 = Rng::new(123);
-        for _ in 0..100 {
-            assert_eq!(r1.next(), r2.next());
+    fn every_deal_lays_out_the_whole_tile_set() {
+        // A shuffle that drops or duplicates a tile leaves a board the player
+        // cannot clear, and they do not find out until the last pair.
+        for (n, deal) in consecutive_deals(4242, 8).into_iter().enumerate() {
+            assert_eq!(deal.len(), 144, "deal {n} is not a full board");
+            for kind in base_tile_kinds() {
+                let count = deal.iter().filter(|k| **k == kind).count();
+                assert_eq!(count, 4, "deal {n} holds {count} of {kind:?}, not 4");
+            }
+            for i in 0..4u8 {
+                let seasons = deal.iter().filter(|k| **k == TileKind::Season(i)).count();
+                assert_eq!(seasons, 1, "deal {n} holds {seasons} of Season({i}), not 1");
+                let flowers = deal.iter().filter(|k| **k == TileKind::Flower(i)).count();
+                assert_eq!(flowers, 1, "deal {n} holds {flowers} of Flower({i}), not 1");
+            }
         }
     }
 
     #[test]
-    fn rng_different_seeds() {
-        let mut r1 = Rng::new(1);
-        let mut r2 = Rng::new(2);
-        assert_ne!(r1.next(), r2.next());
-    }
-
-    #[test]
-    fn rng_range() {
-        let mut rng = Rng::new(42);
-        for _ in 0..200 {
-            let v = rng.next_range(10);
-            assert!(v < 10);
+    fn consecutive_deals_differ_from_one_another() {
+        let deals = consecutive_deals(4242, 8);
+        for (i, a) in deals.iter().enumerate() {
+            for b in deals.iter().skip(i + 1) {
+                assert_ne!(a, b, "two deals off one generator came out identical");
+            }
         }
     }
 
     #[test]
-    fn rng_range_zero() {
-        let mut rng = Rng::new(42);
-        assert_eq!(rng.next_range(0), 0);
+    fn a_tile_kind_reaches_many_different_positions() {
+        // Bamboo(1) has four copies, so eight deals fill 32 of the 144 slots
+        // and a working shuffle reaches the high twenties distinct.
+        //
+        // What this does *not* do, measured: discriminate against the broken
+        // `state % bound` reduction. Simulating all three reductions over the
+        // same 144-element shuffle from the same seed gives 28 distinct
+        // positions for the broken one, 28 for the `>> 33` variant this crate
+        // actually shipped, and 29 for the fix. A 143-swap shuffle makes too
+        // many draws, at too many non-power-of-two bounds, for a low-bit
+        // counter to survive out to where any one tile lands -- unlike the
+        // four-element shuffle in `apps/maze`, which collapsed to 3 of its 24
+        // orderings. So this is an invariant -- a deal must not park tiles in
+        // a handful of slots, however that came about -- and not a regression
+        // test for the reduction. Nor does it need to be one: the note on
+        // `FALLBACK_SEED` above records that this crate's copy shifted before
+        // reducing and so never had the defect. It was deleted for being a
+        // copy, not for being wrong.
+        let deals = consecutive_deals(4242, 8);
+        let mut seen: Vec<usize> = Vec::new();
+        for deal in &deals {
+            for (i, kind) in deal.iter().enumerate() {
+                if *kind == TileKind::Bamboo(1) && !seen.contains(&i) {
+                    seen.push(i);
+                }
+            }
+        }
+        assert!(
+            seen.len() >= 24,
+            "Bamboo(1) reached only {} distinct positions across 8 deals",
+            seen.len()
+        );
     }
 
+    #[cfg(not(unix))]
     #[test]
-    fn rng_shuffle_preserves_elements() {
-        let mut rng = Rng::new(99);
-        let mut data: Vec<u32> = (0..20).collect();
-        let original = data.clone();
-        rng.shuffle(&mut data);
-        data.sort();
-        assert_eq!(data, original);
-    }
-
-    #[test]
-    fn rng_shuffle_changes_order() {
-        let mut rng = Rng::new(42);
-        let mut data: Vec<u32> = (0..20).collect();
-        let original = data.clone();
-        rng.shuffle(&mut data);
-        // Extremely unlikely to stay in the same order with 20 elements.
-        assert_ne!(data, original);
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        // A host `cargo test` has no SlateOS kernel to ask, so
+        // `seed_from_system` takes the fallback -- and two fresh games really
+        // are identical here, exactly as they were under the old hardcoded
+        // 42. That is why this asserts *which* seed rather than checking that
+        // two games differ: a variety check would pass on the broken code and
+        // fail on the fix.
+        let app = Mahjong::new();
+        assert_eq!(
+            app.seed, FALLBACK_SEED,
+            "a fresh game did not ask the system for its seed"
+        );
+        assert_ne!(app.seed, 42, "a fresh game is still dealt from a literal");
     }
 
     // ── TileKind tests ──────────────────────────────────────────────
@@ -1432,7 +1492,7 @@ mod tests {
 
     #[test]
     fn board_new_has_tiles() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let board = Board::new(&mut rng);
         assert!(!board.tiles.is_empty());
         assert!(board.remaining() > 0);
@@ -1440,7 +1500,7 @@ mod tests {
 
     #[test]
     fn board_new_all_tiles_present() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let board = Board::new(&mut rng);
         // All tiles should start as not removed.
         for tile in &board.tiles {
@@ -1450,7 +1510,7 @@ mod tests {
 
     #[test]
     fn board_remaining_decreases_on_remove() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let mut board = Board::new(&mut rng);
         let initial = board.remaining();
         board.remove_pair(0, 1);
@@ -1459,7 +1519,7 @@ mod tests {
 
     #[test]
     fn board_restore_pair() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let mut board = Board::new(&mut rng);
         let initial = board.remaining();
         board.remove_pair(0, 1);
@@ -1469,7 +1529,7 @@ mod tests {
 
     #[test]
     fn board_remove_pair_marks_removed() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let mut board = Board::new(&mut rng);
         board.remove_pair(0, 1);
         assert!(board.tiles[0].removed);
@@ -1646,7 +1706,7 @@ mod tests {
 
     #[test]
     fn board_shuffle_preserves_count() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let mut board = Board::new(&mut rng);
         let before = board.remaining();
         board.shuffle_remaining(&mut rng);
@@ -1655,7 +1715,7 @@ mod tests {
 
     #[test]
     fn board_shuffle_preserves_positions() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let mut board = Board::new(&mut rng);
         let positions_before: Vec<TilePos> = board.tiles.iter().map(|t| t.pos).collect();
         board.shuffle_remaining(&mut rng);
@@ -1665,7 +1725,7 @@ mod tests {
 
     #[test]
     fn board_tile_screen_pos_exists() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let board = Board::new(&mut rng);
         for i in 0..board.tiles.len() {
             assert!(board.tile_screen_pos(i).is_some());
@@ -2020,16 +2080,34 @@ mod tests {
     #[test]
     fn app_arrow_keys_move_cursor() {
         let mut app = Mahjong::with_seed(42);
-        let _initial = app.cursor.tile_idx;
-        app.handle_key(&make_key(Key::Right));
-        // Cursor may or may not change depending on layout, but shouldn't crash.
-        let _ = app.cursor.tile_idx;
-        // Try all directions.
-        app.handle_key(&make_key(Key::Left));
-        app.handle_key(&make_key(Key::Up));
-        app.handle_key(&make_key(Key::Down));
-        // No crash is success. (No assertion needed; reaching this line
-        // means the four key events handled cleanly.)
+
+        // The cursor must stay on a real tile after every move. It was not
+        // checked before -- the test bound the index to `_initial` and then
+        // discarded it, so a move that ran the cursor off the end of the
+        // layout would have passed. `tile_screen_pos` returning `Some` is the
+        // same question the renderer asks, so this is the property that
+        // matters rather than a bare bounds check.
+        let mut moved = false;
+        for key in [Key::Right, Key::Left, Key::Up, Key::Down] {
+            let before = app.cursor.tile_idx;
+            app.handle_key(&make_key(key));
+            if let Some(idx) = app.cursor.tile_idx {
+                assert!(
+                    app.board.tile_screen_pos(idx).is_some(),
+                    "cursor left the layout after {key:?}, at index {idx}"
+                );
+            }
+            moved |= app.cursor.tile_idx != before;
+        }
+
+        // Note what is deliberately *not* asserted: that Right-then-Left
+        // returns the cursor where it started. It does not -- from tile 0 the
+        // four moves end on tile 96 -- because navigation picks the nearest
+        // tile in the pressed direction on a three-layer turtle layout, and
+        // "nearest to the right of X" is not the inverse of "nearest to the
+        // left of Y". That is spatial navigation working, not a bug.
+        assert!(moved, "no arrow key moved the cursor at all");
+        assert_ne!(app.cursor.tile_idx, None, "cursor fell off the board");
     }
 
     #[test]
@@ -2665,7 +2743,7 @@ mod tests {
 
     #[test]
     fn board_free_tiles_on_full_board() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let board = Board::new(&mut rng);
         let free = board.free_tiles();
         // On a standard layout, there should be some free tiles.
@@ -2674,7 +2752,7 @@ mod tests {
 
     #[test]
     fn board_hint_on_full_board() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let board = Board::new(&mut rng);
         // A freshly shuffled board with 4 copies of each type should almost
         // always have a valid pair among the free tiles.

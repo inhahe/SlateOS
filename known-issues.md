@@ -35771,3 +35771,66 @@ this boot, and the gap is the pre-preemption half of boot, not slow entropy.
 The wait is only reachable from the kernel's own boot self-tests, which take
 the early-out and never sleep. The entry exists
 because the *contract* is wrong, not because anything currently hangs on it.
+
+### A-RECLAIM-SPACE-CANNOT-FREE-A-LANE'S-OWN-TARGET — the rename probe is vetoed by an unattributed handle
+
+**Where:** `scripts/reclaim-space.py` step 3 ("*our own* `target/`"), via
+`reclaim_dir`'s rename probe.
+
+**Symptom.** On 2026-08-18, with no build running anywhere and the boot lock
+free, the probe reported:
+
+```
+Step 2: target/ directories, integration checkout first
+  SKIP (in use)  D:\visual studio projects\os-lane-a\target  [Access is denied]
+```
+
+Reproducible with a bare `os.rename` outside the script, so it is a property of
+the tree and not of the script's logic (WinError 5).
+
+**Narrowed, but not resolved.** Renaming the *children* of `target/` one at a
+time isolates it to exactly one:
+
+| child | rename |
+|---|---|
+| `.rustc_info.json`, `CACHEDIR.TAG`, `debug`, `release`, `x86_64-unknown-none` | OK |
+| **`x86_64-pc-windows-gnu`** | **Access is denied** |
+
+That `debug` renames while `x86_64-pc-windows-gnu` does not is the informative
+part. An open file *inside* a directory blocks renaming every ancestor, so if
+the handle were on some file below `x86_64-pc-windows-gnu/debug/` then renaming
+`debug` would have failed too — it did not. The handle is therefore on the
+`x86_64-pc-windows-gnu` directory node itself, which is the signature of a
+process holding it as its **current working directory** rather than having a
+file open in it.
+
+That also explains why it could not be attributed: a cwd is not an image path,
+so `Get-Process | Where Path -like` finds nothing (checked — no process runs
+from under `target/`), and `D:\utils\handle.exe` is v3.2 and refuses to
+enumerate without administrator rights ("Initialization error: Make sure that
+you are an administrator"), which this session does not have.
+
+**Why it matters.** Step 3 is the step that spends *this lane's* build output
+before any other lane's — the script's stated fairness rule. If it is
+permanently vetoed, a reclaim run can only finish orphaned staging directories
+and clear old `build/` scratch. On the day this was found that was the
+difference between freeing ~27 GiB and freeing 1.6 GiB, and the boot test's
+`--reclaim-space` retry therefore fails to clear the floor in exactly the
+situation it was added for.
+
+**Not a defect in the probe.** The rename test is behaving correctly: it is
+refusing to delete a directory the OS says is in use, which is the whole reason
+it renames instead of consulting timestamps. The bug, if any, is whatever holds
+the cwd.
+
+**Next step when it recurs:** run `handle.exe` (or Process Explorer's
+Find-Handle) from an elevated shell against `x86_64-pc-windows-gnu` and record
+the owning process. If it turns out to be a long-lived tool (rust-analyzer, a
+shell, an editor) the fix is on that side; if it is an orphaned test process,
+it is `scripts/run-timeout.py`'s job-object teardown that let one escape and
+that is the real bug. Until it is attributed, do not "fix" it by weakening the
+probe — a reclaim that deletes a directory something is using is far worse than
+one that frees less than it hoped.
+
+**Discovered:** 2026-08-18, while testing `boot-test.sh --reclaim-space`
+end-to-end.

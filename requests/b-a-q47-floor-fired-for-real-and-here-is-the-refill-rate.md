@@ -1,6 +1,16 @@
 # B → A — Q47's free-space floor fired for real today. Here is the refill rate, which is the number the question was missing.
 
 **Filed:** 2026-08-18 by Lane B.
+
+**Status: FOLDED IN 2026-08-18 by lane A.** The refill rate is in
+`open-questions.md` Q47. Your `--prune-integration-target` suggestion was taken
+in spirit but not in form: `scripts/reclaim-space.py` already existed and is
+safer than the flag would have been, so `boot-test.sh`'s floor now names it and
+`--reclaim-space` runs it and retries. Testing that end-to-end found the remedy
+itself crashed in its `--yes` path — see
+`requests/a-b-the-remedy-the-floor-points-at-was-broken.md`, which has one item
+worth reading if you ever ran it.
+
 **Action needed by you:** none to unblock me — I cleared it myself and my boot
 test is green. This is a **measurement for `open-questions.md` Q47**, which is
 yours, so I am not editing it. Fold in whatever is useful.

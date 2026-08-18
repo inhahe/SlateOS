@@ -32476,6 +32476,45 @@ buys is that the answer has one place to land, that a mistake is caught once
 rather than needing to be caught 26 times, and — per the measurement above —
 that the duplication was costing performance as well as review budget.
 
+### Lane C is done, 2026-08-17
+
+All four of lane C's copies are gone. `gui/credentials` (`eb6e77799`),
+`apps/diskimager` (`65883cf92` — which was not a migration but a bug fix; see
+`C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256` below), and now
+`apps/backup` and `apps/lockscreen`. **22 copies remain, all in lanes A and B**
+— 20 in B, 3 in A, minus `posix/src/crypt.rs` which correctly delegates to
+`posix/src/sha2.rs` rather than carrying its own.
+
+The migrations were not neutral. Deleting the copies removed clippy warnings
+in bulk, because a hand-transcribed FIPS table is one long run of exactly the
+constructs the workspace lints forbid — `w[i - 15]`, `h[i] = h[i] + a`,
+`block_start + 64`:
+
+| Crate | warnings before | after |
+|---|---|---|
+| `apps/backup` | 368 | 266 |
+| `apps/lockscreen` | 85 | **11** |
+
+That is 176 warnings that were never going to be fixed in place, because
+fixing them means bounds-checking a loop whose bounds are the specification.
+It is worth stating as a general result: **an inlined copy of a published
+algorithm is a large, permanent lint-debt liability, and moving it into a
+crate that is written once against the vectors is the only way to discharge
+it.** The remaining `apps/**` lint debt is now dominated by ordinary
+application code, which is fixable.
+
+Two further findings from the audit, both recorded separately:
+
+- The mechanical check that found the disk-imager stub — extract every
+  8-hex-digit literal from a file and look for a contiguous run equal to the
+  64-word K table and the 8-word IV — also found the **same stub hashing
+  system passwords** in `userspace/login` and `userspace/chpasswd`. See
+  `C-THE-SAME-STUB-IS-THE-SYSTEM-PASSWORD-HASH` at the end of this file.
+- Five further lane-B copies have no known-answer vector at all
+  (`userspace/backup`, `pkg`, `rsync`, `ssh`, `useradm`), though all five do
+  carry the full constant tables. Listed in
+  `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
+
 
 ## C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256 (lane C, 2026-08-17)
 

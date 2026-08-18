@@ -652,6 +652,7 @@ name = "backup-app"
 version = "0.1.0"
 dependencies = [
  "safeio",
+ "sha2",
 ]
 
 [[package]]
@@ -5584,6 +5585,7 @@ name = "lockscreen"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "sha2",
 ]
 
 [[package]]

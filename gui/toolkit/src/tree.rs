@@ -239,33 +239,23 @@ impl TreeView {
             .and_then(|fid| visible.iter().position(|&vid| vid == fid));
 
         match key.key {
+            // With nothing focused yet, either arrow lands on the first row
+            // rather than stepping away from an imaginary position. At the far
+            // end, the step is refused: `checked_sub` has nowhere to go, and
+            // `focus_row` finds no row past the last one.
             Key::Up if key.modifiers == Modifiers::NONE => {
-                if let Some(idx) = current_idx {
-                    if idx > 0 {
-                        let new_id = visible[idx - 1];
-                        self.select(new_id);
-                        self.ensure_visible(idx - 1);
-                        return Some(TreeEvent::Selected(new_id));
-                    }
-                } else if let Some(&first) = visible.first() {
-                    self.select(first);
-                    self.ensure_visible(0);
-                    return Some(TreeEvent::Selected(first));
-                }
+                let target = match current_idx {
+                    Some(idx) => idx.checked_sub(1)?,
+                    None => 0,
+                };
+                return self.focus_row(&visible, target);
             }
             Key::Down if key.modifiers == Modifiers::NONE => {
-                if let Some(idx) = current_idx {
-                    if idx + 1 < visible.len() {
-                        let new_id = visible[idx + 1];
-                        self.select(new_id);
-                        self.ensure_visible(idx + 1);
-                        return Some(TreeEvent::Selected(new_id));
-                    }
-                } else if let Some(&first) = visible.first() {
-                    self.select(first);
-                    self.ensure_visible(0);
-                    return Some(TreeEvent::Selected(first));
-                }
+                let target = match current_idx {
+                    Some(idx) => idx.checked_add(1)?,
+                    None => 0,
+                };
+                return self.focus_row(&visible, target);
             }
             Key::Right if key.modifiers == Modifiers::NONE => {
                 if let Some(fid) = self.focused_id {
@@ -304,18 +294,14 @@ impl TreeView {
                 }
             }
             Key::Home if key.modifiers == Modifiers::NONE => {
-                if let Some(&first) = visible.first() {
-                    self.select(first);
-                    self.scroll_offset = 0.0;
-                    return Some(TreeEvent::Selected(first));
-                }
+                let event = self.focus_row(&visible, 0)?;
+                // Home goes to the top of the list, not merely to a position
+                // from which the first row is visible.
+                self.scroll_offset = 0.0;
+                return Some(event);
             }
             Key::End if key.modifiers == Modifiers::NONE => {
-                if let Some(&last) = visible.last() {
-                    self.select(last);
-                    self.ensure_visible(visible.len() - 1);
-                    return Some(TreeEvent::Selected(last));
-                }
+                return self.focus_row(&visible, visible.len().saturating_sub(1));
             }
             _ => {}
         }
@@ -407,13 +393,13 @@ impl TreeView {
         let visible = self.visible_nodes();
         let row_h = self.config.row_height;
         let start_row = (self.scroll_offset / row_h) as usize;
-        let visible_rows = (height / row_h) as usize + 2; // +2 for partial rows
-        let end_row = (start_row + visible_rows).min(visible.len());
+        // +2 for the partial rows at the top and bottom of the viewport.
+        let visible_rows = ((height / row_h) as usize).saturating_add(2);
+        let end_row = start_row.saturating_add(visible_rows);
 
-        for idx in start_row..end_row {
-            let Some(node) = visible.get(idx) else {
-                continue;
-            };
+        // `take` before `skip` so both count absolute rows, and the `take`
+        // does the clamping to the list's length that the loop bound used to.
+        for (idx, node) in visible.iter().enumerate().take(end_row).skip(start_row) {
             let row_y = y + (idx as f32 * row_h) - self.scroll_offset;
             let indent = node.depth as f32 * self.config.indent_width;
 
@@ -551,6 +537,24 @@ impl TreeView {
         (total_height - self.viewport_height).max(0.0)
     }
 
+    /// Select the node on visible row `idx`, scroll it into view, and report
+    /// the selection — or do nothing at all if there is no such row.
+    ///
+    /// Up, Down, Home and End were four copies of these three lines, and each
+    /// copy proved "the row exists" its own way: `idx > 0` before an
+    /// `idx - 1`, `idx + 1 < len` before an `idx + 1`, a `.last()` before a
+    /// `len() - 1`. Every one of those proofs sat in a statement above the
+    /// indexing it justified. Here the row is fetched and the existence
+    /// established by the same `get`, so a caller can ask for any index —
+    /// including one off either end — and get back a refusal rather than a
+    /// panic.
+    fn focus_row(&mut self, visible: &[TreeNodeId], idx: usize) -> Option<TreeEvent> {
+        let &id = visible.get(idx)?;
+        self.select(id);
+        self.ensure_visible(idx);
+        Some(TreeEvent::Selected(id))
+    }
+
     fn ensure_visible(&mut self, row_index: usize) {
         let row_top = row_index as f32 * self.config.row_height;
         let row_bottom = row_top + self.config.row_height;
@@ -602,7 +606,7 @@ impl TreeView {
     fn compute_depths(nodes: &mut [TreeNode], depth: u32) {
         for node in nodes.iter_mut() {
             node.depth = depth;
-            Self::compute_depths(&mut node.children, depth + 1);
+            Self::compute_depths(&mut node.children, depth.saturating_add(1));
         }
     }
 
@@ -766,6 +770,97 @@ mod tests {
 
         let event = tree.handle_key(&key);
         assert_eq!(event, Some(TreeEvent::Selected(5)));
+    }
+
+    fn press(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        }
+    }
+
+    /// Pressing into the end of the list must stay put and say nothing, rather
+    /// than wrapping, panicking, or reporting a selection that did not change.
+    #[test]
+    fn arrowing_off_either_end_of_the_list_does_nothing() {
+        let mut tree = TreeView::new(TreeConfig::default());
+        tree.set_nodes(sample_tree());
+        tree.set_viewport_height(200.0);
+
+        tree.select(1);
+        assert_eq!(tree.handle_key(&press(Key::Up)), None);
+        assert_eq!(tree.focused_id(), Some(1), "still on the first row");
+
+        tree.select(5);
+        assert_eq!(tree.handle_key(&press(Key::Down)), None);
+        assert_eq!(tree.focused_id(), Some(5), "still on the last row");
+    }
+
+    /// Every key that moves the selection has to cope with there being nowhere
+    /// to move it. `End` was the sharp one: it computed `len() - 1`.
+    #[test]
+    fn navigating_an_empty_tree_is_refused_rather_than_fatal() {
+        let mut tree = TreeView::new(TreeConfig::default());
+        tree.set_viewport_height(200.0);
+        for key in [Key::Up, Key::Down, Key::Home, Key::End] {
+            assert_eq!(
+                tree.handle_key(&press(key)),
+                None,
+                "{key:?} on an empty tree"
+            );
+            assert_eq!(tree.focused_id(), None);
+        }
+    }
+
+    /// Home and End reach the ends of the *visible* list — which expanding a
+    /// branch changes — and Home additionally scrolls the list fully to the top
+    /// rather than only far enough to reveal the first row.
+    #[test]
+    fn home_and_end_reach_the_ends_of_the_visible_list() {
+        let mut tree = TreeView::new(TreeConfig::default());
+        tree.set_nodes(sample_tree());
+        tree.set_viewport_height(40.0);
+        tree.expand_all();
+
+        assert_eq!(
+            tree.handle_key(&press(Key::End)),
+            Some(TreeEvent::Selected(5))
+        );
+        assert!(
+            tree.scroll_offset > 0.0,
+            "the last row was scrolled into view"
+        );
+
+        assert_eq!(
+            tree.handle_key(&press(Key::Home)),
+            Some(TreeEvent::Selected(1))
+        );
+        assert_eq!(tree.scroll_offset, 0.0, "Home goes to the very top");
+    }
+
+    /// The render loop bounds its row range by an estimate from the viewport
+    /// height; a viewport taller than the list must still stop at the last row.
+    #[test]
+    fn rendering_a_viewport_taller_than_the_tree_stops_at_the_last_row() {
+        let mut tree = TreeView::new(TreeConfig::default());
+        tree.set_nodes(sample_tree());
+        tree.set_viewport_height(10_000.0);
+
+        let commands = tree.render(0.0, 0.0, 300.0, 10_000.0);
+        let labels: Vec<&str> = commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.contains(&"Root A") && labels.contains(&"Root B"));
+        assert!(
+            !labels.contains(&"Child A1"),
+            "collapsed children are not rows to render"
+        );
     }
 
     #[test]

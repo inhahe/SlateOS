@@ -57805,67 +57805,72 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   - the 15-byte truncation the syscall applies (mirrored here);
             //   - an unknown task id is rejected (returns false).
             {
-                // Task 0 (the BSP idle task) is deliberately not renameable — its
-                // name is a kernel-owned diagnostic label, not a thread's comm.
-                // Assert that first, because it is the invariant the rest of this
-                // block has to work around: these self-tests run in kernel context
-                // where `current_task_id()` is 0, so naming "the current task" is
-                // exactly the call that must be refused.  Before the refusal
-                // existed, a sibling prctl self-test permanently relabelled the
-                // idle task and its name then showed up as the running task in a
-                // liveness hang dump.  See `sched::set_task_name`.
-                assert!(!crate::sched::set_task_name(0, b"nope"));
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Task 0 (the BSP idle task) is deliberately not renameable — its
+                    // name is a kernel-owned diagnostic label, not a thread's comm.
+                    // Assert that first, because it is the invariant the rest of this
+                    // block has to work around: these self-tests run in kernel context
+                    // where `current_task_id()` is 0, so naming "the current task" is
+                    // exactly the call that must be refused.  Before the refusal
+                    // existed, a sibling prctl self-test permanently relabelled the
+                    // idle task and its name then showed up as the running task in a
+                    // liveness hang dump.  See `sched::set_task_name`.
+                    assert!(!crate::sched::set_task_name(0, b"nope"));
 
-                // Round-trip the storage layer on a real, renameable task rather
-                // than on `current_task_id()`.  Picking the lowest non-zero id
-                // makes the choice deterministic across boots, so a failure here
-                // names the same task every time instead of whichever one happened
-                // to be scheduled.
-                let Some(cur) = crate::sched::task_list()
-                    .iter()
-                    .map(|t| t.id)
-                    .filter(|&id| id != 0)
-                    .min()
-                else {
+                    // Round-trip the storage layer on a real, renameable task rather
+                    // than on `current_task_id()`.  Picking the lowest non-zero id
+                    // makes the choice deterministic across boots, so a failure here
+                    // names the same task every time instead of whichever one happened
+                    // to be scheduled.
+                    let Some(cur) = crate::sched::task_list()
+                        .iter()
+                        .map(|t| t.id)
+                        .filter(|&id| id != 0)
+                        .min()
+                    else {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: no non-idle task exists to exercise \
+                         the PR_SET/GET_NAME storage round-trip"
+                        );
+                        return Err(KernelError::InternalError);
+                    };
+
+                    // Snapshot the live task's comm so we can restore it.
+                    let mut saved = [0u8; 32];
+                    let saved_len = crate::sched::copy_task_name(cur, &mut saved);
+
+                    // Set then read back.
+                    assert!(crate::sched::set_task_name(cur, b"new-comm"));
+                    let mut buf = [0u8; 32];
+                    let n = crate::sched::copy_task_name(cur, &mut buf);
+                    assert_eq!(buf.get(..n), Some(&b"new-comm"[..]));
+
+                    // 15-byte truncation invariant: the syscall handler truncates
+                    // a 16-byte input to 15 visible bytes before storing (the
+                    // 16th storage byte is the implicit NUL).  Mirror the
+                    // call-site truncation and verify the storage layer keeps it.
+                    let long = b"abcdefghijklmnop"; // 16 bytes
+                    assert_eq!(long.len(), 16);
+                    let truncated = long.get(..15).unwrap_or(&[]);
+                    assert!(crate::sched::set_task_name(cur, truncated));
+                    let mut buf2 = [0u8; 32];
+                    let n2 = crate::sched::copy_task_name(cur, &mut buf2);
+                    assert_eq!(buf2.get(..n2), Some(&b"abcdefghijklmno"[..]));
+
+                    // Unknown task id -> false (no such task to name).
+                    assert!(!crate::sched::set_task_name(u64::MAX, b"nope"));
+                    assert_eq!(crate::sched::copy_task_name(u64::MAX, &mut buf), 0);
+
+                    // Restore the original comm so the running task is unchanged.
+                    let restore = saved.get(..saved_len).unwrap_or(&[]);
+                    assert!(crate::sched::set_task_name(cur, restore));
                     serial_println!(
-                        "[syscall/linux]   FAIL: no non-idle task exists to exercise \
-                     the PR_SET/GET_NAME storage round-trip"
+                        "[syscall/linux]   OK: PR_SET/GET_NAME -> sched task comm round-trip"
                     );
-                    return Err(KernelError::InternalError);
-                };
-
-                // Snapshot the live task's comm so we can restore it.
-                let mut saved = [0u8; 32];
-                let saved_len = crate::sched::copy_task_name(cur, &mut saved);
-
-                // Set then read back.
-                assert!(crate::sched::set_task_name(cur, b"new-comm"));
-                let mut buf = [0u8; 32];
-                let n = crate::sched::copy_task_name(cur, &mut buf);
-                assert_eq!(buf.get(..n), Some(&b"new-comm"[..]));
-
-                // 15-byte truncation invariant: the syscall handler truncates
-                // a 16-byte input to 15 visible bytes before storing (the
-                // 16th storage byte is the implicit NUL).  Mirror the
-                // call-site truncation and verify the storage layer keeps it.
-                let long = b"abcdefghijklmnop"; // 16 bytes
-                assert_eq!(long.len(), 16);
-                let truncated = long.get(..15).unwrap_or(&[]);
-                assert!(crate::sched::set_task_name(cur, truncated));
-                let mut buf2 = [0u8; 32];
-                let n2 = crate::sched::copy_task_name(cur, &mut buf2);
-                assert_eq!(buf2.get(..n2), Some(&b"abcdefghijklmno"[..]));
-
-                // Unknown task id -> false (no such task to name).
-                assert!(!crate::sched::set_task_name(u64::MAX, b"nope"));
-                assert_eq!(crate::sched::copy_task_name(u64::MAX, &mut buf), 0);
-
-                // Restore the original comm so the running task is unchanged.
-                let restore = saved.get(..saved_len).unwrap_or(&[]);
-                assert!(crate::sched::set_task_name(cur, restore));
-                serial_println!(
-                    "[syscall/linux]   OK: PR_SET/GET_NAME -> sched task comm round-trip"
-                );
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 61: PR_SET_PDEATHSIG / PR_GET_PDEATHSIG.
@@ -57888,136 +57893,141 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // ok-but-no-PCB path.  We exercise the storage layer via
             // direct helper calls below instead.
             {
-                // Out-of-range signal -> EINVAL.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 65,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 65) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // sig == 0 (disable) is valid -> 0.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 0) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // sig == 64 (upper boundary) is valid -> 0.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 64) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Mid-range signal (SIGTERM == 15) is valid -> 0.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 15,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 15) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Out-of-range signal -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 65,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 65) not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // sig == 0 (disable) is valid -> 0.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 0) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // sig == 64 (upper boundary) is valid -> 0.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 64) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Mid-range signal (SIGTERM == 15) is valid -> 0.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 15,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_PDEATHSIG, 15) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // PR_GET_PDEATHSIG with NULL -> EFAULT.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_PDEATHSIG, NULL) not EFAULT ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // PR_GET_PDEATHSIG with NULL -> EFAULT.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_PDEATHSIG, NULL) not EFAULT ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // PR_GET_PDEATHSIG with a kernel-stack scratch buffer —
-                // succeeds and copy_to_user in kernel context bypasses
-                // validation, so the buffer gets written with the
-                // current value.  In kernel context caller_pid() is
-                // None, so the value reported is 0 (disabled).
-                let mut sig_out: i32 = 0x7f;
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: (&raw mut sig_out) as u64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_PDEATHSIG, &buf) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                if sig_out != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_PDEATHSIG, &buf) buf not 0 ({})",
-                        sig_out
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // PR_GET_PDEATHSIG with a kernel-stack scratch buffer —
+                    // succeeds and copy_to_user in kernel context bypasses
+                    // validation, so the buffer gets written with the
+                    // current value.  In kernel context caller_pid() is
+                    // None, so the value reported is 0 (disabled).
+                    let mut sig_out: i32 = 0x7f;
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: (&raw mut sig_out) as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_PDEATHSIG, &buf) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    if sig_out != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_PDEATHSIG, &buf) buf not 0 ({})",
+                            sig_out
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Storage-layer round-trip via the pcb helpers directly.
-                // We can't drive caller_pid() from this context so we
-                // verify the underlying store-and-query independently.
-                let test_pid = pcb::create("pdeathsig-test", 0);
-                // Default is disabled.
-                assert_eq!(pcb::get_pdeathsig(test_pid), Some(0));
-                // Install SIGTERM (15).  set returns the prior value.
-                assert_eq!(pcb::set_pdeathsig(test_pid, 15), Some(0));
-                assert_eq!(pcb::get_pdeathsig(test_pid), Some(15));
-                // Replace with SIGKILL (9).
-                assert_eq!(pcb::set_pdeathsig(test_pid, 9), Some(15));
-                assert_eq!(pcb::get_pdeathsig(test_pid), Some(9));
-                // Disable.
-                assert_eq!(pcb::set_pdeathsig(test_pid, 0), Some(9));
-                assert_eq!(pcb::get_pdeathsig(test_pid), Some(0));
-                pcb::destroy(test_pid);
-                // After destroy the PCB is gone.
-                assert_eq!(pcb::get_pdeathsig(test_pid), None);
-                assert_eq!(pcb::set_pdeathsig(test_pid, 1), None);
+                    // Storage-layer round-trip via the pcb helpers directly.
+                    // We can't drive caller_pid() from this context so we
+                    // verify the underlying store-and-query independently.
+                    let test_pid = pcb::create("pdeathsig-test", 0);
+                    // Default is disabled.
+                    assert_eq!(pcb::get_pdeathsig(test_pid), Some(0));
+                    // Install SIGTERM (15).  set returns the prior value.
+                    assert_eq!(pcb::set_pdeathsig(test_pid, 15), Some(0));
+                    assert_eq!(pcb::get_pdeathsig(test_pid), Some(15));
+                    // Replace with SIGKILL (9).
+                    assert_eq!(pcb::set_pdeathsig(test_pid, 9), Some(15));
+                    assert_eq!(pcb::get_pdeathsig(test_pid), Some(9));
+                    // Disable.
+                    assert_eq!(pcb::set_pdeathsig(test_pid, 0), Some(9));
+                    assert_eq!(pcb::get_pdeathsig(test_pid), Some(0));
+                    pcb::destroy(test_pid);
+                    // After destroy the PCB is gone.
+                    assert_eq!(pcb::get_pdeathsig(test_pid), None);
+                    assert_eq!(pcb::set_pdeathsig(test_pid, 1), None);
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 66: PR_SET_DUMPABLE / PR_GET_DUMPABLE round-trip.
@@ -58033,106 +58043,111 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      cleanly across the full 0..=2 range (the helper has no
             //      validation; the syscall surface gates the user range).
             {
-                // Out-of-range -> EINVAL.  The 0x1_0000_0000 and
-                // 0x1_0000_0001 values are the batch-428 truncation
-                // discriminators: low 32 bits land in {0, 1}, so a
-                // pre-batch `args.arg1 as u32` narrow would have accepted
-                // them.  Linux compares the full 64-bit arg2 to {0, 1} and
-                // returns EINVAL — match that.
-                for bad in [
-                    2u64,
-                    3,
-                    1_000,
-                    u64::MAX,
-                    0x1_0000_0000_u64,
-                    0x1_0000_0001_u64,
-                ] {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Out-of-range -> EINVAL.  The 0x1_0000_0000 and
+                    // 0x1_0000_0001 values are the batch-428 truncation
+                    // discriminators: low 32 bits land in {0, 1}, so a
+                    // pre-batch `args.arg1 as u32` narrow would have accepted
+                    // them.  Linux compares the full 64-bit arg2 to {0, 1} and
+                    // returns EINVAL — match that.
+                    for bad in [
+                        2u64,
+                        3,
+                        1_000,
+                        u64::MAX,
+                        0x1_0000_0000_u64,
+                        0x1_0000_0001_u64,
+                    ] {
+                        let a = SyscallArgs {
+                            arg0: 4,
+                            arg1: bad,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_DUMPABLE, {}) not EINVAL ({})",
+                                bad,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // 0 (DUMP_DISABLE) accepted.
                     let a = SyscallArgs {
                         arg0: 4,
-                        arg1: bad,
+                        arg1: 0,
                         arg2: 0,
                         arg3: 0,
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_DUMPABLE, {}) not EINVAL ({})",
-                            bad,
+                            "[syscall/linux]   FAIL: prctl(PR_SET_DUMPABLE, 0) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // 0 (DUMP_DISABLE) accepted.
-                let a = SyscallArgs {
-                    arg0: 4,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_DUMPABLE, 0) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // 1 (DUMP_USER) accepted.
-                let a = SyscallArgs {
-                    arg0: 4,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_DUMPABLE, 1) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_GET_DUMPABLE in kernel context -> default 1.
-                let a = SyscallArgs {
-                    arg0: 3,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 1 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_DUMPABLE) not 1 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // 1 (DUMP_USER) accepted.
+                    let a = SyscallArgs {
+                        arg0: 4,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_DUMPABLE, 1) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // PR_GET_DUMPABLE in kernel context -> default 1.
+                    let a = SyscallArgs {
+                        arg0: 3,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 1 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_DUMPABLE) not 1 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Storage-layer round-trip via pcb helpers directly.
-                let test_pid = pcb::create("dumpable-test", 0);
-                // Default is 1 (SUID_DUMP_USER).
-                assert_eq!(pcb::get_dumpable(test_pid), Some(1));
-                // Install 0 (DUMP_DISABLE).  set returns the prior value.
-                assert_eq!(pcb::set_dumpable(test_pid, 0), Some(1));
-                assert_eq!(pcb::get_dumpable(test_pid), Some(0));
-                // Cycle back to 1.
-                assert_eq!(pcb::set_dumpable(test_pid, 1), Some(0));
-                assert_eq!(pcb::get_dumpable(test_pid), Some(1));
-                // The helper itself stores anything — the 2 (SUID_DUMP_ROOT)
-                // sentinel must be reachable for the eventual exec-time
-                // setuid hook, even though the syscall surface refuses it
-                // from userspace.
-                assert_eq!(pcb::set_dumpable(test_pid, 2), Some(1));
-                assert_eq!(pcb::get_dumpable(test_pid), Some(2));
-                pcb::destroy(test_pid);
-                // After destroy the PCB is gone.
-                assert_eq!(pcb::get_dumpable(test_pid), None);
-                assert_eq!(pcb::set_dumpable(test_pid, 1), None);
+                    // Storage-layer round-trip via pcb helpers directly.
+                    let test_pid = pcb::create("dumpable-test", 0);
+                    // Default is 1 (SUID_DUMP_USER).
+                    assert_eq!(pcb::get_dumpable(test_pid), Some(1));
+                    // Install 0 (DUMP_DISABLE).  set returns the prior value.
+                    assert_eq!(pcb::set_dumpable(test_pid, 0), Some(1));
+                    assert_eq!(pcb::get_dumpable(test_pid), Some(0));
+                    // Cycle back to 1.
+                    assert_eq!(pcb::set_dumpable(test_pid, 1), Some(0));
+                    assert_eq!(pcb::get_dumpable(test_pid), Some(1));
+                    // The helper itself stores anything — the 2 (SUID_DUMP_ROOT)
+                    // sentinel must be reachable for the eventual exec-time
+                    // setuid hook, even though the syscall surface refuses it
+                    // from userspace.
+                    assert_eq!(pcb::set_dumpable(test_pid, 2), Some(1));
+                    assert_eq!(pcb::get_dumpable(test_pid), Some(2));
+                    pcb::destroy(test_pid);
+                    // After destroy the PCB is gone.
+                    assert_eq!(pcb::get_dumpable(test_pid), None);
+                    assert_eq!(pcb::set_dumpable(test_pid, 1), None);
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 67: PR_SET_KEEPCAPS / PR_GET_KEEPCAPS round-trip.
@@ -58146,132 +58161,137 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   4. pcb::{get,set}_keepcaps round-trips through
             //      0 -> 1 -> destroy -> None.
             {
-                // Out-of-range -> EINVAL.  Same batch-428 truncation
-                // discriminators as PR_SET_DUMPABLE: 0x1_0000_0000 and
-                // 0x1_0000_0001 catch the `args.arg1 as u32` narrow that
-                // pre-batch silently accepted.
-                for bad in [2u64, 3, 100, u64::MAX, 0x1_0000_0000_u64, 0x1_0000_0001_u64] {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Out-of-range -> EINVAL.  Same batch-428 truncation
+                    // discriminators as PR_SET_DUMPABLE: 0x1_0000_0000 and
+                    // 0x1_0000_0001 catch the `args.arg1 as u32` narrow that
+                    // pre-batch silently accepted.
+                    for bad in [2u64, 3, 100, u64::MAX, 0x1_0000_0000_u64, 0x1_0000_0001_u64] {
+                        let a = SyscallArgs {
+                            arg0: 8,
+                            arg1: bad,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_KEEPCAPS, {}) not EINVAL ({})",
+                                bad,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // 0 (KEEPCAPS_CLEAR) accepted.
                     let a = SyscallArgs {
                         arg0: 8,
-                        arg1: bad,
+                        arg1: 0,
                         arg2: 0,
                         arg3: 0,
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_KEEPCAPS, {}) not EINVAL ({})",
-                            bad,
+                            "[syscall/linux]   FAIL: prctl(PR_SET_KEEPCAPS, 0) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // 0 (KEEPCAPS_CLEAR) accepted.
-                let a = SyscallArgs {
-                    arg0: 8,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_KEEPCAPS, 0) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // 1 (KEEPCAPS_KEEP) accepted.
-                let a = SyscallArgs {
-                    arg0: 8,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_KEEPCAPS, 1) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_GET_KEEPCAPS in kernel context -> default 0.
-                let a = SyscallArgs {
-                    arg0: 7,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_KEEPCAPS) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // 1 (KEEPCAPS_KEEP) accepted.
+                    let a = SyscallArgs {
+                        arg0: 8,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_KEEPCAPS, 1) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // PR_GET_KEEPCAPS in kernel context -> default 0.
+                    let a = SyscallArgs {
+                        arg0: 7,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_KEEPCAPS) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Storage-layer round-trip via pcb helpers directly.
-                let test_pid = pcb::create("keepcaps-test", 0);
-                // Default is 0 (KEEPCAPS_CLEAR).
-                assert_eq!(pcb::get_keepcaps(test_pid), Some(0));
-                // Install 1 (KEEPCAPS_KEEP).  set returns the prior value.
-                assert_eq!(pcb::set_keepcaps(test_pid, 1), Some(0));
-                assert_eq!(pcb::get_keepcaps(test_pid), Some(1));
-                // keepcaps is a *view* over securebits bit 4 (single source of
-                // truth): setting keepcaps must surface in PR_GET_SECUREBITS and
-                // vice versa.  Setting keepcaps=1 lit SECBIT_KEEP_CAPS only.
-                assert_eq!(
-                    pcb::get_securebits(test_pid),
-                    Some(pcb::LINUX_SECBIT_KEEP_CAPS)
-                );
-                // Writing securebits directly is reflected by get_keepcaps.
-                assert_eq!(
-                    pcb::set_securebits(test_pid, pcb::LINUX_SECBIT_NOROOT),
-                    Some(pcb::LINUX_SECBIT_KEEP_CAPS)
-                );
-                assert_eq!(pcb::get_keepcaps(test_pid), Some(0));
-                // Re-light bit 4 alongside an unrelated bit; keepcaps sees it but
-                // set_keepcaps(0) must clear ONLY bit 4, leaving NOROOT intact.
-                assert_eq!(
-                    pcb::set_securebits(
-                        test_pid,
-                        pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_NOROOT
-                    ),
-                    Some(pcb::LINUX_SECBIT_NOROOT)
-                );
-                assert_eq!(pcb::get_keepcaps(test_pid), Some(1));
-                assert_eq!(pcb::set_keepcaps(test_pid, 0), Some(1));
-                assert_eq!(pcb::get_keepcaps(test_pid), Some(0));
-                assert_eq!(
-                    pcb::get_securebits(test_pid),
-                    Some(pcb::LINUX_SECBIT_NOROOT)
-                );
-                pcb::destroy(test_pid);
-                // After destroy the PCB is gone.
-                assert_eq!(pcb::get_keepcaps(test_pid), None);
-                assert_eq!(pcb::set_keepcaps(test_pid, 1), None);
+                    // Storage-layer round-trip via pcb helpers directly.
+                    let test_pid = pcb::create("keepcaps-test", 0);
+                    // Default is 0 (KEEPCAPS_CLEAR).
+                    assert_eq!(pcb::get_keepcaps(test_pid), Some(0));
+                    // Install 1 (KEEPCAPS_KEEP).  set returns the prior value.
+                    assert_eq!(pcb::set_keepcaps(test_pid, 1), Some(0));
+                    assert_eq!(pcb::get_keepcaps(test_pid), Some(1));
+                    // keepcaps is a *view* over securebits bit 4 (single source of
+                    // truth): setting keepcaps must surface in PR_GET_SECUREBITS and
+                    // vice versa.  Setting keepcaps=1 lit SECBIT_KEEP_CAPS only.
+                    assert_eq!(
+                        pcb::get_securebits(test_pid),
+                        Some(pcb::LINUX_SECBIT_KEEP_CAPS)
+                    );
+                    // Writing securebits directly is reflected by get_keepcaps.
+                    assert_eq!(
+                        pcb::set_securebits(test_pid, pcb::LINUX_SECBIT_NOROOT),
+                        Some(pcb::LINUX_SECBIT_KEEP_CAPS)
+                    );
+                    assert_eq!(pcb::get_keepcaps(test_pid), Some(0));
+                    // Re-light bit 4 alongside an unrelated bit; keepcaps sees it but
+                    // set_keepcaps(0) must clear ONLY bit 4, leaving NOROOT intact.
+                    assert_eq!(
+                        pcb::set_securebits(
+                            test_pid,
+                            pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_NOROOT
+                        ),
+                        Some(pcb::LINUX_SECBIT_NOROOT)
+                    );
+                    assert_eq!(pcb::get_keepcaps(test_pid), Some(1));
+                    assert_eq!(pcb::set_keepcaps(test_pid, 0), Some(1));
+                    assert_eq!(pcb::get_keepcaps(test_pid), Some(0));
+                    assert_eq!(
+                        pcb::get_securebits(test_pid),
+                        Some(pcb::LINUX_SECBIT_NOROOT)
+                    );
+                    pcb::destroy(test_pid);
+                    // After destroy the PCB is gone.
+                    assert_eq!(pcb::get_keepcaps(test_pid), None);
+                    assert_eq!(pcb::set_keepcaps(test_pid, 1), None);
 
-                // PR_SET_KEEPCAPS lock gate (Linux cap_task_prctl): the pure
-                // decision helper refuses once SECBIT_KEEP_CAPS_LOCKED is set,
-                // regardless of the other bits, and permits otherwise.  Tested
-                // directly because the EPERM path needs a caller PCB that the
-                // kernel self-test context cannot install.
-                assert!(keepcaps_change_allowed(0));
-                assert!(keepcaps_change_allowed(pcb::LINUX_SECBIT_KEEP_CAPS));
-                assert!(keepcaps_change_allowed(pcb::LINUX_SECBIT_NOROOT));
-                assert!(!keepcaps_change_allowed(pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED));
-                assert!(!keepcaps_change_allowed(
-                    pcb::LINUX_SECBIT_KEEP_CAPS
-                        | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
-                        | pcb::LINUX_SECBIT_NOROOT
-                ));
+                    // PR_SET_KEEPCAPS lock gate (Linux cap_task_prctl): the pure
+                    // decision helper refuses once SECBIT_KEEP_CAPS_LOCKED is set,
+                    // regardless of the other bits, and permits otherwise.  Tested
+                    // directly because the EPERM path needs a caller PCB that the
+                    // kernel self-test context cannot install.
+                    assert!(keepcaps_change_allowed(0));
+                    assert!(keepcaps_change_allowed(pcb::LINUX_SECBIT_KEEP_CAPS));
+                    assert!(keepcaps_change_allowed(pcb::LINUX_SECBIT_NOROOT));
+                    assert!(!keepcaps_change_allowed(pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED));
+                    assert!(!keepcaps_change_allowed(
+                        pcb::LINUX_SECBIT_KEEP_CAPS
+                            | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
+                            | pcb::LINUX_SECBIT_NOROOT
+                    ));
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 428 — PR_SET_DUMPABLE + PR_SET_KEEPCAPS arg2 narrowing
@@ -58316,144 +58336,149 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // covered by user-context smoke tests in the syscall
             // integration suite.
             {
-                // setrlimit divergence probes.
-                // (a) BOGUS_RES + NULL → EFAULT (was EINVAL pre-batch).
-                let a = SyscallArgs {
-                    arg0: 99,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SETRLIMIT, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: setrlimit(bogus, NULL) not EFAULT ({})",
-                        dispatch_linux(nr::SETRLIMIT, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // (b) VALID_RES + NULL → EFAULT (was 0 pre-batch — silent
-                //     data-loss for daemons dropping RLIMIT_CORE).
-                let a = SyscallArgs {
-                    arg0: 3,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SETRLIMIT, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: setrlimit(STACK, NULL) not EFAULT ({})",
-                        dispatch_linux(nr::SETRLIMIT, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // (c) VALID_RES + VALID_PTR with cur<=max → must still
-                //     succeed (sanity: the new EFAULT gate doesn't break
-                //     the happy path).
-                let good_limit: [u64; 2] = [200, 400];
-                let a = SyscallArgs {
-                    arg0: 7, // RLIMIT_NOFILE
-                    arg1: good_limit.as_ptr() as u64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SETRLIMIT, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: setrlimit(NOFILE, valid) happy path not 0 ({})",
-                        dispatch_linux(nr::SETRLIMIT, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // setrlimit divergence probes.
+                    // (a) BOGUS_RES + NULL → EFAULT (was EINVAL pre-batch).
+                    let a = SyscallArgs {
+                        arg0: 99,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SETRLIMIT, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: setrlimit(bogus, NULL) not EFAULT ({})",
+                            dispatch_linux(nr::SETRLIMIT, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (b) VALID_RES + NULL → EFAULT (was 0 pre-batch — silent
+                    //     data-loss for daemons dropping RLIMIT_CORE).
+                    let a = SyscallArgs {
+                        arg0: 3,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SETRLIMIT, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: setrlimit(STACK, NULL) not EFAULT ({})",
+                            dispatch_linux(nr::SETRLIMIT, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (c) VALID_RES + VALID_PTR with cur<=max → must still
+                    //     succeed (sanity: the new EFAULT gate doesn't break
+                    //     the happy path).
+                    let good_limit: [u64; 2] = [200, 400];
+                    let a = SyscallArgs {
+                        arg0: 7, // RLIMIT_NOFILE
+                        arg1: good_limit.as_ptr() as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SETRLIMIT, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: setrlimit(NOFILE, valid) happy path not 0 ({})",
+                            dispatch_linux(nr::SETRLIMIT, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // getrlimit divergence probes.
-                // (d) VALID_RES + NULL → EFAULT (was 0 pre-batch — silent
-                //     data-loss; caller reads uninit memory thinking it
-                //     held the rlimit).
-                let a = SyscallArgs {
-                    arg0: 3,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::GETRLIMIT, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: getrlimit(STACK, NULL) not EFAULT ({})",
-                        dispatch_linux(nr::GETRLIMIT, &a).value
-                    );
-                    return Err(KernelError::InternalError);
+                    // getrlimit divergence probes.
+                    // (d) VALID_RES + NULL → EFAULT (was 0 pre-batch — silent
+                    //     data-loss; caller reads uninit memory thinking it
+                    //     held the rlimit).
+                    let a = SyscallArgs {
+                        arg0: 3,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GETRLIMIT, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: getrlimit(STACK, NULL) not EFAULT ({})",
+                            dispatch_linux(nr::GETRLIMIT, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (e) BOGUS_RES + NULL → EINVAL (matches Linux's
+                    //     do_prlimit-first ordering; resource is more
+                    //     specific than pointer when both fail).
+                    let a = SyscallArgs {
+                        arg0: 99,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GETRLIMIT, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: getrlimit(bogus, NULL) not EINVAL ({})",
+                            dispatch_linux(nr::GETRLIMIT, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (f) BOGUS_RES = u64::MAX truncates to u32::MAX → still
+                    //     >= NUM_RLIMITS → EINVAL.  Also exercises the int
+                    //     truncation thread.
+                    let a = SyscallArgs {
+                        arg0: u64::MAX,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GETRLIMIT, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: getrlimit(u64::MAX, NULL) not EINVAL ({})",
+                            dispatch_linux(nr::GETRLIMIT, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (g) VALID_RES + VALID_PTR → success and the read-back
+                    //     matches DEFAULT_RLIMITS[STACK] in kernel context.
+                    let mut readback = [0u64; 2];
+                    let a = SyscallArgs {
+                        arg0: 3, // RLIMIT_STACK
+                        arg1: readback.as_mut_ptr() as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GETRLIMIT, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: getrlimit(STACK, valid) happy path not 0 ({})",
+                            dispatch_linux(nr::GETRLIMIT, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    let (def_cur, def_max) = pcb::DEFAULT_RLIMITS[3];
+                    if readback[0] != def_cur || readback[1] != def_max {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: getrlimit(STACK) read = ({}, {}) (expected default ({}, {}))",
+                            readback[0],
+                            readback[1],
+                            def_cur,
+                            def_max
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
-                // (e) BOGUS_RES + NULL → EINVAL (matches Linux's
-                //     do_prlimit-first ordering; resource is more
-                //     specific than pointer when both fail).
-                let a = SyscallArgs {
-                    arg0: 99,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::GETRLIMIT, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: getrlimit(bogus, NULL) not EINVAL ({})",
-                        dispatch_linux(nr::GETRLIMIT, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // (f) BOGUS_RES = u64::MAX truncates to u32::MAX → still
-                //     >= NUM_RLIMITS → EINVAL.  Also exercises the int
-                //     truncation thread.
-                let a = SyscallArgs {
-                    arg0: u64::MAX,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::GETRLIMIT, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: getrlimit(u64::MAX, NULL) not EINVAL ({})",
-                        dispatch_linux(nr::GETRLIMIT, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // (g) VALID_RES + VALID_PTR → success and the read-back
-                //     matches DEFAULT_RLIMITS[STACK] in kernel context.
-                let mut readback = [0u64; 2];
-                let a = SyscallArgs {
-                    arg0: 3, // RLIMIT_STACK
-                    arg1: readback.as_mut_ptr() as u64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::GETRLIMIT, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: getrlimit(STACK, valid) happy path not 0 ({})",
-                        dispatch_linux(nr::GETRLIMIT, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                let (def_cur, def_max) = pcb::DEFAULT_RLIMITS[3];
-                if readback[0] != def_cur || readback[1] != def_max {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: getrlimit(STACK) read = ({}, {}) (expected default ({}, {}))",
-                        readback[0],
-                        readback[1],
-                        def_cur,
-                        def_max
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                case()?;
             }
             serial_println!(
                 "[syscall/linux]   setrlimit/getrlimit unconditional copy_to/from_user EFAULT gate (Linux: legacy wrappers always touch rlim, NULL → EFAULT regardless of resource validity): OK"
@@ -58478,120 +58503,125 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // synchronously page-fault the kernel.  Userspace BAD_PTR
             // coverage lives in the syscall integration suite.
             {
-                // (a) gettimeofday(NULL, NULL) → 0, no observable effect.
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: gettimeofday(NULL, NULL) not 0 ({})",
-                        dispatch_linux(nr::GETTIMEOFDAY, &a).value
-                    );
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // (a) gettimeofday(NULL, NULL) → 0, no observable effect.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: gettimeofday(NULL, NULL) not 0 ({})",
+                            dispatch_linux(nr::GETTIMEOFDAY, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (b) gettimeofday(valid_tv, NULL) → 0, tv populated with
+                    //     monotonically-advancing realtime.  Two reads must
+                    //     produce a non-decreasing tv_sec/tv_usec pair (and a
+                    //     non-zero tv_sec since clock_realtime is seeded from
+                    //     boot epoch).
+                    #[repr(C)]
+                    #[derive(Clone, Copy)]
+                    struct Tv {
+                        sec: i64,
+                        usec: i64,
+                    }
+                    let mut tv1 = Tv { sec: -1, usec: -1 };
+                    let a = SyscallArgs {
+                        arg0: (&raw mut tv1).addr() as u64,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: gettimeofday(valid, NULL) not 0 ({})",
+                            dispatch_linux(nr::GETTIMEOFDAY, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    if tv1.sec < 0 || tv1.usec < 0 || tv1.usec >= 1_000_000 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: gettimeofday(valid, NULL) tv out of range ({}, {})",
+                            tv1.sec,
+                            tv1.usec
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (c) gettimeofday(NULL, valid_tz) → 0, tz must be
+                    //     overwritten with {0, 0}.  Pre-seed with sentinels to
+                    //     detect the silent-skip pre-batch bug.
+                    let mut tz = [0xAAi32, 0x55];
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: tz.as_mut_ptr() as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: gettimeofday(NULL, valid_tz) not 0 ({})",
+                            dispatch_linux(nr::GETTIMEOFDAY, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    if tz[0] != 0 || tz[1] != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: gettimeofday tz not overwritten to (0,0): ({}, {})",
+                            tz[0],
+                            tz[1]
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // (d) gettimeofday(valid_tv, valid_tz) → 0, both populated.
+                    let mut tv2 = Tv { sec: -1, usec: -1 };
+                    let mut tz2 = [0x33i32, 0x77];
+                    let a = SyscallArgs {
+                        arg0: (&raw mut tv2).addr() as u64,
+                        arg1: tz2.as_mut_ptr() as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: gettimeofday(valid, valid_tz) not 0 ({})",
+                            dispatch_linux(nr::GETTIMEOFDAY, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    if tv2.sec < tv1.sec || (tv2.sec == tv1.sec && tv2.usec < tv1.usec) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: gettimeofday tv not monotonic: ({},{}) -> ({},{})",
+                            tv1.sec,
+                            tv1.usec,
+                            tv2.sec,
+                            tv2.usec
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    if tz2[0] != 0 || tz2[1] != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: gettimeofday tz (both-valid) not (0,0): ({}, {})",
+                            tz2[0],
+                            tz2[1]
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
-                // (b) gettimeofday(valid_tv, NULL) → 0, tv populated with
-                //     monotonically-advancing realtime.  Two reads must
-                //     produce a non-decreasing tv_sec/tv_usec pair (and a
-                //     non-zero tv_sec since clock_realtime is seeded from
-                //     boot epoch).
-                #[repr(C)]
-                #[derive(Clone, Copy)]
-                struct Tv {
-                    sec: i64,
-                    usec: i64,
-                }
-                let mut tv1 = Tv { sec: -1, usec: -1 };
-                let a = SyscallArgs {
-                    arg0: (&raw mut tv1).addr() as u64,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: gettimeofday(valid, NULL) not 0 ({})",
-                        dispatch_linux(nr::GETTIMEOFDAY, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                if tv1.sec < 0 || tv1.usec < 0 || tv1.usec >= 1_000_000 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: gettimeofday(valid, NULL) tv out of range ({}, {})",
-                        tv1.sec,
-                        tv1.usec
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // (c) gettimeofday(NULL, valid_tz) → 0, tz must be
-                //     overwritten with {0, 0}.  Pre-seed with sentinels to
-                //     detect the silent-skip pre-batch bug.
-                let mut tz = [0xAAi32, 0x55];
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: tz.as_mut_ptr() as u64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: gettimeofday(NULL, valid_tz) not 0 ({})",
-                        dispatch_linux(nr::GETTIMEOFDAY, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                if tz[0] != 0 || tz[1] != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: gettimeofday tz not overwritten to (0,0): ({}, {})",
-                        tz[0],
-                        tz[1]
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // (d) gettimeofday(valid_tv, valid_tz) → 0, both populated.
-                let mut tv2 = Tv { sec: -1, usec: -1 };
-                let mut tz2 = [0x33i32, 0x77];
-                let a = SyscallArgs {
-                    arg0: (&raw mut tv2).addr() as u64,
-                    arg1: tz2.as_mut_ptr() as u64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::GETTIMEOFDAY, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: gettimeofday(valid, valid_tz) not 0 ({})",
-                        dispatch_linux(nr::GETTIMEOFDAY, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                if tv2.sec < tv1.sec || (tv2.sec == tv1.sec && tv2.usec < tv1.usec) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: gettimeofday tv not monotonic: ({},{}) -> ({},{})",
-                        tv1.sec,
-                        tv1.usec,
-                        tv2.sec,
-                        tv2.usec
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                if tz2[0] != 0 || tz2[1] != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: gettimeofday tz (both-valid) not (0,0): ({}, {})",
-                        tz2[0],
-                        tz2[1]
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                case()?;
             }
             serial_println!(
                 "[syscall/linux]   gettimeofday tz argument writes sys_tz=0 (Linux: deprecated struct timezone always zero on modern kernels, NULL-skip per-arg): OK"
@@ -58617,58 +58647,84 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      surface gates 1-only; helper has no validation so
             //      future code can manipulate).
             {
-                // arg2 == 0 -> EINVAL (no "clear" path).
-                let a = SyscallArgs {
-                    arg0: 38,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 0) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // arg2 == 2 -> EINVAL.
-                let a = SyscallArgs {
-                    arg0: 38,
-                    arg1: 2,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 2) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // arg2 == u64::MAX -> EINVAL.
-                let a = SyscallArgs {
-                    arg0: 38,
-                    arg1: u64::MAX,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_NNP, MAX) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // arg2 == 1 but non-zero auxiliary -> EINVAL.  Check each
-                // slot to prove the gate covers all four.
-                for (slot, name) in &[(1u8, "arg3"), (2, "arg4"), (3, "arg5")] {
-                    let mut a = SyscallArgs {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // arg2 == 0 -> EINVAL (no "clear" path).
+                    let a = SyscallArgs {
+                        arg0: 38,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 0) not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // arg2 == 2 -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 38,
+                        arg1: 2,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 2) not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // arg2 == u64::MAX -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 38,
+                        arg1: u64::MAX,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_NNP, MAX) not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // arg2 == 1 but non-zero auxiliary -> EINVAL.  Check each
+                    // slot to prove the gate covers all four.
+                    for (slot, name) in &[(1u8, "arg3"), (2, "arg4"), (3, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 38,
+                            arg1: 1,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            1 => a.arg2 = 1,
+                            2 => a.arg3 = 1,
+                            3 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 1, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // arg2 == 1 with all auxiliaries == 0 -> 0.
+                    let a = SyscallArgs {
                         arg0: 38,
                         arg1: 1,
                         arg2: 0,
@@ -58676,92 +58732,71 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        1 => a.arg2 = 1,
-                        2 => a.arg3 = 1,
-                        3 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 1, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 1) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // arg2 == 1 with all auxiliaries == 0 -> 0.
-                let a = SyscallArgs {
-                    arg0: 38,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_NNP, 1) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
 
-                // PR_GET_NO_NEW_PRIVS: non-zero auxiliary -> EINVAL.
-                let a = SyscallArgs {
-                    arg0: 39,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_NNP, …arg2=1) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // All-zero auxiliaries: kernel context -> 0 (default).
-                // (already exercised above with the existing test, but
-                // explicit re-check for batch coverage.)
-                let a = SyscallArgs {
-                    arg0: 39,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_NNP) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // PR_GET_NO_NEW_PRIVS: non-zero auxiliary -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 39,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_NNP, …arg2=1) not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // All-zero auxiliaries: kernel context -> 0 (default).
+                    // (already exercised above with the existing test, but
+                    // explicit re-check for batch coverage.)
+                    let a = SyscallArgs {
+                        arg0: 39,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_NNP) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Storage-layer round-trip via pcb helpers directly.
-                let test_pid = pcb::create("nnp-test", 0);
-                // Default is 0 (NNP cleared).
-                assert_eq!(pcb::get_no_new_privs(test_pid), Some(0));
-                // Install 1 (set NNP).  set returns the prior value.
-                assert_eq!(pcb::set_no_new_privs(test_pid, 1), Some(0));
-                assert_eq!(pcb::get_no_new_privs(test_pid), Some(1));
-                // The helper itself is not sticky — only the syscall
-                // surface enforces stickiness.  Verify the helper
-                // accepts a "clear" so future exec-time code can
-                // legitimately reset the flag if Linux ever permits it
-                // (it currently doesn't, but the helper layer must not
-                // hard-code policy).
-                assert_eq!(pcb::set_no_new_privs(test_pid, 0), Some(1));
-                assert_eq!(pcb::get_no_new_privs(test_pid), Some(0));
-                pcb::destroy(test_pid);
-                // After destroy the PCB is gone.
-                assert_eq!(pcb::get_no_new_privs(test_pid), None);
-                assert_eq!(pcb::set_no_new_privs(test_pid, 1), None);
+                    // Storage-layer round-trip via pcb helpers directly.
+                    let test_pid = pcb::create("nnp-test", 0);
+                    // Default is 0 (NNP cleared).
+                    assert_eq!(pcb::get_no_new_privs(test_pid), Some(0));
+                    // Install 1 (set NNP).  set returns the prior value.
+                    assert_eq!(pcb::set_no_new_privs(test_pid, 1), Some(0));
+                    assert_eq!(pcb::get_no_new_privs(test_pid), Some(1));
+                    // The helper itself is not sticky — only the syscall
+                    // surface enforces stickiness.  Verify the helper
+                    // accepts a "clear" so future exec-time code can
+                    // legitimately reset the flag if Linux ever permits it
+                    // (it currently doesn't, but the helper layer must not
+                    // hard-code policy).
+                    assert_eq!(pcb::set_no_new_privs(test_pid, 0), Some(1));
+                    assert_eq!(pcb::get_no_new_privs(test_pid), Some(0));
+                    pcb::destroy(test_pid);
+                    // After destroy the PCB is gone.
+                    assert_eq!(pcb::get_no_new_privs(test_pid), None);
+                    assert_eq!(pcb::set_no_new_privs(test_pid, 1), None);
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 69: PR_SET_CHILD_SUBREAPER / PR_GET_CHILD_SUBREAPER
@@ -58781,9 +58816,51 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   6. pcb storage layer: default 0, set 1, query 1, set 0,
             //      query 0, destroy -> None.
             {
-                // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET.
-                for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET.
+                    for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 36,
+                            arg1: 1,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_SET_CHILD_SUBREAPER(0): accepted (clears flag).
+                    let a = SyscallArgs {
+                        arg0: 36,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, 0) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // PR_SET_CHILD_SUBREAPER(1): accepted (sets flag).
+                    let a = SyscallArgs {
                         arg0: 36,
                         arg1: 1,
                         arg2: 0,
@@ -58791,73 +58868,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, 1) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // PR_SET_CHILD_SUBREAPER(0): accepted (clears flag).
-                let a = SyscallArgs {
-                    arg0: 36,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, 0) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_SET_CHILD_SUBREAPER(1): accepted (sets flag).
-                let a = SyscallArgs {
-                    arg0: 36,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, 1) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_SET_CHILD_SUBREAPER(42): accepted (normalises to 1).
-                let a = SyscallArgs {
-                    arg0: 36,
-                    arg1: 42,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, 42) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // PR_SET_CHILD_SUBREAPER(42): accepted (normalises to 1).
+                    let a = SyscallArgs {
+                        arg0: 36,
+                        arg1: 42,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_CHILD_SUBREAPER, 42) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // arg3/arg4/arg5 != 0 -> EINVAL on PR_GET.
-                for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                    // arg3/arg4/arg5 != 0 -> EINVAL on PR_GET.
+                    for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 37,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_GET_CHILD_SUBREAPER NULL pointer -> EFAULT.
+                    let a = SyscallArgs {
                         arg0: 37,
                         arg1: 0,
                         arg2: 0,
@@ -58865,77 +58926,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, NULL) not EFAULT ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // PR_GET_CHILD_SUBREAPER NULL pointer -> EFAULT.
-                let a = SyscallArgs {
-                    arg0: 37,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, NULL) not EFAULT ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_GET_CHILD_SUBREAPER with scratch buffer -> 0
-                // (kernel context: no PCB, default applies).
-                let mut subreaper_out: i32 = 0x7f;
-                let a = SyscallArgs {
-                    arg0: 37,
-                    arg1: (&raw mut subreaper_out) as u64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, &buf) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                if subreaper_out != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, &buf) buf not 0 ({})",
-                        subreaper_out
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // PR_GET_CHILD_SUBREAPER with scratch buffer -> 0
+                    // (kernel context: no PCB, default applies).
+                    let mut subreaper_out: i32 = 0x7f;
+                    let a = SyscallArgs {
+                        arg0: 37,
+                        arg1: (&raw mut subreaper_out) as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, &buf) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    if subreaper_out != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_CHILD_SUBREAPER, &buf) buf not 0 ({})",
+                            subreaper_out
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Storage-layer round-trip via pcb helpers directly.
-                let test_pid = pcb::create("subreaper-test", 0);
-                // Default is 0.
-                assert_eq!(pcb::get_child_subreaper(test_pid), Some(0));
-                // Install 1.  set returns the prior value.
-                assert_eq!(pcb::set_child_subreaper(test_pid, 1), Some(0));
-                assert_eq!(pcb::get_child_subreaper(test_pid), Some(1));
-                // Clear back to 0.
-                assert_eq!(pcb::set_child_subreaper(test_pid, 0), Some(1));
-                assert_eq!(pcb::get_child_subreaper(test_pid), Some(0));
-                pcb::destroy(test_pid);
-                // After destroy the PCB is gone.
-                assert_eq!(pcb::get_child_subreaper(test_pid), None);
-                assert_eq!(pcb::set_child_subreaper(test_pid, 1), None);
+                    // Storage-layer round-trip via pcb helpers directly.
+                    let test_pid = pcb::create("subreaper-test", 0);
+                    // Default is 0.
+                    assert_eq!(pcb::get_child_subreaper(test_pid), Some(0));
+                    // Install 1.  set returns the prior value.
+                    assert_eq!(pcb::set_child_subreaper(test_pid, 1), Some(0));
+                    assert_eq!(pcb::get_child_subreaper(test_pid), Some(1));
+                    // Clear back to 0.
+                    assert_eq!(pcb::set_child_subreaper(test_pid, 0), Some(1));
+                    assert_eq!(pcb::get_child_subreaper(test_pid), Some(0));
+                    pcb::destroy(test_pid);
+                    // After destroy the PCB is gone.
+                    assert_eq!(pcb::get_child_subreaper(test_pid), None);
+                    assert_eq!(pcb::set_child_subreaper(test_pid, 1), None);
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 70: PR_SET_THP_DISABLE / PR_GET_THP_DISABLE round-trip
@@ -58951,9 +58991,51 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   5. pcb storage layer: default 0, set 1, query 1, set 0,
             //      query 0, destroy -> None.
             {
-                // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET_THP_DISABLE.
-                for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET_THP_DISABLE.
+                    for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 41,
+                            arg1: 1,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_SET_THP_DISABLE(0): accepted (clears flag).
+                    let a = SyscallArgs {
+                        arg0: 41,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, 0) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // PR_SET_THP_DISABLE(1): accepted (sets flag).
+                    let a = SyscallArgs {
                         arg0: 41,
                         arg1: 1,
                         arg2: 0,
@@ -58961,75 +59043,61 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, 1) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // PR_SET_THP_DISABLE(0): accepted (clears flag).
-                let a = SyscallArgs {
-                    arg0: 41,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, 0) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_SET_THP_DISABLE(1): accepted (sets flag).
-                let a = SyscallArgs {
-                    arg0: 41,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, 1) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_SET_THP_DISABLE(42): accepted (normalises to 1).
-                let a = SyscallArgs {
-                    arg0: 41,
-                    arg1: 42,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, 42) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // PR_SET_THP_DISABLE(42): accepted (normalises to 1).
+                    let a = SyscallArgs {
+                        arg0: 41,
+                        arg1: 42,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_THP_DISABLE, 42) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // arg2/arg3/arg4/arg5 != 0 -> EINVAL on PR_GET_THP_DISABLE.
-                // (Note: unlike SUBREAPER, GET_THP_DISABLE returns the flag
-                // directly via the syscall return — arg1 is also gated.)
-                for (slot, name) in &[(1u8, "arg2"), (2, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                    // arg2/arg3/arg4/arg5 != 0 -> EINVAL on PR_GET_THP_DISABLE.
+                    // (Note: unlike SUBREAPER, GET_THP_DISABLE returns the flag
+                    // directly via the syscall return — arg1 is also gated.)
+                    for (slot, name) in &[(1u8, "arg2"), (2, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 42,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            1 => a.arg1 = 1,
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_GET_THP_DISABLE, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_GET_THP_DISABLE with all-zero auxiliaries -> 0
+                    // (kernel context: no PCB, default applies).
+                    let a = SyscallArgs {
                         arg0: 42,
                         arg1: 0,
                         arg2: 0,
@@ -59037,55 +59105,32 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        1 => a.arg1 = 1,
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_THP_DISABLE, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_GET_THP_DISABLE) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // PR_GET_THP_DISABLE with all-zero auxiliaries -> 0
-                // (kernel context: no PCB, default applies).
-                let a = SyscallArgs {
-                    arg0: 42,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_THP_DISABLE) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
 
-                // Storage-layer round-trip via pcb helpers directly.
-                let test_pid = pcb::create("thp-disable-test", 0);
-                // Default is 0 (THP enabled — system-wide policy applies).
-                assert_eq!(pcb::get_thp_disable(test_pid), Some(0));
-                // Install 1 (disable THP for this process).  set returns
-                // the prior value.
-                assert_eq!(pcb::set_thp_disable(test_pid, 1), Some(0));
-                assert_eq!(pcb::get_thp_disable(test_pid), Some(1));
-                // Clear back to 0.
-                assert_eq!(pcb::set_thp_disable(test_pid, 0), Some(1));
-                assert_eq!(pcb::get_thp_disable(test_pid), Some(0));
-                pcb::destroy(test_pid);
-                // After destroy the PCB is gone.
-                assert_eq!(pcb::get_thp_disable(test_pid), None);
-                assert_eq!(pcb::set_thp_disable(test_pid, 1), None);
+                    // Storage-layer round-trip via pcb helpers directly.
+                    let test_pid = pcb::create("thp-disable-test", 0);
+                    // Default is 0 (THP enabled — system-wide policy applies).
+                    assert_eq!(pcb::get_thp_disable(test_pid), Some(0));
+                    // Install 1 (disable THP for this process).  set returns
+                    // the prior value.
+                    assert_eq!(pcb::set_thp_disable(test_pid, 1), Some(0));
+                    assert_eq!(pcb::get_thp_disable(test_pid), Some(1));
+                    // Clear back to 0.
+                    assert_eq!(pcb::set_thp_disable(test_pid, 0), Some(1));
+                    assert_eq!(pcb::get_thp_disable(test_pid), Some(0));
+                    pcb::destroy(test_pid);
+                    // After destroy the PCB is gone.
+                    assert_eq!(pcb::get_thp_disable(test_pid), None);
+                    assert_eq!(pcb::set_thp_disable(test_pid, 1), None);
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 71: PR_SET_TIMERSLACK / PR_GET_TIMERSLACK round-trip
@@ -59099,9 +59144,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      query 1_000_000, query default still 50_000,
             //      destroy -> None.
             {
-                // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET_TIMERSLACK.
-                for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET_TIMERSLACK.
+                    for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 29,
+                            arg1: 100_000,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_TIMERSLACK, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_SET_TIMERSLACK(100_000): kernel context — returns 0
+                    // (no PCB to mutate but Linux's success path is mirrored).
+                    let a = SyscallArgs {
                         arg0: 29,
                         arg1: 100_000,
                         arg2: 0,
@@ -59109,60 +59181,61 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_TIMERSLACK, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_SET_TIMERSLACK, 100000) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // PR_SET_TIMERSLACK(100_000): kernel context — returns 0
-                // (no PCB to mutate but Linux's success path is mirrored).
-                let a = SyscallArgs {
-                    arg0: 29,
-                    arg1: 100_000,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_TIMERSLACK, 100000) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_SET_TIMERSLACK(0): kernel context still returns 0
-                // (reset to default — no PCB to consult, no side effect).
-                let a = SyscallArgs {
-                    arg0: 29,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_TIMERSLACK, 0) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // PR_SET_TIMERSLACK(0): kernel context still returns 0
+                    // (reset to default — no PCB to consult, no side effect).
+                    let a = SyscallArgs {
+                        arg0: 29,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_TIMERSLACK, 0) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // arg1/arg2/arg3/arg4/arg5 != 0 -> EINVAL on PR_GET_TIMERSLACK.
-                // (Returns directly via syscall return, no user pointer.)
-                for (slot, name) in &[(1u8, "arg2"), (2, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                    // arg1/arg2/arg3/arg4/arg5 != 0 -> EINVAL on PR_GET_TIMERSLACK.
+                    // (Returns directly via syscall return, no user pointer.)
+                    for (slot, name) in &[(1u8, "arg2"), (2, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 30,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            1 => a.arg1 = 1,
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_GET_TIMERSLACK, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_GET_TIMERSLACK with all-zero auxiliaries -> 50_000
+                    // (kernel context: no PCB, compile-time default applies).
+                    let a = SyscallArgs {
                         arg0: 30,
                         arg1: 0,
                         arg2: 0,
@@ -59170,58 +59243,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        1 => a.arg1 = 1,
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != 50_000 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_TIMERSLACK, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_GET_TIMERSLACK) not 50000 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // PR_GET_TIMERSLACK with all-zero auxiliaries -> 50_000
-                // (kernel context: no PCB, compile-time default applies).
-                let a = SyscallArgs {
-                    arg0: 30,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 50_000 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_TIMERSLACK) not 50000 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
 
-                // Storage-layer round-trip via pcb helpers directly.
-                let test_pid = pcb::create("timerslack-test", 0);
-                // Default is 50_000 (Linux DEFAULT_TIMER_SLACK_NS).
-                assert_eq!(pcb::get_timer_slack_ns(test_pid), Some(50_000));
-                assert_eq!(pcb::get_timer_slack_default_ns(test_pid), Some(50_000),);
-                // Install 1_000_000 ns (1ms slack).  set returns the prior.
-                assert_eq!(pcb::set_timer_slack_ns(test_pid, 1_000_000), Some(50_000),);
-                assert_eq!(pcb::get_timer_slack_ns(test_pid), Some(1_000_000),);
-                // Default is unchanged — only the active value moves.
-                assert_eq!(pcb::get_timer_slack_default_ns(test_pid), Some(50_000),);
-                // Reset back to default via the helper directly.
-                assert_eq!(pcb::set_timer_slack_ns(test_pid, 50_000), Some(1_000_000),);
-                assert_eq!(pcb::get_timer_slack_ns(test_pid), Some(50_000));
-                pcb::destroy(test_pid);
-                // After destroy the PCB is gone.
-                assert_eq!(pcb::get_timer_slack_ns(test_pid), None);
-                assert_eq!(pcb::get_timer_slack_default_ns(test_pid), None);
-                assert_eq!(pcb::set_timer_slack_ns(test_pid, 1), None);
+                    // Storage-layer round-trip via pcb helpers directly.
+                    let test_pid = pcb::create("timerslack-test", 0);
+                    // Default is 50_000 (Linux DEFAULT_TIMER_SLACK_NS).
+                    assert_eq!(pcb::get_timer_slack_ns(test_pid), Some(50_000));
+                    assert_eq!(pcb::get_timer_slack_default_ns(test_pid), Some(50_000),);
+                    // Install 1_000_000 ns (1ms slack).  set returns the prior.
+                    assert_eq!(pcb::set_timer_slack_ns(test_pid, 1_000_000), Some(50_000),);
+                    assert_eq!(pcb::get_timer_slack_ns(test_pid), Some(1_000_000),);
+                    // Default is unchanged — only the active value moves.
+                    assert_eq!(pcb::get_timer_slack_default_ns(test_pid), Some(50_000),);
+                    // Reset back to default via the helper directly.
+                    assert_eq!(pcb::set_timer_slack_ns(test_pid, 50_000), Some(1_000_000),);
+                    assert_eq!(pcb::get_timer_slack_ns(test_pid), Some(50_000));
+                    pcb::destroy(test_pid);
+                    // After destroy the PCB is gone.
+                    assert_eq!(pcb::get_timer_slack_ns(test_pid), None);
+                    assert_eq!(pcb::get_timer_slack_default_ns(test_pid), None);
+                    assert_eq!(pcb::set_timer_slack_ns(test_pid, 1), None);
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 72: PR_SET_TSC / PR_GET_TSC round-trip with strict
@@ -59236,28 +59286,54 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   7. pcb storage: default 1, set 2, query 2, set 1, query 1,
             //      destroy -> None.
             {
-                // arg1 not in {1, 2} -> EINVAL on PR_SET_TSC.
-                for bad_val in &[0u64, 3, 99, u64::MAX] {
-                    let a = SyscallArgs {
-                        arg0: 26,
-                        arg1: *bad_val,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_TSC, {}) not EINVAL ({})",
-                            bad_val,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // arg1 not in {1, 2} -> EINVAL on PR_SET_TSC.
+                    for bad_val in &[0u64, 3, 99, u64::MAX] {
+                        let a = SyscallArgs {
+                            arg0: 26,
+                            arg1: *bad_val,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_TSC, {}) not EINVAL ({})",
+                                bad_val,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET_TSC.
-                for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                    // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET_TSC.
+                    for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 26,
+                            arg1: 1,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_TSC, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_SET_TSC(1) -> 0 (kernel context: no PCB, no side effect).
+                    let a = SyscallArgs {
                         arg0: 26,
                         arg1: 1,
                         arg2: 0,
@@ -59265,57 +59341,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_TSC, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_SET_TSC, 1) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // PR_SET_TSC(1) -> 0 (kernel context: no PCB, no side effect).
-                let a = SyscallArgs {
-                    arg0: 26,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_TSC, 1) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_SET_TSC(2) -> 0.
-                let a = SyscallArgs {
-                    arg0: 26,
-                    arg1: 2,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_TSC, 2) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // PR_SET_TSC(2) -> 0.
+                    let a = SyscallArgs {
+                        arg0: 26,
+                        arg1: 2,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_TSC, 2) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // arg3/arg4/arg5 != 0 -> EINVAL on PR_GET_TSC.
-                for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                    // arg3/arg4/arg5 != 0 -> EINVAL on PR_GET_TSC.
+                    for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 25,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_GET_TSC, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_GET_TSC NULL pointer -> EFAULT.
+                    let a = SyscallArgs {
                         arg0: 25,
                         arg1: 0,
                         arg2: 0,
@@ -59323,77 +59399,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_TSC, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_GET_TSC, NULL) not EFAULT ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // PR_GET_TSC NULL pointer -> EFAULT.
-                let a = SyscallArgs {
-                    arg0: 25,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_TSC, NULL) not EFAULT ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_GET_TSC with scratch buffer -> writes 1
-                // (kernel context: no PCB, default applies).
-                let mut tsc_out: i32 = 0x7f;
-                let a = SyscallArgs {
-                    arg0: 25,
-                    arg1: (&raw mut tsc_out) as u64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_TSC, &buf) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                if tsc_out != 1 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_TSC, &buf) buf not 1 ({})",
-                        tsc_out
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // PR_GET_TSC with scratch buffer -> writes 1
+                    // (kernel context: no PCB, default applies).
+                    let mut tsc_out: i32 = 0x7f;
+                    let a = SyscallArgs {
+                        arg0: 25,
+                        arg1: (&raw mut tsc_out) as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_TSC, &buf) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    if tsc_out != 1 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_TSC, &buf) buf not 1 ({})",
+                            tsc_out
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Storage-layer round-trip via pcb helpers directly.
-                let test_pid = pcb::create("tsc-test", 0);
-                // Default is PR_TSC_ENABLE (1).
-                assert_eq!(pcb::get_tsc_mode(test_pid), Some(1));
-                // Install PR_TSC_SIGSEGV (2).  set returns the prior.
-                assert_eq!(pcb::set_tsc_mode(test_pid, 2), Some(1));
-                assert_eq!(pcb::get_tsc_mode(test_pid), Some(2));
-                // Clear back to 1.
-                assert_eq!(pcb::set_tsc_mode(test_pid, 1), Some(2));
-                assert_eq!(pcb::get_tsc_mode(test_pid), Some(1));
-                pcb::destroy(test_pid);
-                // After destroy the PCB is gone.
-                assert_eq!(pcb::get_tsc_mode(test_pid), None);
-                assert_eq!(pcb::set_tsc_mode(test_pid, 1), None);
+                    // Storage-layer round-trip via pcb helpers directly.
+                    let test_pid = pcb::create("tsc-test", 0);
+                    // Default is PR_TSC_ENABLE (1).
+                    assert_eq!(pcb::get_tsc_mode(test_pid), Some(1));
+                    // Install PR_TSC_SIGSEGV (2).  set returns the prior.
+                    assert_eq!(pcb::set_tsc_mode(test_pid, 2), Some(1));
+                    assert_eq!(pcb::get_tsc_mode(test_pid), Some(2));
+                    // Clear back to 1.
+                    assert_eq!(pcb::set_tsc_mode(test_pid, 1), Some(2));
+                    assert_eq!(pcb::get_tsc_mode(test_pid), Some(1));
+                    pcb::destroy(test_pid);
+                    // After destroy the PCB is gone.
+                    assert_eq!(pcb::get_tsc_mode(test_pid), None);
+                    assert_eq!(pcb::set_tsc_mode(test_pid, 1), None);
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 73: PR_GET_TID_ADDRESS round-trip with strict
@@ -59405,9 +59460,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      (kernel-context: no `set_tid_address` registration
             //      for the boot-time bootstrap task).
             {
-                // arg3/arg4/arg5 != 0 -> EINVAL.
-                for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // arg3/arg4/arg5 != 0 -> EINVAL.
+                    for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 40,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // NULL pointer -> EFAULT.
+                    let a = SyscallArgs {
                         arg0: 40,
                         arg1: 0,
                         arg2: 0,
@@ -59415,63 +59496,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, NULL) not EFAULT ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
+                    // Scratch buffer pre-filled with a sentinel to confirm
+                    // we actually wrote (and not just left the prior bytes).
+                    let mut tid_addr_out: u64 = 0xdead_beef_cafe_babe;
+                    let a = SyscallArgs {
+                        arg0: 40,
+                        arg1: (&raw mut tid_addr_out) as u64,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, &buf) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Kernel context (no registration) -> 0.
+                    if tid_addr_out != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, &buf) buf not 0 (0x{:x})",
+                            tid_addr_out
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
-                // NULL pointer -> EFAULT.
-                let a = SyscallArgs {
-                    arg0: 40,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, NULL) not EFAULT ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Scratch buffer pre-filled with a sentinel to confirm
-                // we actually wrote (and not just left the prior bytes).
-                let mut tid_addr_out: u64 = 0xdead_beef_cafe_babe;
-                let a = SyscallArgs {
-                    arg0: 40,
-                    arg1: (&raw mut tid_addr_out) as u64,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, &buf) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Kernel context (no registration) -> 0.
-                if tid_addr_out != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_TID_ADDRESS, &buf) buf not 0 (0x{:x})",
-                        tid_addr_out
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                case()?;
             }
 
             // Batch 74: PR_MCE_KILL / PR_MCE_KILL_GET round-trip with
@@ -59488,9 +59548,88 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   8. pcb storage round-trips DEFAULT -> EARLY -> LATE ->
             //      DEFAULT -> destroy -> None.
             {
-                // arg4/arg5 != 0 -> EINVAL on PR_MCE_KILL.
-                for (slot, name) in &[(3u8, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // arg4/arg5 != 0 -> EINVAL on PR_MCE_KILL.
+                    for (slot, name) in &[(3u8, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 33,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // arg1 not in {0, 1} -> EINVAL.
+                    for bad_action in &[2u64, 3, 99, u64::MAX] {
+                        let a = SyscallArgs {
+                            arg0: 33,
+                            arg1: *bad_action,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, action={}) not EINVAL ({})",
+                                bad_action,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // CLEAR (arg1=0) + arg2 != 0 -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 33,
+                        arg1: 0,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, CLEAR, arg2=1) not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // SET (arg1=1) + arg2 not in {0, 1, 2} -> EINVAL.
+                    for bad_policy in &[3u64, 99, u64::MAX] {
+                        let a = SyscallArgs {
+                            arg0: 33,
+                            arg1: 1,
+                            arg2: *bad_policy,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, SET, policy={}) not EINVAL ({})",
+                                bad_policy,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // CLEAR (arg1=0, arg2=0) -> 0.
+                    let a = SyscallArgs {
                         arg0: 33,
                         arg1: 0,
                         arg2: 0,
@@ -59498,113 +59637,61 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, …{}=1) not EINVAL ({})",
-                            name,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // arg1 not in {0, 1} -> EINVAL.
-                for bad_action in &[2u64, 3, 99, u64::MAX] {
-                    let a = SyscallArgs {
-                        arg0: 33,
-                        arg1: *bad_action,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, action={}) not EINVAL ({})",
-                            bad_action,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // CLEAR (arg1=0) + arg2 != 0 -> EINVAL.
-                let a = SyscallArgs {
-                    arg0: 33,
-                    arg1: 0,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, CLEAR, arg2=1) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // SET (arg1=1) + arg2 not in {0, 1, 2} -> EINVAL.
-                for bad_policy in &[3u64, 99, u64::MAX] {
-                    let a = SyscallArgs {
-                        arg0: 33,
-                        arg1: 1,
-                        arg2: *bad_policy,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, SET, policy={}) not EINVAL ({})",
-                            bad_policy,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // CLEAR (arg1=0, arg2=0) -> 0.
-                let a = SyscallArgs {
-                    arg0: 33,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, CLEAR) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // SET + LATE/EARLY/DEFAULT all succeed.
-                for policy in &[0u64, 1, 2] {
-                    let a = SyscallArgs {
-                        arg0: 33,
-                        arg1: 1,
-                        arg2: *policy,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
                     if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, SET, {}) not 0 ({})",
-                            policy,
+                            "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, CLEAR) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
+                    // SET + LATE/EARLY/DEFAULT all succeed.
+                    for policy in &[0u64, 1, 2] {
+                        let a = SyscallArgs {
+                            arg0: 33,
+                            arg1: 1,
+                            arg2: *policy,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_MCE_KILL, SET, {}) not 0 ({})",
+                                policy,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
 
-                // PR_MCE_KILL_GET: arg1..arg5 != 0 -> EINVAL.
-                for (slot, name) in &[(1u8, "arg2"), (2, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                    // PR_MCE_KILL_GET: arg1..arg5 != 0 -> EINVAL.
+                    for (slot, name) in &[(1u8, "arg2"), (2, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 34,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            1 => a.arg1 = 1,
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_MCE_KILL_GET, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // Kernel context -> 2 (DEFAULT).
+                    let a = SyscallArgs {
                         arg0: 34,
                         arg1: 0,
                         arg2: 0,
@@ -59612,56 +59699,34 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        1 => a.arg1 = 1,
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != 2 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_MCE_KILL_GET, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_MCE_KILL_GET) not 2 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // Kernel context -> 2 (DEFAULT).
-                let a = SyscallArgs {
-                    arg0: 34,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 2 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_MCE_KILL_GET) not 2 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
 
-                // Storage-layer round-trip via pcb helpers directly.
-                let test_pid = pcb::create("mce-kill-test", 0);
-                // Default is PR_MCE_KILL_DEFAULT (2).
-                assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(2));
-                // Install EARLY (1).
-                assert_eq!(pcb::set_mce_kill_policy(test_pid, 1), Some(2));
-                assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(1));
-                // Install LATE (0).
-                assert_eq!(pcb::set_mce_kill_policy(test_pid, 0), Some(1));
-                assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(0));
-                // Back to DEFAULT (2).
-                assert_eq!(pcb::set_mce_kill_policy(test_pid, 2), Some(0));
-                assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(2));
-                pcb::destroy(test_pid);
-                // After destroy the PCB is gone.
-                assert_eq!(pcb::get_mce_kill_policy(test_pid), None);
-                assert_eq!(pcb::set_mce_kill_policy(test_pid, 1), None);
+                    // Storage-layer round-trip via pcb helpers directly.
+                    let test_pid = pcb::create("mce-kill-test", 0);
+                    // Default is PR_MCE_KILL_DEFAULT (2).
+                    assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(2));
+                    // Install EARLY (1).
+                    assert_eq!(pcb::set_mce_kill_policy(test_pid, 1), Some(2));
+                    assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(1));
+                    // Install LATE (0).
+                    assert_eq!(pcb::set_mce_kill_policy(test_pid, 0), Some(1));
+                    assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(0));
+                    // Back to DEFAULT (2).
+                    assert_eq!(pcb::set_mce_kill_policy(test_pid, 2), Some(0));
+                    assert_eq!(pcb::get_mce_kill_policy(test_pid), Some(2));
+                    pcb::destroy(test_pid);
+                    // After destroy the PCB is gone.
+                    assert_eq!(pcb::get_mce_kill_policy(test_pid), None);
+                    assert_eq!(pcb::set_mce_kill_policy(test_pid, 1), None);
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 75: PR_TASK_PERF_EVENTS_DISABLE (31) /
@@ -59670,26 +59735,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // the option must succeed so perf-aware userspace doesn't
             // warn).  Linux ignores arg2..arg5 for both; we do too.
             {
-                for option in &[31u64, 32] {
-                    // Linux ignores extra args — verify we do too even
-                    // with garbage in arg2..arg5.
-                    let a = SyscallArgs {
-                        arg0: *option,
-                        arg1: 0xdead_beef,
-                        arg2: 0xdead_beef,
-                        arg3: 0xdead_beef,
-                        arg4: 0xdead_beef,
-                        arg5: 0xdead_beef,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_TASK_PERF_EVENTS_{}, garbage) not 0 ({})",
-                            option,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    for option in &[31u64, 32] {
+                        // Linux ignores extra args — verify we do too even
+                        // with garbage in arg2..arg5.
+                        let a = SyscallArgs {
+                            arg0: *option,
+                            arg1: 0xdead_beef,
+                            arg2: 0xdead_beef,
+                            arg3: 0xdead_beef,
+                            arg4: 0xdead_beef,
+                            arg5: 0xdead_beef,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_TASK_PERF_EVENTS_{}, garbage) not 0 ({})",
+                                option,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
+                    Ok(())
                 }
+                case()?;
             }
 
             // Batch 76: PR_SET_MDWE / PR_GET_MDWE round-trip with strict
@@ -59711,103 +59781,130 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      from non-zero -> EPERM, helper bypass set 0 ->
             //      query 0, destroy -> None.
             {
-                // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET_MDWE.
-                for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
-                        arg0: 65,
-                        arg1: 1,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    match slot {
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // arg3/arg4/arg5 != 0 -> EINVAL on PR_SET_MDWE.
+                    for (slot, name) in &[(2u8, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 65,
+                            arg1: 1,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_MDWE, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_MDWE, …{}=1) not EINVAL ({})",
-                            name,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // arg1 with high bits set (above u32) -> EINVAL.
-                let a = SyscallArgs {
-                    arg0: 65,
-                    arg1: 1u64 << 33,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_MDWE, 1<<33) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // arg1 with undefined low bits (4 = neither MDWE bit) -> EINVAL.
-                let a = SyscallArgs {
-                    arg0: 65,
-                    arg1: 4,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_MDWE, 4) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // NO_INHERIT (2) without REFUSE_EXEC_GAIN (1) -> EINVAL.
-                let a = SyscallArgs {
-                    arg0: 65,
-                    arg1: 2,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_MDWE, 2) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Valid values 0, 1, 3 all -> 0 in kernel context
-                // (no PCB to apply stickiness against).
-                for v in &[0u64, 1, 3] {
+                    // arg1 with high bits set (above u32) -> EINVAL.
                     let a = SyscallArgs {
                         arg0: 65,
-                        arg1: *v,
+                        arg1: 1u64 << 33,
                         arg2: 0,
                         arg3: 0,
                         arg4: 0,
                         arg5: 0,
                     };
-                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_MDWE, {}) not 0 ({})",
-                            v,
+                            "[syscall/linux]   FAIL: prctl(PR_SET_MDWE, 1<<33) not EINVAL ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
+                    // arg1 with undefined low bits (4 = neither MDWE bit) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 65,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_MDWE, 4) not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // NO_INHERIT (2) without REFUSE_EXEC_GAIN (1) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 65,
+                        arg1: 2,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_MDWE, 2) not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Valid values 0, 1, 3 all -> 0 in kernel context
+                    // (no PCB to apply stickiness against).
+                    for v in &[0u64, 1, 3] {
+                        let a = SyscallArgs {
+                            arg0: 65,
+                            arg1: *v,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_MDWE, {}) not 0 ({})",
+                                v,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
 
-                // PR_GET_MDWE: arg1..arg5 != 0 -> EINVAL.
-                for (slot, name) in &[(1u8, "arg2"), (2, "arg3"), (3, "arg4"), (4, "arg5")] {
-                    let mut a = SyscallArgs {
+                    // PR_GET_MDWE: arg1..arg5 != 0 -> EINVAL.
+                    for (slot, name) in &[(1u8, "arg2"), (2, "arg3"), (3, "arg4"), (4, "arg5")] {
+                        let mut a = SyscallArgs {
+                            arg0: 66,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        match slot {
+                            1 => a.arg1 = 1,
+                            2 => a.arg2 = 1,
+                            3 => a.arg3 = 1,
+                            4 => a.arg4 = 1,
+                            _ => unreachable!(),
+                        }
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_GET_MDWE, …{}=1) not EINVAL ({})",
+                                name,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // Kernel context -> 0 (default).
+                    let a = SyscallArgs {
                         arg0: 66,
                         arg1: 0,
                         arg2: 0,
@@ -59815,57 +59912,35 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg4: 0,
                         arg5: 0,
                     };
-                    match slot {
-                        1 => a.arg1 = 1,
-                        2 => a.arg2 = 1,
-                        3 => a.arg3 = 1,
-                        4 => a.arg4 = 1,
-                        _ => unreachable!(),
-                    }
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_MDWE, …{}=1) not EINVAL ({})",
-                            name,
+                            "[syscall/linux]   FAIL: prctl(PR_GET_MDWE) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // Kernel context -> 0 (default).
-                let a = SyscallArgs {
-                    arg0: 66,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_MDWE) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
 
-                // Storage-layer round-trip via pcb helpers directly.
-                let test_pid = pcb::create("mdwe-test", 0);
-                // Default is 0.
-                assert_eq!(pcb::get_mdwe_bits(test_pid), Some(0));
-                // Helper bypass: install 1.  set returns the prior value.
-                assert_eq!(pcb::set_mdwe_bits(test_pid, 1), Some(0));
-                assert_eq!(pcb::get_mdwe_bits(test_pid), Some(1));
-                // Helper is NOT sticky — only the syscall surface
-                // enforces stickiness.  Verify helper accepts an
-                // arbitrary mutation so test fixtures keep working.
-                assert_eq!(pcb::set_mdwe_bits(test_pid, 3), Some(1));
-                assert_eq!(pcb::get_mdwe_bits(test_pid), Some(3));
-                assert_eq!(pcb::set_mdwe_bits(test_pid, 0), Some(3));
-                assert_eq!(pcb::get_mdwe_bits(test_pid), Some(0));
-                pcb::destroy(test_pid);
-                // After destroy the PCB is gone.
-                assert_eq!(pcb::get_mdwe_bits(test_pid), None);
-                assert_eq!(pcb::set_mdwe_bits(test_pid, 1), None);
+                    // Storage-layer round-trip via pcb helpers directly.
+                    let test_pid = pcb::create("mdwe-test", 0);
+                    // Default is 0.
+                    assert_eq!(pcb::get_mdwe_bits(test_pid), Some(0));
+                    // Helper bypass: install 1.  set returns the prior value.
+                    assert_eq!(pcb::set_mdwe_bits(test_pid, 1), Some(0));
+                    assert_eq!(pcb::get_mdwe_bits(test_pid), Some(1));
+                    // Helper is NOT sticky — only the syscall surface
+                    // enforces stickiness.  Verify helper accepts an
+                    // arbitrary mutation so test fixtures keep working.
+                    assert_eq!(pcb::set_mdwe_bits(test_pid, 3), Some(1));
+                    assert_eq!(pcb::get_mdwe_bits(test_pid), Some(3));
+                    assert_eq!(pcb::set_mdwe_bits(test_pid, 0), Some(3));
+                    assert_eq!(pcb::get_mdwe_bits(test_pid), Some(0));
+                    pcb::destroy(test_pid);
+                    // After destroy the PCB is gone.
+                    assert_eq!(pcb::get_mdwe_bits(test_pid), None);
+                    assert_eq!(pcb::set_mdwe_bits(test_pid, 1), None);
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 77: PR_GET_TIMING / PR_SET_TIMING — Linux supports
@@ -59878,87 +59953,92 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   4. PR_SET_TIMING ignores arg2..arg5 (Linux does too).
             //   5. PR_GET_TIMING -> 0, ignoring arg1..arg5.
             {
-                // PR_SET_TIMING(0) -> 0.
-                let a = SyscallArgs {
-                    arg0: 14,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 0) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // PR_SET_TIMING(0) -> 0.
+                    let a = SyscallArgs {
+                        arg0: 14,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 0) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // PR_SET_TIMING(1) -> EINVAL (timestamp mode never wired up).
+                    let a = SyscallArgs {
+                        arg0: 14,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 1) not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // PR_SET_TIMING(0xdead) -> EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 14,
+                        arg1: 0xdead,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 0xdead) not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // PR_SET_TIMING(0) with garbage arg2..arg5 -> 0 (Linux
+                    // ignores those).
+                    let a = SyscallArgs {
+                        arg0: 14,
+                        arg1: 0,
+                        arg2: 0xaaaa,
+                        arg3: 0xbbbb,
+                        arg4: 0xcccc,
+                        arg5: 0xdddd,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 0, garbage…) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // PR_GET_TIMING -> 0 regardless of arg1..arg5.
+                    let a = SyscallArgs {
+                        arg0: 13,
+                        arg1: 0xaaaa,
+                        arg2: 0xbbbb,
+                        arg3: 0xcccc,
+                        arg4: 0xdddd,
+                        arg5: 0xeeee,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_TIMING, garbage…) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
-                // PR_SET_TIMING(1) -> EINVAL (timestamp mode never wired up).
-                let a = SyscallArgs {
-                    arg0: 14,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 1) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_SET_TIMING(0xdead) -> EINVAL.
-                let a = SyscallArgs {
-                    arg0: 14,
-                    arg1: 0xdead,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 0xdead) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_SET_TIMING(0) with garbage arg2..arg5 -> 0 (Linux
-                // ignores those).
-                let a = SyscallArgs {
-                    arg0: 14,
-                    arg1: 0,
-                    arg2: 0xaaaa,
-                    arg3: 0xbbbb,
-                    arg4: 0xcccc,
-                    arg5: 0xdddd,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_TIMING, 0, garbage…) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_GET_TIMING -> 0 regardless of arg1..arg5.
-                let a = SyscallArgs {
-                    arg0: 13,
-                    arg1: 0xaaaa,
-                    arg2: 0xbbbb,
-                    arg3: 0xcccc,
-                    arg4: 0xdddd,
-                    arg5: 0xeeee,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_TIMING, garbage…) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                case()?;
             }
 
             // Batch 78: PR_GET_SECCOMP — Linux returns the current
@@ -59975,54 +60055,59 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      untouched (see todo.txt 107).  Verify the
             //      regression hasn't snuck in.
             {
-                // PR_GET_SECCOMP -> 0.
-                let a = SyscallArgs {
-                    arg0: 21,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_SECCOMP) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // PR_GET_SECCOMP -> 0.
+                    let a = SyscallArgs {
+                        arg0: 21,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_SECCOMP) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // PR_GET_SECCOMP with garbage arg1..arg5 -> still 0.
+                    let a = SyscallArgs {
+                        arg0: 21,
+                        arg1: 0xaaaa,
+                        arg2: 0xbbbb,
+                        arg3: 0xcccc,
+                        arg4: 0xdddd,
+                        arg5: 0xeeee,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_GET_SECCOMP, garbage…) not 0 ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // PR_SET_SECCOMP still EINVAL (intentional non-change).
+                    let a = SyscallArgs {
+                        arg0: 22,
+                        arg1: 2,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_SECCOMP, FILTER) unexpectedly not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
-                // PR_GET_SECCOMP with garbage arg1..arg5 -> still 0.
-                let a = SyscallArgs {
-                    arg0: 21,
-                    arg1: 0xaaaa,
-                    arg2: 0xbbbb,
-                    arg3: 0xcccc,
-                    arg4: 0xdddd,
-                    arg5: 0xeeee,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_SECCOMP, garbage…) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_SET_SECCOMP still EINVAL (intentional non-change).
-                let a = SyscallArgs {
-                    arg0: 22,
-                    arg1: 2,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_SECCOMP, FILTER) unexpectedly not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                case()?;
             }
 
             // Batch 79: PR_GET_IO_FLUSHER / PR_SET_IO_FLUSHER round-trip
@@ -60035,69 +60120,136 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   5. PR_GET_IO_FLUSHER in kernel context -> 0 (default).
             //   6. pcb storage round-trip via direct helpers.
             {
-                // arg3 / arg4 / arg5 != 0 -> EINVAL on PR_SET_IO_FLUSHER.
-                for (idx, a) in [
-                    SyscallArgs {
-                        arg0: 57,
-                        arg1: 0,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 57,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 1,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 57,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 1,
-                        arg5: 0,
-                    },
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_IO_FLUSHER, …{}=1) not EINVAL ({})",
-                            idx + 3,
-                            dispatch_linux(nr::PRCTL, a).value
-                        );
-                        return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // arg3 / arg4 / arg5 != 0 -> EINVAL on PR_SET_IO_FLUSHER.
+                    for (idx, a) in [
+                        SyscallArgs {
+                            arg0: 57,
+                            arg1: 0,
+                            arg2: 1,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 57,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 1,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 57,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 1,
+                            arg5: 0,
+                        },
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_IO_FLUSHER, …{}=1) not EINVAL ({})",
+                                idx + 3,
+                                dispatch_linux(nr::PRCTL, a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // arg1 not in {0, 1} -> EINVAL.
-                for v in [2u64, 3, 0xff, u64::MAX] {
-                    let a = SyscallArgs {
-                        arg0: 57,
-                        arg1: v,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_IO_FLUSHER, {}) not EINVAL ({})",
-                            v,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
+                    // arg1 not in {0, 1} -> EINVAL.
+                    for v in [2u64, 3, 0xff, u64::MAX] {
+                        let a = SyscallArgs {
+                            arg0: 57,
+                            arg1: v,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_IO_FLUSHER, {}) not EINVAL ({})",
+                                v,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // PR_SET_IO_FLUSHER(0) / (1) -> 0 in kernel context.
-                for v in [0u64, 1] {
+                    // PR_SET_IO_FLUSHER(0) / (1) -> 0 in kernel context.
+                    for v in [0u64, 1] {
+                        let a = SyscallArgs {
+                            arg0: 57,
+                            arg1: v,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_IO_FLUSHER, {}) not 0 ({})",
+                                v,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_GET_IO_FLUSHER arg1..arg5 != 0 -> EINVAL.
+                    for (idx, a) in [
+                        SyscallArgs {
+                            arg0: 58,
+                            arg1: 1,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 58,
+                            arg1: 0,
+                            arg2: 1,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 58,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 1,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 58,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 1,
+                            arg5: 0,
+                        },
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_GET_IO_FLUSHER, …{}=1) not EINVAL ({})",
+                                idx + 2,
+                                dispatch_linux(nr::PRCTL, a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // Kernel context PR_GET_IO_FLUSHER -> 0.
                     let a = SyscallArgs {
-                        arg0: 57,
-                        arg1: v,
+                        arg0: 58,
+                        arg1: 0,
                         arg2: 0,
                         arg3: 0,
                         arg4: 0,
@@ -60105,87 +60257,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     };
                     if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_IO_FLUSHER, {}) not 0 ({})",
-                            v,
+                            "[syscall/linux]   FAIL: prctl(PR_GET_IO_FLUSHER) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // PR_GET_IO_FLUSHER arg1..arg5 != 0 -> EINVAL.
-                for (idx, a) in [
-                    SyscallArgs {
-                        arg0: 58,
-                        arg1: 1,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 58,
-                        arg1: 0,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 58,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 1,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 58,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 1,
-                        arg5: 0,
-                    },
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_IO_FLUSHER, …{}=1) not EINVAL ({})",
-                            idx + 2,
-                            dispatch_linux(nr::PRCTL, a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // Kernel context PR_GET_IO_FLUSHER -> 0.
-                let a = SyscallArgs {
-                    arg0: 58,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_IO_FLUSHER) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
 
-                // Storage-layer round-trip via pcb helpers directly.
-                let test_pid = pcb::create("io-flusher-test", 0);
-                assert_eq!(pcb::get_io_flusher(test_pid), Some(0));
-                assert_eq!(pcb::set_io_flusher(test_pid, 1), Some(0));
-                assert_eq!(pcb::get_io_flusher(test_pid), Some(1));
-                assert_eq!(pcb::set_io_flusher(test_pid, 0), Some(1));
-                assert_eq!(pcb::get_io_flusher(test_pid), Some(0));
-                pcb::destroy(test_pid);
-                assert_eq!(pcb::get_io_flusher(test_pid), None);
-                assert_eq!(pcb::set_io_flusher(test_pid, 1), None);
+                    // Storage-layer round-trip via pcb helpers directly.
+                    let test_pid = pcb::create("io-flusher-test", 0);
+                    assert_eq!(pcb::get_io_flusher(test_pid), Some(0));
+                    assert_eq!(pcb::set_io_flusher(test_pid, 1), Some(0));
+                    assert_eq!(pcb::get_io_flusher(test_pid), Some(1));
+                    assert_eq!(pcb::set_io_flusher(test_pid, 0), Some(1));
+                    assert_eq!(pcb::get_io_flusher(test_pid), Some(0));
+                    pcb::destroy(test_pid);
+                    assert_eq!(pcb::get_io_flusher(test_pid), None);
+                    assert_eq!(pcb::set_io_flusher(test_pid, 1), None);
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 80: PR_GET_SPECULATION_CTRL / PR_SET_SPECULATION_CTRL —
@@ -60199,157 +60289,162 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   5. PR_SET_SPECULATION_CTRL with arg3/arg4 != 0 -> EINVAL.
             //   6. PR_SET_SPECULATION_CTRL with unknown which -> ENODEV.
             {
-                // PR_GET valid which -> 0.
-                for which in [0u64, 1, 2] {
-                    let a = SyscallArgs {
-                        arg0: 52,
-                        arg1: which,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_SPECULATION_CTRL, {}) not 0 ({})",
-                            which,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // PR_GET arg2..arg4 != 0 -> EINVAL.
-                for (idx, a) in [
-                    SyscallArgs {
-                        arg0: 52,
-                        arg1: 0,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 52,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 1,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 52,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 1,
-                        arg5: 0,
-                    },
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_SPECULATION_CTRL, …{}=1) not EINVAL ({})",
-                            idx + 3,
-                            dispatch_linux(nr::PRCTL, a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // PR_GET unknown which -> ENODEV.
-                for which in [3u64, 0xff, u64::MAX] {
-                    let a = SyscallArgs {
-                        arg0: 52,
-                        arg1: which,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::ENODEV) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_SPECULATION_CTRL, which={}) not ENODEV ({})",
-                            which,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // PR_SET known which -> ENXIO.  Try each known which
-                // with a representative ctrl value.
-                for which in [0u64, 1, 2] {
-                    for ctrl in [2u64, 4, 8] {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // PR_GET valid which -> 0.
+                    for which in [0u64, 1, 2] {
                         let a = SyscallArgs {
-                            arg0: 53,
+                            arg0: 52,
                             arg1: which,
-                            arg2: ctrl,
+                            arg2: 0,
                             arg3: 0,
                             arg4: 0,
                             arg5: 0,
                         };
-                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::ENXIO) {
+                        if dispatch_linux(nr::PRCTL, &a).value != 0 {
                             serial_println!(
-                                "[syscall/linux]   FAIL: prctl(PR_SET_SPECULATION_CTRL, which={}, ctrl={}) not ENXIO ({})",
+                                "[syscall/linux]   FAIL: prctl(PR_GET_SPECULATION_CTRL, {}) not 0 ({})",
                                 which,
-                                ctrl,
                                 dispatch_linux(nr::PRCTL, &a).value
                             );
                             return Err(KernelError::InternalError);
                         }
                     }
-                }
-                // PR_SET arg3/arg4 != 0 -> EINVAL.  arg3/arg4 take
-                // precedence over the which/ctrl validation in Linux.
-                for (idx, a) in [
-                    SyscallArgs {
-                        arg0: 53,
-                        arg1: 0,
-                        arg2: 2,
-                        arg3: 1,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 53,
-                        arg1: 0,
-                        arg2: 2,
-                        arg3: 0,
-                        arg4: 1,
-                        arg5: 0,
-                    },
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_SPECULATION_CTRL, …{}=1) not EINVAL ({})",
-                            idx + 4,
-                            dispatch_linux(nr::PRCTL, a).value
-                        );
-                        return Err(KernelError::InternalError);
+                    // PR_GET arg2..arg4 != 0 -> EINVAL.
+                    for (idx, a) in [
+                        SyscallArgs {
+                            arg0: 52,
+                            arg1: 0,
+                            arg2: 1,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 52,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 1,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 52,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 1,
+                            arg5: 0,
+                        },
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_GET_SPECULATION_CTRL, …{}=1) not EINVAL ({})",
+                                idx + 3,
+                                dispatch_linux(nr::PRCTL, a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // PR_SET unknown which -> ENODEV.
-                for which in [3u64, 0xff, u64::MAX] {
-                    let a = SyscallArgs {
-                        arg0: 53,
-                        arg1: which,
-                        arg2: 2,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::ENODEV) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_SPECULATION_CTRL, which={}) not ENODEV ({})",
-                            which,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
+                    // PR_GET unknown which -> ENODEV.
+                    for which in [3u64, 0xff, u64::MAX] {
+                        let a = SyscallArgs {
+                            arg0: 52,
+                            arg1: which,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::ENODEV) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_GET_SPECULATION_CTRL, which={}) not ENODEV ({})",
+                                which,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
+                    // PR_SET known which -> ENXIO.  Try each known which
+                    // with a representative ctrl value.
+                    for which in [0u64, 1, 2] {
+                        for ctrl in [2u64, 4, 8] {
+                            let a = SyscallArgs {
+                                arg0: 53,
+                                arg1: which,
+                                arg2: ctrl,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::ENXIO) {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: prctl(PR_SET_SPECULATION_CTRL, which={}, ctrl={}) not ENXIO ({})",
+                                    which,
+                                    ctrl,
+                                    dispatch_linux(nr::PRCTL, &a).value
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
+                    }
+                    // PR_SET arg3/arg4 != 0 -> EINVAL.  arg3/arg4 take
+                    // precedence over the which/ctrl validation in Linux.
+                    for (idx, a) in [
+                        SyscallArgs {
+                            arg0: 53,
+                            arg1: 0,
+                            arg2: 2,
+                            arg3: 1,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 53,
+                            arg1: 0,
+                            arg2: 2,
+                            arg3: 0,
+                            arg4: 1,
+                            arg5: 0,
+                        },
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_SPECULATION_CTRL, …{}=1) not EINVAL ({})",
+                                idx + 4,
+                                dispatch_linux(nr::PRCTL, a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_SET unknown which -> ENODEV.
+                    for which in [3u64, 0xff, u64::MAX] {
+                        let a = SyscallArgs {
+                            arg0: 53,
+                            arg1: which,
+                            arg2: 2,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::ENODEV) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_SPECULATION_CTRL, which={}) not ENODEV ({})",
+                                which,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    Ok(())
                 }
+                case()?;
             }
 
             // Batch 81: PR_SET_MEMORY_MERGE / PR_GET_MEMORY_MERGE
@@ -60363,69 +60458,136 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   5. Kernel context PR_GET_MEMORY_MERGE -> 0 (default).
             //   6. pcb storage round-trip.
             {
-                // arg3/arg4/arg5 != 0 -> EINVAL.
-                for (idx, a) in [
-                    SyscallArgs {
-                        arg0: 67,
-                        arg1: 0,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 67,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 1,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 67,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 1,
-                        arg5: 0,
-                    },
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_MEMORY_MERGE, …{}=1) not EINVAL ({})",
-                            idx + 3,
-                            dispatch_linux(nr::PRCTL, a).value
-                        );
-                        return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // arg3/arg4/arg5 != 0 -> EINVAL.
+                    for (idx, a) in [
+                        SyscallArgs {
+                            arg0: 67,
+                            arg1: 0,
+                            arg2: 1,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 67,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 1,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 67,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 1,
+                            arg5: 0,
+                        },
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_MEMORY_MERGE, …{}=1) not EINVAL ({})",
+                                idx + 3,
+                                dispatch_linux(nr::PRCTL, a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // arg1 not in {0, 1} -> EINVAL.
-                for v in [2u64, 3, 0xff, u64::MAX] {
-                    let a = SyscallArgs {
-                        arg0: 67,
-                        arg1: v,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_MEMORY_MERGE, {}) not EINVAL ({})",
-                            v,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
+                    // arg1 not in {0, 1} -> EINVAL.
+                    for v in [2u64, 3, 0xff, u64::MAX] {
+                        let a = SyscallArgs {
+                            arg0: 67,
+                            arg1: v,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_MEMORY_MERGE, {}) not EINVAL ({})",
+                                v,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // PR_SET_MEMORY_MERGE(0) / (1) -> 0.
-                for v in [0u64, 1] {
+                    // PR_SET_MEMORY_MERGE(0) / (1) -> 0.
+                    for v in [0u64, 1] {
+                        let a = SyscallArgs {
+                            arg0: 67,
+                            arg1: v,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_MEMORY_MERGE, {}) not 0 ({})",
+                                v,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_GET_MEMORY_MERGE arg1..arg5 != 0 -> EINVAL.
+                    for (idx, a) in [
+                        SyscallArgs {
+                            arg0: 68,
+                            arg1: 1,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 68,
+                            arg1: 0,
+                            arg2: 1,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 68,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 1,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 68,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 1,
+                            arg5: 0,
+                        },
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_GET_MEMORY_MERGE, …{}=1) not EINVAL ({})",
+                                idx + 2,
+                                dispatch_linux(nr::PRCTL, a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // Kernel context PR_GET_MEMORY_MERGE -> 0.
                     let a = SyscallArgs {
-                        arg0: 67,
-                        arg1: v,
+                        arg0: 68,
+                        arg1: 0,
                         arg2: 0,
                         arg3: 0,
                         arg4: 0,
@@ -60433,87 +60595,25 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     };
                     if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_MEMORY_MERGE, {}) not 0 ({})",
-                            v,
+                            "[syscall/linux]   FAIL: prctl(PR_GET_MEMORY_MERGE) not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // PR_GET_MEMORY_MERGE arg1..arg5 != 0 -> EINVAL.
-                for (idx, a) in [
-                    SyscallArgs {
-                        arg0: 68,
-                        arg1: 1,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 68,
-                        arg1: 0,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 68,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 1,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 68,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 1,
-                        arg5: 0,
-                    },
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_MEMORY_MERGE, …{}=1) not EINVAL ({})",
-                            idx + 2,
-                            dispatch_linux(nr::PRCTL, a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // Kernel context PR_GET_MEMORY_MERGE -> 0.
-                let a = SyscallArgs {
-                    arg0: 68,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_MEMORY_MERGE) not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
 
-                // Storage-layer round-trip via pcb helpers directly.
-                let test_pid = pcb::create("memory-merge-test", 0);
-                assert_eq!(pcb::get_memory_merge(test_pid), Some(0));
-                assert_eq!(pcb::set_memory_merge(test_pid, 1), Some(0));
-                assert_eq!(pcb::get_memory_merge(test_pid), Some(1));
-                assert_eq!(pcb::set_memory_merge(test_pid, 0), Some(1));
-                assert_eq!(pcb::get_memory_merge(test_pid), Some(0));
-                pcb::destroy(test_pid);
-                assert_eq!(pcb::get_memory_merge(test_pid), None);
-                assert_eq!(pcb::set_memory_merge(test_pid, 1), None);
+                    // Storage-layer round-trip via pcb helpers directly.
+                    let test_pid = pcb::create("memory-merge-test", 0);
+                    assert_eq!(pcb::get_memory_merge(test_pid), Some(0));
+                    assert_eq!(pcb::set_memory_merge(test_pid, 1), Some(0));
+                    assert_eq!(pcb::get_memory_merge(test_pid), Some(1));
+                    assert_eq!(pcb::set_memory_merge(test_pid, 0), Some(1));
+                    assert_eq!(pcb::get_memory_merge(test_pid), Some(0));
+                    pcb::destroy(test_pid);
+                    assert_eq!(pcb::get_memory_merge(test_pid), None);
+                    assert_eq!(pcb::set_memory_merge(test_pid, 1), None);
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 82: PR_CAP_AMBIENT — ambient capability set
@@ -60528,27 +60628,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   6. pcb-layer round-trip: raise / lower / clear /
             //      is_set return correct prior values.
             {
-                // op == 0 -> EINVAL.
-                let a = SyscallArgs {
-                    arg0: 47,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op=0) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // op > 4 -> EINVAL.
-                for op in [5u64, 0xff, u64::MAX] {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // op == 0 -> EINVAL.
                     let a = SyscallArgs {
                         arg0: 47,
-                        arg1: op,
+                        arg1: 0,
                         arg2: 0,
                         arg3: 0,
                         arg4: 0,
@@ -60556,43 +60641,101 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     };
                     if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}) not EINVAL ({})",
-                            op,
+                            "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op=0) not EINVAL ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
-                }
-                // RAISE / LOWER / IS_SET with cap > CAP_LAST_CAP (40)
-                // -> EINVAL.
-                for op in [1u64, 2, 3] {
-                    for cap in [41u64, 0xff, u64::MAX] {
+                    // op > 4 -> EINVAL.
+                    for op in [5u64, 0xff, u64::MAX] {
                         let a = SyscallArgs {
                             arg0: 47,
                             arg1: op,
-                            arg2: cap,
+                            arg2: 0,
                             arg3: 0,
                             arg4: 0,
                             arg5: 0,
                         };
                         if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
                             serial_println!(
-                                "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}, cap={}) not EINVAL ({})",
+                                "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}) not EINVAL ({})",
                                 op,
-                                cap,
                                 dispatch_linux(nr::PRCTL, &a).value
                             );
                             return Err(KernelError::InternalError);
                         }
                     }
-                }
-                // RAISE / LOWER / IS_SET with arg3 or arg4 != 0 ->
-                // EINVAL.  arg2 must be a valid cap; pick 0 (CAP_CHOWN).
-                for op in [1u64, 2, 3] {
+                    // RAISE / LOWER / IS_SET with cap > CAP_LAST_CAP (40)
+                    // -> EINVAL.
+                    for op in [1u64, 2, 3] {
+                        for cap in [41u64, 0xff, u64::MAX] {
+                            let a = SyscallArgs {
+                                arg0: 47,
+                                arg1: op,
+                                arg2: cap,
+                                arg3: 0,
+                                arg4: 0,
+                                arg5: 0,
+                            };
+                            if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}, cap={}) not EINVAL ({})",
+                                    op,
+                                    cap,
+                                    dispatch_linux(nr::PRCTL, &a).value
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
+                    }
+                    // RAISE / LOWER / IS_SET with arg3 or arg4 != 0 ->
+                    // EINVAL.  arg2 must be a valid cap; pick 0 (CAP_CHOWN).
+                    for op in [1u64, 2, 3] {
+                        for (idx, a) in [
+                            SyscallArgs {
+                                arg0: 47,
+                                arg1: op,
+                                arg2: 0,
+                                arg3: 1,
+                                arg4: 0,
+                                arg5: 0,
+                            },
+                            SyscallArgs {
+                                arg0: 47,
+                                arg1: op,
+                                arg2: 0,
+                                arg3: 0,
+                                arg4: 1,
+                                arg5: 0,
+                            },
+                        ]
+                        .iter()
+                        .enumerate()
+                        {
+                            if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
+                                serial_println!(
+                                    "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}, …{}=1) not EINVAL ({})",
+                                    op,
+                                    idx + 3,
+                                    dispatch_linux(nr::PRCTL, a).value
+                                );
+                                return Err(KernelError::InternalError);
+                            }
+                        }
+                    }
+                    // CLEAR_ALL with arg2 / arg3 / arg4 != 0 -> EINVAL.
                     for (idx, a) in [
                         SyscallArgs {
                             arg0: 47,
-                            arg1: op,
+                            arg1: 4,
+                            arg2: 1,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 47,
+                            arg1: 4,
                             arg2: 0,
                             arg3: 1,
                             arg4: 0,
@@ -60600,7 +60743,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         },
                         SyscallArgs {
                             arg0: 47,
-                            arg1: op,
+                            arg1: 4,
                             arg2: 0,
                             arg3: 0,
                             arg4: 1,
@@ -60612,138 +60755,100 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     {
                         if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
                             serial_println!(
-                                "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}, …{}=1) not EINVAL ({})",
-                                op,
-                                idx + 3,
+                                "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT_CLEAR_ALL, …{}=1) not EINVAL ({})",
+                                idx + 2,
                                 dispatch_linux(nr::PRCTL, a).value
                             );
                             return Err(KernelError::InternalError);
                         }
                     }
-                }
-                // CLEAR_ALL with arg2 / arg3 / arg4 != 0 -> EINVAL.
-                for (idx, a) in [
-                    SyscallArgs {
-                        arg0: 47,
-                        arg1: 4,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 47,
-                        arg1: 4,
-                        arg2: 0,
-                        arg3: 1,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 47,
-                        arg1: 4,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 1,
-                        arg5: 0,
-                    },
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT_CLEAR_ALL, …{}=1) not EINVAL ({})",
-                            idx + 2,
-                            dispatch_linux(nr::PRCTL, a).value
-                        );
-                        return Err(KernelError::InternalError);
+                    // Kernel context: RAISE/LOWER/CLEAR_ALL -> 0.
+                    // IS_SET -> 0 (no PCB, unwrap_or(0) path).
+                    for (op, cap) in [(1u64, 0u64), (2, 5), (3, 12), (4, 0)] {
+                        let a = SyscallArgs {
+                            arg0: 47,
+                            arg1: op,
+                            arg2: cap,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}, cap={}) kernel-ctx not 0 ({})",
+                                op,
+                                cap,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // Kernel context: RAISE/LOWER/CLEAR_ALL -> 0.
-                // IS_SET -> 0 (no PCB, unwrap_or(0) path).
-                for (op, cap) in [(1u64, 0u64), (2, 5), (3, 12), (4, 0)] {
-                    let a = SyscallArgs {
-                        arg0: 47,
-                        arg1: op,
-                        arg2: cap,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_CAP_AMBIENT, op={}, cap={}) kernel-ctx not 0 ({})",
-                            op,
-                            cap,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
 
-                // pcb storage round-trip.
-                let test_pid = pcb::create("ambient-cap-test", 0);
-                // Default empty mask.
-                assert_eq!(pcb::get_ambient_caps(test_pid), Some(0));
-                assert_eq!(pcb::is_ambient_cap_set(test_pid, 0), Some(0));
-                assert_eq!(pcb::is_ambient_cap_set(test_pid, 12), Some(0));
-                // Raise CAP_NET_ADMIN (12) — was-set is 0.
-                assert_eq!(pcb::raise_ambient_cap(test_pid, 12), Some(0));
-                assert_eq!(pcb::is_ambient_cap_set(test_pid, 12), Some(1));
-                assert_eq!(pcb::get_ambient_caps(test_pid), Some(1u64 << 12));
-                // Re-raising returns was-set=1.
-                assert_eq!(pcb::raise_ambient_cap(test_pid, 12), Some(1));
-                // Raise CAP_CHOWN (0) too.
-                assert_eq!(pcb::raise_ambient_cap(test_pid, 0), Some(0));
-                assert_eq!(
-                    pcb::get_ambient_caps(test_pid),
-                    Some((1u64 << 12) | (1u64 << 0))
-                );
-                // Lower CAP_NET_ADMIN.
-                assert_eq!(pcb::lower_ambient_cap(test_pid, 12), Some(1));
-                assert_eq!(pcb::is_ambient_cap_set(test_pid, 12), Some(0));
-                assert_eq!(pcb::get_ambient_caps(test_pid), Some(1u64 << 0));
-                // Lowering already-clear bit returns was-set=0.
-                assert_eq!(pcb::lower_ambient_cap(test_pid, 12), Some(0));
-                // Helper bypass: install arbitrary mask (even high bits).
-                assert_eq!(
-                    pcb::set_ambient_caps(test_pid, 0xdead_beef_dead_beef),
-                    Some(1u64 << 0)
-                );
-                assert_eq!(pcb::get_ambient_caps(test_pid), Some(0xdead_beef_dead_beef));
-                // Clear via helper.
-                assert_eq!(
-                    pcb::set_ambient_caps(test_pid, 0),
-                    Some(0xdead_beef_dead_beef)
-                );
-                pcb::destroy(test_pid);
-                assert_eq!(pcb::get_ambient_caps(test_pid), None);
-                assert_eq!(pcb::set_ambient_caps(test_pid, 1), None);
-                assert_eq!(pcb::raise_ambient_cap(test_pid, 0), None);
-                assert_eq!(pcb::lower_ambient_cap(test_pid, 0), None);
-                assert_eq!(pcb::is_ambient_cap_set(test_pid, 0), None);
+                    // pcb storage round-trip.
+                    let test_pid = pcb::create("ambient-cap-test", 0);
+                    // Default empty mask.
+                    assert_eq!(pcb::get_ambient_caps(test_pid), Some(0));
+                    assert_eq!(pcb::is_ambient_cap_set(test_pid, 0), Some(0));
+                    assert_eq!(pcb::is_ambient_cap_set(test_pid, 12), Some(0));
+                    // Raise CAP_NET_ADMIN (12) — was-set is 0.
+                    assert_eq!(pcb::raise_ambient_cap(test_pid, 12), Some(0));
+                    assert_eq!(pcb::is_ambient_cap_set(test_pid, 12), Some(1));
+                    assert_eq!(pcb::get_ambient_caps(test_pid), Some(1u64 << 12));
+                    // Re-raising returns was-set=1.
+                    assert_eq!(pcb::raise_ambient_cap(test_pid, 12), Some(1));
+                    // Raise CAP_CHOWN (0) too.
+                    assert_eq!(pcb::raise_ambient_cap(test_pid, 0), Some(0));
+                    assert_eq!(
+                        pcb::get_ambient_caps(test_pid),
+                        Some((1u64 << 12) | (1u64 << 0))
+                    );
+                    // Lower CAP_NET_ADMIN.
+                    assert_eq!(pcb::lower_ambient_cap(test_pid, 12), Some(1));
+                    assert_eq!(pcb::is_ambient_cap_set(test_pid, 12), Some(0));
+                    assert_eq!(pcb::get_ambient_caps(test_pid), Some(1u64 << 0));
+                    // Lowering already-clear bit returns was-set=0.
+                    assert_eq!(pcb::lower_ambient_cap(test_pid, 12), Some(0));
+                    // Helper bypass: install arbitrary mask (even high bits).
+                    assert_eq!(
+                        pcb::set_ambient_caps(test_pid, 0xdead_beef_dead_beef),
+                        Some(1u64 << 0)
+                    );
+                    assert_eq!(pcb::get_ambient_caps(test_pid), Some(0xdead_beef_dead_beef));
+                    // Clear via helper.
+                    assert_eq!(
+                        pcb::set_ambient_caps(test_pid, 0),
+                        Some(0xdead_beef_dead_beef)
+                    );
+                    pcb::destroy(test_pid);
+                    assert_eq!(pcb::get_ambient_caps(test_pid), None);
+                    assert_eq!(pcb::set_ambient_caps(test_pid, 1), None);
+                    assert_eq!(pcb::raise_ambient_cap(test_pid, 0), None);
+                    assert_eq!(pcb::lower_ambient_cap(test_pid, 0), None);
+                    assert_eq!(pcb::is_ambient_cap_set(test_pid, 0), None);
 
-                // PR_CAP_AMBIENT_RAISE securebits gate (Linux kernel/sys.c):
-                // EPERM iff SECURE_NO_CAP_AMBIENT_RAISE is set.  Tested via the
-                // pure helper — the EPERM path is unreachable from this
-                // kernel-context self-test (no caller PCB to set the bit).
-                assert!(ambient_raise_allowed(0));
-                assert!(ambient_raise_allowed(pcb::LINUX_SECBIT_KEEP_CAPS));
-                assert!(ambient_raise_allowed(pcb::LINUX_SECBIT_NOROOT));
-                assert!(!ambient_raise_allowed(
-                    pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE
-                ));
-                // The gate keys only on bit 6, regardless of unrelated bits.
-                assert!(!ambient_raise_allowed(
-                    pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE
-                        | pcb::LINUX_SECBIT_NOROOT
-                        | pcb::LINUX_SECBIT_KEEP_CAPS
-                ));
-                serial_println!(
-                    "[syscall/linux]   PR_CAP_AMBIENT_RAISE securebits gate \
-                 (Linux: EPERM when SECURE_NO_CAP_AMBIENT_RAISE set): OK"
-                );
+                    // PR_CAP_AMBIENT_RAISE securebits gate (Linux kernel/sys.c):
+                    // EPERM iff SECURE_NO_CAP_AMBIENT_RAISE is set.  Tested via the
+                    // pure helper — the EPERM path is unreachable from this
+                    // kernel-context self-test (no caller PCB to set the bit).
+                    assert!(ambient_raise_allowed(0));
+                    assert!(ambient_raise_allowed(pcb::LINUX_SECBIT_KEEP_CAPS));
+                    assert!(ambient_raise_allowed(pcb::LINUX_SECBIT_NOROOT));
+                    assert!(!ambient_raise_allowed(
+                        pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE
+                    ));
+                    // The gate keys only on bit 6, regardless of unrelated bits.
+                    assert!(!ambient_raise_allowed(
+                        pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE
+                            | pcb::LINUX_SECBIT_NOROOT
+                            | pcb::LINUX_SECBIT_KEEP_CAPS
+                    ));
+                    serial_println!(
+                        "[syscall/linux]   PR_CAP_AMBIENT_RAISE securebits gate \
+                     (Linux: EPERM when SECURE_NO_CAP_AMBIENT_RAISE set): OK"
+                    );
+                    Ok(())
+                }
+                case()?;
             }
 
             // Batch 83: PR_GET_SECUREBITS (27) / PR_SET_SECUREBITS (28)
@@ -60761,152 +60866,59 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   7. pcb-layer round-trip: set / get arbitrary values
             //      (helper bypasses lock validation).
             {
-                // PR_GET_SECUREBITS arg1..arg4 != 0 -> EINVAL.
-                for (idx, a) in [
-                    SyscallArgs {
-                        arg0: 27,
-                        arg1: 1,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 27,
-                        arg1: 0,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 27,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 1,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 27,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 1,
-                        arg5: 0,
-                    },
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_GET_SECUREBITS, …{}=1) not EINVAL ({})",
-                            idx + 1,
-                            dispatch_linux(nr::PRCTL, a).value
-                        );
-                        return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // PR_GET_SECUREBITS arg1..arg4 != 0 -> EINVAL.
+                    for (idx, a) in [
+                        SyscallArgs {
+                            arg0: 27,
+                            arg1: 1,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 27,
+                            arg1: 0,
+                            arg2: 1,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 27,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 1,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 27,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 1,
+                            arg5: 0,
+                        },
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_GET_SECUREBITS, …{}=1) not EINVAL ({})",
+                                idx + 1,
+                                dispatch_linux(nr::PRCTL, a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // PR_GET_SECUREBITS kernel context -> 0.
-                let a = SyscallArgs {
-                    arg0: 27,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_GET_SECUREBITS) kernel-ctx not 0 ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_SET_SECUREBITS arg2..arg4 != 0 -> EINVAL.
-                // arg1 = 0 is otherwise valid; the tail policing fires.
-                for (idx, a) in [
-                    SyscallArgs {
-                        arg0: 28,
-                        arg1: 0,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 28,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 1,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 28,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 1,
-                        arg5: 0,
-                    },
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, …{}=1) not EINVAL ({})",
-                            idx + 2,
-                            dispatch_linux(nr::PRCTL, a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // PR_SET_SECUREBITS arg1 with bits outside SECURE_ALL_FLAGS
-                // (0xff) -> EINVAL.  0x100 is the first invalid bit.
-                for bad in [0x100u64, 0xffff_0000, 0x8000_0000] {
+                    // PR_GET_SECUREBITS kernel context -> 0.
                     let a = SyscallArgs {
-                        arg0: 28,
-                        arg1: bad,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, {:#x}) not EINVAL ({})",
-                            bad,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                // PR_SET_SECUREBITS arg1 > u32::MAX -> EINVAL (must
-                // reject before truncation would silently drop bits).
-                let a = SyscallArgs {
-                    arg0: 28,
-                    arg1: 0x1_0000_0000,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, >u32::MAX) not EINVAL ({})",
-                        dispatch_linux(nr::PRCTL, &a).value
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // PR_SET_SECUREBITS kernel context with valid bits -> 0
-                // (no PCB; just goes through value validation).
-                for v in [0u64, 1, 0x55, 0xaa, 0xff] {
-                    let a = SyscallArgs {
-                        arg0: 28,
-                        arg1: v,
+                        arg0: 27,
+                        arg1: 0,
                         arg2: 0,
                         arg3: 0,
                         arg4: 0,
@@ -60914,112 +60926,210 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     };
                     if dispatch_linux(nr::PRCTL, &a).value != 0 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, {:#x}) kernel-ctx not 0 ({})",
-                            v,
+                            "[syscall/linux]   FAIL: prctl(PR_GET_SECUREBITS) kernel-ctx not 0 ({})",
                             dispatch_linux(nr::PRCTL, &a).value
                         );
                         return Err(KernelError::InternalError);
                     }
+                    // PR_SET_SECUREBITS arg2..arg4 != 0 -> EINVAL.
+                    // arg1 = 0 is otherwise valid; the tail policing fires.
+                    for (idx, a) in [
+                        SyscallArgs {
+                            arg0: 28,
+                            arg1: 0,
+                            arg2: 1,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 28,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 1,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 28,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 1,
+                            arg5: 0,
+                        },
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, …{}=1) not EINVAL ({})",
+                                idx + 2,
+                                dispatch_linux(nr::PRCTL, a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_SET_SECUREBITS arg1 with bits outside SECURE_ALL_FLAGS
+                    // (0xff) -> EINVAL.  0x100 is the first invalid bit.
+                    for bad in [0x100u64, 0xffff_0000, 0x8000_0000] {
+                        let a = SyscallArgs {
+                            arg0: 28,
+                            arg1: bad,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, {:#x}) not EINVAL ({})",
+                                bad,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+                    // PR_SET_SECUREBITS arg1 > u32::MAX -> EINVAL (must
+                    // reject before truncation would silently drop bits).
+                    let a = SyscallArgs {
+                        arg0: 28,
+                        arg1: 0x1_0000_0000,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, >u32::MAX) not EINVAL ({})",
+                            dispatch_linux(nr::PRCTL, &a).value
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // PR_SET_SECUREBITS kernel context with valid bits -> 0
+                    // (no PCB; just goes through value validation).
+                    for v in [0u64, 1, 0x55, 0xaa, 0xff] {
+                        let a = SyscallArgs {
+                            arg0: 28,
+                            arg1: v,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_SET_SECUREBITS, {:#x}) kernel-ctx not 0 ({})",
+                                v,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+
+                    // pcb storage round-trip.
+                    let test_pid = pcb::create("securebits-test", 0);
+                    // Default 0.
+                    assert_eq!(pcb::get_securebits(test_pid), Some(0));
+                    // Helper bypasses lock checks: install arbitrary values.
+                    assert_eq!(pcb::set_securebits(test_pid, 0x55), Some(0));
+                    assert_eq!(pcb::get_securebits(test_pid), Some(0x55));
+                    assert_eq!(pcb::set_securebits(test_pid, 0xff), Some(0x55));
+                    assert_eq!(pcb::get_securebits(test_pid), Some(0xff));
+                    // Helper accepts values the surface would reject — that
+                    // is the documented contract (policy lives at the
+                    // syscall layer).
+                    assert_eq!(pcb::set_securebits(test_pid, 0xdead_beef), Some(0xff));
+                    assert_eq!(pcb::get_securebits(test_pid), Some(0xdead_beef));
+                    assert_eq!(pcb::set_securebits(test_pid, 0), Some(0xdead_beef));
+                    pcb::destroy(test_pid);
+                    assert_eq!(pcb::get_securebits(test_pid), None);
+                    assert_eq!(pcb::set_securebits(test_pid, 1), None);
+
+                    // Constant sanity: SECURE_ALL_FLAGS is the union of
+                    // SECURE_ALL_BITS (flags, even bits) and
+                    // SECURE_ALL_LOCKS (locks, odd bits), with no overlap
+                    // and covering exactly the low 8 bits.
+                    assert_eq!(pcb::LINUX_SECURE_ALL_BITS & pcb::LINUX_SECURE_ALL_LOCKS, 0);
+                    assert_eq!(
+                        pcb::LINUX_SECURE_ALL_BITS | pcb::LINUX_SECURE_ALL_LOCKS,
+                        pcb::LINUX_SECURE_ALL_FLAGS
+                    );
+                    assert_eq!(pcb::LINUX_SECURE_ALL_FLAGS, 0xff);
+                    assert_eq!(pcb::LINUX_SECURE_ALL_BITS, 0x55);
+                    assert_eq!(pcb::LINUX_SECURE_ALL_LOCKS, 0xaa);
+                    // Every flag bit sits one position below its lock bit.
+                    assert_eq!(
+                        pcb::LINUX_SECBIT_NOROOT_LOCKED,
+                        pcb::LINUX_SECBIT_NOROOT << 1
+                    );
+                    assert_eq!(
+                        pcb::LINUX_SECBIT_NO_SETUID_FIXUP_LOCKED,
+                        pcb::LINUX_SECBIT_NO_SETUID_FIXUP << 1
+                    );
+                    assert_eq!(
+                        pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
+                        pcb::LINUX_SECBIT_KEEP_CAPS << 1
+                    );
+                    assert_eq!(
+                        pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
+                        pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE << 1
+                    );
+
+                    // PR_SET_SECUREBITS lock-bit enforcement truth table, via the
+                    // pure decision helper (the EPERM path is unreachable from this
+                    // kernel-context self-test, which has no caller PCB to seed the
+                    // current securebits with lock bits).  Mirrors cap_task_prctl.
+                    //
+                    // No locks set: any value change is permitted.
+                    assert!(securebits_change_allowed(0, 0));
+                    assert!(securebits_change_allowed(0, pcb::LINUX_SECURE_ALL_FLAGS));
+                    assert!(securebits_change_allowed(
+                        pcb::LINUX_SECBIT_NOROOT,
+                        pcb::LINUX_SECBIT_NO_SETUID_FIXUP
+                    ));
+                    // Setting a NEW lock bit (that wasn't set before) is allowed.
+                    assert!(securebits_change_allowed(
+                        0,
+                        pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
+                    ));
+                    // A currently-set lock bit must remain set — clearing it -> denied.
+                    assert!(!securebits_change_allowed(
+                        pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
+                        0
+                    ));
+                    assert!(!securebits_change_allowed(
+                        pcb::LINUX_SECBIT_NOROOT_LOCKED,
+                        pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED // different lock, original cleared
+                    ));
+                    // A locked flag may not flip.  KEEP_CAPS locked + currently SET:
+                    // clearing the flag while keeping the lock -> denied.
+                    assert!(!securebits_change_allowed(
+                        pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
+                        pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
+                    ));
+                    // KEEP_CAPS locked + currently CLEAR: setting the flag -> denied.
+                    assert!(!securebits_change_allowed(
+                        pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
+                        pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
+                    ));
+                    // Locked flag kept at its current value (and lock kept) -> allowed,
+                    // even while flipping an UNlocked flag in the same word.
+                    assert!(securebits_change_allowed(
+                        pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
+                        pcb::LINUX_SECBIT_KEEP_CAPS
+                            | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
+                            | pcb::LINUX_SECBIT_NOROOT
+                    ));
+                    serial_println!(
+                        "[syscall/linux]   PR_SET_SECUREBITS lock-bit enforcement \
+                     (cap_task_prctl: locked bit can't clear, locked flag can't flip): OK"
+                    );
+                    Ok(())
                 }
-
-                // pcb storage round-trip.
-                let test_pid = pcb::create("securebits-test", 0);
-                // Default 0.
-                assert_eq!(pcb::get_securebits(test_pid), Some(0));
-                // Helper bypasses lock checks: install arbitrary values.
-                assert_eq!(pcb::set_securebits(test_pid, 0x55), Some(0));
-                assert_eq!(pcb::get_securebits(test_pid), Some(0x55));
-                assert_eq!(pcb::set_securebits(test_pid, 0xff), Some(0x55));
-                assert_eq!(pcb::get_securebits(test_pid), Some(0xff));
-                // Helper accepts values the surface would reject — that
-                // is the documented contract (policy lives at the
-                // syscall layer).
-                assert_eq!(pcb::set_securebits(test_pid, 0xdead_beef), Some(0xff));
-                assert_eq!(pcb::get_securebits(test_pid), Some(0xdead_beef));
-                assert_eq!(pcb::set_securebits(test_pid, 0), Some(0xdead_beef));
-                pcb::destroy(test_pid);
-                assert_eq!(pcb::get_securebits(test_pid), None);
-                assert_eq!(pcb::set_securebits(test_pid, 1), None);
-
-                // Constant sanity: SECURE_ALL_FLAGS is the union of
-                // SECURE_ALL_BITS (flags, even bits) and
-                // SECURE_ALL_LOCKS (locks, odd bits), with no overlap
-                // and covering exactly the low 8 bits.
-                assert_eq!(pcb::LINUX_SECURE_ALL_BITS & pcb::LINUX_SECURE_ALL_LOCKS, 0);
-                assert_eq!(
-                    pcb::LINUX_SECURE_ALL_BITS | pcb::LINUX_SECURE_ALL_LOCKS,
-                    pcb::LINUX_SECURE_ALL_FLAGS
-                );
-                assert_eq!(pcb::LINUX_SECURE_ALL_FLAGS, 0xff);
-                assert_eq!(pcb::LINUX_SECURE_ALL_BITS, 0x55);
-                assert_eq!(pcb::LINUX_SECURE_ALL_LOCKS, 0xaa);
-                // Every flag bit sits one position below its lock bit.
-                assert_eq!(
-                    pcb::LINUX_SECBIT_NOROOT_LOCKED,
-                    pcb::LINUX_SECBIT_NOROOT << 1
-                );
-                assert_eq!(
-                    pcb::LINUX_SECBIT_NO_SETUID_FIXUP_LOCKED,
-                    pcb::LINUX_SECBIT_NO_SETUID_FIXUP << 1
-                );
-                assert_eq!(
-                    pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
-                    pcb::LINUX_SECBIT_KEEP_CAPS << 1
-                );
-                assert_eq!(
-                    pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
-                    pcb::LINUX_SECBIT_NO_CAP_AMBIENT_RAISE << 1
-                );
-
-                // PR_SET_SECUREBITS lock-bit enforcement truth table, via the
-                // pure decision helper (the EPERM path is unreachable from this
-                // kernel-context self-test, which has no caller PCB to seed the
-                // current securebits with lock bits).  Mirrors cap_task_prctl.
-                //
-                // No locks set: any value change is permitted.
-                assert!(securebits_change_allowed(0, 0));
-                assert!(securebits_change_allowed(0, pcb::LINUX_SECURE_ALL_FLAGS));
-                assert!(securebits_change_allowed(
-                    pcb::LINUX_SECBIT_NOROOT,
-                    pcb::LINUX_SECBIT_NO_SETUID_FIXUP
-                ));
-                // Setting a NEW lock bit (that wasn't set before) is allowed.
-                assert!(securebits_change_allowed(
-                    0,
-                    pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
-                ));
-                // A currently-set lock bit must remain set — clearing it -> denied.
-                assert!(!securebits_change_allowed(
-                    pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
-                    0
-                ));
-                assert!(!securebits_change_allowed(
-                    pcb::LINUX_SECBIT_NOROOT_LOCKED,
-                    pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED // different lock, original cleared
-                ));
-                // A locked flag may not flip.  KEEP_CAPS locked + currently SET:
-                // clearing the flag while keeping the lock -> denied.
-                assert!(!securebits_change_allowed(
-                    pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
-                    pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
-                ));
-                // KEEP_CAPS locked + currently CLEAR: setting the flag -> denied.
-                assert!(!securebits_change_allowed(
-                    pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
-                    pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
-                ));
-                // Locked flag kept at its current value (and lock kept) -> allowed,
-                // even while flipping an UNlocked flag in the same word.
-                assert!(securebits_change_allowed(
-                    pcb::LINUX_SECBIT_KEEP_CAPS | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED,
-                    pcb::LINUX_SECBIT_KEEP_CAPS
-                        | pcb::LINUX_SECBIT_KEEP_CAPS_LOCKED
-                        | pcb::LINUX_SECBIT_NOROOT
-                ));
-                serial_println!(
-                    "[syscall/linux]   PR_SET_SECUREBITS lock-bit enforcement \
-                 (cap_task_prctl: locked bit can't clear, locked flag can't flip): OK"
-                );
+                case()?;
             }
 
             // Batch 84: PR_CAPBSET_READ (23) / PR_CAPBSET_DROP (24)
@@ -61039,202 +61149,207 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   8. LINUX_CAP_FULL_SET sanity: every bit 0..=40 set,
             //      no bit 41+ set.
             {
-                // PR_CAPBSET_READ cap > CAP_LAST_CAP (40) -> EINVAL.
-                for bad_cap in [41u64, 0xff, u64::MAX] {
-                    let a = SyscallArgs {
-                        arg0: 23,
-                        arg1: bad_cap,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_CAPBSET_READ, cap={}) not EINVAL ({})",
-                            bad_cap,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // PR_CAPBSET_READ cap > CAP_LAST_CAP (40) -> EINVAL.
+                    for bad_cap in [41u64, 0xff, u64::MAX] {
+                        let a = SyscallArgs {
+                            arg0: 23,
+                            arg1: bad_cap,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_CAPBSET_READ, cap={}) not EINVAL ({})",
+                                bad_cap,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // PR_CAPBSET_READ arg2..arg4 != 0 -> EINVAL.
-                // arg1 = 0 (CAP_CHOWN) is otherwise valid.
-                for (idx, a) in [
-                    SyscallArgs {
-                        arg0: 23,
-                        arg1: 0,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 23,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 1,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 23,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 1,
-                        arg5: 0,
-                    },
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_CAPBSET_READ, …{}=1) not EINVAL ({})",
-                            idx + 2,
-                            dispatch_linux(nr::PRCTL, a).value
-                        );
-                        return Err(KernelError::InternalError);
+                    // PR_CAPBSET_READ arg2..arg4 != 0 -> EINVAL.
+                    // arg1 = 0 (CAP_CHOWN) is otherwise valid.
+                    for (idx, a) in [
+                        SyscallArgs {
+                            arg0: 23,
+                            arg1: 0,
+                            arg2: 1,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 23,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 1,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 23,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 1,
+                            arg5: 0,
+                        },
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_CAPBSET_READ, …{}=1) not EINVAL ({})",
+                                idx + 2,
+                                dispatch_linux(nr::PRCTL, a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // PR_CAPBSET_READ kernel context: every valid cap -> 1.
-                for cap in [0u64, 1, 12, 21, 40] {
-                    let a = SyscallArgs {
-                        arg0: 23,
-                        arg1: cap,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != 1 {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_CAPBSET_READ, cap={}) kernel-ctx not 1 ({})",
-                            cap,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
+                    // PR_CAPBSET_READ kernel context: every valid cap -> 1.
+                    for cap in [0u64, 1, 12, 21, 40] {
+                        let a = SyscallArgs {
+                            arg0: 23,
+                            arg1: cap,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != 1 {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_CAPBSET_READ, cap={}) kernel-ctx not 1 ({})",
+                                cap,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // PR_CAPBSET_DROP cap > CAP_LAST_CAP -> EINVAL.
-                for bad_cap in [41u64, 0xff, u64::MAX] {
-                    let a = SyscallArgs {
-                        arg0: 24,
-                        arg1: bad_cap,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_CAPBSET_DROP, cap={}) not EINVAL ({})",
-                            bad_cap,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
+                    // PR_CAPBSET_DROP cap > CAP_LAST_CAP -> EINVAL.
+                    for bad_cap in [41u64, 0xff, u64::MAX] {
+                        let a = SyscallArgs {
+                            arg0: 24,
+                            arg1: bad_cap,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_CAPBSET_DROP, cap={}) not EINVAL ({})",
+                                bad_cap,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // PR_CAPBSET_DROP arg2..arg4 != 0 -> EINVAL.
-                for (idx, a) in [
-                    SyscallArgs {
-                        arg0: 24,
-                        arg1: 0,
-                        arg2: 1,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 24,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 1,
-                        arg4: 0,
-                        arg5: 0,
-                    },
-                    SyscallArgs {
-                        arg0: 24,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 1,
-                        arg5: 0,
-                    },
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_CAPBSET_DROP, …{}=1) not EINVAL ({})",
-                            idx + 2,
-                            dispatch_linux(nr::PRCTL, a).value
-                        );
-                        return Err(KernelError::InternalError);
+                    // PR_CAPBSET_DROP arg2..arg4 != 0 -> EINVAL.
+                    for (idx, a) in [
+                        SyscallArgs {
+                            arg0: 24,
+                            arg1: 0,
+                            arg2: 1,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 24,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 1,
+                            arg4: 0,
+                            arg5: 0,
+                        },
+                        SyscallArgs {
+                            arg0: 24,
+                            arg1: 0,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 1,
+                            arg5: 0,
+                        },
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        if dispatch_linux(nr::PRCTL, a).value != -i64::from(errno::EINVAL) {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_CAPBSET_DROP, …{}=1) not EINVAL ({})",
+                                idx + 2,
+                                dispatch_linux(nr::PRCTL, a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
-                // PR_CAPBSET_DROP kernel context with valid cap -> 0.
-                for cap in [0u64, 5, 12, 40] {
-                    let a = SyscallArgs {
-                        arg0: 24,
-                        arg1: cap,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl(PR_CAPBSET_DROP, cap={}) kernel-ctx not 0 ({})",
-                            cap,
-                            dispatch_linux(nr::PRCTL, &a).value
-                        );
-                        return Err(KernelError::InternalError);
+                    // PR_CAPBSET_DROP kernel context with valid cap -> 0.
+                    for cap in [0u64, 5, 12, 40] {
+                        let a = SyscallArgs {
+                            arg0: 24,
+                            arg1: cap,
+                            arg2: 0,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl(PR_CAPBSET_DROP, cap={}) kernel-ctx not 0 ({})",
+                                cap,
+                                dispatch_linux(nr::PRCTL, &a).value
+                            );
+                            return Err(KernelError::InternalError);
+                        }
                     }
-                }
 
-                // pcb storage round-trip.
-                let test_pid = pcb::create("capbset-test", 0);
-                // Default full set.
-                assert_eq!(pcb::get_cap_bset(test_pid), Some(pcb::LINUX_CAP_FULL_SET));
-                // Every cap 0..=40 reads 1; bits 41+ would be outside
-                // the surface but the helper does not validate.
-                for cap in 0u32..=40 {
-                    assert_eq!(pcb::is_cap_in_bset(test_pid, cap), Some(1));
-                }
-                // Drop CAP_NET_ADMIN (12) — prior value 1.
-                assert_eq!(pcb::drop_cap_from_bset(test_pid, 12), Some(1));
-                assert_eq!(pcb::is_cap_in_bset(test_pid, 12), Some(0));
-                // Other caps unaffected.
-                assert_eq!(pcb::is_cap_in_bset(test_pid, 11), Some(1));
-                assert_eq!(pcb::is_cap_in_bset(test_pid, 13), Some(1));
-                // Re-dropping reports 0 (was already cleared).
-                assert_eq!(pcb::drop_cap_from_bset(test_pid, 12), Some(0));
-                // Helper bypass: install arbitrary mask.
-                assert_eq!(
-                    pcb::set_cap_bset(test_pid, 0xdead_beef_dead_beef),
-                    Some(pcb::LINUX_CAP_FULL_SET & !(1u64 << 12))
-                );
-                assert_eq!(pcb::get_cap_bset(test_pid), Some(0xdead_beef_dead_beef));
-                // Restore full set via helper.
-                assert_eq!(
-                    pcb::set_cap_bset(test_pid, pcb::LINUX_CAP_FULL_SET),
-                    Some(0xdead_beef_dead_beef)
-                );
-                pcb::destroy(test_pid);
-                assert_eq!(pcb::get_cap_bset(test_pid), None);
-                assert_eq!(pcb::set_cap_bset(test_pid, 0), None);
-                assert_eq!(pcb::drop_cap_from_bset(test_pid, 0), None);
-                assert_eq!(pcb::is_cap_in_bset(test_pid, 0), None);
+                    // pcb storage round-trip.
+                    let test_pid = pcb::create("capbset-test", 0);
+                    // Default full set.
+                    assert_eq!(pcb::get_cap_bset(test_pid), Some(pcb::LINUX_CAP_FULL_SET));
+                    // Every cap 0..=40 reads 1; bits 41+ would be outside
+                    // the surface but the helper does not validate.
+                    for cap in 0u32..=40 {
+                        assert_eq!(pcb::is_cap_in_bset(test_pid, cap), Some(1));
+                    }
+                    // Drop CAP_NET_ADMIN (12) — prior value 1.
+                    assert_eq!(pcb::drop_cap_from_bset(test_pid, 12), Some(1));
+                    assert_eq!(pcb::is_cap_in_bset(test_pid, 12), Some(0));
+                    // Other caps unaffected.
+                    assert_eq!(pcb::is_cap_in_bset(test_pid, 11), Some(1));
+                    assert_eq!(pcb::is_cap_in_bset(test_pid, 13), Some(1));
+                    // Re-dropping reports 0 (was already cleared).
+                    assert_eq!(pcb::drop_cap_from_bset(test_pid, 12), Some(0));
+                    // Helper bypass: install arbitrary mask.
+                    assert_eq!(
+                        pcb::set_cap_bset(test_pid, 0xdead_beef_dead_beef),
+                        Some(pcb::LINUX_CAP_FULL_SET & !(1u64 << 12))
+                    );
+                    assert_eq!(pcb::get_cap_bset(test_pid), Some(0xdead_beef_dead_beef));
+                    // Restore full set via helper.
+                    assert_eq!(
+                        pcb::set_cap_bset(test_pid, pcb::LINUX_CAP_FULL_SET),
+                        Some(0xdead_beef_dead_beef)
+                    );
+                    pcb::destroy(test_pid);
+                    assert_eq!(pcb::get_cap_bset(test_pid), None);
+                    assert_eq!(pcb::set_cap_bset(test_pid, 0), None);
+                    assert_eq!(pcb::drop_cap_from_bset(test_pid, 0), None);
+                    assert_eq!(pcb::is_cap_in_bset(test_pid, 0), None);
 
-                // Constant sanity: CAP_FULL_SET has every bit 0..=40
-                // set and no bit 41+ set.
-                assert_eq!(pcb::LINUX_CAP_FULL_SET, (1u64 << 41) - 1);
-                assert_eq!(pcb::LINUX_CAP_FULL_SET & (1u64 << 40), 1u64 << 40);
-                assert_eq!(pcb::LINUX_CAP_FULL_SET & (1u64 << 41), 0);
-                assert_eq!(pcb::LINUX_CAP_FULL_SET.count_ones(), 41);
+                    // Constant sanity: CAP_FULL_SET has every bit 0..=40
+                    // set and no bit 41+ set.
+                    assert_eq!(pcb::LINUX_CAP_FULL_SET, (1u64 << 41) - 1);
+                    assert_eq!(pcb::LINUX_CAP_FULL_SET & (1u64 << 40), 1u64 << 40);
+                    assert_eq!(pcb::LINUX_CAP_FULL_SET & (1u64 << 41), 0);
+                    assert_eq!(pcb::LINUX_CAP_FULL_SET.count_ones(), 41);
+                    Ok(())
+                }
+                case()?;
             }
         }
         Ok(())
@@ -85222,118 +85337,123 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // the sched_flags field (offset 8..16).  Round-trip on a
             // synthetic PCB (pid=0 in kernel context does not persist).
             {
-                let srof = pcb::create("srof-attr-b527", 0);
-                if srof > i32::MAX as u64 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: srof-attr test_pid too large ({})",
-                        srof
-                    );
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let srof = pcb::create("srof-attr-b527", 0);
+                    if srof > i32::MAX as u64 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: srof-attr test_pid too large ({})",
+                            srof
+                        );
+                        pcb::destroy(srof);
+                        return Err(KernelError::InternalError);
+                    }
+                    // setattr: size=48, policy=SCHED_NORMAL, sched_flags=RESET_ON_FORK.
+                    let mut sa = [0u8; 48];
+                    sa[0..4].copy_from_slice(&48u32.to_le_bytes()); // size
+                    // policy @4 = 0 (SCHED_NORMAL)
+                    sa[8..16].copy_from_slice(&1u64.to_le_bytes()); // sched_flags = RESET_ON_FORK
+                    // nice @16 = 0, priority @20 = 0
+                    let sa_ptr = sa.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: srof,
+                        arg1: sa_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: setattr(RESET_ON_FORK) want 0 got {}",
+                            dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                        );
+                        pcb::destroy(srof);
+                        return Err(KernelError::InternalError);
+                    }
+                    if pcb::get_sched_reset_on_fork(srof) != Some(true) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: setattr did not persist reset_on_fork"
+                        );
+                        pcb::destroy(srof);
+                        return Err(KernelError::InternalError);
+                    }
+                    // getattr reads it back: sched_flags @ 8..16 must carry 0x01.
+                    let mut ga = [0u8; 48];
+                    let ga_ptr = ga.as_mut_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: srof,
+                        arg1: ga_ptr,
+                        arg2: 48,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: getattr(RESET_ON_FORK) want 0 got {}",
+                            dispatch_linux(nr::SCHED_GETATTR, &a).value,
+                        );
+                        pcb::destroy(srof);
+                        return Err(KernelError::InternalError);
+                    }
+                    let flags_back = u64::from_le_bytes([
+                        ga[8], ga[9], ga[10], ga[11], ga[12], ga[13], ga[14], ga[15],
+                    ]);
+                    if flags_back != 0x01 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: getattr sched_flags want 0x01 got {:#x}",
+                            flags_back
+                        );
+                        pcb::destroy(srof);
+                        return Err(KernelError::InternalError);
+                    }
+                    // Clear via setattr (sched_flags=0) -> getattr reports 0.
+                    let mut sa = [0u8; 48];
+                    sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    let sa_ptr = sa.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: srof,
+                        arg1: sa_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: setattr(clear) want 0 got {}",
+                            dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                        );
+                        pcb::destroy(srof);
+                        return Err(KernelError::InternalError);
+                    }
+                    let mut ga = [0u8; 48];
+                    let ga_ptr = ga.as_mut_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: srof,
+                        arg1: ga_ptr,
+                        arg2: 48,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    let _ = dispatch_linux(nr::SCHED_GETATTR, &a).value;
+                    let flags_back = u64::from_le_bytes([
+                        ga[8], ga[9], ga[10], ga[11], ga[12], ga[13], ga[14], ga[15],
+                    ]);
+                    if flags_back != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: getattr sched_flags after clear want 0 got {:#x}",
+                            flags_back
+                        );
+                        pcb::destroy(srof);
+                        return Err(KernelError::InternalError);
+                    }
                     pcb::destroy(srof);
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // setattr: size=48, policy=SCHED_NORMAL, sched_flags=RESET_ON_FORK.
-                let mut sa = [0u8; 48];
-                sa[0..4].copy_from_slice(&48u32.to_le_bytes()); // size
-                // policy @4 = 0 (SCHED_NORMAL)
-                sa[8..16].copy_from_slice(&1u64.to_le_bytes()); // sched_flags = RESET_ON_FORK
-                // nice @16 = 0, priority @20 = 0
-                let sa_ptr = sa.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: srof,
-                    arg1: sa_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: setattr(RESET_ON_FORK) want 0 got {}",
-                        dispatch_linux(nr::SCHED_SETATTR, &a).value,
-                    );
-                    pcb::destroy(srof);
-                    return Err(KernelError::InternalError);
-                }
-                if pcb::get_sched_reset_on_fork(srof) != Some(true) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: setattr did not persist reset_on_fork"
-                    );
-                    pcb::destroy(srof);
-                    return Err(KernelError::InternalError);
-                }
-                // getattr reads it back: sched_flags @ 8..16 must carry 0x01.
-                let mut ga = [0u8; 48];
-                let ga_ptr = ga.as_mut_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: srof,
-                    arg1: ga_ptr,
-                    arg2: 48,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_GETATTR, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: getattr(RESET_ON_FORK) want 0 got {}",
-                        dispatch_linux(nr::SCHED_GETATTR, &a).value,
-                    );
-                    pcb::destroy(srof);
-                    return Err(KernelError::InternalError);
-                }
-                let flags_back = u64::from_le_bytes([
-                    ga[8], ga[9], ga[10], ga[11], ga[12], ga[13], ga[14], ga[15],
-                ]);
-                if flags_back != 0x01 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: getattr sched_flags want 0x01 got {:#x}",
-                        flags_back
-                    );
-                    pcb::destroy(srof);
-                    return Err(KernelError::InternalError);
-                }
-                // Clear via setattr (sched_flags=0) -> getattr reports 0.
-                let mut sa = [0u8; 48];
-                sa[0..4].copy_from_slice(&48u32.to_le_bytes());
-                let sa_ptr = sa.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: srof,
-                    arg1: sa_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: setattr(clear) want 0 got {}",
-                        dispatch_linux(nr::SCHED_SETATTR, &a).value,
-                    );
-                    pcb::destroy(srof);
-                    return Err(KernelError::InternalError);
-                }
-                let mut ga = [0u8; 48];
-                let ga_ptr = ga.as_mut_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: srof,
-                    arg1: ga_ptr,
-                    arg2: 48,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                let _ = dispatch_linux(nr::SCHED_GETATTR, &a).value;
-                let flags_back = u64::from_le_bytes([
-                    ga[8], ga[9], ga[10], ga[11], ga[12], ga[13], ga[14], ga[15],
-                ]);
-                if flags_back != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: getattr sched_flags after clear want 0 got {:#x}",
-                        flags_back
-                    );
-                    pcb::destroy(srof);
-                    return Err(KernelError::InternalError);
-                }
-                pcb::destroy(srof);
+                case()?;
             }
             serial_println!(
                 "[syscall/linux]   sched_{{set,get}}attr SCHED_FLAG_RESET_ON_FORK round-trip (batch 527): OK"
@@ -85347,180 +85467,185 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // __setscheduler_params is skipped (policy+priority not stored).
             // Exercise both on a synthetic PCB starting from FIFO prio=10.
             {
-                let kp = pcb::create("kpkp-b528", 0);
-                if kp > i32::MAX as u64 {
-                    serial_println!("[syscall/linux]   FAIL: kpkp test_pid too large ({})", kp);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let kp = pcb::create("kpkp-b528", 0);
+                    if kp > i32::MAX as u64 {
+                        serial_println!("[syscall/linux]   FAIL: kpkp test_pid too large ({})", kp);
+                        pcb::destroy(kp);
+                        return Err(KernelError::InternalError);
+                    }
+                    // Seed FIFO prio=10 via sched_setscheduler.
+                    let fifo_param = 10i32.to_ne_bytes();
+                    let fifo_param_ptr = fifo_param.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: kp,
+                        arg1: 1,
+                        arg2: fifo_param_ptr,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: seed setscheduler(FIFO,10) want 0 got {}",
+                            dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
+                        );
+                        pcb::destroy(kp);
+                        return Err(KernelError::InternalError);
+                    }
+                    // (a) KEEP_PARAMS with attr policy=1 (FIFO) priority=99: under
+                    // v6.6 get_params() pre-loads the task's current rt_priority
+                    // (10), the validity checks run against that, and
+                    // __setscheduler_params is skipped — so the 99 is discarded
+                    // and priority stays 10.  Pre-batch the 99 would have
+                    // clobbered it.  policy is likewise not re-stored (stays FIFO).
+                    let mut sa = [0u8; 48];
+                    sa[0..4].copy_from_slice(&48u32.to_le_bytes()); // size
+                    sa[4..8].copy_from_slice(&1u32.to_le_bytes()); // policy = FIFO
+                    sa[8..16].copy_from_slice(&0x10u64.to_le_bytes()); // KEEP_PARAMS
+                    sa[20..24].copy_from_slice(&99u32.to_le_bytes()); // priority = 99 (ignored)
+                    let sa_ptr = sa.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: kp,
+                        arg1: sa_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: setattr(KEEP_PARAMS) want 0 got {}",
+                            dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                        );
+                        pcb::destroy(kp);
+                        return Err(KernelError::InternalError);
+                    }
+                    if pcb::get_sched_priority(kp) != Some(10) || pcb::get_sched_policy(kp) != Some(1) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: KEEP_PARAMS must preserve FIFO/prio=10; got {:?}/{:?}",
+                            pcb::get_sched_policy(kp),
+                            pcb::get_sched_priority(kp)
+                        );
+                        pcb::destroy(kp);
+                        return Err(KernelError::InternalError);
+                    }
+                    // (b) KEEP_POLICY keeps the task's policy (FIFO) but NOT its
+                    // params: the attr sched_policy=3 (BATCH) is discarded, yet
+                    // the attr priority IS used (KEEP_POLICY != KEEP_PARAMS), so
+                    // a valid FIFO priority must be supplied.  Set priority=5;
+                    // getscheduler stays FIFO (1) and priority updates to 5.
+                    let mut sa = [0u8; 48];
+                    sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    sa[4..8].copy_from_slice(&3u32.to_le_bytes()); // policy = BATCH (ignored)
+                    sa[8..16].copy_from_slice(&0x08u64.to_le_bytes()); // KEEP_POLICY
+                    sa[20..24].copy_from_slice(&5u32.to_le_bytes()); // priority = 5 (used)
+                    let sa_ptr = sa.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: kp,
+                        arg1: sa_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: setattr(KEEP_POLICY) want 0 got {}",
+                            dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                        );
+                        pcb::destroy(kp);
+                        return Err(KernelError::InternalError);
+                    }
+                    let a = SyscallArgs {
+                        arg0: kp,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    let v = dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value;
+                    if v != 1 || pcb::get_sched_priority(kp) != Some(5) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: after KEEP_POLICY want FIFO(1)/prio=5 got {:#x}/{:?}",
+                            v,
+                            pcb::get_sched_priority(kp)
+                        );
+                        pcb::destroy(kp);
+                        return Err(KernelError::InternalError);
+                    }
+                    // (c) KEEP_POLICY also ignores a same-call RESET_ON_FORK bit:
+                    // reset_on_fork comes from the task (currently false), so it
+                    // must stay false even though the attr sets the 0x01 bit.  A
+                    // valid FIFO priority (5) is still required.
+                    let mut sa = [0u8; 48];
+                    sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    sa[8..16].copy_from_slice(&(0x08u64 | 0x01u64).to_le_bytes()); // KEEP_POLICY|RESET_ON_FORK
+                    sa[20..24].copy_from_slice(&5u32.to_le_bytes()); // priority = 5
+                    let sa_ptr = sa.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: kp,
+                        arg1: sa_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: setattr(KEEP_POLICY|RESET_ON_FORK) want 0 got {}",
+                            dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                        );
+                        pcb::destroy(kp);
+                        return Err(KernelError::InternalError);
+                    }
+                    if pcb::get_sched_reset_on_fork(kp) != Some(false) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: KEEP_POLICY must ignore same-call RESET_ON_FORK; got {:?}",
+                            pcb::get_sched_reset_on_fork(kp)
+                        );
+                        pcb::destroy(kp);
+                        return Err(KernelError::InternalError);
+                    }
+                    // (d) sanity: a plain setattr WITHOUT either keep flag DOES
+                    // store policy+priority (regression guard the keep flags do
+                    // not over-suppress).  policy=2 (RR) priority=7.
+                    let mut sa = [0u8; 48];
+                    sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    sa[4..8].copy_from_slice(&2u32.to_le_bytes()); // policy = RR
+                    sa[20..24].copy_from_slice(&7u32.to_le_bytes()); // priority = 7
+                    let sa_ptr = sa.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: kp,
+                        arg1: sa_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: setattr(RR,7) want 0 got {}",
+                            dispatch_linux(nr::SCHED_SETATTR, &a).value,
+                        );
+                        pcb::destroy(kp);
+                        return Err(KernelError::InternalError);
+                    }
+                    if pcb::get_sched_policy(kp) != Some(2) || pcb::get_sched_priority(kp) != Some(7) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: plain setattr must store RR/7; got {:?}/{:?}",
+                            pcb::get_sched_policy(kp),
+                            pcb::get_sched_priority(kp)
+                        );
+                        pcb::destroy(kp);
+                        return Err(KernelError::InternalError);
+                    }
                     pcb::destroy(kp);
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // Seed FIFO prio=10 via sched_setscheduler.
-                let fifo_param = 10i32.to_ne_bytes();
-                let fifo_param_ptr = fifo_param.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: kp,
-                    arg1: 1,
-                    arg2: fifo_param_ptr,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: seed setscheduler(FIFO,10) want 0 got {}",
-                        dispatch_linux(nr::SCHED_SETSCHEDULER, &a).value,
-                    );
-                    pcb::destroy(kp);
-                    return Err(KernelError::InternalError);
-                }
-                // (a) KEEP_PARAMS with attr policy=1 (FIFO) priority=99: under
-                // v6.6 get_params() pre-loads the task's current rt_priority
-                // (10), the validity checks run against that, and
-                // __setscheduler_params is skipped — so the 99 is discarded
-                // and priority stays 10.  Pre-batch the 99 would have
-                // clobbered it.  policy is likewise not re-stored (stays FIFO).
-                let mut sa = [0u8; 48];
-                sa[0..4].copy_from_slice(&48u32.to_le_bytes()); // size
-                sa[4..8].copy_from_slice(&1u32.to_le_bytes()); // policy = FIFO
-                sa[8..16].copy_from_slice(&0x10u64.to_le_bytes()); // KEEP_PARAMS
-                sa[20..24].copy_from_slice(&99u32.to_le_bytes()); // priority = 99 (ignored)
-                let sa_ptr = sa.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: kp,
-                    arg1: sa_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: setattr(KEEP_PARAMS) want 0 got {}",
-                        dispatch_linux(nr::SCHED_SETATTR, &a).value,
-                    );
-                    pcb::destroy(kp);
-                    return Err(KernelError::InternalError);
-                }
-                if pcb::get_sched_priority(kp) != Some(10) || pcb::get_sched_policy(kp) != Some(1) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: KEEP_PARAMS must preserve FIFO/prio=10; got {:?}/{:?}",
-                        pcb::get_sched_policy(kp),
-                        pcb::get_sched_priority(kp)
-                    );
-                    pcb::destroy(kp);
-                    return Err(KernelError::InternalError);
-                }
-                // (b) KEEP_POLICY keeps the task's policy (FIFO) but NOT its
-                // params: the attr sched_policy=3 (BATCH) is discarded, yet
-                // the attr priority IS used (KEEP_POLICY != KEEP_PARAMS), so
-                // a valid FIFO priority must be supplied.  Set priority=5;
-                // getscheduler stays FIFO (1) and priority updates to 5.
-                let mut sa = [0u8; 48];
-                sa[0..4].copy_from_slice(&48u32.to_le_bytes());
-                sa[4..8].copy_from_slice(&3u32.to_le_bytes()); // policy = BATCH (ignored)
-                sa[8..16].copy_from_slice(&0x08u64.to_le_bytes()); // KEEP_POLICY
-                sa[20..24].copy_from_slice(&5u32.to_le_bytes()); // priority = 5 (used)
-                let sa_ptr = sa.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: kp,
-                    arg1: sa_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: setattr(KEEP_POLICY) want 0 got {}",
-                        dispatch_linux(nr::SCHED_SETATTR, &a).value,
-                    );
-                    pcb::destroy(kp);
-                    return Err(KernelError::InternalError);
-                }
-                let a = SyscallArgs {
-                    arg0: kp,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                let v = dispatch_linux(nr::SCHED_GETSCHEDULER, &a).value;
-                if v != 1 || pcb::get_sched_priority(kp) != Some(5) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: after KEEP_POLICY want FIFO(1)/prio=5 got {:#x}/{:?}",
-                        v,
-                        pcb::get_sched_priority(kp)
-                    );
-                    pcb::destroy(kp);
-                    return Err(KernelError::InternalError);
-                }
-                // (c) KEEP_POLICY also ignores a same-call RESET_ON_FORK bit:
-                // reset_on_fork comes from the task (currently false), so it
-                // must stay false even though the attr sets the 0x01 bit.  A
-                // valid FIFO priority (5) is still required.
-                let mut sa = [0u8; 48];
-                sa[0..4].copy_from_slice(&48u32.to_le_bytes());
-                sa[8..16].copy_from_slice(&(0x08u64 | 0x01u64).to_le_bytes()); // KEEP_POLICY|RESET_ON_FORK
-                sa[20..24].copy_from_slice(&5u32.to_le_bytes()); // priority = 5
-                let sa_ptr = sa.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: kp,
-                    arg1: sa_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: setattr(KEEP_POLICY|RESET_ON_FORK) want 0 got {}",
-                        dispatch_linux(nr::SCHED_SETATTR, &a).value,
-                    );
-                    pcb::destroy(kp);
-                    return Err(KernelError::InternalError);
-                }
-                if pcb::get_sched_reset_on_fork(kp) != Some(false) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: KEEP_POLICY must ignore same-call RESET_ON_FORK; got {:?}",
-                        pcb::get_sched_reset_on_fork(kp)
-                    );
-                    pcb::destroy(kp);
-                    return Err(KernelError::InternalError);
-                }
-                // (d) sanity: a plain setattr WITHOUT either keep flag DOES
-                // store policy+priority (regression guard the keep flags do
-                // not over-suppress).  policy=2 (RR) priority=7.
-                let mut sa = [0u8; 48];
-                sa[0..4].copy_from_slice(&48u32.to_le_bytes());
-                sa[4..8].copy_from_slice(&2u32.to_le_bytes()); // policy = RR
-                sa[20..24].copy_from_slice(&7u32.to_le_bytes()); // priority = 7
-                let sa_ptr = sa.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: kp,
-                    arg1: sa_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: setattr(RR,7) want 0 got {}",
-                        dispatch_linux(nr::SCHED_SETATTR, &a).value,
-                    );
-                    pcb::destroy(kp);
-                    return Err(KernelError::InternalError);
-                }
-                if pcb::get_sched_policy(kp) != Some(2) || pcb::get_sched_priority(kp) != Some(7) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: plain setattr must store RR/7; got {:?}/{:?}",
-                        pcb::get_sched_policy(kp),
-                        pcb::get_sched_priority(kp)
-                    );
-                    pcb::destroy(kp);
-                    return Err(KernelError::InternalError);
-                }
-                pcb::destroy(kp);
+                case()?;
             }
             serial_println!(
                 "[syscall/linux]   sched_setattr SCHED_FLAG_KEEP_POLICY/KEEP_PARAMS semantics (batch 528): OK"
@@ -85532,210 +85657,215 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // attr for fair_policy ∈ {NORMAL, BATCH} (not IDLE).  Exercise the
             // full round-trip + KEEP_PARAMS preservation on a synthetic PCB.
             {
-                let np = pcb::create("nice-b529", 0);
-                if np > i32::MAX as u64 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: nice-b529 test_pid too large ({})",
-                        np
-                    );
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                // Helper closure: getattr -> (policy, nice, priority) read out
-                // of the v0 sched_attr buffer.
-                let read_attr = |pid: u64| -> (u32, i32, u32) {
-                    let mut ga = [0u8; 48];
-                    let ga_ptr = ga.as_mut_ptr() as u64;
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let np = pcb::create("nice-b529", 0);
+                    if np > i32::MAX as u64 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: nice-b529 test_pid too large ({})",
+                            np
+                        );
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    // Helper closure: getattr -> (policy, nice, priority) read out
+                    // of the v0 sched_attr buffer.
+                    let read_attr = |pid: u64| -> (u32, i32, u32) {
+                        let mut ga = [0u8; 48];
+                        let ga_ptr = ga.as_mut_ptr() as u64;
+                        let a = SyscallArgs {
+                            arg0: pid,
+                            arg1: ga_ptr,
+                            arg2: 48,
+                            arg3: 0,
+                            arg4: 0,
+                            arg5: 0,
+                        };
+                        let _ = dispatch_linux(nr::SCHED_GETATTR, &a).value;
+                        let pol = u32::from_le_bytes([ga[4], ga[5], ga[6], ga[7]]);
+                        let nic = i32::from_le_bytes([ga[16], ga[17], ga[18], ga[19]]);
+                        let pri = u32::from_le_bytes([ga[20], ga[21], ga[22], ga[23]]);
+                        (pol, nic, pri)
+                    };
+                    // (a) setpriority(nice=10) -> sched_getattr reports nice=10,
+                    // consistent with getpriority (same PCB field).
                     let a = SyscallArgs {
-                        arg0: pid,
-                        arg1: ga_ptr,
-                        arg2: 48,
+                        arg0: 0,
+                        arg1: np,
+                        arg2: 10,
                         arg3: 0,
                         arg4: 0,
                         arg5: 0,
                     };
-                    let _ = dispatch_linux(nr::SCHED_GETATTR, &a).value;
-                    let pol = u32::from_le_bytes([ga[4], ga[5], ga[6], ga[7]]);
-                    let nic = i32::from_le_bytes([ga[16], ga[17], ga[18], ga[19]]);
-                    let pri = u32::from_le_bytes([ga[20], ga[21], ga[22], ga[23]]);
-                    (pol, nic, pri)
-                };
-                // (a) setpriority(nice=10) -> sched_getattr reports nice=10,
-                // consistent with getpriority (same PCB field).
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: np,
-                    arg2: 10,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SETPRIORITY, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: setpriority(10) want 0");
+                    if dispatch_linux(nr::SETPRIORITY, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: setpriority(10) want 0");
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    if read_attr(np).1 != 10 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: getattr nice after setpriority want 10 got {}",
+                            read_attr(np).1
+                        );
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    // (b) setattr(NORMAL, nice=5) -> stores nice=5; getattr reports it.
+                    let mut sa = [0u8; 48];
+                    sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    // policy @4 = 0 (SCHED_NORMAL)
+                    sa[16..20].copy_from_slice(&5i32.to_le_bytes()); // nice = 5
+                    let sa_ptr = sa.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: np,
+                        arg1: sa_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: setattr(NORMAL,nice=5) want 0");
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    if pcb::get_nice(np) != Some(5) || read_attr(np).1 != 5 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: setattr nice store want 5 got {:?}/{}",
+                            pcb::get_nice(np),
+                            read_attr(np).1
+                        );
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    // (c) setattr(KEEP_PARAMS, NORMAL, nice=99): 99 clamps to 19,
+                    // but KEEP_PARAMS pre-loads the current nice (5) and skips the
+                    // store -> nice stays 5.
+                    let mut sa = [0u8; 48];
+                    sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    sa[8..16].copy_from_slice(&0x10u64.to_le_bytes()); // KEEP_PARAMS
+                    sa[16..20].copy_from_slice(&99i32.to_le_bytes()); // nice = 99 (ignored)
+                    let sa_ptr = sa.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: np,
+                        arg1: sa_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: setattr(KEEP_PARAMS,nice) want 0");
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    if pcb::get_nice(np) != Some(5) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: KEEP_PARAMS must preserve nice=5 got {:?}",
+                            pcb::get_nice(np)
+                        );
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    // (d) setattr(BATCH=3, nice=-3): stores negative nice; getattr
+                    // reports it and policy=3.
+                    let mut sa = [0u8; 48];
+                    sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    sa[4..8].copy_from_slice(&3u32.to_le_bytes()); // policy = BATCH
+                    sa[16..20].copy_from_slice(&(-3i32).to_le_bytes()); // nice = -3
+                    let sa_ptr = sa.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: np,
+                        arg1: sa_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: setattr(BATCH,nice=-3) want 0");
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    let (pol, nic, _) = read_attr(np);
+                    if pcb::get_nice(np) != Some(-3) || nic != -3 || pol != 3 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: BATCH/nice=-3 want pol3/nice-3 got {}/{:?}/{}",
+                            pol,
+                            pcb::get_nice(np),
+                            nic
+                        );
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    // (e) setattr(IDLE=5, prio=0): fair_policy() excludes IDLE, so
+                    // nice is NOT re-stored (stays -3), yet getattr's non-RT
+                    // branch still reports it.
+                    let mut sa = [0u8; 48];
+                    sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    sa[4..8].copy_from_slice(&5u32.to_le_bytes()); // policy = IDLE
+                    sa[16..20].copy_from_slice(&8i32.to_le_bytes()); // nice = 8 (ignored for IDLE)
+                    let sa_ptr = sa.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: np,
+                        arg1: sa_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: setattr(IDLE) want 0");
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    let (pol, nic, _) = read_attr(np);
+                    if pcb::get_nice(np) != Some(-3) || nic != -3 || pol != 5 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: IDLE must keep nice=-3 got pol{}/nice{:?}/attr{}",
+                            pol,
+                            pcb::get_nice(np),
+                            nic
+                        );
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    // (f) setattr(FIFO=1, prio=10): RT task reports priority and
+                    // leaves sched_nice at 0 (get_params RT branch); the stored
+                    // nice field is untouched.
+                    let mut sa = [0u8; 48];
+                    sa[0..4].copy_from_slice(&48u32.to_le_bytes());
+                    sa[4..8].copy_from_slice(&1u32.to_le_bytes()); // policy = FIFO
+                    sa[20..24].copy_from_slice(&10u32.to_le_bytes()); // priority = 10
+                    let sa_ptr = sa.as_ptr() as u64;
+                    let a = SyscallArgs {
+                        arg0: np,
+                        arg1: sa_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: setattr(FIFO,prio=10) want 0");
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
+                    let (pol, nic, pri) = read_attr(np);
+                    if pol != 1 || nic != 0 || pri != 10 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: FIFO want pol1/nice0/prio10 got {}/{}/{}",
+                            pol,
+                            nic,
+                            pri
+                        );
+                        pcb::destroy(np);
+                        return Err(KernelError::InternalError);
+                    }
                     pcb::destroy(np);
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                if read_attr(np).1 != 10 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: getattr nice after setpriority want 10 got {}",
-                        read_attr(np).1
-                    );
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                // (b) setattr(NORMAL, nice=5) -> stores nice=5; getattr reports it.
-                let mut sa = [0u8; 48];
-                sa[0..4].copy_from_slice(&48u32.to_le_bytes());
-                // policy @4 = 0 (SCHED_NORMAL)
-                sa[16..20].copy_from_slice(&5i32.to_le_bytes()); // nice = 5
-                let sa_ptr = sa.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: np,
-                    arg1: sa_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: setattr(NORMAL,nice=5) want 0");
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                if pcb::get_nice(np) != Some(5) || read_attr(np).1 != 5 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: setattr nice store want 5 got {:?}/{}",
-                        pcb::get_nice(np),
-                        read_attr(np).1
-                    );
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                // (c) setattr(KEEP_PARAMS, NORMAL, nice=99): 99 clamps to 19,
-                // but KEEP_PARAMS pre-loads the current nice (5) and skips the
-                // store -> nice stays 5.
-                let mut sa = [0u8; 48];
-                sa[0..4].copy_from_slice(&48u32.to_le_bytes());
-                sa[8..16].copy_from_slice(&0x10u64.to_le_bytes()); // KEEP_PARAMS
-                sa[16..20].copy_from_slice(&99i32.to_le_bytes()); // nice = 99 (ignored)
-                let sa_ptr = sa.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: np,
-                    arg1: sa_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: setattr(KEEP_PARAMS,nice) want 0");
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                if pcb::get_nice(np) != Some(5) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: KEEP_PARAMS must preserve nice=5 got {:?}",
-                        pcb::get_nice(np)
-                    );
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                // (d) setattr(BATCH=3, nice=-3): stores negative nice; getattr
-                // reports it and policy=3.
-                let mut sa = [0u8; 48];
-                sa[0..4].copy_from_slice(&48u32.to_le_bytes());
-                sa[4..8].copy_from_slice(&3u32.to_le_bytes()); // policy = BATCH
-                sa[16..20].copy_from_slice(&(-3i32).to_le_bytes()); // nice = -3
-                let sa_ptr = sa.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: np,
-                    arg1: sa_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: setattr(BATCH,nice=-3) want 0");
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                let (pol, nic, _) = read_attr(np);
-                if pcb::get_nice(np) != Some(-3) || nic != -3 || pol != 3 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: BATCH/nice=-3 want pol3/nice-3 got {}/{:?}/{}",
-                        pol,
-                        pcb::get_nice(np),
-                        nic
-                    );
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                // (e) setattr(IDLE=5, prio=0): fair_policy() excludes IDLE, so
-                // nice is NOT re-stored (stays -3), yet getattr's non-RT
-                // branch still reports it.
-                let mut sa = [0u8; 48];
-                sa[0..4].copy_from_slice(&48u32.to_le_bytes());
-                sa[4..8].copy_from_slice(&5u32.to_le_bytes()); // policy = IDLE
-                sa[16..20].copy_from_slice(&8i32.to_le_bytes()); // nice = 8 (ignored for IDLE)
-                let sa_ptr = sa.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: np,
-                    arg1: sa_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: setattr(IDLE) want 0");
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                let (pol, nic, _) = read_attr(np);
-                if pcb::get_nice(np) != Some(-3) || nic != -3 || pol != 5 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: IDLE must keep nice=-3 got pol{}/nice{:?}/attr{}",
-                        pol,
-                        pcb::get_nice(np),
-                        nic
-                    );
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                // (f) setattr(FIFO=1, prio=10): RT task reports priority and
-                // leaves sched_nice at 0 (get_params RT branch); the stored
-                // nice field is untouched.
-                let mut sa = [0u8; 48];
-                sa[0..4].copy_from_slice(&48u32.to_le_bytes());
-                sa[4..8].copy_from_slice(&1u32.to_le_bytes()); // policy = FIFO
-                sa[20..24].copy_from_slice(&10u32.to_le_bytes()); // priority = 10
-                let sa_ptr = sa.as_ptr() as u64;
-                let a = SyscallArgs {
-                    arg0: np,
-                    arg1: sa_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SCHED_SETATTR, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: setattr(FIFO,prio=10) want 0");
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                let (pol, nic, pri) = read_attr(np);
-                if pol != 1 || nic != 0 || pri != 10 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: FIFO want pol1/nice0/prio10 got {}/{}/{}",
-                        pol,
-                        nic,
-                        pri
-                    );
-                    pcb::destroy(np);
-                    return Err(KernelError::InternalError);
-                }
-                pcb::destroy(np);
+                case()?;
             }
             serial_println!(
                 "[syscall/linux]   sched_setattr/getattr nice round-trip (batch 529): OK"
@@ -99171,78 +99301,83 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // wrong errno.  Tests use a fd value of -1 so the unfixed path
             // resolves to EBADF (the post-fix path stops earlier at EINVAL).
             {
-                #[repr(C)]
-                struct Iov {
-                    base: u64,
-                    len: u64,
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    #[repr(C)]
+                    struct Iov {
+                        base: u64,
+                        len: u64,
+                    }
+                    // Discriminator A: iov_len = u64::MAX -> EINVAL (pre-batch: EBADF).
+                    let iov_bad: [Iov; 1] = [Iov {
+                        base: 0,
+                        len: u64::MAX,
+                    }];
+                    let iov_ptr_bad = (&raw const iov_bad[0]) as u64;
+                    core::hint::black_box(&iov_bad);
+                    let a = SyscallArgs {
+                        arg0: u64::MAX, // fd = -1
+                        arg1: iov_ptr_bad,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: preadv iov_len=u64::MAX not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // Discriminator B: iov_len = i64::MAX as u64 + 1 -> EINVAL
+                    // (smallest SSIZE_MAX boundary failure).
+                    let iov_b: [Iov; 1] = [Iov {
+                        base: 0,
+                        len: (i64::MAX as u64) + 1,
+                    }];
+                    let iov_ptr_b = (&raw const iov_b[0]) as u64;
+                    core::hint::black_box(&iov_b);
+                    let a = SyscallArgs {
+                        arg0: u64::MAX,
+                        arg1: iov_ptr_b,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PWRITEV, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: pwritev iov_len=SSIZE_MAX+1 not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Discriminator C: iov_len = i64::MAX exactly -> *passes* the
+                    // SSIZE_MAX gate, so the call advances to the fd lookup and
+                    // returns EBADF.  This proves the new gate is upper-bound
+                    // exclusive (i.e. strictly `> i64::MAX as u64`), matching
+                    // Linux's `(ssize_t)len < 0` test.
+                    let iov_ok: [Iov; 1] = [Iov {
+                        base: 0,
+                        len: i64::MAX as u64,
+                    }];
+                    let iov_ptr_ok = (&raw const iov_ok[0]) as u64;
+                    core::hint::black_box(&iov_ok);
+                    let a = SyscallArgs {
+                        arg0: u64::MAX,
+                        arg1: iov_ptr_ok,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::EBADF) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: preadv iov_len=SSIZE_MAX not EBADF (gate is not exclusive)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!("[syscall/linux]   preadv/pwritev iov_len SSIZE_MAX gating: OK");
+                    Ok(())
                 }
-                // Discriminator A: iov_len = u64::MAX -> EINVAL (pre-batch: EBADF).
-                let iov_bad: [Iov; 1] = [Iov {
-                    base: 0,
-                    len: u64::MAX,
-                }];
-                let iov_ptr_bad = (&raw const iov_bad[0]) as u64;
-                core::hint::black_box(&iov_bad);
-                let a = SyscallArgs {
-                    arg0: u64::MAX, // fd = -1
-                    arg1: iov_ptr_bad,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: preadv iov_len=u64::MAX not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-                // Discriminator B: iov_len = i64::MAX as u64 + 1 -> EINVAL
-                // (smallest SSIZE_MAX boundary failure).
-                let iov_b: [Iov; 1] = [Iov {
-                    base: 0,
-                    len: (i64::MAX as u64) + 1,
-                }];
-                let iov_ptr_b = (&raw const iov_b[0]) as u64;
-                core::hint::black_box(&iov_b);
-                let a = SyscallArgs {
-                    arg0: u64::MAX,
-                    arg1: iov_ptr_b,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PWRITEV, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: pwritev iov_len=SSIZE_MAX+1 not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Discriminator C: iov_len = i64::MAX exactly -> *passes* the
-                // SSIZE_MAX gate, so the call advances to the fd lookup and
-                // returns EBADF.  This proves the new gate is upper-bound
-                // exclusive (i.e. strictly `> i64::MAX as u64`), matching
-                // Linux's `(ssize_t)len < 0` test.
-                let iov_ok: [Iov; 1] = [Iov {
-                    base: 0,
-                    len: i64::MAX as u64,
-                }];
-                let iov_ptr_ok = (&raw const iov_ok[0]) as u64;
-                core::hint::black_box(&iov_ok);
-                let a = SyscallArgs {
-                    arg0: u64::MAX,
-                    arg1: iov_ptr_ok,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PREADV, &a).value != -i64::from(errno::EBADF) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: preadv iov_len=SSIZE_MAX not EBADF (gate is not exclusive)"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!("[syscall/linux]   preadv/pwritev iov_len SSIZE_MAX gating: OK");
+                case()?;
             }
 
             // ---- capget / capset NULL-data error matrix ----
@@ -99257,109 +99392,114 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // sys_capset has no such ternary: a NULL data pointer alongside
             // a valid version surfaces EFAULT from copy_from_user(&kdata, ...).
             {
-                const V3: u32 = 0x2008_0522;
-                // Discriminator A: capget(bad_version_header, NULL datap)
-                //   pre-batch -> -EINVAL (we always returned EINVAL on the
-                //                version-rewrite arm regardless of datap);
-                //   post-batch -> 0 (header rewritten to V3 in-place,
-                //                returning success so the caller can retry
-                //                with the now-correct version).
-                let mut hdr_a: [u8; 8] = [0x99, 0x99, 0x99, 0x99, 0, 0, 0, 0];
-                let hdr_a_ptr = (&raw mut hdr_a[0]) as u64;
-                core::hint::black_box(&hdr_a);
-                let a = SyscallArgs {
-                    arg0: hdr_a_ptr,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CAPGET, &a).value != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: capget(bad_version, NULL) not 0 (version probe)"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // The header must have been rewritten in place to V3.
-                let v_after = u32::from_ne_bytes([hdr_a[0], hdr_a[1], hdr_a[2], hdr_a[3]]);
-                if v_after != V3 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: capget(bad_version, NULL) did not rewrite header to V3"
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    const V3: u32 = 0x2008_0522;
+                    // Discriminator A: capget(bad_version_header, NULL datap)
+                    //   pre-batch -> -EINVAL (we always returned EINVAL on the
+                    //                version-rewrite arm regardless of datap);
+                    //   post-batch -> 0 (header rewritten to V3 in-place,
+                    //                returning success so the caller can retry
+                    //                with the now-correct version).
+                    let mut hdr_a: [u8; 8] = [0x99, 0x99, 0x99, 0x99, 0, 0, 0, 0];
+                    let hdr_a_ptr = (&raw mut hdr_a[0]) as u64;
+                    core::hint::black_box(&hdr_a);
+                    let a = SyscallArgs {
+                        arg0: hdr_a_ptr,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CAPGET, &a).value != 0 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: capget(bad_version, NULL) not 0 (version probe)"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // The header must have been rewritten in place to V3.
+                    let v_after = u32::from_ne_bytes([hdr_a[0], hdr_a[1], hdr_a[2], hdr_a[3]]);
+                    if v_after != V3 {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: capget(bad_version, NULL) did not rewrite header to V3"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator B: capget(bad_version_header, valid datap)
-                //   acceptance: still -EINVAL, proving the post-batch ternary
-                //   only converts the NULL-datap arm.  Pre-batch also -EINVAL.
-                let mut hdr_b: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0];
-                let hdr_b_ptr = (&raw mut hdr_b[0]) as u64;
-                let mut datap_buf = [0u8; 24];
-                let datap_b = (&raw mut datap_buf[0]) as u64;
-                core::hint::black_box(&hdr_b);
-                core::hint::black_box(&datap_buf);
-                let a = SyscallArgs {
-                    arg0: hdr_b_ptr,
-                    arg1: datap_b,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CAPGET, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: capget(bad_version, valid datap) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator B: capget(bad_version_header, valid datap)
+                    //   acceptance: still -EINVAL, proving the post-batch ternary
+                    //   only converts the NULL-datap arm.  Pre-batch also -EINVAL.
+                    let mut hdr_b: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0];
+                    let hdr_b_ptr = (&raw mut hdr_b[0]) as u64;
+                    let mut datap_buf = [0u8; 24];
+                    let datap_b = (&raw mut datap_buf[0]) as u64;
+                    core::hint::black_box(&hdr_b);
+                    core::hint::black_box(&datap_buf);
+                    let a = SyscallArgs {
+                        arg0: hdr_b_ptr,
+                        arg1: datap_b,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CAPGET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: capget(bad_version, valid datap) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator C: capset(V3_header, NULL data)
-                //   pre-batch -> 0 (we accepted any valid-version capset
-                //                without inspecting data);
-                //   post-batch -> -EFAULT (data pointer is unreadable for
-                //                the required 24 bytes of cap_user_data).
-                let mut hdr_c: [u8; 8] = [0; 8];
-                hdr_c[0] = V3.to_ne_bytes()[0];
-                hdr_c[1] = V3.to_ne_bytes()[1];
-                hdr_c[2] = V3.to_ne_bytes()[2];
-                hdr_c[3] = V3.to_ne_bytes()[3];
-                let hdr_c_ptr = (&raw const hdr_c[0]) as u64;
-                core::hint::black_box(&hdr_c);
-                let a = SyscallArgs {
-                    arg0: hdr_c_ptr,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!("[syscall/linux]   FAIL: capset(V3, NULL data) not EFAULT");
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator C: capset(V3_header, NULL data)
+                    //   pre-batch -> 0 (we accepted any valid-version capset
+                    //                without inspecting data);
+                    //   post-batch -> -EFAULT (data pointer is unreadable for
+                    //                the required 24 bytes of cap_user_data).
+                    let mut hdr_c: [u8; 8] = [0; 8];
+                    hdr_c[0] = V3.to_ne_bytes()[0];
+                    hdr_c[1] = V3.to_ne_bytes()[1];
+                    hdr_c[2] = V3.to_ne_bytes()[2];
+                    hdr_c[3] = V3.to_ne_bytes()[3];
+                    let hdr_c_ptr = (&raw const hdr_c[0]) as u64;
+                    core::hint::black_box(&hdr_c);
+                    let a = SyscallArgs {
+                        arg0: hdr_c_ptr,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!("[syscall/linux]   FAIL: capset(V3, NULL data) not EFAULT");
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator D: capset(V3_header, valid data) -> 0
-                //   acceptance: well-formed call still succeeds (pre- and
-                //   post-batch).  Proves the new gate is restricted to the
-                //   NULL/unreadable case.
-                let data_buf = [0u8; 24];
-                let data_ptr = (&raw const data_buf[0]) as u64;
-                core::hint::black_box(&data_buf);
-                let a = SyscallArgs {
-                    arg0: hdr_c_ptr,
-                    arg1: data_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CAPSET, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: capset(V3, valid data) not 0");
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator D: capset(V3_header, valid data) -> 0
+                    //   acceptance: well-formed call still succeeds (pre- and
+                    //   post-batch).  Proves the new gate is restricted to the
+                    //   NULL/unreadable case.
+                    let data_buf = [0u8; 24];
+                    let data_ptr = (&raw const data_buf[0]) as u64;
+                    core::hint::black_box(&data_buf);
+                    let a = SyscallArgs {
+                        arg0: hdr_c_ptr,
+                        arg1: data_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CAPSET, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: capset(V3, valid data) not 0");
+                        return Err(KernelError::InternalError);
+                    }
 
-                serial_println!("[syscall/linux]   capget/capset NULL-data error matrix: OK");
+                    serial_println!("[syscall/linux]   capget/capset NULL-data error matrix: OK");
+                    Ok(())
+                }
+                case()?;
             }
 
             // ---- prctl(PR_SET_NAME) NULL-arg2 -> EFAULT ----
@@ -99372,57 +99512,62 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // surfaces -EFAULT.  Pre-batch we treated NULL as silent OK
             // ("comm unchanged"), observably wrong.
             {
-                const PR_SET_NAME: u64 = 15;
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    const PR_SET_NAME: u64 = 15;
 
-                // Discriminator A: prctl(PR_SET_NAME, NULL)
-                //   pre-batch -> 0 (silent OK)
-                //   post-batch -> -EFAULT (matches Linux's strncpy_from_user
-                //                fault path).
-                let a = SyscallArgs {
-                    arg0: PR_SET_NAME,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!("[syscall/linux]   FAIL: prctl(PR_SET_NAME, NULL) not EFAULT");
-                    return Err(KernelError::InternalError);
+                    // Discriminator A: prctl(PR_SET_NAME, NULL)
+                    //   pre-batch -> 0 (silent OK)
+                    //   post-batch -> -EFAULT (matches Linux's strncpy_from_user
+                    //                fault path).
+                    let a = SyscallArgs {
+                        arg0: PR_SET_NAME,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!("[syscall/linux]   FAIL: prctl(PR_SET_NAME, NULL) not EFAULT");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator B: prctl(PR_SET_NAME, valid_stack_buf_with_name)
+                    //   acceptance: a well-formed call still succeeds (pre- and
+                    //   post-batch), confirming the new gate is restricted to
+                    //   the NULL/unreadable case.
+                    //
+                    // This comment used to claim "kernel context has no PCB so the
+                    // name isn't actually stored".  That was false and cost us a
+                    // misleading hang dump: `current_task_id()` is 0 here, task 0 is
+                    // the BSP idle task and it very much exists, so the store landed
+                    // on it and the idle task wore the name below for the rest of the
+                    // boot.  `sched::set_task_name` now refuses task 0 outright, which
+                    // makes the original claim true — but by construction rather than
+                    // by luck.  Keep the assertion on the *return value* only: the
+                    // name is deliberately not stored, so there is nothing to read
+                    // back.
+                    let name_buf: [u8; 16] = *b"prctl-batch269\0\0";
+                    let name_ptr = (&raw const name_buf[0]) as u64;
+                    core::hint::black_box(&name_buf);
+                    let a = SyscallArgs {
+                        arg0: PR_SET_NAME,
+                        arg1: name_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: prctl(PR_SET_NAME, valid name) not 0");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    serial_println!("[syscall/linux]   prctl(PR_SET_NAME) NULL-arg2 gating: OK");
+                    Ok(())
                 }
-
-                // Discriminator B: prctl(PR_SET_NAME, valid_stack_buf_with_name)
-                //   acceptance: a well-formed call still succeeds (pre- and
-                //   post-batch), confirming the new gate is restricted to
-                //   the NULL/unreadable case.
-                //
-                // This comment used to claim "kernel context has no PCB so the
-                // name isn't actually stored".  That was false and cost us a
-                // misleading hang dump: `current_task_id()` is 0 here, task 0 is
-                // the BSP idle task and it very much exists, so the store landed
-                // on it and the idle task wore the name below for the rest of the
-                // boot.  `sched::set_task_name` now refuses task 0 outright, which
-                // makes the original claim true — but by construction rather than
-                // by luck.  Keep the assertion on the *return value* only: the
-                // name is deliberately not stored, so there is nothing to read
-                // back.
-                let name_buf: [u8; 16] = *b"prctl-batch269\0\0";
-                let name_ptr = (&raw const name_buf[0]) as u64;
-                core::hint::black_box(&name_buf);
-                let a = SyscallArgs {
-                    arg0: PR_SET_NAME,
-                    arg1: name_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: prctl(PR_SET_NAME, valid name) not 0");
-                    return Err(KernelError::InternalError);
-                }
-
-                serial_println!("[syscall/linux]   prctl(PR_SET_NAME) NULL-arg2 gating: OK");
+                case()?;
             }
 
             // Batch 350: prctl option int truncation.
@@ -99433,106 +99578,111 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // option register fell through to the EINVAL default arm
             // instead of dispatching the truncated PR_* code.
             {
-                // (a) option = 0x1_0000_0001 (high garbage + PR_SET_PDEATHSIG)
-                //     with sig=0 (disable).  Pre-batch: EINVAL (default arm
-                //     because 0x1_0000_0001 doesn't match `1 =>`).
-                //     Post-batch: truncates to 1, dispatches PR_SET_PDEATHSIG
-                //     with sig=0, returns 0.  Kernel context has no PCB so
-                //     the set is a silent no-op, but the arm still returns 0.
-                let a = SyscallArgs {
-                    arg0: 0x1_0000_0001,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: prctl(high|PDEATHSIG, sig=0) not 0");
-                    return Err(KernelError::InternalError);
-                }
-
-                // (b) option = 0x1_0000_0007 (high garbage + PR_GET_KEEPCAPS).
-                //     Pre-batch: EINVAL.  Post-batch: truncates to 7,
-                //     returns the default KEEPCAPS_CLEAR (0) in kernel ctx.
-                let a = SyscallArgs {
-                    arg0: 0x1_0000_0007,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: prctl(high|GET_KEEPCAPS) not 0");
-                    return Err(KernelError::InternalError);
-                }
-
-                // (c) option = 0xFFFF_FFFF_5961_6d61 (sign-extended-looking
-                //     high half + PR_SET_PTRACER "Yama").  Truncates to
-                //     i32 = 0x5961_6d61 (positive), widens to u64 =
-                //     0x5961_6d61, matches the PTRACER arm with arg2/3/4=0
-                //     -> ok(0).  Pre-batch saw the full u64 not match the
-                //     arm literal -> EINVAL default arm.
-                let a = SyscallArgs {
-                    arg0: 0xFFFF_FFFF_5961_6D61,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: prctl(high|PR_SET_PTRACER) not 0");
-                    return Err(KernelError::InternalError);
-                }
-
-                // (d) option = 0xDEAD_BEEF (no high half, but unrecognised
-                //     PR_* code).  Regression guard: even with truncation
-                //     applied, an unrecognised low-32 value must still
-                //     return EINVAL (post-batch parity with pre-batch).
-                //     0xDEAD_BEEF as i32 = -559038737 -> as u32 = 0xDEAD_BEEF
-                //     -> doesn't match any arm -> EINVAL default.
-                let a = SyscallArgs {
-                    arg0: 0xDEAD_BEEF,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: prctl(bogus low-32) not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-
-                // (e) Cast isolation: verify the i32 -> u32 -> u64 widening
-                //     produces what the match expects for representative
-                //     option values.
-                let cases: [(u64, u64); 5] = [
-                    (0x1_0000_0001, 1),                   // high garbage + 1
-                    (0x1_0000_0007, 7),                   // high garbage + 7
-                    (0xFFFF_FFFF_0000_0001, 1),           // sign-ext high + 1
-                    (0xFFFF_FFFF_5961_6D61, 0x5961_6D61), // sign-ext high + Yama
-                    (0xDEAD_BEEF, 0xDEAD_BEEF),           // already in low 32
-                ];
-                for &(input, expect) in &cases {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                    let i = input as i32;
-                    #[allow(clippy::cast_sign_loss)]
-                    let got = u64::from(i as u32);
-                    if got != expect {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: prctl trunc cast {:#x} -> {:#x} (want {:#x})",
-                            input,
-                            got,
-                            expect
-                        );
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // (a) option = 0x1_0000_0001 (high garbage + PR_SET_PDEATHSIG)
+                    //     with sig=0 (disable).  Pre-batch: EINVAL (default arm
+                    //     because 0x1_0000_0001 doesn't match `1 =>`).
+                    //     Post-batch: truncates to 1, dispatches PR_SET_PDEATHSIG
+                    //     with sig=0, returns 0.  Kernel context has no PCB so
+                    //     the set is a silent no-op, but the arm still returns 0.
+                    let a = SyscallArgs {
+                        arg0: 0x1_0000_0001,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: prctl(high|PDEATHSIG, sig=0) not 0");
                         return Err(KernelError::InternalError);
                     }
-                }
 
-                serial_println!("[syscall/linux]   prctl option int truncation: OK");
+                    // (b) option = 0x1_0000_0007 (high garbage + PR_GET_KEEPCAPS).
+                    //     Pre-batch: EINVAL.  Post-batch: truncates to 7,
+                    //     returns the default KEEPCAPS_CLEAR (0) in kernel ctx.
+                    let a = SyscallArgs {
+                        arg0: 0x1_0000_0007,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: prctl(high|GET_KEEPCAPS) not 0");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // (c) option = 0xFFFF_FFFF_5961_6d61 (sign-extended-looking
+                    //     high half + PR_SET_PTRACER "Yama").  Truncates to
+                    //     i32 = 0x5961_6d61 (positive), widens to u64 =
+                    //     0x5961_6d61, matches the PTRACER arm with arg2/3/4=0
+                    //     -> ok(0).  Pre-batch saw the full u64 not match the
+                    //     arm literal -> EINVAL default arm.
+                    let a = SyscallArgs {
+                        arg0: 0xFFFF_FFFF_5961_6D61,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: prctl(high|PR_SET_PTRACER) not 0");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // (d) option = 0xDEAD_BEEF (no high half, but unrecognised
+                    //     PR_* code).  Regression guard: even with truncation
+                    //     applied, an unrecognised low-32 value must still
+                    //     return EINVAL (post-batch parity with pre-batch).
+                    //     0xDEAD_BEEF as i32 = -559038737 -> as u32 = 0xDEAD_BEEF
+                    //     -> doesn't match any arm -> EINVAL default.
+                    let a = SyscallArgs {
+                        arg0: 0xDEAD_BEEF,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PRCTL, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: prctl(bogus low-32) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // (e) Cast isolation: verify the i32 -> u32 -> u64 widening
+                    //     produces what the match expects for representative
+                    //     option values.
+                    let cases: [(u64, u64); 5] = [
+                        (0x1_0000_0001, 1),                   // high garbage + 1
+                        (0x1_0000_0007, 7),                   // high garbage + 7
+                        (0xFFFF_FFFF_0000_0001, 1),           // sign-ext high + 1
+                        (0xFFFF_FFFF_5961_6D61, 0x5961_6D61), // sign-ext high + Yama
+                        (0xDEAD_BEEF, 0xDEAD_BEEF),           // already in low 32
+                    ];
+                    for &(input, expect) in &cases {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                        let i = input as i32;
+                        #[allow(clippy::cast_sign_loss)]
+                        let got = u64::from(i as u32);
+                        if got != expect {
+                            serial_println!(
+                                "[syscall/linux]   FAIL: prctl trunc cast {:#x} -> {:#x} (want {:#x})",
+                                input,
+                                got,
+                                expect
+                            );
+                            return Err(KernelError::InternalError);
+                        }
+                    }
+
+                    serial_println!("[syscall/linux]   prctl option int truncation: OK");
+                    Ok(())
+                }
+                case()?;
             }
 
             // ---- capset pid != current -> EPERM ----
@@ -99555,86 +99705,91 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // EPERM, mirroring what an unprivileged userspace caller
             // would see.
             {
-                const V3: u32 = 0x2008_0522;
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    const V3: u32 = 0x2008_0522;
 
-                // Discriminator A: capset(V3 hdr w/ pid=12345, NULL data)
-                //   pre-batch -> -EFAULT (data NULL fired first)
-                //   post-batch -> -EPERM (new gate fires before data NULL)
-                let mut hdr_a: [u8; 8] = [0; 8];
-                hdr_a[0] = V3.to_ne_bytes()[0];
-                hdr_a[1] = V3.to_ne_bytes()[1];
-                hdr_a[2] = V3.to_ne_bytes()[2];
-                hdr_a[3] = V3.to_ne_bytes()[3];
-                // pid = 12345 little-endian at bytes 4..8
-                let pid_le = 12345u32.to_ne_bytes();
-                hdr_a[4] = pid_le[0];
-                hdr_a[5] = pid_le[1];
-                hdr_a[6] = pid_le[2];
-                hdr_a[7] = pid_le[3];
-                let hdr_a_ptr = (&raw const hdr_a[0]) as u64;
-                core::hint::black_box(&hdr_a);
-                let a = SyscallArgs {
-                    arg0: hdr_a_ptr,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EPERM) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: capset(V3, pid=other, NULL) not EPERM"
-                    );
-                    return Err(KernelError::InternalError);
+                    // Discriminator A: capset(V3 hdr w/ pid=12345, NULL data)
+                    //   pre-batch -> -EFAULT (data NULL fired first)
+                    //   post-batch -> -EPERM (new gate fires before data NULL)
+                    let mut hdr_a: [u8; 8] = [0; 8];
+                    hdr_a[0] = V3.to_ne_bytes()[0];
+                    hdr_a[1] = V3.to_ne_bytes()[1];
+                    hdr_a[2] = V3.to_ne_bytes()[2];
+                    hdr_a[3] = V3.to_ne_bytes()[3];
+                    // pid = 12345 little-endian at bytes 4..8
+                    let pid_le = 12345u32.to_ne_bytes();
+                    hdr_a[4] = pid_le[0];
+                    hdr_a[5] = pid_le[1];
+                    hdr_a[6] = pid_le[2];
+                    hdr_a[7] = pid_le[3];
+                    let hdr_a_ptr = (&raw const hdr_a[0]) as u64;
+                    core::hint::black_box(&hdr_a);
+                    let a = SyscallArgs {
+                        arg0: hdr_a_ptr,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: capset(V3, pid=other, NULL) not EPERM"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator B: capset(V3 hdr w/ pid=12345, valid data buf)
+                    //   pre-batch -> 0 (silent OK)
+                    //   post-batch -> -EPERM (gate fires before data validation)
+                    let data_buf = [0u8; 24];
+                    let data_ptr = (&raw const data_buf[0]) as u64;
+                    core::hint::black_box(&data_buf);
+                    let a = SyscallArgs {
+                        arg0: hdr_a_ptr,
+                        arg1: data_ptr,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EPERM) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: capset(V3, pid=other, valid data) not EPERM"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator C: capset(V3 hdr w/ pid=0, NULL data) -> EFAULT
+                    //   acceptance: pid==0 ("current task") bypasses the EPERM
+                    //   gate, so the call falls through to the data-NULL gate
+                    //   and surfaces -EFAULT.  Pre-batch behaviour, preserved.
+                    let mut hdr_c: [u8; 8] = [0; 8];
+                    hdr_c[0] = V3.to_ne_bytes()[0];
+                    hdr_c[1] = V3.to_ne_bytes()[1];
+                    hdr_c[2] = V3.to_ne_bytes()[2];
+                    hdr_c[3] = V3.to_ne_bytes()[3];
+                    // pid bytes 4..8 stay 0 -> pid_in_hdr == 0
+                    let hdr_c_ptr = (&raw const hdr_c[0]) as u64;
+                    core::hint::black_box(&hdr_c);
+                    let a = SyscallArgs {
+                        arg0: hdr_c_ptr,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!("[syscall/linux]   FAIL: capset(V3, pid=0, NULL) not EFAULT");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    serial_println!("[syscall/linux]   capset pid != current EPERM gating: OK");
+                    Ok(())
                 }
-
-                // Discriminator B: capset(V3 hdr w/ pid=12345, valid data buf)
-                //   pre-batch -> 0 (silent OK)
-                //   post-batch -> -EPERM (gate fires before data validation)
-                let data_buf = [0u8; 24];
-                let data_ptr = (&raw const data_buf[0]) as u64;
-                core::hint::black_box(&data_buf);
-                let a = SyscallArgs {
-                    arg0: hdr_a_ptr,
-                    arg1: data_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EPERM) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: capset(V3, pid=other, valid data) not EPERM"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-
-                // Discriminator C: capset(V3 hdr w/ pid=0, NULL data) -> EFAULT
-                //   acceptance: pid==0 ("current task") bypasses the EPERM
-                //   gate, so the call falls through to the data-NULL gate
-                //   and surfaces -EFAULT.  Pre-batch behaviour, preserved.
-                let mut hdr_c: [u8; 8] = [0; 8];
-                hdr_c[0] = V3.to_ne_bytes()[0];
-                hdr_c[1] = V3.to_ne_bytes()[1];
-                hdr_c[2] = V3.to_ne_bytes()[2];
-                hdr_c[3] = V3.to_ne_bytes()[3];
-                // pid bytes 4..8 stay 0 -> pid_in_hdr == 0
-                let hdr_c_ptr = (&raw const hdr_c[0]) as u64;
-                core::hint::black_box(&hdr_c);
-                let a = SyscallArgs {
-                    arg0: hdr_c_ptr,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CAPSET, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!("[syscall/linux]   FAIL: capset(V3, pid=0, NULL) not EFAULT");
-                    return Err(KernelError::InternalError);
-                }
-
-                serial_println!("[syscall/linux]   capset pid != current EPERM gating: OK");
+                case()?;
             }
 
             // ---- capget pid validation (Linux gate order) ----
@@ -99658,113 +99813,118 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // returns 0 and the early return at the head of the body fires
             // before the pid check.  Discriminator D below pins that down.
             {
-                const V3: u32 = 0x2008_0522;
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    const V3: u32 = 0x2008_0522;
 
-                // Helper to build an 8-byte capget header with a given pid.
-                let build_hdr = |pid: i32| -> [u8; 8] {
-                    let mut hdr = [0u8; 8];
-                    let v3 = V3.to_ne_bytes();
-                    hdr[0] = v3[0];
-                    hdr[1] = v3[1];
-                    hdr[2] = v3[2];
-                    hdr[3] = v3[3];
-                    let pid_le = pid.to_ne_bytes();
-                    hdr[4] = pid_le[0];
-                    hdr[5] = pid_le[1];
-                    hdr[6] = pid_le[2];
-                    hdr[7] = pid_le[3];
-                    hdr
-                };
+                    // Helper to build an 8-byte capget header with a given pid.
+                    let build_hdr = |pid: i32| -> [u8; 8] {
+                        let mut hdr = [0u8; 8];
+                        let v3 = V3.to_ne_bytes();
+                        hdr[0] = v3[0];
+                        hdr[1] = v3[1];
+                        hdr[2] = v3[2];
+                        hdr[3] = v3[3];
+                        let pid_le = pid.to_ne_bytes();
+                        hdr[4] = pid_le[0];
+                        hdr[5] = pid_le[1];
+                        hdr[6] = pid_le[2];
+                        hdr[7] = pid_le[3];
+                        hdr
+                    };
 
-                // Discriminator A: capget(V3 hdr w/ pid=-1, valid datap)
-                //   pre-batch -> 0 (all-ones data written, pid ignored)
-                //   post-batch -> -EINVAL (Linux gate `if (pid < 0)`).
-                let hdr_a = build_hdr(-1);
-                let hdr_a_ptr = (&raw const hdr_a[0]) as u64;
-                let mut datap_buf = [0u8; 24];
-                let datap_a = (&raw mut datap_buf[0]) as u64;
-                core::hint::black_box(&hdr_a);
-                core::hint::black_box(&datap_buf);
-                let a = SyscallArgs {
-                    arg0: hdr_a_ptr,
-                    arg1: datap_a,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CAPGET, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: capget(V3, pid=-1, valid datap) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
+                    // Discriminator A: capget(V3 hdr w/ pid=-1, valid datap)
+                    //   pre-batch -> 0 (all-ones data written, pid ignored)
+                    //   post-batch -> -EINVAL (Linux gate `if (pid < 0)`).
+                    let hdr_a = build_hdr(-1);
+                    let hdr_a_ptr = (&raw const hdr_a[0]) as u64;
+                    let mut datap_buf = [0u8; 24];
+                    let datap_a = (&raw mut datap_buf[0]) as u64;
+                    core::hint::black_box(&hdr_a);
+                    core::hint::black_box(&datap_buf);
+                    let a = SyscallArgs {
+                        arg0: hdr_a_ptr,
+                        arg1: datap_a,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CAPGET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: capget(V3, pid=-1, valid datap) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator B: capget(V3 hdr w/ pid=12345, valid datap)
+                    //   pre-batch -> 0 (silent success, all-ones written)
+                    //   post-batch -> -ESRCH (find_task_by_vpid(12345) fails;
+                    //     no PCB exists for pid 12345 in self-test context).
+                    let hdr_b = build_hdr(12345);
+                    let hdr_b_ptr = (&raw const hdr_b[0]) as u64;
+                    core::hint::black_box(&hdr_b);
+                    let a = SyscallArgs {
+                        arg0: hdr_b_ptr,
+                        arg1: datap_a,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CAPGET, &a).value != -i64::from(errno::ESRCH) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: capget(V3, pid=other, valid datap) not ESRCH"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator C: capget(V3 hdr w/ pid=0, valid datap) -> 0
+                    //   acceptance: pid==0 ("current task") takes the
+                    //   else-branch in Linux (no find_task call) and the call
+                    //   succeeds.  Pre-batch behaviour preserved.
+                    let hdr_c = build_hdr(0);
+                    let hdr_c_ptr = (&raw const hdr_c[0]) as u64;
+                    core::hint::black_box(&hdr_c);
+                    let a = SyscallArgs {
+                        arg0: hdr_c_ptr,
+                        arg1: datap_a,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CAPGET, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: capget(V3, pid=0, valid datap) not 0");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator D: capget(V3 hdr w/ pid=-1, datap=NULL) -> 0
+                    //   acceptance: the NULL-datap arm at the head of sys_capget
+                    //   returns 0 BEFORE the pid<0 check runs.  Pre- and
+                    //   post-batch behaviour both yield 0; this guards against
+                    //   accidentally re-ordering the pid check ahead of the
+                    //   NULL-datap version-probe early return.
+                    let hdr_d = build_hdr(-1);
+                    let hdr_d_ptr = (&raw const hdr_d[0]) as u64;
+                    core::hint::black_box(&hdr_d);
+                    let a = SyscallArgs {
+                        arg0: hdr_d_ptr,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::CAPGET, &a).value != 0 {
+                        serial_println!("[syscall/linux]   FAIL: capget(V3, pid=-1, NULL datap) not 0");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    serial_println!("[syscall/linux]   capget pid validation (Linux gate order): OK");
+                    Ok(())
                 }
-
-                // Discriminator B: capget(V3 hdr w/ pid=12345, valid datap)
-                //   pre-batch -> 0 (silent success, all-ones written)
-                //   post-batch -> -ESRCH (find_task_by_vpid(12345) fails;
-                //     no PCB exists for pid 12345 in self-test context).
-                let hdr_b = build_hdr(12345);
-                let hdr_b_ptr = (&raw const hdr_b[0]) as u64;
-                core::hint::black_box(&hdr_b);
-                let a = SyscallArgs {
-                    arg0: hdr_b_ptr,
-                    arg1: datap_a,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CAPGET, &a).value != -i64::from(errno::ESRCH) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: capget(V3, pid=other, valid datap) not ESRCH"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-
-                // Discriminator C: capget(V3 hdr w/ pid=0, valid datap) -> 0
-                //   acceptance: pid==0 ("current task") takes the
-                //   else-branch in Linux (no find_task call) and the call
-                //   succeeds.  Pre-batch behaviour preserved.
-                let hdr_c = build_hdr(0);
-                let hdr_c_ptr = (&raw const hdr_c[0]) as u64;
-                core::hint::black_box(&hdr_c);
-                let a = SyscallArgs {
-                    arg0: hdr_c_ptr,
-                    arg1: datap_a,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CAPGET, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: capget(V3, pid=0, valid datap) not 0");
-                    return Err(KernelError::InternalError);
-                }
-
-                // Discriminator D: capget(V3 hdr w/ pid=-1, datap=NULL) -> 0
-                //   acceptance: the NULL-datap arm at the head of sys_capget
-                //   returns 0 BEFORE the pid<0 check runs.  Pre- and
-                //   post-batch behaviour both yield 0; this guards against
-                //   accidentally re-ordering the pid check ahead of the
-                //   NULL-datap version-probe early return.
-                let hdr_d = build_hdr(-1);
-                let hdr_d_ptr = (&raw const hdr_d[0]) as u64;
-                core::hint::black_box(&hdr_d);
-                let a = SyscallArgs {
-                    arg0: hdr_d_ptr,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::CAPGET, &a).value != 0 {
-                    serial_println!("[syscall/linux]   FAIL: capget(V3, pid=-1, NULL datap) not 0");
-                    return Err(KernelError::InternalError);
-                }
-
-                serial_println!("[syscall/linux]   capget pid validation (Linux gate order): OK");
+                case()?;
             }
 
             // ---- pread64/pwrite64 fd-before-count gate order ----
@@ -99785,64 +99945,69 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // — i.e., that the fd gate still fires for oversized
             // counts.
             {
-                // Discriminator A: pread64(fd=-1, count=u64::MAX, pos=0)
-                //   batch-271-buggy -> -EINVAL (count gate fired first)
-                //   batch-272-fix  -> -EBADF  (fd gate fires first,
-                //                              matches Linux)
-                let a = SyscallArgs {
-                    arg0: u64::MAX,
-                    arg1: 0,
-                    arg2: u64::MAX,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::EBADF) {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Discriminator A: pread64(fd=-1, count=u64::MAX, pos=0)
+                    //   batch-271-buggy -> -EINVAL (count gate fired first)
+                    //   batch-272-fix  -> -EBADF  (fd gate fires first,
+                    //                              matches Linux)
+                    let a = SyscallArgs {
+                        arg0: u64::MAX,
+                        arg1: 0,
+                        arg2: u64::MAX,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::EBADF) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: pread64(fd=-1, count=u64::MAX) not EBADF"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator B: pwrite64(fd=-1, count=SSIZE_MAX+1, pos=0)
+                    //   Same correction symmetrically for pwrite.
+                    let too_big = (i64::MAX as u64).wrapping_add(1);
+                    let a = SyscallArgs {
+                        arg0: u64::MAX,
+                        arg1: 0,
+                        arg2: too_big,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PWRITE64, &a).value != -i64::from(errno::EBADF) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: pwrite64(fd=-1, count=SSIZE_MAX+1) not EBADF"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator C: pread64(fd=-1, pos < 0, count=1) -> -EINVAL
+                    //   Acceptance: pos < 0 still fires BEFORE the fd
+                    //   lookup (Linux gate 1).  Confirms the pos gate's
+                    //   position is unchanged by batch 272's count gate
+                    //   move.  u64::MAX as i64 == -1, so pos < 0.
+                    let a = SyscallArgs {
+                        arg0: u64::MAX,
+                        arg1: 0,
+                        arg2: 1,
+                        arg3: u64::MAX,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: pread64(fd=-1, pos<0) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+
                     serial_println!(
-                        "[syscall/linux]   FAIL: pread64(fd=-1, count=u64::MAX) not EBADF"
+                        "[syscall/linux]   pread64/pwrite64 fd-before-count gate order: OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-
-                // Discriminator B: pwrite64(fd=-1, count=SSIZE_MAX+1, pos=0)
-                //   Same correction symmetrically for pwrite.
-                let too_big = (i64::MAX as u64).wrapping_add(1);
-                let a = SyscallArgs {
-                    arg0: u64::MAX,
-                    arg1: 0,
-                    arg2: too_big,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PWRITE64, &a).value != -i64::from(errno::EBADF) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: pwrite64(fd=-1, count=SSIZE_MAX+1) not EBADF"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-
-                // Discriminator C: pread64(fd=-1, pos < 0, count=1) -> -EINVAL
-                //   Acceptance: pos < 0 still fires BEFORE the fd
-                //   lookup (Linux gate 1).  Confirms the pos gate's
-                //   position is unchanged by batch 272's count gate
-                //   move.  u64::MAX as i64 == -1, so pos < 0.
-                let a = SyscallArgs {
-                    arg0: u64::MAX,
-                    arg1: 0,
-                    arg2: 1,
-                    arg3: u64::MAX,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PREAD64, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: pread64(fd=-1, pos<0) not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-
-                serial_println!(
-                    "[syscall/linux]   pread64/pwrite64 fd-before-count gate order: OK"
-                );
+                case()?;
             }
 
             // ---- mremap new_size PAGE_ALIGN overflow gating ----
@@ -99856,59 +100021,64 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // mirrors the PAGE_ALIGN-then-zero-check pattern using
             // checked_add.
             {
-                // Discriminator A: mremap(old=0, old_len=0x4000,
-                //   new_len=0, flags=0, new_addr=0)
-                //   -> EINVAL (existing behaviour, both pre/post)
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: 0x4000,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: mremap(new_len=0) not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Discriminator A: mremap(old=0, old_len=0x4000,
+                    //   new_len=0, flags=0, new_addr=0)
+                    //   -> EINVAL (existing behaviour, both pre/post)
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x4000,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: mremap(new_len=0) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator B: mremap(old=0, old_len=0x4000,
-                //   new_len=u64::MAX, flags=0, new_addr=0)
-                //   pre-batch -> -ENOMEM (size != 0, fell through)
-                //   post-batch -> -EINVAL (PAGE_ALIGN wraps to 0,
-                //                          matches Linux)
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: 0x4000,
-                    arg2: u64::MAX,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: mremap(new_len=u64::MAX) not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator B: mremap(old=0, old_len=0x4000,
+                    //   new_len=u64::MAX, flags=0, new_addr=0)
+                    //   pre-batch -> -ENOMEM (size != 0, fell through)
+                    //   post-batch -> -EINVAL (PAGE_ALIGN wraps to 0,
+                    //                          matches Linux)
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x4000,
+                        arg2: u64::MAX,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: mremap(new_len=u64::MAX) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator C: mremap(old=0, old_len=0x4000,
-                //   new_len=0x4000, flags=0, new_addr=0)
-                //   Acceptance: a non-overflowing new_len still
-                //   reaches the ENOMEM terminal answer, confirming
-                //   the new gate doesn't over-reject.
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: 0x4000,
-                    arg2: 0x4000,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::ENOMEM) {
-                    serial_println!("[syscall/linux]   FAIL: mremap(new_len=0x4000) not ENOMEM");
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator C: mremap(old=0, old_len=0x4000,
+                    //   new_len=0x4000, flags=0, new_addr=0)
+                    //   Acceptance: a non-overflowing new_len still
+                    //   reaches the ENOMEM terminal answer, confirming
+                    //   the new gate doesn't over-reject.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x4000,
+                        arg2: 0x4000,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::ENOMEM) {
+                        serial_println!("[syscall/linux]   FAIL: mremap(new_len=0x4000) not ENOMEM");
+                        return Err(KernelError::InternalError);
+                    }
 
-                serial_println!("[syscall/linux]   mremap new_size PAGE_ALIGN overflow gating: OK");
+                    serial_println!("[syscall/linux]   mremap new_size PAGE_ALIGN overflow gating: OK");
+                    Ok(())
+                }
+                case()?;
             }
 
             // ---- setsockopt/getsockopt no-syscall-entry-level gate ----
@@ -99922,88 +100092,93 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // reorders so fd is checked before optval/optlen
             // validation.
             {
-                // Stack-allocated valid optval/optlen buffers for the
-                // discriminators below; black_box keeps them live.
-                let optval_buf = [0u8; 4];
-                let optval_p = (&raw const optval_buf[0]) as u64;
-                core::hint::black_box(&optval_buf);
-                let optlen_buf = [4u8, 0, 0, 0];
-                let optlen_p = (&raw const optlen_buf[0]) as u64;
-                core::hint::black_box(&optlen_buf);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Stack-allocated valid optval/optlen buffers for the
+                    // discriminators below; black_box keeps them live.
+                    let optval_buf = [0u8; 4];
+                    let optval_p = (&raw const optval_buf[0]) as u64;
+                    core::hint::black_box(&optval_buf);
+                    let optlen_buf = [4u8, 0, 0, 0];
+                    let optlen_p = (&raw const optlen_buf[0]) as u64;
+                    core::hint::black_box(&optlen_buf);
 
-                // Discriminator A: setsockopt(fd=3, level=-1, optname=1,
-                //   optval=valid, optlen=4)
-                //   pre-batch: -EINVAL  (spurious level<0 gate)
-                //   post-batch: -EBADF  (fd kernel-ctx no-op, falls
-                //                        through to terminal EBADF)
-                let a = SyscallArgs {
-                    arg0: 3,
-                    arg1: u64::from(u32::MAX),
-                    arg2: 1,
-                    arg3: optval_p,
-                    arg4: 4,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SETSOCKOPT, &a).value != -i64::from(errno::EBADF) {
-                    serial_println!("[syscall/linux]   FAIL: setsockopt(level=-1) not EBADF");
-                    return Err(KernelError::InternalError);
+                    // Discriminator A: setsockopt(fd=3, level=-1, optname=1,
+                    //   optval=valid, optlen=4)
+                    //   pre-batch: -EINVAL  (spurious level<0 gate)
+                    //   post-batch: -EBADF  (fd kernel-ctx no-op, falls
+                    //                        through to terminal EBADF)
+                    let a = SyscallArgs {
+                        arg0: 3,
+                        arg1: u64::from(u32::MAX),
+                        arg2: 1,
+                        arg3: optval_p,
+                        arg4: 4,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SETSOCKOPT, &a).value != -i64::from(errno::EBADF) {
+                        serial_println!("[syscall/linux]   FAIL: setsockopt(level=-1) not EBADF");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator B: setsockopt(fd=3, level=0, optname=1,
+                    //   optval=valid, optlen=-1)
+                    //   Acceptance: optlen<0 -> EINVAL gate is preserved
+                    //   (Linux gate 1).  Both pre and post: -EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 3,
+                        arg1: 0,
+                        arg2: 1,
+                        arg3: optval_p,
+                        arg4: u64::from(u32::MAX),
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SETSOCKOPT, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: setsockopt(optlen=-1) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator C: getsockopt(fd=3, level=-1, optname=1,
+                    //   optval=valid, optlen=valid)
+                    //   pre-batch: -EINVAL  (spurious level<0 gate)
+                    //   post-batch: -EBADF  (fd kernel-ctx no-op, optlen
+                    //                        ptr valid, terminal EBADF)
+                    let a = SyscallArgs {
+                        arg0: 3,
+                        arg1: u64::from(u32::MAX),
+                        arg2: 1,
+                        arg3: optval_p,
+                        arg4: optlen_p,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GETSOCKOPT, &a).value != -i64::from(errno::EBADF) {
+                        serial_println!("[syscall/linux]   FAIL: getsockopt(level=-1) not EBADF");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator D: getsockopt(fd=3, level=0, optname=1,
+                    //   optval=valid, optlen=NULL)
+                    //   Acceptance: optlen-NULL -> EFAULT gate is preserved,
+                    //   just relocated to AFTER fd lookup (which is a no-op
+                    //   in kernel context, so EFAULT still fires).  Both
+                    //   pre and post: -EFAULT.
+                    let a = SyscallArgs {
+                        arg0: 3,
+                        arg1: 0,
+                        arg2: 1,
+                        arg3: optval_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::GETSOCKOPT, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!("[syscall/linux]   FAIL: getsockopt(optlen=NULL) not EFAULT");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    serial_println!("[syscall/linux]   setsockopt/getsockopt no-level gate: OK");
+                    Ok(())
                 }
-
-                // Discriminator B: setsockopt(fd=3, level=0, optname=1,
-                //   optval=valid, optlen=-1)
-                //   Acceptance: optlen<0 -> EINVAL gate is preserved
-                //   (Linux gate 1).  Both pre and post: -EINVAL.
-                let a = SyscallArgs {
-                    arg0: 3,
-                    arg1: 0,
-                    arg2: 1,
-                    arg3: optval_p,
-                    arg4: u64::from(u32::MAX),
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SETSOCKOPT, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: setsockopt(optlen=-1) not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-
-                // Discriminator C: getsockopt(fd=3, level=-1, optname=1,
-                //   optval=valid, optlen=valid)
-                //   pre-batch: -EINVAL  (spurious level<0 gate)
-                //   post-batch: -EBADF  (fd kernel-ctx no-op, optlen
-                //                        ptr valid, terminal EBADF)
-                let a = SyscallArgs {
-                    arg0: 3,
-                    arg1: u64::from(u32::MAX),
-                    arg2: 1,
-                    arg3: optval_p,
-                    arg4: optlen_p,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::GETSOCKOPT, &a).value != -i64::from(errno::EBADF) {
-                    serial_println!("[syscall/linux]   FAIL: getsockopt(level=-1) not EBADF");
-                    return Err(KernelError::InternalError);
-                }
-
-                // Discriminator D: getsockopt(fd=3, level=0, optname=1,
-                //   optval=valid, optlen=NULL)
-                //   Acceptance: optlen-NULL -> EFAULT gate is preserved,
-                //   just relocated to AFTER fd lookup (which is a no-op
-                //   in kernel context, so EFAULT still fires).  Both
-                //   pre and post: -EFAULT.
-                let a = SyscallArgs {
-                    arg0: 3,
-                    arg1: 0,
-                    arg2: 1,
-                    arg3: optval_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::GETSOCKOPT, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!("[syscall/linux]   FAIL: getsockopt(optlen=NULL) not EFAULT");
-                    return Err(KernelError::InternalError);
-                }
-
-                serial_println!("[syscall/linux]   setsockopt/getsockopt no-level gate: OK");
+                case()?;
             }
 
             // ---- listen/shutdown drop spurious entry-layer gates ----
@@ -100014,77 +100189,82 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // for bogus fds.  Batch 275 removes those gates, matching
             // Linux's "fd first" entry-layer surface.
             {
-                // Discriminator A: listen(fd=3, backlog=-1)
-                //   pre-batch: -EINVAL  (spurious backlog<0 gate)
-                //   post-batch: -EBADF  (fd kernel-ctx no-op, falls
-                //                        through to terminal EBADF)
-                let a = SyscallArgs {
-                    arg0: 3,
-                    arg1: u64::from(u32::MAX),
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::LISTEN, &a).value != -i64::from(errno::EBADF) {
-                    serial_println!("[syscall/linux]   FAIL: listen(backlog=-1) not EBADF");
-                    return Err(KernelError::InternalError);
-                }
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Discriminator A: listen(fd=3, backlog=-1)
+                    //   pre-batch: -EINVAL  (spurious backlog<0 gate)
+                    //   post-batch: -EBADF  (fd kernel-ctx no-op, falls
+                    //                        through to terminal EBADF)
+                    let a = SyscallArgs {
+                        arg0: 3,
+                        arg1: u64::from(u32::MAX),
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LISTEN, &a).value != -i64::from(errno::EBADF) {
+                        serial_println!("[syscall/linux]   FAIL: listen(backlog=-1) not EBADF");
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator B: listen(fd=3, backlog=5)
-                //   Acceptance: a valid backlog still reaches the
-                //   terminal EBADF (unchanged pre/post).
-                let a = SyscallArgs {
-                    arg0: 3,
-                    arg1: 5,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::LISTEN, &a).value != -i64::from(errno::EBADF) {
-                    serial_println!("[syscall/linux]   FAIL: listen(backlog=5) not EBADF");
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator B: listen(fd=3, backlog=5)
+                    //   Acceptance: a valid backlog still reaches the
+                    //   terminal EBADF (unchanged pre/post).
+                    let a = SyscallArgs {
+                        arg0: 3,
+                        arg1: 5,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::LISTEN, &a).value != -i64::from(errno::EBADF) {
+                        serial_println!("[syscall/linux]   FAIL: listen(backlog=5) not EBADF");
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator C: shutdown(fd=3, how=9)
-                //   pre-batch: -EINVAL  (spurious how-range gate)
-                //   post-batch: -EBADF  (fd kernel-ctx no-op, falls
-                //                        through to terminal EBADF;
-                //                        on a real socket Linux would
-                //                        also reach the inet_shutdown
-                //                        EINVAL response, just after
-                //                        the fd succeeds.)
-                let a = SyscallArgs {
-                    arg0: 3,
-                    arg1: 9,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SHUTDOWN, &a).value != -i64::from(errno::EBADF) {
-                    serial_println!("[syscall/linux]   FAIL: shutdown(how=9) not EBADF");
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator C: shutdown(fd=3, how=9)
+                    //   pre-batch: -EINVAL  (spurious how-range gate)
+                    //   post-batch: -EBADF  (fd kernel-ctx no-op, falls
+                    //                        through to terminal EBADF;
+                    //                        on a real socket Linux would
+                    //                        also reach the inet_shutdown
+                    //                        EINVAL response, just after
+                    //                        the fd succeeds.)
+                    let a = SyscallArgs {
+                        arg0: 3,
+                        arg1: 9,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SHUTDOWN, &a).value != -i64::from(errno::EBADF) {
+                        serial_println!("[syscall/linux]   FAIL: shutdown(how=9) not EBADF");
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator D: shutdown(fd=3, how=2) (SHUT_RDWR)
-                //   Acceptance: a valid how still reaches the terminal
-                //   EBADF (unchanged pre/post).
-                let a = SyscallArgs {
-                    arg0: 3,
-                    arg1: 2,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SHUTDOWN, &a).value != -i64::from(errno::EBADF) {
-                    serial_println!("[syscall/linux]   FAIL: shutdown(how=2) not EBADF");
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator D: shutdown(fd=3, how=2) (SHUT_RDWR)
+                    //   Acceptance: a valid how still reaches the terminal
+                    //   EBADF (unchanged pre/post).
+                    let a = SyscallArgs {
+                        arg0: 3,
+                        arg1: 2,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SHUTDOWN, &a).value != -i64::from(errno::EBADF) {
+                        serial_println!("[syscall/linux]   FAIL: shutdown(how=2) not EBADF");
+                        return Err(KernelError::InternalError);
+                    }
 
-                serial_println!("[syscall/linux]   listen/shutdown drop entry gates: OK");
+                    serial_println!("[syscall/linux]   listen/shutdown drop entry gates: OK");
+                    Ok(())
+                }
+                case()?;
             }
 
             // ---- socket/socketpair EAFNOSUPPORT + EOPNOTSUPP ----
@@ -100096,100 +100276,105 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // defined.  Batch 276 introduces EAFNOSUPPORT and the
             // proper gate order: flag-mask -> family -> type.
             {
-                // Discriminator A: socket(domain=99, type=SOCK_STREAM)
-                //   pre-batch: -EINVAL  (family collapse)
-                //   post-batch: -EAFNOSUPPORT
-                let a = SyscallArgs {
-                    arg0: 99,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EAFNOSUPPORT) {
-                    serial_println!("[syscall/linux]   FAIL: socket(domain=99) not EAFNOSUPPORT");
-                    return Err(KernelError::InternalError);
-                }
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Discriminator A: socket(domain=99, type=SOCK_STREAM)
+                    //   pre-batch: -EINVAL  (family collapse)
+                    //   post-batch: -EAFNOSUPPORT
+                    let a = SyscallArgs {
+                        arg0: 99,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EAFNOSUPPORT) {
+                        serial_println!("[syscall/linux]   FAIL: socket(domain=99) not EAFNOSUPPORT");
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator B: socket(domain=99, type=0x10001)
-                //   Acceptance: high flag bit fires FIRST now (gate 1),
-                //   so even an unknown family still returns -EINVAL
-                //   when a bad flag is set.  This confirms the
-                //   reordered gate 1 fires before gate 2.
-                let a = SyscallArgs {
-                    arg0: 99,
-                    arg1: 0x1_0000 | 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(bad-flag + bad-family) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator B: socket(domain=99, type=0x10001)
+                    //   Acceptance: high flag bit fires FIRST now (gate 1),
+                    //   so even an unknown family still returns -EINVAL
+                    //   when a bad flag is set.  This confirms the
+                    //   reordered gate 1 fires before gate 2.
+                    let a = SyscallArgs {
+                        arg0: 99,
+                        arg1: 0x1_0000 | 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(bad-flag + bad-family) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator C: socketpair(domain=2 (AF_INET),
-                //   type=SOCK_STREAM, sv=valid)
-                //   pre-batch: -EINVAL  (non-AF_UNIX collapse)
-                //   post-batch: -EOPNOTSUPP (family known but ops
-                //     ->socketpair == NULL on Linux)
-                let sv_buf = [0u8; 8];
-                let sv_p = (&raw const sv_buf[0]) as u64;
-                core::hint::black_box(&sv_buf);
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!("[syscall/linux]   FAIL: socketpair(AF_INET) not EOPNOTSUPP");
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator C: socketpair(domain=2 (AF_INET),
+                    //   type=SOCK_STREAM, sv=valid)
+                    //   pre-batch: -EINVAL  (non-AF_UNIX collapse)
+                    //   post-batch: -EOPNOTSUPP (family known but ops
+                    //     ->socketpair == NULL on Linux)
+                    let sv_buf = [0u8; 8];
+                    let sv_p = (&raw const sv_buf[0]) as u64;
+                    core::hint::black_box(&sv_buf);
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!("[syscall/linux]   FAIL: socketpair(AF_INET) not EOPNOTSUPP");
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator D: socketpair(domain=99 (unknown),
-                //   type=SOCK_STREAM, sv=valid)
-                //   pre-batch: -EINVAL  (family collapse)
-                //   post-batch: -EAFNOSUPPORT (unknown family)
-                let a = SyscallArgs {
-                    arg0: 99,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EAFNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(domain=99) not EAFNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator D: socketpair(domain=99 (unknown),
+                    //   type=SOCK_STREAM, sv=valid)
+                    //   pre-batch: -EINVAL  (family collapse)
+                    //   post-batch: -EAFNOSUPPORT (unknown family)
+                    let a = SyscallArgs {
+                        arg0: 99,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EAFNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(domain=99) not EAFNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
 
-                // Discriminator E: socketpair(domain=1 (AF_UNIX),
-                //   type=SOCK_STREAM, sv=valid)
-                //   Acceptance: AF_UNIX still falls through to the
-                //   terminal -ENOSYS (no socketpair backend yet).
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!("[syscall/linux]   FAIL: socketpair(AF_UNIX) not ENOSYS");
-                    return Err(KernelError::InternalError);
-                }
+                    // Discriminator E: socketpair(domain=1 (AF_UNIX),
+                    //   type=SOCK_STREAM, sv=valid)
+                    //   Acceptance: AF_UNIX still falls through to the
+                    //   terminal -ENOSYS (no socketpair backend yet).
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!("[syscall/linux]   FAIL: socketpair(AF_UNIX) not ENOSYS");
+                        return Err(KernelError::InternalError);
+                    }
 
-                serial_println!("[syscall/linux]   socket/socketpair EAFNOSUPPORT gating: OK");
+                    serial_println!("[syscall/linux]   socket/socketpair EAFNOSUPPORT gating: OK");
+                    Ok(())
+                }
+                case()?;
             }
 
             // ---- perf_event_open __reserved_2 in-struct check ----
@@ -100204,96 +100389,101 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // our trailing-zero check and reach pid/cpu or terminal
             // ENOSYS, where Linux returns -EINVAL.
             {
-                // Build a perf_event_attr with size=136 and bytes
-                // [108..112] set so that __reserved_2 (u16 @ 110)
-                // is non-zero.  Layout:
-                //   type @ 0           (u32, 0)
-                //   size @ 4           (u32, 136)
-                //   ... (all zero through offset 108)
-                //   sample_max_stack @ 108 (u16, 0)
-                //   __reserved_2 @ 110     (u16, NON-ZERO)
-                //   ... rest zero
-                let mut attr_buf = [0u8; 136];
-                attr_buf[4] = 136; // size = 136 (u32 LE)
-                attr_buf[110] = 0x01; // __reserved_2 byte 0
-                attr_buf[111] = 0x00; // __reserved_2 byte 1
-                let attr_p = (&raw const attr_buf[0]) as u64;
-                core::hint::black_box(&attr_buf);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Build a perf_event_attr with size=136 and bytes
+                    // [108..112] set so that __reserved_2 (u16 @ 110)
+                    // is non-zero.  Layout:
+                    //   type @ 0           (u32, 0)
+                    //   size @ 4           (u32, 136)
+                    //   ... (all zero through offset 108)
+                    //   sample_max_stack @ 108 (u16, 0)
+                    //   __reserved_2 @ 110     (u16, NON-ZERO)
+                    //   ... rest zero
+                    let mut attr_buf = [0u8; 136];
+                    attr_buf[4] = 136; // size = 136 (u32 LE)
+                    attr_buf[110] = 0x01; // __reserved_2 byte 0
+                    attr_buf[111] = 0x00; // __reserved_2 byte 1
+                    let attr_p = (&raw const attr_buf[0]) as u64;
+                    core::hint::black_box(&attr_buf);
 
-                // Discriminator A: perf_event_open(attr w/
-                //   __reserved_2=1, size=136, pid=0, cpu=0, gfd=-1,
-                //   flags=0)
-                //   pre-batch: -EINVAL (from pid/cpu? no, pid=0
-                //     cpu=0 passes) -> falls through to terminal
-                //     -ENOSYS.
-                //   post-batch: -EINVAL (reserved-field check).
-                let a = SyscallArgs {
-                    arg0: attr_p,
-                    arg1: 0,
-                    arg2: 0,
-                    #[allow(clippy::cast_sign_loss)]
-                    arg3: -1_i64 as u64,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: perf_event_open(__reserved_2!=0) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
+                    // Discriminator A: perf_event_open(attr w/
+                    //   __reserved_2=1, size=136, pid=0, cpu=0, gfd=-1,
+                    //   flags=0)
+                    //   pre-batch: -EINVAL (from pid/cpu? no, pid=0
+                    //     cpu=0 passes) -> falls through to terminal
+                    //     -ENOSYS.
+                    //   post-batch: -EINVAL (reserved-field check).
+                    let a = SyscallArgs {
+                        arg0: attr_p,
+                        arg1: 0,
+                        arg2: 0,
+                        #[allow(clippy::cast_sign_loss)]
+                        arg3: -1_i64 as u64,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: perf_event_open(__reserved_2!=0) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator B: same attr but __reserved_2 = 0
+                    //   (size still 136, all else zeroed)
+                    //   Acceptance: clean attr falls through to terminal
+                    //   -ENOSYS (we don't implement perf events).
+                    let mut attr_buf2 = [0u8; 136];
+                    attr_buf2[4] = 136;
+                    // __reserved_2 stays zero
+                    let attr_p2 = (&raw const attr_buf2[0]) as u64;
+                    core::hint::black_box(&attr_buf2);
+                    let a = SyscallArgs {
+                        arg0: attr_p2,
+                        arg1: 0,
+                        arg2: 0,
+                        #[allow(clippy::cast_sign_loss)]
+                        arg3: -1_i64 as u64,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: perf_event_open(__reserved_2==0) not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+
+                    // Discriminator C: short attr (size=64, VER0)
+                    //   Acceptance: __reserved_2 is below the requested
+                    //   size, so our check is bypassed (Linux zero-fills
+                    //   bytes [size, sizeof(attr)) so __reserved_2 is
+                    //   effectively zero).  Falls through to terminal
+                    //   -ENOSYS regardless of what's at offset 110 in
+                    //   the user buffer.
+                    let mut attr_short = [0u8; 64];
+                    attr_short[4] = 64;
+                    let attr_short_p = (&raw const attr_short[0]) as u64;
+                    core::hint::black_box(&attr_short);
+                    let a = SyscallArgs {
+                        arg0: attr_short_p,
+                        arg1: 0,
+                        arg2: 0,
+                        #[allow(clippy::cast_sign_loss)]
+                        arg3: -1_i64 as u64,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!("[syscall/linux]   FAIL: perf_event_open(size=64) not ENOSYS");
+                        return Err(KernelError::InternalError);
+                    }
+
+                    serial_println!("[syscall/linux]   perf_event_open __reserved_2 gating: OK");
+                    Ok(())
                 }
-
-                // Discriminator B: same attr but __reserved_2 = 0
-                //   (size still 136, all else zeroed)
-                //   Acceptance: clean attr falls through to terminal
-                //   -ENOSYS (we don't implement perf events).
-                let mut attr_buf2 = [0u8; 136];
-                attr_buf2[4] = 136;
-                // __reserved_2 stays zero
-                let attr_p2 = (&raw const attr_buf2[0]) as u64;
-                core::hint::black_box(&attr_buf2);
-                let a = SyscallArgs {
-                    arg0: attr_p2,
-                    arg1: 0,
-                    arg2: 0,
-                    #[allow(clippy::cast_sign_loss)]
-                    arg3: -1_i64 as u64,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: perf_event_open(__reserved_2==0) not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-
-                // Discriminator C: short attr (size=64, VER0)
-                //   Acceptance: __reserved_2 is below the requested
-                //   size, so our check is bypassed (Linux zero-fills
-                //   bytes [size, sizeof(attr)) so __reserved_2 is
-                //   effectively zero).  Falls through to terminal
-                //   -ENOSYS regardless of what's at offset 110 in
-                //   the user buffer.
-                let mut attr_short = [0u8; 64];
-                attr_short[4] = 64;
-                let attr_short_p = (&raw const attr_short[0]) as u64;
-                core::hint::black_box(&attr_short);
-                let a = SyscallArgs {
-                    arg0: attr_short_p,
-                    arg1: 0,
-                    arg2: 0,
-                    #[allow(clippy::cast_sign_loss)]
-                    arg3: -1_i64 as u64,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::PERF_EVENT_OPEN, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!("[syscall/linux]   FAIL: perf_event_open(size=64) not ENOSYS");
-                    return Err(KernelError::InternalError);
-                }
-
-                serial_println!("[syscall/linux]   perf_event_open __reserved_2 gating: OK");
+                case()?;
             }
 
             // ---- mremap MREMAP_FIXED new_addr+new_size overflow / TASK_SIZE ----
@@ -100320,51 +100510,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //           confirms the gate only fires for out-of-bounds
             //           new_addr and doesn't regress the legacy path)
             {
-                // Discriminator A: new_addr+new_size overflow.
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: 0x4000,
-                    arg2: 0x4000,
-                    arg3: 3,
-                    arg4: 0xFFFF_FFFF_FFFF_C000,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: mremap(FIXED, new_addr+sz overflow) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // Discriminator A: new_addr+new_size overflow.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x4000,
+                        arg2: 0x4000,
+                        arg3: 3,
+                        arg4: 0xFFFF_FFFF_FFFF_C000,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mremap(FIXED, new_addr+sz overflow) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Discriminator B: new_addr above USER_SPACE_END.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x4000,
+                        arg2: 0x4000,
+                        arg3: 3,
+                        arg4: 0x10_0000_0000_0000,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: mremap(FIXED, new_addr above USER_SPACE_END) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // Discriminator C: new_addr inside user space — acceptance,
+                    // still falls through to ENOMEM.
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0x4000,
+                        arg2: 0x4000,
+                        arg3: 3,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::ENOMEM) {
+                        serial_println!("[syscall/linux]   FAIL: mremap(FIXED, new_addr=0) not ENOMEM");
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!("[syscall/linux]   mremap MREMAP_FIXED new_addr bounds: OK");
+                    Ok(())
                 }
-                // Discriminator B: new_addr above USER_SPACE_END.
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: 0x4000,
-                    arg2: 0x4000,
-                    arg3: 3,
-                    arg4: 0x10_0000_0000_0000,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: mremap(FIXED, new_addr above USER_SPACE_END) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Discriminator C: new_addr inside user space — acceptance,
-                // still falls through to ENOMEM.
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: 0x4000,
-                    arg2: 0x4000,
-                    arg3: 3,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::MREMAP, &a).value != -i64::from(errno::ENOMEM) {
-                    serial_println!("[syscall/linux]   FAIL: mremap(FIXED, new_addr=0) not ENOMEM");
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!("[syscall/linux]   mremap MREMAP_FIXED new_addr bounds: OK");
+                case()?;
             }
 
             // ---- socket per-(family, type) protocol whitelist ----
@@ -100394,117 +100589,122 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      pre: ENOSYS ; post: ENOSYS (SOCK_RAW accepts any
             //      protocol on Linux — confirms gate is type-scoped)
             {
-                // A: AF_INET SOCK_STREAM bad proto -> EPROTONOSUPPORT.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,STREAM,99) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // A: AF_INET SOCK_STREAM bad proto -> EPROTONOSUPPORT.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,STREAM,99) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_INET SOCK_DGRAM bad proto -> EPROTONOSUPPORT.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,99) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_INET6 SOCK_STREAM bad proto -> EPROTONOSUPPORT.
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 1,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET6,STREAM,99) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_UNIX rejects any non-zero protocol.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,99) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: AF_INET SOCK_STREAM IPPROTO_TCP -> ENOSYS (accept), or
+                    // daemon-routed when the net.userspace switch is on.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 6,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,STREAM,TCP) gate mismatch"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: AF_INET SOCK_DGRAM IPPROTO_UDP -> ENOSYS (accept) when the
+                    // net.userspace switch is off, or a daemon-backed datagram fd when
+                    // it is on (same switch-aware gate as the stream case E). The
+                    // datagram socket-fd path (create_dgram → dgram_bind/send_to/
+                    // recv_from) is only wired behind the switch; kernel-context /
+                    // switch-off keeps the historical ENOSYS acceptance.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 17,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDP) gate mismatch"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // G: AF_INET SOCK_RAW any proto -> ENOSYS (accept;
+                    // gate is type-scoped, RAW accepts any protocol).
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 3,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RAW,99) not ENOSYS");
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!("[syscall/linux]   socket EPROTONOSUPPORT gating: OK");
+                    Ok(())
                 }
-                // B: AF_INET SOCK_DGRAM bad proto -> EPROTONOSUPPORT.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,99) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_INET6 SOCK_STREAM bad proto -> EPROTONOSUPPORT.
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 1,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET6,STREAM,99) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_UNIX rejects any non-zero protocol.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,99) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: AF_INET SOCK_STREAM IPPROTO_TCP -> ENOSYS (accept), or
-                // daemon-routed when the net.userspace switch is on.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 6,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,STREAM,TCP) gate mismatch"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: AF_INET SOCK_DGRAM IPPROTO_UDP -> ENOSYS (accept) when the
-                // net.userspace switch is off, or a daemon-backed datagram fd when
-                // it is on (same switch-aware gate as the stream case E). The
-                // datagram socket-fd path (create_dgram → dgram_bind/send_to/
-                // recv_from) is only wired behind the switch; kernel-context /
-                // switch-off keeps the historical ENOSYS acceptance.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 17,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDP) gate mismatch"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // G: AF_INET SOCK_RAW any proto -> ENOSYS (accept;
-                // gate is type-scoped, RAW accepts any protocol).
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 3,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RAW,99) not ENOSYS");
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!("[syscall/linux]   socket EPROTONOSUPPORT gating: OK");
+                case()?;
             }
 
             // ---- socket (family, SOCK_RDM) ESOCKTNOSUPPORT ----
@@ -100536,106 +100736,111 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   F. socket(AF_INET, SOCK_STREAM=1, 0)
             //      Acceptance: STREAM is supported; ENOSYS.
             {
-                // A: AF_INET / SOCK_RDM.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 4,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,RDM) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // A: AF_INET / SOCK_RDM.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,RDM) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_INET6 / SOCK_RDM.
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET6,RDM) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_UNIX / SOCK_RDM.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,RDM) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_INET / SOCK_RDM + non-zero protocol still
+                    // hits ESOCKTNOSUPPORT (type gate precedes proto
+                    // gate, matching Linux's err-init ordering).
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 4,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,RDM,99) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: AF_NETLINK / SOCK_RDM now hits the widened
+                    // gate from batch 282 (AF_NETLINK supports only
+                    // SOCK_RAW and SOCK_DGRAM, mirroring Linux's
+                    // netlink_create switch).  Pre-280 this was
+                    // ENOSYS; pre-282 the comment said "ENOSYS
+                    // (AF_NETLINK not in allowlist)"; post-282 it is
+                    // ESOCKTNOSUPPORT just like AF_INET/RDM.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,RDM) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: AF_INET / SOCK_STREAM acceptance regression
+                    // check — STREAM is ENOSYS off, daemon-routed on.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,STREAM) regression gate mismatch"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!("[syscall/linux]   socket ESOCKTNOSUPPORT gating: OK");
+                    Ok(())
                 }
-                // B: AF_INET6 / SOCK_RDM.
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 4,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET6,RDM) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_UNIX / SOCK_RDM.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 4,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,RDM) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_INET / SOCK_RDM + non-zero protocol still
-                // hits ESOCKTNOSUPPORT (type gate precedes proto
-                // gate, matching Linux's err-init ordering).
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 4,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,RDM,99) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: AF_NETLINK / SOCK_RDM now hits the widened
-                // gate from batch 282 (AF_NETLINK supports only
-                // SOCK_RAW and SOCK_DGRAM, mirroring Linux's
-                // netlink_create switch).  Pre-280 this was
-                // ENOSYS; pre-282 the comment said "ENOSYS
-                // (AF_NETLINK not in allowlist)"; post-282 it is
-                // ESOCKTNOSUPPORT just like AF_INET/RDM.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 4,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,RDM) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: AF_INET / SOCK_STREAM acceptance regression
-                // check — STREAM is ENOSYS off, daemon-routed on.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,STREAM) regression gate mismatch"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!("[syscall/linux]   socket ESOCKTNOSUPPORT gating: OK");
+                case()?;
             }
 
             // ---- socket type-range gate widening (batch 466) ----
@@ -100681,128 +100886,133 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      `>= SOCK_MAX` gate.
             //      pre: EINVAL ; post: EINVAL (unchanged)
             {
-                // A: AF_INET / SOCK_DCCP
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 6,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // A: AF_INET / SOCK_DCCP
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 6,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,DCCP) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_INET / SOCK_PACKET
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 10,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,SOCK_PACKET) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_INET / type=7 (reserved)
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 7,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,7) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_UNIX / type=0
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,0) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: AF_NETLINK / SOCK_DCCP
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 6,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,DCCP) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: AF_PACKET / SOCK_DCCP
+                    let a = SyscallArgs {
+                        arg0: 17,
+                        arg1: 6,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_PACKET,DCCP) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // G: AF_PACKET / SOCK_PACKET — Linux accepts,
+                    // we surface ENOSYS for the stub backend.
+                    let a = SyscallArgs {
+                        arg0: 17,
+                        arg1: 10,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_PACKET,SOCK_PACKET) not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // H: AF_INET / type=11 (>= SOCK_MAX) — EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 11,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: socket(AF_INET,11) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,DCCP) not ESOCKTNOSUPPORT"
+                        "[syscall/linux]   socket type-range gate widened to Linux SOCK_MAX=11 (was 1..=5); 0/6/7/8/9 surface ESOCKTNOSUPPORT per family-create err-init; SOCK_PACKET on AF_PACKET accepted: OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_INET / SOCK_PACKET
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 10,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,SOCK_PACKET) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_INET / type=7 (reserved)
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 7,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,7) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_UNIX / type=0
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,0) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: AF_NETLINK / SOCK_DCCP
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 6,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,DCCP) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: AF_PACKET / SOCK_DCCP
-                let a = SyscallArgs {
-                    arg0: 17,
-                    arg1: 6,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_PACKET,DCCP) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // G: AF_PACKET / SOCK_PACKET — Linux accepts,
-                // we surface ENOSYS for the stub backend.
-                let a = SyscallArgs {
-                    arg0: 17,
-                    arg1: 10,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_PACKET,SOCK_PACKET) not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // H: AF_INET / type=11 (>= SOCK_MAX) — EINVAL.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 11,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: socket(AF_INET,11) not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socket type-range gate widened to Linux SOCK_MAX=11 (was 1..=5); 0/6/7/8/9 surface ESOCKTNOSUPPORT per family-create err-init; SOCK_PACKET on AF_PACKET accepted: OK"
-                );
+                case()?;
             }
 
             // ---- socket AF_INET/AF_INET6 IPPROTO_MAX gate (batch 468) ----
@@ -100854,125 +101064,130 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      surfaces EPROTONOSUPPORT for non-zero.
             //      pre: EPROTONOSUPPORT ; post: EPROTONOSUPPORT
             {
-                // A: AF_INET / STREAM / -1
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: u64::from(u32::MAX),
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: socket(AF_INET,STREAM,-1) not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-                // B: AF_INET / STREAM / 256
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 256,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // A: AF_INET / STREAM / -1
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: u64::from(u32::MAX),
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: socket(AF_INET,STREAM,-1) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_INET / STREAM / 256
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 256,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,STREAM,256) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_INET6 / DGRAM / 256
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 2,
+                        arg2: 256,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,256) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_INET / SOCK_RAW / 256
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 3,
+                        arg2: 256,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RAW,256) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: AF_INET / SOCK_RAW / -1
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 3,
+                        arg2: u64::from(u32::MAX),
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RAW,-1) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: AF_INET / SOCK_RDM / 256 — IPPROTO_MAX
+                    // precedes ESOCKTNOSUPPORT in inet_create.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 4,
+                        arg2: 256,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RDM,256) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    // G: regression — AF_INET / STREAM / TCP=6
+                    // ENOSYS off, daemon-routed on.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 6,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,STREAM,TCP) regression gate mismatch"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // H: regression — AF_UNIX unaffected by the new
+                    // gate; non-zero protocol still
+                    // EPROTONOSUPPORT from unix_create.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: u64::from(u32::MAX),
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,-1) regression not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,STREAM,256) not EINVAL"
+                        "[syscall/linux]   socket AF_INET/AF_INET6 protocol range 0..IPPROTO_MAX=256 (Linux inet_create/inet6_create open gate; precedes ESOCKTNOSUPPORT err-init and EPROTONOSUPPORT list-match): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // C: AF_INET6 / DGRAM / 256
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 2,
-                    arg2: 256,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,256) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_INET / SOCK_RAW / 256
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 3,
-                    arg2: 256,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RAW,256) not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-                // E: AF_INET / SOCK_RAW / -1
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 3,
-                    arg2: u64::from(u32::MAX),
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RAW,-1) not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-                // F: AF_INET / SOCK_RDM / 256 — IPPROTO_MAX
-                // precedes ESOCKTNOSUPPORT in inet_create.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 4,
-                    arg2: 256,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: socket(AF_INET,RDM,256) not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-                // G: regression — AF_INET / STREAM / TCP=6
-                // ENOSYS off, daemon-routed on.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 6,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,STREAM,TCP) regression gate mismatch"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // H: regression — AF_UNIX unaffected by the new
-                // gate; non-zero protocol still
-                // EPROTONOSUPPORT from unix_create.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: u64::from(u32::MAX),
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,-1) regression not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socket AF_INET/AF_INET6 protocol range 0..IPPROTO_MAX=256 (Linux inet_create/inet6_create open gate; precedes ESOCKTNOSUPPORT err-init and EPROTONOSUPPORT list-match): OK"
-                );
+                case()?;
             }
 
             // ---- Batch 470: socket AF_NETLINK protocol MAX_LINKS=32 ----
@@ -101008,134 +101223,139 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   H. Gate-ordering proof: socket(AF_NETLINK, STREAM=1, 99)
             //      -> ESOCKTNOSUPPORT (same as G — type wins)
             {
-                // A: AF_NETLINK / DGRAM / -1 (u64::MAX low 32 = -1).
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 2,
-                    arg2: u64::MAX,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // A: AF_NETLINK / DGRAM / -1 (u64::MAX low 32 = -1).
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 2,
+                        arg2: u64::MAX,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,-1) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_NETLINK / RAW / -1.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 3,
+                        arg2: u64::MAX,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,RAW,-1) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_NETLINK / DGRAM / 32.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 2,
+                        arg2: 32,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,32) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_NETLINK / RAW / 99.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 3,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,RAW,99) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: Regression — AF_NETLINK / DGRAM / 0
+                    // (NETLINK_ROUTE) — in range, falls to ENOSYS.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 2,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,0) regression not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: Regression — AF_NETLINK / DGRAM / 31
+                    // (high boundary in-range).
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 2,
+                        arg2: 31,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,31) regression not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // G: Gate-ordering proof — AF_NETLINK / STREAM=1
+                    // / -1.  Gate 4 ESOCKTNOSUPPORT fires before
+                    // gate 4.5 MAX_LINKS — matches netlink_create
+                    // type-check-first ordering.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 1,
+                        arg2: u64::MAX,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,STREAM,-1) gate-order not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // H: Gate-ordering — AF_NETLINK / STREAM / 99.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 1,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,STREAM,99) gate-order not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,-1) not EPROTONOSUPPORT"
+                        "[syscall/linux]   socket AF_NETLINK protocol range 0..MAX_LINKS=32 (Linux netlink_create EPROTONOSUPPORT after type check; precedes ENOSYS terminal): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_NETLINK / RAW / -1.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 3,
-                    arg2: u64::MAX,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,RAW,-1) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_NETLINK / DGRAM / 32.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 2,
-                    arg2: 32,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,32) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_NETLINK / RAW / 99.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 3,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,RAW,99) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: Regression — AF_NETLINK / DGRAM / 0
-                // (NETLINK_ROUTE) — in range, falls to ENOSYS.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 2,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,0) regression not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: Regression — AF_NETLINK / DGRAM / 31
-                // (high boundary in-range).
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 2,
-                    arg2: 31,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM,31) regression not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // G: Gate-ordering proof — AF_NETLINK / STREAM=1
-                // / -1.  Gate 4 ESOCKTNOSUPPORT fires before
-                // gate 4.5 MAX_LINKS — matches netlink_create
-                // type-check-first ordering.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 1,
-                    arg2: u64::MAX,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,STREAM,-1) gate-order not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // H: Gate-ordering — AF_NETLINK / STREAM / 99.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 1,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,STREAM,99) gate-order not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socket AF_NETLINK protocol range 0..MAX_LINKS=32 (Linux netlink_create EPROTONOSUPPORT after type check; precedes ENOSYS terminal): OK"
-                );
+                case()?;
             }
 
             // ---- Batch 471: socket AF_UNIX accepts protocol = PF_UNIX ----
@@ -101161,101 +101381,106 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   F. Regression: socket(AF_UNIX, STREAM, -1)  -> EPROTONOSUPPORT
             //      (negative cast to u32 = 0xFFFFFFFF != 1)
             {
-                // A: AF_UNIX / STREAM / PF_UNIX=1 — accepted.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // A: AF_UNIX / STREAM / PF_UNIX=1 — accepted.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,PF_UNIX) not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_UNIX / DGRAM / PF_UNIX.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 2,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,DGRAM,PF_UNIX) not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_UNIX / SEQPACKET / PF_UNIX.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 5,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,SEQPACKET,PF_UNIX) not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: Regression — AF_UNIX / STREAM / 0.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,0) regression not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: Regression — AF_UNIX / STREAM / 2 — still
+                    // EPROTONOSUPPORT (not PF_UNIX, not zero).
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 2,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,2) regression not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: Regression — AF_UNIX / STREAM / -1 (u64::MAX
+                    // low 32 = 0xFFFFFFFF, != 1).
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: u64::MAX,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,-1) regression not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,PF_UNIX) not ENOSYS"
+                        "[syscall/linux]   socket AF_UNIX protocol PF_UNIX=1 accepted (Linux unix_create `protocol && protocol != PF_UNIX` gate): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_UNIX / DGRAM / PF_UNIX.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 2,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,DGRAM,PF_UNIX) not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_UNIX / SEQPACKET / PF_UNIX.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 5,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,SEQPACKET,PF_UNIX) not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: Regression — AF_UNIX / STREAM / 0.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,0) regression not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: Regression — AF_UNIX / STREAM / 2 — still
-                // EPROTONOSUPPORT (not PF_UNIX, not zero).
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: 2,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,2) regression not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: Regression — AF_UNIX / STREAM / -1 (u64::MAX
-                // low 32 = 0xFFFFFFFF, != 1).
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: u64::MAX,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,-1) regression not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socket AF_UNIX protocol PF_UNIX=1 accepted (Linux unix_create `protocol && protocol != PF_UNIX` gate): OK"
-                );
+                case()?;
             }
 
             // ---- Batch 472: socket AF_INET/AF_INET6 SOCK_DGRAM ----
@@ -101287,133 +101512,138 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      (still rejects unrelated protocols)
             //   H. Regression: socket(AF_INET6, DGRAM, UDPLITE=136) -> ENOSYS
             {
-                // A: AF_INET / DGRAM / ICMP=1 — accepted post-batch.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // A: AF_INET / DGRAM / ICMP=1 — accepted post-batch.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,ICMP) not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_INET6 / DGRAM / ICMPV6=58.
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 2,
+                        arg2: 58,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,ICMPV6) not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: Regression — AF_INET / DGRAM / UDP=17.  ENOSYS when the
+                    // net.userspace switch is off; a daemon-backed datagram fd when it
+                    // is on (switch-aware gate, same as the SOCK_STREAM/TCP case).
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 17,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDP) regression gate mismatch"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: Regression — AF_INET / DGRAM / UDPLITE=136.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 136,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDPLITE) regression not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: Cross-family — AF_INET / DGRAM / ICMPV6=58
+                    // (not in inetsw[SOCK_DGRAM] for AF_INET).
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 58,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,ICMPV6) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: Cross-family — AF_INET6 / DGRAM / ICMP=1
+                    // (not in inet6sw[SOCK_DGRAM] for AF_INET6).
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 2,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,ICMP) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // G: Regression — AF_INET / DGRAM / 99.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,99) regression not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // H: Regression — AF_INET6 / DGRAM / UDPLITE=136.
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 2,
+                        arg2: 136,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,UDPLITE) regression not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,ICMP) not ENOSYS"
+                        "[syscall/linux]   socket AF_INET adds ICMP=1, AF_INET6 adds ICMPV6=58 to SOCK_DGRAM accept (Linux inetsw/inet6sw[SOCK_DGRAM] ping-protocol entries): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_INET6 / DGRAM / ICMPV6=58.
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 2,
-                    arg2: 58,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,ICMPV6) not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: Regression — AF_INET / DGRAM / UDP=17.  ENOSYS when the
-                // net.userspace switch is off; a daemon-backed datagram fd when it
-                // is on (switch-aware gate, same as the SOCK_STREAM/TCP case).
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 17,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDP) regression gate mismatch"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: Regression — AF_INET / DGRAM / UDPLITE=136.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 136,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,UDPLITE) regression not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: Cross-family — AF_INET / DGRAM / ICMPV6=58
-                // (not in inetsw[SOCK_DGRAM] for AF_INET).
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 58,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,ICMPV6) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: Cross-family — AF_INET6 / DGRAM / ICMP=1
-                // (not in inet6sw[SOCK_DGRAM] for AF_INET6).
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 2,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,ICMP) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // G: Regression — AF_INET / DGRAM / 99.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,DGRAM,99) regression not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // H: Regression — AF_INET6 / DGRAM / UDPLITE=136.
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 2,
-                    arg2: 136,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET6,DGRAM,UDPLITE) regression not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socket AF_INET adds ICMP=1, AF_INET6 adds ICMPV6=58 to SOCK_DGRAM accept (Linux inetsw/inet6sw[SOCK_DGRAM] ping-protocol entries): OK"
-                );
+                case()?;
             }
 
             // ---- socket AF_UNIX protocol-check-before-type-check ----
@@ -101429,141 +101659,146 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // before; G is a cross-family regression confirming the
             // change is family-restricted to AF_UNIX.
             {
-                // A: AF_UNIX / SOCK_RDM=4 / protocol=99 — invalid type
-                // AND invalid protocol: gate 3.6 fires first.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 4,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // A: AF_UNIX / SOCK_RDM=4 / protocol=99 — invalid type
+                    // AND invalid protocol: gate 3.6 fires first.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 4,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,RDM,99) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_UNIX / SOCK_DCCP=6 / protocol=99 — same shape
+                    // with a different invalid type.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 6,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,DCCP,99) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_UNIX / SOCK_PACKET=10 / protocol=-1 — negative
+                    // protocol via u64::MAX low-32 = 0xFFFFFFFF, != 0 && != 1.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 10,
+                        arg2: u64::MAX,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,PACKET,-1) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_UNIX / SOCK_RDM / protocol=0 — protocol OK,
+                    // type allowlist fires.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,RDM,0) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: AF_UNIX / SOCK_RDM / protocol=PF_UNIX=1 — protocol
+                    // accepted (`protocol == PF_UNIX`), type allowlist
+                    // fires.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 4,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,RDM,PF_UNIX) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: AF_UNIX / SOCK_DCCP / protocol=PF_UNIX — same
+                    // pattern with a different invalid type.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 6,
+                        arg2: 1,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,DCCP,PF_UNIX) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // G: Cross-family regression — AF_INET / SOCK_RDM / 99.
+                    // Gate 3.6 is AF_UNIX-restricted; AF_INET still hits
+                    // the type allowlist (gate 4) → ESOCKTNOSUPPORT
+                    // because inet_create's inetsw[SOCK_RDM] is empty.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 4,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,RDM,99) cross-family regression not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // H: AF_UNIX / SOCK_STREAM=1 / protocol=99 — already
+                    // EPROTONOSUPPORT pre-batch via gate 5; confirms the
+                    // valid-type path still rejects bad protocols.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,99) regression not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,RDM,99) not EPROTONOSUPPORT"
+                        "[syscall/linux]   socket AF_UNIX protocol check precedes type allowlist (Linux unix_create: EPROTONOSUPPORT before switch-default ESOCKTNOSUPPORT): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_UNIX / SOCK_DCCP=6 / protocol=99 — same shape
-                // with a different invalid type.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 6,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,DCCP,99) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_UNIX / SOCK_PACKET=10 / protocol=-1 — negative
-                // protocol via u64::MAX low-32 = 0xFFFFFFFF, != 0 && != 1.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 10,
-                    arg2: u64::MAX,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,PACKET,-1) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_UNIX / SOCK_RDM / protocol=0 — protocol OK,
-                // type allowlist fires.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 4,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,RDM,0) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: AF_UNIX / SOCK_RDM / protocol=PF_UNIX=1 — protocol
-                // accepted (`protocol == PF_UNIX`), type allowlist
-                // fires.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 4,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,RDM,PF_UNIX) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: AF_UNIX / SOCK_DCCP / protocol=PF_UNIX — same
-                // pattern with a different invalid type.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 6,
-                    arg2: 1,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,DCCP,PF_UNIX) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // G: Cross-family regression — AF_INET / SOCK_RDM / 99.
-                // Gate 3.6 is AF_UNIX-restricted; AF_INET still hits
-                // the type allowlist (gate 4) → ESOCKTNOSUPPORT
-                // because inet_create's inetsw[SOCK_RDM] is empty.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 4,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,RDM,99) cross-family regression not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // H: AF_UNIX / SOCK_STREAM=1 / protocol=99 — already
-                // EPROTONOSUPPORT pre-batch via gate 5; confirms the
-                // valid-type path still rejects bad protocols.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,STREAM,99) regression not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socket AF_UNIX protocol check precedes type allowlist (Linux unix_create: EPROTONOSUPPORT before switch-default ESOCKTNOSUPPORT): OK"
-                );
+                case()?;
             }
 
             // ---- socket AF_INET/AF_INET6 SOCK_RAW + protocol=0 ----
@@ -101596,105 +101831,110 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      pre/post: ENOSYS.  AF_UNIX SOCK_RAW is aliased to
             //      DGRAM inside unix_create, doesn't run inet_create.
             {
-                // A: AF_INET / SOCK_RAW / protocol = 0.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 3,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // A: AF_INET / SOCK_RAW / protocol = 0.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 3,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,RAW,0) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_INET6 / SOCK_RAW / protocol = 0.
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 3,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET6,RAW,0) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: Regression — AF_INET / SOCK_RAW / IPPROTO_TCP=6.
+                    // Wild-card match (IPPROTO_IP == answer->protocol)
+                    // succeeds; CAP_NET_RAW check we don't model.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 3,
+                        arg2: 6,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,RAW,TCP) regression not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: Regression — AF_INET / SOCK_RAW / 99.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 3,
+                        arg2: 99,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,RAW,99) regression not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: Regression — AF_INET / SOCK_STREAM / 0.  User
+                    // wild meets non-wild TCP entry; protocol defaults to
+                    // 6, lookup succeeds.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_INET,STREAM,0) regression gate mismatch"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: Cross-family — AF_UNIX / SOCK_RAW / 0.  AF_UNIX
+                    // doesn't use inetsw; SOCK_RAW is aliased to DGRAM in
+                    // unix_create.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 3,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_UNIX,RAW,0) cross-family regression not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,RAW,0) not EPROTONOSUPPORT"
+                        "[syscall/linux]   socket AF_INET/AF_INET6 SOCK_RAW protocol=0 fails inet_create wild-card list-walk (Linux: EPROTONOSUPPORT; was ENOSYS): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_INET6 / SOCK_RAW / protocol = 0.
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 3,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET6,RAW,0) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: Regression — AF_INET / SOCK_RAW / IPPROTO_TCP=6.
-                // Wild-card match (IPPROTO_IP == answer->protocol)
-                // succeeds; CAP_NET_RAW check we don't model.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 3,
-                    arg2: 6,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,RAW,TCP) regression not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: Regression — AF_INET / SOCK_RAW / 99.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 3,
-                    arg2: 99,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,RAW,99) regression not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: Regression — AF_INET / SOCK_STREAM / 0.  User
-                // wild meets non-wild TCP entry; protocol defaults to
-                // 6, lookup succeeds.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if !assert_stream_socket_gate(dispatch_linux(nr::SOCKET, &a).value) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_INET,STREAM,0) regression gate mismatch"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: Cross-family — AF_UNIX / SOCK_RAW / 0.  AF_UNIX
-                // doesn't use inetsw; SOCK_RAW is aliased to DGRAM in
-                // unix_create.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 3,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_UNIX,RAW,0) cross-family regression not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socket AF_INET/AF_INET6 SOCK_RAW protocol=0 fails inet_create wild-card list-walk (Linux: EPROTONOSUPPORT; was ENOSYS): OK"
-                );
+                case()?;
             }
 
             // ---- socketpair per-(family,type,protocol) gating ----
@@ -101724,87 +101964,92 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   E. socketpair(AF_UNIX, SOCK_RDM=4, 0, sv)
             //      pre: ENOSYS ; post: ESOCKTNOSUPPORT
             {
-                let sv_buf = [0u8; 8];
-                let sv_p = (&raw const sv_buf[0]) as u64;
-                core::hint::black_box(&sv_buf);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let sv_buf = [0u8; 8];
+                    let sv_p = (&raw const sv_buf[0]) as u64;
+                    core::hint::black_box(&sv_buf);
 
-                // A: AF_INET / SOCK_RDM / 0
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 4,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,RDM) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
+                    // A: AF_INET / SOCK_RDM / 0
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,RDM) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_INET / SOCK_STREAM / 99
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 99,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,99) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_UNIX / SOCK_STREAM / 99
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 99,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,99) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_INET / SOCK_STREAM / 0 (regression
+                    // check — EOPNOTSUPP path still wins).
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,0) regression not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: AF_UNIX / SOCK_RDM / 0
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!("[syscall/linux]   socketpair ESOCKT/EPROTO gating: OK");
+                    Ok(())
                 }
-                // B: AF_INET / SOCK_STREAM / 99
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 99,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,99) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_UNIX / SOCK_STREAM / 99
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: 99,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,99) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_INET / SOCK_STREAM / 0 (regression
-                // check — EOPNOTSUPP path still wins).
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,0) regression not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: AF_UNIX / SOCK_RDM / 0
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 4,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!("[syscall/linux]   socketpair ESOCKT/EPROTO gating: OK");
+                case()?;
             }
 
             // ---- socketpair type-range gate widening (batch 467) ----
@@ -101846,133 +102091,138 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      `>= SOCK_MAX` gate at the new boundary).
             //      pre: EINVAL ; post: EINVAL (unchanged)
             {
-                let sv_buf = [0u8; 8];
-                let sv_p = (&raw const sv_buf[0]) as u64;
-                core::hint::black_box(&sv_buf);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let sv_buf = [0u8; 8];
+                    let sv_p = (&raw const sv_buf[0]) as u64;
+                    core::hint::black_box(&sv_buf);
 
-                // A: AF_INET / SOCK_DCCP
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 6,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                    // A: AF_INET / SOCK_DCCP
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 6,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,DCCP) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_INET / SOCK_PACKET
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 10,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,SOCK_PACKET) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_INET / type=7 (reserved)
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 7,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,7) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_UNIX / type=0
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 0,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,0) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: AF_NETLINK / SOCK_DCCP
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 6,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DCCP) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: AF_PACKET / SOCK_DCCP
+                    let a = SyscallArgs {
+                        arg0: 17,
+                        arg1: 6,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_PACKET,DCCP) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // G: AF_PACKET / SOCK_PACKET — packet_create
+                    // accepts, then ops->socketpair == NULL →
+                    // EOPNOTSUPP.
+                    let a = SyscallArgs {
+                        arg0: 17,
+                        arg1: 10,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_PACKET,SOCK_PACKET) not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // H: AF_INET / type=11 (>= SOCK_MAX) — EINVAL.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 11,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: socketpair(AF_INET,11) not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,DCCP) not ESOCKTNOSUPPORT"
+                        "[syscall/linux]   socketpair type-range gate widened to Linux SOCK_MAX=11 (was 1..=5); 0/6/7/8/9 surface ESOCKTNOSUPPORT per family-create err-init; SOCK_PACKET on AF_PACKET reaches ops->socketpair NULL → EOPNOTSUPP: OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_INET / SOCK_PACKET
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 10,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,SOCK_PACKET) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_INET / type=7 (reserved)
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 7,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,7) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_UNIX / type=0
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,0) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: AF_NETLINK / SOCK_DCCP
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 6,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DCCP) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: AF_PACKET / SOCK_DCCP
-                let a = SyscallArgs {
-                    arg0: 17,
-                    arg1: 6,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_PACKET,DCCP) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // G: AF_PACKET / SOCK_PACKET — packet_create
-                // accepts, then ops->socketpair == NULL →
-                // EOPNOTSUPP.
-                let a = SyscallArgs {
-                    arg0: 17,
-                    arg1: 10,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_PACKET,SOCK_PACKET) not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // H: AF_INET / type=11 (>= SOCK_MAX) — EINVAL.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 11,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: socketpair(AF_INET,11) not EINVAL");
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socketpair type-range gate widened to Linux SOCK_MAX=11 (was 1..=5); 0/6/7/8/9 surface ESOCKTNOSUPPORT per family-create err-init; SOCK_PACKET on AF_PACKET reaches ops->socketpair NULL → EOPNOTSUPP: OK"
-                );
+                case()?;
             }
 
             // ---- Batch 469: socketpair AF_INET/AF_INET6 protocol ----
@@ -102013,142 +102263,147 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      batch 467 EPROTONOSUPPORT via gate 3b.
             //      pre: EPROTONOSUPPORT ; post: EPROTONOSUPPORT
             {
-                let sv_buf = [0u8; 8];
-                let sv_p = (&raw const sv_buf[0]) as u64;
-                core::hint::black_box(&sv_buf);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let sv_buf = [0u8; 8];
+                    let sv_p = (&raw const sv_buf[0]) as u64;
+                    core::hint::black_box(&sv_buf);
 
-                // A: AF_INET, STREAM, protocol = -1 (u64::MAX
-                // masks low 32 to 0xFFFFFFFF; `as i32` -> -1).
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: u64::MAX,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
+                    // A: AF_INET, STREAM, protocol = -1 (u64::MAX
+                    // masks low 32 to 0xFFFFFFFF; `as i32` -> -1).
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: u64::MAX,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,-1) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_INET, STREAM, protocol = 256.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 256,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,256) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_INET6, DGRAM, protocol = 256.
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 2,
+                        arg2: 256,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,256) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_INET, SOCK_RAW=3, protocol = 256.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 3,
+                        arg2: 256,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,256) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: AF_INET, SOCK_RAW=3, protocol = -1.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 3,
+                        arg2: u64::MAX,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,-1) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: AF_INET, SOCK_RDM=4, protocol = 256.
+                    // Gate ordering proof — IPPROTO_MAX precedes
+                    // ESOCKTNOSUPPORT (batch 467).
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 4,
+                        arg2: 256,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,RDM,256) not EINVAL"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // G: Regression — AF_INET, STREAM, TCP=6 — in-
+                    // range protocol falls through to gate 3c
+                    // (domain != 1) → EOPNOTSUPP.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 6,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,TCP) not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // H: Regression — AF_UNIX not in IPPROTO_MAX
+                    // gate; gate 3b's EPROTONOSUPPORT path
+                    // (unix_create with non-zero protocol) still
+                    // fires.  args.arg2 as u32 = 0xFFFFFFFF != 0,
+                    // matches (1, _) -> EPROTONOSUPPORT.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: u64::MAX,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,-1) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,-1) not EINVAL"
+                        "[syscall/linux]   socketpair AF_INET/AF_INET6 protocol range 0..IPPROTO_MAX=256 (Linux inet_create/inet6_create open gate; precedes ESOCKTNOSUPPORT, EPROTONOSUPPORT, and EOPNOTSUPP): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_INET, STREAM, protocol = 256.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 256,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,256) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_INET6, DGRAM, protocol = 256.
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 2,
-                    arg2: 256,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,256) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_INET, SOCK_RAW=3, protocol = 256.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 3,
-                    arg2: 256,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,256) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: AF_INET, SOCK_RAW=3, protocol = -1.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 3,
-                    arg2: u64::MAX,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,-1) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: AF_INET, SOCK_RDM=4, protocol = 256.
-                // Gate ordering proof — IPPROTO_MAX precedes
-                // ESOCKTNOSUPPORT (batch 467).
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 4,
-                    arg2: 256,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,RDM,256) not EINVAL"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // G: Regression — AF_INET, STREAM, TCP=6 — in-
-                // range protocol falls through to gate 3c
-                // (domain != 1) → EOPNOTSUPP.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 6,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,TCP) not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // H: Regression — AF_UNIX not in IPPROTO_MAX
-                // gate; gate 3b's EPROTONOSUPPORT path
-                // (unix_create with non-zero protocol) still
-                // fires.  args.arg2 as u32 = 0xFFFFFFFF != 0,
-                // matches (1, _) -> EPROTONOSUPPORT.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: u64::MAX,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,-1) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socketpair AF_INET/AF_INET6 protocol range 0..IPPROTO_MAX=256 (Linux inet_create/inet6_create open gate; precedes ESOCKTNOSUPPORT, EPROTONOSUPPORT, and EOPNOTSUPP): OK"
-                );
+                case()?;
             }
 
             // ---- Batch 470: socketpair AF_NETLINK protocol MAX_LINKS=32 ----
@@ -102178,137 +102433,142 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   H. Gate-ordering: socketpair(AF_NETLINK, STREAM, 99, sv)
             //      -> ESOCKTNOSUPPORT
             {
-                let sv_buf = [0u8; 8];
-                let sv_p = (&raw const sv_buf[0]) as u64;
-                core::hint::black_box(&sv_buf);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let sv_buf = [0u8; 8];
+                    let sv_p = (&raw const sv_buf[0]) as u64;
+                    core::hint::black_box(&sv_buf);
 
-                // A: AF_NETLINK / DGRAM / -1.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 2,
-                    arg2: u64::MAX,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    // A: AF_NETLINK / DGRAM / -1.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 2,
+                        arg2: u64::MAX,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,-1) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_NETLINK / RAW / -1.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 3,
+                        arg2: u64::MAX,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_NETLINK,RAW,-1) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_NETLINK / DGRAM / 32.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 2,
+                        arg2: 32,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,32) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_NETLINK / RAW / 99.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 3,
+                        arg2: 99,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_NETLINK,RAW,99) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: Regression — AF_NETLINK / DGRAM / 0
+                    // (NETLINK_ROUTE). In-range falls to gate 3c
+                    // (domain != 1) → EOPNOTSUPP.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 2,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,0) regression not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: Regression — AF_NETLINK / DGRAM / 31.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 2,
+                        arg2: 31,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,31) regression not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // G: Gate-ordering — AF_NETLINK / STREAM / -1.
+                    // Gate 3a ESOCKTNOSUPPORT fires before gate 3a.5
+                    // MAX_LINKS — netlink_create type-check-first.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 1,
+                        arg2: u64::MAX,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM,-1) gate-order not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // H: Gate-ordering — AF_NETLINK / STREAM / 99.
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 1,
+                        arg2: 99,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM,99) gate-order not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,-1) not EPROTONOSUPPORT"
+                        "[syscall/linux]   socketpair AF_NETLINK protocol range 0..MAX_LINKS=32 (Linux netlink_create EPROTONOSUPPORT after type check; precedes EOPNOTSUPP): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_NETLINK / RAW / -1.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 3,
-                    arg2: u64::MAX,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_NETLINK,RAW,-1) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_NETLINK / DGRAM / 32.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 2,
-                    arg2: 32,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,32) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_NETLINK / RAW / 99.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 3,
-                    arg2: 99,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_NETLINK,RAW,99) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: Regression — AF_NETLINK / DGRAM / 0
-                // (NETLINK_ROUTE). In-range falls to gate 3c
-                // (domain != 1) → EOPNOTSUPP.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 2,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,0) regression not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: Regression — AF_NETLINK / DGRAM / 31.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 2,
-                    arg2: 31,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM,31) regression not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // G: Gate-ordering — AF_NETLINK / STREAM / -1.
-                // Gate 3a ESOCKTNOSUPPORT fires before gate 3a.5
-                // MAX_LINKS — netlink_create type-check-first.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 1,
-                    arg2: u64::MAX,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM,-1) gate-order not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // H: Gate-ordering — AF_NETLINK / STREAM / 99.
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 1,
-                    arg2: 99,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM,99) gate-order not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socketpair AF_NETLINK protocol range 0..MAX_LINKS=32 (Linux netlink_create EPROTONOSUPPORT after type check; precedes EOPNOTSUPP): OK"
-                );
+                case()?;
             }
 
             // ---- Batch 471: socketpair AF_UNIX accepts PF_UNIX ----
@@ -102328,103 +102588,108 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   E. Regression: socketpair(AF_UNIX, STREAM, 2, sv) -> EPROTONOSUPPORT
             //   F. Regression: socketpair(AF_UNIX, STREAM, -1, sv) -> EPROTONOSUPPORT
             {
-                let sv_buf = [0u8; 8];
-                let sv_p = (&raw const sv_buf[0]) as u64;
-                core::hint::black_box(&sv_buf);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let sv_buf = [0u8; 8];
+                    let sv_p = (&raw const sv_buf[0]) as u64;
+                    core::hint::black_box(&sv_buf);
 
-                // A: AF_UNIX / STREAM / PF_UNIX.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: 1,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                    // A: AF_UNIX / STREAM / PF_UNIX.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 1,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,PF_UNIX) not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_UNIX / DGRAM / PF_UNIX.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 2,
+                        arg2: 1,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,DGRAM,PF_UNIX) not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_UNIX / SEQPACKET / PF_UNIX.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 5,
+                        arg2: 1,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,SEQPACKET,PF_UNIX) not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: Regression — AF_UNIX / STREAM / 0.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,0) regression not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: Regression — AF_UNIX / STREAM / 2 — not PF_UNIX.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 2,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,2) regression not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: Regression — AF_UNIX / STREAM / -1.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: u64::MAX,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,-1) regression not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,PF_UNIX) not ENOSYS"
+                        "[syscall/linux]   socketpair AF_UNIX protocol PF_UNIX=1 accepted (Linux unix_create `protocol && protocol != PF_UNIX` gate): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_UNIX / DGRAM / PF_UNIX.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 2,
-                    arg2: 1,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,DGRAM,PF_UNIX) not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_UNIX / SEQPACKET / PF_UNIX.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 5,
-                    arg2: 1,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,SEQPACKET,PF_UNIX) not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: Regression — AF_UNIX / STREAM / 0.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,0) regression not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: Regression — AF_UNIX / STREAM / 2 — not PF_UNIX.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: 2,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,2) regression not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: Regression — AF_UNIX / STREAM / -1.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: u64::MAX,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,-1) regression not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socketpair AF_UNIX protocol PF_UNIX=1 accepted (Linux unix_create `protocol && protocol != PF_UNIX` gate): OK"
-                );
+                case()?;
             }
 
             // ---- Batch 472: socketpair AF_INET/AF_INET6 SOCK_DGRAM ----
@@ -102445,133 +102710,138 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   G. Regression: socketpair(AF_INET, DGRAM, 99, sv) -> EPROTONOSUPPORT
             //   H. Regression: socketpair(AF_INET6, DGRAM, UDPLITE, sv) -> EOPNOTSUPP
             {
-                let sv_buf = [0u8; 8];
-                let sv_p = (&raw const sv_buf[0]) as u64;
-                core::hint::black_box(&sv_buf);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let sv_buf = [0u8; 8];
+                    let sv_p = (&raw const sv_buf[0]) as u64;
+                    core::hint::black_box(&sv_buf);
 
-                // A: AF_INET / DGRAM / ICMP=1.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 1,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                    // A: AF_INET / DGRAM / ICMP=1.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 1,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,ICMP) not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_INET6 / DGRAM / ICMPV6=58.
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 2,
+                        arg2: 58,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,ICMPV6) not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: Regression — AF_INET / DGRAM / UDP=17.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 17,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,UDP) regression not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: Regression — AF_INET / DGRAM / UDPLITE.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 136,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,UDPLITE) regression not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: Cross-family — AF_INET / DGRAM / ICMPV6=58.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 58,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,ICMPV6) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: Cross-family — AF_INET6 / DGRAM / ICMP=1.
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 2,
+                        arg2: 1,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,ICMP) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // G: Regression — AF_INET / DGRAM / 99.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 2,
+                        arg2: 99,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,99) regression not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // H: Regression — AF_INET6 / DGRAM / UDPLITE.
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 2,
+                        arg2: 136,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,UDPLITE) regression not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,ICMP) not EOPNOTSUPP"
+                        "[syscall/linux]   socketpair AF_INET adds ICMP=1, AF_INET6 adds ICMPV6=58 to SOCK_DGRAM accept (Linux inetsw/inet6sw[SOCK_DGRAM] ping-protocol entries; precedes EOPNOTSUPP): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_INET6 / DGRAM / ICMPV6=58.
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 2,
-                    arg2: 58,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,ICMPV6) not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: Regression — AF_INET / DGRAM / UDP=17.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 17,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,UDP) regression not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: Regression — AF_INET / DGRAM / UDPLITE.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 136,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,UDPLITE) regression not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: Cross-family — AF_INET / DGRAM / ICMPV6=58.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 58,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,ICMPV6) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: Cross-family — AF_INET6 / DGRAM / ICMP=1.
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 2,
-                    arg2: 1,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,ICMP) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // G: Regression — AF_INET / DGRAM / 99.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 2,
-                    arg2: 99,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,DGRAM,99) regression not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // H: Regression — AF_INET6 / DGRAM / UDPLITE.
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 2,
-                    arg2: 136,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET6,DGRAM,UDPLITE) regression not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socketpair AF_INET adds ICMP=1, AF_INET6 adds ICMPV6=58 to SOCK_DGRAM accept (Linux inetsw/inet6sw[SOCK_DGRAM] ping-protocol entries; precedes EOPNOTSUPP): OK"
-                );
+                case()?;
             }
 
             // ---- socketpair AF_UNIX protocol-check-before-type ----
@@ -102589,139 +102859,144 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // EPROTONOSUPPORT (rather than ESOCKTNOSUPPORT) even when
             // type is also invalid.
             {
-                let sv_buf = [0u8; 8];
-                let sv_p = (&raw const sv_buf[0]) as u64;
-                core::hint::black_box(&sv_buf);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let sv_buf = [0u8; 8];
+                    let sv_p = (&raw const sv_buf[0]) as u64;
+                    core::hint::black_box(&sv_buf);
 
-                // A: AF_UNIX / SOCK_RDM=4 / protocol=99 / sv.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 4,
-                    arg2: 99,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    // A: AF_UNIX / SOCK_RDM=4 / protocol=99 / sv.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 4,
+                        arg2: 99,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,99,sv) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_UNIX / SOCK_DCCP=6 / protocol=99 / sv.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 6,
+                        arg2: 99,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,DCCP,99,sv) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_UNIX / SOCK_PACKET=10 / protocol=-1 / sv.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 10,
+                        arg2: u64::MAX,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,PACKET,-1,sv) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_UNIX / SOCK_RDM / 0 / sv — protocol OK, type
+                    // allowlist fires.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,0,sv) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: AF_UNIX / SOCK_RDM / 1=PF_UNIX / sv — protocol OK
+                    // via PF_UNIX exemption, type allowlist fires.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 4,
+                        arg2: 1,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,PF_UNIX,sv) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: AF_UNIX / SOCK_DCCP / 1=PF_UNIX / sv — same
+                    // pattern with a different invalid type.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 6,
+                        arg2: 1,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,DCCP,PF_UNIX,sv) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // G: Cross-family regression — AF_INET / SOCK_RDM / 99 /
+                    // sv → ESOCKTNOSUPPORT (gate 3a, AF_INET-restricted
+                    // gate 2-continued doesn't fire because it's AF_UNIX-only).
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 4,
+                        arg2: 99,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,RDM,99,sv) cross-family regression not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // H: AF_UNIX / SOCK_STREAM=1 / 99 / sv — regression
+                    // (already EPROTONOSUPPORT pre-batch via gate 3b).
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 1,
+                        arg2: 99,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,99,sv) regression not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,99,sv) not EPROTONOSUPPORT"
+                        "[syscall/linux]   socketpair AF_UNIX protocol check precedes type allowlist (Linux unix_create: EPROTONOSUPPORT before switch-default ESOCKTNOSUPPORT): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_UNIX / SOCK_DCCP=6 / protocol=99 / sv.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 6,
-                    arg2: 99,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,DCCP,99,sv) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_UNIX / SOCK_PACKET=10 / protocol=-1 / sv.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 10,
-                    arg2: u64::MAX,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,PACKET,-1,sv) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_UNIX / SOCK_RDM / 0 / sv — protocol OK, type
-                // allowlist fires.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 4,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,0,sv) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: AF_UNIX / SOCK_RDM / 1=PF_UNIX / sv — protocol OK
-                // via PF_UNIX exemption, type allowlist fires.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 4,
-                    arg2: 1,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,RDM,PF_UNIX,sv) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: AF_UNIX / SOCK_DCCP / 1=PF_UNIX / sv — same
-                // pattern with a different invalid type.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 6,
-                    arg2: 1,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,DCCP,PF_UNIX,sv) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // G: Cross-family regression — AF_INET / SOCK_RDM / 99 /
-                // sv → ESOCKTNOSUPPORT (gate 3a, AF_INET-restricted
-                // gate 2-continued doesn't fire because it's AF_UNIX-only).
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 4,
-                    arg2: 99,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,RDM,99,sv) cross-family regression not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // H: AF_UNIX / SOCK_STREAM=1 / 99 / sv — regression
-                // (already EPROTONOSUPPORT pre-batch via gate 3b).
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 1,
-                    arg2: 99,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,STREAM,99,sv) regression not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socketpair AF_UNIX protocol check precedes type allowlist (Linux unix_create: EPROTONOSUPPORT before switch-default ESOCKTNOSUPPORT): OK"
-                );
+                case()?;
             }
 
             // ---- socketpair AF_INET/AF_INET6 SOCK_RAW + protocol=0 ----
@@ -102755,108 +103030,113 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      doesn't run inet_create.  Reaches gate 4 / terminal
             //      ENOSYS in our translator.
             {
-                let sv_buf = [0u8; 8];
-                let sv_p = (&raw const sv_buf[0]) as u64;
-                core::hint::black_box(&sv_buf);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let sv_buf = [0u8; 8];
+                    let sv_p = (&raw const sv_buf[0]) as u64;
+                    core::hint::black_box(&sv_buf);
 
-                // A: AF_INET / SOCK_RAW / protocol = 0 / sv.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 3,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                    // A: AF_INET / SOCK_RAW / protocol = 0 / sv.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 3,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,0,sv) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_INET6 / SOCK_RAW / protocol = 0 / sv.
+                    let a = SyscallArgs {
+                        arg0: 10,
+                        arg1: 3,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET6,RAW,0,sv) not EPROTONOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: Regression — AF_INET / SOCK_RAW / IPPROTO_TCP=6 / sv.
+                    // Wild-card list-walk succeeds in sock_create; then
+                    // ops->socketpair == NULL → EOPNOTSUPP via gate 3c.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 3,
+                        arg2: 6,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,TCP,sv) regression not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: Regression — AF_INET / SOCK_RAW / 99 / sv.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 3,
+                        arg2: 99,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,99,sv) regression not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: Regression — AF_INET / SOCK_STREAM / 0 / sv.
+                    // Wild-card → TCP, sock_create OK; gate 3c EOPNOTSUPP.
+                    let a = SyscallArgs {
+                        arg0: 2,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,0,sv) regression not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: Cross-family — AF_UNIX / SOCK_RAW / 0 / sv.  AF_UNIX
+                    // doesn't use inetsw; SOCK_RAW aliased to DGRAM in
+                    // unix_create.  Reaches terminal ENOSYS.
+                    let a = SyscallArgs {
+                        arg0: 1,
+                        arg1: 3,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_UNIX,RAW,0,sv) cross-family regression not ENOSYS"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                     serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,0,sv) not EPROTONOSUPPORT"
+                        "[syscall/linux]   socketpair AF_INET/AF_INET6 SOCK_RAW protocol=0 fails sock_create inet_create wild-card list-walk (Linux: EPROTONOSUPPORT; was EOPNOTSUPP): OK"
                     );
-                    return Err(KernelError::InternalError);
+                    Ok(())
                 }
-                // B: AF_INET6 / SOCK_RAW / protocol = 0 / sv.
-                let a = SyscallArgs {
-                    arg0: 10,
-                    arg1: 3,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EPROTONOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET6,RAW,0,sv) not EPROTONOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: Regression — AF_INET / SOCK_RAW / IPPROTO_TCP=6 / sv.
-                // Wild-card list-walk succeeds in sock_create; then
-                // ops->socketpair == NULL → EOPNOTSUPP via gate 3c.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 3,
-                    arg2: 6,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,TCP,sv) regression not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: Regression — AF_INET / SOCK_RAW / 99 / sv.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 3,
-                    arg2: 99,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,RAW,99,sv) regression not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: Regression — AF_INET / SOCK_STREAM / 0 / sv.
-                // Wild-card → TCP, sock_create OK; gate 3c EOPNOTSUPP.
-                let a = SyscallArgs {
-                    arg0: 2,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_INET,STREAM,0,sv) regression not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // F: Cross-family — AF_UNIX / SOCK_RAW / 0 / sv.  AF_UNIX
-                // doesn't use inetsw; SOCK_RAW aliased to DGRAM in
-                // unix_create.  Reaches terminal ENOSYS.
-                let a = SyscallArgs {
-                    arg0: 1,
-                    arg1: 3,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_UNIX,RAW,0,sv) cross-family regression not ENOSYS"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!(
-                    "[syscall/linux]   socketpair AF_INET/AF_INET6 SOCK_RAW protocol=0 fails sock_create inet_create wild-card list-walk (Linux: EPROTONOSUPPORT; was EOPNOTSUPP): OK"
-                );
+                case()?;
             }
 
             // ---- AF_NETLINK / AF_PACKET socket-type allowlist ----
@@ -102892,147 +103172,152 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //      through to the EOPNOTSUPP gate (netlink
             //      ops->socketpair == NULL).
             {
-                // A: AF_NETLINK / SOCK_STREAM
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,STREAM) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // B: AF_NETLINK / SOCK_SEQPACKET
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 5,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_NETLINK,SEQPACKET) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // C: AF_PACKET / SOCK_STREAM
-                let a = SyscallArgs {
-                    arg0: 17,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_PACKET,STREAM) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // D: AF_PACKET / SOCK_RDM
-                let a = SyscallArgs {
-                    arg0: 17,
-                    arg1: 4,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socket(AF_PACKET,RDM) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // E: AF_NETLINK / SOCK_DGRAM (acceptance — DGRAM in allowlist)
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 2,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!("[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM) not ENOSYS");
-                    return Err(KernelError::InternalError);
-                }
-                // F: AF_PACKET / SOCK_RAW (acceptance — RAW in allowlist)
-                let a = SyscallArgs {
-                    arg0: 17,
-                    arg1: 3,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
-                    serial_println!("[syscall/linux]   FAIL: socket(AF_PACKET,RAW) not ENOSYS");
-                    return Err(KernelError::InternalError);
-                }
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    // A: AF_NETLINK / SOCK_STREAM
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,STREAM) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // B: AF_NETLINK / SOCK_SEQPACKET
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 5,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_NETLINK,SEQPACKET) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // C: AF_PACKET / SOCK_STREAM
+                    let a = SyscallArgs {
+                        arg0: 17,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_PACKET,STREAM) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // D: AF_PACKET / SOCK_RDM
+                    let a = SyscallArgs {
+                        arg0: 17,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socket(AF_PACKET,RDM) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // E: AF_NETLINK / SOCK_DGRAM (acceptance — DGRAM in allowlist)
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 2,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!("[syscall/linux]   FAIL: socket(AF_NETLINK,DGRAM) not ENOSYS");
+                        return Err(KernelError::InternalError);
+                    }
+                    // F: AF_PACKET / SOCK_RAW (acceptance — RAW in allowlist)
+                    let a = SyscallArgs {
+                        arg0: 17,
+                        arg1: 3,
+                        arg2: 0,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKET, &a).value != -i64::from(errno::ENOSYS) {
+                        serial_println!("[syscall/linux]   FAIL: socket(AF_PACKET,RAW) not ENOSYS");
+                        return Err(KernelError::InternalError);
+                    }
 
-                // socketpair mirror tests:
-                let sv_buf = [0u8; 8];
-                let sv_p = (&raw const sv_buf[0]) as u64;
-                core::hint::black_box(&sv_buf);
+                    // socketpair mirror tests:
+                    let sv_buf = [0u8; 8];
+                    let sv_p = (&raw const sv_buf[0]) as u64;
+                    core::hint::black_box(&sv_buf);
 
-                // G: socketpair(AF_NETLINK, SOCK_STREAM, 0, sv)
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 1,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
+                    // G: socketpair(AF_NETLINK, SOCK_STREAM, 0, sv)
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 1,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_NETLINK,STREAM) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // H: socketpair(AF_PACKET, SOCK_RDM, 0, sv)
+                    let a = SyscallArgs {
+                        arg0: 17,
+                        arg1: 4,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_PACKET,RDM) not ESOCKTNOSUPPORT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    // I: socketpair(AF_NETLINK, SOCK_DGRAM, 0, sv)
+                    // Acceptance — DGRAM is in the allowlist; the call
+                    // then proceeds to the ops->socketpair == NULL gate
+                    // and returns EOPNOTSUPP (netlink has no socketpair).
+                    let a = SyscallArgs {
+                        arg0: 16,
+                        arg1: 2,
+                        arg2: 0,
+                        arg3: sv_p,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM) not EOPNOTSUPP"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    serial_println!("[syscall/linux]   AF_NETLINK/AF_PACKET ESOCKT gating: OK");
+                    Ok(())
                 }
-                // H: socketpair(AF_PACKET, SOCK_RDM, 0, sv)
-                let a = SyscallArgs {
-                    arg0: 17,
-                    arg1: 4,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::ESOCKTNOSUPPORT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_PACKET,RDM) not ESOCKTNOSUPPORT"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // I: socketpair(AF_NETLINK, SOCK_DGRAM, 0, sv)
-                // Acceptance — DGRAM is in the allowlist; the call
-                // then proceeds to the ops->socketpair == NULL gate
-                // and returns EOPNOTSUPP (netlink has no socketpair).
-                let a = SyscallArgs {
-                    arg0: 16,
-                    arg1: 2,
-                    arg2: 0,
-                    arg3: sv_p,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                if dispatch_linux(nr::SOCKETPAIR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: socketpair(AF_NETLINK,DGRAM) not EOPNOTSUPP"
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                serial_println!("[syscall/linux]   AF_NETLINK/AF_PACKET ESOCKT gating: OK");
+                case()?;
             }
 
             // futimesat NULL path -> EFAULT.
@@ -103079,62 +103364,77 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // explicit pre-do_utimes usec check; pre-batch returned
             // EFAULT because filename was inspected first.
             {
-                let bad_times: [i64; 4] = [0, 1_000_000, 0, 0];
-                let bad_ptr = (&raw const bad_times[0]) as u64;
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: 0,
-                    arg2: bad_ptr,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                core::hint::black_box(&bad_times);
-                if dispatch_linux(nr::FUTIMESAT, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: futimesat bad tv_usec[0] not EINVAL");
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let bad_times: [i64; 4] = [0, 1_000_000, 0, 0];
+                    let bad_ptr = (&raw const bad_times[0]) as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: bad_ptr,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    core::hint::black_box(&bad_times);
+                    if dispatch_linux(nr::FUTIMESAT, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: futimesat bad tv_usec[0] not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
+                case()?;
             }
             // futimesat discriminator B: tv_usec[1] = i64::MAX with
             // filename=NULL -> EINVAL via the same gate on entry 1.
             {
-                let bad_times: [i64; 4] = [0, 0, 0, i64::MAX];
-                let bad_ptr = (&raw const bad_times[0]) as u64;
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: 0,
-                    arg2: bad_ptr,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                core::hint::black_box(&bad_times);
-                if dispatch_linux(nr::FUTIMESAT, &a).value != -i64::from(errno::EINVAL) {
-                    serial_println!("[syscall/linux]   FAIL: futimesat bad tv_usec[1] not EINVAL");
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let bad_times: [i64; 4] = [0, 0, 0, i64::MAX];
+                    let bad_ptr = (&raw const bad_times[0]) as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: bad_ptr,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    core::hint::black_box(&bad_times);
+                    if dispatch_linux(nr::FUTIMESAT, &a).value != -i64::from(errno::EINVAL) {
+                        serial_println!("[syscall/linux]   FAIL: futimesat bad tv_usec[1] not EINVAL");
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
+                case()?;
             }
             // futimesat discriminator C: well-formed timeval array with
             // filename=NULL -> EFAULT (acceptance: usec gate passes,
             // filename-NULL surfaces).
             {
-                let good_times: [i64; 4] = [0, 999_999, 0, 0];
-                let good_ptr = (&raw const good_times[0]) as u64;
-                let a = SyscallArgs {
-                    arg0: 0,
-                    arg1: 0,
-                    arg2: good_ptr,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                core::hint::black_box(&good_times);
-                if dispatch_linux(nr::FUTIMESAT, &a).value != -i64::from(errno::EFAULT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: futimesat valid tv_usec + NULL fn not EFAULT"
-                    );
-                    return Err(KernelError::InternalError);
+                #[inline(never)]
+                fn case() -> crate::error::KernelResult<()> {
+                    let good_times: [i64; 4] = [0, 999_999, 0, 0];
+                    let good_ptr = (&raw const good_times[0]) as u64;
+                    let a = SyscallArgs {
+                        arg0: 0,
+                        arg1: 0,
+                        arg2: good_ptr,
+                        arg3: 0,
+                        arg4: 0,
+                        arg5: 0,
+                    };
+                    core::hint::black_box(&good_times);
+                    if dispatch_linux(nr::FUTIMESAT, &a).value != -i64::from(errno::EFAULT) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: futimesat valid tv_usec + NULL fn not EFAULT"
+                        );
+                        return Err(KernelError::InternalError);
+                    }
+                    Ok(())
                 }
+                case()?;
             }
             serial_println!("[syscall/linux]   futimesat tv_usec value gating: OK");
         }

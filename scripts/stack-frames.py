@@ -32,6 +32,15 @@ This was written to diagnose A-INTERMITTENT-STACK-CANARY-HALT-AT-REAP-TIME,
 where it found `FpuState` (4096 bytes, embedded by value in `Task`) costing
 40640 bytes of a 64 KiB stack across three spawn-path frames.
 
+`--peak` is for functions `scripts/split-frames.py` has split.  After a split the
+per-symbol ranking is *misleading in the flattering direction*: it shows the
+shrunken outer frame and lists the cases separately, so a function whose peak
+did not move at all looks like a large win.  What is actually on the stack while
+a case runs is `outer + that case`, so `--peak` groups each `::case` back under
+its parent and reports the deepest sum.  It is the number that decides whether a
+split was worth doing: `linux_fd::self_test` split into one case measured
+28 224 -> 18 896 by the ranking and 28 224 -> 28 240 by this, and was reverted.
+
 Caveats: this is a static lower bound.  It misses dynamic `alloca`, any
 re-adjustment after the prologue, and of course says nothing about call depth
 -- a 500-byte frame recursing 100 deep will not show up here.
@@ -120,6 +129,36 @@ def frames(disasm: str) -> dict[str, int]:
     return result
 
 
+MANGLE_TAIL = re.compile(r"17h[0-9a-f]{16}E$")
+
+
+def peaks(table: dict[str, int]) -> list[tuple[int, int, int, int, str]]:
+    """`(peak, outer, deepest case, how many cases, name)` per split function.
+
+    Rust mangles a nested `fn case` as its parent's path with `4case` appended
+    before the hash, so stripping the hash makes parent and children share a
+    prefix.  All of a parent's cases collapse to one entry here, keeping the
+    deepest -- which is the one that sets the peak, since only one case is live
+    at a time.
+    """
+    by_path: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    for sym, n in table.items():
+        p = MANGLE_TAIL.sub("", sym)
+        by_path[p] = max(by_path.get(p, 0), n)
+        counts[p] = counts.get(p, 0) + 1
+    rows = []
+    for p, outer in by_path.items():
+        if p.endswith("4case"):
+            continue
+        deepest = by_path.get(p + "4case")
+        if deepest is None:
+            continue
+        rows.append((outer + deepest, outer, deepest, counts[p + "4case"], p))
+    rows.sort(reverse=True)
+    return rows
+
+
 def elf_for(profile: str) -> str:
     return os.path.join(REPO, "target", "x86_64-unknown-none", profile, "kernel")
 
@@ -139,6 +178,12 @@ def main() -> None:
     ap.add_argument("--top", type=int, default=40, help="how many to list (default 40)")
     ap.add_argument("--min", type=int, default=0, help="only report frames >= N bytes")
     ap.add_argument("--filter", help="only report symbols containing this substring")
+    ap.add_argument(
+        "--peak",
+        action="store_true",
+        help="for functions split into `case` fns, report outer + deepest case "
+        "-- what is really on the stack, which the per-symbol ranking hides",
+    )
     ap.add_argument(
         "--diff",
         nargs=2,
@@ -167,6 +212,18 @@ def main() -> None:
 
     elf = args.elf or elf_for(args.profile)
     table = frames(disassemble(elf))
+
+    if args.peak:
+        rows = peaks(table)
+        if args.filter:
+            rows = [r for r in rows if args.filter in r[4]]
+        rows = [r for r in rows if r[0] >= args.min]
+        print(elf)
+        print(f"{'peak':>8}  {'outer':>8}  {'case':>8}  {'n':>3}  symbol\n")
+        for peak, outer, case, n, sym in rows[: args.top]:
+            print(f"{peak:8d}  {outer:8d}  {case:8d}  {n:3d}  {sym}")
+        return
+
     rows = sorted(((n, s) for s, n in table.items()), reverse=True)
     if args.filter:
         rows = [r for r in rows if args.filter in r[1]]

@@ -33262,6 +33262,82 @@ debug --top 40`, and `--diff BEFORE_ELF AFTER_ELF` to check a change.
 Note the profile: these numbers are debug, which is what `boot-test.sh`
 builds and therefore what any canary halt will come from.
 
+### Progress - 2026-08-18: four functions split, and what stopped the rest
+
+The prescribed fix ("split each self-test into `#[inline(never)]` per-case
+functions") is now mechanised as `scripts/split-frames.py` and applied to the
+four functions it fits.  Measured on the debug kernel:
+
+| Function | before | after (peak) | cases |
+|---|---:|---:|---:|
+| `self_test_prctl_dispatch` | 32 160 | **4 064** | 23 |
+| `self_test_legacy_deprecated_syscalls` | 18 832 | **3 312** | 34 |
+| `net::httpd::self_test` | 17 152 | **11 152** | 8 |
+| `self_test_numa_sched_landlock` | 19 664 | **16 768** | 3 |
+
+That is 52 512 bytes off the four peaks, and `self_test_prctl_dispatch` -
+previously the largest frame in the kernel - is now a rounding error.
+**`kshell::cmd_oci` (31 760) is the new top offender.**
+
+**"Peak" means `outer + deepest case`, and that distinction is the whole
+point.** The per-symbol ranking is misleading in the flattering direction
+after a split: it reports the shrunken outer frame and lists the case
+functions as separate symbols, so a split that achieved nothing looks like a
+large win.  `linux_fd::self_test` is the cautionary case - the ranking called
+it 28 224 -> 18 896, but its one case claims 9 344, so what is really on the
+stack while that case runs is 28 240, i.e. **16 bytes worse than before**.
+`scripts/stack-frames.py --peak` now reports this grouping directly; use it,
+not the ranking, to judge a split.
+
+**Three splits were applied, measured and reverted** on that basis:
+
+| Function | peak before | peak after | verdict |
+|---|---:|---:|---|
+| `self_test_seccomp_ptrace_clone3` | 13 888 | 13 056 | -6%, not worth 35 lines |
+| `self_test_remap_ioprio_futex2` | 13 712 | 13 552 | -1%, noise |
+| `linux_fd::self_test` | 28 224 | 28 240 | a regression |
+
+The common cause is *coverage*: the cases only spanned 73-722 lines of a much
+longer function, so most of the frame stayed outside them.  A partial split
+buys nothing, because the peak is set by whatever the outer frame still holds.
+
+**What is out of the transformer's scope, and why** - these need hand work, not
+a better tool:
+
+- `kshell::cmd_oci` (31 760) and `kshell::cmd_container` (27 432) are
+  `match cmd { "inspect" => { .. }, .. }`.  The arms read outer locals
+  (`parts`), so each needs its fixtures threaded through as parameters -
+  a judgement call about what that interface should be.
+- `eventlog::self_test` (26 720), `self_test_sysv_ipc_mqueue` (15 808) and
+  `self_test_bpf_perf_keyring` (15 568) have **flat** bodies: a long run of
+  `let a = SyscallArgs { .. }; if dispatch(..) { fail }` with no block
+  structure at all.  Splitting them means *inventing* the case boundaries,
+  which is a decision about what the test's units are.
+- `scfilter::init` (21 872), `test_per_cpu_work_stealing` (19 504),
+  `PerCpuScheduler::new_const` (18 752) and `xhci::init` (15 504) are not
+  self-tests and have no case structure to exploit.
+
+**Two properties make the rewrite safe to apply mechanically**, and both are
+worth knowing before hand-splitting anything else:
+
+- A nested `fn` cannot capture, so a case that reads an outer local is
+  `E0434` at compile time, never a silent miscompile.  This fired on the first
+  real attempt (`self_test_remap_ioprio_futex2` shares one futex word across
+  its cases); `--param NAME:TYPE` threads such a fixture through explicitly.
+- `case()?` reproduces `return Err(..)` exactly - both abandon the whole
+  self-test - but it does *not* reproduce `return Ok(())`, which used to end
+  the self-test and would now end only the case, letting every later case run.
+  The transformer refuses a case containing any non-`Err` return rather than
+  rewrite it.  No case in the tree hit this, but nothing else about the
+  rewrite can change behaviour, so it is the one thing worth refusing over.
+
+`python scripts/split-frames.py --check` runs a regression suite of synthetic
+inputs, one per trap the transformer actually fell into against real source:
+the wrapped-`if` brace rustfmt puts on its own line, a block closed by
+`} else {`, a `}` inside a comment (`sched::{set,copy}_task_name`), braces in
+strings and nested block comments, a multi-line raw string (refused, because
+re-indenting would change its value), and the `return Ok(())` case above.
+
 ---
 
 ## A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT (lane A, 2026-08-18) - **not a bug; methodology, recorded so it stops being rediscovered**

@@ -25,6 +25,13 @@
 //! - 5 sample habits pre-loaded
 
 use guitk::color::Color;
+// The shared civil-date arithmetic. This app used to carry its own copy: a
+// Zeller's congruence for the weekday, a *separate* Rata Die day number for
+// differences (offset by -307 rather than the -1 the same formula uses two
+// apps over, and documented as "not calendar-accurate, but consistent"), its
+// own leap rule, and month-stepping `while` loops in `add_days`. See
+// `known-issues.md` C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC.
+use guitk::date::{self, Weekday};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -125,88 +132,81 @@ impl Date {
         Some(Self { year, month, day })
     }
 
-    /// Day of week: 0=Sunday ... 6=Saturday (Zeller's congruence).
+    /// This date in the shared calendar, for arithmetic.
+    ///
+    /// Private, and paired with [`from_civil`](Self::from_civil): the struct
+    /// itself stays, because its three fields are read directly all over the
+    /// grid rendering, but nothing computes on them any more.
+    fn civil(self) -> date::Date {
+        date::Date::from_ymd(self.year, self.month, self.day)
+    }
+
+    fn from_civil(d: date::Date) -> Self {
+        let (year, month, day) = d.ymd();
+        Self { year, month, day }
+    }
+
+    fn weekday(self) -> Weekday {
+        self.civil().weekday()
+    }
+
+    /// Day of week: 0=Sunday ... 6=Saturday.
+    ///
+    /// Was a hand-written Zeller's congruence, correct for years >= 1 and
+    /// wrong below that: `y % 100` and `y / 100` truncate toward zero in
+    /// Rust, not the flooring the formula assumes.
     fn day_of_week(self) -> u32 {
-        let mut y = self.year;
-        let mut m = self.month as i32;
-        if m < 3 {
-            m += 12;
-            y -= 1;
-        }
-        let q = self.day as i32;
-        let k = y % 100;
-        let j = y / 100;
-        let h = (q + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
-        ((h + 6) % 7) as u32
+        u32::try_from(self.weekday().index()).unwrap_or(0)
     }
 
     fn day_of_week_short(self) -> &'static str {
-        match self.day_of_week() {
-            0 => "Sun",
-            1 => "Mon",
-            2 => "Tue",
-            3 => "Wed",
-            4 => "Thu",
-            5 => "Fri",
-            6 => "Sat",
-            _ => "???",
-        }
+        self.weekday().short_name()
     }
 
     fn month_short(self) -> &'static str {
         month_short(self.month)
     }
 
+    /// Add days (positive or negative).
+    ///
+    /// Was a pair of `while` loops that stepped one month at a time, so the
+    /// cost was proportional to the distance moved — and a streak view that
+    /// walks back a year did so one month per iteration. Worse, the loop
+    /// condition read `days_in_month`, whose `_ => 30` fallback would have
+    /// let a bad month produce a date the loop could not leave.
     fn add_days(self, n: i32) -> Self {
-        let mut y = self.year;
-        let mut m = self.month;
-        let mut d = self.day as i32 + n;
-
-        while d > days_in_month(y, m) as i32 {
-            d -= days_in_month(y, m) as i32;
-            m += 1;
-            if m > 12 {
-                m = 1;
-                y += 1;
-            }
-        }
-        while d < 1 {
-            m = if m == 1 { 12 } else { m - 1 };
-            if m == 12 {
-                y -= 1;
-            }
-            d += days_in_month(y, m) as i32;
-        }
-
-        Self {
-            year: y,
-            month: m,
-            day: d as u32,
-        }
+        Self::from_civil(self.civil().add_days(n))
     }
 
-    /// Number of days between self and other (self - other). Positive if self is later.
+    /// Number of days between self and other (self - other). Positive if self
+    /// is later.
+    ///
+    /// The day number this used to subtract was described as "not
+    /// calendar-accurate, but consistent" — true only because the two
+    /// subtracted numbers shared the same offset, which is a property of the
+    /// call site rather than of the function. It is now a real day count.
     fn days_since(self, other: Self) -> i32 {
-        self.to_day_number() - other.to_day_number()
+        other.civil().days_until(self.civil())
     }
 
-    /// Monotonic day number for comparison (not calendar-accurate, but consistent).
+    /// A monotonic day number: days since 1970-01-01, negative before it.
+    ///
+    /// Kept because the streak walk and the grid both compare dates by it,
+    /// but it is no longer a *separate* numbering from the one the weekday
+    /// comes from — both are now the same day count, so they cannot disagree.
+    /// It was a Rata Die offset by -307, which made it monotonic but not a
+    /// count of anything; the old comment said as much.
     fn to_day_number(self) -> i32 {
-        let mut y = self.year;
-        let mut m = self.month as i32;
-        if m <= 2 {
-            y -= 1;
-            m += 12;
-        }
-        // Rata Die approximation
-        365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + self.day as i32 - 307
+        self.civil().days_since_epoch()
     }
 
     /// The Monday of the ISO week containing this date.
     fn week_start_monday(self) -> Self {
-        let dow = self.day_of_week(); // 0=Sun..6=Sat
-        let days_back = if dow == 0 { 6 } else { dow as i32 - 1 };
-        self.add_days(-days_back)
+        // `days_since` on `Weekday` answers "how far back to the given day",
+        // which is exactly the question, rather than reconstructing it from a
+        // 0=Sunday index with a special case for Sunday itself.
+        let back = self.weekday().days_since(Weekday::Monday);
+        self.add_days(-i32::try_from(back).unwrap_or(0))
     }
 
     fn format_short(self) -> String {
@@ -218,32 +218,20 @@ impl Date {
     }
 }
 
+// These delegate to `guitk::date` rather than restating it. Note what the
+// old `days_in_month` returned for an out-of-range month: **30**. The
+// calendar's returned **0** and reminders' returned **0**. Three apps, three
+// different answers to the same impossible question, none of them reachable
+// today and all of them waiting for a caller that does not validate first.
+// The shared version clamps into 1..=12, which is the only answer that keeps
+// every caller's loop terminating.
+
 fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    date::is_leap_year(year)
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 => 31,
-        2 => {
-            if is_leap_year(year) {
-                29
-            } else {
-                28
-            }
-        }
-        3 => 31,
-        4 => 30,
-        5 => 31,
-        6 => 30,
-        7 => 31,
-        8 => 31,
-        9 => 30,
-        10 => 31,
-        11 => 30,
-        12 => 31,
-        _ => 30,
-    }
+    date::days_in_month(year, month)
 }
 
 fn month_short(m: u32) -> &'static str {
@@ -2400,6 +2388,31 @@ mod tests {
         assert_eq!(d.day_of_week(), 0); // 0=Sunday
     }
 
+    /// The weekday abbreviations, which are the habit grid's column headers
+    /// and which nothing asserted: replacing `short_name()` with `name()`
+    /// failed no test, so "Wednesday" could have gone into a column sized for
+    /// "Wed". `day_of_week` was covered twice over; the function that turns
+    /// it into the text a user reads was not covered at all.
+    #[test]
+    fn weekday_abbreviations_are_the_right_day_in_three_characters() {
+        // 2026-05-17 is a Sunday, so this walks Sunday..Saturday in the same
+        // order `day_of_week` numbers them.
+        let want = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        for (i, short) in want.iter().enumerate() {
+            let d = Date {
+                year: 2026,
+                month: 5,
+                day: 17,
+            }
+            .add_days(i32::try_from(i).unwrap_or(0));
+            assert_eq!(d.day_of_week_short(), *short, "offset {i}");
+            assert_eq!(u32::try_from(i).unwrap_or(0), d.day_of_week(), "offset {i}");
+            // Three characters, because the grid lays the columns out for
+            // three. A full name here is a layout bug, not a wrong day.
+            assert_eq!(d.day_of_week_short().len(), 3, "offset {i}");
+        }
+    }
+
     #[test]
     fn test_week_start_monday() {
         let d = Date {
@@ -2433,19 +2446,41 @@ mod tests {
         assert_eq!(d.format_full(), "May 18, 2026");
     }
 
+    /// This used to assert only that 2026-12-31 numbered higher than
+    /// 2026-01-01 — a property every monotone function has, including one
+    /// that returned the year. It could not have caught a wrong day *count*,
+    /// which is what the streak walk and the grid subtract. Now that
+    /// `to_day_number` is days-since-1970 rather than an offset Rata Die, the
+    /// values are checkable, so check them.
     #[test]
-    fn test_to_day_number_monotonic() {
-        let d1 = Date {
+    fn day_numbers_are_days_since_the_epoch() {
+        for (year, month, day, want) in [
+            (1970, 1, 1, 0),
+            (1969, 12, 31, -1), // before the epoch: negative, not clamped
+            (2000, 3, 1, 11017), // just past a leap day in a century-leap year
+            (2026, 1, 1, 20454),
+            (2026, 12, 31, 20818),
+        ] {
+            let d = Date { year, month, day };
+            assert_eq!(d.to_day_number(), want, "{year}-{month:02}-{day:02}");
+        }
+
+        // And the difference is a day count, which is the only thing callers
+        // actually use it for. 2026 is a common year, so 1 Jan to 31 Dec is
+        // 364 days.
+        let jan1 = Date {
             year: 2026,
             month: 1,
             day: 1,
         };
-        let d2 = Date {
+        let dec31 = Date {
             year: 2026,
             month: 12,
             day: 31,
         };
-        assert!(d2.to_day_number() > d1.to_day_number());
+        assert_eq!(dec31.days_since(jan1), 364);
+        assert_eq!(jan1.days_since(dec31), -364);
+        assert_eq!(dec31.to_day_number() - jan1.to_day_number(), 364);
     }
 
     #[test]

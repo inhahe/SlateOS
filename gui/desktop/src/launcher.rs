@@ -138,76 +138,12 @@ struct LaunchRecord {
 
 /// Score how well `query` fuzzy-matches `target`.
 ///
-/// Returns `None` if the query does not match. Higher scores are better.
-pub fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
-    if query.is_empty() {
-        return Some(0);
-    }
-
-    let query_lower: Vec<char> = query.chars().map(|c| c.to_ascii_lowercase()).collect();
-    let target_lower: Vec<char> = target.chars().map(|c| c.to_ascii_lowercase()).collect();
-
-    if query_lower.len() > target_lower.len() {
-        return None;
-    }
-
-    let is_prefix = target_lower
-        .iter()
-        .zip(query_lower.iter())
-        .all(|(t, q)| t == q);
-
-    let mut score: u32 = 0;
-    let mut qi = 0;
-    let mut prev_match_idx: Option<usize> = None;
-    let mut first_match_idx: Option<usize> = None;
-
-    for (ti, &tc) in target_lower.iter().enumerate() {
-        if qi >= query_lower.len() {
-            break;
-        }
-        if tc == query_lower[qi] {
-            if first_match_idx.is_none() {
-                first_match_idx = Some(ti);
-            }
-
-            let at_boundary = ti == 0
-                || target_lower
-                    .get(ti.saturating_sub(1))
-                    .is_some_and(|&prev| prev == ' ' || prev == '-' || prev == '_');
-            if at_boundary {
-                score = score.saturating_add(10);
-            }
-
-            if let Some(prev) = prev_match_idx
-                && ti == prev + 1
-            {
-                score = score.saturating_add(5);
-            }
-
-            prev_match_idx = Some(ti);
-            qi += 1;
-        }
-    }
-
-    if qi < query_lower.len() {
-        return None;
-    }
-
-    if is_prefix {
-        score = score.saturating_add(50);
-    }
-
-    if let Some(idx) = first_match_idx {
-        let early_bonus = 20u32.saturating_sub(idx as u32);
-        score = score.saturating_add(early_bonus);
-    }
-
-    let length_diff = target_lower.len().saturating_sub(query_lower.len());
-    let length_bonus = 10u32.saturating_sub(length_diff.min(10) as u32);
-    score = score.saturating_add(length_bonus);
-
-    Some(score)
-}
+/// Re-exported so the launcher's own callers keep their path, but the
+/// implementation lives in `textfind` — this ranking was written out three
+/// times (here, the Run dialog, and the standalone launcher application), the
+/// second copy carrying a comment promising it stayed in step with this one.
+/// See `textfind::fuzzy_score` for what the score rewards.
+pub use guitk::textfind::fuzzy_score;
 
 fn search_score(query: &str, entry: &AppEntry) -> Option<u32> {
     let mut best: Option<u32> = None;

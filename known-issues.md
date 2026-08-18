@@ -34857,3 +34857,74 @@ the posix `getrandom` symbol, which is the route this batch used. The
 per-vault salt in
 `C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES` is
 therefore unblocked.
+
+## C-THE-SHARED-RNG-CRATE-WAS-ITSELF-DUPLICATED (lane C, 2026-08-18) — FIXED
+
+Two crates existed to end hand-rolled random number generators, written at
+roughly the same time in different corners of lane C, neither aware of the
+other: `randrange` (14 consumers, all games, `no_std` and dependency-free, no
+entropy source) and `guitk::rng` (7 consumers, `RandomSource` + `SystemRandom`,
+inside the GUI toolkit). They used the same method name `below` for two
+different things — a `u64` bound in one, an index in the other.
+
+This was not a cosmetic overlap. `gui/credentials` is a headless service whose
+dependencies are `sha2` and `randrange`; the only wrapper for the kernel
+CSPRNG lived in a widget library it must not link. The entry above says its
+third `generate_password` "should draw from the kernel" — it could not, until
+the entropy source moved somewhere a program without a screen can reach it.
+
+Merged into `randrange` (see design-decisions.md §463): names follow the games,
+the trait and the entropy source follow the desktop, `guitk::rng` becomes
+`pub use randrange as rng;` so no call site changes meaning. The bounded
+reduction now uses Lemire's high-bit multiply *with* a rejection step, so the
+one code path is exactly uniform — it is what a password draws through now,
+not just a card shuffle. `SeededRng` drops `Copy`, because a generator that
+duplicates itself on a move-out gives two callers the same sequence silently.
+
+21 consumer crates converted; randrange 25 tests, all affected crates green.
+
+### The sweep missed an eighth generator, again
+
+`apps/pinball/src/main.rs` carried a private `struct Rng` — the literal
+copy-pasted LCG that `randrange`'s module docs dissect, reduced with
+`% bound` — and **two** earlier sweeps for hand-rolled generators did not find
+it. It surfaced only incidentally, while grepping for consumers during this
+merge.
+
+Two defects in it:
+
+- `Pinball::new()` seeded a fixed `42`, so every session's first table was
+  identical: the same multiball throw, every launch, forever. Nobody reported
+  it because a pinball table looks random the first time you see it.
+- `next_bounded` reduced with `%`, which on this LCG biases toward the low end
+  of the range. It was only ever called from tests, so the bias never reached
+  play — which is why it survived.
+
+Fixed: seeds from `SystemRandom`, falling back to a fixed seed rather than
+refusing to start (the spades precedent — a table may be predictable; a machine
+that will not start is the worse failure, and this is a loss of *variety*, not
+of confidentiality). `with_seed` became `with_rng` so a new table carries the
+old generator forward instead of reseeding one from the other's output. Its
+four generator tests were deleted and replaced with three that test what the
+*game* needs from randomness — chiefly that multiball throws its extra balls
+both ways across 40 seeds.
+
+**The lesson for the next sweep:** grepping for the *name* of a thing finds
+the copies that kept the name. Both misses here were crates that had renamed
+the struct or inlined the arithmetic. Grep for the constants instead — the
+multiplier `6364136223846793005` and its LCG siblings are far harder to
+disguise than the word `Rng`.
+
+### Still unblocked, still to do
+
+`C-GUI-CREDENTIALS-GENERATE-PASSWORD-TAKES-A-SEED` and
+`C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES` are
+now unblocked in the strongest sense: `gui/credentials` already depends on
+`randrange`, which now carries `SystemRandom`. Both of that crate's blocking
+comments ("there is no source of unpredictable numbers in userspace yet") are
+stale and should be corrected in the same change, along with withdrawing
+`requests/c-a-userspace-entropy-syscall.md`.
+
+Four non-secret hand-rolled generators remain: `gui/desktop/src/wallpaper.rs`
+(a *second* LCG, separate from the shuffle), `gui/toolkit/src/listview.rs:427`,
+`apps/speedtest/src/main.rs:414,546`, `apps/videoplayer/src/main.rs:1291`.

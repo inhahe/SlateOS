@@ -860,7 +860,16 @@ pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
     // Empty table — fd 0 returns None.
-    let empty = KernelFdTable::new();
+    //
+    // The three tables in this self-test are built with the `_boxed`
+    // constructors for the reason documented on [`KernelFdTable::new_boxed`]: a
+    // table is `[Option<FdEntry>; MAX_FDS]` = 8 KiB, and at `opt-level = 0` a
+    // by-value one costs that in this frame *and* another in the constructor's,
+    // on a 32 KiB kernel task stack.  Measured before the switch: `self_test`
+    // 8 256 outer + 10 672 in the deepest `case`, with `KernelFdTable::new`
+    // (8 272) and `with_stdio` (8 400) live underneath.  Every use below is a
+    // method call, so `Box` derefs to exactly the same code.
+    let empty = KernelFdTable::new_boxed();
     if empty.lookup(0).is_some() {
         serial_println!("[linux_fd] FAIL: empty table fd 0 should be None");
         return Err(KernelError::InternalError);
@@ -870,7 +879,7 @@ pub fn self_test() -> KernelResult<()> {
         #[inline(never)]
         fn case() -> crate::error::KernelResult<()> {
             // with_stdio — fds 0/1/2 are Console.
-            let mut t = KernelFdTable::with_stdio();
+            let mut t = KernelFdTable::with_stdio_boxed();
             for &fd in &[STDIN_FD, STDOUT_FD, STDERR_FD] {
                 let entry = t.lookup(fd).ok_or_else(|| {
                     serial_println!("[linux_fd] FAIL: stdio fd {} should be installed", fd);
@@ -1026,7 +1035,7 @@ pub fn self_test() -> KernelResult<()> {
             // take_cloexec_entries / ensure_stdio — exec close-on-exec semantics.
             // ------------------------------------------------------------------
             {
-                let mut e = KernelFdTable::with_stdio();
+                let mut e = KernelFdTable::with_stdio_boxed();
                 // Install three File handles; mark fds 3 and 5 cloexec, fd 4 not.
                 let f3 = e.install_lowest(FdEntry::file(0xC0DE, O_RDONLY))?;
                 let f4 = e.install_lowest(FdEntry::file(0xBEEF, O_RDWR))?;

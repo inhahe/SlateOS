@@ -36266,3 +36266,70 @@ nothing else — every other case is identical — and costs the single-pass
 structure that makes the two cursors above tractable. Left as-is deliberately;
 if `csplit` ever needs to handle an input too large to hold in memory, that is
 the change that fixes both at once.
+
+## A-SYSROOT-STALENESS-GATE-IS-WEDGED-BY-GIT-TOUCHING-A-FILE-IT-WATCHES
+
+**Status:** open. Diagnosed 2026-08-18 while verifying a merge; worked around
+locally, not fixed. Lane A (`scripts/`, `toolchain/`).
+
+**Symptom.** `scripts/create-ext4-rootfs.sh` and `scripts/ctest-fixtures.py`
+both refuse to proceed with
+
+```
+[ctest] ERROR: toolchain/sysroot/lib/libc.a is OLDER than 1 tracked source(s).
+[ctest]          newer: toolchain/build-sysroot.ps1
+```
+
+and the remedy they print — re-run `toolchain/build-sysroot.ps1` — **does not
+clear it.** The gate is unsatisfiable by its own instructions, which is worse
+than a gate that over-reports: the reader follows the advice, sees no change,
+and has no next move except `ALLOW_STALE_FIXTURES=1`, which disables a real
+check for an unrelated reason.
+
+**Why re-running does not help.** `build-sysroot.ps1` assembles the sysroot
+with `Copy-Item`, and PowerShell's `Copy-Item` **preserves the source file's
+timestamp**. So `libc.a`'s mtime is not the assembly time — it is the mtime of
+`target/…/libposix.a`, i.e. when cargo last *linked* it. If posix has not
+changed, cargo does not relink, the source mtime does not move, and the copy
+faithfully reproduces the old timestamp. `libc.a` can therefore never become
+newer than an input that was touched after the last real posix build.
+
+**What touches an input without changing it: git.** `checkout`, `merge` and
+`stash` all write mtimes. `sysroot_staleness()` watches `posix/src`,
+`posix/Cargo.toml`, `toolchain/stubs` and `toolchain/build-sysroot.ps1`; any
+git operation that writes one of those wedges the gate. This is not an edge
+case here — `CLAUDE.md` requires `git fetch origin && git merge origin/main` at
+the start of *every* task, and the three lanes merge constantly. It was
+triggered here by a plain `git checkout --` that restored a file to
+byte-identical content.
+
+**Why the current design chose mtime.** Deliberately, and the reasoning is in
+`scripts/ctest-fixtures.py` → `sysroot_staleness()`: *"mtime, not a hash,
+because the question is 'was this built after that was edited' — an ordering,
+which a content hash of a file the stamps do not track cannot answer."* That is
+correct as far as it goes. The hole is the premise that mtime records when a
+file was **edited**; it records when a file was **written**, and git writes
+files it has not edited.
+
+**The proper fix.** Give the sysroot the same treatment the ctest fixtures
+already got when this exact class of bug hit them (their stamps are at
+`version 2` for the same reason): have `toolchain/build-sysroot.ps1` write a
+`toolchain/sysroot/.sysroot.stamp` recording the SHA-256 of every input it was
+built from — the same four roots `sysroot_staleness()` walks — and have the
+checker compare **hashes against that stamp** instead of comparing mtimes. That
+answers the docstring's objection directly: the inputs stop being "files the
+stamps do not track". It also makes the gate satisfiable, because re-running
+the build script always rewrites the stamp. Keep the mtime comparison as a
+fallback for when the stamp is absent, exactly as the fixture gate now keeps it
+as a fallback for when python is absent.
+
+**Workaround used on 2026-08-18** (recorded so it is not mistaken for a fix):
+`touch -d <time before libc.a> toolchain/build-sysroot.ps1`, legitimate only
+because `git diff HEAD` proved the file byte-identical to the commit it was
+built from — i.e. the restored mtime asserts something true. Do not reach for
+`ALLOW_STALE_FIXTURES=1` instead; that suppresses the fixture content check too.
+
+**Related:** the sibling defect in the same run — the mtime gate `exit 1`ing
+before the content-stamp gate could run — *was* fixed, in the commit that adds
+this entry. This entry is the remaining half, one level up, in the check the
+fixtures' own stamps cannot reach.

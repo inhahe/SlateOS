@@ -90,7 +90,7 @@ impl Canvas {
     fn pixel_count(width: u32, height: u32) -> Option<usize> {
         let n = (width as usize).checked_mul(height as usize)?;
         let bytes = n.checked_mul(size_of::<Color>())?;
-        (bytes <= isize::MAX as usize).then_some(n)
+        isize::try_from(bytes).is_ok().then_some(n)
     }
 
     /// A fully transparent canvas.
@@ -462,27 +462,15 @@ impl Canvas {
             for dx in 0..new_width {
                 let (sx0, sx1) = span(dx, self.width, new_width);
                 let (sy0, sy1) = span(dy, self.height, new_height);
-                let (mut r, mut g, mut b, mut a, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
-                for sy in sy0..sy1 {
-                    for sx in sx0..sx1 {
-                        if let Some(c) = self.get(sx, sy) {
-                            r = r.saturating_add(u64::from(c.r));
-                            g = g.saturating_add(u64::from(c.g));
-                            b = b.saturating_add(u64::from(c.b));
-                            a = a.saturating_add(u64::from(c.a));
-                            n = n.saturating_add(1);
-                        }
-                    }
-                }
-                // One guard for all four channels; four `checked_div`s would
-                // add four redundant unwraps under the same proof.
-                #[allow(clippy::manual_checked_ops)]
-                if n > 0 {
-                    out.set(
-                        dx,
-                        dy,
-                        Color::rgba((r / n) as u8, (g / n) as u8, (b / n) as u8, (a / n) as u8),
-                    );
+                // `Color::mean` returns `None` for an empty region and there is
+                // nothing to write in that case, so the "at least one sample"
+                // condition never has to be stated separately from the divide
+                // that depends on it.
+                let region = (sy0..sy1)
+                    .flat_map(|sy| (sx0..sx1).map(move |sx| (sx, sy)))
+                    .filter_map(|(sx, sy)| self.get(sx, sy));
+                if let Some(mean) = Color::mean(region) {
+                    out.set(dx, dy, mean);
                 }
             }
         }

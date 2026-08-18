@@ -1,6 +1,6 @@
 //! Color types for the GUI toolkit.
 
-use core::num::NonZeroU32;
+use core::num::{NonZeroU32, NonZeroU64};
 
 /// RGBA color (8 bits per channel).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -94,6 +94,40 @@ impl Color {
             (self.b as f32 * inv_t + other.b as f32 * t) as u8,
             (self.a as f32 * inv_t + other.a as f32 * t) as u8,
         )
+    }
+
+    /// The component-wise mean of a sequence of colours, or `None` if there
+    /// were none.
+    ///
+    /// This is what a box filter needs — the average of a source region — and
+    /// the `None` is why it lives here rather than at the call site. "Divide by
+    /// the number of samples" is only meaningful when there was at least one,
+    /// and a caller that writes `if n > 0 { .. sum / n .. }` has put that
+    /// condition in a different statement from the division it licenses. Here
+    /// the count is a `NonZeroU64` by the time it is divided by, so the
+    /// condition and the division are the same expression.
+    ///
+    /// The channels are summed as `u64`: an image cannot hold more than
+    /// `usize::MAX` pixels and each contributes at most 255, so on a 64-bit
+    /// machine the sums are within range for any canvas that could be
+    /// allocated. The `saturating_add`s state that bound rather than leaving it
+    /// to this comment.
+    pub fn mean(colors: impl IntoIterator<Item = Color>) -> Option<Color> {
+        let (mut r, mut g, mut b, mut a) = (0_u64, 0_u64, 0_u64, 0_u64);
+        let mut count = 0_u64;
+        for c in colors {
+            r = r.saturating_add(u64::from(c.r));
+            g = g.saturating_add(u64::from(c.g));
+            b = b.saturating_add(u64::from(c.b));
+            a = a.saturating_add(u64::from(c.a));
+            count = count.saturating_add(1);
+        }
+        let count = NonZeroU64::new(count)?;
+        // Each sum is at most `count * 255`, so each quotient is at most 255
+        // and the `unwrap_or` is unreachable — it is here so the ceiling is
+        // stated in the operation rather than in this sentence.
+        let average = |sum: u64| u8::try_from(sum / count).unwrap_or(u8::MAX);
+        Some(Color::rgba(average(r), average(g), average(b), average(a)))
     }
 
     // Common color constants
@@ -209,6 +243,36 @@ mod tests {
         // and `NaN as u8` is 0, so this used to produce transparent black
         // rather than a colour anywhere between the two.
         assert_eq!(a.lerp(b, f32::NAN), a, "a NaN factor means no progress");
+    }
+
+    #[test]
+    fn the_mean_of_nothing_is_nothing_and_the_mean_of_one_is_itself() {
+        assert_eq!(Color::mean(core::iter::empty()), None);
+        let lone = Color::rgba(3, 141, 59, 26);
+        assert_eq!(Color::mean([lone]), Some(lone));
+    }
+
+    #[test]
+    fn the_mean_averages_each_channel_independently() {
+        let mean = Color::mean([
+            Color::rgba(0, 0, 0, 0),
+            Color::rgba(100, 200, 40, 8),
+            Color::rgba(200, 100, 80, 16),
+        ])
+        .unwrap();
+        assert_eq!(mean, Color::rgba(100, 100, 40, 8));
+    }
+
+    /// The extremes cannot overflow the accumulator or the cast back down, and
+    /// a uniform region must come back exactly as it went in — the property a
+    /// box filter relies on to leave flat areas untouched.
+    #[test]
+    fn the_mean_of_many_identical_colours_is_that_colour() {
+        for channel in [0u8, 1, 127, 254, 255] {
+            let c = Color::rgba(channel, channel, channel, channel);
+            let mean = Color::mean(core::iter::repeat_n(c, 1000)).unwrap();
+            assert_eq!(mean, c, "channel {channel}");
+        }
     }
 
     #[test]

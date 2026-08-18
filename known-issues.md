@@ -35836,6 +35836,53 @@ The wait is only reachable from the kernel's own boot self-tests, which take
 the early-out and never sleep. The entry exists
 because the *contract* is wrong, not because anything currently hangs on it.
 
+### Progress (appended 2026-08-18, lane B) — **step 1 of 2 has landed; the kernel half is now unblocked**
+
+`posix/src/random.rs` now calls
+`syscall3(SYS_GETRANDOM, buf, len, u64::from(flags))`, and the flags reach it
+from `getrandom` through `fill_random`. The sysroot and all nine
+`services/ctest-*` fixtures were rebuilt against it, so **there is no longer an
+already-built binary that would pass garbage in `rdx`** — which was the sole
+reason lane A could not read `arg2`. Lane A is clear to do step 2; filed back as
+`requests/b-a-getrandom-native-abi-now-passes-arg2.md`.
+
+**The plumbing turned out to be the smaller half.** `kernel_fill` returned a
+`bool`, so *every* kernel refusal collapsed to `false` and every `false` became
+`EIO`. `GRND_NONBLOCK`'s entire purpose is to elicit `EAGAIN`, which no caller
+retries on if it arrives as `EIO` — so passing the flags through would have
+been necessary but not sufficient, and the flag would still have been broken in
+a way the ABI change alone would have hidden. It now returns three states —
+`Filled` / `Absent` / `Refused(errno)` — and the errno survives to the caller.
+
+That forced a decision, recorded as design-decisions.md §334: **only `Absent`
+falls through to `RDRAND`.** Previously any kernel refusal did. Substituting
+hardware for a refusal would make `GRND_NONBLOCK` succeed on a machine with
+`RDRAND` and fail on one without, for a reason the program cannot inspect —
+and the case is nearly unreachable anyway, since a machine that can serve the
+fallback is one whose pool was credited from `RDSEED` before userspace started.
+Two smaller calls in the same entry: `getentropy` pins its errno to `EIO`
+(its spec names only `EIO`/`EFAULT`), and the readiness timeout reports `EIO`
+rather than the `ETIMEDOUT` the shared table would give, which lane A blessed
+in the request.
+
+Both internal callers — the `arc4random` pool seed and the `AT_RANDOM` stack
+canary — ask with flags `0`, the blocking request. Neither has an error channel
+or a way to mark bytes provisional, and a canary drawn from an uncredited pool
+would be identical in every process booted from one image, which is the exact
+failure the readiness gate exists to prevent.
+
+Two new tests: `test_kernel_fill_reports_absent_on_host` pins the
+`Absent`-vs-`Refused` split the fallback hangs off, and
+`test_host_sentinel_cannot_collide_with_a_kernel_code` pins the assumption
+underneath it — `Absent` is keyed on `-ENOSYS`, and `-38` must stay outside
+every band `errno::native` assigns. If a future band grows to reach it, that
+test fires before the entropy path starts reading a live refusal as an absent
+kernel.
+
+Still open until lane A lands step 2: the kernel continues to ignore `arg2` on
+90, so `GRND_NONBLOCK` and `GRND_INSECURE` remain inert on the native path.
+What has changed is that nothing on our side would now discard the answer.
+
 ### A-RECLAIM-SPACE-CANNOT-FREE-A-LANE'S-OWN-TARGET — the rename probe is vetoed by an unattributed handle
 
 **Where:** `scripts/reclaim-space.py` step 3 ("*our own* `target/`"), via

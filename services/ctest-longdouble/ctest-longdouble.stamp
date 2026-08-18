@@ -9,5 +9,5 @@
 version 2
 input  build.py sha256 3c373aabde056a2e26e40802b32e37af8649200d86f93e8f92a487470d9cfe1a
 input  main.c sha256 402188f2f6421ef31666c9e99f2ffd5def2ad0955174decc7a1a080f0734d222
-input  toolchain/sysroot/lib/libc.a sha256 18987fd133823c948ae9550c531fcdf3bf46c1fe56a9fc445f0bab4135f18841
-output ctest-longdouble.elf sha256 fb2995b7aba636379918f133e2ed289c9fb0f654c265ca867364bd066d969362 size 2613000
+input  toolchain/sysroot/lib/libc.a sha256 73efe5b393c3dea1df28f392364cb68c88d14185a14d1734997a460bd8c9a5e1
+output ctest-longdouble.elf sha256 2e02525242d6cdb56b5a05ebbb9e086705a800c8e2654f07b92f9459a2c87212 size 2636696

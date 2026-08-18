@@ -34925,6 +34925,28 @@ comments ("there is no source of unpredictable numbers in userspace yet") are
 stale and should be corrected in the same change, along with withdrawing
 `requests/c-a-userspace-entropy-syscall.md`.
 
-Four non-secret hand-rolled generators remain: `gui/desktop/src/wallpaper.rs`
-(a *second* LCG, separate from the shuffle), `gui/toolkit/src/listview.rs:427`,
-`apps/speedtest/src/main.rs:414,546`, `apps/videoplayer/src/main.rs:1291`.
+### The constant grep, run immediately, found twenty more
+
+The list here originally read "four non-secret hand-rolled generators remain".
+That number came from the name-based sweeps. Running the constant-based grep
+this entry recommends — one command, thirty seconds — turned up **twenty**, in
+twenty-one files (one of which, `apps/breakout`, is a deliberate reproduction
+of the historical generator inside its own tests, and is not a defect).
+Tracked as `C-TWENTY-MORE-HAND-ROLLED-LCGS`.
+
+Fourteen carry a whole private `struct Lcg` / `struct Rng`, copy-pasted:
+`apps/{dots,game2048,hangman,life,lightsout,mahjong,match3,maze,memory,pipes,
+simon,sudoku,tetris,wordle}`. Four have the arithmetic inlined with no type at
+all — `apps/{flashcards,radio,speedtest,videoplayer}` — which is why a grep for
+`Rng` could never have found them. Two are in the toolkit and the desktop:
+`gui/toolkit/src/listview.rs:427` and `gui/desktop/src/wallpaper.rs:758` (a
+*second* LCG in that file, separate from the shuffle already fixed).
+
+Nearly all of them repeat pinball's *other* defect as well: `new()` seeds a
+literal `42` (or `123`, or `12345`), so every session of that game is the same
+session — the same maze, the same tetromino order, the same word. That is the
+more visible bug of the two, and it has been shipping in fourteen games.
+
+`% bound` appears in most of them and `(next() >> 33) as usize % max` in the
+rest — the same reduction `randrange`'s module docs exist to explain, in
+crates that were never told the crate exists.

@@ -10065,6 +10065,14 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      stream is gone.  Flags (GRND_NONBLOCK / GRND_RANDOM /
 ##      GRND_INSECURE) are accepted but ignored — we never block and
 ##      we don't distinguish urandom/random sources.
+##      SUPERSEDED 2026-08-18: both halves of that last sentence are
+##      now false.  sys_getrandom waits for a credited pool (4381365de)
+##      and reads arg2 as the GRND_* word, so NONBLOCK and INSECURE are
+##      honoured on the native path as well as on Linux-ABI 318.  See
+##      known-issues.md ->
+##      A-GETRANDOM-VALIDATES-THE-GRND-FLAGS-THEN-THROWS-THEM-AWAY.
+##      (GRND_RANDOM is still a no-op, deliberately: one pool, as Linux
+##      has had since 5.6.)
 ##   2. Cross-CPU TLB shootdown for mprotect — DONE.  sys_mprotect
 ##      now batches all PTE updates and ends with a single
 ##      mprotect_flush_range() call that delegates to

@@ -35775,7 +35775,7 @@ existing configuration can newly be rejected.
 
 ---
 
-## A-GETRANDOM-VALIDATES-THE-GRND-FLAGS-THEN-THROWS-THEM-AWAY (lane A, 2026-08-18) — **open; needs an ABI change in lane B's tree first**
+## A-GETRANDOM-VALIDATES-THE-GRND-FLAGS-THEN-THROWS-THEM-AWAY (lane A, 2026-08-18) — **FIXED 2026-08-18; both steps landed**
 
 **What a user would see:** a program that explicitly asks `getrandom` *not* to
 block can be made to wait anyway — up to 15 seconds — and a program that says
@@ -35882,6 +35882,56 @@ kernel.
 Still open until lane A lands step 2: the kernel continues to ignore `arg2` on
 90, so `GRND_NONBLOCK` and `GRND_INSECURE` remain inert on the native path.
 What has changed is that nothing on our side would now discard the answer.
+
+### FIXED (appended 2026-08-18, lane A) — step 2 has landed; the entry is closed
+
+`kernel/src/syscall/handlers.rs::sys_getrandom` reads `args.arg2` as the
+`GRND_*` word, with the semantics syscall 318 already had:
+`GRND_NONBLOCK` ⇒ `WouldBlock` instead of waiting, `GRND_INSECURE` ⇒ skip the
+readiness gate, `GRND_RANDOM` ⇒ accepted no-op, `GRND_RANDOM | GRND_INSECURE`
+and any unknown bit ⇒ `InvalidArgument`. Combined with lane B's step 1, the
+full chain now works: a program that says "do not block" is not blocked, and a
+program that says "I accept weak bytes" can get them.
+
+**The `GRND_*` constants moved to `handlers.rs` and 318 now imports them.**
+They were declared twice — once per entry point — which is one declaration that
+can be edited alone. Two entry points disagreeing about the numeric value of a
+flag is a bug no test on either side can see, because each side would be
+self-consistent.
+
+Two deliberate choices worth keeping:
+
+- **Flags are screened before the zero-length early-out.** `getrandom(NULL, 0,
+  FLAG)` is the shape of a feature probe, and answering it with success for a
+  flag we do not implement is worse than answering `EINVAL` — the caller then
+  uses the flag believing it is honoured. Syscall 318 already ordered it this
+  way; the native path now matches.
+- **`is_ready()` is consulted before `GRND_NONBLOCK` is acted on**, so the flag
+  on an already-credited pool is an ordinary success. `GRND_NONBLOCK` means "do
+  not wait", not "do not serve me"; a handler that returned `EAGAIN`
+  unconditionally would be a plausible misreading and is excluded by test.
+
+**The test is the part to preserve.** `test_dispatch_getrandom_flags`
+(`kernel/src/syscall/dispatch.rs`) asserts `GRND_NONBLOCK` ⇒ **`WouldBlock`
+specifically**, not "some error". That battery runs before `rng::init`, so a
+handler that ignored the flag would *also* fail there — with `TimedOut`, from
+`wait_until_ready`'s "nothing is crediting this pool" early-out. A test written
+as "it errors" would have passed against the broken handler, which is a fair
+description of how this flag stayed inert for as long as it did. The two errnos
+are not interchangeable downstream either: libc maps `WouldBlock` to `EAGAIN`
+and pins `TimedOut` to `EIO`, and `EAGAIN` is the only one a `GRND_NONBLOCK`
+caller retries on.
+
+Replied to lane B as
+`requests/a-b-getrandom-kernel-now-reads-arg2-step-2-landed.md`, including a
+declined offer: lane B proposed splitting `TimedOut` out so it surfaces
+distinctly on `getrandom` rather than sharing `getentropy`'s `EIO`. Declined —
+`getentropy(3)` specifies only `EIO`/`EFAULT` and shares the path, and no caller
+can act differently on the distinction. **The cost, recorded so it is not
+invisible:** a timed-out `getrandom(buf, n, 0)` is indistinguishable at the
+errno from a genuine I/O failure, so a machine whose entropy is not accruing
+looks like a machine with a broken RNG. The kernel logs the difference where it
+happens; the errno does not carry it.
 
 ### A-RECLAIM-SPACE-CANNOT-FREE-A-LANE'S-OWN-TARGET — the rename probe is vetoed by an unattributed handle
 

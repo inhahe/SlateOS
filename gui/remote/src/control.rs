@@ -56,7 +56,7 @@
 //! bits, oversized counts and non-UTF-8 strings are all [`DecodeError`]s
 //! naming what was wrong.
 
-use crate::{DecodeError, Reader, write_f32, write_string, write_u32, write_u64};
+use crate::{DecodeError, Reader, capacity_hint, write_f32, write_string, write_u32, write_u64};
 
 /// Request-frame magic: `b"CREQ"` (client → compositor).
 pub const REQUEST_MAGIC: [u8; 4] = *b"CREQ";
@@ -406,7 +406,7 @@ impl ResponseTag {
 /// Encode a batch of requests as one `CREQ` frame.
 #[must_use]
 pub fn encode_requests(requests: &[Request]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(CONTROL_HEADER_LEN + requests.len() * 24);
+    let mut out = Vec::with_capacity(capacity_hint(CONTROL_HEADER_LEN, requests.len(), 24));
     encode_requests_into(&mut out, requests);
     out
 }
@@ -423,7 +423,7 @@ pub fn encode_requests_into(out: &mut Vec<u8>, requests: &[Request]) {
 /// Encode a batch of responses as one `CRSP` frame.
 #[must_use]
 pub fn encode_responses(responses: &[Response]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(CONTROL_HEADER_LEN + responses.len() * 16);
+    let mut out = Vec::with_capacity(capacity_hint(CONTROL_HEADER_LEN, responses.len(), 16));
     encode_responses_into(&mut out, responses);
     out
 }
@@ -585,7 +585,7 @@ pub fn decode_requests(input: &[u8]) -> Result<(Vec<Request>, usize), DecodeErro
             body: decode_request_body(&mut r)?,
         });
     }
-    Ok((out, r.pos))
+    Ok((out, r.position()))
 }
 
 /// Streaming decode of a `CREQ` frame: `Ok(None)` when the buffer holds only
@@ -609,7 +609,7 @@ pub fn decode_responses(input: &[u8]) -> Result<(Vec<Response>, usize), DecodeEr
             body: decode_response_body(&mut r)?,
         });
     }
-    Ok((out, r.pos))
+    Ok((out, r.position()))
 }
 
 /// Streaming decode of a `CRSP` frame: `Ok(None)` on a partial frame.
@@ -624,10 +624,7 @@ pub fn try_decode_responses(input: &[u8]) -> Result<Option<(Vec<Response>, usize
 fn read_header(input: &[u8], magic: [u8; 4]) -> Result<(Reader<'_>, u32), DecodeError> {
     let mut r = Reader::new(input);
     r.need(CONTROL_HEADER_LEN)?;
-    if [r.buf[0], r.buf[1], r.buf[2], r.buf[3]] != magic {
-        return Err(DecodeError::BadMagic);
-    }
-    r.pos = 4;
+    r.expect_magic(magic)?;
     let ver = r.read_u8()?;
     if ver != CONTROL_VERSION {
         return Err(DecodeError::UnsupportedVersion(ver));

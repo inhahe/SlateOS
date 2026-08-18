@@ -44,7 +44,7 @@
 
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::{DecodeError, Reader, write_f32, write_u32, write_u64};
+use crate::{DecodeError, Reader, capacity_hint, write_f32, write_u32, write_u64};
 
 /// Input-frame magic: `b"INPT"`.
 pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
@@ -256,7 +256,7 @@ key_table! {
 /// header.
 #[must_use]
 pub fn encode_input_frame(events: &[InputEvent]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(INPUT_HEADER_LEN + events.len() * 24);
+    let mut out = Vec::with_capacity(capacity_hint(INPUT_HEADER_LEN, events.len(), 24));
     encode_input_frame_into(&mut out, events);
     out
 }
@@ -454,11 +454,7 @@ pub fn try_decode_input_frame(
 fn decode_internal(input: &[u8]) -> Result<(Vec<InputEvent>, usize), DecodeError> {
     let mut r = Reader::new(input);
     r.need(INPUT_HEADER_LEN)?;
-    let magic = [r.buf[0], r.buf[1], r.buf[2], r.buf[3]];
-    if magic != INPUT_MAGIC {
-        return Err(DecodeError::BadMagic);
-    }
-    r.pos = 4;
+    r.expect_magic(INPUT_MAGIC)?;
     let ver = r.read_u8()?;
     if ver != INPUT_VERSION {
         return Err(DecodeError::UnsupportedVersion(ver));
@@ -478,7 +474,7 @@ fn decode_internal(input: &[u8]) -> Result<(Vec<InputEvent>, usize), DecodeError
     for _ in 0..n {
         events.push(decode_event(&mut r)?);
     }
-    Ok((events, r.pos))
+    Ok((events, r.position()))
 }
 
 fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {

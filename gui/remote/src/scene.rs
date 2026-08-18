@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 
 use guitk::render::RenderTree;
 
-use crate::{DecodeError, Reader};
+use crate::{DecodeError, Reader, capacity_hint};
 
 /// Scene-frame magic: `b"SCEN"`.
 pub const SCENE_MAGIC: [u8; 4] = *b"SCEN";
@@ -95,7 +95,7 @@ pub struct SceneFrame {
 /// Encode a scene frame to its wire representation.
 #[must_use]
 pub fn encode_scene_frame(frame: &SceneFrame) -> Vec<u8> {
-    let mut out = Vec::with_capacity(SCENE_HEADER_LEN + frame.windows.len() * 48);
+    let mut out = Vec::with_capacity(capacity_hint(SCENE_HEADER_LEN, frame.windows.len(), 48));
     out.extend_from_slice(&SCENE_MAGIC);
     out.push(SCENE_VERSION);
     out.push(0); // flags
@@ -158,11 +158,7 @@ pub fn encode_scene_frame(frame: &SceneFrame) -> Vec<u8> {
 pub fn decode_scene_frame(input: &[u8]) -> Result<(SceneFrame, usize), DecodeError> {
     let mut r = Reader::new(input);
     r.need(SCENE_HEADER_LEN)?;
-    let magic = [r.buf[0], r.buf[1], r.buf[2], r.buf[3]];
-    if magic != SCENE_MAGIC {
-        return Err(DecodeError::BadMagic);
-    }
-    r.pos = 4;
+    r.expect_magic(SCENE_MAGIC)?;
     let ver = r.read_u8()?;
     if ver != SCENE_VERSION {
         return Err(DecodeError::UnsupportedVersion(ver));
@@ -201,10 +197,12 @@ pub fn decode_scene_frame(input: &[u8]) -> Result<(SceneFrame, usize), DecodeErr
             0 => None,
             1 => {
                 // Decode one inline ORDR frame from the remaining bytes and
-                // advance our cursor by however many it consumed.
-                let rest = r.buf.get(r.pos..).ok_or(DecodeError::UnexpectedEof)?;
-                let (tree, consumed) = crate::decode_frame(rest)?;
-                r.pos += consumed;
+                // advance our cursor by however many it consumed. `advance`
+                // re-checks that many bytes are actually there, so a nested
+                // decoder reporting a length longer than the buffer is an
+                // error here rather than a cursor left past the end.
+                let (tree, consumed) = crate::decode_frame(r.rest())?;
+                r.advance(consumed)?;
                 Some(tree)
             }
             other => return Err(DecodeError::BadTag(other)),
@@ -228,7 +226,7 @@ pub fn decode_scene_frame(input: &[u8]) -> Result<(SceneFrame, usize), DecodeErr
             windows,
             removed,
         },
-        r.pos,
+        r.position(),
     ))
 }
 
@@ -384,6 +382,14 @@ pub fn apply_scene_frame(
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
     use guitk::color::Color;
     use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};

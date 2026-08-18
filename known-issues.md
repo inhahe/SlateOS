@@ -31703,6 +31703,60 @@ removed by deleting it rather than by fixing 96 sites (see
 elsewhere — a large warning count usually means a duplicated *shape*, and the
 cheap fix and the correct fix are the same one.
 
+### Second correction, 2026-08-17: the per-crate counts above are wrong too, and two crates are free
+
+The five figures in the table (`~1752`, `~946`, `~720`, `~660`, `~598`) are
+still not measurements of the crate they name. **`cargo clippy -p X -- <flags>`
+applies those flags to X's *dependencies* as well**, because the flags go to
+the clippy driver through `CLIPPY_ARGS` and the driver applies them to every
+crate it compiles in that invocation. Every one of these crates depends on
+`guitk`, so each figure was mostly a count of `gui/toolkit`'s warnings
+attributed to whichever crate happened to pull it in. That is why the five
+numbers were all the same order of magnitude and all wrong.
+
+The honest measurement filters the JSON diagnostics by the span's file path,
+keeping only those inside the crate's own directory. Doing that:
+
+| Crate | logged above | actually |
+|---|---|---|
+| `gui/desktop` | ~1752 | 1561 |
+| `gui/toolkit` | ~946 | **1488** |
+| `gui/remote` | ~720 | 281 |
+| `gui/notifications` | ~598 | **20** |
+| `gui/window` | ~660 | **0** |
+
+So the job is not five comparable crates. It is two crates that hold 95% of
+the debt (`toolkit` and `desktop`, 3049 between them), one middling one
+(`remote`), and **two that are essentially already done**: `gui/window` is
+clean and needs only the opt-in plus the deletion of its private
+`#![deny(clippy::all)] / #![warn(clippy::pedantic)]` pair, and
+`gui/notifications` has twenty.
+
+The composition is also uniform and worth stating, because it says what the
+work actually is:
+
+| Lint | toolkit | desktop | remote | notifications |
+|---|---|---|---|---|
+| `indexing_slicing` | 772 | 491 | 153 | 11 |
+| `arithmetic_side_effects` | 567 | 785 | 94 | 6 |
+| `unwrap_used` | 52 | 170 | 20 | — |
+| `expect_used` | 35 | 68 | 10 | — |
+| `panic` | 25 | 17 | 4 | 3 |
+| everything else | 37 | 30 | 0 | 0 |
+
+Over 96% of it is the two defensive lints, and — per the note above about
+duplicated shapes — `gui/toolkit`'s 600 worst are concentrated in one file,
+`svg.rs`, whose top repeated source lines are `i += 1;` (74), `*pos += 1;`
+(34) and `while i < tokens.len() && is_number_token(&tokens[i])` (18). That is
+one hand-rolled tokeniser cursor written out several hundred times, not
+several hundred problems. The fix is a cursor type, once.
+
+**Methodological rule, third version.** Measuring clippy against a workspace
+lints table has now been got wrong twice in the same entry. Both times the
+error inflated the number and blurred which code it belonged to. The rule:
+*add `[lints] workspace = true` and build the crate alone*, and if that is not
+possible yet, reproduce the table on the command line **and filter the
+diagnostics by file path**. Never quote a raw total from a `-p` invocation.
 
 ## C-TEXT-WAS-CUT-BY-COUNTING-CHARACTERS-INSTEAD-OF-MEASURING-IT (lane C, 2026-08-17) - **fixed**
 

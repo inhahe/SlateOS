@@ -29259,6 +29259,124 @@ puts a real newline inside `seq:` own diagnostic, which lets a format string
 forge a second line of output — and we escape it as `\ooo`, the same choice
 `coreutils::getopt` already makes for an unknown short option.
 
+### Progress (appended 2026-08-17, `printf`)
+
+`printf` is rewritten and certified (`scripts/printf-diff.sh`: 1178 passed, 0
+differed, 7 differ on purpose, comparing stdout, stderr *and* exit status
+separately against glibc's `printf` in WSL; `--flip` reports 817 differences on
+a deliberately misaligned reference). **It does not move the 16-of-85 counter,
+and that is not an oversight:** `printf` is the one utility that must *not* use
+`coreutils::getopt`. Upstream parses its two options by hand, with a comment
+saying why — `getopt_long` would let `--v` abbreviate `--version`, and a format
+string is an operand, so `printf --v` has to print the four characters `--v`
+rather than a version banner. Converting it to the shared parser would be a
+regression dressed as consistency.
+
+It was the worst-shipped utility we had. The old 329-line version had no
+floating point at all (`%f` printed the argument unchanged), no field widths,
+no format reuse, no `%b` or `%q`, and read numbers with Rust's parser, so a bad
+one silently became zero. It is the second caller of `coreutils::extfloat` and
+the first of `coreutils::cfmt`, the new eighth shared module. Seven things
+worth carrying forward:
+
+- **The reference is neither `printf` nor `/usr/bin/printf`, and both wrong
+  answers look plausible.** In WSL a bare `printf` is *bash's builtin*, a
+  different program with different diagnostics (`printf: 0o17: invalid number`
+  where GNU says `'0o17': value not completely converted`); the first
+  measurement batch of this task was silently taken against it. But spelling it
+  `/usr/bin/printf` breaks the comparison the other way, because every GNU
+  diagnostic is prefixed with `argv[0]` — each one would read
+  `/usr/bin/printf: …` against our `printf: …`. `env printf` is the spelling
+  that satisfies both: PATH holds no builtins, and `exec` keeps `argv[0]` bare.
+  Any utility whose name collides with a shell builtin (`echo`, `test`, `true`,
+  `false`, `kill`, `pwd`) has this trap waiting.
+- **A field too wide to render is a `write error` at exit, not a complaint at
+  the directive.** C counts a width in `int`, so `%2147483648d`,
+  `%.2147483648d`, and a `*` width of exactly `INT_MIN` (whose magnitude is one
+  past `INT_MAX`, and which `printf`'s own `INT_MIN <= w <= INT_MAX` check
+  therefore lets through) all fail inside the C library: the conversion writes
+  nothing, the rest of the format still prints, and only the *stream* remembers
+  — so `printf '%*d|%s|\n' -2147483648 5 tail` prints `|tail|`, then reports
+  `printf: write error` with no `strerror` clause, and exits 1. Ours reaches
+  the same place with a `stream_failed` flag standing in for the stream's error
+  indicator. It also outranks `\c`, because upstream's `exit (EXIT_SUCCESS)`
+  still runs the `atexit` handler.
+- **The same escape means different things in a format and in a `%b`
+  argument.** In the format, `\101` is `A` and `\0101` is a backspace followed
+  by `1`; in a `%b` argument the leading `0` is optional, so `\0101` is `A`.
+  One flag (`octal_0`) selects between them, and the two spellings are visible
+  on the same input — `printf '\0101'` and `printf %b '\0101'` disagree.
+- **`\u` falls back to its own spelling, in the opposite case to the
+  diagnostic.** In the C locale gnulib's conversion succeeds below U+0080 (so
+  `\u0041` is `A` and `\u0000` is a NUL byte) and fails above, printing the
+  escape back as `\uXXXX`/`\UXXXXXXXX` in **upper** case — while the surrogate
+  refusal, `invalid universal character name \ud800`, is **lower** case. Two
+  adjacent sentences in one file disagreeing on hex case is exactly what a
+  transcription smooths over and a differential test catches.
+- **Partial output survives a fatal format error.** `printf 'a%z'` prints `a`
+  and *then* complains, because upstream flushes through
+  `atexit (close_stdout)`. A reimplementation that reports before flushing
+  loses the `a`, and nothing in the diagnostic hints that it should not.
+- **The flag/conversion table is a validity check, not just formatting.**
+  `%#d`, `%0s`, `%#s`, `%.1c`, `%'e`, `%5b` and `%-q` are all *invalid
+  conversion specifications* — fatal, not ignored — because each flag removes
+  entries from upstream's 256-entry `ok[]` table. `%b` and `%q` are matched
+  before the flag loop, which is why they accept none.
+- **A harness that builds only when the binary is missing measures the wrong
+  binary.** `cargo test` and `cargo clippy` do not refresh `printf.exe`, so a
+  fix verified by a unit test and then measured here was measured against the
+  *previous* build, and reported as a genuine remaining difference in an
+  otherwise clean run. Both `printf-diff.sh` and `seq-diff.sh` now build every
+  run unless `OURS` was set by the caller.
+
+The seven deliberate differences are one policy, the same one `seq` and
+`coreutils::getopt` already apply: where a diagnostic echoes bytes the caller
+chose — an unknown conversion (`%\n`, `%\x1b[31m`) or the tail of a character
+constant (`%d "'aé"`) — GNU writes the raw byte and we escape it as `\ooo`.
+Raw is a forged line, or a terminal escape sequence, inside `printf`'s own
+error stream.
+
+One case the harness cannot carry, recorded so it is not "fixed" later: an
+argument that is not valid UTF-8. Our side is a native Windows binary, so argv
+arrives as UTF-16 and MSYS transcodes on the way in — `\xff\xfe` comes back as
+`\xc3\xbf\xc3\xbe`. The mangling is outside our code (an MSYS-native program
+given the same argument sees the original bytes) and cannot happen on the
+target, where argv is bytes; such a case would measure the Windows command
+line rather than `printf`. Non-UTF-8 bytes are still tested where they can be:
+in the *format*, where they arrive as escapes the program decodes itself, and
+in `cfmt`'s unit tests, which take a byte slice directly.
+
+## TD-PRINTF-BUILDS-THE-WHOLE-FIELD-IN-MEMORY (lane B, 2026-08-17) — **open, low priority**
+
+**In short:** `printf '%2147483647d' 5` asks for a number padded out to two
+billion characters. GNU prints it, slowly, a chunk at a time, using almost no
+memory. Ours would try to build the whole two-gigabyte line in memory first,
+and on a machine without two spare gigabytes it fails instead of printing.
+Nobody types this on purpose; a script computing a width from data could.
+
+**Where:** `coreutils::cfmt::pad` and `cfmt::integer` return a `Vec<u8>`
+holding the finished field, and `extfloat::render` returns a `String`. The
+width has already been bounded to `INT_MAX` by `MAX_FIELD` in
+`userspace/coreutils/src/bin/printf.rs` — anything wider is the `write error`
+case described above — so the exposure is exactly the range 1 byte to
+`INT_MAX`.
+
+**Reproduce:** `printf '%2147483647d' 5`. GNU streams it; ours allocates. Do
+not add it to `printf-cases.py`: it is a *legal* input, so the reference would
+faithfully write two gigabytes into the record file.
+
+**The proper fix:** give `cfmt` a `render_to(&mut impl Write, …)` that emits
+padding in fixed-size chunks rather than materialising it, and let `render`
+keep its `Vec` signature by calling it. `printf` and `seq` both write to a
+`BufWriter` already, so neither call site changes shape. This also removes the
+one place where a caller-chosen number decides an allocation size, which is
+worth doing on its own account.
+
+**Why it is not urgent:** the answer is never *wrong*, only expensive, and
+`MAX_FIELD` already rules out the case that used to hang outright — a `*`
+width of `INT_MIN`, which allocated two gigabytes and stopped responding
+(fixed 2026-08-17, and now a unit test plus a differential case).
+
 ## TD-EDITOR-IS-NOT-BIDIRECTIONAL
 
 **Status: OPEN — items 3 and 4 (steps (c) and (d)) done 2026-08-17; 1 and 2

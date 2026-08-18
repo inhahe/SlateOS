@@ -9,5 +9,13 @@ osfont = { path = "../font" }
 textfmt = { path = "../../textfmt" }
 textfind = { path = "../../textfind" }
 
+# The shared TZ-rules engine, for the file dialog's Modified column. The libc's
+# `localtime`, the shell's `%(…)T` and the taskbar clock all render local time
+# through this crate; a file dialog with its own calendar arithmetic would be a
+# fourth answer to "what day is this timestamp?", and the one the user compares
+# against `ls -l`. It is `no_std` and dependency-free, so linking it costs
+# nothing. See tzrules/src/lib.rs's "Why this is a crate and not a module".
+tzrules = { path = "../../tzrules" }
+
 [lints]
 workspace = true

@@ -955,6 +955,71 @@ tools depend on libc) and two authentication bypasses found in `login` while
 fixing this.
 
 
+## B-Q4 — [B] The system has two separate lists of who its users are, and nothing keeps them in step. A user created in one is invisible to the other. Which one is the real one? — Status: OPEN
+
+**In short:** There are two files on this system that each claim to be *the*
+list of user accounts: `/etc/users.yaml` and the pair `/etc/passwd` +
+`/etc/shadow`. Twenty-three programs read one or the other, and **not a single
+line of code copies anything between them.** So if you create a user with
+`useradd`, they can log in at a text console and over SSH, but the graphical
+login screen does not know they exist; if you create the same user with
+`useradm`, the graphical screen shows them and `sudo` works, but `ssh` and
+`passwd` say "no such user". Both halves work perfectly, on different lists of
+people. I need to know which list wins before I make either of them better,
+because every hour spent on the losing one is thrown away.
+
+**Terms:**
+
+- **`/etc/passwd`** — the classic Unix account list: one line per user, colon
+  separated, world-readable. Contains no passwords despite the name.
+- **`/etc/shadow`** — its companion, holding one scrambled password per user,
+  readable only by root.
+- **`/etc/users.yaml`** — this project's own account file, in YAML, holding
+  everything (name, password, home, groups, avatar, admin flag) in one place.
+- **POSIX compatibility** — the promise that software written for Unix runs
+  here unmodified. Such software calls `getpwnam()`, which by long habit means
+  "read `/etc/passwd`".
+
+### The two camps, as they stand today
+
+| | `/etc/users.yaml` | `/etc/passwd` + `/etc/shadow` |
+|---|---|---|
+| Programs using it | 7 | 16 |
+| Which ones | `useradm`, the graphical login screen, `su`, `sudo`, `polkit`, `chown`, `chroot` | `useradd`, `passwd`, the text-console `login`, `chage`, `chpasswd`, `doas`, `sshd`, `ftpd`, `getent`, `w`, `who`, `last`, `loginctl`, `lsns`, `fuser`, `mktemp` |
+| Creates accounts with | `useradm add` | `useradd` |
+| Sets passwords with | `useradm passwd` | `passwd`, `chpasswd` |
+| Grants admin rights via | `is_admin: true` in the record | membership of `wheel` in `/etc/group` |
+| State of the code | one shared implementation as of today (§330); five separate broken parsers before that | one shared implementation as of yesterday (§329); three separate broken hashers before that |
+
+The duplication is not merely wasteful — it has already produced two of the
+worst defects found in this tree. `sudo` and `doas` are the same program for
+the same purpose, and they answer "is this person an administrator?" from
+different files. So do the two `login`s. A machine can genuinely believe an
+account is an administrator at the graphical prompt and not exist at all over
+SSH.
+
+### The options
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **A. `/etc/users.yaml` wins.** Delete `/etc/passwd` and `/etc/shadow`; port the 16 programs onto `userdb`. | `cat /etc/passwd` says "no such file". `getent passwd alice` still answers, reading YAML. | It is what `design.txt` asks for — "configuration files will be yaml" (line 1108). One file rather than three. Records carry fields Unix has nowhere to put (avatar, auto-login, last-login count) without a parallel file. Already the format the graphical desktop uses. | Every piece of software ever ported here that calls `getpwnam()` and reads the file directly breaks. We do not yet know how many of those there will be, and the answer arrives with each new port, not now. |
+| **B. `/etc/passwd` + `/etc/shadow` win.** Delete `/etc/users.yaml`; port the 7 programs onto the classic files. | `useradm` writes colon-separated lines. The graphical login screen loses avatars and auto-login unless a second file is added for them. | Ported software works untouched. Administrators already know the format. Every Unix tool that manipulates accounts — including ones we have not written — works by construction. | Contradicts `design.txt`'s YAML rule for the most security-sensitive file on the system. The desktop's extra fields need a second file anyway, which re-creates the split this option was meant to end. |
+| **C. One store, two faces.** `/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow` are *generated* from it on every change, read-only, for compatibility. | Both files exist and always agree. Writing to `/etc/passwd` by hand is silently undone at the next `useradm` run. | Nothing breaks now and nothing breaks later. This is roughly what macOS does (its truth is a database; the flat files are vestigial). | Two of the 16 programs *write* accounts (`useradd`, `passwd`) — they must be redirected to the YAML, or the generated file is stale the moment anyone uses them. A file that looks writable and is not surprises people. |
+| **D. Leave it.** | Nothing. Two disjoint sets of users, indefinitely. | No work. | This is the current state and it is a live defect, not a design. Two programs answering "who may become root?" differently is the exact shape of the `is_admin`/`admin` bug §330 just fixed one level down, and of the two-`sudo`-binaries problem in `known-issues.md`. |
+
+**Recommendation: C.** It is the only option that does not choose between
+`design.txt` and every future port, and the redirect work it needs (pointing
+`useradd` and `passwd` at the YAML) is work option A needs anyway. If C turns
+out to be more machinery than it is worth, it degrades gracefully into A —
+stop generating the flat files and the truth is unchanged.
+
+**If this is never answered:** it does not get worse on its own, but every
+account-related task from here on has to guess, and half of them will guess
+wrong. Concretely blocked right now: I cannot finish the "two `sudo` binaries"
+cleanup in `known-issues.md`, because which one to delete depends on which file
+is authoritative; and I should not spend more effort improving either account
+stack until the losing one is known.
+
 ---
 
 # Resolved

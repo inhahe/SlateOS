@@ -131,14 +131,12 @@ impl fmt::Display for Personality {
 }
 
 fn detect_personality(argv0: &str) -> Personality {
-    let bytes = argv0.as_bytes();
-    let mut last_sep = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'/' || b == b'\\' {
-            last_sep = i + 1;
-        }
-    }
-    let base = &argv0[last_sep..];
+    // `rsplit` over both separators rather than a hand-rolled scan producing a
+    // byte index to slice at: that index landed on a character boundary only
+    // because `/` and `\` happen to be ASCII, which is a fact about the
+    // separators rather than anything the code established. `rsplit` always
+    // yields at least one item, so the fallback is unreachable.
+    let base = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let base = base.strip_suffix(".exe").unwrap_or(base);
 
     match base {
@@ -442,11 +440,13 @@ fn parse_alias(text: &str, aliases: &mut HashMap<String, Vec<String>>) -> Result
     // Multiple aliases can be on one line, separated by `:`.
     for alias_part in text.split(':') {
         let alias_part = alias_part.trim();
-        let eq_pos = alias_part
-            .find('=')
+        // `split_once` rather than `find` plus two slices: it hands back both
+        // sides already past the delimiter, so nothing here depends on `=`
+        // being one byte wide, and there is no index to get wrong.
+        let (name, members_str) = alias_part
+            .split_once('=')
             .ok_or_else(|| SudoError::ParseError(format!("missing '=' in alias: {alias_part}")))?;
-        let name = alias_part[..eq_pos].trim().to_string();
-        let members_str = &alias_part[eq_pos + 1..];
+        let name = name.trim().to_string();
         let members: Vec<String> = members_str
             .split(',')
             .map(|s| s.trim().to_string())
@@ -467,6 +467,13 @@ fn parse_alias(text: &str, aliases: &mut HashMap<String, Vec<String>>) -> Result
 }
 
 /// Parse a Defaults directive.
+// The `Result` is the sudoers-parser family's signature, not this function's:
+// `parse_alias` and `parse_privilege_spec` alongside it do reject input, and
+// every caller drives them uniformly with `?`. Dropping it here would make the
+// one directive that cannot currently be rejected look different from the ones
+// that can, and this is precisely where validation attaches when it is added --
+// see the note in `known-issues.md` about malformed directives being accepted.
+#[allow(clippy::unnecessary_wraps)]
 fn parse_defaults(rest: &str, config: &mut SudoersConfig) -> Result<(), SudoError> {
     let rest = rest.trim();
 
@@ -500,10 +507,11 @@ fn parse_defaults(rest: &str, config: &mut SudoersConfig) -> Result<(), SudoErro
             continue;
         }
 
-        if let Some(eq_pos) = part.find('=') {
-            let key = part[..eq_pos].trim().to_string();
-            let val = part[eq_pos + 1..].trim().trim_matches('"').to_string();
-            settings.push((key, val));
+        if let Some((key, val)) = part.split_once('=') {
+            settings.push((
+                key.trim().to_string(),
+                val.trim().trim_matches('"').to_string(),
+            ));
         } else if let Some(stripped) = part.strip_prefix('!') {
             // Negated boolean: `!requiretty` means requiretty=false.
             settings.push((stripped.trim().to_string(), "false".to_string()));
@@ -522,28 +530,25 @@ fn parse_defaults(rest: &str, config: &mut SudoersConfig) -> Result<(), SudoErro
 /// Format: `user host = (runas) NOPASSWD: command, command, ...`
 fn parse_privilege_spec(line: &str, config: &mut SudoersConfig) -> Result<(), SudoError> {
     // Split at first `=` that is not inside parentheses.
-    let eq_pos = find_eq_outside_parens(line).ok_or_else(|| {
+    let (left, right) = split_at_eq_outside_parens(line).ok_or_else(|| {
         SudoError::ParseError(format!("missing '=' in privilege specification: {line}"))
     })?;
-
-    let left = line[..eq_pos].trim();
-    let right = line[eq_pos + 1..].trim();
+    let (left, right) = (left.trim(), right.trim());
 
     // Left side: user(s) host(s) separated by whitespace.
     // The last whitespace-separated token(s) before `=` are the hosts.
     // Simple heuristic: split by whitespace, first token is user spec,
     // remaining are hosts. If there is only one token, host is ALL.
     let left_parts: Vec<&str> = left.split_whitespace().collect();
-    let (user_strs, host_strs) = if left_parts.len() >= 2 {
-        let users = vec![left_parts[0]];
-        let hosts: Vec<&str> = left_parts[1..].to_vec();
-        (users, hosts)
-    } else if left_parts.len() == 1 {
-        (vec![left_parts[0]], vec!["ALL"])
-    } else {
+    let Some((user_str, host_parts)) = left_parts.split_first() else {
         return Err(SudoError::ParseError(
             "empty left side of privilege spec".to_string(),
         ));
+    };
+    let (user_strs, host_strs) = if host_parts.is_empty() {
+        (vec![*user_str], vec!["ALL"])
+    } else {
+        (vec![*user_str], host_parts.to_vec())
     };
 
     let users: Vec<String> = user_strs.iter().map(|s| (*s).to_string()).collect();
@@ -562,14 +567,23 @@ fn parse_privilege_spec(line: &str, config: &mut SudoersConfig) -> Result<(), Su
     Ok(())
 }
 
-/// Find the position of `=` that is not inside parentheses.
-fn find_eq_outside_parens(s: &str) -> Option<usize> {
+/// Split at the `=` that is not inside parentheses, returning both sides.
+///
+/// Returns the halves rather than the position, because the position was
+/// only ever useful for producing them and made every caller re-derive the
+/// `+ 1` that steps over the `=`. That step is correct here only because `=`
+/// is one byte; expressed as `strip_prefix` it is correct because it strips
+/// the character it names.
+fn split_at_eq_outside_parens(s: &str) -> Option<(&str, &str)> {
     let mut depth = 0u32;
     for (i, c) in s.char_indices() {
         match c {
             '(' => depth = depth.saturating_add(1),
             ')' => depth = depth.saturating_sub(1),
-            '=' if depth == 0 => return Some(i),
+            '=' if depth == 0 => {
+                let (left, from_eq) = s.split_at(i);
+                return Some((left, from_eq.strip_prefix('=').unwrap_or(from_eq)));
+            }
             _ => {}
         }
     }
@@ -583,15 +597,13 @@ fn parse_runas_prefix(s: &str) -> (RunasSpec, &str) {
         return (RunasSpec::default(), trimmed);
     }
 
-    if let Some(close) = trimmed.find(')') {
-        let inner = &trimmed[1..close];
-        let rest = trimmed[close + 1..].trim();
-
-        let (user_part, group_part) = if let Some(colon) = inner.find(':') {
-            (&inner[..colon], &inner[colon + 1..])
-        } else {
-            (inner, "")
-        };
+    // `(` is known present from the `starts_with` above, and `split_once` takes
+    // the rest apart at `)` without an index that has to step over it.
+    if let Some(after_open) = trimmed.strip_prefix('(')
+        && let Some((inner, rest)) = after_open.split_once(')')
+    {
+        let rest = rest.trim();
+        let (user_part, group_part) = inner.split_once(':').unwrap_or((inner, ""));
 
         let users: Vec<String> = user_part
             .split(',')
@@ -619,6 +631,10 @@ fn parse_runas_prefix(s: &str) -> (RunasSpec, &str) {
 }
 
 /// Parse a comma-separated command list, handling tags like NOPASSWD:, NOEXEC:, etc.
+// `Result` retained for the same reason as `parse_defaults` above: the family's
+// signature, and the attachment point for the validation this parser does not
+// yet do.
+#[allow(clippy::unnecessary_wraps)]
 fn parse_cmnd_list(s: &str) -> Result<Vec<CmndSpec>, SudoError> {
     let mut commands = Vec::new();
     let mut nopasswd = false;
@@ -660,12 +676,12 @@ fn parse_cmnd_list(s: &str) -> Result<Vec<CmndSpec>, SudoError> {
             continue;
         }
 
-        // Split command from optional arguments.
-        let (cmd, args) = if let Some(space) = part.find(' ') {
-            (part[..space].trim(), part[space + 1..].trim())
-        } else {
-            (part, "")
-        };
+        // Split command from optional arguments. `split_once` hands back both
+        // halves already past the space, so there is no `space + 1` whose
+        // correctness rests on the separator being one byte wide.
+        let (cmd, args) = part
+            .split_once(' ')
+            .map_or((part, ""), |(cmd, args)| (cmd.trim(), args.trim()));
 
         commands.push(CmndSpec {
             nopasswd,
@@ -803,7 +819,7 @@ fn validate_sudoers_line(line: &str, line_num: usize, strict: bool, errors: &mut
     }
 
     // Privilege spec must have `=`.
-    if find_eq_outside_parens(line).is_none() {
+    if split_at_eq_outside_parens(line).is_none() {
         errors.push(SyntaxError {
             line_num,
             message: "unrecognized line (missing '=' in privilege specification)".to_string(),
@@ -984,11 +1000,9 @@ fn command_matches(
                 return true;
             }
             // Split member into command and args.
-            let (cmd, args) = if let Some(space) = member.find(' ') {
-                (&member[..space], member[space + 1..].trim())
-            } else {
-                (member.as_str(), "")
-            };
+            let (cmd, args) = member
+                .split_once(' ')
+                .map_or((member.as_str(), ""), |(cmd, args)| (cmd, args.trim()));
             if command_path_matches(cmd, actual_cmd) && (args.is_empty() || args == "*") {
                 return true;
             }
@@ -1021,8 +1035,12 @@ fn command_path_matches(spec: &str, actual: &str) -> bool {
         return true;
     }
     // Wildcard: `/usr/bin/*` matches any command in `/usr/bin/`.
-    if spec.ends_with("/*") {
-        let dir = &spec[..spec.len() - 1];
+    // `strip_suffix` rather than `ends_with` followed by a length subtraction:
+    // it removes the character it names, so the two cannot disagree about how
+    // much to trim.
+    if let Some(dir) = spec.strip_suffix('*')
+        && dir.ends_with('/')
+    {
         return actual.starts_with(dir);
     }
     // Basename match: if spec has no path separator, match basename of actual.
@@ -1333,11 +1351,15 @@ fn days_to_date(mut days: u64) -> (u64, u64, u64) {
 
     loop {
         let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if days < days_in_year {
+        // `checked_sub` is the loop's exit test and its subtraction at once.
+        // The old form compared and then subtracted -- two statements of one
+        // fact, which is the shape that lets a guard drift from the operation
+        // it guards. Same below for months.
+        let Some(rest) = days.checked_sub(days_in_year) else {
             break;
-        }
-        days -= days_in_year;
-        year += 1;
+        };
+        days = rest;
+        year = year.saturating_add(1);
     }
 
     let leap = is_leap_year(year);
@@ -1358,14 +1380,15 @@ fn days_to_date(mut days: u64) -> (u64, u64, u64) {
 
     let mut month = 1u64;
     for &md in &month_days {
-        if days < md {
+        let Some(rest) = days.checked_sub(md) else {
             break;
-        }
-        days -= md;
-        month += 1;
+        };
+        days = rest;
+        month = month.saturating_add(1);
     }
 
-    (year, month, days + 1)
+    // Days are counted from zero within the month; calendars start at one.
+    (year, month, days.saturating_add(1))
 }
 
 /// Check if a year is a leap year.
@@ -1496,19 +1519,22 @@ fn replay_session(io_dir: &str, session_id: &str, speed_factor: f64) -> Result<(
 
     for line in timing_content.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 3 {
+        // A slice pattern rather than a length test followed by three indexes:
+        // the guard and the accesses were two statements of one fact, and only
+        // the pattern keeps them from disagreeing.
+        let [stream_text, delay_text, nbytes_text, ..] = parts.as_slice() else {
             continue;
-        }
+        };
 
-        let stream_type: u32 = match parts[0].parse() {
+        let stream_type: u32 = match stream_text.parse() {
             Ok(t) => t,
             Err(_) => continue,
         };
-        let delay_secs: f64 = match parts[1].parse() {
+        let delay_secs: f64 = match delay_text.parse() {
             Ok(d) => d,
             Err(_) => continue,
         };
-        let nbytes: usize = match parts[2].parse() {
+        let nbytes: usize = match nbytes_text.parse() {
             Ok(n) => n,
             Err(_) => continue,
         };
@@ -1529,8 +1555,13 @@ fn replay_session(io_dir: &str, session_id: &str, speed_factor: f64) -> Result<(
         // Only replay stdout (type 1).
         if stream_type == 1 {
             let end = offset.saturating_add(nbytes).min(stdout_data.len());
-            if offset < stdout_data.len() {
-                let _ = out.write_all(&stdout_data[offset..end]);
+            // `get` rather than a slice plus a separate `offset <` test: the
+            // range is clamped above, and asking for it returns None instead of
+            // panicking if a timing file ever describes bytes past the log.
+            if let Some(chunk) = stdout_data.get(offset..end) {
+                // Errors ignored: replay is best-effort output to a terminal
+                // that may have gone away, and there is nothing to recover.
+                let _ = out.write_all(chunk);
                 let _ = out.flush();
             }
             offset = end;
@@ -1877,177 +1908,108 @@ impl Default for SudoOpts {
     }
 }
 
+/// What a short option does when it is recognised.
+///
+/// A table rather than two `match` arms, because the previous code spelled the
+/// same fourteen flags out twice — once for the bundled form (`-inE`) and once
+/// for the standalone form (`-i -n -E`) — and the two lists had to agree by
+/// hand. Two lists that must agree is the shape of the `is_admin`/`admin` bug
+/// this crate was already fixed for once; here it decides which user you
+/// become, so the lists are now one list.
+enum ShortOption {
+    /// A boolean flag: `-E`.
+    Flag(fn(&mut SudoOpts)),
+    /// Takes a value, either glued on (`-uroot`) or as the next argv element
+    /// (`-u root`). Both forms reach the same setter through this arm.
+    Value(fn(&mut SudoOpts, String)),
+}
+
+/// Map one short-option character to what it sets.
+fn short_option(flag: char) -> Option<ShortOption> {
+    Some(match flag {
+        'u' => ShortOption::Value(|o, v| o.target_user = v),
+        'g' => ShortOption::Value(|o, v| o.target_group = v),
+        'p' => ShortOption::Value(|o, v| o.prompt = v),
+        'i' => ShortOption::Flag(|o| o.login_shell = true),
+        's' => ShortOption::Flag(|o| o.shell = true),
+        'l' => ShortOption::Flag(|o| o.list = true),
+        'v' => ShortOption::Flag(|o| o.validate = true),
+        'k' => ShortOption::Flag(|o| o.invalidate = true),
+        'K' => ShortOption::Flag(|o| o.remove_timestamp = true),
+        'n' => ShortOption::Flag(|o| o.non_interactive = true),
+        'b' => ShortOption::Flag(|o| o.background = true),
+        'e' => ShortOption::Flag(|o| o.edit_mode = true),
+        'E' => ShortOption::Flag(|o| o.preserve_env = true),
+        _ => return None,
+    })
+}
+
 /// Parse sudo command-line arguments.
+///
+/// Driven by a slice cursor rather than an index. That matters more here than
+/// it looks: the old loop advanced `i` from inside the flag-bundle loop to
+/// consume an option's value, so two counters shared responsibility for one
+/// position and every `args[i]` after that point rested on both being right.
 fn parse_sudo_args(args: &[String]) -> Result<SudoOpts, SudoError> {
     let mut opts = SudoOpts::default();
-    let mut i = 0;
-    let mut end_of_opts = false;
+    let mut rest = args;
 
-    while i < args.len() {
-        if end_of_opts {
-            opts.command.push(args[i].clone());
-            i += 1;
-            continue;
-        }
-
-        let arg = &args[i];
+    while let Some((arg, tail)) = rest.split_first() {
+        rest = tail;
 
         if arg == "--" {
-            end_of_opts = true;
-            i += 1;
-            continue;
-        }
-
-        if !arg.starts_with('-') {
-            // First non-option argument starts the command.
-            opts.command.extend(args[i..].iter().cloned());
+            // Everything after `--` is the command, options included.
+            opts.command.extend(rest.iter().cloned());
             break;
         }
 
-        // Handle combined short flags like -inE.
-        if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2 {
-            // Could be combined flags or a flag with value.
-            let flags = &arg[1..];
-            let mut j = 0;
-            let flag_bytes = flags.as_bytes();
-            while j < flag_bytes.len() {
-                match flag_bytes[j] {
-                    b'u' => {
-                        // -u takes the rest or next arg as value.
-                        let rest = &flags[j + 1..];
-                        if !rest.is_empty() {
-                            opts.target_user = rest.to_string();
-                        } else {
-                            i += 1;
-                            if i >= args.len() {
-                                return Err(SudoError::UsageError(
-                                    "-u requires an argument".to_string(),
-                                ));
-                            }
-                            opts.target_user = args[i].clone();
-                        }
-                        j = flag_bytes.len(); // Consumed rest.
-                    }
-                    b'g' => {
-                        let rest = &flags[j + 1..];
-                        if !rest.is_empty() {
-                            opts.target_group = rest.to_string();
-                        } else {
-                            i += 1;
-                            if i >= args.len() {
-                                return Err(SudoError::UsageError(
-                                    "-g requires an argument".to_string(),
-                                ));
-                            }
-                            opts.target_group = args[i].clone();
-                        }
-                        j = flag_bytes.len();
-                    }
-                    b'p' => {
-                        let rest = &flags[j + 1..];
-                        if !rest.is_empty() {
-                            opts.prompt = rest.to_string();
-                        } else {
-                            i += 1;
-                            if i >= args.len() {
-                                return Err(SudoError::UsageError(
-                                    "-p requires an argument".to_string(),
-                                ));
-                            }
-                            opts.prompt = args[i].clone();
-                        }
-                        j = flag_bytes.len();
-                    }
-                    b'i' => {
-                        opts.login_shell = true;
-                        j += 1;
-                    }
-                    b's' => {
-                        opts.shell = true;
-                        j += 1;
-                    }
-                    b'l' => {
-                        opts.list = true;
-                        j += 1;
-                    }
-                    b'v' => {
-                        opts.validate = true;
-                        j += 1;
-                    }
-                    b'k' => {
-                        opts.invalidate = true;
-                        j += 1;
-                    }
-                    b'K' => {
-                        opts.remove_timestamp = true;
-                        j += 1;
-                    }
-                    b'n' => {
-                        opts.non_interactive = true;
-                        j += 1;
-                    }
-                    b'b' => {
-                        opts.background = true;
-                        j += 1;
-                    }
-                    b'e' => {
-                        opts.edit_mode = true;
-                        j += 1;
-                    }
-                    b'E' => {
-                        opts.preserve_env = true;
-                        j += 1;
-                    }
-                    _ => {
-                        return Err(SudoError::UsageError(format!(
-                            "unknown option: -{}",
-                            flags.chars().nth(j).unwrap_or('?')
-                        )));
-                    }
-                }
-            }
-            i += 1;
-            continue;
+        if !arg.starts_with('-') {
+            // The first non-option argument starts the command, and takes the
+            // remainder with it.
+            opts.command.push(arg.clone());
+            opts.command.extend(rest.iter().cloned());
+            break;
         }
 
-        match arg.as_str() {
-            "-u" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err(SudoError::UsageError("-u requires an argument".to_string()));
-                }
-                opts.target_user = args[i].clone();
-            }
-            "-g" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err(SudoError::UsageError("-g requires an argument".to_string()));
-                }
-                opts.target_group = args[i].clone();
-            }
-            "-p" => {
-                i += 1;
-                if i >= args.len() {
-                    return Err(SudoError::UsageError("-p requires an argument".to_string()));
-                }
-                opts.prompt = args[i].clone();
-            }
-            "-i" => opts.login_shell = true,
-            "-s" => opts.shell = true,
-            "-l" => opts.list = true,
-            "-v" => opts.validate = true,
-            "-k" => opts.invalidate = true,
-            "-K" => opts.remove_timestamp = true,
-            "-n" => opts.non_interactive = true,
-            "-b" => opts.background = true,
-            "-e" => opts.edit_mode = true,
-            "-E" => opts.preserve_env = true,
-            other => {
-                return Err(SudoError::UsageError(format!("unknown option: {other}")));
-            }
+        if arg.starts_with("--") {
+            return Err(SudoError::UsageError(format!("unknown option: {arg}")));
         }
 
-        i += 1;
+        let flags = arg.strip_prefix('-').unwrap_or(arg);
+        if flags.is_empty() {
+            // A bare `-`, which names no option at all.
+            return Err(SudoError::UsageError(format!("unknown option: {arg}")));
+        }
+
+        let mut chars = flags.chars();
+        while let Some(flag) = chars.next() {
+            // `chars.as_str()` is the untouched remainder of the bundle after
+            // this character - exactly what `-uroot` needs, and correct for a
+            // multi-byte character, which an index into `as_bytes()` was not.
+            let glued = chars.as_str();
+            match short_option(flag) {
+                None => {
+                    return Err(SudoError::UsageError(format!("unknown option: -{flag}")));
+                }
+                Some(ShortOption::Flag(set)) => set(&mut opts),
+                Some(ShortOption::Value(set)) => {
+                    let value = if glued.is_empty() {
+                        let Some((next, after_next)) = rest.split_first() else {
+                            return Err(SudoError::UsageError(format!(
+                                "-{flag} requires an argument"
+                            )));
+                        };
+                        rest = after_next;
+                        next.clone()
+                    } else {
+                        glued.to_string()
+                    };
+                    set(&mut opts, value);
+                    // The remainder of the bundle was the value.
+                    break;
+                }
+            }
+        }
     }
 
     Ok(opts)
@@ -2078,30 +2040,32 @@ impl Default for VisudoOpts {
 /// Parse visudo command-line arguments.
 fn parse_visudo_args(args: &[String]) -> Result<VisudoOpts, SudoError> {
     let mut opts = VisudoOpts::default();
-    let mut i = 0;
+    // A slice cursor, as in `parse_sudo_args`: `-f` takes its value from a tail
+    // already proved non-empty, so there is no `i + 1` to bounds-check
+    // separately from the `args[i + 1]` that follows it.
+    let mut rest = args;
 
-    while i < args.len() {
-        match args[i].as_str() {
+    while let Some((arg, tail)) = rest.split_first() {
+        rest = tail;
+        match arg.as_str() {
             "-c" => opts.check_only = true,
             "-s" => opts.strict = true,
             "-f" => {
-                i += 1;
-                if i >= args.len() {
+                let Some((value, after_value)) = rest.split_first() else {
                     return Err(SudoError::UsageError("-f requires an argument".to_string()));
-                }
-                opts.file = args[i].clone();
+                };
+                opts.file = value.clone();
+                rest = after_value;
             }
             other if other.starts_with('-') => {
                 return Err(SudoError::UsageError(format!("unknown option: {other}")));
             }
-            _ => {
+            other => {
                 return Err(SudoError::UsageError(format!(
-                    "unexpected argument: {}",
-                    args[i]
+                    "unexpected argument: {other}"
                 )));
             }
         }
-        i += 1;
     }
 
     Ok(opts)
@@ -2134,24 +2098,26 @@ impl Default for SudoreplayOpts {
 /// Parse sudoreplay command-line arguments.
 fn parse_sudoreplay_args(args: &[String]) -> Result<SudoreplayOpts, SudoError> {
     let mut opts = SudoreplayOpts::default();
-    let mut i = 0;
+    // A slice cursor, as in `parse_sudo_args` and `parse_visudo_args`.
+    let mut rest = args;
 
-    while i < args.len() {
-        match args[i].as_str() {
+    while let Some((arg, tail)) = rest.split_first() {
+        rest = tail;
+        match arg.as_str() {
             "-l" => opts.list = true,
             "-d" => {
-                i += 1;
-                if i >= args.len() {
+                let Some((value, after_value)) = rest.split_first() else {
                     return Err(SudoError::UsageError("-d requires an argument".to_string()));
-                }
-                opts.directory = args[i].clone();
+                };
+                opts.directory = value.clone();
+                rest = after_value;
             }
             "-s" => {
-                i += 1;
-                if i >= args.len() {
+                let Some((value, after_value)) = rest.split_first() else {
                     return Err(SudoError::UsageError("-s requires an argument".to_string()));
-                }
-                opts.speed_factor = args[i]
+                };
+                rest = after_value;
+                opts.speed_factor = value
                     .parse::<f64>()
                     .map_err(|_| SudoError::UsageError("invalid speed factor".to_string()))?;
                 if opts.speed_factor <= 0.0 {
@@ -2167,7 +2133,6 @@ fn parse_sudoreplay_args(args: &[String]) -> Result<SudoreplayOpts, SudoError> {
                 opts.session_id = Some(other.to_string());
             }
         }
-        i += 1;
     }
 
     Ok(opts)
@@ -2320,6 +2285,18 @@ fn run_sudo(args: &[String]) -> i32 {
 
     let command_str = effective_command.join(" ");
 
+    // Bind the program and its arguments in the same step that proves there is
+    // a program, rather than indexing `[0]` at three later points that each
+    // rest on the emptiness argument above still holding. Both branches of the
+    // `if` produce a non-empty vector, so this cannot fire -- but this is the
+    // crate that decides which user runs what, and "cannot fire" is exactly the
+    // reasoning that stops being true when the branches above are edited.
+    let Some((program, program_args)) = effective_command.split_first() else {
+        eprintln!("sudo: no command to execute");
+        print_sudo_usage();
+        return 1;
+    };
+
     // Check authorization.
     let auth_result = check_authorization(
         &config,
@@ -2327,7 +2304,7 @@ fn run_sudo(args: &[String]) -> i32 {
         &hostname,
         &opts.target_user,
         &opts.target_group,
-        &effective_command[0],
+        program,
         &user_groups,
     );
 
@@ -2426,10 +2403,8 @@ fn run_sudo(args: &[String]) -> i32 {
     // Execute the command.
     // On Slate OS, this would use exec() syscall to replace the process.
     // For now, we simulate with std::process::Command.
-    let mut cmd = process::Command::new(&effective_command[0]);
-    if effective_command.len() > 1 {
-        cmd.args(&effective_command[1..]);
-    }
+    let mut cmd = process::Command::new(program);
+    cmd.args(program_args);
 
     // Set the environment.
     cmd.env_clear();
@@ -2466,7 +2441,7 @@ fn run_sudo(args: &[String]) -> i32 {
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("sudo: unable to execute {}: {e}", effective_command[0]);
+            eprintln!("sudo: unable to execute {program}: {e}");
             1
         }
     }
@@ -2751,7 +2726,6 @@ fn run_visudo(args: &[String]) -> i32 {
         }
 
         match response.trim() {
-            "e" | "E" => continue,
             "x" | "X" => {
                 let _ = fs::remove_file(&temp_path);
                 release_lock(&lock_path);
@@ -2769,7 +2743,11 @@ fn run_visudo(args: &[String]) -> i32 {
                 release_lock(&lock_path);
                 return 0;
             }
-            _ => continue,
+            // "e"/"E" -- and anything unrecognised, which sudo also treats as
+            // edit-again rather than as a reason to discard the file -- fall
+            // through to the loop's next iteration. These were two arms both
+            // saying `continue`, which is one behaviour written twice.
+            _ => {}
         }
     }
 }
@@ -2836,22 +2814,18 @@ fn run_sudoreplay(args: &[String]) -> i32 {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("sudo");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    let personality = detect_personality(&prog_name);
-    let rest = if args.len() > 1 { &args[1..] } else { &[] };
+    // `detect_personality` takes the basename and strips `.exe` itself, so the
+    // hand-rolled copy of that logic which used to stand here was a second
+    // implementation of one rule -- the rule that decides whether this process
+    // behaves as `sudo` or as `visudo`. Pass argv[0] through whole, and take
+    // the remainder from the same split, so the two cannot disagree about
+    // where the arguments begin.
+    let (argv0, rest) = args
+        .split_first()
+        .map_or(("sudo", [].as_slice()), |(argv0, rest)| {
+            (argv0.as_str(), rest)
+        });
+    let personality = detect_personality(argv0);
 
     let exit_code = match personality {
         Personality::Sudo => run_sudo(rest),
@@ -3026,6 +3000,21 @@ mod tests {
     #[test]
     fn personality_detect_empty_defaults_sudo() {
         assert_eq!(detect_personality(""), Personality::Sudo);
+    }
+
+    #[test]
+    fn personality_detect_handles_a_non_ascii_path() {
+        // Our paths allow every byte but `/` and NUL, so a directory name can
+        // hold multi-byte characters. The previous scan produced a byte index
+        // and sliced the `&str` at it, which is a panic on a boundary that is
+        // not a character boundary -- it survived only because it was always
+        // reached via a `/`. `visudo` here is the whole point: this decides
+        // whether the process edits the policy file or grants root.
+        assert_eq!(
+            detect_personality("/usr/sbin/\u{e9}t\u{e9}/visudo"),
+            Personality::Visudo
+        );
+        assert_eq!(detect_personality("\u{e9}sudo"), Personality::Sudo);
     }
 
     #[test]
@@ -4052,6 +4041,54 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
         assert_eq!(opts.target_user, "root");
     }
 
+    // The cases below are the ones the single option table exists for: each is a
+    // place where the bundled form and the standalone form previously ran through
+    // separate code that had to agree by hand.
+
+    #[test]
+    fn a_value_glued_to_its_flag_reaches_the_same_field_as_a_separate_one() {
+        let glued = parse_sudo_args(&["-uoperator".to_string()]).unwrap();
+        let separate = parse_sudo_args(&["-u".to_string(), "operator".to_string()]).unwrap();
+        assert_eq!(glued.target_user, "operator");
+        assert_eq!(glued.target_user, separate.target_user);
+    }
+
+    #[test]
+    fn a_value_flag_ending_a_bundle_takes_the_next_argument() {
+        let args = ["-nu".to_string(), "operator".to_string(), "id".to_string()];
+        let opts = parse_sudo_args(&args).unwrap();
+        assert!(opts.non_interactive);
+        assert_eq!(opts.target_user, "operator");
+        assert_eq!(opts.command, vec!["id".to_string()]);
+    }
+
+    #[test]
+    fn a_value_flag_mid_bundle_swallows_the_rest_of_it() {
+        // `-nuoperator` is `-n` plus `-u operator`, not `-n -u -o -p -e ...`.
+        let opts = parse_sudo_args(&["-nuoperator".to_string()]).unwrap();
+        assert!(opts.non_interactive);
+        assert_eq!(opts.target_user, "operator");
+    }
+
+    #[test]
+    fn a_bundle_missing_its_trailing_value_is_an_error() {
+        assert!(parse_sudo_args(&["-nu".to_string()]).is_err());
+    }
+
+    #[test]
+    fn a_bare_dash_and_a_long_option_are_both_rejected() {
+        assert!(parse_sudo_args(&["-".to_string()]).is_err());
+        assert!(parse_sudo_args(&["--frobnicate".to_string()]).is_err());
+    }
+
+    #[test]
+    fn an_option_after_the_command_belongs_to_the_command() {
+        let args = ["id".to_string(), "-u".to_string()];
+        let opts = parse_sudo_args(&args).unwrap();
+        assert_eq!(opts.command, vec!["id".to_string(), "-u".to_string()]);
+        assert_eq!(opts.target_user, "root");
+    }
+
     // -- Visudo option parsing tests --
 
     #[test]
@@ -4295,26 +4332,45 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
         assert!(format!("{sudo_err}").contains("not found"));
     }
 
-    // -- find_eq_outside_parens tests --
+    // -- split_at_eq_outside_parens tests --
+    //
+    // These assert the two halves rather than the index, which is what callers
+    // actually consume. The index form let a test pass while the caller's own
+    // `+ 1` was the thing that decided whether the `=` ended up in the
+    // right-hand side.
 
     #[test]
     fn find_eq_simple() {
-        assert_eq!(find_eq_outside_parens("a = b"), Some(2));
+        assert_eq!(split_at_eq_outside_parens("a = b"), Some(("a ", " b")));
     }
 
     #[test]
     fn find_eq_inside_parens() {
-        assert_eq!(find_eq_outside_parens("a (x=y) = b"), Some(8));
+        assert_eq!(
+            split_at_eq_outside_parens("a (x=y) = b"),
+            Some(("a (x=y) ", " b"))
+        );
     }
 
     #[test]
     fn find_eq_no_eq() {
-        assert_eq!(find_eq_outside_parens("no equals here"), None);
+        assert_eq!(split_at_eq_outside_parens("no equals here"), None);
     }
 
     #[test]
     fn find_eq_nested_parens() {
-        assert_eq!(find_eq_outside_parens("a ((x=y)) = b"), Some(10));
+        assert_eq!(
+            split_at_eq_outside_parens("a ((x=y)) = b"),
+            Some(("a ((x=y)) ", " b"))
+        );
+    }
+
+    #[test]
+    fn find_eq_keeps_the_equals_out_of_both_halves() {
+        // The `=` belongs to neither side. An off-by-one in the old caller
+        // would have left it leading the right half, and a `Defaults` setting
+        // would then have parsed `=value` as its value.
+        assert_eq!(split_at_eq_outside_parens("k=v"), Some(("k", "v")));
     }
 
     // -- Format runas tests --

@@ -36,8 +36,11 @@
 
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
+
+use userdb::UserDb;
 
 // ============================================================================
 // Syscall numbers (fs zone: 600-799)
@@ -151,15 +154,6 @@ fn kernel_error_to_string(code: i64) -> String {
 // User/group database (reads /etc/users.yaml)
 // ============================================================================
 
-const USER_DB_PATH: &str = "/etc/users.yaml";
-
-/// A resolved user entry from the Slate OS user database.
-struct UserEntry {
-    uid: u32,
-    username: String,
-    groups: Vec<String>,
-}
-
 /// A resolved group with a numeric GID.
 ///
 /// Slate OS assigns GIDs by order of appearance in the groups collected across
@@ -170,69 +164,28 @@ struct GroupEntry {
     name: String,
 }
 
-/// Read all users from /etc/users.yaml (same format as useradm).
-fn read_users() -> Vec<UserEntry> {
-    let content = match fs::read_to_string(USER_DB_PATH) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut users = Vec::new();
-    let mut uid: u32 = 0;
-    let mut username = String::new();
-    let mut groups: Vec<String> = Vec::new();
-    let mut in_entry = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("- uid:") || trimmed.starts_with("-  uid:") {
-            // Flush previous entry.
-            if in_entry && !username.is_empty() {
-                users.push(UserEntry {
-                    uid,
-                    username: username.clone(),
-                    groups: groups.clone(),
-                });
+/// Read the user database, treating an absent or unreadable file as empty.
+///
+/// An empty database means names cannot be resolved, so `chown alice f` fails
+/// with "invalid user" rather than silently doing something else — which is the
+/// right failure: chown's whole job is to name an owner, and guessing one would
+/// change the file to an owner the user did not ask for.
+fn read_users() -> UserDb {
+    match UserDb::load(userdb::DEFAULT_PATH) {
+        Ok(db) => db,
+        Err(e) => {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!("chown: cannot read {}: {e}", userdb::DEFAULT_PATH);
             }
-            uid = trimmed
-                .split(':')
-                .nth(1)
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(0);
-            username.clear();
-            groups.clear();
-            in_entry = true;
-        } else if in_entry {
-            if let Some(val) = trimmed.strip_prefix("username:") {
-                username = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("groups:") {
-                let val = val.trim().trim_matches(|c: char| c == '[' || c == ']');
-                groups = val
-                    .split(',')
-                    .map(|g| g.trim().trim_matches('"').to_string())
-                    .filter(|g| !g.is_empty())
-                    .collect();
-            }
+            UserDb::new()
         }
     }
-
-    // Flush the last entry.
-    if in_entry && !username.is_empty() {
-        users.push(UserEntry {
-            uid,
-            username,
-            groups,
-        });
-    }
-
-    users
 }
 
 /// Build the group table by collecting every unique group name from all users
 /// and assigning GIDs in order. Well-known groups get fixed IDs:
 ///   root=0, admin=1, users=100.
-fn build_group_table(users: &[UserEntry]) -> Vec<GroupEntry> {
+fn build_group_table(users: &UserDb) -> Vec<GroupEntry> {
     let mut groups = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -246,14 +199,22 @@ fn build_group_table(users: &[UserEntry]) -> Vec<GroupEntry> {
     }
 
     let mut next_gid: u32 = 101;
-    for user in users {
-        for g in &user.groups {
-            if !seen.contains(g) {
+    for user in users.records() {
+        // An administrator is a member of `wheel` whether or not the field
+        // lists it: the database records administrator-ness as a flag, and a
+        // `chgrp wheel` that failed with "invalid group" on a machine that
+        // plainly has administrators would be inexplicable.
+        let mut names = user.groups();
+        if user.is_admin() {
+            names.push("wheel".to_string());
+        }
+        for g in names {
+            if !seen.contains(&g) {
                 groups.push(GroupEntry {
                     gid: next_gid,
                     name: g.clone(),
                 });
-                seen.insert(g.clone());
+                seen.insert(g);
                 next_gid = next_gid.saturating_add(1);
             }
         }
@@ -263,12 +224,12 @@ fn build_group_table(users: &[UserEntry]) -> Vec<GroupEntry> {
 }
 
 /// Resolve a username to a UID.
-fn resolve_uid(name: &str, users: &[UserEntry]) -> Option<u32> {
+fn resolve_uid(name: &str, users: &UserDb) -> Option<u32> {
     // Try numeric first.
     if let Ok(n) = name.parse::<u32>() {
         return Some(n);
     }
-    users.iter().find(|u| u.username == name).map(|u| u.uid)
+    users.find(name).and_then(userdb::Record::uid)
 }
 
 /// Resolve a group name to a GID.
@@ -506,10 +467,24 @@ fn parse_symbolic_mode(mode_str: &str) -> Result<Vec<ModeClause>, String> {
 
         while pos < len {
             match bytes[pos] {
-                b'u' => { who_u = true; who_any = true; }
-                b'g' => { who_g = true; who_any = true; }
-                b'o' => { who_o = true; who_any = true; }
-                b'a' => { who_u = true; who_g = true; who_o = true; who_any = true; }
+                b'u' => {
+                    who_u = true;
+                    who_any = true;
+                }
+                b'g' => {
+                    who_g = true;
+                    who_any = true;
+                }
+                b'o' => {
+                    who_o = true;
+                    who_any = true;
+                }
+                b'a' => {
+                    who_u = true;
+                    who_g = true;
+                    who_o = true;
+                    who_any = true;
+                }
                 _ => break,
             }
             pos += 1;
@@ -550,10 +525,17 @@ fn parse_symbolic_mode(mode_str: &str) -> Result<Vec<ModeClause>, String> {
                 b'x' | b'X' => x = true,
                 b's' => {
                     // setuid if 'u' is in who, setgid if 'g' is in who
-                    if who_u { suid = true; }
-                    if who_g { sgid = true; }
+                    if who_u {
+                        suid = true;
+                    }
+                    if who_g {
+                        sgid = true;
+                    }
                     // If neither u nor g was explicit, default both
-                    if !who_u && !who_g { suid = true; sgid = true; }
+                    if !who_u && !who_g {
+                        suid = true;
+                        sgid = true;
+                    }
                 }
                 b't' => sticky = true,
                 _ => {
@@ -592,23 +574,47 @@ fn clause_bits(clause: &ModeClause) -> u32 {
     let mut bits: u32 = 0;
 
     if clause.who_user {
-        if clause.read { bits |= S_IRUSR; }
-        if clause.write { bits |= S_IWUSR; }
-        if clause.execute { bits |= S_IXUSR; }
+        if clause.read {
+            bits |= S_IRUSR;
+        }
+        if clause.write {
+            bits |= S_IWUSR;
+        }
+        if clause.execute {
+            bits |= S_IXUSR;
+        }
     }
     if clause.who_group {
-        if clause.read { bits |= S_IRGRP; }
-        if clause.write { bits |= S_IWGRP; }
-        if clause.execute { bits |= S_IXGRP; }
+        if clause.read {
+            bits |= S_IRGRP;
+        }
+        if clause.write {
+            bits |= S_IWGRP;
+        }
+        if clause.execute {
+            bits |= S_IXGRP;
+        }
     }
     if clause.who_other {
-        if clause.read { bits |= S_IROTH; }
-        if clause.write { bits |= S_IWOTH; }
-        if clause.execute { bits |= S_IXOTH; }
+        if clause.read {
+            bits |= S_IROTH;
+        }
+        if clause.write {
+            bits |= S_IWOTH;
+        }
+        if clause.execute {
+            bits |= S_IXOTH;
+        }
     }
-    if clause.setuid { bits |= S_ISUID; }
-    if clause.setgid { bits |= S_ISGID; }
-    if clause.sticky { bits |= S_ISVTX; }
+    if clause.setuid {
+        bits |= S_ISUID;
+    }
+    if clause.setgid {
+        bits |= S_ISGID;
+    }
+    if clause.sticky {
+        bits |= S_ISVTX;
+    }
 
     bits
 }
@@ -617,12 +623,22 @@ fn clause_bits(clause: &ModeClause) -> u32 {
 /// unmentioned bits in the relevant classes.
 fn clause_who_mask(clause: &ModeClause) -> u32 {
     let mut mask: u32 = 0;
-    if clause.who_user { mask |= S_IRUSR | S_IWUSR | S_IXUSR; }
-    if clause.who_group { mask |= S_IRGRP | S_IWGRP | S_IXGRP; }
-    if clause.who_other { mask |= S_IROTH | S_IWOTH | S_IXOTH; }
+    if clause.who_user {
+        mask |= S_IRUSR | S_IWUSR | S_IXUSR;
+    }
+    if clause.who_group {
+        mask |= S_IRGRP | S_IWGRP | S_IXGRP;
+    }
+    if clause.who_other {
+        mask |= S_IROTH | S_IWOTH | S_IXOTH;
+    }
     // '=' on user also clears setuid, on group clears setgid, on any clears sticky
-    if clause.who_user { mask |= S_ISUID; }
-    if clause.who_group { mask |= S_ISGID; }
+    if clause.who_user {
+        mask |= S_ISUID;
+    }
+    if clause.who_group {
+        mask |= S_ISGID;
+    }
     mask |= S_ISVTX;
     mask
 }
@@ -688,7 +704,7 @@ struct OwnerSpec {
 /// Parse an ownership string like `root`, `root:admin`, `:users`, `1000:100`.
 fn parse_owner_spec(
     spec: &str,
-    users: &[UserEntry],
+    users: &UserDb,
     groups: &[GroupEntry],
 ) -> Result<OwnerSpec, String> {
     if let Some(group_name) = spec.strip_prefix(':') {
@@ -706,16 +722,14 @@ fn parse_owner_spec(
         let owner_str = &spec[..colon_pos];
         let group_str = &spec[colon_pos + 1..];
 
-        let uid = resolve_uid(owner_str, users)
-            .ok_or_else(|| format!("unknown user: '{owner_str}'"))?;
+        let uid =
+            resolve_uid(owner_str, users).ok_or_else(|| format!("unknown user: '{owner_str}'"))?;
 
         let gid = if group_str.is_empty() {
             // `OWNER:` -- set group to the owner's primary group
             users
-                .iter()
-                .find(|u| u.uid == uid)
-                .and_then(|u| u.groups.first())
-                .and_then(|g| resolve_gid(g, groups))
+                .find_uid(uid)
+                .and_then(|u| u.groups().first().and_then(|g| resolve_gid(g, groups)))
         } else {
             Some(
                 resolve_gid(group_str, groups)
@@ -730,8 +744,7 @@ fn parse_owner_spec(
     }
 
     // Plain `OWNER` -- change owner only
-    let uid = resolve_uid(spec, users)
-        .ok_or_else(|| format!("unknown user: '{spec}'"))?;
+    let uid = resolve_uid(spec, users).ok_or_else(|| format!("unknown user: '{spec}'"))?;
     Ok(OwnerSpec {
         uid: Some(uid),
         gid: None,
@@ -742,7 +755,7 @@ fn parse_owner_spec(
 /// empty to mean "don't check".
 fn parse_from_filter(
     spec: &str,
-    users: &[UserEntry],
+    users: &UserDb,
     groups: &[GroupEntry],
 ) -> Result<(Option<u32>, Option<u32>), String> {
     if let Some(colon_pos) = spec.find(':') {
@@ -770,8 +783,8 @@ fn parse_from_filter(
         Ok((uid, gid))
     } else {
         // Just an owner, no group filter.
-        let uid = resolve_uid(spec, users)
-            .ok_or_else(|| format!("unknown user in --from: '{spec}'"))?;
+        let uid =
+            resolve_uid(spec, users).ok_or_else(|| format!("unknown user in --from: '{spec}'"))?;
         Ok((Some(uid), None))
     }
 }
@@ -883,11 +896,7 @@ fn detect_mode(argv0: &str) -> Mode {
     }
 }
 
-fn parse_args(
-    args: &[String],
-    users: &[UserEntry],
-    groups: &[GroupEntry],
-) -> Result<Options, String> {
+fn parse_args(args: &[String], users: &UserDb, groups: &[GroupEntry]) -> Result<Options, String> {
     if args.is_empty() {
         return Err("no arguments provided".to_string());
     }
@@ -1019,11 +1028,7 @@ fn parse_args(
 // ============================================================================
 
 /// Run chown on a single file. Returns (changed: bool, error: Option<String>).
-fn chown_one(
-    path: &str,
-    spec: &OwnerSpec,
-    opts: &Options,
-) -> (bool, Option<String>) {
+fn chown_one(path: &str, spec: &OwnerSpec, opts: &Options) -> (bool, Option<String>) {
     // Read current metadata (best-effort) for --from matching and accurate
     // change detection. If it fails we fall back to assuming a field changes
     // whenever it is specified.
@@ -1104,11 +1109,7 @@ fn format_owner(uid: Option<u32>, gid: Option<u32>) -> String {
 }
 
 /// Execute chown for all target files.
-fn run_chown(
-    opts: &Options,
-    users: &[UserEntry],
-    groups: &[GroupEntry],
-) -> bool {
+fn run_chown(opts: &Options, users: &UserDb, groups: &[GroupEntry]) -> bool {
     // -h / --no-dereference asks us to operate on the symlink itself. The
     // Slate OS VFS set_owner path resolves symlinks (resolve_follow) and there is
     // no lchown-equivalent syscall yet, so we cannot honor this. Warn rather
@@ -1353,10 +1354,7 @@ fn print_chmod_help() {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let binary_mode = args
-        .first()
-        .map(|a| detect_mode(a))
-        .unwrap_or(Mode::Chown);
+    let binary_mode = args.first().map(|a| detect_mode(a)).unwrap_or(Mode::Chown);
 
     // Load the user database for name resolution (chown needs this; chmod
     // does not, but loading is cheap and keeps the code path simple).
@@ -1373,7 +1371,11 @@ fn main() {
                 }
                 process::exit(0);
             }
-            let name = if binary_mode == Mode::Chown { "chown" } else { "chmod" };
+            let name = if binary_mode == Mode::Chown {
+                "chown"
+            } else {
+                "chmod"
+            };
             eprintln!("{name}: {msg}");
             eprintln!("Try '{name} --help' for usage information.");
             process::exit(1);
@@ -1398,19 +1400,22 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn sample_users() -> Vec<UserEntry> {
-        vec![
-            UserEntry {
-                uid: 0,
-                username: "root".to_string(),
-                groups: vec!["root".to_string(), "admin".to_string()],
-            },
-            UserEntry {
-                uid: 1000,
-                username: "alice".to_string(),
-                groups: vec!["users".to_string(), "staff".to_string()],
-            },
-        ]
+    /// A database in the form `useradm` writes it.
+    ///
+    /// Written as text rather than built from setters so that the parser this
+    /// crate now shares is exercised on the same bytes the writer produces —
+    /// the hand-rolled parser it replaces read `groups:` correctly but was
+    /// never fed a file that any writer had actually emitted.
+    fn sample_users() -> UserDb {
+        UserDb::parse(
+            "users:\n\
+             \x20 - uid: 0\n\
+             \x20   username: \"root\"\n\
+             \x20   groups: [\"root\", \"admin\"]\n\
+             \x20 - uid: 1000\n\
+             \x20   username: \"alice\"\n\
+             \x20   groups: [\"users\", \"staff\"]\n",
+        )
     }
 
     // ---- mode detection ----------------------------------------------------
@@ -1647,6 +1652,39 @@ mod tests {
         assert_eq!(resolve_uid("0", &users), Some(0));
         assert_eq!(resolve_uid("7777", &users), Some(7777));
         assert_eq!(resolve_uid("ghost", &users), None);
+    }
+
+    #[test]
+    fn an_administrator_is_a_member_of_wheel() {
+        // The database records administrator-ness as `is_admin: true` rather
+        // than as a group, so `chgrp wheel` would otherwise fail with "unknown
+        // group" on a machine that plainly has administrators.
+        let users = UserDb::parse(
+            "users:\n\
+             \x20 - uid: 1000\n\
+             \x20   username: \"alice\"\n\
+             \x20   is_admin: true\n",
+        );
+        let groups = build_group_table(&users);
+        assert!(resolve_gid("wheel", &groups).is_some());
+    }
+
+    #[test]
+    fn names_resolve_through_a_database_the_writer_produced() {
+        // The migration's whole point: this crate reads what `useradm` writes.
+        // Serialising and re-parsing is the only step at which a reader and a
+        // writer that disagree can be seen to disagree.
+        let mut db = UserDb::new();
+        let mut alice = userdb::Record::new();
+        alice.set_uid(1000);
+        alice.set(userdb::field::USERNAME, "alice");
+        alice.set_groups(&["users".to_string(), "staff".to_string()]);
+        db.push(alice);
+
+        let reparsed = UserDb::parse(&db.to_text());
+        assert_eq!(resolve_uid("alice", &reparsed), Some(1000));
+        let groups = build_group_table(&reparsed);
+        assert_eq!(resolve_gid("staff", &groups), Some(101));
     }
 
     // ---- --from filter parsing ---------------------------------------------

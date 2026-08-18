@@ -1506,6 +1506,9 @@ version = "0.1.0"
 [[package]]
 name = "chown"
 version = "0.1.0"
+dependencies = [
+ "userdb",
+]
 
 [[package]]
 name = "chpasswd"
@@ -1537,6 +1540,9 @@ version = "0.1.0"
 [[package]]
 name = "chroot"
 version = "0.1.0"
+dependencies = [
+ "userdb",
+]
 
 [[package]]
 name = "chroot-cli"

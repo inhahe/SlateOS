@@ -9,5 +9,5 @@
 version 2
 input  build.py sha256 77d760d6ca55933f981b5694b757f702a7873d3b02cb6af3f05962ef7fcf17a9
 input  main.c sha256 63d04652d3b60e56441a68b04b13efa36a561491b1c3fe3db08a1634ca71d37f
-input  toolchain/sysroot/lib/libc.a sha256 a2dbcc11a19b4cd7b9301fdf988d4f86db642726ccf5c38b5a669006686f5e4a
-output ctest-ctty.elf sha256 ce9062a73478398f453515b15e39c0b2eb405057a4f781f0a7c9403f90bcbec4 size 2634896
+input  toolchain/sysroot/lib/libc.a sha256 18987fd133823c948ae9550c531fcdf3bf46c1fe56a9fc445f0bab4135f18841
+output ctest-ctty.elf sha256 8db90a555e1a3b8ff6993c19833be04054179cb274c7e1d6e937e04825ac40c0 size 2616272

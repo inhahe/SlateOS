@@ -266,8 +266,16 @@ def line_starts(lines: list[str]) -> list[int]:
     return starts
 
 
-def find_fn(lines: list[str], name: str) -> int:
-    """Return the 0-based index of the `fn <name>(` definition line."""
+def find_fn(lines: list[str], name: str, at: int = 0) -> int:
+    """Return the 0-based index of the `fn <name>(` definition line.
+
+    `at` (a 1-based line number) picks one when the name is not unique, which
+    a second pass over an already-split file needs: this tool names every case
+    it generates `case`, so `kshell.rs` holds 78 of them and the biggest frame
+    left in it is one particular `fn case`.  Requiring the exact line rather
+    than an ordinal keeps the reference stable against edits above it failing
+    loudly instead of silently selecting a different function.
+    """
     hits = [
         i
         for i, ln in enumerate(lines)
@@ -275,7 +283,16 @@ def find_fn(lines: list[str], name: str) -> int:
         and ln.split("fn ", 1)[1].split("(")[0].split("<")[0].strip() == name
     ]
     assert hits, f"no `fn {name}` found"
-    assert len(hits) == 1, f"`fn {name}` is ambiguous: lines {[h + 1 for h in hits]}"
+    if at:
+        assert at - 1 in hits, (
+            f"line {at} is not a `fn {name}` definition; found at "
+            f"{[h + 1 for h in hits]}"
+        )
+        return at - 1
+    assert len(hits) == 1, (
+        f"`fn {name}` is ambiguous: lines {[h + 1 for h in hits]}; "
+        f"pass --at LINE to choose one"
+    )
     return hits[0]
 
 
@@ -991,6 +1008,35 @@ def _needs_result(text: str, code: bytearray, lo: int, hi: int) -> bool:
     return "?" in masked or RETURN_RE.search(masked) is not None
 
 
+def _check_unit_returns(
+    text: str, code: bytearray, starts: list[int], lo: int, hi: int
+) -> None:
+    """Refuse a case of a unit-returning function that contains any `return`.
+
+    The `KernelResult` shape has an escape hatch -- `case()?` propagates a
+    `return Err(..)` unchanged -- and a unit function has none: a `return;`
+    that used to abandon the whole function would come to abandon only the
+    case, and every statement it was skipping would run.  There is no call
+    spelling that fixes that, so the paragraph cannot be split.
+
+    `--arms` is the exception that proves it: an arm's `return;` is faithful
+    only because `find_match` has already established the match is in tail
+    position, where returning from the case and falling out of it are the same
+    thing.  A paragraph in the middle of a body has no such guarantee.
+    """
+    masked = _masked(text, code, lo, hi)
+    m = RETURN_RE.search(masked)
+    assert m is None, (
+        f"line {_line_of(starts, lo + m.start()) + 1}: a case of a "
+        f"unit-returning function contains a `return`, which would abandon "
+        f"only the case once it becomes a call; split this one by hand"
+    )
+    assert "?" not in masked, (
+        f"a case of a unit-returning function contains `?`, which needs a "
+        f"`Try` return type it cannot be given here"
+    )
+
+
 def _check_returns(
     text: str, code: bytearray, starts: list[int], lo: int, hi: int
 ) -> None:
@@ -1058,6 +1104,7 @@ def rewrite(
     params: list[tuple[str, ...]] | None = None,
     arms: bool = False,
     flat: int = 0,
+    at: int = 0,
 ) -> tuple[str, list[tuple[int, int]]]:
     # A fixture's call expression defaults to its own name; `--param` lets it
     # differ, so a `Vec` local can be handed to a `&[T]` parameter.
@@ -1067,9 +1114,10 @@ def rewrite(
     starts = line_starts(lines)
     depth, code, lits = scan(text)
 
-    fn_idx = find_fn(lines, fn_name)
+    fn_idx = find_fn(lines, fn_name, at)
     b_open = body_open(lines, fn_idx)
     sig = " ".join(lines[fn_idx : b_open + 1])
+    unit = False
 
     if arms:
         # Every arm keeps its own `return;`, so the cases must be infallible and
@@ -1090,9 +1138,17 @@ def rewrite(
         )
         noun = "arm whose body is not a block on its own lines"
     else:
-        assert "KernelResult<()>" in sig, (
-            f"`fn {fn_name}` does not return KernelResult<()>; this transformer "
-            f"only handles that signature (see the module docstring)"
+        # A unit-returning body is splittable too, on the stricter terms
+        # `_check_unit_returns` states: its cases must contain no `return` and
+        # no `?`, because neither has a faithful call spelling.  `cmd_oci`'s
+        # `run` arm is the reason -- 1 178 lines and the largest frame left in
+        # `kshell.rs`, in a function the earlier assertion turned away purely
+        # for its signature.
+        unit = "->" not in sig
+        assert unit or "KernelResult<()>" in sig, (
+            f"`fn {fn_name}` returns neither `()` nor KernelResult<()>; this "
+            f"transformer only handles those signatures (see the module "
+            f"docstring)"
         )
         open_idx = container(lines, depth, code, starts, b_open, text, bool(flat))
         inner = _depth_inside(lines, depth, code, starts, open_idx)
@@ -1150,6 +1206,9 @@ def rewrite(
             if arms:
                 # `return;` stays a `return;`, and the tail-position check in
                 # `find_match` is what makes that faithful.
+                fallible = False
+            elif unit:
+                _check_unit_returns(text, code, starts, lo_off, hi_off)
                 fallible = False
             else:
                 _check_returns(text, code, starts, lo_off, hi_off)
@@ -1823,6 +1882,76 @@ _case(
 )
 
 
+_case(
+    # A unit-returning body splits too.  Every case is infallible by
+    # construction -- `-> KernelResult<()>` would be a lie and a
+    # `clippy::unnecessary_wraps` besides -- so this is the plain `fn case()`
+    # shape throughout, and the paragraph too short to be worth a case stays
+    # in the outer frame where it was.
+    "a unit-returning body splits into plain cases",
+    """fn self_test() {
+    println("a");
+
+    step_one();
+    step_two();
+    step_three();
+
+    step_four();
+    step_five();
+    step_six();
+}
+""",
+    """fn self_test() {
+    println("a");
+
+    {
+        #[inline(never)]
+        fn case() {
+            step_one();
+            step_two();
+            step_three();
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            step_four();
+            step_five();
+            step_six();
+        }
+        case();
+    }
+}
+""",
+    flat=3,
+)
+
+_case(
+    # The counterpart to "a case's `return Ok(())` is refused".  There the
+    # objection is that `case()?` reproduces only `return Err(..)`; here there
+    # is no `?` to reach for at all, so a `return;` that abandoned the whole
+    # function would come to abandon one case and let the rest run.  Refused,
+    # not skipped: the rewrite would compile and be wrong.
+    "a `return` in a unit-returning body's case is refused",
+    """fn self_test() {
+    step_one();
+    step_two();
+    if broken() {
+        return;
+    }
+
+    step_four();
+    step_five();
+    step_six();
+}
+""",
+    AssertionError,
+    flat=3,
+)
+
+
 def self_check() -> int:
     """Run the regression suite.  Returns 0 iff every case behaves."""
     failed = 0
@@ -1908,6 +2037,15 @@ def main() -> int:
         "binds nothing read after it.",
     )
     ap.add_argument(
+        "--at",
+        type=int,
+        default=0,
+        metavar="LINE",
+        help="the line --fn's definition is on, when the name is not unique. "
+        "Every case this tool generates is named `case`, so a second pass over "
+        "an already-split file needs this to say which one",
+    )
+    ap.add_argument(
         "--dry-run",
         action="store_true",
         help="report what would change without writing",
@@ -1945,7 +2083,9 @@ def main() -> int:
         text = f.read()
     if args.arms and args.flat:
         ap.error("--arms and --flat are different shapes; pick one")
-    out, cases = rewrite(text, args.fn_name, params, args.arms, args.flat)
+    out, cases = rewrite(
+        text, args.fn_name, params, args.arms, args.flat, args.at
+    )
     if not cases:
         what = (
             "match arms with block bodies"

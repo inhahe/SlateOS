@@ -307,12 +307,13 @@ pub fn flex_layout(
         })
         .collect();
 
-    // Total gap space
-    let total_gap = if children.len() > 1 {
-        flex.gap * (children.len() - 1) as f32
-    } else {
-        0.0
-    };
+    // Gaps go *between* items, so there is exactly one fewer gap than there
+    // are items — and none at all when there are none. Counted once here
+    // rather than re-derived at each of the four places that needed it, each
+    // of which had subtracted 1 from a length under the protection of its own
+    // separate emptiness test.
+    let gap_count = items.len().saturating_sub(1);
+    let total_gap = flex.gap * gap_count as f32;
 
     // Calculate total main size
     let total_main: f32 = items.iter().map(|item| item.main_size).sum::<f32>() + total_gap;
@@ -365,31 +366,35 @@ pub fn flex_layout(
     };
 
     let between_space = match flex.justify {
-        FlexJustify::SpaceBetween if items.len() > 1 => remaining / (items.len() - 1) as f32,
+        FlexJustify::SpaceBetween if gap_count > 0 => remaining / gap_count as f32,
         FlexJustify::SpaceAround if !items.is_empty() => remaining / items.len() as f32,
         FlexJustify::SpaceEvenly => remaining / (items.len() as f32 + 1.0),
         _ => 0.0,
     };
 
-    let item_count = items.len();
-
+    // Laying the gap down *before* every item but the first places exactly the
+    // same gaps as "after every item but the last" and needs no index
+    // arithmetic to say which item is last — which is what made the previous
+    // form underflow-shaped: `i < item_count - 1` subtracts from a length that
+    // is only non-zero because the loop is running at all.
+    let step = flex.gap + between_space;
     if flex.direction.is_reversed() {
         // Reverse: start from end
         main_pos = available_main;
         for (i, item) in items.iter_mut().enumerate() {
+            if i > 0 {
+                main_pos -= step;
+            }
             main_pos -= item.computed_main;
             item.computed_main_pos = main_pos;
-            if i < item_count - 1 {
-                main_pos -= flex.gap + between_space;
-            }
         }
     } else {
         for (i, item) in items.iter_mut().enumerate() {
+            if i > 0 {
+                main_pos += step;
+            }
             item.computed_main_pos = main_pos;
             main_pos += item.computed_main;
-            if i < item_count - 1 {
-                main_pos += flex.gap + between_space;
-            }
         }
     }
 
@@ -499,6 +504,77 @@ mod tests {
         assert_eq!(results[1].width, 80.0);
         assert_eq!(results[2].x, 130.0);
         assert_eq!(results[2].width, 60.0);
+    }
+
+    #[test]
+    fn one_item_takes_no_gaps_and_no_space_between() {
+        // The single-item case is where every "one fewer gap than items"
+        // subtraction has to stop, and it reaches all four of them at once:
+        // the total gap, the SpaceBetween divisor, and the per-item step in
+        // each direction.
+        let container = Size::new(300.0, 100.0);
+        for direction in [FlexDirection::Row, FlexDirection::RowReverse] {
+            let flex = FlexLayout {
+                direction,
+                gap: 20.0,
+                justify: FlexJustify::SpaceBetween,
+                ..FlexLayout::default()
+            };
+            let children = vec![(Size::new(50.0, 30.0), FlexItem::default())];
+            let results = flex_layout(container, &flex, &children, &Edges::ZERO);
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].width, 50.0);
+            // Start of the container going forward, flush to its end in
+            // reverse. Either way no gap is laid down for an absent neighbour.
+            let expected = if direction == FlexDirection::RowReverse {
+                250.0
+            } else {
+                0.0
+            };
+            assert_eq!(results[0].x, expected, "{direction:?}");
+        }
+    }
+
+    #[test]
+    fn gaps_fall_between_items_and_never_outside_them() {
+        // Three 50-wide items in a 300-wide row with a 20 gap: two gaps, so
+        // the run is 190 wide and starts at 0. The same three in reverse end
+        // flush against the right edge. Off-by-one in the gap count moves
+        // every item after the first, so the interior positions are the
+        // assertion that matters.
+        let container = Size::new(300.0, 100.0);
+        let children: Vec<_> = (0..3)
+            .map(|_| (Size::new(50.0, 30.0), FlexItem::default()))
+            .collect();
+
+        let forward = flex_layout(
+            container,
+            &FlexLayout {
+                gap: 20.0,
+                ..FlexLayout::default()
+            },
+            &children,
+            &Edges::ZERO,
+        );
+        assert_eq!(
+            forward.iter().map(|b| b.x).collect::<Vec<_>>(),
+            vec![0.0, 70.0, 140.0]
+        );
+
+        let reversed = flex_layout(
+            container,
+            &FlexLayout {
+                direction: FlexDirection::RowReverse,
+                gap: 20.0,
+                ..FlexLayout::default()
+            },
+            &children,
+            &Edges::ZERO,
+        );
+        assert_eq!(
+            reversed.iter().map(|b| b.x).collect::<Vec<_>>(),
+            vec![250.0, 180.0, 110.0]
+        );
     }
 
     #[test]

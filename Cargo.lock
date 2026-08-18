@@ -899,6 +899,10 @@ name = "blkid"
 version = "0.1.0"
 
 [[package]]
+name = "blockbuf"
+version = "0.1.0"
+
+[[package]]
 name = "blockdev"
 version = "0.1.0"
 
@@ -6147,6 +6151,13 @@ name = "mcfly-cli"
 version = "0.1.0"
 
 [[package]]
+name = "md5"
+version = "0.1.0"
+dependencies = [
+ "blockbuf",
+]
+
+[[package]]
 name = "mdadm"
 version = "0.1.0"
 
@@ -9401,6 +9412,13 @@ version = "0.1.0"
 [[package]]
 name = "sfwbar-cli"
 version = "0.1.0"
+
+[[package]]
+name = "sha1"
+version = "0.1.0"
+dependencies = [
+ "blockbuf",
+]
 
 [[package]]
 name = "sha2"

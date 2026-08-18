@@ -406,54 +406,78 @@ pub fn self_test() {
     assert_eq!(b.id(), BACKEND_PRIORITY_RR);
     serial_println!("[sched::backend]   new_const default: OK");
 
-    // Test 2: Create each backend from ID.
-    let rr = SchedulerBackend::from_id(BACKEND_PRIORITY_RR);
-    assert_eq!(rr.id(), BACKEND_PRIORITY_RR);
-    let eevdf = SchedulerBackend::from_id(BACKEND_EEVDF);
-    assert_eq!(eevdf.id(), BACKEND_EEVDF);
-    let dl = SchedulerBackend::from_id(BACKEND_DEADLINE);
-    assert_eq!(dl.id(), BACKEND_DEADLINE);
-    serial_println!("[sched::backend]   from_id: OK");
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 2: Create each backend from ID.
+            let rr = SchedulerBackend::from_id(BACKEND_PRIORITY_RR);
+            assert_eq!(rr.id(), BACKEND_PRIORITY_RR);
+            let eevdf = SchedulerBackend::from_id(BACKEND_EEVDF);
+            assert_eq!(eevdf.id(), BACKEND_EEVDF);
+            let dl = SchedulerBackend::from_id(BACKEND_DEADLINE);
+            assert_eq!(dl.id(), BACKEND_DEADLINE);
+            serial_println!("[sched::backend]   from_id: OK");
+        }
+        case();
+    }
 
     // Test 3: Unknown ID falls back to PriorityRR.
     let unknown = SchedulerBackend::from_id(255);
     assert_eq!(unknown.id(), BACKEND_PRIORITY_RR);
     serial_println!("[sched::backend]   unknown_id fallback: OK");
 
-    // Test 4: Enqueue/pick_next cycle on each backend.
-    for &backend_id in &[BACKEND_PRIORITY_RR, BACKEND_EEVDF, BACKEND_DEADLINE] {
-        let mut b = SchedulerBackend::from_id(backend_id);
-        assert!(!b.has_ready());
-        b.enqueue(100, 10);
-        assert!(b.has_ready());
-        assert_eq!(b.total_tasks(), 1);
-        let picked = b.pick_next();
-        assert_eq!(picked, Some(100));
-        assert!(!b.has_ready());
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 4: Enqueue/pick_next cycle on each backend.
+            for &backend_id in &[BACKEND_PRIORITY_RR, BACKEND_EEVDF, BACKEND_DEADLINE] {
+                let mut b = SchedulerBackend::from_id(backend_id);
+                assert!(!b.has_ready());
+                b.enqueue(100, 10);
+                assert!(b.has_ready());
+                assert_eq!(b.total_tasks(), 1);
+                let picked = b.pick_next();
+                assert_eq!(picked, Some(100));
+                assert!(!b.has_ready());
+            }
+            serial_println!("[sched::backend]   enqueue/pick_next all backends: OK");
+        }
+        case();
     }
-    serial_println!("[sched::backend]   enqueue/pick_next all backends: OK");
 
-    // Test 5: Tick dispatch.
-    for &backend_id in &[BACKEND_PRIORITY_RR, BACKEND_EEVDF, BACKEND_DEADLINE] {
-        let mut b = SchedulerBackend::from_id(backend_id);
-        b.enqueue(200, 5);
-        let _ = b.pick_next(); // Set current task context.
-        // Tick should work without panic.
-        let _ = b.tick();
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 5: Tick dispatch.
+            for &backend_id in &[BACKEND_PRIORITY_RR, BACKEND_EEVDF, BACKEND_DEADLINE] {
+                let mut b = SchedulerBackend::from_id(backend_id);
+                b.enqueue(200, 5);
+                let _ = b.pick_next(); // Set current task context.
+                // Tick should work without panic.
+                let _ = b.tick();
+            }
+            serial_println!("[sched::backend]   tick all backends: OK");
+        }
+        case();
     }
-    serial_println!("[sched::backend]   tick all backends: OK");
 
-    // Test 6: Desired/active backend API.
-    let orig = desired_backend();
-    assert!(set_desired_backend(BACKEND_EEVDF));
-    assert_eq!(desired_backend(), BACKEND_EEVDF);
-    assert!(set_desired_backend(BACKEND_DEADLINE));
-    assert_eq!(desired_backend(), BACKEND_DEADLINE);
-    assert!(!set_desired_backend(99)); // Invalid.
-    assert_eq!(desired_backend(), BACKEND_DEADLINE); // Unchanged.
-    // Restore original.
-    set_desired_backend(orig);
-    serial_println!("[sched::backend]   desired_backend API: OK");
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 6: Desired/active backend API.
+            let orig = desired_backend();
+            assert!(set_desired_backend(BACKEND_EEVDF));
+            assert_eq!(desired_backend(), BACKEND_EEVDF);
+            assert!(set_desired_backend(BACKEND_DEADLINE));
+            assert_eq!(desired_backend(), BACKEND_DEADLINE);
+            assert!(!set_desired_backend(99)); // Invalid.
+            assert_eq!(desired_backend(), BACKEND_DEADLINE); // Unchanged.
+            // Restore original.
+            set_desired_backend(orig);
+            serial_println!("[sched::backend]   desired_backend API: OK");
+        }
+        case();
+    }
 
     // Test 7: Backend names.
     assert_eq!(backend_name(BACKEND_PRIORITY_RR), "PriorityRoundRobin");
@@ -462,60 +486,84 @@ pub fn self_test() {
     assert_eq!(backend_name(99), "Unknown");
     serial_println!("[sched::backend]   backend_name: OK");
 
-    // Test 8: Time slice dispatch.
-    for &backend_id in &[BACKEND_PRIORITY_RR, BACKEND_EEVDF, BACKEND_DEADLINE] {
-        let mut b = SchedulerBackend::from_id(backend_id);
-        let old = b.time_slice(0);
-        assert!(old.is_some());
-        assert!(b.set_time_slice(0, 10));
-        assert_eq!(b.time_slice(0), Some(10));
-        // Restore.
-        if let Some(v) = old {
-            b.set_time_slice(0, v);
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 8: Time slice dispatch.
+            for &backend_id in &[BACKEND_PRIORITY_RR, BACKEND_EEVDF, BACKEND_DEADLINE] {
+                let mut b = SchedulerBackend::from_id(backend_id);
+                let old = b.time_slice(0);
+                assert!(old.is_some());
+                assert!(b.set_time_slice(0, 10));
+                assert_eq!(b.time_slice(0), Some(10));
+                // Restore.
+                if let Some(v) = old {
+                    b.set_time_slice(0, v);
+                }
+            }
+            serial_println!("[sched::backend]   time_slice dispatch: OK");
         }
+        case();
     }
-    serial_println!("[sched::backend]   time_slice dispatch: OK");
 
-    // Test 9: Profile dispatch.
-    for &backend_id in &[BACKEND_PRIORITY_RR, BACKEND_EEVDF, BACKEND_DEADLINE] {
-        let mut b = SchedulerBackend::from_id(backend_id);
-        b.apply_profile(WorkloadProfile::Server);
-        // Server profile: base=4, so level 0 should have time_slice=4.
-        assert_eq!(b.time_slice(0), Some(4));
-        b.apply_profile(WorkloadProfile::Desktop);
-        assert_eq!(b.time_slice(0), Some(2));
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 9: Profile dispatch.
+            for &backend_id in &[BACKEND_PRIORITY_RR, BACKEND_EEVDF, BACKEND_DEADLINE] {
+                let mut b = SchedulerBackend::from_id(backend_id);
+                b.apply_profile(WorkloadProfile::Server);
+                // Server profile: base=4, so level 0 should have time_slice=4.
+                assert_eq!(b.time_slice(0), Some(4));
+                b.apply_profile(WorkloadProfile::Desktop);
+                assert_eq!(b.time_slice(0), Some(2));
+            }
+            serial_println!("[sched::backend]   apply_profile dispatch: OK");
+        }
+        case();
     }
-    serial_println!("[sched::backend]   apply_profile dispatch: OK");
 
-    // Test 10: Deadline-specific operations on non-deadline backends.
-    let mut rr = SchedulerBackend::from_id(BACKEND_PRIORITY_RR);
-    assert!(!rr.register_deadline(
-        1,
-        deadline::DeadlineParams {
-            budget_ticks: 1,
-            deadline_ticks: 5,
-            period_ticks: 10,
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 10: Deadline-specific operations on non-deadline backends.
+            let mut rr = SchedulerBackend::from_id(BACKEND_PRIORITY_RR);
+            assert!(!rr.register_deadline(
+                1,
+                deadline::DeadlineParams {
+                    budget_ticks: 1,
+                    deadline_ticks: 5,
+                    period_ticks: 10,
+                }
+            ));
+            assert_eq!(rr.deadline_utilization(), 0);
+            assert_eq!(rr.deadline_throttled_count(), 0);
+            assert_eq!(rr.deadline_current_tick(), 0);
+            serial_println!("[sched::backend]   deadline ops on non-deadline: OK");
         }
-    ));
-    assert_eq!(rr.deadline_utilization(), 0);
-    assert_eq!(rr.deadline_throttled_count(), 0);
-    assert_eq!(rr.deadline_current_tick(), 0);
-    serial_println!("[sched::backend]   deadline ops on non-deadline: OK");
+        case();
+    }
 
-    // Test 11: Deadline-specific operations on deadline backend.
-    let mut dl = SchedulerBackend::from_id(BACKEND_DEADLINE);
-    assert!(dl.register_deadline(
-        1,
-        deadline::DeadlineParams {
-            budget_ticks: 1,
-            deadline_ticks: 5,
-            period_ticks: 10,
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 11: Deadline-specific operations on deadline backend.
+            let mut dl = SchedulerBackend::from_id(BACKEND_DEADLINE);
+            assert!(dl.register_deadline(
+                1,
+                deadline::DeadlineParams {
+                    budget_ticks: 1,
+                    deadline_ticks: 5,
+                    period_ticks: 10,
+                }
+            ));
+            assert!(dl.deadline_utilization() > 0);
+            dl.unregister_deadline(1);
+            assert_eq!(dl.deadline_utilization(), 0);
+            serial_println!("[sched::backend]   deadline-specific ops: OK");
         }
-    ));
-    assert!(dl.deadline_utilization() > 0);
-    dl.unregister_deadline(1);
-    assert_eq!(dl.deadline_utilization(), 0);
-    serial_println!("[sched::backend]   deadline-specific ops: OK");
+        case();
+    }
 
     serial_println!("[sched::backend] Self-test PASSED (11 tests)");
 }

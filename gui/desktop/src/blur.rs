@@ -203,6 +203,306 @@ impl BlurRegion {
 }
 
 // ============================================================================
+// Rgb — the blur's per-channel accumulator
+// ============================================================================
+
+/// The three colour channels of a pixel, widened for accumulation.
+///
+/// The sliding window of a box blur holds the sum of up to `2 * radius + 1`
+/// pixels, which does not fit in a `u8`. Keeping the three channels together
+/// in one value — rather than as three loose `sr`/`sg`/`sb` locals threaded
+/// through every loop — means the window is added to, subtracted from and
+/// averaged as a single thing, so the three channels cannot drift apart.
+///
+/// Every operation saturates. The window's arithmetic is balanced by
+/// construction, but "balanced by construction" is a proof that lives in a
+/// different function from the subtraction that depends on it; saturating
+/// makes the failure a clamped pixel rather than a channel that wraps from 0
+/// to four billion and paints white.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct Rgb {
+    r: u32,
+    g: u32,
+    b: u32,
+}
+
+impl Rgb {
+    /// Split a packed ARGB pixel into its three channels. Alpha is dropped:
+    /// this pipeline composites onto an opaque framebuffer.
+    #[inline]
+    const fn from_argb(px: u32) -> Self {
+        Self {
+            r: (px >> 16) & 0xFF,
+            g: (px >> 8) & 0xFF,
+            b: px & 0xFF,
+        }
+    }
+
+    /// Repack into an opaque ARGB pixel, clamping each channel to 8 bits.
+    #[inline]
+    const fn to_argb(self) -> u32 {
+        let r = if self.r > 255 { 255 } else { self.r };
+        let g = if self.g > 255 { 255 } else { self.g };
+        let b = if self.b > 255 { 255 } else { self.b };
+        0xFF00_0000 | (r << 16) | (g << 8) | b
+    }
+
+    /// This pixel counted `n` times — the edge replication a box blur needs
+    /// when its window hangs off the end of a line.
+    #[inline]
+    fn scaled(self, n: u32) -> Self {
+        Self {
+            r: self.r.saturating_mul(n),
+            g: self.g.saturating_mul(n),
+            b: self.b.saturating_mul(n),
+        }
+    }
+
+    #[inline]
+    fn plus(self, other: Self) -> Self {
+        Self {
+            r: self.r.saturating_add(other.r),
+            g: self.g.saturating_add(other.g),
+            b: self.b.saturating_add(other.b),
+        }
+    }
+
+    #[inline]
+    fn minus(self, other: Self) -> Self {
+        Self {
+            r: self.r.saturating_sub(other.r),
+            g: self.g.saturating_sub(other.g),
+            b: self.b.saturating_sub(other.b),
+        }
+    }
+
+    /// Divide the accumulated window by its width, using a pre-computed
+    /// fixed-point reciprocal instead of an integer division per channel.
+    ///
+    /// Adds half a fixed-point unit before the shift so the division rounds to
+    /// nearest rather than truncating. With pure truncation each pass loses ~1
+    /// per channel (because [`reciprocal_table`] rounds the reciprocal down),
+    /// so the three-pass, two-direction pipeline drifted uniform images by up
+    /// to 6. Rounding to nearest keeps uniform images stable.
+    #[inline]
+    fn average(self, inv: u32) -> u32 {
+        let scale = |v: u32| {
+            v.saturating_mul(inv)
+                .saturating_add(0x8000)
+                .checked_shr(16)
+                .unwrap_or(0)
+                .min(255)
+        };
+        Self {
+            r: scale(self.r),
+            g: scale(self.g),
+            b: scale(self.b),
+        }
+        .to_argb()
+    }
+}
+
+// ============================================================================
+// PixelRect — a rectangle of pixels that carries its own dimensions
+// ============================================================================
+
+/// Opaque black — what a read outside a buffer yields, and what a freshly
+/// allocated rectangle is filled with.
+const OPAQUE_BLACK: u32 = 0xFF00_0000;
+
+/// A rectangular block of ARGB pixels that knows its own shape.
+///
+/// The blur pipeline used to pass a `&[u32]` alongside a `width` and a
+/// `height` and recompute `row * width + col` by hand at every access — six
+/// separate nested loops, each with its own bounds handling, and each correct
+/// only because of a clamp performed in some *other* function. That is how
+/// this module came to blur with a kernel one sample short (see
+/// [`box_blur_line`]) and to write a row's overhang onto the start of the next
+/// scanline whenever a region reached the right-hand edge.
+///
+/// A buffer that carries its own dimensions moves that index arithmetic into
+/// one place that can be tested on its own, and leaves no way to spell an
+/// out-of-range access at the call sites.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PixelRect {
+    pixels: Vec<u32>,
+    width: usize,
+    height: usize,
+}
+
+impl PixelRect {
+    /// An opaque black rectangle of the given size.
+    pub fn new(width: u32, height: u32) -> Self {
+        let width = width as usize;
+        let height = height as usize;
+        let len = width.saturating_mul(height);
+        Self {
+            pixels: vec![OPAQUE_BLACK; len],
+            width,
+            height,
+        }
+    }
+
+    /// Copy a rectangle out of a framebuffer.
+    ///
+    /// Anything the requested rectangle covers that the framebuffer does not
+    /// is filled with opaque black rather than left uninitialised or silently
+    /// shortened, so the result always has exactly the size asked for — the
+    /// callers downstream index it by its own dimensions.
+    pub fn from_framebuffer(
+        buffer: &[u32],
+        fb_width: u32,
+        rx: u32,
+        ry: u32,
+        rw: u32,
+        rh: u32,
+    ) -> Self {
+        let mut rect = Self::new(rw, rh);
+        let fb_w = fb_width as usize;
+        if fb_w == 0 {
+            return rect;
+        }
+        let (rx, ry) = (rx as usize, ry as usize);
+        // A row of the region may hang off the right-hand edge of the
+        // framebuffer. Bound it by the framebuffer's own row, not merely by
+        // the buffer's total length: a length check alone lets the overhang
+        // wrap onto the next scanline.
+        let available = fb_w.saturating_sub(rx);
+        let span = rect.width.min(available);
+        for row in 0..rect.height {
+            let Some(start) = ry
+                .checked_add(row)
+                .and_then(|r| r.checked_mul(fb_w))
+                .and_then(|s| s.checked_add(rx))
+            else {
+                break;
+            };
+            let Some(end) = start.checked_add(span) else {
+                break;
+            };
+            let (Some(src), Some(dst)) = (buffer.get(start..end), rect.row_mut(row)) else {
+                continue;
+            };
+            let Some(dst) = dst.get_mut(..span) else {
+                continue;
+            };
+            dst.copy_from_slice(src);
+        }
+        rect
+    }
+
+    /// Width in pixels.
+    pub fn width(&self) -> u32 {
+        u32::try_from(self.width).unwrap_or(u32::MAX)
+    }
+
+    /// Height in pixels.
+    pub fn height(&self) -> u32 {
+        u32::try_from(self.height).unwrap_or(u32::MAX)
+    }
+
+    /// Whether the rectangle holds no pixels.
+    pub fn is_empty(&self) -> bool {
+        self.pixels.is_empty()
+    }
+
+    /// The pixels in row-major order.
+    pub fn pixels(&self) -> &[u32] {
+        &self.pixels
+    }
+
+    /// The pixels in row-major order, mutably.
+    pub fn pixels_mut(&mut self) -> &mut [u32] {
+        &mut self.pixels
+    }
+
+    /// One row of pixels, or `None` if `row` is past the bottom.
+    fn row(&self, row: usize) -> Option<&[u32]> {
+        let start = row.checked_mul(self.width)?;
+        let end = start.checked_add(self.width)?;
+        self.pixels.get(start..end)
+    }
+
+    /// One row of pixels, mutably.
+    fn row_mut(&mut self, row: usize) -> Option<&mut [u32]> {
+        let start = row.checked_mul(self.width)?;
+        let end = start.checked_add(self.width)?;
+        self.pixels.get_mut(start..end)
+    }
+
+    /// The pixel at `(col, row)`, or `None` if it lies outside.
+    pub fn get(&self, col: usize, row: usize) -> Option<u32> {
+        self.row(row)?.get(col).copied()
+    }
+
+    /// Store a pixel at `(col, row)`. Out-of-range writes are dropped — a
+    /// rectangle cannot be made to grow by writing past its edge.
+    pub fn set(&mut self, col: usize, row: usize, px: u32) {
+        if let Some(slot) = self.row_mut(row).and_then(|r| r.get_mut(col)) {
+            *slot = px;
+        }
+    }
+
+    /// The pixel at `(col, row)` with coordinates clamped to the rectangle.
+    ///
+    /// This is what makes the blur's edge handling a property of the buffer
+    /// rather than a special case at every call site: sampling past an edge
+    /// repeats that edge, which is what stops a blurred panel darkening into
+    /// its own borders.
+    pub fn sample(&self, col: usize, row: usize) -> u32 {
+        let col = col.min(self.width.saturating_sub(1));
+        let row = row.min(self.height.saturating_sub(1));
+        self.get(col, row).unwrap_or(OPAQUE_BLACK)
+    }
+
+    /// Visit every pixel of this rectangle together with the framebuffer pixel
+    /// it would be written to, at framebuffer position `(rx, ry)`.
+    ///
+    /// The single place in this module where region coordinates become
+    /// framebuffer indices. Rows that fall outside the framebuffer, and the
+    /// part of a row that overhangs its right-hand edge, are simply not
+    /// visited.
+    fn blit_with(
+        &self,
+        buffer: &mut [u32],
+        fb_width: u32,
+        rx: u32,
+        ry: u32,
+        mut visit: impl FnMut(usize, usize, u32, &mut u32),
+    ) {
+        let fb_w = fb_width as usize;
+        if fb_w == 0 {
+            return;
+        }
+        let (rx, ry) = (rx as usize, ry as usize);
+        let span = self.width.min(fb_w.saturating_sub(rx));
+        for row in 0..self.height {
+            let Some(start) = ry
+                .checked_add(row)
+                .and_then(|r| r.checked_mul(fb_w))
+                .and_then(|s| s.checked_add(rx))
+            else {
+                return;
+            };
+            let Some(end) = start.checked_add(span) else {
+                return;
+            };
+            let (Some(src), Some(dst)) = (self.row(row), buffer.get_mut(start..end)) else {
+                continue;
+            };
+            for (col, (&px, slot)) in src.iter().zip(dst.iter_mut()).enumerate() {
+                visit(col, row, px, slot);
+            }
+        }
+    }
+
+    /// Copy this rectangle into a framebuffer at `(rx, ry)`.
+    pub fn blit_into(&self, buffer: &mut [u32], fb_width: u32, rx: u32, ry: u32) {
+        self.blit_with(buffer, fb_width, rx, ry, |_, _, px, slot| *slot = px);
+    }
+}
+
+// ============================================================================
 // BlurRenderer — software blur implementation
 // ============================================================================
 
@@ -228,28 +528,25 @@ impl BlurRenderer {
         }
 
         let (rx, ry, rw, rh) = region.pixel_bounds(fb_width, fb_height);
-        if rw == 0 || rh == 0 {
+        let mut sub = PixelRect::from_framebuffer(buffer, fb_width, rx, ry, rw, rh);
+        if sub.is_empty() {
             return;
         }
 
-        // Extract sub-buffer for the region.
-        let mut sub = Self::extract_sub(buffer, fb_width, rx, ry, rw, rh);
-
         // Three-pass box blur (approximates Gaussian).
-        let radius = region.effect.radius as u32;
-        let radius = radius.max(1);
-        Self::box_blur_pass(&mut sub, rw, rh, radius);
-        Self::box_blur_pass(&mut sub, rw, rh, radius);
-        Self::box_blur_pass(&mut sub, rw, rh, radius);
+        let radius = (region.effect.radius as usize).max(1);
+        for _ in 0..3 {
+            Self::box_blur_pass(&mut sub, radius);
+        }
 
         // Apply saturation adjustment.
         if (region.effect.saturation - 1.0).abs() > 0.01 {
-            Self::apply_saturation(&mut sub, region.effect.saturation);
+            Self::apply_saturation(sub.pixels_mut(), region.effect.saturation);
         }
 
         // Apply noise texture.
         if region.effect.noise_amount > 0.001 {
-            Self::apply_noise(&mut sub, rw, rh, region.effect.noise_amount);
+            Self::apply_noise(&mut sub, region.effect.noise_amount);
         }
 
         // Write back with rounded corner mask and opacity.
@@ -259,8 +556,6 @@ impl BlurRenderer {
             &sub,
             rx,
             ry,
-            rw,
-            rh,
             region.corner_radius,
             region.effect.opacity,
         );
@@ -274,90 +569,46 @@ impl BlurRenderer {
         let len = (width as usize).saturating_mul(height as usize);
         let tint_argb = Self::color_to_argb(tint);
         let ta = tint.a as u32;
-        let inv_ta = 255u32.saturating_sub(ta);
-        let tr = (tint_argb >> 16) & 0xFF;
-        let tg = (tint_argb >> 8) & 0xFF;
-        let tb = tint_argb & 0xFF;
+        let t = Rgb::from_argb(tint_argb);
 
-        let mut out = Vec::with_capacity(len);
-        for &bg_px in background.iter().take(len) {
-            let br = (bg_px >> 16) & 0xFF;
-            let bg_g = (bg_px >> 8) & 0xFF;
-            let bb = bg_px & 0xFF;
-
-            let r = (tr * ta + br * inv_ta) / 255;
-            let g = (tg * ta + bg_g * inv_ta) / 255;
-            let b = (tb * ta + bb * inv_ta) / 255;
-
-            out.push(0xFF00_0000 | (r.min(255) << 16) | (g.min(255) << 8) | b.min(255));
-        }
-        out
+        background
+            .iter()
+            .take(len)
+            .map(|&bg_px| Self::blend_pixel(t.to_argb(), bg_px, ta))
+            .collect()
     }
 
     // ------------------------------------------------------------------
-    // Internal: sub-buffer extraction / write-back
+    // Internal: write-back
     // ------------------------------------------------------------------
-
-    /// Copy a rectangular region from the framebuffer into a contiguous Vec.
-    fn extract_sub(buffer: &[u32], fb_width: u32, rx: u32, ry: u32, rw: u32, rh: u32) -> Vec<u32> {
-        let fb_w = fb_width as usize;
-        let rw_us = rw as usize;
-        let mut sub = Vec::with_capacity(rw_us * rh as usize);
-        for row in 0..rh {
-            let start = (ry + row) as usize * fb_w + rx as usize;
-            let end = start + rw_us;
-            if end <= buffer.len() {
-                sub.extend_from_slice(&buffer[start..end]);
-            } else {
-                // Pad with black if out-of-bounds (should not happen with clamping).
-                sub.resize(sub.len() + rw_us, 0xFF00_0000);
-            }
-        }
-        sub
-    }
 
     /// Write the processed sub-buffer back, applying rounded-corner masking
     /// and global opacity.
     fn write_back_with_clip(
         buffer: &mut [u32],
         fb_width: u32,
-        sub: &[u32],
+        sub: &PixelRect,
         rx: u32,
         ry: u32,
-        rw: u32,
-        rh: u32,
         corner_radius: f32,
         opacity: f32,
     ) {
-        let fb_w = fb_width as usize;
-        let rw_us = rw as usize;
         let op = (opacity.clamp(0.0, 1.0) * 255.0) as u32;
-
-        for row in 0..rh {
-            let fb_row_start = (ry + row) as usize * fb_w + rx as usize;
-            let sub_row_start = row as usize * rw_us;
-
-            for col in 0..rw {
-                let sub_idx = sub_row_start + col as usize;
-                let fb_idx = fb_row_start + col as usize;
-                if fb_idx >= buffer.len() || sub_idx >= sub.len() {
-                    continue;
-                }
-
-                // Rounded corner test.
-                if corner_radius > 0.5 && !Self::in_rounded_rect(col, row, rw, rh, corner_radius) {
-                    continue; // Leave the original pixel.
-                }
-
-                let src = sub[sub_idx];
-                if op >= 255 {
-                    buffer[fb_idx] = src;
-                } else {
-                    let dst = buffer[fb_idx];
-                    buffer[fb_idx] = Self::blend_pixel(src, dst, op);
-                }
+        let (rw, rh) = (sub.width(), sub.height());
+        sub.blit_with(buffer, fb_width, rx, ry, |col, row, src, slot| {
+            let (Ok(col), Ok(row)) = (u32::try_from(col), u32::try_from(row)) else {
+                return;
+            };
+            // Rounded corner test — outside the arc, leave the original pixel.
+            if corner_radius > 0.5 && !Self::in_rounded_rect(col, row, rw, rh, corner_radius) {
+                return;
             }
-        }
+            *slot = if op >= 255 {
+                src
+            } else {
+                Self::blend_pixel(src, *slot, op)
+            };
+        });
     }
 
     /// Test whether a pixel at (col, row) inside a rect of size (w, h) falls
@@ -382,114 +633,31 @@ impl BlurRenderer {
 
         let dx = col as f32 + 0.5 - cx;
         let dy = row as f32 + 0.5 - cy;
-        dx * dx + dy * dy <= r * r
+        dx.mul_add(dx, dy * dy) <= r * r
     }
 
     // ------------------------------------------------------------------
     // Internal: box blur (separable horizontal + vertical)
     // ------------------------------------------------------------------
 
-    /// Single box blur pass (horizontal then vertical).
-    fn box_blur_pass(buf: &mut [u32], width: u32, height: u32, radius: u32) {
-        let mut tmp = vec![0u32; buf.len()];
-        Self::box_blur_h(buf, &mut tmp, width, height, radius);
-        Self::box_blur_v(&tmp, buf, width, height, radius);
-    }
-
-    /// Horizontal box blur: `src` → `dst`.
-    fn box_blur_h(src: &[u32], dst: &mut [u32], width: u32, height: u32, radius: u32) {
-        let w = width as usize;
-        let r = radius as usize;
-        let diameter = 2 * r + 1;
-        let inv = reciprocal_table(diameter as u32);
-
-        for row in 0..height as usize {
-            let row_start = row * w;
-
-            // Seed the running sum with the leftmost pixel replicated for the
-            // out-of-bounds region, plus the first `radius` real pixels.
-            let first = Self::unpack(src[row_start]);
-            let (mut sr, mut sg, mut sb) = (
-                first.0 * (r as u32 + 1),
-                first.1 * (r as u32 + 1),
-                first.2 * (r as u32 + 1),
+    /// Single box blur pass: every row, then every column.
+    fn box_blur_pass(rect: &mut PixelRect, radius: usize) {
+        let mut tmp = PixelRect::new(rect.width(), rect.height());
+        for row in 0..rect.height {
+            box_blur_line(
+                rect.width,
+                radius,
+                |i| rect.sample(i, row),
+                |i, px| tmp.set(i, row, px),
             );
-
-            for i in 0..r.min(w) {
-                let px = Self::unpack(src[row_start + i]);
-                sr += px.0;
-                sg += px.1;
-                sb += px.2;
-            }
-            // Replicate edge for initial right side.
-            if r > w {
-                let edge = Self::unpack(src[row_start + w.saturating_sub(1)]);
-                let extra = (r - w) as u32;
-                sr += edge.0 * extra;
-                sg += edge.1 * extra;
-                sb += edge.2 * extra;
-            }
-
-            for col in 0..w {
-                dst[row_start + col] = Self::pack_with_inv(sr, sg, sb, inv);
-
-                // Advance the sliding window.
-                let add_idx = (col + r + 1).min(w - 1);
-                let rem_idx = col.saturating_sub(r);
-
-                let add = Self::unpack(src[row_start + add_idx]);
-                let rem = Self::unpack(src[row_start + rem_idx]);
-
-                sr = sr.wrapping_add(add.0).wrapping_sub(rem.0);
-                sg = sg.wrapping_add(add.1).wrapping_sub(rem.1);
-                sb = sb.wrapping_add(add.2).wrapping_sub(rem.2);
-            }
         }
-    }
-
-    /// Vertical box blur: `src` → `dst`.
-    fn box_blur_v(src: &[u32], dst: &mut [u32], width: u32, height: u32, radius: u32) {
-        let w = width as usize;
-        let h = height as usize;
-        let r = radius as usize;
-        let diameter = 2 * r + 1;
-        let inv = reciprocal_table(diameter as u32);
-
-        for col in 0..w {
-            let first = Self::unpack(src[col]);
-            let (mut sr, mut sg, mut sb) = (
-                first.0 * (r as u32 + 1),
-                first.1 * (r as u32 + 1),
-                first.2 * (r as u32 + 1),
+        for col in 0..tmp.width {
+            box_blur_line(
+                tmp.height,
+                radius,
+                |i| tmp.sample(col, i),
+                |i, px| rect.set(col, i, px),
             );
-
-            for i in 0..r.min(h) {
-                let px = Self::unpack(src[i * w + col]);
-                sr += px.0;
-                sg += px.1;
-                sb += px.2;
-            }
-            if r > h {
-                let edge = Self::unpack(src[h.saturating_sub(1) * w + col]);
-                let extra = (r - h) as u32;
-                sr += edge.0 * extra;
-                sg += edge.1 * extra;
-                sb += edge.2 * extra;
-            }
-
-            for row in 0..h {
-                dst[row * w + col] = Self::pack_with_inv(sr, sg, sb, inv);
-
-                let add_idx = (row + r + 1).min(h - 1);
-                let rem_idx = row.saturating_sub(r);
-
-                let add = Self::unpack(src[add_idx * w + col]);
-                let rem = Self::unpack(src[rem_idx * w + col]);
-
-                sr = sr.wrapping_add(add.0).wrapping_sub(rem.0);
-                sg = sg.wrapping_add(add.1).wrapping_sub(rem.1);
-                sb = sb.wrapping_add(add.2).wrapping_sub(rem.2);
-            }
         }
     }
 
@@ -502,45 +670,58 @@ impl BlurRenderer {
     /// `factor` > 1.0 boosts saturation; < 1.0 desaturates.
     fn apply_saturation(buf: &mut [u32], factor: f32) {
         for px in buf.iter_mut() {
-            let (r, g, b) = Self::unpack(*px);
+            let c = Rgb::from_argb(*px);
             // Luma (Rec. 709 coefficients).
-            let luma = (r as f32 * 0.2126 + g as f32 * 0.7152 + b as f32 * 0.0722) as u32;
-            let nr = Self::sat_channel(r, luma, factor);
-            let ng = Self::sat_channel(g, luma, factor);
-            let nb = Self::sat_channel(b, luma, factor);
-            *px = 0xFF00_0000 | (nr << 16) | (ng << 8) | nb;
+            let luma =
+                (c.r as f32).mul_add(0.2126, (c.g as f32).mul_add(0.7152, c.b as f32 * 0.0722));
+            *px = Rgb {
+                r: Self::sat_channel(c.r, luma, factor),
+                g: Self::sat_channel(c.g, luma, factor),
+                b: Self::sat_channel(c.b, luma, factor),
+            }
+            .to_argb();
         }
     }
 
-    fn sat_channel(val: u32, luma: u32, factor: f32) -> u32 {
-        let v = luma as f32 + (val as f32 - luma as f32) * factor;
-        (v.round() as u32).min(255)
+    fn sat_channel(val: u32, luma: f32, factor: f32) -> u32 {
+        let v = (val as f32 - luma).mul_add(factor, luma);
+        v.round().clamp(0.0, 255.0) as u32
     }
 
     /// Add a subtle deterministic noise pattern.
     ///
     /// Uses a simple hash based on pixel position rather than a PRNG so results
     /// are reproducible and cache-friendly.
-    fn apply_noise(buf: &mut [u32], width: u32, height: u32, amount: f32) {
-        let strength = (amount * 255.0) as i32;
+    fn apply_noise(rect: &mut PixelRect, amount: f32) {
+        let strength = (amount.clamp(0.0, 1.0) * 255.0) as u32;
         if strength == 0 {
             return;
         }
-        for row in 0..height {
-            for col in 0..width {
-                let idx = row as usize * width as usize + col as usize;
-                if idx >= buf.len() {
+        // The hash lands in [0, 2 * strength]; shifting by `strength` centres
+        // it on zero so the noise brightens as often as it darkens.
+        let span = strength.saturating_mul(2).saturating_add(1);
+        for row in 0..rect.height {
+            for col in 0..rect.width {
+                let Some(px) = rect.get(col, row) else {
                     continue;
-                }
-                // Simple spatial hash → value in [-strength, +strength].
-                let hash = pixel_hash(col, row);
-                let noise = (hash % (2 * strength as u32 + 1)) as i32 - strength;
-
-                let (r, g, b) = Self::unpack(buf[idx]);
-                let nr = (r as i32 + noise).clamp(0, 255) as u32;
-                let ng = (g as i32 + noise).clamp(0, 255) as u32;
-                let nb = (b as i32 + noise).clamp(0, 255) as u32;
-                buf[idx] = 0xFF00_0000 | (nr << 16) | (ng << 8) | nb;
+                };
+                let (Ok(x), Ok(y)) = (u32::try_from(col), u32::try_from(row)) else {
+                    continue;
+                };
+                let noise = i64::from(pixel_hash(x, y) % span) - i64::from(strength);
+                let shift =
+                    |v: u32| -> u32 { (i64::from(v).saturating_add(noise)).clamp(0, 255) as u32 };
+                let c = Rgb::from_argb(px);
+                rect.set(
+                    col,
+                    row,
+                    Rgb {
+                        r: shift(c.r),
+                        g: shift(c.g),
+                        b: shift(c.b),
+                    }
+                    .to_argb(),
+                );
             }
         }
     }
@@ -552,43 +733,36 @@ impl BlurRenderer {
     /// Unpack ARGB u32 into (R, G, B) as u32 for accumulation.
     #[inline]
     fn unpack(px: u32) -> (u32, u32, u32) {
-        ((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF)
+        let c = Rgb::from_argb(px);
+        (c.r, c.g, c.b)
     }
 
     /// Pack RGB channels using a pre-computed reciprocal (fixed-point multiply
     /// instead of integer division).
-    ///
-    /// Adds 0x8000 (half the fixed-point unit) before the shift so the division
-    /// rounds to nearest rather than truncating. With pure truncation each box
-    /// blur pass loses ~1 per channel (because `reciprocal_table` rounds the
-    /// reciprocal down), so the 3-pass × 2-direction pipeline drifted uniform
-    /// images by up to 6. Rounding to nearest keeps uniform images stable.
     #[inline]
     fn pack_with_inv(sr: u32, sg: u32, sb: u32, inv: u32) -> u32 {
-        let r = ((sr * inv + 0x8000) >> 16).min(255);
-        let g = ((sg * inv + 0x8000) >> 16).min(255);
-        let b = ((sb * inv + 0x8000) >> 16).min(255);
-        0xFF00_0000 | (r << 16) | (g << 8) | b
+        Rgb {
+            r: sr,
+            g: sg,
+            b: sb,
+        }
+        .average(inv)
     }
 
     /// Alpha-blend `src` over `dst` with the given source alpha (0..255).
     #[inline]
     fn blend_pixel(src: u32, dst: u32, alpha: u32) -> u32 {
+        let alpha = alpha.min(255);
         let inv = 255u32.saturating_sub(alpha);
-
-        let sr = (src >> 16) & 0xFF;
-        let sg = (src >> 8) & 0xFF;
-        let sb = src & 0xFF;
-
-        let dr = (dst >> 16) & 0xFF;
-        let dg = (dst >> 8) & 0xFF;
-        let db = dst & 0xFF;
-
-        let r = (sr * alpha + dr * inv) / 255;
-        let g = (sg * alpha + dg * inv) / 255;
-        let b = (sb * alpha + db * inv) / 255;
-
-        0xFF00_0000 | (r.min(255) << 16) | (g.min(255) << 8) | b.min(255)
+        let s = Rgb::from_argb(src).scaled(alpha);
+        let d = Rgb::from_argb(dst).scaled(inv);
+        let mix = |a: u32, b: u32| a.saturating_add(b).checked_div(255).unwrap_or(0);
+        Rgb {
+            r: mix(s.r, d.r),
+            g: mix(s.g, d.g),
+            b: mix(s.b, d.b),
+        }
+        .to_argb()
     }
 
     /// Convert a `Color` to packed ARGB u32.
@@ -607,7 +781,11 @@ pub struct BlurManager {
     /// Active blur regions keyed by caller-assigned ID.
     regions: HashMap<u64, BlurRegion>,
     /// Cached blurred pixel data per region ID.
-    cache: HashMap<u64, Vec<u32>>,
+    ///
+    /// A [`PixelRect`] and not a bare `Vec<u32>`: the cache outlives the frame
+    /// that filled it, and a cached buffer that has forgotten its own width is
+    /// one resize away from being blitted back at the wrong stride.
+    cache: HashMap<u64, PixelRect>,
     /// Dirty flags per region (set when underlying content may have changed).
     dirty: HashMap<u64, bool>,
     /// Master toggle — when false, no blur processing occurs.
@@ -694,81 +872,41 @@ impl BlurManager {
         let ids: Vec<u64> = self.regions.keys().copied().collect();
         for id in ids {
             let is_dirty = self.dirty.get(&id).copied().unwrap_or(true);
+            let Some(region) = self.regions.get(&id) else {
+                continue;
+            };
+            if !region.enabled {
+                continue;
+            }
+            let (rx, ry, rw, rh) = region.pixel_bounds(fb_width, fb_height);
 
             // Use cache if not dirty and cache exists.
             if !is_dirty && let Some(cached) = self.cache.get(&id) {
-                if let Some(region) = self.regions.get(&id)
-                    && region.enabled
-                {
-                    let (rx, ry, rw, rh) = region.pixel_bounds(fb_width, fb_height);
-                    Self::blit_cached(buffer, fb_width, cached, rx, ry, rw, rh);
-                }
+                cached.blit_into(buffer, fb_width, rx, ry);
                 continue;
             }
 
-            // Need to recompute.
-            if let Some(region) = self.regions.get(&id) {
-                if !region.enabled {
-                    continue;
-                }
-                let region_clone = region.clone();
-                let (rx, ry, rw, rh) = region_clone.pixel_bounds(fb_width, fb_height);
-                if rw == 0 || rh == 0 {
-                    continue;
-                }
-
-                // Apply blur to the framebuffer in-place.
-                BlurRenderer::blur_region(buffer, fb_width, fb_height, &region_clone);
-
-                // Composite the tint over the blurred region.
-                let sub = BlurRenderer::extract_sub(buffer, fb_width, rx, ry, rw, rh);
-                let composited =
-                    BlurRenderer::composite_blur(&sub, region_clone.effect.tint, rw, rh);
-
-                // Write composited result back.
-                let fb_w = fb_width as usize;
-                let rw_us = rw as usize;
-                for row in 0..rh {
-                    let fb_start = (ry + row) as usize * fb_w + rx as usize;
-                    let sub_start = row as usize * rw_us;
-                    for col in 0..rw_us {
-                        let fb_idx = fb_start + col;
-                        let sub_idx = sub_start + col;
-                        if fb_idx < buffer.len() && sub_idx < composited.len() {
-                            buffer[fb_idx] = composited[sub_idx];
-                        }
-                    }
-                }
-
-                // Cache the result.
-                self.cache.insert(id, composited);
-                self.dirty.insert(id, false);
+            if rw == 0 || rh == 0 {
+                continue;
             }
-        }
-    }
+            let region = region.clone();
 
-    /// Blit cached pixel data back into the framebuffer.
-    fn blit_cached(
-        buffer: &mut [u32],
-        fb_width: u32,
-        cached: &[u32],
-        rx: u32,
-        ry: u32,
-        rw: u32,
-        rh: u32,
-    ) {
-        let fb_w = fb_width as usize;
-        let rw_us = rw as usize;
-        for row in 0..rh {
-            let fb_start = (ry + row) as usize * fb_w + rx as usize;
-            let sub_start = row as usize * rw_us;
-            for col in 0..rw_us {
-                let fb_idx = fb_start + col;
-                let sub_idx = sub_start + col;
-                if fb_idx < buffer.len() && sub_idx < cached.len() {
-                    buffer[fb_idx] = cached[sub_idx];
-                }
+            // Apply blur to the framebuffer in-place, then composite the tint
+            // over the blurred region and write that back.
+            BlurRenderer::blur_region(buffer, fb_width, fb_height, &region);
+            let sub = PixelRect::from_framebuffer(buffer, fb_width, rx, ry, rw, rh);
+            let mut composited = sub;
+            for px in composited.pixels_mut() {
+                *px = BlurRenderer::blend_pixel(
+                    BlurRenderer::color_to_argb(region.effect.tint),
+                    *px,
+                    region.effect.tint.a as u32,
+                );
             }
+            composited.blit_into(buffer, fb_width, rx, ry);
+
+            self.cache.insert(id, composited);
+            self.dirty.insert(id, false);
         }
     }
 }
@@ -783,16 +921,70 @@ impl Default for BlurManager {
 // Free helpers
 // ============================================================================
 
+/// Run a one-dimensional box blur along a single line of pixels.
+///
+/// `read(i)` yields the i-th pixel of the line and `write(i, px)` stores the
+/// result. A row and a column differ only in those two closures, so the
+/// sliding window — the part that is easy to get wrong — exists exactly once.
+///
+/// It *was* wrong, in both of the two copies this replaces. The window for
+/// output `i` covers `[i - radius, i + radius]`, but the old code seeded it
+/// with `radius + 1` copies of the first pixel and then the pixels `0..radius`
+/// *exclusive*: the sample at `+radius` was never in the sum, and the first
+/// pixel was counted once too many. Because the sliding step was written
+/// against the correct window, the error did not cancel — it persisted across
+/// the whole line. A palindromic row `[10, 20, 30, 20, 10]` blurred at radius
+/// 1 came back `[10, 17, 20, 17, 10]` where the kernel's own definition gives
+/// `[13, 20, 23, 20, 13]`, and the three-pass, two-direction pipeline
+/// compounded that bias into a visible misregistration between a blurred
+/// panel and the wallpaper it was supposed to be blurring.
+///
+/// `radius` is capped at `len`: past that the window already spans the whole
+/// line and further growth only shifts weight between the two replicated ends,
+/// while the accumulator would have to hold `255 * (2 * radius + 1)`.
+fn box_blur_line(
+    len: usize,
+    radius: usize,
+    read: impl Fn(usize) -> u32,
+    mut write: impl FnMut(usize, u32),
+) {
+    if len == 0 {
+        return;
+    }
+    let last = len.saturating_sub(1);
+    let radius = radius.min(len);
+    let diameter = radius.saturating_mul(2).saturating_add(1);
+    let inv = reciprocal_table(u32::try_from(diameter).unwrap_or(u32::MAX));
+
+    // Sampling past either end of the line repeats that end's pixel.
+    let at = |i: usize| Rgb::from_argb(read(i.min(last)));
+
+    // Seed the window for output 0. It covers `[-radius, radius]`; every
+    // position left of the line takes the first pixel, which is `radius`
+    // copies of it, and then the pixels `0..=radius` themselves.
+    let mut sum = at(0).scaled(u32::try_from(radius).unwrap_or(u32::MAX));
+    for k in 0..=radius {
+        sum = sum.plus(at(k));
+    }
+
+    for i in 0..len {
+        write(i, sum.average(inv));
+        // Slide to `i + 1`: the sample at `i - radius` leaves the window and
+        // the one at `i + radius + 1` enters it. Both saturate into the
+        // clamped edge, which is exactly the edge replication we want.
+        let leaving = at(i.saturating_sub(radius));
+        let entering = at(i.saturating_add(radius).saturating_add(1));
+        sum = sum.minus(leaving).plus(entering);
+    }
+}
+
 /// Fixed-point reciprocal (16-bit fractional) for integer division avoidance.
 ///
 /// Returns `(1 << 16) / n` — multiply an accumulated sum by this value and
 /// shift right by 16 to get the average.
 #[inline]
 fn reciprocal_table(n: u32) -> u32 {
-    if n == 0 {
-        return 0;
-    }
-    (1u32 << 16) / n
+    (1u32 << 16).checked_div(n).unwrap_or(0)
 }
 
 /// Deterministic spatial hash for noise generation.
@@ -1229,7 +1421,7 @@ mod tests {
         mgr.register(1, BlurRegion::new(0.0, 0.0, 10.0, 10.0, BlurEffect::none()));
         // Simulate cached state.
         mgr.dirty.insert(1, false);
-        mgr.cache.insert(1, vec![0u32; 100]);
+        mgr.cache.insert(1, PixelRect::new(10, 10));
 
         mgr.invalidate(1);
         assert_eq!(*mgr.dirty.get(&1).expect("dirty"), true);
@@ -1411,5 +1603,302 @@ mod tests {
         // Factor 0 should collapse R=G=B to the luma value.
         assert_eq!(r, g);
         assert_eq!(g, b);
+    }
+
+    // ======================================================================
+    // The box kernel itself
+    //
+    // The suite above passed for as long as this module existed while the
+    // sliding window was seeded one sample short — every one of those tests
+    // asks only whether the output got blurrier, which a wrong kernel does
+    // just as well as a right one. These ask whether it is *the* kernel.
+    // ======================================================================
+
+    /// Blur one line by the kernel's definition: the mean of the window
+    /// `[i - radius, i + radius]`, with positions off either end taking that
+    /// end's pixel. Deliberately the slow, obvious formulation — it is the
+    /// specification the fast sliding-window version has to agree with.
+    fn reference_blur_line(line: &[u32], radius: usize) -> Vec<u32> {
+        let n = line.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let radius = radius.min(n);
+        (0..n)
+            .map(|i| {
+                let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+                for k in 0..=(2 * radius) {
+                    let j = (i + k).saturating_sub(radius).min(n - 1);
+                    let px = line[j];
+                    r += (px >> 16) & 0xFF;
+                    g += (px >> 8) & 0xFF;
+                    b += px & 0xFF;
+                }
+                let d = (2 * radius + 1) as u32;
+                let avg = |v: u32| ((v * 2 + d) / (d * 2)).min(255);
+                0xFF00_0000 | (avg(r) << 16) | (avg(g) << 8) | avg(b)
+            })
+            .collect()
+    }
+
+    fn gray(v: u32) -> u32 {
+        0xFF00_0000 | (v << 16) | (v << 8) | v
+    }
+
+    fn blur_line_via_module(line: &[u32], radius: usize) -> Vec<u32> {
+        let mut out = vec![0u32; line.len()];
+        box_blur_line(
+            line.len(),
+            radius,
+            |i| line.get(i).copied().unwrap_or(0),
+            |i, px| {
+                if let Some(slot) = out.get_mut(i) {
+                    *slot = px;
+                }
+            },
+        );
+        out
+    }
+
+    #[test]
+    fn the_sliding_window_agrees_with_the_kernels_own_definition() {
+        // Several shapes, each at several radii, against the brute-force mean.
+        let lines: Vec<Vec<u32>> = vec![
+            vec![10, 20, 30, 20, 10].into_iter().map(gray).collect(),
+            vec![0, 0, 255, 0, 0, 0, 0, 0]
+                .into_iter()
+                .map(gray)
+                .collect(),
+            (0..40u32).map(|v| gray(v * 6)).collect(),
+            vec![gray(255); 9],
+            vec![gray(7)],
+        ];
+        for line in &lines {
+            for radius in 0..=6 {
+                let got = blur_line_via_module(line, radius);
+                let want = reference_blur_line(line, radius);
+                // The module divides by a fixed-point reciprocal rather than
+                // exactly, so allow the one greylevel that costs; the point
+                // of the test is the window's *contents*, not its rounding.
+                assert_eq!(got.len(), want.len());
+                for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+                    let (gv, wv) = (g & 0xFF, w & 0xFF);
+                    assert!(
+                        gv.abs_diff(wv) <= 1,
+                        "radius {radius}, pixel {i}: got {gv}, kernel says {wv} \
+                         (line len {})",
+                        line.len()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_palindromic_line_blurs_to_a_palindrome() {
+        // A centred kernel with symmetric edge handling cannot turn a
+        // symmetric line into an asymmetric one. The old implementation could:
+        // its window sat half a sample to the left of where it claimed to be.
+        let line: Vec<u32> = vec![10u32, 20, 90, 200, 90, 20, 10]
+            .into_iter()
+            .map(gray)
+            .collect();
+        for radius in 0..=8 {
+            let out = blur_line_via_module(&line, radius);
+            for i in 0..out.len() {
+                let mirror = out.len() - 1 - i;
+                assert_eq!(
+                    out[i] & 0xFF,
+                    out[mirror] & 0xFF,
+                    "radius {radius}: pixel {i} and its mirror {mirror} differ"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_flat_line_survives_any_radius_unchanged() {
+        let line = vec![gray(0x5A); 12];
+        for radius in 0..=30 {
+            for (i, &px) in blur_line_via_module(&line, radius).iter().enumerate() {
+                assert!(
+                    (px & 0xFF).abs_diff(0x5A) <= 1,
+                    "radius {radius}, pixel {i}: flat input drifted to {:#X}",
+                    px & 0xFF
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_blurred_point_of_light_stays_where_it_was_put() {
+        // The bug this catches is the one a user would actually see: a blur
+        // whose kernel is off-centre slides the frosted backdrop away from the
+        // wallpaper it is frosting. A single bright pixel at the exact centre
+        // of a square must blur to a pattern symmetric about both axes.
+        let n = 33u32;
+        let mut buf = vec![0xFF00_0000u32; (n * n) as usize];
+        let centre = (n / 2 * n + n / 2) as usize;
+        buf[centre] = 0xFF_FF_FF_FF;
+
+        let region = BlurRegion::new(
+            0.0,
+            0.0,
+            n as f32,
+            n as f32,
+            BlurEffect::new(3.0, 1.0, Color::TRANSPARENT, 1.0, 0.0),
+        );
+        BlurRenderer::blur_region(&mut buf, n, n, &region);
+
+        let at = |col: u32, row: u32| buf[(row * n + col) as usize] & 0xFF;
+        for row in 0..n {
+            for col in 0..n {
+                assert_eq!(
+                    at(col, row),
+                    at(n - 1 - col, row),
+                    "left/right asymmetry at ({col}, {row})"
+                );
+                assert_eq!(
+                    at(col, row),
+                    at(col, n - 1 - row),
+                    "top/bottom asymmetry at ({col}, {row})"
+                );
+                // Transposing is not an exact symmetry of a separable integer
+                // blur: the horizontal pass rounds to whole greylevels before
+                // the vertical one reads them, so rows-then-columns and
+                // columns-then-rows can land a level apart. The alignment of
+                // the two axes — which is what a mis-seeded window breaks — is
+                // asserted exactly by the two mirror checks above.
+                assert!(
+                    at(col, row).abs_diff(at(row, col)) <= 1,
+                    "the horizontal and vertical passes disagree at ({col}, {row}): \
+                     {} vs {}",
+                    at(col, row),
+                    at(row, col)
+                );
+            }
+        }
+        assert!(
+            at(n / 2, n / 2) > at(0, 0),
+            "the light should still be brightest where it was placed"
+        );
+    }
+
+    // ======================================================================
+    // PixelRect
+    // ======================================================================
+
+    #[test]
+    fn sampling_outside_a_rect_repeats_its_edge() {
+        let mut rect = PixelRect::new(3, 2);
+        for row in 0..2 {
+            for col in 0..3 {
+                rect.set(col, row, gray((col * 10 + row) as u32));
+            }
+        }
+        // Past the right edge and past the bottom, in both directions.
+        assert_eq!(rect.sample(99, 0), rect.sample(2, 0));
+        assert_eq!(rect.sample(0, 99), rect.sample(0, 1));
+        assert_eq!(rect.sample(usize::MAX, usize::MAX), rect.sample(2, 1));
+        // Inside, sampling and getting agree.
+        assert_eq!(rect.sample(1, 1), rect.get(1, 1).expect("in range"));
+    }
+
+    #[test]
+    fn a_rect_cannot_be_grown_by_writing_past_its_edge() {
+        let mut rect = PixelRect::new(2, 2);
+        let before = rect.pixels().len();
+        rect.set(2, 0, 0xFF_FF_FF_FF);
+        rect.set(0, 2, 0xFF_FF_FF_FF);
+        rect.set(usize::MAX, usize::MAX, 0xFF_FF_FF_FF);
+        assert_eq!(rect.pixels().len(), before);
+        assert!(rect.pixels().iter().all(|&px| px == OPAQUE_BLACK));
+    }
+
+    #[test]
+    fn an_empty_rect_is_safe_to_blur_sample_and_blit() {
+        for (w, h) in [(0u32, 0u32), (0, 4), (4, 0)] {
+            let mut rect = PixelRect::new(w, h);
+            assert!(rect.is_empty());
+            assert_eq!(rect.sample(0, 0), OPAQUE_BLACK);
+            rect.set(0, 0, 0xFF_FF_FF_FF);
+            BlurRenderer::box_blur_pass(&mut rect, 4);
+            let mut fb = vec![0u32; 16];
+            rect.blit_into(&mut fb, 4, 0, 0);
+            assert!(fb.iter().all(|&px| px == 0), "{w}x{h} rect wrote something");
+        }
+    }
+
+    #[test]
+    fn a_region_at_the_right_edge_does_not_wrap_onto_the_next_scanline() {
+        // The old write-back checked only `index < buffer.len()`, so a row
+        // whose width overhung the framebuffer spilled onto the start of the
+        // row below. `pixel_bounds` happened to prevent that — a fact proved
+        // two functions away from the loop that depended on it.
+        let (fb_w, fb_h) = (8usize, 4usize);
+        let mut fb = vec![0u32; fb_w * fb_h];
+        // A 4-wide rect placed so that half of it hangs off the right edge.
+        let mut rect = PixelRect::new(4, 2);
+        for px in rect.pixels_mut() {
+            *px = 0xFF_FF_FF_FF;
+        }
+        rect.blit_into(&mut fb, fb_w as u32, 6, 1);
+
+        for row in 0..fb_h {
+            for col in 0..fb_w {
+                let want_lit = (1..3).contains(&row) && col >= 6;
+                let got = fb[row * fb_w + col];
+                assert_eq!(
+                    got != 0,
+                    want_lit,
+                    "pixel ({col}, {row}) should {} be written",
+                    if want_lit { "" } else { "not" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extracting_past_the_framebuffer_yields_black_not_a_short_buffer() {
+        // Callers index the extracted rect by its own dimensions, so it has to
+        // be exactly the size asked for even when the framebuffer runs out.
+        let fb = vec![0xFF_11_22_33u32; 4 * 4];
+        let rect = PixelRect::from_framebuffer(&fb, 4, 2, 2, 4, 4);
+        assert_eq!(rect.pixels().len(), 16);
+        assert_eq!(rect.get(0, 0), Some(0xFF_11_22_33));
+        // Past the framebuffer's right edge and bottom.
+        assert_eq!(rect.get(3, 0), Some(OPAQUE_BLACK));
+        assert_eq!(rect.get(0, 3), Some(OPAQUE_BLACK));
+    }
+
+    #[test]
+    fn the_accumulator_saturates_rather_than_wrapping() {
+        // The window's arithmetic is balanced by construction, but the
+        // subtraction must not be able to wrap a channel from 0 to four
+        // billion and paint white where black belongs.
+        let zero = Rgb::default();
+        let one = Rgb { r: 1, g: 2, b: 3 };
+        assert_eq!(zero.minus(one), zero);
+        assert_eq!(
+            Rgb {
+                r: u32::MAX,
+                g: 0,
+                b: 0
+            }
+            .plus(one)
+            .r,
+            u32::MAX
+        );
+        assert_eq!(Rgb { r: 2, g: 0, b: 0 }.scaled(u32::MAX).r, u32::MAX);
+        // And packing clamps rather than bleeding into the next channel.
+        assert_eq!(
+            Rgb {
+                r: 999,
+                g: 999,
+                b: 999
+            }
+            .to_argb(),
+            0xFF_FF_FF_FF
+        );
     }
 }

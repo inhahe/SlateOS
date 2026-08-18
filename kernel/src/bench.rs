@@ -2155,11 +2155,26 @@ fn report_canary(start: Option<u64>) {
                 continue;
             };
             let pos = p.load(Ordering::Relaxed);
-            let (c, t) = centi_parts(v.load(Ordering::Relaxed));
+            // Full centicycle resolution here, deliberately *not* the tenths
+            // `centi_parts` yields. The trace exists to drive a per-position
+            // correction, and against a ~5-cycle reference a tenth of a cycle
+            // is ~2% — coarser than the drift such a correction would remove,
+            // so rounding to tenths would let it inject more error than it
+            // takes out. The same CANARY line proves the gap rather than
+            // merely asserting it: a run whose `min`/`max` were 515 and 517
+            // centicycles renders as "5.1" and "5.1" at tenths, i.e. the trace
+            // could not express variation its own record reports.
+            //
+            // Safe to widen because nothing parses this line: it postdates
+            // `bench-history.py`'s `CANARY_RE` (which matches the fixed-arity
+            // tuple on the CANARY line only), and `canary-load-test.sh` merely
+            // greps it for a human to read. Before the first parser exists is
+            // the one moment this change costs nothing.
+            let centi = v.load(Ordering::Relaxed);
             if pos == CANARY_POS_ENDPOINT {
-                serial_print!(" end:{}.{}", c, t);
+                serial_print!(" end:{}.{:02}", centi / CENTI, centi % CENTI);
             } else {
-                serial_print!(" {}:{}.{}", pos, c, t);
+                serial_print!(" {}:{}.{:02}", pos, centi / CENTI, centi % CENTI);
             }
         }
         serial_println!("");

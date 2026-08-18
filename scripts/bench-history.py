@@ -143,6 +143,38 @@ CANARY_RE = re.compile(
     r"(?:\s+(\d+)(?:\s+(\d+)\s+(\d+))?)?)?\s*$"
 )
 
+# `[bench] CANARY-TRACE <pos>:<cycles> ... end:<cycles> ...`
+#
+# The per-sample trace behind the `min`/`max`/`spread` summary above. `<pos>`
+# is the scored-benchmark index the sample followed; `end` marks a suite
+# endpoint, which brackets the suite rather than sitting at a position.
+#
+# Why parse it at all, when `spread` already summarises it: extremes say *how
+# much* the reference cost moved and can never say *where*, and the two causes
+# have opposite remedies. Samples dear at the same positions across runs are
+# the suite's own cache/TLB residue -- real, repeatable, and not contamination.
+# Samples dear at differing positions each run are host load. `spread` reports
+# the identical number for both.
+#
+# It is also the only input a *positional* drift correction could have. The
+# existing `global_drift` removes a whole-suite factor, which is the right
+# model for a uniformly busier host and the wrong one for a burst that lands
+# on two benchmarks and leaves the other sixty untouched -- the exact case the
+# canary was built to catch.
+#
+# Absent from every record written before this parser existed, so every
+# consumer must treat "no trace" as normal rather than as an error.
+#
+# The value is accepted with or without a fractional part, and with any number
+# of fractional digits, because the kernel emitted tenths before it emitted
+# hundredths. `parse_canary` normalises both to integer centicycles rather
+# than carrying a float, so a 1-digit log and a 2-digit log land in the same
+# units -- see `_trace_centi`.
+CANARY_TRACE_RE = re.compile(
+    r"^\[bench\]\s+CANARY-TRACE((?:\s+\S+?:\d+(?:\.\d+)?)*)\s*$"
+)
+CANARY_TRACE_SAMPLE_RE = re.compile(r"(\S+?):(\d+)(?:\.(\d+))?")
+
 # Percent deviation at which a run is called contaminated. Must match
 # `CANARY_TOLERANCE_PCT` in `kernel/src/bench.rs`; the kernel prints its own
 # verdict, and this recomputes it so a replayed/old log is judged by the same
@@ -347,17 +379,41 @@ def split_pct(token):
 
 
 def parse_serial(path):
-    """Extract {name: (measured_ns, target_ns, verdict, mean_ns, iters, split)}.
+    """Extract {name: (measured_ns, target_ns, verdict, mean_ns, iters, split, pos)}.
 
     `mean_ns` and `iters` are `None` for a log predating their emission, and
     `split` is `SPLIT_ABSENT` for a log predating *its* emission. The tuple is
     extended only at the end so existing positional readers (`value[0]`,
     `value[3]`) keep meaning what they meant.
 
+    `pos` is the benchmark's **suite position**: its 0-based ordinal among the
+    SCORE lines. It is not decoration -- it is the join key between a benchmark
+    and the canary trace, which records the position each reference sample was
+    taken at and nothing else. Without it the trace can say "the host went 3x
+    dearer around position 32" and no reader can name a single benchmark that
+    sat there.
+
+    # Why the ordinal has to be captured here and stored explicitly
+
+    The kernel emits SCORE lines from `SCORECARD` in push order, which is
+    `record()` order, which is exactly the order that increments
+    `CANARY_SCORED` -- so the Nth SCORE line and canary position N are the same
+    N by construction, not by coincidence. That correspondence is only
+    available *while reading the log in order*.
+
+    It cannot be recovered afterwards from a stored record. `entries` is a
+    `{name: value}` dict, and Python would have preserved its insertion order,
+    but records are written with `json.dumps(..., sort_keys=True)` -- so every
+    one of the 71 records on disk has its entries sorted alphabetically, and
+    the suite order is gone. Deriving the index from key order would therefore
+    be wrong on every historical record and *silently* wrong: it would yield a
+    plausible integer for every benchmark, just not the right one.
+
     Returns an empty dict if the log has no scorecard, which is the normal
     case for a boot run without `--bench`.
     """
     entries = {}
+    seen = 0
     try:
         # The serial log is written by QEMU and can contain stray bytes if a
         # boot is killed mid-write, so decode leniently rather than failing.
@@ -379,7 +435,15 @@ def parse_serial(path):
                         int(mean) if mean is not None else None,
                         int(iters) if iters is not None else None,
                         split,
+                        # Counted over SCORE lines seen, not over `entries`:
+                        # a duplicate name must not renumber the suite behind
+                        # the canary's back. `len(entries)` would do exactly
+                        # that -- a repeated name overwrites rather than
+                        # appends, so every later benchmark would shift one
+                        # position left of where the kernel sampled it.
+                        seen,
                     )
+                    seen += 1
     except FileNotFoundError:
         print(f"bench-history: no serial log at {path}", file=sys.stderr)
         return {}
@@ -389,24 +453,73 @@ def parse_serial(path):
     return entries
 
 
+def _trace_centi(whole, frac):
+    """One trace value as integer centicycles.
+
+    `frac` is whatever digits followed the point, or None. The kernel printed
+    tenths before it printed hundredths, so both widths appear in the logs on
+    disk and both must land in the same units: "5.1" is 510 centicycles, not
+    51. Padding right (rather than left) is what makes that true, and is the
+    whole reason this is a function instead of a `float(...) * 100` that would
+    also drag in binary-rounding surprises on exactly the values we care about.
+
+    Longer-than-two fractions are truncated rather than rejected: a future
+    kernel printing more precision should not make an older parser refuse the
+    line outright.
+    """
+    digits = (frac or "")[:2].ljust(2, "0")
+    return int(whole) * 100 + int(digits)
+
+
+def parse_canary_trace(text):
+    """Parse the sample list off a CANARY-TRACE line into a list of dicts.
+
+    Each element is `{"pos": <int> or None, "centi": <int>}`, in the order the
+    samples were taken. `pos` is None for a suite endpoint (`end:`), which is
+    not at a suite position -- None rather than a sentinel integer so that no
+    arithmetic can silently treat it as position zero, and so it survives a
+    JSON round-trip as `null`.
+    """
+    samples = []
+    for pos, whole, frac in CANARY_TRACE_SAMPLE_RE.findall(text):
+        samples.append({
+            "pos": None if pos == "end" else int(pos),
+            "centi": _trace_centi(whole, frac),
+        })
+    return samples
+
+
 def parse_canary(path):
     """Extract the contamination canary as a dict, or None.
 
     Keys: `start`, `end`, `pct` always; `min`, `max`, `spread`, `samples`
-    only when the log carries mid-suite sampling.
+    only when the log carries mid-suite sampling; `trace` only when the log
+    carries the per-sample CANARY-TRACE line.
 
     None means the log has no canary at all, in which case contamination is
     *unknown* for that run -- materially different from "known clean", and
     callers must not conflate the two.
 
     The last CANARY line wins, matching `parse_serial`'s last-wins behaviour
-    for SCORE, so a concatenated/replayed log reports its final suite.
+    for SCORE, so a concatenated/replayed log reports its final suite. The
+    trace attaches to the CANARY line it follows rather than being tracked
+    independently: the kernel prints it immediately after, so binding it to
+    the open `result` keeps a suite's trace from ever being stapled onto a
+    later suite that emitted no trace of its own (`samples == 0` suppresses
+    the line entirely).
     """
     result = None
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                match = CANARY_RE.match(line.strip())
+                stripped = line.strip()
+                trace_match = CANARY_TRACE_RE.match(stripped)
+                if trace_match and result is not None:
+                    samples = parse_canary_trace(trace_match.group(1))
+                    if samples:
+                        result["trace"] = samples
+                    continue
+                match = CANARY_RE.match(stripped)
                 if match:
                     (start, end, pct, lo, hi, spread, samples,
                      invalid, lo_centi, hi_centi) = match.groups()
@@ -2905,6 +3018,16 @@ def main(argv=None):
         }
         if splits:
             record["split"] = splits
+        # Suite position, same sibling-map convention, and the one field here
+        # that cannot be reconstructed later: `sort_keys=True` below alphabetises
+        # `entries` on the way to disk, so a record written without this map has
+        # lost its suite order permanently. The 71 records already on disk are
+        # in exactly that state -- which is why this is stored rather than
+        # derived, and why positional analysis can only ever apply to records
+        # written from here on.
+        positions = {n: v[6] for n, v in current_entries.items() if len(v) > 6}
+        if positions:
+            record["positions"] = positions
         # Same append-only reasoning: a sibling key, absent on older records.
         # Recorded even when clean, because a stored verdict with no stored
         # measurement could never be re-judged if the tolerance is retuned --

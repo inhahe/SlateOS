@@ -107,16 +107,16 @@ def test_parse_formats(bh, tmpdir):
                 "random noise\n")
     check("old-format SCORE parses with dispersion absent",
           bh.parse_serial(old),
-          {"page_alloc_free": (14052, 1000, "OVER", None, None, None),
-           "firewall_check": (228, 300, "PASS", None, None, None)})
+          {"page_alloc_free": (14052, 1000, "OVER", None, None, None, 0),
+           "firewall_check": (228, 300, "PASS", None, None, None, 1)})
 
     new = write(tmpdir, "new.txt",
                 "[bench] SCORE page_alloc_free 14052 1000 OVER 20110 1000\n"
                 "[bench] SCORE firewall_check 228 300 PASS 261 2000\n")
     check("new-format SCORE parses mean and iterations",
           bh.parse_serial(new),
-          {"page_alloc_free": (14052, 1000, "OVER", 20110, 1000, None),
-           "firewall_check": (228, 300, "PASS", 261, 2000, None)})
+          {"page_alloc_free": (14052, 1000, "OVER", 20110, 1000, None, 0),
+           "firewall_check": (228, 300, "PASS", 261, 2000, None, 1)})
 
     # A single boot can straddle the change only in a replayed/concatenated
     # log, but the parser should not care which line has the extension.
@@ -125,8 +125,51 @@ def test_parse_formats(bh, tmpdir):
                   "[bench] SCORE b 20 30 PASS\n")
     check("a log mixing both formats parses both",
           bh.parse_serial(mixed),
-          {"a": (10, 1, "OVER", 15, 500, None),
-           "b": (20, 30, "PASS", None, None, None)})
+          {"a": (10, 1, "OVER", 15, 500, None, 0),
+           "b": (20, 30, "PASS", None, None, None, 1)})
+
+
+def test_suite_position_matches_the_canary_axis(bh, tmpdir):
+    """Each entry carries its 0-based SCORE-line ordinal, counted over lines.
+
+    This is the join key between a benchmark and the canary trace, and it only
+    exists while the log is being read in order -- records are written with
+    `sort_keys=True`, which alphabetises `entries` and destroys suite order on
+    the way to disk.
+
+    The duplicate-name case is the one that matters. `record()` on the kernel
+    side pushes a SCORECARD entry *and* ticks `CANARY_SCORED` for every scored
+    benchmark, name collisions included, so the kernel's position axis counts
+    lines. A parser numbering by `len(entries)` would instead count *distinct
+    names* and silently shift every benchmark after a collision one place left
+    of where the sample was actually taken -- an off-by-one that reads as a
+    perfectly plausible integer and would misattribute a contamination spike to
+    its neighbour.
+    """
+    log = write(tmpdir, "positions.txt",
+                "[bench] SCORE first 10 20 PASS 12 500\n"
+                "[bench] this is not a score line\n"
+                "[bench] SCORE second 10 20 PASS 12 500\n"
+                "[bench] SCORE third 10 - TRACK 12 500\n")
+    got = bh.parse_serial(log)
+    check("positions follow SCORE-line order",
+          [got[n][6] for n in ("first", "second", "third")], [0, 1, 2])
+    check("non-SCORE lines do not consume a position",
+          got["second"][6], 1)
+    check("a TRACK line occupies a position like any other",
+          got["third"][6], 2)
+
+    # A repeat of `first` must not renumber what follows it.
+    dup = write(tmpdir, "positions-dup.txt",
+                "[bench] SCORE first 10 20 PASS 12 500\n"
+                "[bench] SCORE second 10 20 PASS 12 500\n"
+                "[bench] SCORE first 11 20 PASS 12 500\n"
+                "[bench] SCORE fourth 10 20 PASS 12 500\n")
+    got = bh.parse_serial(dup)
+    check("a duplicate name takes the later position, last-wins",
+          (got["first"][0], got["first"][6]), (11, 2))
+    check("a duplicate does not shift its successors",
+          got["fourth"][6], 3)
 
 
 def test_parse_split_column(bh, tmpdir):
@@ -290,6 +333,104 @@ def test_canary(bh, tmpdir):
                   "[bench] CANARY 300 900 300\n")
     check("the last canary wins",
           bh.parse_canary(twice), {"start": 300, "end": 900, "pct": 300})
+
+
+def test_canary_trace_parses_and_keeps_its_units(bh, tmpdir):
+    """The per-sample trace parses, and both wire precisions land in one unit.
+
+    The trace is the only record of *where* in the suite the reference cost
+    moved. `min`/`max`/`spread` can say how far it moved and can never say
+    where, yet the two causes of movement have opposite remedies: dear at the
+    same positions across runs is the suite's own cache/TLB residue, dear at
+    differing positions is host load. So the trace has to survive into the
+    record, not just onto the console.
+
+    The units assertion is the one with teeth. The kernel printed tenths
+    before it printed hundredths, so both widths sit in the logs on disk, and
+    "5.1" and "5.10" are the same measurement. A parser that read the fraction
+    as a plain integer would make them 51 and 510 -- a tenfold error, in the
+    quantity a positional correction would multiply by.
+    """
+    log = write(tmpdir, "canary-trace.txt",
+                "[bench] SCORE a 10 1 PASS\n"
+                "[bench] CANARY 5 5 100 5 5 0 13 0 515 517\n"
+                "[bench] CANARY-TRACE 0:5.15 8:5.17 16:5.15 end:5.15\n")
+    got = bh.parse_canary(log)
+    check("the trace is attached to the canary",
+          [s["centi"] for s in (got or {}).get("trace", [])],
+          [515, 517, 515, 515])
+    check("suite positions are kept as integers",
+          [s["pos"] for s in (got or {}).get("trace", [])],
+          [0, 8, 16, None])
+
+    # `end:` is not at a suite position -- it brackets the suite. None rather
+    # than a sentinel integer so no arithmetic can mistake it for position 0,
+    # and so it survives a JSON round-trip as null.
+    check("an endpoint sample has no position",
+          (got or {})["trace"][-1], {"pos": None, "centi": 515})
+
+    # Tenths and hundredths must be the same quantity. Padding right is what
+    # makes that true; padding left (or int(frac)) silently divides by ten.
+    check("a tenths-era trace reads in the same units as a hundredths-era one",
+          [s["centi"] for s in bh.parse_canary_trace(" 0:5.1 8:5.10 16:5")],
+          [510, 510, 500])
+
+    # The real line from build/ab-old-2.log, kept verbatim. It is a genuinely
+    # contaminated run and the reason a *positional* correction is worth
+    # having: a 3.2x spike confined to position 32 and a smaller one at 72,
+    # against a flat ~5.1 everywhere else. Whole-suite `spread` reports one
+    # number for that and cannot tell it from every benchmark being 3x slower.
+    real = ("[bench] CANARY-TRACE 0:5.3 8:5.1 16:5.1 24:5.1 32:16.3 40:5.8 "
+            "48:5.0 56:5.1 64:5.9 72:7.1 80:5.1 end:5.1 end:14.8")
+    samples = bh.parse_canary_trace(real[len("[bench] CANARY-TRACE"):])
+    check("the real 13-sample trace parses whole", len(samples), 13)
+    check("the real trace preserves the isolated spike",
+          max(s["centi"] for s in samples if s["pos"] == 32), 1630)
+    check("and the quiet positions stay quiet",
+          sorted({s["centi"] for s in samples if s["pos"] in (8, 16, 24, 80)}),
+          [510])
+
+
+def test_canary_trace_absence_is_not_an_error(bh, tmpdir):
+    """No trace must read as "not recorded", never as an empty measurement.
+
+    Every one of the 68 canary records already on disk predates this parser,
+    so "absent" is the common case and has to stay distinguishable from "the
+    trace was taken and was empty". The kernel suppresses the line entirely
+    when `samples == 0`, which is exactly when a reader must not conclude the
+    host was quiet.
+    """
+    plain = write(tmpdir, "canary-no-trace.txt",
+                  "[bench] CANARY 283 275 97 271 279 2 9\n")
+    check("a canary without a trace has no trace key",
+          "trace" in (bh.parse_canary(plain) or {}), False)
+
+    # A trace with no samples must not create the key either -- an empty list
+    # would read as a completed measurement that found nothing.
+    check("an empty trace line does not create the key",
+          "trace" in (bh.parse_canary(write(
+              tmpdir, "canary-empty-trace.txt",
+              "[bench] CANARY 283 275 97 271 279 2 9\n"
+              "[bench] CANARY-TRACE\n")) or {}), False)
+
+    # A trace belongs to the CANARY line it follows. Two suites in one log,
+    # the second emitting no trace: the first suite's trace must not be
+    # stapled onto the second suite's record, which is what tracking the
+    # "last trace seen" independently of the last canary would do.
+    twice = write(tmpdir, "canary-trace-twice.txt",
+                  "[bench] CANARY 100 100 100 100 100 0 9\n"
+                  "[bench] CANARY-TRACE 0:9.99 8:9.99\n"
+                  "[bench] CANARY 300 900 300\n")
+    got = bh.parse_canary(twice)
+    check("the last canary still wins", (got or {}).get("start"), 300)
+    check("and it does not inherit the earlier suite's trace",
+          "trace" in (got or {}), False)
+
+    # A trace arriving before any canary has nothing to attach to and must be
+    # dropped rather than crashing or inventing a record.
+    check("a trace with no canary at all yields no canary",
+          bh.parse_canary(write(tmpdir, "canary-orphan-trace.txt",
+                                "[bench] CANARY-TRACE 0:5.15\n")), None)
 
 
 def test_canary_broken_is_not_contamination(bh, tmpdir):

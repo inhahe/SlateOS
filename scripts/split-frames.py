@@ -337,6 +337,27 @@ def find_cases(
     return cases, skipped
 
 
+def _last_open_brace(
+    lines: list[str], code: bytearray, starts: list[int], idx: int
+) -> int:
+    """Character offset of the last *real* `{` on line `idx`.
+
+    A `{` the scanner swallowed as part of a literal or comment is not a
+    brace, so the mask decides which one counts.
+    """
+    line, base = lines[idx], starts[idx]
+    return base + max(k for k in range(len(line)) if line[k] == "{" and code[base + k])
+
+
+def _masked(text: str, code: bytearray, lo: int, hi: int) -> str:
+    """`text[lo:hi]` with comments and literals blanked to spaces.
+
+    Offsets are preserved, so a match position in the result is a position in
+    the original.
+    """
+    return "".join(text[k] if code[k] else " " for k in range(lo, hi))
+
+
 def _depth_inside(
     lines: list[str],
     depth: list[int],
@@ -349,17 +370,13 @@ def _depth_inside(
     Taken from the scanner rather than by counting `{` textually, so a brace in
     a string on that line cannot throw it off.
     """
-    line, base = lines[idx], starts[idx]
     # Depth is recorded *before* each char, so just inside the line's last `{`
-    # it is one deeper.  A `{` that the scanner swallowed as part of a literal
-    # or comment carries the depth of its surroundings, so taking the last one
-    # is only correct if it is real -- assert that it is.
-    pos = max(k for k in range(len(line)) if line[k] == "{" and code[base + k])
-    nxt = base + pos + 1
-    assert depth[nxt] == depth[base + pos] + 1, (
+    # it is one deeper.
+    pos = _last_open_brace(lines, code, starts, idx)
+    assert depth[pos + 1] == depth[pos] + 1, (
         f"line {idx + 1}: the last `{{` is inside a literal or comment"
     )
-    return depth[nxt]
+    return depth[pos + 1]
 
 
 def _matching_close(
@@ -380,17 +397,22 @@ def _matching_close(
     """
     if text is not None:
         assert code is not None
-        base = starts[open_idx]
-        line = lines[open_idx]
-        pos = max(k for k in range(len(line)) if line[k] == "{" and code[base + k])
-        for k in range(base + pos + 1, len(text)):
-            if code[k] and text[k] == "}" and depth[k] == inner:
-                return _line_of(starts, k)
-        raise AssertionError(f"no close for the block opened at line {open_idx + 1}")
+        pos = _last_open_brace(lines, code, starts, open_idx)
+        return _line_of(starts, _close_off(text, code, depth, pos, inner))
     for j in range(open_idx + 1, len(lines)):
         if lines[j].strip() == "}" and depth[starts[j]] == inner:
             return j
     raise AssertionError(f"no close for the block opened at line {open_idx + 1}")
+
+
+def _close_off(
+    text: str, code: bytearray, depth: list[int], open_off: int, inner: int
+) -> int:
+    """Character offset of the `}` closing the `{` at `open_off`."""
+    for k in range(open_off + 1, len(text)):
+        if code[k] and text[k] == "}" and depth[k] == inner:
+            return k
+    raise AssertionError(f"no close for the `{{` at offset {open_off}")
 
 
 def _line_of(starts: list[int], off: int) -> int:
@@ -431,13 +453,127 @@ def _is_statement_block(
     """
     if lines[close_idx].strip() != "}":
         return False
-    base = starts[open_idx]
-    line = lines[open_idx]
-    pos = max(k for k in range(len(line)) if line[k] == "{" and code[base + k])
-    for k in range(base + pos - 1, -1, -1):
+    pos = _last_open_brace(lines, code, starts, open_idx)
+    for k in range(pos - 1, -1, -1):
         if code[k] and not text[k].isspace():
             return text[k] in ";{}"
     return False
+
+
+def find_match(
+    lines: list[str],
+    depth: list[int],
+    code: bytearray,
+    starts: list[int],
+    text: str,
+    open_idx: int,
+    close_idx: int,
+    inner: int,
+) -> tuple[int, int]:
+    """The body's trailing `match`, as `(open line, close line)`.
+
+    "Trailing" is not a stylistic preference, it is the whole safety argument
+    for `--arms`.  A dispatcher's arms are full of bare `return;` -- the usual
+    way to reject bad arguments -- and moving one into a nested `fn` turns
+    "leave the command" into "leave this case".  Those are the same thing
+    exactly when the match is the last statement of the function, because then
+    there is nothing after the case for control to fall back into.  So the
+    match is required to be last, and the check is on characters, not lines: a
+    single statement after it would make every `return` in every arm a silent
+    behaviour change.
+    """
+    hits = [
+        i
+        for i in range(open_idx + 1, close_idx)
+        if depth[starts[i]] == inner
+        and _masked(text, code, starts[i], starts[i + 1] - 1).strip().startswith("match")
+        and lines[i].rstrip().endswith("{")
+    ]
+    assert hits, (
+        "no `match ... {` at the top level of this function body; --arms only "
+        "handles a function whose whole body is one dispatching match"
+    )
+    m_open = hits[-1]
+    m_close = _matching_close(lines, depth, starts, m_open, inner + 1, text, code)
+    after = _close_off(
+        text, code, depth, _last_open_brace(lines, code, starts, m_open), inner + 1
+    )
+    tail = _masked(text, code, after + 1, starts[close_idx]).strip().strip(";")
+    assert not tail, (
+        f"line {m_close + 1}: the match is not the last statement of "
+        f"`{lines[open_idx].strip()}` -- {tail[:60]!r} follows it, so a "
+        f"`return` inside an arm would change meaning; split this by hand"
+    )
+    return m_open, m_close
+
+
+def find_arm_cases(
+    lines: list[str],
+    depth: list[int],
+    code: bytearray,
+    starts: list[int],
+    text: str,
+    m_open: int,
+    m_close: int,
+    arm_depth: int,
+) -> tuple[list[tuple[int, int]], int]:
+    """Arms of the match at `m_open` whose body is a brace block.
+
+    Found by walking to each `=>` that sits at the arm level -- nested matches
+    put theirs deeper, so the depth test alone separates them -- and taking the
+    next code character.  An arm whose body is an expression (`_ => println!(..)`)
+    or another match (`"test" => match f() { .. }`) has no block to move and is
+    counted as skipped rather than mangled.
+
+    Unlike a bare statement block, an arm's braces are *not* regenerated: the
+    `"inspect" =>` that precedes the `{`, and the `,` that may follow the `}`,
+    are part of the match and must survive verbatim.  So an arm is only usable
+    when its `{` ends its line and its `}` owns one, which is what rustfmt
+    produces for any arm big enough to be worth splitting.
+    """
+    cases: list[tuple[int, int]] = []
+    skipped = 0
+    k = _last_open_brace(lines, code, starts, m_open) + 1
+    hi = starts[m_close]
+    while k < hi:
+        if not (code[k] and text[k] == "=" and text[k + 1 : k + 2] == ">"):
+            k += 1
+            continue
+        if depth[k] != arm_depth:
+            k += 1
+            continue
+        j = k + 2
+        while j < hi and not (code[j] and not text[j].isspace()):
+            j += 1
+        if j >= hi or text[j] != "{":
+            skipped += 1
+            k = j
+            continue
+        c = _close_off(text, code, depth, j, arm_depth + 1)
+        o_line, c_line = _line_of(starts, j), _line_of(starts, c)
+        if _arm_block_ok(lines, code, starts, text, j, o_line, c_line):
+            cases.append((o_line, c_line))
+        else:
+            skipped += 1
+        k = c + 1
+    return cases, skipped
+
+
+def _arm_block_ok(
+    lines: list[str],
+    code: bytearray,
+    starts: list[int],
+    text: str,
+    open_off: int,
+    o_line: int,
+    c_line: int,
+) -> bool:
+    """Can this arm's block be wrapped without touching its own braces?"""
+    if c_line <= o_line:
+        return False
+    if lines[c_line].strip() not in ("}", "},"):
+        return False
+    return not _masked(text, code, open_off + 1, starts[o_line + 1] - 1).strip()
 
 
 def _needs_result(text: str, code: bytearray, lo: int, hi: int) -> bool:
@@ -454,7 +590,7 @@ def _needs_result(text: str, code: bytearray, lo: int, hi: int) -> bool:
     false positive merely reproduces today's warning; a false negative is a
     compile error the build catches immediately.
     """
-    masked = "".join(text[k] if code[k] else " " for k in range(lo, hi))
+    masked = _masked(text, code, lo, hi)
     return "?" in masked or RETURN_RE.search(masked) is not None
 
 
@@ -474,7 +610,7 @@ def _check_returns(
     A `return` inside a closure nested in the case is caught too, even though it
     is harmless.  Declining to split is cheap; being subtly wrong is not.
     """
-    masked = "".join(text[k] if code[k] else " " for k in range(lo, hi))
+    masked = _masked(text, code, lo, hi)
     m = RETURN_NOT_ERR.search(masked)
     assert m is None, (
         f"line {_line_of(starts, lo + m.start()) + 1}: a case contains a "
@@ -488,8 +624,8 @@ def _used_params(
     code: bytearray,
     lo: int,
     hi: int,
-    params: list[tuple[str, str]],
-) -> list[tuple[str, str]]:
+    params: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
     """Which declared fixtures this case actually mentions.
 
     Passing every fixture to every case would earn an `unused_variables`
@@ -498,35 +634,61 @@ def _used_params(
     because the compiler is: a fixture this misses is still `E0434`, and one it
     adds spuriously is still an unused-variable warning.
     """
-    masked = "".join(text[k] if code[k] else " " for k in range(lo, hi))
+    masked = _masked(text, code, lo, hi)
     return [p for p in params if re.search(rf"\b{re.escape(p[0])}\b", masked)]
 
 
 def rewrite(
-    text: str, fn_name: str, params: list[tuple[str, str]] | None = None
+    text: str,
+    fn_name: str,
+    params: list[tuple[str, ...]] | None = None,
+    arms: bool = False,
 ) -> tuple[str, list[tuple[int, int]]]:
-    params = params or []
+    # A fixture's call expression defaults to its own name; `--param` lets it
+    # differ, so a `Vec` local can be handed to a `&[T]` parameter.
+    params = [(p[0], p[1], p[2] if len(p) > 2 else p[0]) for p in (params or [])]
     assert "\r\n" not in text, "file has CRLF; this transformer assumes LF"
     lines = text.split("\n")
     starts = line_starts(lines)
     depth, code, lits = scan(text)
 
     fn_idx = find_fn(lines, fn_name)
-    sig = " ".join(lines[fn_idx : fn_idx + 3])
-    assert "KernelResult<()>" in sig, (
-        f"`fn {fn_name}` does not return KernelResult<()>; this transformer only "
-        f"handles that signature (see the module docstring)"
-    )
+    b_open = body_open(lines, fn_idx)
+    sig = " ".join(lines[fn_idx : b_open + 1])
 
-    open_idx = container(lines, depth, code, starts, body_open(lines, fn_idx), text)
-    inner = _depth_inside(lines, depth, code, starts, open_idx)
-    close_idx = _matching_close(lines, depth, starts, open_idx, inner, text, code)
+    if arms:
+        # Every arm keeps its own `return;`, so the cases must be infallible and
+        # the function must return unit -- see `find_match` for why that is the
+        # condition rather than a preference.
+        assert "->" not in sig, (
+            f"`fn {fn_name}` returns a value; --arms only handles a unit "
+            f"function, because it relies on `return;` inside an arm meaning "
+            f"the same thing after the arm becomes a call"
+        )
+        inner = _depth_inside(lines, depth, code, starts, b_open)
+        close_idx = _matching_close(lines, depth, starts, b_open, inner, text, code)
+        m_open, m_close = find_match(
+            lines, depth, code, starts, text, b_open, close_idx, inner
+        )
+        cases, skipped = find_arm_cases(
+            lines, depth, code, starts, text, m_open, m_close, inner + 1
+        )
+        noun = "arm whose body is not a block on its own lines"
+    else:
+        assert "KernelResult<()>" in sig, (
+            f"`fn {fn_name}` does not return KernelResult<()>; this transformer "
+            f"only handles that signature (see the module docstring)"
+        )
+        open_idx = container(lines, depth, code, starts, b_open, text)
+        inner = _depth_inside(lines, depth, code, starts, open_idx)
+        close_idx = _matching_close(lines, depth, starts, open_idx, inner, text, code)
+        cases, skipped = find_cases(
+            lines, depth, code, starts, text, open_idx, close_idx, inner
+        )
+        noun = "`{` that is not a bare statement block"
 
-    cases, skipped = find_cases(
-        lines, depth, code, starts, text, open_idx, close_idx, inner
-    )
     if skipped:
-        print(f"  note: skipped {skipped} `{{` that is not a bare statement block")
+        print(f"  note: skipped {skipped} {noun}")
     if not cases:
         return text, []
 
@@ -548,10 +710,6 @@ def rewrite(
                     f"offset {a}: {span[:80]!r}"
                 )
 
-    first = lines[cases[0][0]]
-    pad = first[: len(first) - len(first.lstrip())]  # the `{`'s own indent
-    inner_pad = pad + "    "
-
     out: list[str] = []
     case_at = {o: c for o, c in cases}
     expect = 0
@@ -559,13 +717,23 @@ def rewrite(
     while i < len(lines):
         if i in case_at:
             c = case_at[i]
-            _check_returns(text, code, starts, starts[i + 1], starts[c])
-            fallible = _needs_result(text, code, starts[i + 1], starts[c])
+            head = lines[i]
+            pad = head[: len(head) - len(head.lstrip())]  # the `{`'s own indent
+            inner_pad = pad + "    "
+            if arms:
+                # `return;` stays a `return;`, and the tail-position check in
+                # `find_match` is what makes that faithful.
+                fallible = False
+            else:
+                _check_returns(text, code, starts, starts[i + 1], starts[c])
+                fallible = _needs_result(text, code, starts[i + 1], starts[c])
             take = _used_params(text, code, starts[i + 1], starts[c], params)
-            decl = ", ".join(f"{n}: {t}" for n, t in take)
-            pass_ = ", ".join(n for n, _ in take)
+            decl = ", ".join(f"{n}: {t}" for n, t, _ in take)
+            pass_ = ", ".join(e for _, _, e in take)
             ret = f" -> {RET_TYPE}" if fallible else ""
-            out.append(f"{pad}{{")
+            # An arm's own braces carry the `pat =>` and the trailing `,`, so
+            # they are kept verbatim; a bare statement block's are regenerated.
+            out.append(head if arms else f"{pad}{{")
             out.append(f"{inner_pad}#[inline(never)]")
             out.append(f"{inner_pad}fn case({decl}){ret} {{")
             for b in lines[i + 1 : c]:
@@ -574,7 +742,7 @@ def rewrite(
                 out.append(f"{inner_pad}    Ok(())")
             out.append(f"{inner_pad}}}")
             out.append(f"{inner_pad}case({pass_}){'?' if fallible else ''};")
-            out.append(f"{pad}}}")
+            out.append(lines[c] if arms else f"{pad}}}")
             # Fallible: 2 fn-header lines + `Ok(())` + the fn close + the call
             # = 5.  Infallible: the same without the `Ok(())` = 4.
             expect += 5 if fallible else 4
@@ -597,11 +765,11 @@ def rewrite(
 # `git show HEAD:...` and diffing against the working tree -- only holds until
 # the rewrite is committed, and stops being a test the moment it is.
 # --------------------------------------------------------------------------
-CASES: list[tuple[str, str, str, list[tuple[str, str]]]] = []
+CASES: list[tuple[str, str, str, list[tuple[str, ...]], bool]] = []
 
 
-def _case(name: str, src: str, want, params=()) -> None:
-    CASES.append((name, src, want, list(params)))
+def _case(name: str, src: str, want, params=(), arms: bool = False) -> None:
+    CASES.append((name, src, want, list(params), arms))
 
 
 _case(
@@ -924,12 +1092,113 @@ _case(
 )
 
 
+_case(
+    # `kshell::cmd_oci`: the dispatcher shape.  The arm's own braces carry
+    # `"inspect" =>` and a trailing `,`, so they are kept rather than
+    # regenerated, and the shared `parts` is threaded in with a call expression
+    # that differs from the parameter name (`&parts` for a `Vec`).
+    "match arms become cases, braces and commas intact",
+    """fn self_test(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "inspect" => {
+            let Some(dir) = parts.get(1) else {
+                println!("usage");
+                return;
+            };
+            show(dir);
+        }
+        "test" => match run() {
+            Ok(()) => println!("ok"),
+            Err(e) => println!("{:?}", e),
+        },
+        _ => {
+            println!("unknown");
+        }
+    }
+}
+""",
+    """fn self_test(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    match parts.first().copied().unwrap_or("") {
+        "inspect" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let Some(dir) = parts.get(1) else {
+                    println!("usage");
+                    return;
+                };
+                show(dir);
+            }
+            case(&parts);
+        }
+        "test" => match run() {
+            Ok(()) => println!("ok"),
+            Err(e) => println!("{:?}", e),
+        },
+        _ => {
+            #[inline(never)]
+            fn case() {
+                println!("unknown");
+            }
+            case();
+        }
+    }
+}
+""",
+    [("parts", "&[&str]", "&parts")],
+    arms=True,
+)
+
+_case(
+    # The safety condition, and the only one that cannot be delegated to the
+    # compiler: a statement after the match means an arm's `return;` skips it,
+    # while `case(); ` would not.
+    "a match that is not the last statement is refused",
+    """fn self_test(args: &str) {
+    match args {
+        "a" => {
+            return;
+        }
+        _ => {
+            println!("b");
+        }
+    }
+    println!("done");
+}
+""",
+    AssertionError,
+    arms=True,
+)
+
+_case(
+    # A dispatcher that returns a value cannot use this shape at all: `return x`
+    # inside an arm would return from the case, not the command.
+    "--arms refuses a function that returns a value",
+    """fn self_test(args: &str) -> u32 {
+    match args {
+        "a" => {
+            return 1;
+        }
+        _ => {
+            return 0;
+        }
+    }
+}
+""",
+    AssertionError,
+    arms=True,
+)
+
+
 def self_check() -> int:
     """Run the regression suite.  Returns 0 iff every case behaves."""
     failed = 0
-    for name, src, want, params in CASES:
+    for name, src, want, params, arms in CASES:
         try:
-            got, cases = rewrite(src, "self_test", params)
+            got, cases = rewrite(src, "self_test", params, arms)
         except AssertionError as exc:
             if want is AssertionError:
                 print(f"ok   {name} (refused: {exc})")
@@ -976,13 +1245,24 @@ def main() -> int:
         "--param",
         action="append",
         default=[],
-        metavar="NAME:TYPE",
+        metavar="NAME[=EXPR]:TYPE",
         help="pass an outer local into each case that names it, e.g. "
         "--param u32_ptr:u64 (repeatable). Use this for a fixture the cases "
         "share; a nested `fn` cannot capture, so without it such a case is "
-        "E0434. Pass cheap handles only -- a fixture passed by value is "
-        "copied into the case frame, which is the cost this tool exists to "
-        "remove.",
+        "E0434. EXPR overrides what the call passes, for when the parameter "
+        "type is not the local's -- `--param parts=&parts:&[&str]` hands a "
+        "`Vec<&str>` to a slice parameter. Pass cheap handles only: a fixture "
+        "passed by value is copied into the case frame, which is the cost "
+        "this tool exists to remove.",
+    )
+    ap.add_argument(
+        "--arms",
+        action="store_true",
+        help="split the arms of the function's trailing `match` instead of "
+        "bare statement blocks -- the shape of every kshell dispatcher. Only "
+        "for a function returning unit whose match is its last statement; "
+        "both are checked, because they are what make an arm's `return;` "
+        "still mean `return;` once the arm is a call.",
     )
     ap.add_argument(
         "--dry-run",
@@ -1003,16 +1283,21 @@ def main() -> int:
 
     params = []
     for p in args.param:
-        name, sep, ty = p.partition(":")
+        # The name never contains a colon and the type routinely does
+        # (`crate::error::E`), so the first colon is the split -- and `=`, if
+        # present, precedes it.
+        head, sep, ty = p.partition(":")
+        name, _, expr = head.partition("=")
         if not sep or not name.strip() or not ty.strip():
-            ap.error(f"--param wants NAME:TYPE, got {p!r}")
-        params.append((name.strip(), ty.strip()))
+            ap.error(f"--param wants NAME[=EXPR]:TYPE, got {p!r}")
+        params.append((name.strip(), ty.strip(), (expr or name).strip()))
 
     with io.open(args.file, encoding="utf-8", newline="") as f:
         text = f.read()
-    out, cases = rewrite(text, args.fn_name, params)
+    out, cases = rewrite(text, args.fn_name, params, args.arms)
     if not cases:
-        print(f"{args.fn_name}: no bare sibling case blocks found; nothing to do")
+        what = "match arms with block bodies" if args.arms else "bare sibling blocks"
+        print(f"{args.fn_name}: no {what} found; nothing to do")
         return 0
     span = sum(c - o + 1 for o, c in cases)
     grew = len(out.split("\n")) - len(text.split("\n"))

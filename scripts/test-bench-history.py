@@ -2278,7 +2278,8 @@ def test_hot_symbols_ignore_unrelated_compress_functions(bh, tmpdir):
         ("_ZN6kernel2fs9fcompress13compress_data17habcdE", 0x3333),
     ])
     got = bh.elf_symbol_addresses(elf)
-    check("unrelated compress symbols are not reported", got, {})
+    check("unrelated compress symbols are not reported",
+          {k: v for k, v in got.items() if v is not None}, {})
 
 
 def test_hot_symbols_prefer_the_function_over_a_wrapper(bh, tmpdir):
@@ -2306,7 +2307,8 @@ def test_hot_symbols_skip_undefined_symbols(bh, tmpdir):
         ("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress", 0),
     ])
     got = bh.elf_symbol_addresses(elf)
-    check("an undefined symbol contributes no address", got, {})
+    check("an undefined symbol contributes no address",
+          {k: v for k, v in got.items() if v is not None}, {})
 
 
 def test_hot_symbols_degrade_quietly_on_bad_input(bh, tmpdir):
@@ -2449,16 +2451,44 @@ def test_hot_symbols_absent_and_empty_mean_different_things(bh, tmpdir):
     blank = _synth_elf(os.path.join(tmpdir, "blank.elf"),
                        [("_ZN6kernel2mm5alloc17habcE", 0x2000)])
     looked = run(["--kernel-elf", blank], "blank.jsonl")
-    check("an ELF with none of the hot functions records an empty map",
-          looked.get("hot_symbols"), {})
+    check("an ELF with none of the hot functions names them all as null",
+          looked.get("hot_symbols"),
+          {k: None for k in bh.HOT_SYMBOLS})
 
     real = _synth_elf(os.path.join(tmpdir, "real.elf"),
                       [("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress",
                         0xffffffff80afce00)])
     found = run(["--kernel-elf", real], "real.jsonl")
+    expected = {k: None for k in bh.HOT_SYMBOLS}
+    expected["crypto::compress"] = "0xffffffff80afce00"
     check("the address reaches the history record",
-          found.get("hot_symbols"),
-          {"crypto::compress": "0xffffffff80afce00"})
+          found.get("hot_symbols"), expected)
+
+
+def test_hot_symbols_report_a_stale_pattern_as_null_not_absence(bh, tmpdir):
+    """A pattern that stops matching must be visible, not silently dropped.
+
+    `HOT_SYMBOLS` keys on the length-prefixed module path, so moving
+    `crypto::compress` into the shared `sha2` crate turns `6crypto8compress`
+    into `4sha28compress` and the pattern matches nothing. Dropping the key on a
+    miss would hide that -- and hide it at the worst moment, since the very
+    change that breaks the pattern is the one that relocates the function and so
+    is the most likely to swing the benchmark.
+    """
+    moved = _synth_elf(os.path.join(tmpdir, "moved.elf"), [
+        # What the symbol becomes after the sha2 adoption.
+        ("_RNvNtCsjQArNW8oxTF_4sha28compress", 0xffffffff80364980),
+    ])
+    got = bh.elf_symbol_addresses(moved)
+    check("the relocated function no longer matches the old pattern",
+          got.get("crypto::compress"), None)
+    check("...but the key is still there, so the miss is legible",
+          "crypto::compress" in got, True)
+
+    # An unparseable binary says nothing at all, and must not be confused with
+    # a binary that said "this symbol is gone".
+    check("a binary that told us nothing is empty, not all-null",
+          bh.elf_symbol_addresses(os.path.join(tmpdir, "absent.elf")), {})
 
 
 def main():

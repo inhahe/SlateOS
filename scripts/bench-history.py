@@ -229,6 +229,12 @@ def elf_symbol_addresses(path, wanted=HOT_SYMBOLS):
     Returns `{}` -- never raises -- if the file is missing, is not ELF64, or has
     been stripped.  This is bookkeeping attached to a benchmark record; it must
     never be the reason a completed measurement fails to be written.
+
+    On a file that *did* parse, every key of `wanted` is present, mapped to
+    `None` where the pattern matched no symbol.  So `{}` means "this binary told
+    us nothing" while a `null` value means "we looked for this one and it is not
+    there any more" -- most likely because it moved module and the pattern needs
+    updating.  The two must stay distinguishable; see the comment at the return.
     """
     try:
         with open(path, "rb") as fh:
@@ -281,7 +287,19 @@ def elf_symbol_addresses(path, wanted=HOT_SYMBOLS):
                     prev = best.get(friendly)
                     if prev is None or len(name) < prev[0]:
                         best[friendly] = (len(name), value)
-        return {k: f"{v[1]:#018x}" for k, v in sorted(best.items())}
+        # Every wanted name is present, `null` where the pattern matched
+        # nothing. A pattern goes stale when its function moves module -- and
+        # the obvious next move, `crypto::compress` into the shared `sha2`
+        # crate, would do exactly that, turning `6crypto8compress` into
+        # `4sha28compress`. Dropping the key on a miss would make that failure
+        # silent, and silent in the worst possible way: the diagnostic would
+        # disappear at the moment it is most needed, because the very change
+        # that broke the pattern is the one that relocates the function.
+        return {
+            friendly: (f"{best[friendly][1]:#018x}" if friendly in best
+                       else None)
+            for friendly in sorted(wanted)
+        }
     except (struct.error, IndexError, ValueError):
         return {}
 

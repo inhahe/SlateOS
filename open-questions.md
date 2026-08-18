@@ -904,6 +904,59 @@ That is the operator's decision, not mine. Related: Q49 (modern AMD),
 
 ---
 
+## B-Q3 — [B] Passwords set before today cannot be checked, because the three programs that store them each scrambled them differently. They now fail closed — an administrator must reset them. Accept that, or let those users in one last time? — Status: OPEN
+
+**In short:** The file that stores users' passwords, `/etc/shadow`, was being
+written by three different programs that disagreed about *how* to scramble a
+password before storing it — so a password set with `passwd` could not be used
+to log in at all. That is fixed: all three now use one shared implementation.
+The leftover question is what to do with the entries written by the old, broken
+code. Right now they are refused: those users cannot log in until root runs
+`passwd <username>` for them, and `login` prints a message saying exactly that.
+The alternative is to let `login` accept the old entry one final time and
+quietly rewrite it in the correct format as the user logs in. **This only
+matters for test accounts on a development machine — nothing has shipped.**
+
+**Terms:**
+
+- **Hashing a password** — running it through a one-way scramble, so the file
+  stores something nobody can reverse back into the password.
+- **`/etc/shadow`** — the file holding one scrambled password per user. Only
+  root can read it.
+- **Failing closed** — when the system cannot tell whether a password is right,
+  it answers "no" rather than "yes".
+
+**How we can tell the bad entries apart, with certainty.** This is what makes
+the question a small one: there is no guessing involved. A correct entry's
+scrambled part is always exactly 22, 43 or 86 characters, depending on the
+method. Every entry the old code wrote is exactly 64 characters, and drawn from
+a different alphabet. The two populations do not overlap, so nothing correct can
+ever be mistaken for broken, or the reverse.
+
+| Option | *What changes:* | Cost |
+|---|---|---|
+| **A. Fail closed** *(implemented)* | A user with an old entry types the right password and is still refused; the screen says to run `passwd <user>` as root. | Someone must run one command per affected account. |
+| B. Accept once, then rewrite | That user logs in normally and never notices; their entry is silently corrected on the way through. | `login` keeps code that treats a known non-hash as if it were a password check, in the one place in the system where a wrong answer is a break-in. It also has to rewrite `/etc/shadow` while running as root before dropping privileges — and a rewrite interrupted by power loss damages the file that gates every login. |
+| C. Offline converter | Neither — an administrator runs a separate tool once, with nobody logged in, which rewrites the old entries. | Only viable if the old scramble were reversible enough to re-derive the hash, which it is not: the original passwords are unrecoverable, so this tool could only *blank* the entries, which is option A with extra steps. |
+
+**Recommendation: keep A.** B's only benefit is saving a `passwd` command, and
+it buys that by keeping dead authentication code alive and adding a file rewrite
+inside the login path. C cannot actually work, and is listed only so the option
+is visibly ruled out rather than overlooked.
+
+**If this is never answered:** nothing gets worse and nothing is blocked. A is
+already in place and is the safe direction — the failure mode is "a developer
+has to reset a test password", not "someone gets in who should not". Answer it
+only if you would rather not reset those accounts.
+
+Recorded as `design-decisions.md` §329, which also covers the layering choice
+(the three tools now depend on the `posix` crate for `crypt(3)`, as real Unix
+tools depend on libc) and two authentication bypasses found in `login` while
+fixing this.
+
+
+---
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

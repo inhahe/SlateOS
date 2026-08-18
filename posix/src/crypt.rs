@@ -564,6 +564,238 @@ pub extern "C" fn setkey(key: *const u8) {
 }
 
 // ---------------------------------------------------------------------------
+// Safe Rust API
+// ---------------------------------------------------------------------------
+//
+// `crypt()` above is the C ABI: raw pointers, a NUL terminator, and a
+// process-global static buffer that the next call overwrites.  Each of those
+// is a hazard for a Rust caller, and the callers that matter most are Rust:
+// `passwd`, `chpasswd` and `login` all write and read the same
+// `/etc/shadow`.  Before this existed all three hashed passwords themselves
+// rather than reach through the C signature, and all three got it wrong in
+// different ways — one invented a `$sha256$` format, two computed a made-up
+// mixing function with no work factor, and one of those labelled the result
+// `$5$`, which is the standard identifier for SHA-256 crypt.
+//
+// So the functions below are not a convenience wrapper; they are the
+// interface the shadow-file tools were missing.  They are reentrant (the
+// result lands in the caller's buffer), they cannot be called with a
+// mismatched key/salt pointer, and `verify` removes the last thing a caller
+// could still do by hand: choose which slice of the stored entry to compare.
+
+/// The size of the scratch buffer the safe API writes into.
+pub const BUF_LEN: usize = CRYPT_OUTPUT_LEN;
+
+/// Scratch space for one crypt result.  See [`buf`].
+pub type HashBuf = [u8; BUF_LEN];
+
+/// A zeroed [`HashBuf`], for callers that would rather not name the size.
+#[must_use]
+pub fn buf() -> HashBuf {
+    [0u8; BUF_LEN]
+}
+
+/// A password-hashing method, for building the setting of a *new* password.
+///
+/// Verification never needs this: a stored hash names its own method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    /// `$1$` — MD5 crypt.  Cryptographically broken; supported so existing
+    /// entries can still be verified, never to be chosen for a new password.
+    Md5,
+    /// `$5$` — SHA-256 crypt.
+    Sha256,
+    /// `$6$` — SHA-512 crypt.  The shadow-suite default, and ours.
+    Sha512,
+}
+
+impl Method {
+    /// The crypt(3) identifier that names this method in `/etc/shadow`.
+    #[must_use]
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Self::Md5 => "$1$",
+            Self::Sha256 => "$5$",
+            Self::Sha512 => "$6$",
+        }
+    }
+
+    /// How many crypt-base-64 characters this method's hash field holds.
+    ///
+    /// A fixed number, because the digest is a fixed size: 16 bytes for MD5
+    /// (22 characters), 32 for SHA-256 (43), 64 for SHA-512 (86).  This is
+    /// what [`stored_method`] checks, and it is how an entry this tree wrote
+    /// before the safe API existed — 64 *hex* digits under a `$5$` label —
+    /// is told apart from a genuine one, with no ambiguity in either
+    /// direction.
+    #[must_use]
+    pub fn hash_len(self) -> usize {
+        match self {
+            Self::Md5 => 22,
+            Self::Sha256 => 43,
+            Self::Sha512 => 86,
+        }
+    }
+
+    /// The longest salt this method uses.  A longer one is truncated when
+    /// hashing, so an entry carrying one can never be reproduced.
+    #[must_use]
+    pub fn salt_max(self) -> usize {
+        match self {
+            Self::Md5 => MD5_SALT_MAX,
+            Self::Sha256 | Self::Sha512 => SALT_MAX,
+        }
+    }
+
+    /// The method named by a `$N$` prefix, if it is one we implement.
+    fn from_prefix(setting: &[u8]) -> Option<Self> {
+        match setting.get(..3)? {
+            b"$1$" => Some(Self::Md5),
+            b"$5$" => Some(Self::Sha256),
+            b"$6$" => Some(Self::Sha512),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `b` is a character of the crypt base-64 alphabet.
+fn is_b64(b: u8) -> bool {
+    b == b'.' || b == b'/' || b.is_ascii_digit() || b.is_ascii_alphabetic()
+}
+
+/// Shared body of [`hash_into`] and [`verify`]: run the crypt and copy the
+/// result into `out` *without* its NUL terminator, returning its length.
+fn compute_into(key: &[u8], setting: &[u8], out: &mut HashBuf) -> Option<usize> {
+    let mut ob = OutBuf::new();
+    if !compute_crypt(key, setting, &mut ob) || ob.overflow {
+        return None;
+    }
+    // `compute_crypt` NUL-terminates for the C API's benefit; the Rust API
+    // reports a length instead, so the terminator is dropped here rather
+    // than left for every caller to remember to strip.
+    let len = ob.len.checked_sub(1)?;
+    out.get_mut(..len)?.copy_from_slice(ob.buf.get(..len)?);
+    Some(len)
+}
+
+/// Hash `key` under `setting`, writing the crypt string into `out`.
+///
+/// The safe equivalent of [`crypt`]: the same settings (`$1$`, `$5$`, `$6$`,
+/// with an optional `rounds=N$`) and the same output, but reentrant — the
+/// result lands in the caller's buffer, so a call on another thread cannot
+/// replace it between it being computed and being read.
+///
+/// `setting` may be a bare `"$6$<salt>$"` (see [`setting_into`]) or a whole
+/// stored hash, since the salt is read up to the first `$` either way.
+///
+/// Returns `None` if `setting` selects no method we implement, if the result
+/// would not fit, or if the result is not valid UTF-8 — which can only
+/// happen when `setting` carries a non-ASCII salt, and which anything about
+/// to write `/etc/shadow` wants rejected rather than stored.  Use [`verify`]
+/// to check an existing entry; it works on bytes and so is unaffected.
+pub fn hash_into<'o>(key: &[u8], setting: &[u8], out: &'o mut HashBuf) -> Option<&'o str> {
+    let n = compute_into(key, setting, out)?;
+    core::str::from_utf8(out.get(..n)?).ok()
+}
+
+/// Assemble a setting for a *new* password: `"$N$<salt>$"`.
+///
+/// Rejects a salt that is empty, longer than the method uses (a truncated
+/// salt means the entry written is not the entry that was asked for), or
+/// that holds anything outside the crypt base-64 alphabet — `$` above all,
+/// which would silently end the salt early.
+pub fn setting_into<'o>(method: Method, salt: &[u8], out: &'o mut HashBuf) -> Option<&'o str> {
+    if salt.is_empty() || salt.len() > method.salt_max() || !salt.iter().copied().all(is_b64) {
+        return None;
+    }
+    let prefix = method.prefix().as_bytes();
+    let salt_end = prefix.len().checked_add(salt.len())?;
+    let len = salt_end.checked_add(1)?;
+    out.get_mut(..prefix.len())?.copy_from_slice(prefix);
+    out.get_mut(prefix.len()..salt_end)?.copy_from_slice(salt);
+    *out.get_mut(salt_end)? = b'$';
+    core::str::from_utf8(out.get(..len)?).ok()
+}
+
+/// Check `key` against a stored crypt hash, in constant time.
+///
+/// The stored hash *is* the setting — crypt's defining property is that
+/// re-running it on the same password reproduces the entry exactly — so this
+/// one call is the whole of password verification: no salt parsing, no
+/// method dispatch, and no opportunity for a caller to compare the wrong
+/// slice of the entry.
+///
+/// Returns `false` for anything this build cannot recompute.  That covers
+/// every locked (`!`, `!!`, `*`) and empty entry, every entry in a format we
+/// do not implement, and every entry whose salt is too long to reproduce.
+/// Refusing to authenticate is the only safe answer to "I cannot check
+/// this"; a caller that wants to *report* why should ask [`stored_method`]
+/// first.
+///
+/// The comparison runs over the recomputed string, whose length is fixed by
+/// the method named in the entry's own prefix, so returning early on a
+/// length mismatch discloses nothing that reading the entry did not.
+#[must_use]
+pub fn verify(key: &[u8], stored: &[u8]) -> bool {
+    let mut scratch = buf();
+    let Some(len) = compute_into(key, stored, &mut scratch) else {
+        return false;
+    };
+    let Some(computed) = scratch.get(..len) else {
+        return false;
+    };
+    if computed.len() != stored.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in computed.iter().zip(stored.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+/// The method a stored entry names, if the entry has the exact shape that
+/// method produces.
+///
+/// A *shape* check, not a verification: it reads the `$N$` prefix, skips an
+/// optional `rounds=N$`, skips the salt, and requires what remains to be
+/// exactly [`Method::hash_len`] characters of crypt base-64.
+///
+/// It exists to tell a genuine entry from one this tree wrote before the
+/// safe API existed.  `chpasswd` labelled its output `$5$` while computing
+/// something that was not SHA-crypt, and `passwd` invented `$sha256$`
+/// outright; both wrote a 64-hex-digit hash field, against SHA-256 crypt's
+/// 43 base-64 characters.  A caller that gets `None` here knows the entry
+/// can never verify, and can say so instead of reporting a wrong password.
+#[must_use]
+pub fn stored_method(stored: &[u8]) -> Option<Method> {
+    let method = Method::from_prefix(stored)?;
+    let mut rest = stored.get(3..)?;
+
+    // An explicit rounds field, which only the SHA methods accept.  A
+    // malformed one is deliberately not skipped: `sha_crypt` lets it become
+    // part of the salt, so the shape check has to agree.
+    if method != Method::Md5 {
+        if let Some(after) = rest.strip_prefix(b"rounds=") {
+            let digits = after.iter().take_while(|b| b.is_ascii_digit()).count();
+            if digits > 0 && after.get(digits) == Some(&b'$') {
+                rest = after.get(digits.checked_add(1)?..)?;
+            }
+        }
+    }
+
+    let salt_end = rest.iter().position(|&b| b == b'$')?;
+    if salt_end > method.salt_max() {
+        return None;
+    }
+    let hash = rest.get(salt_end.checked_add(1)?..)?;
+    if hash.len() != method.hash_len() || !hash.iter().copied().all(is_b64) {
+        return None;
+    }
+    Some(method)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -883,5 +1115,180 @@ mod tests {
     #[test]
     fn output_len_constant() {
         assert_eq!(CRYPT_OUTPUT_LEN, 128);
+    }
+
+    // -----------------------------------------------------------------------
+    // Safe Rust API
+    // -----------------------------------------------------------------------
+    //
+    // These need no `CRYPT_TEST_LOCK`: the whole point of the safe API is
+    // that the result lands in the caller's buffer, so there is no shared
+    // state for cargo's parallel runner to trample.  A test that *did* need
+    // the lock would be evidence of a bug.
+
+    /// The same Drepper vector the C API is checked against, so a divergence
+    /// between the two paths shows up as a failure here rather than as an
+    /// unexplained difference in `/etc/shadow`.
+    #[test]
+    fn hash_into_matches_the_drepper_vector() {
+        let mut b = buf();
+        assert_eq!(
+            hash_into(b"Hello world!", b"$6$saltstring", &mut b),
+            Some(
+                "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1"
+            )
+        );
+    }
+
+    #[test]
+    fn hash_into_rejects_an_unsupported_setting() {
+        let mut b = buf();
+        assert_eq!(hash_into(b"pw", b"$sha256$0123456789abcdef", &mut b), None);
+        assert_eq!(hash_into(b"pw", b"plain", &mut b), None);
+        assert_eq!(hash_into(b"pw", b"", &mut b), None);
+    }
+
+    /// Verification is defined by re-running crypt on the stored entry, so
+    /// the entry a fresh hash produces must verify against itself.
+    #[test]
+    fn a_fresh_hash_verifies_against_itself() {
+        for method in [Method::Md5, Method::Sha256, Method::Sha512] {
+            let mut sb = buf();
+            let setting = setting_into(method, b"aBcD1234", &mut sb)
+                .unwrap_or_else(|| panic!("{method:?} setting"));
+            let mut hb = buf();
+            let hash = hash_into(b"correct horse", setting.as_bytes(), &mut hb)
+                .unwrap_or_else(|| panic!("{method:?} hash"));
+            assert!(
+                verify(b"correct horse", hash.as_bytes()),
+                "{method:?} did not verify its own output: {hash}"
+            );
+            assert!(!verify(b"correct hors", hash.as_bytes()), "{method:?}");
+            assert!(!verify(b"", hash.as_bytes()), "{method:?}");
+        }
+    }
+
+    /// The failure lane C reported: a password set by one tool could not be
+    /// used by another, because the two disagreed about the format.  Going
+    /// through this API there is only one format, so the round trip closes.
+    #[test]
+    fn a_password_set_through_the_api_verifies_through_the_api() {
+        let mut sb = buf();
+        let setting = setting_into(Method::Sha512, b"0123456789abcdef", &mut sb).expect("setting");
+        let mut hb = buf();
+        let stored = hash_into(b"correct horse", setting.as_bytes(), &mut hb).expect("hash");
+        assert!(stored.starts_with("$6$0123456789abcdef$"));
+        assert_eq!(stored_method(stored.as_bytes()), Some(Method::Sha512));
+        assert!(verify(b"correct horse", stored.as_bytes()));
+    }
+
+    /// Locked and empty entries are not passwords, and must never
+    /// authenticate — including against the empty password.
+    #[test]
+    fn verify_refuses_locked_and_unrecomputable_entries() {
+        for stored in [
+            &b"!"[..],
+            b"!!",
+            b"*",
+            b"",
+            b"x",
+            b"!$6$salt$hash",
+            b"$sha256$0123456789abcdef$0000",
+        ] {
+            assert!(!verify(b"", stored), "{stored:?}");
+            assert!(!verify(b"correct horse", stored), "{stored:?}");
+        }
+    }
+
+    /// An entry whose salt exceeds the method's maximum cannot be
+    /// reproduced — hashing truncates the salt, so the recomputed header
+    /// differs — and must therefore fail rather than half-match.
+    #[test]
+    fn verify_refuses_an_over_long_salt() {
+        let over = b"$6$0123456789abcdefXYZ$";
+        let mut hb = buf();
+        let hash = hash_into(b"pw", over, &mut hb).expect("hash");
+        assert!(hash.starts_with("$6$0123456789abcdef$"), "{hash}");
+        let mut forged = std::string::String::from("$6$0123456789abcdefXYZ$");
+        forged.push_str(hash.rsplit('$').next().expect("hash field"));
+        assert!(!verify(b"pw", forged.as_bytes()));
+        assert_eq!(stored_method(forged.as_bytes()), None);
+    }
+
+    /// The discriminator that makes the migration decidable: the entries
+    /// this tree used to write carry a 64-hex-digit hash field, which is not
+    /// the length any real method produces.
+    #[test]
+    fn stored_method_rejects_the_formats_this_tree_used_to_write() {
+        let bogus = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(bogus.len(), 64);
+        for prefix in ["$5$", "$6$", "$1$", "$sha256$"] {
+            let entry = std::format!("{prefix}0123456789abcdef${bogus}");
+            assert_eq!(
+                stored_method(entry.as_bytes()),
+                None,
+                "{entry} was accepted as well-formed"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_method_accepts_genuine_entries() {
+        for (entry, want) in [
+            (
+                "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1",
+                Method::Sha512,
+            ),
+            (
+                "$5$saltstring$5B8vYYiY.CVt1RlTTf8KbXBH3hsxY/GNooZaBBGWEc5",
+                Method::Sha256,
+            ),
+            (
+                "$5$rounds=10000$saltstringsaltst$3xv.VbSHBb41AL9AvLeujZkZRBAwqFMz2.opqey6IcA",
+                Method::Sha256,
+            ),
+        ] {
+            assert_eq!(stored_method(entry.as_bytes()), Some(want), "{entry}");
+            // A shape this build calls well-formed must also be one it can
+            // reproduce, or the two checks would disagree about the same
+            // entry.
+            let mut hb = buf();
+            let again = hash_into(b"Hello world!", entry.as_bytes(), &mut hb).expect("rehash");
+            assert_eq!(again.len(), entry.len(), "{entry}");
+        }
+    }
+
+    #[test]
+    fn setting_into_rejects_a_salt_it_cannot_carry_verbatim() {
+        let mut b = buf();
+        assert_eq!(setting_into(Method::Sha512, b"", &mut b), None);
+        // `$` would end the salt early, so the entry would not name the salt
+        // that was asked for.
+        assert_eq!(setting_into(Method::Sha512, b"ab$cd", &mut b), None);
+        assert_eq!(setting_into(Method::Sha512, b"ab cd", &mut b), None);
+        assert_eq!(setting_into(Method::Sha512, b"\xffbad", &mut b), None);
+        // 17 characters, one over SHA-crypt's maximum.
+        assert_eq!(
+            setting_into(Method::Sha512, b"0123456789abcdefg", &mut b),
+            None
+        );
+        // MD5 truncates at 8, so 9 is over for it while fine for SHA.
+        assert_eq!(setting_into(Method::Md5, b"012345678", &mut b), None);
+        assert_eq!(
+            setting_into(Method::Sha512, b"012345678", &mut b),
+            Some("$6$012345678$")
+        );
+    }
+
+    #[test]
+    fn method_hash_lengths_match_what_the_methods_emit() {
+        for method in [Method::Md5, Method::Sha256, Method::Sha512] {
+            let mut sb = buf();
+            let setting = setting_into(method, b"salt", &mut sb).expect("setting");
+            let mut hb = buf();
+            let hash = hash_into(b"pw", setting.as_bytes(), &mut hb).expect("hash");
+            let field = hash.rsplit('$').next().expect("hash field");
+            assert_eq!(field.len(), method.hash_len(), "{method:?}: {hash}");
+        }
     }
 }

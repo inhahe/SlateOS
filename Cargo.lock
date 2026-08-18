@@ -1510,6 +1510,9 @@ version = "0.1.0"
 [[package]]
 name = "chpasswd"
 version = "0.1.0"
+dependencies = [
+ "posix",
+]
 
 [[package]]
 name = "chroma-cli"
@@ -5624,6 +5627,9 @@ dependencies = [
 [[package]]
 name = "login-cli"
 version = "0.1.0"
+dependencies = [
+ "posix",
+]
 
 [[package]]
 name = "loginctl"
@@ -7684,6 +7690,9 @@ version = "0.1.0"
 [[package]]
 name = "passwd"
 version = "0.1.0"
+dependencies = [
+ "posix",
+]
 
 [[package]]
 name = "passwd-cli"

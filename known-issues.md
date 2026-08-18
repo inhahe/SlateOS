@@ -34336,3 +34336,68 @@ readers. This is the §329 fix applied to the second password store.
 `/etc/users.yaml` or `/etc/shadow` is the system's one account database):
 whichever wins, the tools that write a file today must agree about it today, and
 one parser is easier to delete later than seven.
+
+### FIXED, 2026-08-17 (`cc0fa5da9`, `5ab46559a`, `3a3321a76`)
+
+Both writers now go through one crate, `userspace/userdb`. It parses records
+into raw lines and rewrites only the field asked for, so neither program can
+delete a field it does not model; it writes passwords with `posix::crypt`
+(SHA-512-crypt, 5000 rounds) and verifies with `crypt`'s self-describing
+property, so the salt-name and pre-image disagreements have nothing left to
+disagree about; and where the two writers used different names for the same
+fact (`home_dir`/`home`, `is_admin`/`admin`, `avatar_path`/`avatar`,
+`password_salt`/`salt`), a write updates **every** spelling the record
+carries, so a preserved field cannot go stale. 23 tests in `userdb`, 5 new in
+`useradm`, 44 green in `login`. Reasoning in `design-decisions.md` §330.
+
+`hash_password`, `read_users`, `write_users`, `generate_salt`, `sha256_hex`
+and the local SHA-256 are deleted from `useradm`; `hash_password`,
+`serialize_users_yaml`, `parse_users_yaml`, `sha256`, `bytes_to_hex` and
+`hex_to_bytes` are deleted from `init/login`.
+
+Eight collateral defects fixed in passing, listed in §330 — the two that
+matter most: a read failure produced an *empty* database that the next save
+wrote over the real file (both writers), and in `login` that same failure
+substituted the built-in defaults, which include a root account whose password
+is in the source, so a permission error opened the machine up rather than
+closing it.
+
+**Still open — the five read-only parsers.** `su`, `sudo`, `polkit`, `chown`
+and `chroot` have not been migrated and still carry their own copies. `su` and
+`sudo` read `home:`, which *neither* writer has ever written, so they are
+reading a field that is not there on every file this tree has produced;
+migrating them is a bug fix, not housekeeping. Tracked as the remainder of
+this entry rather than a new one, because it is the same defect with the same
+fix.
+
+---
+
+## [B] The login screen ignores `avatar_path` and always draws initials (2026-08-17)
+
+**In short:** An account can name a picture to show next to it on the login
+screen — the `avatar_path:` field in `/etc/users.yaml`, which `useradm mod
+--avatar` sets. The login screen never looks at it. It draws a coloured circle
+with the user's initials for every account, so setting an avatar appears to
+work, reports success, and changes nothing anyone can see.
+
+`init/login/src/main.rs`: `UserAccount::avatar_path` carries an
+`#[allow(dead_code)]` precisely because no drawing code calls it; the avatar is
+rendered by the initials-and-circle path in the user-tile drawing code, with no
+branch on whether a path is set.
+
+### Proper fix
+
+Load the named image and draw it clipped to the circle, falling back to the
+initials when the field is unset, the file is missing, or it does not decode.
+The fallback is not optional: an avatar path can point at a file on a
+filesystem that is not mounted yet at login time, and a login screen that
+refuses to draw a user it cannot find a picture for is a login screen that
+cannot log that user in.
+
+Needs an image decoder reachable from `init/` — lane C owns `gui/`, so if the
+decoder lives there this becomes a request rather than a local change. Check
+what `gui/toolkit` exposes before assuming.
+
+**Severity:** cosmetic, but it is a silent no-op in a command that reports
+success, which is the kind of thing that gets diagnosed as a broken file
+rather than a missing feature.

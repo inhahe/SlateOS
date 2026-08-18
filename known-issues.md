@@ -32560,3 +32560,39 @@ implementations.
 the next stub cannot pass. The minimum bar for any hash in this tree: the
 digest of the empty input, and the digest of `"abc"`. Both are published for
 all three algorithms.
+
+### FIXED, 2026-08-17 (`cf5ebb13f`, and the commit that follows it)
+
+Done as written above — delegated, not patched.
+
+`blockbuf`, `sha1` and `md5` now sit at the workspace root beside `sha2`.
+Three crates rather than two because SHA-1 and MD5 written standalone would
+have meant a third and fourth copy of Merkle–Damgård partial-block and padding
+logic, which is the half that actually hides bugs: a wrong compression
+function fails the first known-answer vector, whereas a wrong buffer only
+misbehaves in the seam between two `update` calls — so it passes every
+published vector, all of which arrive in a single call. `blockbuf` is that
+logic once, tested over every length up to three blocks at every possible
+split point. MD5's `T` table is generated from its definition
+`floor(2^32 · |sin(i+1)|)` rather than transcribed, which removes that error
+class rather than testing for it.
+
+`HashState` is now a three-variant enum over `md5::Md5` / `sha1::Sha1` /
+`sha2::Sha256`, and `diskimager` carries four new tests:
+
+| Test | What the stub would have failed |
+|---|---|
+| `hashes_match_their_published_vectors` | everything — six vectors, empty and `"abc"`, all three algorithms |
+| `each_algorithm_produces_its_own_length_and_value` | nothing; it guards the picker wiring, not the maths |
+| `splitting_the_input_does_not_change_the_digest` | nothing; it guards the *new* risk, that a file read in chunks hashes differently from a file read whole |
+| `finalize_is_repeatable` | nothing; the real hashers consume themselves on finalize, so `HashState` finalizes a clone |
+
+117 tests pass in `diskimager`; 26 tests and 5 doctests in the three crates.
+The crate's 29 remaining clippy warnings are pre-existing and unchanged —
+measured before and after, identical counts by lint — and are tracked
+separately under the `apps/**` half of the lint debt.
+
+**The generalisable lesson, restated because it is the only one that
+matters:** none of the eight original tests was wrong. They were all true of
+`state[i % 8] = state[i % 8] * 31 + byte`. Shape tests cannot fail on a stub,
+so a subsystem with only shape tests is untested no matter how many it has.

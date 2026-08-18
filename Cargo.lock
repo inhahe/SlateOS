@@ -2394,6 +2394,9 @@ name = "diskimager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "md5",
+ "sha1",
+ "sha2",
 ]
 
 [[package]]

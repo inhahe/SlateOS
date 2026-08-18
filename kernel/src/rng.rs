@@ -825,7 +825,6 @@ pub fn credit_target_bits() -> u32 {
 
 /// Interrupts whose arrival timing passed the third-difference test.
 #[must_use]
-#[allow(dead_code)]
 pub fn credited_interrupts() -> u64 {
     CREDITED_IRQS.load(Ordering::Relaxed)
 }
@@ -980,6 +979,41 @@ pub fn self_test() {
         reseed_count(),
         entropy_contributions(),
     );
+
+    // --- 6. Credited entropy ---
+    //
+    // Reported unconditionally, and deliberately *not* asserted on.  This runs
+    // late enough that interrupt timing should long since have credited the
+    // pool, so on a healthy boot it reads "ready".  But readiness is a property
+    // of the machine, not of this code: a host that delivered perfectly
+    // periodic interrupts would legitimately leave the pool uncredited, and
+    // failing the self-test for that would be blaming the RNG for the
+    // environment.  What matters is that the state is *visible* — an
+    // uncredited pool means every userspace `getrandom` is failing, which is a
+    // condition nobody should have to discover by bisecting a boot log.
+    //
+    // This is also the only place the state is reliably printed: the
+    // ready-transition message is emitted from a work item queued by an
+    // interrupt handler, and a dropped submission loses the line (never the
+    // readiness itself).
+    if is_ready() {
+        serial_println!(
+            "[rng]   Credited: READY ({}/{} bits; {} of {} interrupts qualified)",
+            credited_bits(),
+            credit_target_bits(),
+            credited_interrupts(),
+            entropy_contributions(),
+        );
+    } else {
+        serial_println!(
+            "[rng]   Credited: NOT READY ({}/{} bits; {} of {} interrupts qualified) \
+             -- userspace getrandom will fail",
+            credited_bits(),
+            credit_target_bits(),
+            credited_interrupts(),
+            entropy_contributions(),
+        );
+    }
 
     serial_println!("[rng] Self-test PASSED");
 }

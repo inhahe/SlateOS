@@ -7271,7 +7271,11 @@ pub fn sys_console_try_read_char(args: &SyscallArgs) -> SyscallResult {
 /// so reaching it means entropy is not accruing — a broken state that must
 /// surface as an error rather than as an unbounded hang or, worse, as
 /// predictable key material.
-const GETRANDOM_WAIT_NS: u64 = 15_000_000_000;
+///
+/// Shared with the Linux-ABI translation of `getrandom` (syscall 318) in
+/// `syscall::linux`, so the two entry points cannot drift into disagreeing
+/// about how long "too long" is.
+pub(crate) const GETRANDOM_WAIT_NS: u64 = 15_000_000_000;
 
 /// `SYS_GETRANDOM` — fill a userspace buffer with CSPRNG output.
 ///

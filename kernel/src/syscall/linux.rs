@@ -46718,19 +46718,42 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
 
 /// `getrandom(buf, buflen, flags)` — fill `buf` with random bytes.
 ///
-/// Backed by the kernel ChaCha20 CSPRNG (`crate::rng`).  Linux's
-/// `getrandom(2)` returns "best effort to avoid blocking for entropy";
-/// our RNG is always available once `rng::init()` has run (during
-/// boot), and falls back to TSC+HPET lazy-seeding if a caller somehow
-/// races early boot.
+/// Backed by the kernel ChaCha20 CSPRNG (`crate::rng`).
 ///
-/// `flags` validation matches Linux:
-///   - `GRND_NONBLOCK` (0x0001) — we never block, so it's effectively
-///     a no-op, but the flag is accepted.
-///   - `GRND_RANDOM`   (0x0002) — we don't distinguish urandom vs
-///     random sources; same CSPRNG either
-///     way.
-///   - `GRND_INSECURE` (0x0004) — accepted for API compatibility.
+/// ## Waiting for entropy — and why this path is the one that can do it right
+///
+/// `getrandom(2)`'s entire reason for existing is that it does **not** hand
+/// out output from a pool that was never given anything unpredictable — the
+/// lesson Linux learned from `/dev/urandom`.  This translation therefore waits
+/// for `rng::is_ready()` exactly as Linux waits for `crng_ready()`.
+///
+/// Until 2026-08-18 it did not, and documented that as "we never block".  That
+/// was a real hole rather than a cosmetic divergence: the *native*
+/// `SYS_GETRANDOM` (90) had just been given the readiness gate, and a caller
+/// who wanted uncredited bytes could simply ask for them through this ABI
+/// instead.  A guarantee with a second, unguarded door is not a guarantee.
+///
+/// This entry point can implement the full semantics where the native one
+/// cannot, and the reason is purely mechanical: `flags` genuinely arrives here.
+/// The native ABI's libc stub passes two arguments, so its third register holds
+/// whatever the compiler left there and cannot be read as a flags word until
+/// lane B widens the stub (see
+/// `requests/a-b-getrandom-now-waits-for-a-credited-pool.md`).  So `GRND_*`
+/// works here and nowhere else, for now.
+///
+/// `flags` handling matches Linux:
+///   - `GRND_NONBLOCK` (0x0001) — if the pool is not yet credited, fail
+///     immediately with `EAGAIN` rather than waiting.  This is Linux's
+///     behaviour and it is now meaningful: before this change nothing ever
+///     blocked, so the flag was accidentally correct by doing nothing.
+///   - `GRND_RANDOM`   (0x0002) — we do not distinguish urandom from random;
+///     same CSPRNG and the same readiness gate either way, as Linux has done
+///     since 5.6.
+///   - `GRND_INSECURE` (0x0004) — "I accept possibly-weak bytes": skips the
+///     readiness gate entirely and never blocks.  This is the documented
+///     escape hatch for callers that need bytes during early boot and are not
+///     using them as key material, and it is the *only* way to get uncredited
+///     output.
 ///   - `GRND_RANDOM | GRND_INSECURE` together is rejected with EINVAL
 ///     because those flags request mutually-exclusive entropy sources
 ///     (this matches Linux's behaviour since 5.6).
@@ -46739,6 +46762,13 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
 ///     ABI drift: a future Linux flag we don't yet know about should
 ///     cause callers to fall back rather than blindly trust an
 ///     unrelated CSPRNG path.
+///
+/// On a wait that times out we return `EAGAIN`, not a success with weak bytes.
+/// Linux would simply block forever there; an unbounded wait turns an entropy
+/// shortage into an unbootable machine with no diagnostic, so the wait is
+/// capped and the caller is told.  `EAGAIN` is the errno a `getrandom` caller
+/// already has to handle for the `GRND_NONBLOCK` case, so this needs no new
+/// error path on the userspace side.
 ///
 /// ## Batch 432 — remove the universal 256-byte short-read cap
 ///
@@ -46838,6 +46868,22 @@ fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
 
     if buf_len == 0 {
         return SyscallResult::ok(0);
+    }
+
+    // Readiness gate.  `GRND_INSECURE` is the caller explicitly waiving it;
+    // everyone else waits, and `GRND_NONBLOCK` converts the wait into an
+    // immediate EAGAIN.
+    //
+    // Ordered before `validate_user_write` on purpose: the wait sleeps, and a
+    // pointer validated before a sleep is a pointer another thread has had
+    // time to unmap.
+    if flags & GRND_INSECURE == 0 && !crate::rng::is_ready() {
+        if flags & GRND_NONBLOCK != 0 {
+            return linux_err(errno::EAGAIN);
+        }
+        if !crate::rng::wait_until_ready(crate::syscall::handlers::GETRANDOM_WAIT_NS) {
+            return linux_err(errno::EAGAIN);
+        }
     }
 
     // Linux gate: import_ubuf calls access_ok over the entire
@@ -92676,7 +92722,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             //   - buflen == 0 with any valid flags -> 0 (no-op).
             //   - Valid flags (GRND_NONBLOCK or 0) with a writable scratch
             //     buffer -> positive byte count.
+            //
+            // Readiness note: this battery runs long before `rng::init`, so the
+            // CSPRNG pool is uncredited here and every call that does *not*
+            // pass `GRND_INSECURE` is expected to be refused.  The tests below
+            // that are about fill *semantics* — byte counts, the removed
+            // 256-byte cap — therefore pass `GRND_INSECURE` deliberately: that
+            // flag means "I accept possibly-weak bytes", which is exactly the
+            // contract a length-checking test wants and is the flag's actual
+            // purpose rather than a way around the gate.  The readiness
+            // behaviour itself is asserted separately, further down.
             {
+                const INSECURE: u64 = 0x4;
                 let rand_buf = [0u8; 32];
                 let rand_ptr = rand_buf.as_ptr() as u64;
 
@@ -92728,11 +92785,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     return Err(KernelError::InternalError);
                 }
-                // Valid 8-byte read with no flags -> 8.
+                // Valid 8-byte read -> 8.
                 let a = SyscallArgs {
                     arg0: rand_ptr,
                     arg1: 8,
-                    arg2: 0,
+                    arg2: INSECURE,
                     arg3: 0,
                     arg4: 0,
                     arg5: 0,
@@ -92740,14 +92797,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 let r = dispatch_linux(nr::GETRANDOM, &a).value;
                 if r != 8 {
                     serial_println!(
-                        "[syscall/linux]   FAIL: getrandom(8,0) returned {} (expected 8)",
+                        "[syscall/linux]   FAIL: getrandom(8, INSECURE) returned {} (expected 8)",
                         r
                     );
                     return Err(KernelError::InternalError);
                 }
-                // Valid read with all three accepted single-source flags
-                // (GRND_NONBLOCK alone, GRND_RANDOM alone, GRND_INSECURE
-                // alone).  Each must succeed.
+
+                // The readiness gate, and the two flags that steer it.
+                //
+                // `GRND_INSECURE` must succeed whatever the pool's state — it
+                // is the caller waiving the requirement.  The other two follow
+                // the pool: credited, and they return bytes; uncredited, and
+                // they must be *refused*, because handing out uncredited bytes
+                // through this ABI is precisely the hole that made the native
+                // syscall's gate meaningless.
+                let ready = crate::rng::is_ready();
                 for flag in [0x1u64, 0x2, 0x4] {
                     let a = SyscallArgs {
                         arg0: rand_ptr,
@@ -92758,7 +92822,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         arg5: 0,
                     };
                     let r = dispatch_linux(nr::GETRANDOM, &a).value;
-                    if r != 4 {
+                    // GRND_INSECURE (0x4) never consults the pool.
+                    let expected_ok = ready || flag == 0x4;
+                    if expected_ok && r != 4 {
                         serial_println!(
                             "[syscall/linux]   FAIL: getrandom(4, flag=0x{:x}) returned {} (expected 4)",
                             flag,
@@ -92766,7 +92832,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                         );
                         return Err(KernelError::InternalError);
                     }
+                    if !expected_ok && r != -i64::from(errno::EAGAIN) {
+                        serial_println!(
+                            "[syscall/linux]   FAIL: getrandom(4, flag=0x{:x}) returned {} with an \
+                             uncredited pool (expected EAGAIN)",
+                            flag,
+                            r
+                        );
+                        return Err(KernelError::InternalError);
+                    }
                 }
+
+                // No flags at all, which is how essentially every real caller
+                // invokes it: same rule as GRND_RANDOM above.
+                let a = SyscallArgs {
+                    arg0: rand_ptr,
+                    arg1: 8,
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                let r = dispatch_linux(nr::GETRANDOM, &a).value;
+                let want = if ready { 8 } else { -i64::from(errno::EAGAIN) };
+                if r != want {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: getrandom(8, 0) returned {} (expected {}, pool {})",
+                        r,
+                        want,
+                        if ready { "credited" } else { "uncredited" }
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                serial_println!(
+                    "[syscall/linux]   getrandom readiness gate ({}): OK",
+                    if ready {
+                        "pool credited, calls succeed"
+                    } else {
+                        "pool uncredited, only GRND_INSECURE succeeds"
+                    }
+                );
             }
             // Batch 432: large-buffer getrandom no longer caps at 256 —
             // requests of 512/1024/2048 bytes return the full length.

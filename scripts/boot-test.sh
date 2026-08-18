@@ -111,6 +111,19 @@
 #                                       # TCG/no-PMU QEMU this is the only NMI
 #                                       # source that can catch a single-CPU
 #                                       # IF=0 spin.
+#   ./scripts/boot-test.sh --bootstrap  # if a git-ignored prerequisite is
+#                                       # missing (one of the six ring-3 service
+#                                       # binaries the kernel embeds, or the
+#                                       # limine/ tree staged into the ESP), run
+#                                       # scripts/bootstrap-worktree.sh and
+#                                       # continue instead of refusing.  Without
+#                                       # it the run stops before Step 1 and
+#                                       # prints the command — provisioning
+#                                       # builds six crates and may clone a
+#                                       # bootloader, which a run should not do
+#                                       # unasked.  This is what a fresh
+#                                       # worktree needs; see known-issues.md
+#                                       # A-A-FRESH-CHECKOUT-CANNOT-BOOT-TEST-…
 
 set -euo pipefail
 
@@ -743,6 +756,14 @@ MIN_FREE_GB="${BOOT_TEST_MIN_FREE_GB:-20}"
 # happened to be the one that noticed.  See check_free_space.
 RECLAIM_SPACE="${BOOT_TEST_RECLAIM_SPACE:-0}"
 
+# Opt-in: when a git-ignored prerequisite is missing, run
+# scripts/bootstrap-worktree.sh and continue instead of refusing.  Off by
+# default for the same reason --reclaim-space is: provisioning builds six
+# crates and may clone a bootloader over the network, and a run should not
+# spend minutes on that merely because it happened to be the one that noticed.
+# See check_prerequisites.
+BOOTSTRAP="${BOOT_TEST_BOOTSTRAP:-0}"
+
 # Parse args
 for arg in "$@"; do
     case "$arg" in
@@ -778,6 +799,7 @@ for arg in "$@"; do
         --host-load=*) HOST_LOAD="${arg#*=}" ;;
         --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
         --reclaim-space) RECLAIM_SPACE=1 ;;
+        --bootstrap) BOOTSTRAP=1 ;;
     esac
 done
 
@@ -1401,6 +1423,118 @@ if [ -z "$OVMF" ]; then
     echo "ERROR: OVMF/EDK2 firmware not found" >&2
     exit 1
 fi
+
+# Git-ignored prerequisites (known-issues.md
+# A-A-FRESH-CHECKOUT-CANNOT-BOOT-TEST-AND-NEITHER-FAILURE-NAMES-THE-MISSING-STEP).
+#
+# Two classes of artifact are required and absent from any fresh checkout: the
+# six ring-3 service binaries the kernel pulls in with `include_bytes!`, and the
+# `limine/` bootloader tree staged into the ESP.  Both used to be discovered the
+# hard way — the first as fifteen `couldn't read .../release/netstack` errors
+# from a compiler that is not what is missing, and the second as a bare
+# `cp: cannot stat 'limine/BOOTX64.EFI'` raised *after* a full workspace build
+# had already been spent.  Neither message named the step to run, so the
+# knowledge lived only in the shell history of whoever set the tree up first.
+#
+# Checked here, before Step 1, because that is the last point at which the
+# limine failure is free.  The list is not restated: bootstrap-worktree.sh
+# derives it from the kernel's own `include_bytes!` paths, so a service added
+# to the kernel is covered here without anyone remembering to add it.
+check_prerequisites() {
+    local boot="$SCRIPT_DIR/bootstrap-worktree.sh"
+    if [ ! -x "$boot" ] && [ ! -f "$boot" ]; then
+        echo "WARNING: $boot not found; build/boot prerequisites are NOT being" \
+             "checked for this run." >&2
+        return 0
+    fi
+
+    # Ask only about what this particular run needs.  A --no-build --no-stage
+    # soak boots the image already in the ESP: it compiles nothing and copies
+    # nothing, so neither the embedded service binaries nor limine/ can affect
+    # it, and refusing such a run for their absence would be refusing a run that
+    # would have worked.  rootfs.ext4 is always in scope — every boot attaches
+    # it, and its absence silently shrinks the suite rather than blocking it.
+    local need="rootfs"
+    [ "$NO_BUILD" -eq 0 ] && need="services,$need"
+    [ "$NO_STAGE" -eq 0 ] && need="limine,$need"
+
+    local report status
+    report="$(bash "$boot" --check --need="$need" 2>&1)" && status=0 || status=$?
+
+    case "$status" in
+        0) echo "Prerequisites OK ($need)." ;;
+        3)
+            # Degrading, not blocking: the boot test runs and passes, having
+            # quietly skipped every REAL-glibc rung.  Refusing would be wrong —
+            # the run is still useful — but saying nothing would let a green
+            # result stand for more than it measured.
+            echo "" >&2
+            echo "$report" >&2
+            echo "" >&2
+            echo "WARNING: continuing, but this run tests LESS than a normal one." >&2
+            echo "" >&2
+            ;;
+        1)
+            if [ "$BOOTSTRAP" = "1" ]; then
+                echo "Prerequisites missing; --bootstrap given, provisioning:" >&2
+                echo "$report" >&2
+                # Not silenced and not backgrounded: this builds several crates
+                # and may clone a bootloader, and a caller who asked for it
+                # should see it happen.
+                #
+                # Its exit status is deliberately not tested, for the same
+                # reason check_free_space ignores reclaim-space.py's: a run that
+                # could not provision *everything* may well have provisioned
+                # everything that blocks a build.  bootstrap-worktree.sh exits
+                # non-zero when only `rootfs.ext4` is missing, and that alone
+                # must not turn a now-buildable tree back into a refusal.  The
+                # re-check below is the authority.
+                bash "$boot" || true
+                report="$(bash "$boot" --check --need="$need" 2>&1)" && status=0 || status=$?
+                case "$status" in
+                    0)
+                        echo "Prerequisites provisioned."
+                        return 0
+                        ;;
+                    3)
+                        echo "Prerequisites provisioned, except rootfs.ext4:" >&2
+                        echo "$report" >&2
+                        echo "" >&2
+                        echo "WARNING: continuing, but this run tests LESS than a normal one." >&2
+                        echo "" >&2
+                        return 0
+                        ;;
+                esac
+                echo "ERROR: --bootstrap ran but prerequisites are still missing." >&2
+            fi
+            echo "" >&2
+            echo "$report" >&2
+            echo "" >&2
+            echo "ERROR: this checkout cannot build or stage a boot image yet." >&2
+            echo "" >&2
+            echo "Refusing here rather than at the point of failure.  A missing service" >&2
+            echo "binary surfaces as fifteen include_bytes! errors blaming the kernel, and" >&2
+            echo "a missing limine/ surfaces as a 'cp: cannot stat' AFTER a full workspace" >&2
+            echo "build has been spent — neither of which names the step above." >&2
+            echo "" >&2
+            echo "Run the command above, or re-run this script with --bootstrap to do" >&2
+            echo "that and continue in one go." >&2
+            exit 1
+            ;;
+        *)
+            # Includes 2 (the embed list could not be derived).  Do not continue
+            # on an unclassified answer: the one thing this check must never do
+            # is let "I could not tell" pass for "nothing is missing".
+            echo "" >&2
+            echo "$report" >&2
+            echo "" >&2
+            echo "ERROR: prerequisite check exited $status (unexpected); refusing." >&2
+            exit 1
+            ;;
+    esac
+}
+
+check_prerequisites
 
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then

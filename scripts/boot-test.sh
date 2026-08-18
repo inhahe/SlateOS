@@ -1567,6 +1567,20 @@ fi
 # rather than dead code.  Override with QEMU_CPU=... to test other models.
 QEMU_CPU="${QEMU_CPU:-qemu64,+smep,+smap,+umip}"
 
+# Extra QEMU arguments, for diagnosing emulator-side effects without touching
+# the guest.  Word-split on purpose so a caller can pass several:
+#
+#     QEMU_EXTRA="-accel tcg,tb-size=512" ./scripts/boot-test.sh --bench
+#
+# This exists because a benchmark result can move by 4x for reasons that are
+# entirely QEMU's — commit 665fbb27b, which edits only `audio_mixer.rs`, moved
+# `crypto_sha256_64B` from 7364 to 28184 cycles while the SHA-256 machine code
+# stayed byte-identical (same symbol size, same mangled hash; only the address
+# changed).  Separating "our code got slower" from "TCG got slower at running
+# the same code" needs the binary held fixed and the emulator varied, which is
+# exactly what this knob is for.  Default empty: no effect on ordinary runs.
+read -r -a QEMU_EXTRA_ARGS <<< "${QEMU_EXTRA:-}"
+
 # --- Cross-worktree boot lock -------------------------------------------------
 #
 # The three lanes each work in their OWN git worktree (D:/…/os, os-lane-a,
@@ -2094,6 +2108,7 @@ QEMU_START_EPOCH=$(date +%s)
     -no-reboot \
     -m 3072M \
     -cpu "$QEMU_CPU" \
+    "${QEMU_EXTRA_ARGS[@]}" \
     -machine q35 &
 QEMU_PID=$!
 # Ensure QEMU is reaped even if the harness is interrupted (Ctrl-C, SIGTERM)

@@ -35885,3 +35885,107 @@ the way a literal list would.
 and `limine/` from an already-working worktree. That is also the *better* thing
 to do when bisecting, for an unrelated reason: holding the service binaries
 fixed makes `kernel/` the only variable across the bisect.
+
+## A-A-4x-CRYPTO-"REGRESSION"-BISECTS-TO-A-COMMIT-THAT-ONLY-EDITS-audio_mixer.rs (lane A, 2026-08-18)
+
+**Status: the machine code did not change. Do NOT revert the commit this
+bisects to.** What is wrong is our confidence in the benchmark, not the kernel.
+
+### What was seen
+
+`bench/history.jsonl` shows `crypto_sha256_64B` sitting in a 1930-2560 ns band
+for 20 consecutive runs and then stepping to 8087/8083 ns — a clean step, not
+drift, and the second reading has a perfectly clean contamination canary
+(spread 0%, whole-suite drift -0.1%), so it is not host load.
+
+Rebuilding the last known-good commit `5666d38cb` from scratch in a fresh
+worktree on the same host, with the same staged service binaries and
+bootloader, reproduces the split:
+
+| benchmark | `5666d38cb` | HEAD `b2180939e` | ratio |
+|---|---|---|---|
+| `crypto_sha256_64B` | 7426 cy | 30048 cy | 4.05x |
+| `crypto_sha256_1KiB` | 55274 cy | 249860 cy | 4.52x |
+| `crypto_hmac_sha256` | 20058 cy | 77056 cy | 3.84x |
+
+### What it bisects to
+
+`git bisect run` over the 145-commit range, restricted with `-- kernel/` to the
+21 commits that touch guest code, threshold 15000 cycles (chosen in the empty
+band between the ~7-10k and ~28-30k populations — no measurement has ever
+landed near it):
+
+```
+GOOD 91a52df12: 9490    BAD  665fbb27b: 28184
+GOOD 80a1e70c1: 7180    GOOD 398d57d1c: 7324
+GOOD 0e54368e9: 7364
+665fbb27bd5773438c629798dd5d2e39df49c731 is the first bad commit
+```
+
+**`665fbb27b` is "kernel: take `mix_output`'s 12 KiB of scratch off the stack".
+It changes `kernel/src/audio_mixer.rs` and nothing else** — 77 insertions, 25
+deletions, one file. There is no causal path from the audio mixer to SHA-256.
+
+### Why it is not a code change
+
+`llvm-nm` on a pre-regression kernel and on HEAD gives, for every SHA-256
+symbol, **the same size and the same mangled hash** — `compress` is `0x26e`
+bytes with hash `h8234a763022d2833` in both, likewise `Sha256::update`
+(`0x14f`), `sha256` (`0xb6`) and `hmac_sha256` (`0x411`). Identical machine
+code, identical 64-byte input, ~4x slower, deterministic.
+
+The only thing that differs is the **address**:
+
+| symbol | good build | HEAD |
+|---|---|---|
+| `crypto::compress` | `…80b039f0` | `…80afce00` |
+| `crypto::sha256` | `…80afd1f0` | `…80af6600` |
+| `net::tcp::tcp_checksum_ip` | `…808b5be0` | `…808ae8c0` |
+
+a uniform shift of `0x6BF0` (27632 bytes).
+
+### The shape of the damage, across all 98 benchmarks
+
+Comparing the GOOD step (`398d57d1c`) against the BAD one (`665fbb27b`) — same
+host, same suite, adjacent commits:
+
+| ratio | benchmark | good -> bad |
+|---|---|---|
+| **12.48x** | `net_tcp_checksum_v6_1460b` | 5946 -> 74224 |
+| 3.85x | `crypto_sha256_64B` | 7324 -> 28184 |
+| 3.63x | `crypto_sha256_1KiB` | 54606 -> 198208 |
+| 3.18x | `crypto_hmac_sha256` | 19712 -> 62654 |
+| 2.46x | `vfs_write_16k` | 1434244 -> 3521676 |
+| … | … | … |
+| 0.78x | `crypto_poly1305_1KiB` | 24274 -> 18868 |
+| 0.75x | `ipc_channel_roundtrip` | 2714 -> 2028 |
+
+**Median ratio across all 98: 0.995.** Five benchmarks above 2x, none below
+0.5x, and several genuinely *faster*. This is not a machine that got slower —
+it is a handful of specific hot loops falling off a cliff while everything else
+is unmoved. The two worst are both tight streaming loops over a byte buffer,
+which is the signature of an address-indexed structure in the emulator
+(translation-block jump cache and/or the softmmu TLB, both direct-mapped on
+address bits) aliasing for those particular loops at those particular
+addresses.
+
+### Why it still matters even though it is not our bug
+
+- **Every crypto and checksum number in `bench/history.jsonl` is only
+  comparable within a build.** A 4x swing can be introduced by an unrelated
+  one-file commit, so the 10%-regression rule in `CLAUDE.md` cannot be applied
+  to these benchmarks as they stand: it will fire on noise and miss real
+  regressions hidden under a favourable relayout.
+- **It will keep flapping.** Nothing about `665fbb27b` is special; the next
+  commit that shifts `.text` can move it back or somewhere worse.
+- The effect is almost certainly **invisible on real hardware**, so it must not
+  be "fixed" in the kernel by contorting the crypto code.
+
+### Open: the mechanism, and what to do about the suite
+
+Being run down now with a `QEMU_EXTRA` knob added to `boot-test.sh` (identical
+binary, varied emulator) — see the next entry when it lands. The fix for the
+suite is likely one of: pin the hot benchmarks' buffers to a fixed alignment,
+report crypto throughput relative to an in-run reference loop rather than in
+absolute cycles, or mark these benchmarks as placement-sensitive and compare
+them only against same-build baselines.

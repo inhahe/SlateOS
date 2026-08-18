@@ -29,15 +29,34 @@ right thing to prune and a source tree the wrong thing.
 Order of attack (cheapest and most clearly disposable first):
 
   1. this worktree's `build/` scratch older than --scratch-age-days,
-  2. the integration checkout's `target/` (nobody develops there),
-  3. *our own* `target/`  -- we pay for our own rebuild before anyone else's,
-  4. every other worktree's `target/`  -- only with --allow-lane-targets.
+  2. *scratch worktrees'* `target/` -- trees that are neither the integration
+     checkout nor one of the three lanes, so they are nobody's working tree,
+  3. the integration checkout's `target/` (nobody develops there),
+  4. *our own* `target/`  -- we pay for our own rebuild before anyone else's,
+  5. every *lane's* `target/`  -- only with --allow-lane-targets.
 
-Step 3 comes before step 4 deliberately.  Every `target/` costs its owner the
-same rebuild, so there is no lane whose tree is free to take; the only honest
+Step 4 comes before step 5 deliberately.  Every lane's `target/` costs its owner
+the same rebuild, so there is no lane whose tree is free to take; the only honest
 tie-break is that the lane running the script is the one that chose to free
 space and should therefore be the one to pay for it.  A run left at its
-defaults can only ever cost this lane and the integration tree.
+defaults can only ever cost this lane, the integration tree, and trees that
+belong to no lane at all.
+
+Step 2 exists because "every other worktree" was previously one undifferentiated
+class behind --allow-lane-targets, which put a dead bisect checkout -- created
+for one afternoon's investigation and never revisited -- behind the same guard
+as a lane's live working tree.  Those are not the same risk.  `CLAUDE.md` names
+exactly four blessed trees (`os`, `os-lane-a/b/c`); a worktree on any other
+branch, or on none, was made ad hoc for a scratch task, and its `target/` costs
+nobody a rebuild they were ever going to run.  Taking it at the defaults is what
+lets a lane that trips the floor stop paying for the privilege with its own cold
+rebuild every time.
+
+The classification is by *branch*, not by directory name, so renaming a scratch
+directory to look like a lane -- or a lane to look like scratch -- cannot change
+what it is.  A tree that is actively building is still protected: cargo holds
+`target/`, the atomic rename is vetoed, and the candidate is skipped with the
+holder named, exactly as for any other class.
 
 Nothing outside a worktree root is ever touched, and nothing that git does not
 consider ignored is ever touched: both are asserted, not assumed.
@@ -125,6 +144,75 @@ def worktrees(repo):
     if path is not None:
         result.append((path, branch))
     return result
+
+
+# The branches that make a worktree somebody's.  `main` is the integration
+# checkout; `lane-a/b/c` are the three agents' working trees.  `CLAUDE.md`
+# ("Worktrees -- one checkout per lane") blesses exactly these four and no more,
+# so anything else is a scratch tree somebody made for one task.
+INTEGRATION_BRANCH = "main"
+LANE_BRANCH = re.compile(r"^lane-[a-z]$")
+
+
+def is_scratch_worktree(branch):
+    """True if `branch` belongs to no lane and is not the integration checkout.
+
+    `branch` is "" for a detached HEAD, which is what `git worktree add <path>
+    <commit>` produces and therefore what every bisect/scratch tree here looks
+    like.  Classifying by branch rather than by path is deliberate: a directory
+    name is a label anyone can change, whereas the branch is what actually
+    decides whether some lane's next `git commit` lands in that tree.
+    """
+    return branch != INTEGRATION_BRANCH and not LANE_BRANCH.match(branch or "")
+
+
+def candidate_order(trees, root, allow_lane_targets):
+    """[(worktree, why)] in the order their `target/` should be attacked.
+
+    Pure: it decides *who pays*, from nothing but the worktree list, and touches
+    no disk.  That is deliberate -- this is the function that can quietly cost
+    another agent a cold rebuild, so it is the one that has to be testable
+    without a git repository, a full disk, or anything else that would keep the
+    test from being run on every change.
+
+    Scratch worktrees go first: they belong to no lane, so their `target/` is
+    the only build output here whose loss costs nobody a rebuild they were going
+    to run.  The integration checkout is next -- no lane develops there, it only
+    merges, and a merge rebuild costs time and nothing else.  Ours is after
+    that, and specifically *before* any other lane's: another lane's `target/`
+    is not a free lunch, it is that lane's rebuild, exactly as ours is ours.
+    Spending our own first is the only ordering that cannot be read as helping
+    ourselves at a neighbour's expense.
+
+    `root` keeps its own place even when this worktree is itself detached, so an
+    accident of what HEAD happens to point at cannot promote the tree we are
+    running in ahead of the integration checkout.
+    """
+    def key(p):
+        return os.path.normcase(os.path.normpath(p))
+
+    root_key = key(root)
+    main_tree = trees[0][0] if trees else root
+
+    # Each candidate carries the class that put it in the list, so the run says
+    # *why* a tree was eligible rather than only that it was.  "no lane owns it"
+    # beside a path is the difference between a reader checking the claim and a
+    # reader taking the script's word for which trees were fair game.
+    order = [(p, "no lane owns it") for p, b in trees
+             if is_scratch_worktree(b) and key(p) != root_key]
+    order += [(main_tree, "integration checkout"),
+              (root, "this lane -- ours to pay")]
+    if allow_lane_targets:
+        order += [(p, "another lane -- --allow-lane-targets")
+                  for p, b in trees[1:] if not is_scratch_worktree(b)]
+
+    seen, unique = set(), []
+    for tree, why in order:
+        k = key(tree)
+        if k not in seen:
+            seen.add(k)
+            unique.append((tree, why))
+    return unique
 
 
 def is_ignored_dir(tree, relpath):
@@ -396,9 +484,12 @@ def main(argv=None):
     ap.add_argument(
         "--allow-lane-targets",
         action="store_true",
-        help="also consider *other* lanes' target/ dirs. Without it a run can "
-        "only cost the integration checkout and this worktree (they are still "
-        "skipped if anything holds them open)",
+        help="also consider the *other three lanes'* target/ dirs -- someone "
+        "else's working tree, and someone else's rebuild. Without it a run can "
+        "only cost the integration checkout, this worktree, and worktrees that "
+        "belong to no lane at all (a detached bisect/scratch checkout, which is "
+        "nobody's and is taken by default). Everything is still skipped if "
+        "anything holds it open",
     )
     args = ap.parse_args(argv)
 
@@ -425,7 +516,6 @@ def main(argv=None):
     if not trees:
         sys.stderr.write("could not enumerate worktrees\n")
         return 2
-    main_tree = trees[0][0]
 
     # Before anything anyone might still want: finish the deletions a previous
     # run abandoned half-way.  This runs across *every* worktree regardless of
@@ -446,25 +536,11 @@ def main(argv=None):
         log("Done: %.1f GiB free." % free_gib(root))
         return 0
 
-    # The integration checkout is the safest target/ to prune: no lane develops
-    # there, it only merges, and a merge rebuild costs time and nothing else.
-    # Ours is next, and specifically *before* any other lane's: another lane's
-    # target/ is not a free lunch, it is that lane's rebuild, exactly as ours is
-    # ours.  Spending our own first is the only ordering that cannot be read as
-    # helping ourselves at a neighbour's expense.
-    order = [main_tree, root]
-    if args.allow_lane_targets:
-        order += [p for p, _b in trees[1:]]
-    seen, unique = set(), []
-    for tree in order:
-        key = os.path.normcase(os.path.normpath(tree))
-        if key not in seen:
-            seen.add(key)
-            unique.append(tree)
+    unique = candidate_order(trees, root, args.allow_lane_targets)
 
-    log("Step 2: target/ directories, integration checkout first")
+    log("Step 2: target/ directories, unowned scratch trees first")
     considered = refused = 0
-    for tree in unique:
+    for tree, why in unique:
         target = os.path.normpath(os.path.join(tree, "target"))
         if not os.path.isdir(target):
             continue
@@ -473,6 +549,7 @@ def main(argv=None):
             refused += 1
             log("  REFUSING %s: git does not consider it ignored" % target)
             continue
+        log("  candidate  %s  [%s]" % (target, why))
         reclaim_dir(target, dry, args.sizes, log)
         if not dry and free_gib(root) >= args.need:
             break

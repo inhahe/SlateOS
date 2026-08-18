@@ -360,6 +360,68 @@ floor now names the tool and accepts `--reclaim-space` to run it and retry.
 That reduces B's cost but deliberately does **not** pick B: it is opt-in per
 run and changes nothing unless asked for.
 
+### 2026-08-18, later — what option B *actually* costs a lane, and why it is now smaller
+
+Lane B ran the tool for real and measured the thing this entry had been pricing
+by assumption
+(`requests/b-a-reclaim-space-crashes-on-every-real-run-and-strands-the-tree.md`).
+Their finding, which is the more consequential half of that file:
+
+> With `os/target` already cleaned and the other two lanes' trees off-limits at
+> the defaults, **the only candidate the script can offer this lane is its own
+> `target/`.**
+
+That is worth stating plainly, because it changes B's price. Above, B's cost is
+written as "a chore that recurs every two to three days" — a chore being an
+*interruption*. But if the only tree a lane may reclaim is its own, the recurring
+cost is not one command; it is **a full cold rebuild for whichever lane trips the
+floor**, every two or three days. That is a materially worse number than this
+entry has been carrying, and it was a structural property of the defaults, not an
+accident: the ordering was `[integration checkout, our own]`, with *every* other
+worktree — live lane tree and dead scratch checkout alike — behind
+`--allow-lane-targets`.
+
+**Lane A has since fixed the part of that which was ours to fix.** Lumping those
+two together was wrong: `CLAUDE.md` blesses exactly four worktrees (`os`,
+`os-lane-a/b/c`), so a checkout on any other branch — or on none, which is what
+`git worktree add <path> <commit>` produces and therefore what every bisect tree
+here is — belongs to nobody, and its `target/` costs no one a rebuild they were
+going to run. `reclaim-space.py` now classifies worktrees **by branch** and
+attacks unowned scratch trees *first*, ahead of the integration checkout and well
+ahead of our own. Live lane trees stay exactly where they were, behind the flag.
+A tree that is mid-build is still protected by the existing rename veto.
+
+Measured in this worktree today, in precisely lane B's situation (`os/target`
+already clean):
+
+```
+Step 2: target/ directories, unowned scratch trees first
+  candidate  …\os-bisect-a\target            [no lane owns it]
+  candidate  …\os-straddle-scratch\target    [no lane owns it]
+  candidate  …\os-lane-a\target              [this lane -- ours to pay]
+```
+
+Two candidates now precede the lane's own tree where before there were none.
+
+**Honesty about the size of that win: today it is small.** Those two scratch
+trees hold 76 MB and 75 MB — they have been pruned since they were built, so they
+would not have saved lane B this morning. What changed is structural, not
+numeric: the class exists, it is taken by default, and it is where a dead bisect
+checkout's build output lands (`os-bisect-a` held a full kernel build when it was
+created). The next lane to trip the floor with a live scratch tree around pays
+nothing instead of paying a rebuild.
+
+**Net effect on the decision: B is cheaper than the paragraph above priced it,
+but not free, and the residual cost is exactly what lane B named.** Once scratch
+trees are exhausted, a lane still faces its own `target/` and nobody else's. That
+is deliberate — spending our own before a neighbour's is the only ordering that
+cannot be read as helping ourselves at their expense — but it means B's
+steady-state cost, in the worst case, remains one cold rebuild per floor-trip.
+Option A (one shared `target/`) does not have that cost at all, because there is
+only one tree to prune and no question of whose it is. **That is the sharpest
+argument for A that has been made in this entry, and it came from a measurement
+rather than from reasoning.**
+
 ## Q48 — [B] Finishing §312 will make "set the system clock", "listen on port 80" and "raise your own resource limit" permanently impossible. Give each of them a real kernel object to hang off, or leave them denied? — Status: OPEN
 
 **In short:** You decided last year (§312) that our C library should stop

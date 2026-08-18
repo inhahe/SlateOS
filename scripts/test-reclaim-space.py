@@ -170,6 +170,90 @@ def test_veto_names_the_holder(mod, tmp):
         held.close()
 
 
+def test_classifies_worktrees_by_branch_not_by_name(mod, tmp):
+    """Only `main` and `lane-<x>` belong to somebody; everything else is scratch.
+
+    Classifying by branch rather than by directory name is the whole point: a
+    directory called `os-lane-a` that is parked on a detached HEAD is a scratch
+    checkout somebody named suggestively, and a directory called `os-scratch`
+    sitting on `lane-b` is lane B's working tree.  Getting this backwards costs
+    a lane its build output, so it is asserted rather than assumed.
+    """
+    for branch in ("main", "lane-a", "lane-b", "lane-c"):
+        check("%r is owned, not scratch" % branch,
+              not mod.is_scratch_worktree(branch))
+    # "" is what `git worktree list --porcelain` reports for a detached HEAD,
+    # which is what every bisect tree here actually is.
+    for branch in ("", None, "lane-ab", "lane-1", "mainline", "wip/lane-a",
+                   "bisect", "detached"):
+        check("%r is scratch" % branch, mod.is_scratch_worktree(branch))
+
+
+def test_scratch_targets_are_reclaimable_without_the_lane_flag(mod, tmp):
+    """The ordering is what decides who pays, so it is asserted directly.
+
+    Lane B measured (request `b-a-q47-...`, and the Q47 entry) that with the
+    integration checkout already clean, the only candidate the defaults could
+    offer a lane was its own `target/` -- i.e. every trip of the free-space
+    floor cost that lane a full cold rebuild.  A dead bisect checkout was
+    sitting right there, behind the same flag as a live lane tree.  These are
+    the assertions that that is no longer true.
+    """
+    trees = [
+        ("/repo/os", "main"),
+        ("/repo/os-lane-a", "lane-a"),
+        ("/repo/os-lane-b", "lane-b"),
+        ("/repo/os-bisect-a", ""),
+        ("/repo/os-straddle-scratch", ""),
+    ]
+    order = mod.candidate_order(trees, "/repo/os-lane-a", False)
+    paths = [p for p, _w in order]
+
+    check("scratch trees are candidates at the defaults",
+          "/repo/os-bisect-a" in paths and "/repo/os-straddle-scratch" in paths,
+          repr(paths))
+    check("another lane's tree still is not, without the flag",
+          "/repo/os-lane-b" not in paths, repr(paths))
+    check("scratch comes before the integration checkout",
+          paths.index("/repo/os-bisect-a") < paths.index("/repo/os"),
+          repr(paths))
+    check("the integration checkout comes before our own",
+          paths.index("/repo/os") < paths.index("/repo/os-lane-a"),
+          repr(paths))
+    check("every candidate says which class put it there",
+          all(w for _p, w in order), repr(order))
+
+    # With the flag, other lanes join -- but strictly last, after we have
+    # already offered up our own.
+    order = mod.candidate_order(trees, "/repo/os-lane-a", True)
+    paths = [p for p, _w in order]
+    check("--allow-lane-targets admits the other lane",
+          "/repo/os-lane-b" in paths, repr(paths))
+    check("and puts it after our own tree",
+          paths.index("/repo/os-lane-a") < paths.index("/repo/os-lane-b"),
+          repr(paths))
+
+
+def test_our_own_tree_is_never_promoted_by_being_detached(mod, tmp):
+    """A detached lane worktree must not sweep itself up as scratch.
+
+    If it did, the tree we are running in would be attacked *before* the
+    integration checkout -- the one ordering the docstring promises against --
+    and it would be labelled "no lane owns it", which is a false statement about
+    the tree whose rebuild we are about to pay for.
+    """
+    trees = [("/repo/os", "main"), ("/repo/os-lane-a", "")]
+    order = mod.candidate_order(trees, "/repo/os-lane-a", False)
+    paths = [p for p, _w in order]
+    check("our own detached tree appears exactly once",
+          paths.count("/repo/os-lane-a") == 1, repr(paths))
+    check("our own detached tree is still ordered after the integration tree",
+          paths.index("/repo/os") < paths.index("/repo/os-lane-a"), repr(paths))
+    why = dict(order)["/repo/os-lane-a"]
+    check("and is labelled as ours to pay, not as unowned",
+          "ours to pay" in why, why)
+
+
 def main():
     mod = load_module()
     tmp = tempfile.mkdtemp(prefix="reclaim-test-")
@@ -180,6 +264,9 @@ def main():
         test_missing_path_is_not_an_error,
         test_in_use_is_skipped_not_forced,
         test_veto_names_the_holder,
+        test_classifies_worktrees_by_branch_not_by_name,
+        test_scratch_targets_are_reclaimable_without_the_lane_flag,
+        test_our_own_tree_is_never_promoted_by_being_detached,
     )
     try:
         for test in tests:

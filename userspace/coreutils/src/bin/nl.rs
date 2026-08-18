@@ -609,10 +609,10 @@ fn set_style(
                 // matches everything, but `ere` will not compile it.
                 None
             } else {
-                // POSIX *basic* expressions, upstream's `RE_SYNTAX_POSIX_BASIC`.
-                // `ere::bre` refuses backreferences, which glibc accepts here;
-                // see known-issues.md, and `scripts/nl-diff.sh` marks those
-                // cases xfail rather than pretending they agree.
+                // POSIX *basic* expressions, upstream's `RE_SYNTAX_POSIX_BASIC`,
+                // backreferences included. What still differs from glibc is only
+                // the wording of a compile error, which `scripts/nl-diff.sh`
+                // marks xfail rather than pretending the two agree.
                 let compiled = bre::compile(pattern, false)
                     .map_err(|e| deferred.fatal(String::from_utf8_lossy(&e.0).into_owned()))?;
                 Some(Box::new(compiled))
@@ -855,8 +855,12 @@ impl<'o> Numberer<'o> {
             // `re_search (…, line_buf.length - 1, …)` is: `-bp'x$'` must not be
             // asked to match against the newline.
             Style::Matching(None) => true,
+            // An abandoned search (only a backreference pattern can cause one)
+            // is not "did not match": numbering the line anyway would put a
+            // wrong number on every line after it, so the run stops.
             Style::Matching(Some(re)) => re
                 .find(line.split_last().map_or(line, |(_, rest)| rest))
+                .map_err(|e| io::Error::other(e.to_string()))?
                 .is_some(),
         };
 

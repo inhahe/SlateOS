@@ -483,8 +483,13 @@ fn colon(subject: &[u8], pattern: &[u8]) -> Result<Str, Fail> {
     }
     let re = ere::bre::compile(pattern, false)
         .map_err(|e| Fail(String::from_utf8_lossy(&e.0).into_owned()))?;
+    // A search that gave up is neither a match nor a non-match. `expr` is used
+    // for control flow — `expr "$f" : 'lib' >/dev/null || exit` — so reporting
+    // it as "no match" would take the failure branch on a question we never
+    // answered. Only a pattern with a backreference can produce one.
     let matched = re
         .capture_spans(subject)
+        .map_err(|e| Fail(e.to_string()))?
         .filter(|spans| matches!(spans.first(), Some(&Some((0, _)))));
 
     if re.group_count() > 0 {
@@ -758,10 +763,18 @@ mod tests {
     }
 
     #[test]
-    fn a_backreference_is_refused_rather_than_mistranslated() {
-        // The Pike VM cannot express one; treating `\1` as a literal `1` would
-        // answer a different question with no diagnostic.
-        assert!(eval_err(&["abc", ":", "\\(a\\)\\1"]).contains("backreference"));
+    fn a_backreference_matches_what_its_group_matched() {
+        // Refused outright until 2026-08-18; see design-decisions.md §333.
+        // `:` yields group 1 when the pattern has one, so this is `aa`'s first
+        // half, and the empty string when the doubling is not there.
+        assert_eq!(eval(&["aa", ":", "\\(a\\)\\1"]), "a");
+        assert_eq!(eval(&["ab", ":", "\\(a\\)\\1"]), "");
+        // Without a group it is a character count, and the anchoring at the
+        // start still applies.
+        assert_eq!(eval(&["abcabcx", ":", "\\(abc\\)\\1"]), "abc");
+        // A reference to a group that does not exist is still a diagnostic,
+        // not a literal digit — `\2` must not quietly match a `2`.
+        assert!(eval_err(&["a2", ":", "\\(a\\)\\2"]).contains("backreference"));
     }
 
     #[test]

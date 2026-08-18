@@ -12534,7 +12534,21 @@ impl Shell {
                 return false;
             }
         };
-        match re.captures(&subject) {
+        let found = match re.captures(&subject) {
+            Ok(found) => found,
+            // A search that gave up is not a non-match. `[[ ! $x =~ re ]]` is
+            // how a script tests for absence, so answering "no match" would
+            // take the *true* branch on a question the engine declined. The
+            // same channel a bad pattern uses says so: status 2, distinct from
+            // the 1 that means "matched nothing". Only a backreference pattern
+            // can reach this.
+            Err(e) => {
+                self.perrln(&bfmt![b"=~: ", e.to_string().as_bytes()]);
+                self.cond_regex_error = true;
+                return false;
+            }
+        };
+        match found {
             Some(groups) => {
                 // Each capture slot maps 1:1 to a BASH_REMATCH index; unmatched
                 // optional groups are stored as empty strings, as bash does.

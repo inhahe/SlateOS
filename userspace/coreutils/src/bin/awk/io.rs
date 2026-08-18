@@ -179,6 +179,16 @@ impl Records {
         }
     }
 
+    /// A record separator search that gave up is reported as an I/O error.
+    ///
+    /// `RS` is a regex the program chose, so one with a backreference can
+    /// exhaust the matcher's budget. This path has no way to say "I do not
+    /// know where the record ends" other than failing the read: carrying on
+    /// would silently glue two records into one.
+    fn limit_err(e: ere::MatchLimit) -> io::Error {
+        io::Error::other(format!("RS: {e}"))
+    }
+
     fn next_by_regex(&mut self, re: &Regex) -> io::Result<Option<Str>> {
         loop {
             let rest = self.rest();
@@ -186,7 +196,7 @@ impl Records {
             // longer with more input — `RS = "ab*"` against `a` followed by
             // more `b`s — so only a match that ends before the end is
             // trusted, unless there is no more input.
-            if let Some((s, e)) = re.find(rest)
+            if let Some((s, e)) = re.find(rest).map_err(Self::limit_err)?
                 && (e < rest.len() || self.eof)
                 && e > s
             {
@@ -199,7 +209,7 @@ impl Records {
                 if rest.is_empty() {
                     return Ok(None);
                 }
-                if let Some((s, e)) = re.find(rest)
+                if let Some((s, e)) = re.find(rest).map_err(Self::limit_err)?
                     && e > s
                 {
                     let rec = rest.get(..s).unwrap_or_default().to_vec();

@@ -25,12 +25,14 @@
 # produced a 2 GB transcript during measurement. Cases here stay in single
 # digits, and the bounds of `-w` are tested through its *diagnostics* instead.
 #
-# ## Three cases that differ on purpose
+# ## Two cases that differ on purpose
 #
 # `-bp` compiles a POSIX **basic** regular expression. Ours goes through
-# `ere::bre`, which refuses backreferences on purpose, and whose compile-error
-# wording is its own rather than glibc's `Invalid regular expression`. Those are
-# `xfail_case`d rather than silently tolerated.
+# `ere::bre`, whose compile-error wording is its own rather than glibc's
+# `Invalid regular expression`. Those two are `xfail_case`d rather than silently
+# tolerated. (Backreferences used to be a third: `ere` refused them, so
+# `-bp'\(ab\)\1'` numbered nothing. It has a backtracking matcher for those
+# patterns now — `design-decisions.md` §333 — and the case agrees with GNU.)
 #
 # The locale is `C.UTF-8`, with the diagnostics that pass an argument through
 # gnulib's `quote()` referenced under `LC_ALL=C` so the quote marks are ASCII on
@@ -342,8 +344,7 @@ run_case -w3 --body-numbering=p blanks.txt
 # The same styles on the other two sections.
 run_case -w3 -hp'H' -fp'F' -bp'B' sec.txt
 run_case -w3 -bn -hp'.' sec.txt
-xfail_case 'ere::bre refuses backreferences; glibc accepts them here' \
-  -w3 -bp'\(ab\)\1' words.txt
+run_case -w3 -bp'\(ab\)\1' words.txt
 xfail_case 'the regex compile-error wording is ere::bre own, not glibc regcomp' \
   -w3 -bp'[' words.txt
 xfail_case 'the regex compile-error wording is ere::bre own, not glibc regcomp' \

@@ -17,7 +17,8 @@
 //! arrow-key movement, 4 ghosts with chase/scatter AI, power pellets
 //! that make ghosts vulnerable, wrap-around tunnel, 3 lives, score
 //! tracking, level progression, and menu/pause/game-over states.
-//! Uses an LCG pseudo-random number generator (no external rand crate).
+//! Randomness comes from the shared `randrange` crate, seeded from the
+//! system so that two players do not get the same game.
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};

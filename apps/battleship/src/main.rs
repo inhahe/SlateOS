@@ -18,7 +18,8 @@
 //! an AI opponent with hunt/target firing strategy, hit/miss markers,
 //! ship sinking detection with announcements, win/loss detection,
 //! and live stats (shots fired, hit rate, ships remaining).
-//! Uses an LCG pseudo-random number generator (no external rand crate).
+//! Randomness comes from the shared `randrange` crate, seeded from the
+//! system so that two players do not get the same game.
 //! Themed with the Catppuccin Mocha palette.
 
 use guitk::color::Color;

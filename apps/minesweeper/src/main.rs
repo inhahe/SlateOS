@@ -10,7 +10,8 @@
 //! Features three difficulty levels (Beginner, Intermediate, Expert),
 //! first-click-safe mine placement, flood-fill reveal, flagging,
 //! mine counter, timer, win/loss detection, and game-over full reveal.
-//! Uses an LCG pseudo-random number generator (no external rand crate).
+//! Randomness comes from the shared `randrange` crate, seeded from the
+//! system so that two players do not get the same game.
 
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};

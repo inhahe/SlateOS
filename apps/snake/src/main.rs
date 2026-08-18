@@ -15,7 +15,8 @@
 //! food and bonus food spawning, collision detection (walls/self),
 //! scoring with streak bonuses, three difficulty levels, wrap mode,
 //! pause/resume, direction queue for fast input, and a stats panel.
-//! Uses an LCG pseudo-random number generator (no external rand crate).
+//! Randomness comes from the shared `randrange` crate, seeded from the
+//! system so that two players do not get the same game.
 
 use guitk::color::Color;
 use guitk::event::{Event, Key};

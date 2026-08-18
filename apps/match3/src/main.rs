@@ -16,7 +16,8 @@
 //! gravity/cascading, special gems (line clear, color bomb),
 //! three game modes (Classic, Timed, Moves), high score tracking,
 //! a hint system, and automatic shuffle when no moves exist.
-//! Uses an LCG pseudo-random number generator (no external rand crate).
+//! Randomness comes from the shared `randrange` crate, seeded from the
+//! system so that two players do not get the same game.
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};

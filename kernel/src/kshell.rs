@@ -91411,6 +91411,838 @@ impl<'a> OciRunFlags<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `oci run` / `oci create`, split into lifecycle phases.
+//
+// The single `case` this used to be carried a 13 344-byte prologue: the largest
+// frame in the kernel, and the last one still above the ~13 KiB floor that
+// `alloc`'s own BTree rebalancing sets (`Handle::insert_recursing` is 13 088
+// bytes, and is not ours to split).  At `opt-level = 0` -- which is what
+// `scripts/boot-test.sh` builds, so it is the profile a stack-overflow canary
+// would actually fire in -- LLVM gives every temporary its own slot and reuses
+// none.  A function that runs a container end to end therefore pays, all at
+// once and for its whole duration, for the layer extractor's counters, the
+// overlay mount's three paths, the DNS registration's `Vec`, the volume/tmpfs/
+// port loops' temporaries, and the launcher's four argv/envp `Vec`s -- none of
+// which are live at the same time in any real sense.
+//
+// Splitting the phases into siblings makes each frame live only for its own
+// phase.  They are siblings rather than nested `fn`s because a nested `fn`
+// cannot capture its environment either, so nesting would buy nothing but
+// indentation.
+//
+// The order below is the container's lifecycle: extract -> configure -> create
+// -> attach network -> jail -> apply Created-state settings -> launch.
+// ---------------------------------------------------------------------------
+
+/// Extract every layer of `image` into a fresh lower directory and build the
+/// copy-on-write overlay over it.
+///
+/// Returns `(rootfs_lower, overlay_id)`.  `None` means a directory could not be
+/// created or a layer failed to extract -- both already reported to the console,
+/// and both fatal to the run.  A `None` *overlay id* inside the `Some` is not a
+/// failure: the caller then jails the container at the read-only lower
+/// directory, which is runnable, just without write isolation.
+#[inline(never)]
+fn oci_run_prepare_rootfs(
+    image_name: &str,
+    blob_dir: &str,
+    image: &crate::oci::OciImage,
+) -> Option<(String, Option<crate::fs::overlay::OverlayId>)> {
+    // Step 2: Create rootfs directory and extract layers.
+    let rootfs_base = alloc::format!("/tmp/oci-{}", image_name);
+    let rootfs_lower = alloc::format!("{}/lower", rootfs_base);
+    let rootfs_upper = alloc::format!("{}/upper", rootfs_base);
+
+    // Create directory structure.
+    if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_base) {
+        // May already exist — ignore AlreadyExists.
+        if !matches!(e, crate::error::KernelError::AlreadyExists) {
+            crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_base, e);
+            return None;
+        }
+    }
+    if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_lower) {
+        if !matches!(e, crate::error::KernelError::AlreadyExists) {
+            crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_lower, e);
+            return None;
+        }
+    }
+    if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_upper) {
+        if !matches!(e, crate::error::KernelError::AlreadyExists) {
+            crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_upper, e);
+            return None;
+        }
+    }
+
+    // Extract each layer into the lower directory (merged — last layer wins).
+    let mut total_files: u64 = 0;
+    for (idx, layer) in image.manifest.layers.iter().enumerate() {
+        crate::console_println!(
+            "[oci] Extracting layer {}/{} ({} bytes)...",
+            idx.saturating_add(1),
+            image.manifest.layers.len(),
+            layer.size
+        );
+        match crate::oci::extract_layer(blob_dir, layer, &rootfs_lower) {
+            Ok(count) => {
+                total_files = total_files.saturating_add(count);
+                crate::console_println!(
+                    "[oci]   Layer {}: {} files extracted",
+                    idx.saturating_add(1),
+                    count
+                );
+            }
+            Err(e) => {
+                crate::console_println!(
+                    "[oci] Failed to extract layer {}: {:?}",
+                    idx.saturating_add(1),
+                    e
+                );
+                return None;
+            }
+        }
+    }
+    crate::console_println!(
+        "[oci] Rootfs: {} total files in {}",
+        total_files,
+        rootfs_lower
+    );
+
+    // Step 3: Create overlay filesystem (lower = extracted image
+    // layers, upper = writable scratch).  On success we mount it into
+    // the VFS so the container's writes are copy-on-write isolated
+    // from the read-only image.  If overlay creation fails we fall
+    // back to jailing the container directly at the read-only lower
+    // dir (no write isolation, but still runnable).
+    let overlay_name = alloc::format!("oci-{}", image_name);
+    let overlay_id = match crate::fs::overlay::create(&overlay_name, &rootfs_lower, &rootfs_upper) {
+        Ok(ov_id) => {
+            crate::console_println!(
+                "[oci] Overlay created (id={}): lower={}, upper={}",
+                ov_id,
+                rootfs_lower,
+                rootfs_upper
+            );
+            Some(ov_id)
+        }
+        Err(e) => {
+            crate::console_println!(
+                "[oci] Overlay creation failed: {:?} (continuing without overlay)",
+                e
+            );
+            None
+        }
+    };
+    Some((rootfs_lower, overlay_id))
+}
+
+/// Build the container configuration from the parsed flags and the network
+/// addressing settled by `--net`/`--network`.
+#[inline(never)]
+fn oci_run_build_config(
+    image_source: &str,
+    image_name: &str,
+    f: &OciRunFlags<'_>,
+    net_ip: Option<[u8; 4]>,
+    net_gw: Option<[u8; 4]>,
+    net_mask: Option<[u8; 4]>,
+) -> crate::container::ContainerConfig {
+    // Step 4: Create container.
+    let mut cfg = crate::container::ContainerConfig::new(image_name);
+    // Record the image the container came from (dir path or store
+    // `name:tag` ref) so `oci commit` / `docker commit` can later
+    // author a new image layered on this base.
+    cfg.image_source = String::from(image_source);
+    cfg.net_ip = net_ip;
+    cfg.net_gateway = net_gw;
+    cfg.net_dns = f.net_dns;
+    if net_ip.is_some() {
+        // Prefer the network's mask (from IPAM); fall back to /24 for a
+        // bare `--net IP`.
+        cfg.net_mask = net_mask.or(Some([255, 255, 255, 0]));
+    }
+    // Apply optional resource limits (--memory / --cpus). 0 = unlimited
+    // is the cgroup default, so we only override when a flag was given.
+    if let Some(frames) = f.mem_frames {
+        cfg.mem_limit = frames;
+    }
+    if let Some(pct) = f.cpu_percent {
+        cfg.cpu_quota = pct;
+    }
+    // Apply optional UTS hostname (--hostname/-h). The builder
+    // truncates names longer than 64 bytes.
+    if let Some(hn) = f.hostname {
+        cfg = cfg.hostname(hn);
+    }
+    // Apply metadata labels. --label-file first, then CLI --label, so
+    // the builder's last-write-wins dedup makes CLI labels override
+    // file labels (Docker precedence).
+    for (k, v) in &f.label_file_entries {
+        cfg = cfg.label(k, v);
+    }
+    for (k, v) in &f.labels {
+        cfg = cfg.label(k, v);
+    }
+    // Apply optional lifecycle automation (--restart / --rm). Note
+    // --read-only is applied post-create via set_read_only_root below,
+    // not here.
+    if let Some(policy) = f.restart_policy {
+        cfg.restart_policy = policy;
+    }
+    cfg.auto_remove = f.auto_remove;
+    cfg
+}
+
+/// Report the freshly-created container's identity and metadata.
+#[inline(never)]
+fn oci_run_report_created(
+    ct_id: crate::container::ContainerId,
+    image_name: &str,
+    cfg: &crate::container::ContainerConfig,
+) {
+    crate::console_println!();
+    crate::console_println!("=== Container Created ===");
+    crate::console_println!("  Container ID: {}", ct_id);
+    crate::console_println!("  Name:         {}", image_name);
+    if !cfg.hostname.is_empty() {
+        crate::console_println!("  Hostname:     {}", cfg.hostname);
+    }
+    if cfg.restart_policy != crate::container::RestartPolicy::No {
+        crate::console_println!("  Restart:      {}", cfg.restart_policy);
+    }
+    if cfg.auto_remove {
+        crate::console_println!("  AutoRemove:   yes (--rm)");
+    }
+    for (k, v) in &cfg.labels {
+        crate::console_println!("  Label:        {}={}", k, v);
+    }
+}
+
+/// Bind a `--network` reservation to the freshly-created container: take
+/// ownership of the leased address, register the container's embedded-DNS names,
+/// and attach its host-side veth to the network's shared L2 bridge.
+///
+/// Every step here is advisory and warns rather than failing.  A container whose
+/// bridge attach failed still has host/NAT connectivity; one whose DNS
+/// registration failed is still reachable by address.  Failing the whole run
+/// over either would be worse than the degraded networking it prevents.
+#[inline(never)]
+fn oci_run_bind_network(
+    ct_id: crate::container::ContainerId,
+    nn: &str,
+    ip: [u8; 4],
+    net_aliases: &[&str],
+) {
+    match crate::cnetwork::set_allocation_owner(nn, ip, ct_id) {
+        Ok(()) => crate::console_println!("  Network:      {} (ip {})", nn, fmt_ipv4(ip)),
+        Err(e) => crate::console_println!(
+            "[oci] Warning: could not bind network '{}' owner: {:?}",
+            nn,
+            e
+        ),
+    }
+    // Register the container's DNS names on the network so
+    // same-network peers can resolve it by name (Docker
+    // embedded DNS): the container name plus its hostname
+    // (when set and distinct). Non-fatal on failure.
+    if let Some(cinfo) = crate::container::info(ct_id) {
+        let mut names: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+        if !cinfo.name.is_empty() {
+            names.push(cinfo.name.as_str());
+        }
+        if !cinfo.hostname.is_empty() && !cinfo.hostname.eq_ignore_ascii_case(&cinfo.name) {
+            names.push(cinfo.hostname.as_str());
+        }
+        // Explicit --network-alias names (register_dns_names
+        // de-duplicates case-insensitively).
+        for &al in net_aliases {
+            names.push(al);
+        }
+        if !names.is_empty() {
+            if let Err(e) = crate::cnetwork::register_dns_names(nn, ct_id, &names) {
+                crate::console_println!(
+                    "[oci] Warning: could not register DNS names on '{}': {:?}",
+                    nn,
+                    e
+                );
+            }
+        }
+    }
+    // Attach the container's host-side veth to the network's
+    // shared L2 bridge so same-network peers can reach it
+    // directly (Docker user-defined bridge semantics). The
+    // bridge is created lazily on the first attach; a
+    // single-member network never allocates one. Non-fatal:
+    // without the bridge the container still has host/NAT
+    // connectivity, just no direct peer L2 path.
+    match crate::container::info(ct_id).and_then(|i| i.veth_pair) {
+        Some(vp) => {
+            match crate::cnetwork::attach_container_veth(nn, ct_id, vp) {
+                Ok(()) => {
+                    let peers = crate::cnetwork::inspect(nn).map_or(0, |i| i.allocations.len());
+                    crate::console_println!(
+                        "  L2 bridge:    {} ({} member{})",
+                        nn,
+                        peers,
+                        if peers == 1 { "" } else { "s" }
+                    );
+                    // Record the create-time primary network as a
+                    // membership (§60) so `inspect`/`ps` list it
+                    // alongside any runtime `network connect`s. It
+                    // reuses the primary veth just attached above.
+                    if let Some(ni) = crate::cnetwork::inspect(nn) {
+                        let _ = crate::container::record_primary_membership(
+                            ct_id,
+                            nn,
+                            ip,
+                            ni.network_addr,
+                            ni.prefix_len,
+                        );
+                    }
+                }
+                Err(e) => crate::console_println!(
+                    "[oci] Warning: could not attach to network '{}' bridge: {:?}",
+                    nn,
+                    e
+                ),
+            }
+        }
+        None => crate::console_println!(
+            "[oci] Warning: network '{}' has no veth to bridge (no host link)",
+            nn
+        ),
+    }
+}
+
+/// Determine the container's jail root, preferring the merged overlay mount.
+///
+/// Returns `(jail_root, merged_mount)`, where `merged_mount` is `Some` only when
+/// the overlay adapter was actually mounted -- the caller records it on the
+/// container so teardown unmounts it.
+#[inline(never)]
+fn oci_run_mount_jail(
+    image_name: &str,
+    rootfs_lower: &str,
+    overlay_id: Option<crate::fs::overlay::OverlayId>,
+) -> (String, Option<String>) {
+    // Determine the container's jail root.  Prefer the merged
+    // overlay mount (copy-on-write isolation): mount the
+    // per-container `OverlayFs` adapter at
+    // `/containers/<name>/rootfs` so reads see the merged view
+    // and writes land in the upper layer.  If the overlay was
+    // not created or the mount fails, fall back to jailing the
+    // container directly at the read-only lower dir.
+    let merged_mount = alloc::format!("/containers/{}/rootfs", image_name);
+    let mut jail_root = String::from(rootfs_lower);
+    let mut mounted_overlay = false;
+    if let Some(ov_id) = overlay_id {
+        match crate::fs::overlay::OverlayFs::new(ov_id) {
+            Ok(ovfs) => {
+                match crate::fs::vfs::Vfs::mount(&merged_mount, alloc::boxed::Box::new(ovfs)) {
+                    Ok(()) => {
+                        jail_root = merged_mount.clone();
+                        mounted_overlay = true;
+                        crate::console_println!(
+                            "[oci] Overlay mounted at {} (copy-on-write)",
+                            merged_mount
+                        );
+                    }
+                    Err(e) => {
+                        crate::console_println!(
+                            "[oci] Could not mount overlay at {}: {:?} (using read-only lower)",
+                            merged_mount,
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                crate::console_println!(
+                    "[oci] Could not open overlay adapter: {:?} (using read-only lower)",
+                    e
+                );
+            }
+        }
+    }
+    (
+        jail_root,
+        if mounted_overlay {
+            Some(merged_mount)
+        } else {
+            None
+        },
+    )
+}
+
+/// Apply every setting that must land while the container is still in Created
+/// state: the rootfs jail, `--read-only`, the overlay bookkeeping, and the
+/// `-v` / `--tmpfs` / `-p` mounts and port publications.
+///
+/// Ordering is load-bearing -- all of this is rejected once the container is
+/// Running -- so it must be called before [`oci_run_launch_init`].
+#[inline(never)]
+fn oci_run_apply_created_state(
+    ct_id: crate::container::ContainerId,
+    jail_root: &str,
+    merged_mount: Option<&str>,
+    overlay_id: Option<crate::fs::overlay::OverlayId>,
+    f: &OciRunFlags<'_>,
+) {
+    // Jail the container to its rootfs (must happen while
+    // still in Created state, before `run`).  The init process
+    // then resolves `/bin/sh`, `/lib/...`, etc. against the
+    // container's filesystem instead of the host.
+    if let Err(e) = crate::container::set_root_path(ct_id, jail_root) {
+        crate::console_println!("[oci] Warning: could not set rootfs jail: {:?}", e);
+    }
+    // Apply Docker `--read-only`: mark the container rootfs
+    // read-only (Created state). Writable `:rw` volumes below
+    // still punch writable holes through it.
+    if f.read_only_root {
+        match crate::container::set_read_only_root(ct_id, true) {
+            Ok(()) => crate::console_println!("  Root FS:      read-only"),
+            Err(e) => {
+                crate::console_println!("[oci] Warning: could not set read-only root: {:?}", e);
+            }
+        }
+    }
+    // If we mounted an overlay, record it on the container so
+    // `container delete` unmounts the adapter on teardown.
+    if let Some(merged_mount) = merged_mount {
+        if let Err(e) = crate::container::set_rootfs_mount(ct_id, merged_mount) {
+            crate::console_println!("[oci] Warning: could not record rootfs mount: {:?}", e);
+        }
+    }
+    // Record the overlay id (independent of whether the adapter
+    // was mounted) so `container diff` can locate the writable
+    // scratch layer even when the merged mount fell back to the
+    // read-only lower dir.
+    if let Some(ov_id) = overlay_id {
+        if let Err(e) = crate::container::set_overlay_id(ct_id, Some(ov_id)) {
+            crate::console_println!("[oci] Warning: could not record overlay id: {:?}", e);
+        }
+    }
+
+    // Install any `-v host:guest` volume (bind) mounts (also
+    // while still in Created state).  A volume lets the
+    // container see a host directory at a guest path, escaping
+    // the rootfs (e.g. `-v /srv/data:/data`).
+    for (host, guest, read_only) in &f.volumes {
+        match crate::container::add_volume_mount(ct_id, host, guest, *read_only) {
+            Ok(()) => crate::console_println!(
+                "  Volume:       {} -> {}{}",
+                host.display(),
+                guest.display(),
+                if *read_only { " (ro)" } else { "" }
+            ),
+            Err(e) => crate::console_println!(
+                "[oci] Warning: could not add volume {}:{}: {:?}",
+                host.display(),
+                guest.display(),
+                e
+            ),
+        }
+    }
+
+    // Install any `--tmpfs /guest` in-memory mounts (Created
+    // state).  Each gives the container an ephemeral writable
+    // filesystem at the guest path, backed by a fresh memfs —
+    // common for scratch space in a `--read-only` container.
+    for guest in &f.tmpfs {
+        match crate::container::add_tmpfs_mount(ct_id, guest) {
+            Ok(()) => {
+                crate::console_println!("  Tmpfs:        {} (in-memory)", guest);
+            }
+            Err(e) => {
+                crate::console_println!("[oci] Warning: could not add tmpfs {}: {:?}", guest, e);
+            }
+        }
+    }
+
+    // Install any `-p host:container` published ports (Created
+    // state).  The NAT rules forwarding host traffic to the
+    // container are installed at run() time; this records the
+    // intent.  Requires the container to have a network IP
+    // (set via `--net`), which add_port_publish enforces.
+    for &(proto, hp, cp) in &f.ports {
+        match crate::container::add_port_publish(ct_id, proto, hp, cp) {
+            Ok(()) => crate::console_println!("  Publish:      {:?} :{} -> :{}", proto, hp, cp),
+            Err(e) => crate::console_println!(
+                "[oci] Warning: could not publish {:?} :{} -> :{}: {:?} (need --net IP)",
+                proto,
+                hp,
+                cp,
+                e
+            ),
+        }
+    }
+}
+
+/// Merge the init process's environment with Docker precedence.
+#[inline(never)]
+fn oci_run_merge_env(
+    f: &OciRunFlags<'_>,
+    image_env: &[alloc::string::String],
+) -> alloc::vec::Vec<alloc::vec::Vec<u8>> {
+    use crate::oci;
+
+    // Merge environment entries using Docker
+    // precedence: CLI `-e` > `--env-file` > image
+    // ENV, with no duplicate keys. Keys are the
+    // bytes before the first `=` (whole entry if
+    // none). We add CLI `-e` first, then env-file
+    // entries whose key isn't already set, then
+    // image ENV entries whose key isn't already set.
+    let mut envp_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+    for spec in &f.extra_env {
+        envp_owned.push(spec.as_bytes().to_vec());
+    }
+    for entry in &f.env_file_entries {
+        let key = oci::env_entry_key(entry);
+        let already = envp_owned.iter().any(|e| oci::env_entry_key(e) == key);
+        if !already {
+            envp_owned.push(entry.clone());
+        }
+    }
+    for entry in image_env {
+        let key = oci::env_entry_key(entry.as_bytes());
+        let already = envp_owned.iter().any(|e| oci::env_entry_key(e) == key);
+        if !already {
+            envp_owned.push(entry.as_bytes().to_vec());
+        }
+    }
+    envp_owned
+}
+
+/// Effective initial working directory for the init process.
+#[inline(never)]
+fn oci_run_effective_workdir(
+    flag: Option<&str>,
+    image_working_dir: &str,
+) -> Option<alloc::string::String> {
+    // Effective working directory: CLI `--workdir`/`-w`
+    // wins, else the image's `WorkingDir`, else none
+    // (init starts at `/`). Owned so the bytes outlive
+    // `opts`, which borrows them via `.cwd()`.
+    let effective_workdir: Option<alloc::string::String> =
+        flag.map(alloc::string::String::from).or_else(|| {
+            let wd = image_working_dir;
+            if wd.is_empty() {
+                None
+            } else {
+                Some(alloc::string::String::from(wd))
+            }
+        });
+    effective_workdir
+}
+
+/// Effective numeric user identity for the init process.
+#[inline(never)]
+fn oci_run_effective_uid_gid(flag: Option<&str>, image_user: &str) -> Option<(u32, u32)> {
+    // Effective user identity: CLI `--user`/`-u`
+    // wins, else the image's `User` config, else
+    // none (init stays root). Only numeric
+    // `uid[:gid]` is accepted — a username has no
+    // /etc/passwd to resolve against here, so it is
+    // warned and ignored. When `:gid` is omitted the
+    // gid defaults to 0 (matching Docker's behavior
+    // for a uid with no passwd entry).
+    let user_spec: Option<alloc::string::String> =
+        flag.map(alloc::string::String::from).or_else(|| {
+            let u = image_user;
+            if u.is_empty() {
+                None
+            } else {
+                Some(alloc::string::String::from(u))
+            }
+        });
+    let effective_uid_gid: Option<(u32, u32)> = user_spec.as_deref().and_then(|s| {
+        let mut segs = s.splitn(2, ':');
+        let uid_s = segs.next().unwrap_or("");
+        let gid_s = segs.next();
+        match (uid_s.parse::<u32>(), gid_s.map(str::parse::<u32>)) {
+            (Ok(uid), None) => Some((uid, 0)),
+            (Ok(uid), Some(Ok(gid))) => Some((uid, gid)),
+            _ => {
+                crate::console_println!("[oci] Ignoring user '{}': expected numeric uid[:gid]", s);
+                None
+            }
+        }
+    });
+    effective_uid_gid
+}
+
+/// Load and launch the container's init process.
+///
+/// Returns whether an init process was actually started; the caller falls back
+/// to the manual `container exec` model when it was not.  Every failure here is
+/// reported and returns `false` rather than propagating: a container that could
+/// not launch its entrypoint is still a created container the user can exec
+/// into, which is more useful than tearing it down.
+#[inline(never)]
+fn oci_run_launch_init(
+    ct_id: crate::container::ContainerId,
+    jail_root: &str,
+    command: &[alloc::string::String],
+    image: &crate::oci::OciImage,
+    f: &OciRunFlags<'_>,
+) -> bool {
+    // Guest-visible exe path (absolute within the rootfs).
+    let exe_rel = command
+        .first()
+        .map(alloc::string::String::as_str)
+        .unwrap_or("");
+    let exe_guest = if exe_rel.starts_with('/') {
+        alloc::string::String::from(exe_rel)
+    } else {
+        alloc::format!("/{}", exe_rel)
+    };
+    // Host path to read the ELF from (jail root + guest
+    // path).  When an overlay is mounted this reads through
+    // the merged view; otherwise it reads the lower dir.
+    let exe_host = alloc::format!("{}{}", jail_root, exe_guest);
+
+    match crate::fs::vfs::Vfs::read_file(&exe_host) {
+        Ok(elf) => {
+            let argv_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+                command.iter().map(|s| s.as_bytes().to_vec()).collect();
+            let argv_refs: alloc::vec::Vec<&[u8]> =
+                argv_owned.iter().map(alloc::vec::Vec::as_slice).collect();
+            let envp_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
+                oci_run_merge_env(f, &image.config.env);
+            let envp_refs: alloc::vec::Vec<&[u8]> =
+                envp_owned.iter().map(alloc::vec::Vec::as_slice).collect();
+            let effective_workdir: Option<alloc::string::String> =
+                oci_run_effective_workdir(f.workdir, &image.config.working_dir);
+            let effective_uid_gid: Option<(u32, u32)> =
+                oci_run_effective_uid_gid(f.user, &image.config.user);
+            let mut opts = crate::proc::spawn::SpawnOptions::new(&exe_guest)
+                .argv(&argv_refs)
+                .envp(&envp_refs)
+                .exe_path(exe_guest.as_bytes());
+            if let Some(wd) = effective_workdir.as_deref() {
+                opts = opts.cwd(wd.as_bytes());
+                crate::console_println!("  WorkDir:      {}", wd);
+            }
+            if let Some((uid, gid)) = effective_uid_gid {
+                opts = opts.uid_gid(uid, gid);
+                crate::console_println!("  User:         {}:{}", uid, gid);
+            }
+            match crate::container::run(ct_id, &elf, &opts) {
+                Ok(pid) => {
+                    crate::console_println!("  Init PID:     {} ({})", pid, exe_guest);
+                    true
+                }
+                Err(e) => {
+                    crate::console_println!("[oci] Failed to launch init process: {:?}", e);
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            crate::console_println!(
+                "[oci] Could not read entrypoint '{}' (host {}): {:?}",
+                exe_guest,
+                exe_host,
+                e
+            );
+            false
+        }
+    }
+}
+
+/// `oci run` / `oci create`: load an image, extract it, create the container and
+/// launch its init process.
+///
+/// This is the phase sequencer; the work is in the `oci_run_*` functions above.
+/// Keeping it a thin sequence of calls is the point -- see the comment heading
+/// this group.
+#[inline(never)]
+fn oci_run(parts: &[&str]) {
+    // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME]
+    //                      [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...]
+    //   where src is an absolute host path (bind mount) or a bare name
+    //   (named volume, created on demand under VOLUMES_ROOT)
+    //                      [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]
+    //
+    // Loads an OCI image, extracts all layers into a merged rootfs
+    // directory, creates a container with the image's configuration,
+    // and reports the container ID for subsequent exec/stop/delete.
+    let Some(dir) = parts.get(1) else {
+        crate::console_println!(
+            "Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [--tmpfs /guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]"
+        );
+        return;
+    };
+
+    // Parse the optional flags.  They come back from a separate function, rather
+    // than being filled by a loop here, to keep the parser's stack slots out of
+    // this frame -- see [`OciRunFlags`].
+    let f = OciRunFlags::parse(parts);
+
+    // Step 1: Load OCI image metadata. `dir` may be an on-disk OCI
+    // layout directory or a named-store reference (`name:tag`);
+    // `blob_dir` is where the layer blobs actually live.
+    crate::console_println!("[oci] Loading image from {}...", dir);
+    let (blob_dir, image) = match crate::oci::resolve_image_source(dir) {
+        Ok(pair) => pair,
+        Err(e) => {
+            crate::console_println!("[oci] Failed to load image: {:?}", e);
+            return;
+        }
+    };
+
+    let image_name = f.name.unwrap_or_else(|| {
+        // Try to derive name from directory path.
+        dir.rsplit('/').next().unwrap_or("oci-container")
+    });
+
+    crate::console_println!(
+        "[oci] Image: {} ({}), {} layers",
+        image.config.architecture,
+        image.config.os,
+        image.manifest.layers.len()
+    );
+
+    // Steps 2 and 3: extract the image's layers and build the overlay over them.
+    let Some((rootfs_lower, overlay_id)) = oci_run_prepare_rootfs(image_name, &blob_dir, &image)
+    else {
+        return;
+    };
+
+    // Addressing settled by `--net`, and then possibly redrawn from a
+    // `--network` lease just below.
+    let mut net_ip = f.net_ip;
+    let mut net_gw = f.net_gw;
+    let mut net_mask: Option<[u8; 4]> = None;
+
+    // Step 3.5: if `--network NAME` was given (and no explicit `--net`
+    // IP), draw a conflict-free address from that network's IPAM. The
+    // reservation is unowned until the container id exists (below); we
+    // stash `(name, ip)` so ownership can be bound after create and so a
+    // failed create can release the reservation rather than leak it.
+    let mut network_lease: Option<(&str, [u8; 4])> = None;
+    if let Some(nn) = f.net_name {
+        if net_ip.is_some() {
+            crate::console_println!(
+                "[oci] --network {} ignored: explicit --net IP already given",
+                nn
+            );
+        } else {
+            match crate::cnetwork::allocate(nn, None) {
+                Ok(lease) => {
+                    net_ip = Some(lease.ip);
+                    net_gw = Some(lease.gateway);
+                    net_mask = Some(lease.netmask);
+                    network_lease = Some((nn, lease.ip));
+                }
+                Err(e) => {
+                    crate::console_println!(
+                        "[oci] Cannot allocate IP from network '{}': {:?}",
+                        nn,
+                        e
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    // Step 4: create the container.
+    let cfg = oci_run_build_config(dir, image_name, &f, net_ip, net_gw, net_mask);
+    let ct_id = match crate::container::create(&cfg) {
+        Ok(id) => id,
+        Err(e) => {
+            // Release the network reservation made before create so a failed run
+            // does not leak an IP.
+            if let Some((nn, ip)) = network_lease {
+                let _ = crate::cnetwork::release(nn, ip);
+            }
+            crate::console_println!("[oci] Container creation failed: {:?}", e);
+            return;
+        }
+    };
+
+    oci_run_report_created(ct_id, image_name, &cfg);
+
+    // Bind the reserved network address to this container so its lease is
+    // reclaimed when the container is deleted.  The reservation was made unowned
+    // above, before the id existed.
+    if let Some((nn, ip)) = network_lease {
+        oci_run_bind_network(ct_id, nn, ip, &f.net_aliases);
+    }
+
+    let (jail_root, merged_mount) = oci_run_mount_jail(image_name, &rootfs_lower, overlay_id);
+    crate::console_println!("  Rootfs:       {}", jail_root);
+
+    // Compute the effective command (what the init process
+    // actually runs), applying Docker's ENTRYPOINT/CMD override
+    // rules: `--entrypoint` replaces (or, with "", clears) the
+    // image ENTRYPOINT and drops its default CMD; trailing
+    // `IMAGE CMD...` tokens replace the image CMD. See
+    // `ImageConfig::effective_command`.
+    let command: alloc::vec::Vec<alloc::string::String> = image
+        .config
+        .effective_command(f.entrypoint_override, &f.cmd_override);
+
+    // Show the effective runtime config.
+    if !command.is_empty() {
+        let cmd_str: alloc::string::String = command.join(" ");
+        crate::console_println!("  Command:      {}", cmd_str);
+    }
+    if !image.config.working_dir.is_empty() {
+        crate::console_println!("  WorkingDir:   {}", image.config.working_dir);
+    }
+    if !image.config.env.is_empty() {
+        crate::console_println!("  Environment:");
+        for e in &image.config.env {
+            crate::console_println!("    {}", e);
+        }
+    }
+
+    if let Some(ns) = crate::container::namespace_ids(ct_id) {
+        crate::console_println!("  PID NS:       {}", ns.0);
+        crate::console_println!("  User NS:      {}", ns.1);
+        crate::console_println!("  Net NS:       {}", ns.2);
+    }
+
+    oci_run_apply_created_state(ct_id, &jail_root, merged_mount.as_deref(), overlay_id, &f);
+
+    // Launch the image's entrypoint/cmd as the container's init process, jailed
+    // to the rootfs.
+    let launched = if command.is_empty() {
+        crate::console_println!(
+            "[oci] Image declares no entrypoint/cmd; not launching an init process."
+        );
+        false
+    } else {
+        oci_run_launch_init(ct_id, &jail_root, &command, &image, &f)
+    };
+
+    crate::console_println!();
+    if launched {
+        crate::console_println!(
+            "Container {} is running. Use 'container info {}' to inspect.",
+            ct_id,
+            ct_id
+        );
+    } else {
+        // No init process launched — fall back to the manual
+        // model so the user can still exec into the container.
+        let _ = crate::container::start(ct_id);
+        crate::console_println!(
+            "Use 'container exec {}' to run commands in this container.",
+            ct_id
+        );
+    }
+    crate::console_println!(
+        "Use 'container stop {}' then 'container delete {}' to clean up.",
+        ct_id,
+        ct_id
+    );
+}
+
 /// `oci` — OCI container image management.
 ///
 /// Subcommands:
@@ -91563,721 +92395,7 @@ fn cmd_oci(args: &str) {
             }
             case(&parts);
         }
-        "run" | "create" => {
-            #[inline(never)]
-            fn case(parts: &[&str]) {
-                // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME]
-                //                      [-v src:/guest[:ro|:rw] ...] [-p host:container[/proto] ...]
-                //   where src is an absolute host path (bind mount) or a bare name
-                //   (named volume, created on demand under VOLUMES_ROOT)
-                //                      [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]
-                //
-                // Loads an OCI image, extracts all layers into a merged rootfs
-                // directory, creates a container with the image's configuration,
-                // and reports the container ID for subsequent exec/stop/delete.
-                let Some(dir) = parts.get(1) else {
-                    crate::console_println!(
-                        "Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]] [--network NAME] [--network-alias NAME ...] [-v src:/guest[:ro|:rw] ...] [--tmpfs /guest ...] [-p host:container[/proto] ...] [-e KEY=value ...] [--env-file FILE ...] [-m SIZE] [--cpus N] [--read-only] [--restart POLICY] [--rm] [-w DIR] [-u UID[:GID]] [--entrypoint EXE] [--hostname NAME] [--label K=V ...] [--label-file FILE] [COMMAND [ARG...]]"
-                    );
-                    return;
-                };
-
-                // Parse the optional flags.  They come back from a separate
-                // function, rather than being filled by a loop here, to keep the
-                // parser's stack slots out of this frame -- see [`OciRunFlags`].
-                let OciRunFlags {
-                    name,
-                    mut net_ip,
-                    mut net_gw,
-                    net_dns,
-                    net_name,
-                    net_aliases,
-                    volumes,
-                    ports,
-                    tmpfs,
-                    extra_env,
-                    env_file_entries,
-                    mem_frames,
-                    cpu_percent,
-                    read_only_root,
-                    restart_policy,
-                    auto_remove,
-                    workdir,
-                    user,
-                    entrypoint_override,
-                    hostname,
-                    labels,
-                    label_file_entries,
-                    cmd_override,
-                } = OciRunFlags::parse(parts);
-                // Not a flag: seeded below from a `--network` IPAM lease.
-                let mut net_mask: Option<[u8; 4]> = None;
-
-                // Step 1: Load OCI image metadata. `dir` may be an on-disk OCI
-                // layout directory or a named-store reference (`name:tag`);
-                // `blob_dir` is where the layer blobs actually live.
-                crate::console_println!("[oci] Loading image from {}...", dir);
-                let (blob_dir, image) = match oci::resolve_image_source(dir) {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        crate::console_println!("[oci] Failed to load image: {:?}", e);
-                        return;
-                    }
-                };
-
-                let image_name = name.unwrap_or_else(|| {
-                    // Try to derive name from directory path.
-                    dir.rsplit('/').next().unwrap_or("oci-container")
-                });
-
-                crate::console_println!(
-                    "[oci] Image: {} ({}), {} layers",
-                    image.config.architecture,
-                    image.config.os,
-                    image.manifest.layers.len()
-                );
-
-                // Step 2: Create rootfs directory and extract layers.
-                let rootfs_base = alloc::format!("/tmp/oci-{}", image_name);
-                let rootfs_lower = alloc::format!("{}/lower", rootfs_base);
-                let rootfs_upper = alloc::format!("{}/upper", rootfs_base);
-
-                // Create directory structure.
-                if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_base) {
-                    // May already exist — ignore AlreadyExists.
-                    if !matches!(e, crate::error::KernelError::AlreadyExists) {
-                        crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_base, e);
-                        return;
-                    }
-                }
-                if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_lower) {
-                    if !matches!(e, crate::error::KernelError::AlreadyExists) {
-                        crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_lower, e);
-                        return;
-                    }
-                }
-                if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_upper) {
-                    if !matches!(e, crate::error::KernelError::AlreadyExists) {
-                        crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_upper, e);
-                        return;
-                    }
-                }
-
-                // Extract each layer into the lower directory (merged — last layer wins).
-                let mut total_files: u64 = 0;
-                for (idx, layer) in image.manifest.layers.iter().enumerate() {
-                    crate::console_println!(
-                        "[oci] Extracting layer {}/{} ({} bytes)...",
-                        idx.saturating_add(1),
-                        image.manifest.layers.len(),
-                        layer.size
-                    );
-                    match oci::extract_layer(&blob_dir, layer, &rootfs_lower) {
-                        Ok(count) => {
-                            total_files = total_files.saturating_add(count);
-                            crate::console_println!(
-                                "[oci]   Layer {}: {} files extracted",
-                                idx.saturating_add(1),
-                                count
-                            );
-                        }
-                        Err(e) => {
-                            crate::console_println!(
-                                "[oci] Failed to extract layer {}: {:?}",
-                                idx.saturating_add(1),
-                                e
-                            );
-                            return;
-                        }
-                    }
-                }
-                crate::console_println!(
-                    "[oci] Rootfs: {} total files in {}",
-                    total_files,
-                    rootfs_lower
-                );
-
-                // Step 3: Create overlay filesystem (lower = extracted image
-                // layers, upper = writable scratch).  On success we mount it into
-                // the VFS so the container's writes are copy-on-write isolated
-                // from the read-only image.  If overlay creation fails we fall
-                // back to jailing the container directly at the read-only lower
-                // dir (no write isolation, but still runnable).
-                let overlay_name = alloc::format!("oci-{}", image_name);
-                let overlay_id =
-                    match crate::fs::overlay::create(&overlay_name, &rootfs_lower, &rootfs_upper) {
-                        Ok(ov_id) => {
-                            crate::console_println!(
-                                "[oci] Overlay created (id={}): lower={}, upper={}",
-                                ov_id,
-                                rootfs_lower,
-                                rootfs_upper
-                            );
-                            Some(ov_id)
-                        }
-                        Err(e) => {
-                            crate::console_println!(
-                                "[oci] Overlay creation failed: {:?} (continuing without overlay)",
-                                e
-                            );
-                            None
-                        }
-                    };
-
-                // Step 3.5: if `--network NAME` was given (and no explicit `--net`
-                // IP), draw a conflict-free address from that network's IPAM. The
-                // reservation is unowned until the container id exists (below); we
-                // stash `(name, ip)` so ownership can be bound after create and so a
-                // failed create can release the reservation rather than leak it.
-                let mut network_lease: Option<(&str, [u8; 4])> = None;
-                if let Some(nn) = net_name {
-                    if net_ip.is_some() {
-                        crate::console_println!(
-                            "[oci] --network {} ignored: explicit --net IP already given",
-                            nn
-                        );
-                    } else {
-                        match crate::cnetwork::allocate(nn, None) {
-                            Ok(lease) => {
-                                net_ip = Some(lease.ip);
-                                net_gw = Some(lease.gateway);
-                                net_mask = Some(lease.netmask);
-                                network_lease = Some((nn, lease.ip));
-                            }
-                            Err(e) => {
-                                crate::console_println!(
-                                    "[oci] Cannot allocate IP from network '{}': {:?}",
-                                    nn,
-                                    e
-                                );
-                                return;
-                            }
-                        }
-                    }
-                }
-
-                // Step 4: Create container.
-                let mut cfg = crate::container::ContainerConfig::new(image_name);
-                // Record the image the container came from (dir path or store
-                // `name:tag` ref) so `oci commit` / `docker commit` can later
-                // author a new image layered on this base.
-                cfg.image_source = String::from(*dir);
-                cfg.net_ip = net_ip;
-                cfg.net_gateway = net_gw;
-                cfg.net_dns = net_dns;
-                if net_ip.is_some() {
-                    // Prefer the network's mask (from IPAM); fall back to /24 for a
-                    // bare `--net IP`.
-                    cfg.net_mask = net_mask.or(Some([255, 255, 255, 0]));
-                }
-                // Apply optional resource limits (--memory / --cpus). 0 = unlimited
-                // is the cgroup default, so we only override when a flag was given.
-                if let Some(frames) = mem_frames {
-                    cfg.mem_limit = frames;
-                }
-                if let Some(pct) = cpu_percent {
-                    cfg.cpu_quota = pct;
-                }
-                // Apply optional UTS hostname (--hostname/-h). The builder
-                // truncates names longer than 64 bytes.
-                if let Some(hn) = hostname {
-                    cfg = cfg.hostname(hn);
-                }
-                // Apply metadata labels. --label-file first, then CLI --label, so
-                // the builder's last-write-wins dedup makes CLI labels override
-                // file labels (Docker precedence).
-                for (k, v) in &label_file_entries {
-                    cfg = cfg.label(k, v);
-                }
-                for (k, v) in &labels {
-                    cfg = cfg.label(k, v);
-                }
-                // Apply optional lifecycle automation (--restart / --rm). Note
-                // --read-only is applied post-create via set_read_only_root below,
-                // not here.
-                if let Some(policy) = restart_policy {
-                    cfg.restart_policy = policy;
-                }
-                cfg.auto_remove = auto_remove;
-
-                match crate::container::create(&cfg) {
-                    Ok(ct_id) => {
-                        crate::console_println!();
-                        crate::console_println!("=== Container Created ===");
-                        crate::console_println!("  Container ID: {}", ct_id);
-                        crate::console_println!("  Name:         {}", image_name);
-                        if !cfg.hostname.is_empty() {
-                            crate::console_println!("  Hostname:     {}", cfg.hostname);
-                        }
-                        if cfg.restart_policy != crate::container::RestartPolicy::No {
-                            crate::console_println!("  Restart:      {}", cfg.restart_policy);
-                        }
-                        if cfg.auto_remove {
-                            crate::console_println!("  AutoRemove:   yes (--rm)");
-                        }
-                        for (k, v) in &cfg.labels {
-                            crate::console_println!("  Label:        {}={}", k, v);
-                        }
-                        // Bind the reserved network address to this container so its
-                        // lease is reclaimed when the container is deleted. The
-                        // reservation was made unowned above (before the id existed).
-                        if let Some((nn, ip)) = network_lease {
-                            match crate::cnetwork::set_allocation_owner(nn, ip, ct_id) {
-                                Ok(()) => crate::console_println!(
-                                    "  Network:      {} (ip {})",
-                                    nn,
-                                    fmt_ipv4(ip)
-                                ),
-                                Err(e) => crate::console_println!(
-                                    "[oci] Warning: could not bind network '{}' owner: {:?}",
-                                    nn,
-                                    e
-                                ),
-                            }
-                            // Register the container's DNS names on the network so
-                            // same-network peers can resolve it by name (Docker
-                            // embedded DNS): the container name plus its hostname
-                            // (when set and distinct). Non-fatal on failure.
-                            if let Some(cinfo) = crate::container::info(ct_id) {
-                                let mut names: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-                                if !cinfo.name.is_empty() {
-                                    names.push(cinfo.name.as_str());
-                                }
-                                if !cinfo.hostname.is_empty()
-                                    && !cinfo.hostname.eq_ignore_ascii_case(&cinfo.name)
-                                {
-                                    names.push(cinfo.hostname.as_str());
-                                }
-                                // Explicit --network-alias names (register_dns_names
-                                // de-duplicates case-insensitively).
-                                for &al in &net_aliases {
-                                    names.push(al);
-                                }
-                                if !names.is_empty() {
-                                    if let Err(e) =
-                                        crate::cnetwork::register_dns_names(nn, ct_id, &names)
-                                    {
-                                        crate::console_println!(
-                                            "[oci] Warning: could not register DNS names on '{}': {:?}",
-                                            nn,
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                            // Attach the container's host-side veth to the network's
-                            // shared L2 bridge so same-network peers can reach it
-                            // directly (Docker user-defined bridge semantics). The
-                            // bridge is created lazily on the first attach; a
-                            // single-member network never allocates one. Non-fatal:
-                            // without the bridge the container still has host/NAT
-                            // connectivity, just no direct peer L2 path.
-                            match crate::container::info(ct_id).and_then(|i| i.veth_pair) {
-                                Some(vp) => {
-                                    match crate::cnetwork::attach_container_veth(nn, ct_id, vp) {
-                                        Ok(()) => {
-                                            let peers = crate::cnetwork::inspect(nn)
-                                                .map_or(0, |i| i.allocations.len());
-                                            crate::console_println!(
-                                                "  L2 bridge:    {} ({} member{})",
-                                                nn,
-                                                peers,
-                                                if peers == 1 { "" } else { "s" }
-                                            );
-                                            // Record the create-time primary network as a
-                                            // membership (§60) so `inspect`/`ps` list it
-                                            // alongside any runtime `network connect`s. It
-                                            // reuses the primary veth just attached above.
-                                            if let Some(ni) = crate::cnetwork::inspect(nn) {
-                                                let _ = crate::container::record_primary_membership(
-                                                    ct_id,
-                                                    nn,
-                                                    ip,
-                                                    ni.network_addr,
-                                                    ni.prefix_len,
-                                                );
-                                            }
-                                        }
-                                        Err(e) => crate::console_println!(
-                                            "[oci] Warning: could not attach to network '{}' bridge: {:?}",
-                                            nn,
-                                            e
-                                        ),
-                                    }
-                                }
-                                None => crate::console_println!(
-                                    "[oci] Warning: network '{}' has no veth to bridge (no host link)",
-                                    nn
-                                ),
-                            }
-                        }
-
-                        // Determine the container's jail root.  Prefer the merged
-                        // overlay mount (copy-on-write isolation): mount the
-                        // per-container `OverlayFs` adapter at
-                        // `/containers/<name>/rootfs` so reads see the merged view
-                        // and writes land in the upper layer.  If the overlay was
-                        // not created or the mount fails, fall back to jailing the
-                        // container directly at the read-only lower dir.
-                        let merged_mount = alloc::format!("/containers/{}/rootfs", image_name);
-                        let mut jail_root = rootfs_lower.clone();
-                        let mut mounted_overlay = false;
-                        if let Some(ov_id) = overlay_id {
-                            match crate::fs::overlay::OverlayFs::new(ov_id) {
-                                Ok(ovfs) => {
-                                    match crate::fs::vfs::Vfs::mount(
-                                        &merged_mount,
-                                        alloc::boxed::Box::new(ovfs),
-                                    ) {
-                                        Ok(()) => {
-                                            jail_root = merged_mount.clone();
-                                            mounted_overlay = true;
-                                            crate::console_println!(
-                                                "[oci] Overlay mounted at {} (copy-on-write)",
-                                                merged_mount
-                                            );
-                                        }
-                                        Err(e) => {
-                                            crate::console_println!(
-                                                "[oci] Could not mount overlay at {}: {:?} (using read-only lower)",
-                                                merged_mount,
-                                                e
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    crate::console_println!(
-                                        "[oci] Could not open overlay adapter: {:?} (using read-only lower)",
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                        crate::console_println!("  Rootfs:       {}", jail_root);
-
-                        // Compute the effective command (what the init process
-                        // actually runs), applying Docker's ENTRYPOINT/CMD override
-                        // rules: `--entrypoint` replaces (or, with "", clears) the
-                        // image ENTRYPOINT and drops its default CMD; trailing
-                        // `IMAGE CMD...` tokens replace the image CMD. See
-                        // `ImageConfig::effective_command`.
-                        let command: alloc::vec::Vec<alloc::string::String> = image
-                            .config
-                            .effective_command(entrypoint_override, &cmd_override);
-
-                        // Show the effective runtime config.
-                        if !command.is_empty() {
-                            let cmd_str: alloc::string::String = command.join(" ");
-                            crate::console_println!("  Command:      {}", cmd_str);
-                        }
-                        if !image.config.working_dir.is_empty() {
-                            crate::console_println!("  WorkingDir:   {}", image.config.working_dir);
-                        }
-                        if !image.config.env.is_empty() {
-                            crate::console_println!("  Environment:");
-                            for e in &image.config.env {
-                                crate::console_println!("    {}", e);
-                            }
-                        }
-
-                        if let Some(ns) = crate::container::namespace_ids(ct_id) {
-                            crate::console_println!("  PID NS:       {}", ns.0);
-                            crate::console_println!("  User NS:      {}", ns.1);
-                            crate::console_println!("  Net NS:       {}", ns.2);
-                        }
-
-                        // Jail the container to its rootfs (must happen while
-                        // still in Created state, before `run`).  The init process
-                        // then resolves `/bin/sh`, `/lib/...`, etc. against the
-                        // container's filesystem instead of the host.
-                        if let Err(e) = crate::container::set_root_path(ct_id, &jail_root) {
-                            crate::console_println!(
-                                "[oci] Warning: could not set rootfs jail: {:?}",
-                                e
-                            );
-                        }
-                        // Apply Docker `--read-only`: mark the container rootfs
-                        // read-only (Created state). Writable `:rw` volumes below
-                        // still punch writable holes through it.
-                        if read_only_root {
-                            match crate::container::set_read_only_root(ct_id, true) {
-                                Ok(()) => crate::console_println!("  Root FS:      read-only"),
-                                Err(e) => crate::console_println!(
-                                    "[oci] Warning: could not set read-only root: {:?}",
-                                    e
-                                ),
-                            }
-                        }
-                        // If we mounted an overlay, record it on the container so
-                        // `container delete` unmounts the adapter on teardown.
-                        if mounted_overlay {
-                            if let Err(e) = crate::container::set_rootfs_mount(ct_id, &merged_mount)
-                            {
-                                crate::console_println!(
-                                    "[oci] Warning: could not record rootfs mount: {:?}",
-                                    e
-                                );
-                            }
-                        }
-                        // Record the overlay id (independent of whether the adapter
-                        // was mounted) so `container diff` can locate the writable
-                        // scratch layer even when the merged mount fell back to the
-                        // read-only lower dir.
-                        if let Some(ov_id) = overlay_id {
-                            if let Err(e) = crate::container::set_overlay_id(ct_id, Some(ov_id)) {
-                                crate::console_println!(
-                                    "[oci] Warning: could not record overlay id: {:?}",
-                                    e
-                                );
-                            }
-                        }
-
-                        // Install any `-v host:guest` volume (bind) mounts (also
-                        // while still in Created state).  A volume lets the
-                        // container see a host directory at a guest path, escaping
-                        // the rootfs (e.g. `-v /srv/data:/data`).
-                        for (host, guest, read_only) in &volumes {
-                            match crate::container::add_volume_mount(ct_id, host, guest, *read_only)
-                            {
-                                Ok(()) => crate::console_println!(
-                                    "  Volume:       {} -> {}{}",
-                                    host.display(),
-                                    guest.display(),
-                                    if *read_only { " (ro)" } else { "" }
-                                ),
-                                Err(e) => crate::console_println!(
-                                    "[oci] Warning: could not add volume {}:{}: {:?}",
-                                    host.display(),
-                                    guest.display(),
-                                    e
-                                ),
-                            }
-                        }
-
-                        // Install any `--tmpfs /guest` in-memory mounts (Created
-                        // state).  Each gives the container an ephemeral writable
-                        // filesystem at the guest path, backed by a fresh memfs —
-                        // common for scratch space in a `--read-only` container.
-                        for guest in &tmpfs {
-                            match crate::container::add_tmpfs_mount(ct_id, guest) {
-                                Ok(()) => {
-                                    crate::console_println!("  Tmpfs:        {} (in-memory)", guest)
-                                }
-                                Err(e) => crate::console_println!(
-                                    "[oci] Warning: could not add tmpfs {}: {:?}",
-                                    guest,
-                                    e
-                                ),
-                            }
-                        }
-
-                        // Install any `-p host:container` published ports (Created
-                        // state).  The NAT rules forwarding host traffic to the
-                        // container are installed at run() time; this records the
-                        // intent.  Requires the container to have a network IP
-                        // (set via `--net`), which add_port_publish enforces.
-                        for &(proto, hp, cp) in &ports {
-                            match crate::container::add_port_publish(ct_id, proto, hp, cp) {
-                                Ok(()) => crate::console_println!(
-                                    "  Publish:      {:?} :{} -> :{}",
-                                    proto,
-                                    hp,
-                                    cp
-                                ),
-                                Err(e) => crate::console_println!(
-                                    "[oci] Warning: could not publish {:?} :{} -> :{}: {:?} (need --net IP)",
-                                    proto,
-                                    hp,
-                                    cp,
-                                    e
-                                ),
-                            }
-                        }
-
-                        // Launch the image's entrypoint/cmd as the container's
-                        // init process, jailed to the rootfs.  `command[0]` is the
-                        // executable; it is read from the host *inside* the rootfs
-                        // (the kernel loads the image before the jail takes effect),
-                        // then the running process resolves its own syscalls against
-                        // the jail.
-                        let launched = if command.is_empty() {
-                            crate::console_println!(
-                                "[oci] Image declares no entrypoint/cmd; not launching an init process."
-                            );
-                            false
-                        } else {
-                            // Guest-visible exe path (absolute within the rootfs).
-                            let exe_rel = command
-                                .first()
-                                .map(alloc::string::String::as_str)
-                                .unwrap_or("");
-                            let exe_guest = if exe_rel.starts_with('/') {
-                                alloc::string::String::from(exe_rel)
-                            } else {
-                                alloc::format!("/{}", exe_rel)
-                            };
-                            // Host path to read the ELF from (jail root + guest
-                            // path).  When an overlay is mounted this reads through
-                            // the merged view; otherwise it reads the lower dir.
-                            let exe_host = alloc::format!("{}{}", jail_root, exe_guest);
-
-                            match crate::fs::vfs::Vfs::read_file(&exe_host) {
-                                Ok(elf) => {
-                                    let argv_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
-                                        command.iter().map(|s| s.as_bytes().to_vec()).collect();
-                                    let argv_refs: alloc::vec::Vec<&[u8]> =
-                                        argv_owned.iter().map(alloc::vec::Vec::as_slice).collect();
-                                    // Merge environment entries using Docker
-                                    // precedence: CLI `-e` > `--env-file` > image
-                                    // ENV, with no duplicate keys. Keys are the
-                                    // bytes before the first `=` (whole entry if
-                                    // none). We add CLI `-e` first, then env-file
-                                    // entries whose key isn't already set, then
-                                    // image ENV entries whose key isn't already set.
-                                    let mut envp_owned: alloc::vec::Vec<alloc::vec::Vec<u8>> =
-                                        alloc::vec::Vec::new();
-                                    for spec in &extra_env {
-                                        envp_owned.push(spec.as_bytes().to_vec());
-                                    }
-                                    for entry in &env_file_entries {
-                                        let key = oci::env_entry_key(entry);
-                                        let already =
-                                            envp_owned.iter().any(|e| oci::env_entry_key(e) == key);
-                                        if !already {
-                                            envp_owned.push(entry.clone());
-                                        }
-                                    }
-                                    for entry in &image.config.env {
-                                        let key = oci::env_entry_key(entry.as_bytes());
-                                        let already =
-                                            envp_owned.iter().any(|e| oci::env_entry_key(e) == key);
-                                        if !already {
-                                            envp_owned.push(entry.as_bytes().to_vec());
-                                        }
-                                    }
-                                    let envp_refs: alloc::vec::Vec<&[u8]> =
-                                        envp_owned.iter().map(alloc::vec::Vec::as_slice).collect();
-                                    // Effective working directory: CLI `--workdir`/`-w`
-                                    // wins, else the image's `WorkingDir`, else none
-                                    // (init starts at `/`). Owned so the bytes outlive
-                                    // `opts`, which borrows them via `.cwd()`.
-                                    let effective_workdir: Option<alloc::string::String> =
-                                        workdir.map(alloc::string::String::from).or_else(|| {
-                                            let wd = &image.config.working_dir;
-                                            if wd.is_empty() {
-                                                None
-                                            } else {
-                                                Some(wd.clone())
-                                            }
-                                        });
-                                    // Effective user identity: CLI `--user`/`-u`
-                                    // wins, else the image's `User` config, else
-                                    // none (init stays root). Only numeric
-                                    // `uid[:gid]` is accepted — a username has no
-                                    // /etc/passwd to resolve against here, so it is
-                                    // warned and ignored. When `:gid` is omitted the
-                                    // gid defaults to 0 (matching Docker's behavior
-                                    // for a uid with no passwd entry).
-                                    let user_spec: Option<alloc::string::String> =
-                                        user.map(alloc::string::String::from).or_else(|| {
-                                            let u = &image.config.user;
-                                            if u.is_empty() { None } else { Some(u.clone()) }
-                                        });
-                                    let effective_uid_gid: Option<(u32, u32)> =
-                                        user_spec.as_deref().and_then(|s| {
-                                            let mut segs = s.splitn(2, ':');
-                                            let uid_s = segs.next().unwrap_or("");
-                                            let gid_s = segs.next();
-                                            match (uid_s.parse::<u32>(), gid_s.map(str::parse::<u32>)) {
-                                                (Ok(uid), None) => Some((uid, 0)),
-                                                (Ok(uid), Some(Ok(gid))) => Some((uid, gid)),
-                                                _ => {
-                                                    crate::console_println!(
-                                                        "[oci] Ignoring user '{}': expected numeric uid[:gid]",
-                                                        s
-                                                    );
-                                                    None
-                                                }
-                                            }
-                                        });
-                                    let mut opts =
-                                        crate::proc::spawn::SpawnOptions::new(&exe_guest)
-                                            .argv(&argv_refs)
-                                            .envp(&envp_refs)
-                                            .exe_path(exe_guest.as_bytes());
-                                    if let Some(wd) = effective_workdir.as_deref() {
-                                        opts = opts.cwd(wd.as_bytes());
-                                        crate::console_println!("  WorkDir:      {}", wd);
-                                    }
-                                    if let Some((uid, gid)) = effective_uid_gid {
-                                        opts = opts.uid_gid(uid, gid);
-                                        crate::console_println!("  User:         {}:{}", uid, gid);
-                                    }
-                                    match crate::container::run(ct_id, &elf, &opts) {
-                                        Ok(pid) => {
-                                            crate::console_println!(
-                                                "  Init PID:     {} ({})",
-                                                pid,
-                                                exe_guest
-                                            );
-                                            true
-                                        }
-                                        Err(e) => {
-                                            crate::console_println!(
-                                                "[oci] Failed to launch init process: {:?}",
-                                                e
-                                            );
-                                            false
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    crate::console_println!(
-                                        "[oci] Could not read entrypoint '{}' (host {}): {:?}",
-                                        exe_guest,
-                                        exe_host,
-                                        e
-                                    );
-                                    false
-                                }
-                            }
-                        };
-
-                        crate::console_println!();
-                        if launched {
-                            crate::console_println!(
-                                "Container {} is running. Use 'container info {}' to inspect.",
-                                ct_id,
-                                ct_id
-                            );
-                        } else {
-                            // No init process launched — fall back to the manual
-                            // model so the user can still exec into the container.
-                            let _ = crate::container::start(ct_id);
-                            crate::console_println!(
-                                "Use 'container exec {}' to run commands in this container.",
-                                ct_id
-                            );
-                        }
-                        crate::console_println!(
-                            "Use 'container stop {}' then 'container delete {}' to clean up.",
-                            ct_id,
-                            ct_id
-                        );
-                    }
-                    Err(e) => {
-                        // Release the network reservation made before create so a
-                        // failed run does not leak an IP.
-                        if let Some((nn, ip)) = network_lease {
-                            let _ = crate::cnetwork::release(nn, ip);
-                        }
-                        crate::console_println!("[oci] Container creation failed: {:?}", e);
-                    }
-                }
-            }
-            case(&parts);
-        }
+        "run" | "create" => oci_run(&parts),
         "save" => {
             #[inline(never)]
             fn case(parts: &[&str]) {

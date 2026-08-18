@@ -196,13 +196,153 @@ struct _Alias {
     _members: Vec<String>,
 }
 
+/// What shape a `Defaults` setting may legally take.
+///
+/// The shape is what makes a misspelling detectable. `Defaults timestamp_timout=5`
+/// is not distinguishable from a valid line by looking at the line alone — only
+/// by knowing that no setting is spelled that way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefaultShape {
+    /// A boolean: `name` sets it, `!name` clears it. Never carries a value.
+    Flag,
+    /// Carries exactly one value: `name=value`. `+=` and `-=` are meaningless.
+    Value,
+    /// A whitespace-separated list: `name=v` replaces, `name+=v` adds,
+    /// `name-=v` removes.
+    List,
+}
+
+/// How a `Defaults` setting was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefaultOp {
+    /// `name` (a flag) or `name=value`.
+    Set,
+    /// `!name`.
+    Negate,
+    /// `name+=value`.
+    Add,
+    /// `name-=value`.
+    Remove,
+}
+
+/// One setting within a `Defaults` directive.
+///
+/// The operator is kept rather than folded into the name at parse time. It used
+/// to be folded in by accident: the name was taken as everything before the
+/// first `=`, so `env_keep += "X"` was stored under the name `env_keep +`. Two
+/// consumers compensated by matching three spellings each (`env_keep`,
+/// `env_keep+=`, `env_keep+`) and every other consumer — `get_default`, and so
+/// `timestamp_timeout` and `env_reset` — simply never saw a `+=` line at all.
+/// That is the band-aid shape: a defect in one place paid for in several.
+#[derive(Debug, Clone)]
+struct DefaultSetting {
+    /// The setting name, with no operator attached.
+    name: String,
+    /// How it was written.
+    op: DefaultOp,
+    /// The value; empty for `Flag` settings, whose truth is carried by `op`.
+    value: String,
+}
+
 /// A Defaults directive from the sudoers file.
 #[derive(Debug, Clone)]
 struct DefaultsDirective {
     /// The scope (empty = global, "user:" prefix, "host:" prefix, etc.)
     scope: String,
-    /// Key-value settings.
-    settings: Vec<(String, String)>,
+    /// The settings on this line, in written order.
+    settings: Vec<DefaultSetting>,
+}
+
+/// The `Defaults` settings whose *shape* this implementation knows.
+///
+/// **This list is knowingly incomplete.** Real sudo's catalogue is larger and
+/// grows; a name missing from here is not evidence the name is wrong. That is
+/// exactly why an unlisted name is reported as a *warning* and a listed name
+/// used with the wrong operator is reported as an *error*: the second is a fact
+/// about the grammar, the first is a fact about this table. A `visudo` that
+/// refused to save a correct file because our table was short would be worse
+/// than the silence it replaced — the administrator could not fix it.
+static KNOWN_DEFAULTS: &[(&str, DefaultShape)] = &[
+    // Flags.
+    ("always_set_home", DefaultShape::Flag),
+    ("authenticate", DefaultShape::Flag),
+    ("env_editor", DefaultShape::Flag),
+    ("env_reset", DefaultShape::Flag),
+    ("fqdn", DefaultShape::Flag),
+    ("ignore_dot", DefaultShape::Flag),
+    ("insults", DefaultShape::Flag),
+    ("log_input", DefaultShape::Flag),
+    ("log_output", DefaultShape::Flag),
+    ("mail_always", DefaultShape::Flag),
+    ("mail_badpass", DefaultShape::Flag),
+    ("mail_no_host", DefaultShape::Flag),
+    ("mail_no_perms", DefaultShape::Flag),
+    ("mail_no_user", DefaultShape::Flag),
+    ("noexec", DefaultShape::Flag),
+    ("path_info", DefaultShape::Flag),
+    ("preserve_groups", DefaultShape::Flag),
+    ("pwfeedback", DefaultShape::Flag),
+    ("requiretty", DefaultShape::Flag),
+    ("root_sudo", DefaultShape::Flag),
+    ("rootpw", DefaultShape::Flag),
+    ("runaspw", DefaultShape::Flag),
+    ("set_home", DefaultShape::Flag),
+    ("set_logname", DefaultShape::Flag),
+    ("shell_noargs", DefaultShape::Flag),
+    ("stay_setuid", DefaultShape::Flag),
+    ("targetpw", DefaultShape::Flag),
+    ("tty_tickets", DefaultShape::Flag),
+    ("umask_override", DefaultShape::Flag),
+    ("use_pty", DefaultShape::Flag),
+    ("visiblepw", DefaultShape::Flag),
+    // Single-valued settings.
+    ("badpass_message", DefaultShape::Value),
+    ("editor", DefaultShape::Value),
+    ("iolog_dir", DefaultShape::Value),
+    ("iolog_file", DefaultShape::Value),
+    ("lecture", DefaultShape::Value),
+    ("lecture_file", DefaultShape::Value),
+    ("logfile", DefaultShape::Value),
+    ("loglinelen", DefaultShape::Value),
+    ("mailerpath", DefaultShape::Value),
+    ("mailfrom", DefaultShape::Value),
+    ("mailsub", DefaultShape::Value),
+    ("mailto", DefaultShape::Value),
+    ("passprompt", DefaultShape::Value),
+    ("passwd_timeout", DefaultShape::Value),
+    ("passwd_tries", DefaultShape::Value),
+    ("runas_default", DefaultShape::Value),
+    ("secure_path", DefaultShape::Value),
+    ("syslog", DefaultShape::Value),
+    ("timestamp_timeout", DefaultShape::Value),
+    ("timestampdir", DefaultShape::Value),
+    ("timestampowner", DefaultShape::Value),
+    ("umask", DefaultShape::Value),
+    ("verifypw", DefaultShape::Value),
+    // Lists.
+    ("env_check", DefaultShape::List),
+    ("env_delete", DefaultShape::List),
+    ("env_file", DefaultShape::List),
+    ("env_keep", DefaultShape::List),
+];
+
+/// The settings this implementation actually acts on.
+///
+/// A name in [`KNOWN_DEFAULTS`] but not here parses cleanly and then does
+/// nothing, which is the same silence the shape checks exist to break — so
+/// `visudo` says so rather than letting the administrator believe
+/// `Defaults requiretty` had an effect. Every entry added here must have a
+/// consumer; the test `honoured_defaults_are_all_known` keeps the two lists
+/// from drifting apart, which is the failure this tree keeps rediscovering
+/// whenever two hand-maintained lists have to agree.
+static HONOURED_DEFAULTS: &[&str] = &["env_check", "env_keep", "env_reset", "timestamp_timeout"];
+
+/// Look up a setting's shape, or `None` if the name is not in [`KNOWN_DEFAULTS`].
+fn default_shape(name: &str) -> Option<DefaultShape> {
+    KNOWN_DEFAULTS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, shape)| *shape)
 }
 
 /// Represents who a command may be run as.
@@ -272,18 +412,37 @@ impl SudoersConfig {
         }
     }
 
+    /// Every globally-scoped setting named `key`, in written order.
+    ///
+    /// `'k` is separate from `'a` on purpose: tying the key's lifetime to the
+    /// config's would make everything borrowed from the config live only as
+    /// long as the *name that was looked up*, so `get_default` could not hand
+    /// its result back to a caller holding only the config.
+    fn global_settings<'a, 'k>(
+        &'a self,
+        key: &'k str,
+    ) -> impl Iterator<Item = &'a DefaultSetting> + use<'a, 'k> {
+        self.defaults
+            .iter()
+            .filter(|d| d.scope.is_empty())
+            .flat_map(|d| d.settings.iter())
+            .filter(move |s| s.name == key)
+    }
+
     /// Get the value of a Defaults setting (global scope).
+    ///
+    /// Later lines win, as in sudo — the last `Defaults` mentioning a setting is
+    /// the one in force. The old implementation returned the *first* match,
+    /// so a file that overrode a setting further down kept the earlier value.
     fn get_default(&self, key: &str) -> Option<&str> {
-        for d in &self.defaults {
-            if d.scope.is_empty() {
-                for (k, v) in &d.settings {
-                    if k == key {
-                        return Some(v.as_str());
-                    }
-                }
-            }
-        }
-        None
+        self.global_settings(key).last().map(|s| match s.op {
+            // A flag's truth is in the operator, not the value; render it so
+            // `is_default_set` and the `timestamp_timeout` parse both see a
+            // string, as they did when everything was a string pair.
+            DefaultOp::Negate => "false",
+            _ if s.value.is_empty() => "true",
+            _ => s.value.as_str(),
+        })
     }
 
     /// Check if a Defaults flag is set (boolean setting).
@@ -292,46 +451,52 @@ impl SudoersConfig {
             .is_some_and(|v| v != "false" && v != "0")
     }
 
-    /// Get env_keep list from Defaults.
-    fn env_keep_list(&self) -> Vec<String> {
-        let mut result: Vec<String> = DEFAULT_ENV_KEEP.iter().map(|s| (*s).to_string()).collect();
-        for d in &self.defaults {
-            if d.scope.is_empty() {
-                for (k, v) in &d.settings {
-                    // Handle env_keep, env_keep+=, and env_keep+ (the `+` remains
-                    // when `+=` is split at the first `=`).
-                    if k == "env_keep" || k == "env_keep+=" || k == "env_keep+" {
-                        for var in v.split_whitespace() {
-                            let var = var.trim_matches('"');
-                            if !result.iter().any(|r| r == var) {
-                                result.push(var.to_string());
-                            }
+    /// Apply the `=`/`+=`/`-=` sequence for a list setting onto `base`.
+    ///
+    /// `=` replaces the accumulated list, `+=` appends, `-=` removes — the
+    /// operators exist to be applied in order, which is why the parser keeps
+    /// them instead of gluing them onto the name.
+    fn resolve_list(&self, key: &str, base: &[&str]) -> Vec<String> {
+        let mut result: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
+        for setting in self.global_settings(key) {
+            let words: Vec<&str> = setting
+                .value
+                .split_whitespace()
+                .map(|w| w.trim_matches('"'))
+                .filter(|w| !w.is_empty())
+                .collect();
+            match setting.op {
+                DefaultOp::Set => result = words.iter().map(|w| (*w).to_string()).collect(),
+                DefaultOp::Add => {
+                    for word in words {
+                        if !result.iter().any(|r| r == word) {
+                            result.push(word.to_string());
                         }
                     }
                 }
+                DefaultOp::Remove => result.retain(|r| !words.iter().any(|w| r == w)),
+                // `!env_keep` — sudoers' disable operator for a list.
+                DefaultOp::Negate => result.clear(),
             }
         }
         result
     }
 
+    /// Get env_keep list from Defaults.
+    ///
+    /// The built-in list is the *base* a bare `env_keep=` replaces, matching
+    /// sudo: `Defaults env_keep = "X"` keeps only `X`, while
+    /// `Defaults env_keep += "X"` keeps the built-ins and `X`. The old code
+    /// could not tell those apart — it never saw the `+=` form at all — so it
+    /// treated both as "add", and a file that deliberately narrowed the kept
+    /// environment did not narrow it.
+    fn env_keep_list(&self) -> Vec<String> {
+        self.resolve_list("env_keep", DEFAULT_ENV_KEEP)
+    }
+
     /// Get env_check list from Defaults.
     fn env_check_list(&self) -> Vec<String> {
-        let mut result = Vec::new();
-        for d in &self.defaults {
-            if d.scope.is_empty() {
-                for (k, v) in &d.settings {
-                    if k == "env_check" || k == "env_check+=" || k == "env_check+" {
-                        for var in v.split_whitespace() {
-                            let var = var.trim_matches('"');
-                            if !result.iter().any(|r: &String| r == var) {
-                                result.push(var.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        result
+        self.resolve_list("env_check", &[])
     }
 
     /// Get the timestamp_timeout (in seconds).
@@ -415,7 +580,7 @@ fn parse_sudoers_line(line: &str, config: &mut SudoersConfig) -> Result<(), Sudo
     }
 
     // Defaults directive.
-    if let Some(rest) = line.strip_prefix("Defaults") {
+    if let Some(rest) = strip_defaults_keyword(line) {
         parse_defaults(rest, config)?;
         return Ok(());
     }
@@ -466,39 +631,80 @@ fn parse_alias(text: &str, aliases: &mut HashMap<String, Vec<String>>) -> Result
     Ok(())
 }
 
-/// Parse a Defaults directive.
-// The `Result` is the sudoers-parser family's signature, not this function's:
-// `parse_alias` and `parse_privilege_spec` alongside it do reject input, and
-// every caller drives them uniformly with `?`. Dropping it here would make the
-// one directive that cannot currently be rejected look different from the ones
-// that can, and this is precisely where validation attaches when it is added --
-// see the note in `known-issues.md` about malformed directives being accepted.
-#[allow(clippy::unnecessary_wraps)]
-fn parse_defaults(rest: &str, config: &mut SudoersConfig) -> Result<(), SudoError> {
-    let rest = rest.trim();
+/// Strip the `Defaults` keyword, but only where it really is the keyword.
+///
+/// A bare `strip_prefix("Defaults")` also fires on a line whose first word
+/// merely begins with it — a user named `Defaultsfoo` — and the remainder is
+/// then read as a settings list. That was harmless while no directive was ever
+/// rejected; now that malformed ones are errors, it would make `visudo` refuse
+/// a file that is entirely correct, which is the one failure a validator must
+/// not have. The keyword ends at whitespace, at a scope sigil, or at the end of
+/// the line.
+fn strip_defaults_keyword(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("Defaults")?;
+    match rest.chars().next() {
+        None => Some(rest),
+        Some(c) if c.is_whitespace() || matches!(c, ':' | '@' | '!' | '>') => Some(rest),
+        Some(_) => None,
+    }
+}
 
+/// Parse a Defaults directive.
+///
+/// Rejects what it can *prove* is wrong — an empty setting name, a name with a
+/// space in it, an unbalanced quote, a negated setting that also carries a
+/// value, a scope with nothing scoped to it, and a known setting used with an
+/// operator its shape forbids. It deliberately does **not** reject a setting
+/// name merely because [`KNOWN_DEFAULTS`] has not heard of it; see that table's
+/// note. `validate_sudoers_line` turns unknown names into warnings, which is
+/// where an incomplete table can be reported without being able to block a save.
+fn parse_defaults(rest: &str, config: &mut SudoersConfig) -> Result<(), SudoError> {
     // Determine scope: Defaults, Defaults:user, Defaults@host, Defaults!cmnd,
     // Defaults>runas.
-    let (scope, settings_str) = if rest.starts_with(':')
-        || rest.starts_with('@')
-        || rest.starts_with('!')
-        || rest.starts_with('>')
-    {
-        // Scoped defaults.
-        let scope_char = &rest[..1];
-        let after = &rest[1..];
-        if let Some(space_pos) = after.find(|c: char| c.is_whitespace()) {
-            let scope_name = after[..space_pos].trim().to_string();
-            let settings = after[space_pos..].trim();
-            (format!("{scope_char}{scope_name}"), settings)
-        } else {
-            // Just a scope with no settings — treat the whole thing as a flag.
-            return Ok(());
+    //
+    // The sigil counts as a scope only when it is attached to the keyword with
+    // no space, which is sudo's rule and is the only thing separating
+    // `Defaults!/usr/bin/foo bar` (a command-scoped default) from
+    // `Defaults !requiretty` (a negated global flag). `rest` therefore must be
+    // examined before it is trimmed -- trimming first loses the distinction,
+    // and the whole space of negated global flags is then read as scopes.
+    let first = rest.chars().next();
+    let (scope, settings_str) = if first.is_some_and(|c| matches!(c, ':' | '@' | '!' | '>')) {
+        // `split_at` on the first char's own length rather than `[..1]`: the
+        // sigils are ASCII, but that is a fact about the sigils and not
+        // something the slice established.
+        let (scope_char, after) = rest.split_at(first.map_or(0, char::len_utf8));
+        let Some(space_pos) = after.find(char::is_whitespace) else {
+            // A scope and nothing scoped to it. This used to return `Ok(())`,
+            // discarding the line in silence — so `Defaults:alice` on its own
+            // was accepted, did nothing, and looked to its author like it had
+            // restricted something for alice.
+            return Err(SudoError::ParseError(format!(
+                "Defaults{rest}: scope with no settings after it"
+            )));
+        };
+        let (scope_name, settings) = after.split_at(space_pos);
+        if scope_name.trim().is_empty() {
+            return Err(SudoError::ParseError(
+                "empty scope in Defaults directive".to_string(),
+            ));
         }
+        (
+            format!("{scope_char}{}", scope_name.trim()),
+            settings.trim(),
+        )
     } else {
-        // Global defaults.
+        // Global defaults. Trimmed only here, after the sigil test above has
+        // had its look at the unmodified string.
+        let rest = rest.trim();
         (String::new(), rest)
     };
+
+    if settings_str.is_empty() {
+        return Err(SudoError::ParseError(
+            "Defaults directive with no settings".to_string(),
+        ));
+    }
 
     let mut settings = Vec::new();
     for part in settings_str.split(',') {
@@ -506,23 +712,134 @@ fn parse_defaults(rest: &str, config: &mut SudoersConfig) -> Result<(), SudoErro
         if part.is_empty() {
             continue;
         }
+        settings.push(parse_default_setting(part)?);
+    }
 
-        if let Some((key, val)) = part.split_once('=') {
-            settings.push((
-                key.trim().to_string(),
-                val.trim().trim_matches('"').to_string(),
-            ));
-        } else if let Some(stripped) = part.strip_prefix('!') {
-            // Negated boolean: `!requiretty` means requiretty=false.
-            settings.push((stripped.trim().to_string(), "false".to_string()));
-        } else {
-            // Boolean flag: `requiretty` means requiretty=true.
-            settings.push((part.to_string(), "true".to_string()));
-        }
+    if settings.is_empty() {
+        return Err(SudoError::ParseError(
+            "Defaults directive with no settings".to_string(),
+        ));
     }
 
     config.defaults.push(DefaultsDirective { scope, settings });
     Ok(())
+}
+
+/// Parse one `name` / `!name` / `name=v` / `name+=v` / `name-=v` setting.
+fn parse_default_setting(part: &str) -> Result<DefaultSetting, SudoError> {
+    // The operator lives at the *first* `=`, and a `+` or `-` immediately
+    // before that `=` is part of the operator rather than of the name.
+    //
+    // Scanning the whole string for `+=` or `-=` instead would be wrong twice
+    // over: it would find one inside a quoted value (`passprompt="a-=b"` would
+    // be read as the setting `passprompt="a` removing `b`), and splitting at the
+    // first `=` and calling everything before it the name -- which is what this
+    // used to do -- produced the name `env_keep +`.
+    let (name_raw, op, value_raw) = match part.split_once('=') {
+        Some((lhs, rhs)) => match lhs.trim() {
+            trimmed if trimmed.ends_with('+') => (
+                trimmed.strip_suffix('+').unwrap_or(trimmed),
+                DefaultOp::Add,
+                Some(rhs),
+            ),
+            trimmed if trimmed.ends_with('-') => (
+                trimmed.strip_suffix('-').unwrap_or(trimmed),
+                DefaultOp::Remove,
+                Some(rhs),
+            ),
+            trimmed => (trimmed, DefaultOp::Set, Some(rhs)),
+        },
+        None => match part.strip_prefix('!') {
+            Some(stripped) => (stripped, DefaultOp::Negate, None),
+            None => (part, DefaultOp::Set, None),
+        },
+    };
+
+    let name = name_raw.trim();
+
+    // A leading `!` that survived the split is one of two mistakes, neither of
+    // which can be a typo for anything valid: `!name=value` asserts two
+    // contradictory things about one setting, and `!!name` repeats the
+    // operator. Both are errors rather than a choice between the halves.
+    if let Some(inner) = name.strip_prefix('!') {
+        return Err(SudoError::ParseError(if op == DefaultOp::Negate {
+            format!("repeated '!' in Defaults setting name: {part}")
+        } else {
+            format!(
+                "Defaults setting '{}' is both negated and given a value",
+                inner.trim()
+            )
+        }));
+    }
+
+    if name.is_empty() {
+        return Err(SudoError::ParseError(format!(
+            "empty setting name in Defaults: {part}"
+        )));
+    }
+    // A space inside the name means the line was written as `passwd tries=3` or
+    // a comma was forgotten between two settings. Either way the name cannot
+    // match anything, so storing it would be storing a line that does nothing.
+    if name.contains(char::is_whitespace) {
+        return Err(SudoError::ParseError(format!(
+            "Defaults setting name contains whitespace (missing comma?): {name}"
+        )));
+    }
+
+    let value = match value_raw {
+        None => String::new(),
+        Some(raw) => {
+            let raw = raw.trim();
+            // An odd number of quotes means the value ran off the end of the
+            // line. `trim_matches('"')` used to swallow that: `env_keep = "A B`
+            // became the value `A B` and the file looked fine.
+            if raw.matches('"').count() % 2 != 0 {
+                return Err(SudoError::ParseError(format!(
+                    "unterminated quote in Defaults value for '{name}'"
+                )));
+            }
+            raw.trim_matches('"').to_string()
+        }
+    };
+
+    // Shape checks run only for names we actually know the shape of. For an
+    // unknown name there is no ground truth to check against, and inventing one
+    // would reject correct files.
+    if let Some(shape) = default_shape(name) {
+        let bad = match (shape, op) {
+            (DefaultShape::Flag, DefaultOp::Set) if value_raw.is_some() => {
+                Some("is a boolean flag and takes no value")
+            }
+            (DefaultShape::Flag, DefaultOp::Add | DefaultOp::Remove) => {
+                Some("is a boolean flag; '+=' and '-=' do not apply to it")
+            }
+            // `!env_keep` is legal and empties the list — sudoers documents `!`
+            // as the "disable" operator for list settings alongside `=`/`+=`/`-=`.
+            // A single-valued setting has nothing to disable, so `!secure_path`
+            // stays an error.
+            (DefaultShape::Value, DefaultOp::Negate) => {
+                Some("takes a value and cannot be negated with '!'")
+            }
+            (DefaultShape::Value | DefaultShape::List, DefaultOp::Set) if value_raw.is_none() => {
+                Some("requires a value, as in 'name=value'")
+            }
+            (DefaultShape::Value, DefaultOp::Add | DefaultOp::Remove) => {
+                Some("holds a single value; '+=' and '-=' apply only to lists")
+            }
+            _ => None,
+        };
+        if let Some(reason) = bad {
+            return Err(SudoError::ParseError(format!(
+                "Defaults setting '{name}' {reason}"
+            )));
+        }
+    }
+
+    Ok(DefaultSetting {
+        name: name.to_string(),
+        op,
+        value,
+    })
 }
 
 /// Parse a user privilege specification line.
@@ -630,11 +947,35 @@ fn parse_runas_prefix(s: &str) -> (RunasSpec, &str) {
     }
 }
 
+/// The tags a command list may carry, and what each one sets.
+///
+/// One table rather than a chain of `strip_prefix` arms, so that "is this a
+/// tag?" and "what does it do?" cannot disagree — the check that rejects an
+/// unknown tag below reads the same list the parser applies.
+static CMND_TAGS: &[(&str, CmndTag)] = &[
+    ("NOPASSWD:", CmndTag::NoPasswd(true)),
+    ("PASSWD:", CmndTag::NoPasswd(false)),
+    ("NOEXEC:", CmndTag::NoExec(true)),
+    ("EXEC:", CmndTag::NoExec(false)),
+    ("SETENV:", CmndTag::SetEnv(true)),
+    ("NOSETENV:", CmndTag::SetEnv(false)),
+];
+
+/// The effect of a command-list tag.
+#[derive(Debug, Clone, Copy)]
+enum CmndTag {
+    NoPasswd(bool),
+    NoExec(bool),
+    SetEnv(bool),
+}
+
 /// Parse a comma-separated command list, handling tags like NOPASSWD:, NOEXEC:, etc.
-// `Result` retained for the same reason as `parse_defaults` above: the family's
-// signature, and the attachment point for the validation this parser does not
-// yet do.
-#[allow(clippy::unnecessary_wraps)]
+///
+/// Rejects a tag with no command after it, a tag-shaped token that is not a
+/// tag, and a command list that is empty. All three used to be accepted and
+/// then quietly amount to nothing: an entry with no commands grants nothing,
+/// which is the safe direction but is never what the line's author meant, and
+/// `visudo -c` said the file was fine.
 fn parse_cmnd_list(s: &str) -> Result<Vec<CmndSpec>, SudoError> {
     let mut commands = Vec::new();
     let mut nopasswd = false;
@@ -646,34 +987,43 @@ fn parse_cmnd_list(s: &str) -> Result<Vec<CmndSpec>, SudoError> {
         if part.is_empty() {
             continue;
         }
+        let had_tag_prefix = CMND_TAGS.iter().any(|(tag, _)| part.starts_with(tag));
 
         // Process tags (NOPASSWD:, PASSWD:, NOEXEC:, EXEC:, SETENV:, NOSETENV:).
-        loop {
-            if let Some(rest) = part.strip_prefix("NOPASSWD:") {
-                nopasswd = true;
-                part = rest.trim();
-            } else if let Some(rest) = part.strip_prefix("PASSWD:") {
-                nopasswd = false;
-                part = rest.trim();
-            } else if let Some(rest) = part.strip_prefix("NOEXEC:") {
-                noexec = true;
-                part = rest.trim();
-            } else if let Some(rest) = part.strip_prefix("EXEC:") {
-                noexec = false;
-                part = rest.trim();
-            } else if let Some(rest) = part.strip_prefix("SETENV:") {
-                setenv = true;
-                part = rest.trim();
-            } else if let Some(rest) = part.strip_prefix("NOSETENV:") {
-                setenv = false;
-                part = rest.trim();
-            } else {
-                break;
+        while let Some((tag, effect)) = CMND_TAGS.iter().find(|(tag, _)| part.starts_with(tag)) {
+            match *effect {
+                CmndTag::NoPasswd(v) => nopasswd = v,
+                CmndTag::NoExec(v) => noexec = v,
+                CmndTag::SetEnv(v) => setenv = v,
             }
+            part = part.get(tag.len()..).unwrap_or("").trim();
         }
 
         if part.is_empty() {
+            if had_tag_prefix {
+                // `NOPASSWD:` with nothing after it. The tag applies to a
+                // command; with no command it applies to nothing, and the next
+                // entry in the list inherits it by accident.
+                return Err(SudoError::ParseError(
+                    "tag with no command after it in command list".to_string(),
+                ));
+            }
             continue;
+        }
+
+        // A token shaped like a tag but not in the table is a misspelling —
+        // `NOPASSWORD:` for `NOPASSWD:`, most likely. Accepted, it becomes a
+        // *command named* `NOPASSWORD:`, so the entry grants a program that
+        // does not exist and silently still asks for a password.
+        if let Some(word) = part.split_whitespace().next()
+            && word.ends_with(':')
+            && word
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_' || c == ':')
+        {
+            return Err(SudoError::ParseError(format!(
+                "unknown tag in command list: {word}"
+            )));
         }
 
         // Split command from optional arguments. `split_once` hands back both
@@ -690,6 +1040,12 @@ fn parse_cmnd_list(s: &str) -> Result<Vec<CmndSpec>, SudoError> {
             command: cmd.to_string(),
             args: args.to_string(),
         });
+    }
+
+    if commands.is_empty() {
+        return Err(SudoError::ParseError(
+            "privilege specification with no commands".to_string(),
+        ));
     }
 
     Ok(commands)
@@ -796,15 +1152,45 @@ fn validate_sudoers_line(line: &str, line_num: usize, strict: bool, errors: &mut
         }
     }
 
-    // Validate Defaults.
-    if let Some(rest) = line.strip_prefix("Defaults") {
-        // Just check that there is something after Defaults.
-        if rest.trim().is_empty() && strict {
+    // Validate Defaults by *running the parser*, rather than by a separate
+    // check that has to agree with it. This branch used to do neither: it
+    // confirmed there was something after `Defaults` and returned, so every
+    // malformed directive reached `visudo -c` and was reported as fine.
+    if let Some(rest) = strip_defaults_keyword(line) {
+        let mut dummy = SudoersConfig::new();
+        if let Err(e) = parse_defaults(rest, &mut dummy) {
             errors.push(SyntaxError {
                 line_num,
-                message: "empty Defaults directive".to_string(),
-                is_warning: !strict,
+                message: e.to_string(),
+                is_warning: false,
             });
+            return;
+        }
+        // Names the parser could not check. Warnings, not errors: an unlisted
+        // name may be a setting real sudo has and `KNOWN_DEFAULTS` does not.
+        // `visudo` must not be able to refuse a correct file over a gap in our
+        // own table — an administrator cannot fix that.
+        for setting in dummy.defaults.iter().flat_map(|d| d.settings.iter()) {
+            if default_shape(&setting.name).is_none() {
+                errors.push(SyntaxError {
+                    line_num,
+                    message: format!("unknown Defaults setting '{}'", setting.name),
+                    is_warning: true,
+                });
+            } else if strict && !HONOURED_DEFAULTS.contains(&setting.name.as_str()) {
+                // Reported only under `-s`, and only for names we do recognise,
+                // so it is a statement about this implementation rather than
+                // about the file. Saying nothing would leave the administrator
+                // believing a setting took effect that never runs.
+                errors.push(SyntaxError {
+                    line_num,
+                    message: format!(
+                        "Defaults setting '{}' is recognised but not yet honoured by this sudo",
+                        setting.name
+                    ),
+                    is_warning: true,
+                });
+            }
         }
         return;
     }
@@ -3122,6 +3508,198 @@ mod tests {
         assert_eq!(config.defaults[0].scope, ":alice");
     }
 
+    // -- Defaults grammar: the malformed directives that used to be accepted --
+    //
+    // Each case below reached `visudo -c` before this and was reported as a
+    // valid file. The point of the group is not that any one of them is likely,
+    // but that `visudo`'s whole job is to catch them before the file is
+    // installed, and it caught none of them.
+
+    #[test]
+    fn defaults_plus_equals_keeps_the_name_clean() {
+        // The defect the operator-aware parse exists for. `env_keep += "X"` was
+        // split at the first `=`, so the name became `env_keep +`. Two consumers
+        // matched three spellings each to work around it; `get_default` matched
+        // one, so no `+=` line was ever visible to `timestamp_timeout` or
+        // `env_reset`.
+        let config = parse_sudoers("Defaults env_keep += \"FOO BAR\"\n").unwrap();
+        let setting = &config.defaults[0].settings[0];
+        assert_eq!(setting.name, "env_keep");
+        assert_eq!(setting.op, DefaultOp::Add);
+        assert_eq!(setting.value, "FOO BAR");
+    }
+
+    #[test]
+    fn defaults_env_keep_assignment_replaces_and_add_appends() {
+        // `=` and `+=` mean different things, and the difference is the whole
+        // reason a file writes one rather than the other: `=` narrows the kept
+        // environment to exactly what is listed. The old code could not see the
+        // `+=` form at all and so treated both as "add" -- a file that meant to
+        // narrow did not narrow, which is the unsafe direction.
+        let replaced = parse_sudoers("Defaults env_keep = \"ONLY_THIS\"\n").unwrap();
+        assert_eq!(replaced.env_keep_list(), vec!["ONLY_THIS".to_string()]);
+
+        let appended = parse_sudoers("Defaults env_keep += \"EXTRA\"\n").unwrap();
+        let keep = appended.env_keep_list();
+        assert!(keep.contains(&"EXTRA".to_string()));
+        assert!(keep.len() > 1, "built-ins should survive `+=`: {keep:?}");
+    }
+
+    #[test]
+    fn defaults_env_keep_minus_equals_removes() {
+        let config =
+            parse_sudoers("Defaults env_keep = \"A B C\"\nDefaults env_keep -= \"B\"\n").unwrap();
+        assert_eq!(
+            config.env_keep_list(),
+            vec!["A".to_string(), "C".to_string()]
+        );
+    }
+
+    #[test]
+    fn defaults_later_line_wins() {
+        // `get_default` returned the *first* match, so a file that overrode a
+        // setting further down kept the earlier value -- the opposite of what
+        // reading the file top to bottom tells you.
+        let config =
+            parse_sudoers("Defaults timestamp_timeout=5\nDefaults timestamp_timeout=30\n").unwrap();
+        assert_eq!(config.get_default("timestamp_timeout"), Some("30"));
+    }
+
+    #[test]
+    fn defaults_flag_with_a_value_is_rejected() {
+        assert!(parse_sudoers("Defaults requiretty=5\n").is_err());
+    }
+
+    #[test]
+    fn defaults_value_setting_without_a_value_is_rejected() {
+        // `Defaults timestamp_timeout` alone used to be stored as the boolean
+        // `timestamp_timeout=true`, which then failed to parse as a number and
+        // fell back to the built-in timeout. Silently.
+        assert!(parse_sudoers("Defaults timestamp_timeout\n").is_err());
+    }
+
+    #[test]
+    fn defaults_value_setting_cannot_be_negated() {
+        assert!(parse_sudoers("Defaults !secure_path\n").is_err());
+    }
+
+    #[test]
+    fn defaults_plus_equals_on_a_single_valued_setting_is_rejected() {
+        assert!(parse_sudoers("Defaults secure_path += /usr/local/bin\n").is_err());
+    }
+
+    #[test]
+    fn defaults_negated_with_a_value_is_rejected() {
+        assert!(parse_sudoers("Defaults !env_reset=1\n").is_err());
+    }
+
+    #[test]
+    fn defaults_empty_name_is_rejected() {
+        assert!(parse_sudoers("Defaults =5\n").is_err());
+        assert!(parse_sudoers("Defaults !\n").is_err());
+    }
+
+    #[test]
+    fn defaults_name_with_whitespace_is_rejected() {
+        // Almost always a forgotten comma between two settings.
+        assert!(parse_sudoers("Defaults passwd tries=3\n").is_err());
+    }
+
+    #[test]
+    fn defaults_unterminated_quote_is_rejected() {
+        // `trim_matches('"')` swallowed this: the value became `A B` and the
+        // file looked fine.
+        assert!(parse_sudoers("Defaults env_keep = \"A B\n").is_err());
+    }
+
+    #[test]
+    fn defaults_scope_with_no_settings_is_rejected() {
+        // Used to return `Ok(())` and discard the line, so this looked to its
+        // author like it had restricted something for alice.
+        assert!(parse_sudoers("Defaults:alice\n").is_err());
+    }
+
+    #[test]
+    fn a_user_whose_name_starts_with_defaults_is_not_a_directive() {
+        // `strip_prefix("Defaults")` fires on this too, and the remainder
+        // (`foo ALL = ALL`) then reads as a settings list with a space in the
+        // name -- an error, in a file that is entirely correct. Harmless while
+        // nothing was ever rejected; a validator that refuses a correct file is
+        // worse than one that misses a wrong one, because the administrator
+        // cannot act on it.
+        let config = parse_sudoers("Defaultsfoo ALL = /bin/ls\n").unwrap();
+        assert_eq!(config.privileges.len(), 1);
+        assert_eq!(config.privileges[0].users, vec!["Defaultsfoo"]);
+        assert!(config.defaults.is_empty());
+        assert!(validate_sudoers("Defaultsfoo ALL = /bin/ls\n", true).is_empty());
+    }
+
+    #[test]
+    fn defaults_unknown_name_still_parses() {
+        // Deliberate: `KNOWN_DEFAULTS` is incomplete, so an unrecognised name is
+        // not evidence of an error. `visudo` reports it as a warning instead --
+        // see `validate_unknown_defaults_setting_is_a_warning`.
+        let config = parse_sudoers("Defaults some_future_sudo_setting=1\n").unwrap();
+        assert_eq!(
+            config.get_default("some_future_sudo_setting"),
+            Some("1"),
+            "an unknown name must still round-trip"
+        );
+    }
+
+    #[test]
+    fn honoured_defaults_are_all_known() {
+        // Two hand-maintained lists that have to agree is this tree's recurring
+        // defect shape. A name in `HONOURED_DEFAULTS` that is absent from
+        // `KNOWN_DEFAULTS` would be warned about as unknown by the very
+        // validator that is supposed to vouch for it.
+        for name in HONOURED_DEFAULTS {
+            assert!(
+                default_shape(name).is_some(),
+                "{name} is honoured but missing from KNOWN_DEFAULTS"
+            );
+        }
+    }
+
+    // -- Command lists --
+
+    #[test]
+    fn cmnd_list_tag_with_no_command_is_rejected() {
+        // The tag applies to a command; with none, it applies to nothing and
+        // the next entry inherits it by accident.
+        assert!(parse_sudoers("alice ALL = NOPASSWD:\n").is_err());
+    }
+
+    #[test]
+    fn cmnd_list_unknown_tag_is_rejected() {
+        // Accepted, `NOPASSWORD:` becomes a *command name*, so the entry grants
+        // a program that does not exist and still asks for a password -- the
+        // opposite of what its author read it as doing, and silent.
+        assert!(parse_sudoers("alice ALL = NOPASSWORD: /bin/ls\n").is_err());
+    }
+
+    #[test]
+    fn cmnd_list_empty_is_rejected() {
+        assert!(parse_sudoers("alice ALL = \n").is_err());
+    }
+
+    #[test]
+    fn cmnd_list_known_tags_still_parse() {
+        let config = parse_sudoers("alice ALL = NOPASSWD: NOEXEC: /bin/ls\n").unwrap();
+        let cmd = &config.privileges[0].commands[0];
+        assert!(cmd.nopasswd);
+        assert!(cmd.noexec);
+        assert_eq!(cmd.command, "/bin/ls");
+    }
+
+    #[test]
+    fn cmnd_list_uppercase_alias_member_is_not_mistaken_for_a_tag() {
+        // A `Cmnd_Alias` name looks like a tag apart from the trailing colon,
+        // which is why the tag check requires one.
+        let config = parse_sudoers("alice ALL = NETWORKING\n").unwrap();
+        assert_eq!(config.privileges[0].commands[0].command, "NETWORKING");
+    }
+
     #[test]
     fn parse_simple_privilege() {
         let config = parse_sudoers("root ALL = (ALL) ALL\n").unwrap();
@@ -3877,10 +4455,47 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
 
     #[test]
     fn env_keep_extended() {
-        let config = parse_sudoers("Defaults env_keep=\"CUSTOM_VAR\"\n").unwrap();
-        let keep = config.env_keep_list();
+        // Changed 2026-08-18. This used to assert that `env_keep="CUSTOM_VAR"`
+        // kept `TERM` as well -- that is, that `=` *adds* to the built-in list.
+        // It does not: sudoers documents `=` as replace and `+=` as add, and
+        // the difference is the whole reason a file writes one rather than the
+        // other. Asserting the old behaviour meant asserting that a file which
+        // deliberately narrowed the kept environment did not narrow it, which
+        // is the unsafe direction to be wrong in. The `+=` form, which is what
+        // the test's name describes, is asserted below.
+        let replaced = parse_sudoers("Defaults env_keep=\"CUSTOM_VAR\"\n").unwrap();
+        assert_eq!(
+            replaced.env_keep_list(),
+            vec!["CUSTOM_VAR".to_string()],
+            "`=` replaces the list"
+        );
+
+        let extended = parse_sudoers("Defaults env_keep+=\"CUSTOM_VAR\"\n").unwrap();
+        let keep = extended.env_keep_list();
         assert!(keep.contains(&"CUSTOM_VAR".to_string()));
-        assert!(keep.contains(&"TERM".to_string()));
+        assert!(keep.contains(&"TERM".to_string()), "`+=` keeps the built-ins");
+    }
+
+    #[test]
+    fn env_keep_can_be_disabled_with_bang() {
+        // `!` is sudoers' disable operator for list settings; it is the one
+        // place a list may legally be written without a value.
+        let config = parse_sudoers("Defaults !env_keep\n").unwrap();
+        assert!(config.env_keep_list().is_empty());
+    }
+
+    #[test]
+    fn defaults_command_scope_needs_no_space_before_the_sigil() {
+        // The only thing separating a command-scoped default from a negated
+        // global flag is whether the sigil is attached to the keyword. Reading
+        // `Defaults !requiretty` as a scope -- which trimming before the sigil
+        // test does -- swallows the entire space of negated global flags.
+        let scoped = parse_sudoers("Defaults!/usr/bin/less !env_reset\n").unwrap();
+        assert_eq!(scoped.defaults[0].scope, "!/usr/bin/less");
+
+        let global = parse_sudoers("Defaults !env_reset\n").unwrap();
+        assert!(global.defaults[0].scope.is_empty());
+        assert!(!global.is_default_set("env_reset"));
     }
 
     #[test]
@@ -4249,6 +4864,72 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
         let content = "#include /etc/sudoers.d/local\n@includedir /etc/sudoers.d\n";
         let errors = validate_sudoers(content, false);
         assert!(errors.is_empty());
+    }
+
+    // -- visudo now actually validates Defaults --
+    //
+    // Every case here reported a clean file before. The `Defaults` branch
+    // confirmed there was something after the keyword and returned, so the one
+    // tool whose job is to catch the administrator's mistake before the policy
+    // is installed caught none of them.
+
+    #[test]
+    fn validate_malformed_defaults_is_an_error() {
+        for content in [
+            "Defaults requiretty=5\n",
+            "Defaults !secure_path\n",
+            "Defaults passwd tries=3\n",
+            "Defaults env_keep = \"A B\n",
+            "Defaults:alice\n",
+        ] {
+            let errors = validate_sudoers(content, false);
+            assert!(
+                errors.iter().any(|e| !e.is_warning),
+                "no error reported for {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_unknown_defaults_setting_is_a_warning() {
+        // A warning rather than an error on purpose: `KNOWN_DEFAULTS` is
+        // knowingly incomplete, and a `visudo` that refused to save a correct
+        // file over a gap in our own table would leave the administrator with
+        // no way to fix it.
+        let errors = validate_sudoers("Defaults some_future_sudo_setting=1\n", false);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].is_warning);
+        assert!(errors[0].message.contains("some_future_sudo_setting"));
+    }
+
+    #[test]
+    fn validate_recognised_but_unhonoured_setting_warns_only_under_strict() {
+        // `Defaults requiretty` parses, means something in real sudo, and does
+        // nothing here. Saying so is the honest report; saying it always would
+        // make `visudo -c` noisy on files that are entirely correct.
+        assert!(validate_sudoers("Defaults requiretty\n", false).is_empty());
+        let strict = validate_sudoers("Defaults requiretty\n", true);
+        assert_eq!(strict.len(), 1);
+        assert!(strict[0].is_warning);
+        assert!(strict[0].message.contains("not yet honoured"));
+    }
+
+    #[test]
+    fn validate_honoured_defaults_are_silent_even_under_strict() {
+        assert!(validate_sudoers("Defaults env_reset\n", true).is_empty());
+        assert!(validate_sudoers("Defaults timestamp_timeout=15\n", true).is_empty());
+        assert!(validate_sudoers("Defaults env_keep += \"DISPLAY\"\n", true).is_empty());
+    }
+
+    #[test]
+    fn validate_malformed_command_list_is_an_error() {
+        for content in ["alice ALL = NOPASSWD:\n", "alice ALL = NOPASSWORD: /bin/ls\n"] {
+            let errors = validate_sudoers(content, false);
+            assert!(
+                errors.iter().any(|e| !e.is_warning),
+                "no error reported for {content:?}"
+            );
+        }
     }
 
     // -- List privileges tests --

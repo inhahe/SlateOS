@@ -35130,3 +35130,71 @@ Check what `pkg`/the installer writes before deleting.
 differently is how a machine ends up believing an account is an administrator
 in one context and not another, which is the same class of defect as the
 `is_admin`/`admin` field split that §330 fixed one level down.
+
+---
+
+## The build volume runs out of space, and nothing reclaims it (lane A)
+
+**Status:** OPEN — 2026-08-18
+
+**In short:** all three lanes build on `D:`, which is a 1.9 TB volume that sits
+at 100% used. On 2026-08-18 it fell to 16 GiB free with three `cargo test
+--workspace` runs live, which is below the floor `scripts/boot-test.sh`
+requires, so lane A could not boot-test at all. Nothing in the tree reclaims
+space; every lane's `target/` grows monotonically and the integration checkout's
+is the largest single consumer.
+
+### What actually happens
+
+`scripts/boot-test.sh` refuses to run below 20 GiB free (`--min-free-gb` to
+override). That guard exists because on 2026-08-15 the volume hit zero bytes
+free and a half-written edit truncated a kernel source file to zero bytes — so
+the guard is right and must not be routinely overridden. But it is a *detector*,
+not a *remedy*: when it fires the agent is simply stuck, and the only advice it
+can offer is to run `cargo clean` by hand in a worktree "nobody is building in".
+
+Which worktree that is cannot be determined from the tree. Measured this
+morning:
+
+| Worktree | `target/` |
+|---|---|
+| `os` (integration) | 19.1 GB |
+| `os-lane-a` | ~0.2 GB (host) + kernel target |
+
+`os/target` is by far the biggest and is entirely regenerable, so it is the
+right thing to prune — but at the time it had been written 157 s earlier by one
+of three live `cargo test --workspace --target x86_64-pc-windows-gnu` processes,
+and a `target/` that is idle for two minutes is *not* the same as one nobody is
+using: a QEMU boot phase writes nothing to `target/` for ~8 minutes. Deleting it
+under another lane costs that lane a ~14-minute rebuild and produces confusing
+mid-build errors. So the one safe reclaim is also the one an agent cannot safely
+perform without coordination it does not have.
+
+Scratch also accumulates unattended: `os-lane-a/build/` held 1.16 GB of
+`objdump` disassembly dumps (`dis-debug.txt`, 450 MB each) and ~80 MB of clippy
+logs left by earlier sessions. That directory is gitignored, so nothing ever
+prompts anyone to look at it. Pruned by hand on 2026-08-18; it will refill.
+
+### Proper fix
+
+Two pieces, neither written yet:
+
+1. **A reclaim helper** — `scripts/reclaim-space.py <n_gib>` that frees space
+   without guessing. It must establish *idleness* rather than infer it: check
+   for a live `cargo`/`rustc`/`qemu` process, and take the same lock
+   `scripts/boot-test.sh` uses to serialise QEMU, so it cannot race a boot test.
+   Prune in a defined order — this lane's `build/` scratch older than N days
+   first, then `target/` directories belonging to worktrees with no live build,
+   integration checkout first. Never touch a source tree.
+2. **A retention rule for `build/`** — the scratch directory has no policy at
+   all. Either the helper ages files out of it, or the boot test prints its size
+   when it exceeds a threshold, so it stops being invisible.
+
+Until then the workaround is manual: measure with
+`Get-ChildItem -Recurse -File | Measure-Object -Property Length -Sum`, confirm
+no live build with `Get-CimInstance Win32_Process -Filter "Name='cargo.exe'"`,
+and prune `os/target` only when the integration checkout is genuinely idle.
+
+**Severity:** high — it does not corrupt anything by itself (the guard sees to
+that), but it stops the one test that gates merging to `main`, and the failure
+mode it guards against has already destroyed a source file once.

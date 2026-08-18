@@ -5,3 +5,6 @@ edition = "2024"
 description = "SlateOS Notification Daemon — system notification management and display"
 [dependencies]
 guitk = { path = "../toolkit" }
+
+[lints]
+workspace = true

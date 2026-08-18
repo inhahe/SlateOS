@@ -239,27 +239,66 @@ fn ease_out_cubic(t: f32) -> f32 {
 // Do Not Disturb
 // ---------------------------------------------------------------------------
 
-/// DND schedule (hour-based, 24h clock).
-#[derive(Clone, Debug)]
+/// Minutes in a day. A time-of-day is always in `0..MINUTES_PER_DAY`.
+const MINUTES_PER_DAY: u16 = 24 * 60;
+
+/// A "quiet hours" window on the 24-hour clock.
+///
+/// The two endpoints are stored as minutes from midnight rather than as an
+/// hour/minute pair, and are only constructible through [`DndSchedule::new`],
+/// which rejects times that are not on the clock. The previous shape kept four
+/// public `u8`s and converted on every call, which meant `start_hour: 25` was
+/// accepted in silence: it produced a start of 1500, past the largest possible
+/// time-of-day, so the window compared as overnight and then never opened. A
+/// schedule that is quietly never active is worse than one that is refused,
+/// because nothing ever reports it — the user just stops getting quiet hours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DndSchedule {
-    pub start_hour: u8,
-    pub start_minute: u8,
-    pub end_hour: u8,
-    pub end_minute: u8,
+    /// Minutes from midnight, `< MINUTES_PER_DAY`.
+    start: u16,
+    /// Minutes from midnight, `< MINUTES_PER_DAY`.
+    end: u16,
 }
 
 impl DndSchedule {
+    /// Build a schedule from wall-clock times, or `None` if either is not a
+    /// real time of day.
+    ///
+    /// `start == end` is accepted and means an empty window, matching the
+    /// `start <= end` branch of [`Self::is_active`]; it is a degenerate
+    /// schedule, not an invalid one.
+    pub fn new(start_hour: u8, start_minute: u8, end_hour: u8, end_minute: u8) -> Option<Self> {
+        Some(Self {
+            start: Self::minutes_from_midnight(start_hour, start_minute)?,
+            end: Self::minutes_from_midnight(end_hour, end_minute)?,
+        })
+    }
+
+    /// `hour:minute` as minutes from midnight, or `None` if it is not a time.
+    ///
+    /// The multiplication cannot overflow once the hour is known to be under
+    /// 24 — the largest value is 23 * 60 + 59 = 1439 — but it is written with
+    /// `checked_*` anyway so that the bound is enforced by the code rather
+    /// than by this comment.
+    fn minutes_from_midnight(hour: u8, minute: u8) -> Option<u16> {
+        if hour >= 24 || minute >= 60 {
+            return None;
+        }
+        u16::from(hour)
+            .checked_mul(60)?
+            .checked_add(u16::from(minute))
+            .filter(|m| *m < MINUTES_PER_DAY)
+    }
+
     /// Check if a given time-of-day (in minutes from midnight) falls within
     /// the DND window.
     fn is_active(&self, minutes_from_midnight: u16) -> bool {
-        let start = self.start_hour as u16 * 60 + self.start_minute as u16;
-        let end = self.end_hour as u16 * 60 + self.end_minute as u16;
-        if start <= end {
+        if self.start <= self.end {
             // Same-day window (e.g. 08:00 - 17:00)
-            minutes_from_midnight >= start && minutes_from_midnight < end
+            minutes_from_midnight >= self.start && minutes_from_midnight < self.end
         } else {
             // Overnight window (e.g. 22:00 - 07:00)
-            minutes_from_midnight >= start || minutes_from_midnight < end
+            minutes_from_midnight >= self.start || minutes_from_midnight < self.end
         }
     }
 }
@@ -511,14 +550,24 @@ impl NotificationDaemon {
             // before inserting the new one, so the post-insert count stays
             // within the cap. Mark the oldest non-dismissing toasts (last in
             // the Vec; newest is at index 0) as dismissing until we're under.
-            let mut non_dismissing = self.toasts.iter().filter(|t| !t.dismissing).count();
-            while non_dismissing >= MAX_VISIBLE_TOASTS {
-                if let Some(oldest) = self.toasts.iter_mut().rev().find(|t| !t.dismissing) {
-                    oldest.dismissing = true;
-                    non_dismissing -= 1;
-                } else {
-                    break;
-                }
+            //
+            // Computed rather than counted down in a loop. The loop this
+            // replaces decremented a counter it had already used to decide to
+            // enter, and needed a `break` arm for the case where the counter
+            // and the Vec disagreed — a shape that cannot be read without
+            // checking that the two stay in step. `excess` is the number to
+            // mark, so `take` enforces it and a short iterator is simply a
+            // shorter one.
+            let live = self.toasts.iter().filter(|t| !t.dismissing).count();
+            let excess = live.saturating_sub(MAX_VISIBLE_TOASTS.saturating_sub(1));
+            for toast in self
+                .toasts
+                .iter_mut()
+                .rev()
+                .filter(|t| !t.dismissing)
+                .take(excess)
+            {
+                toast.dismissing = true;
             }
             self.toasts.insert(0, ToastState::new(notif_id));
         }
@@ -1439,14 +1488,27 @@ impl NotificationDaemon {
     // DND convenience methods
     // -----------------------------------------------------------------------
 
-    /// Set a DND schedule.
-    pub fn set_dnd_schedule(&mut self, start_hour: u8, start_minute: u8, end_hour: u8, end_minute: u8) {
-        self.dnd.schedule = Some(DndSchedule {
-            start_hour,
-            start_minute,
-            end_hour,
-            end_minute,
-        });
+    /// Set a DND schedule, returning `false` if either endpoint is not a real
+    /// time of day.
+    ///
+    /// A rejected schedule leaves the previous one in place rather than
+    /// clearing it: the caller asked for a window that does not exist, and
+    /// silently turning quiet hours *off* is not a closer approximation of
+    /// that request than leaving them as they were.
+    pub fn set_dnd_schedule(
+        &mut self,
+        start_hour: u8,
+        start_minute: u8,
+        end_hour: u8,
+        end_minute: u8,
+    ) -> bool {
+        match DndSchedule::new(start_hour, start_minute, end_hour, end_minute) {
+            Some(schedule) => {
+                self.dnd.schedule = Some(schedule);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Clear the DND schedule.
@@ -1534,6 +1596,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // --- text measurement ---
@@ -1754,18 +1827,65 @@ mod tests {
 
     #[test]
     fn test_dnd_schedule_overnight() {
-        let schedule = DndSchedule {
-            start_hour: 22,
-            start_minute: 0,
-            end_hour: 7,
-            end_minute: 0,
-        };
+        let schedule = DndSchedule::new(22, 0, 7, 0).expect("22:00-07:00 is a real window");
         // 23:00 = 1380 minutes -> should be active.
         assert!(schedule.is_active(1380));
         // 02:00 = 120 minutes -> should be active.
         assert!(schedule.is_active(120));
         // 12:00 = 720 minutes -> should NOT be active.
         assert!(!schedule.is_active(720));
+    }
+
+    /// The bug the type change closes: `start_hour: 25` used to be accepted,
+    /// yielding a start of 1500 — past the largest time-of-day — so the window
+    /// compared as overnight and then never opened. Quiet hours silently
+    /// stopped working and nothing reported it.
+    #[test]
+    fn a_time_that_is_not_on_the_clock_is_refused() {
+        for (sh, sm, eh, em) in [
+            (25, 0, 7, 0),   // hour past midnight
+            (24, 0, 7, 0),   // 24:00 is tomorrow's 00:00, not a time today
+            (22, 60, 7, 0),  // minute past the hour
+            (22, 0, 7, 99),  // ditto, on the far endpoint
+            (22, 0, 255, 0), // the largest u8
+        ] {
+            assert!(
+                DndSchedule::new(sh, sm, eh, em).is_none(),
+                "{sh}:{sm}-{eh}:{em} should not be a schedule"
+            );
+        }
+        // The boundary on the accepted side.
+        assert!(DndSchedule::new(23, 59, 0, 0).is_some());
+    }
+
+    /// A refused schedule must not clear the one already set — silently
+    /// turning quiet hours off is not a closer reading of the request than
+    /// leaving them alone.
+    #[test]
+    fn a_refused_schedule_leaves_the_previous_one_alone() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        assert!(daemon.set_dnd_schedule(22, 0, 7, 0));
+        let good = daemon.dnd.schedule;
+        assert!(good.is_some());
+
+        assert!(!daemon.set_dnd_schedule(25, 0, 7, 0));
+        assert_eq!(daemon.dnd.schedule, good);
+    }
+
+    /// Every minute of the day belongs to exactly one side of a window, and
+    /// the two branches of `is_active` must agree on that. A same-day window
+    /// and its complement should partition the day.
+    #[test]
+    fn a_window_and_its_reverse_partition_the_day() {
+        let day = DndSchedule::new(8, 0, 17, 0).expect("08:00-17:00");
+        let night = DndSchedule::new(17, 0, 8, 0).expect("17:00-08:00");
+        for minute in 0..24 * 60 {
+            assert_ne!(
+                day.is_active(minute),
+                night.is_active(minute),
+                "minute {minute} is in both windows or neither"
+            );
+        }
     }
 
     #[test]

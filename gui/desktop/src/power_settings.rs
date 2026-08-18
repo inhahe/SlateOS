@@ -536,7 +536,7 @@ impl PowerSettingsUI {
             2 => self.render_battery_tab(&mut cmds, x + pad, cy, inner),
             3 => self.render_advanced_tab(&mut cmds, x + pad, cy, inner),
             _ => {}
-        };
+        }
 
         cmds
     }

@@ -47,7 +47,7 @@ pub type ExtensionId = u64;
 pub enum TargetKind {
     /// Any file.
     AnyFile,
-    /// Files matching specific extensions (e.g., ["png", "jpg"]).
+    /// Files matching specific extensions (e.g., `png`, `jpg`).
     FileExtensions(Vec<String>),
     /// Directories only.
     Directory,

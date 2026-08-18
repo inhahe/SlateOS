@@ -1309,7 +1309,7 @@ mod tests {
         assert_ne!(state.shuffle_order, original_order);
         // All indices should still be present.
         let mut sorted = state.shuffle_order.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
     }
 

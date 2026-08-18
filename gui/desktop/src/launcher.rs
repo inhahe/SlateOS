@@ -1333,7 +1333,9 @@ mod tests {
         // for whatever is now selected.
         match st.handle_key(&press(Key::Enter)) {
             LauncherAction::Launch(_) | LauncherAction::None => {}
-            other => panic!("unexpected action after navigation: {other:?}"),
+            LauncherAction::Dismiss => {
+                panic!("navigating must not dismiss the launcher")
+            }
         }
     }
 

@@ -579,7 +579,7 @@ impl StorageSettingsUI {
             1 => self.render_sense_tab(&mut cmds, x + pad, cy, inner),
             2 => self.render_locations_tab(&mut cmds, x + pad, cy, inner),
             _ => {}
-        };
+        }
 
         cmds
     }
@@ -991,7 +991,7 @@ mod tests {
 
     #[test]
     fn format_bytes_units() {
-        assert!(format_bytes(500).contains("B"));
+        assert!(format_bytes(500).contains('B'));
         assert!(format_bytes(1_500).contains("KB"));
         assert!(format_bytes(1_500_000).contains("MB"));
         assert!(format_bytes(1_500_000_000).contains("GB"));

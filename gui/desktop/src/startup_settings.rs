@@ -373,7 +373,7 @@ impl StartupSettings {
             StartupSort::Name => entries.sort_by_key(|a| a.name.to_lowercase()),
             StartupSort::Impact => entries.sort_by_key(|e| std::cmp::Reverse(e.impact)),
             StartupSort::StartupType => {
-                entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label()))
+                entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label()));
             }
             StartupSort::Status => entries.sort_by_key(|e| std::cmp::Reverse(e.enabled)),
         }
@@ -498,7 +498,7 @@ impl StartupSettingsUI {
             StartupSort::Name => entries.sort_by_key(|a| a.name.to_lowercase()),
             StartupSort::Impact => entries.sort_by_key(|e| std::cmp::Reverse(e.impact)),
             StartupSort::StartupType => {
-                entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label()))
+                entries.sort_by(|a, b| a.startup_type.label().cmp(b.startup_type.label()));
             }
             StartupSort::Status => entries.sort_by_key(|e| std::cmp::Reverse(e.enabled)),
         }

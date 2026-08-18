@@ -2504,6 +2504,10 @@ mod tests {
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects
     )]
+    // These tests assert a float equals the exact literal the code under test was
+    // handed. That is the assertion meant: a tolerance would let a value that has
+    // drifted pass as one that has not.
+    #![allow(clippy::float_cmp)]
 
     use super::*;
 

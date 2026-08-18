@@ -210,9 +210,26 @@ impl Default for GammaSettings {
 }
 
 impl GammaSettings {
+    /// How far a gamma may sit from 1.0 and still count as "no correction".
+    ///
+    /// Not an arbitrary epsilon: gamma reaches this type from a UI slider, and
+    /// a deviation this small moves an 8-bit channel by well under one level,
+    /// so it is a difference nothing downstream can display.
+    const IDENTITY_TOLERANCE: f32 = 0.001;
+
+    /// Whether a single channel's gamma is close enough to 1.0 to be a no-op.
+    ///
+    /// Both the per-channel fast path and [`Self::is_default`] ask this
+    /// question, and they must not answer it differently — a gamma that
+    /// `is_default` calls untouched but `apply_channel` decides to correct
+    /// would be a setting the UI reports as off while it is still running.
+    pub fn is_identity(gamma: f32) -> bool {
+        (gamma - 1.0).abs() < Self::IDENTITY_TOLERANCE
+    }
+
     /// Apply gamma correction to a color value (0-255).
     pub fn apply_channel(value: u8, gamma: f32) -> u8 {
-        if gamma == 1.0 {
+        if Self::is_identity(gamma) {
             return value;
         }
         let normalized = value as f32 / 255.0;
@@ -232,9 +249,7 @@ impl GammaSettings {
 
     /// Whether all channels are at default (1.0).
     pub fn is_default(&self) -> bool {
-        (self.red - 1.0).abs() < 0.001
-            && (self.green - 1.0).abs() < 0.001
-            && (self.blue - 1.0).abs() < 0.001
+        Self::is_identity(self.red) && Self::is_identity(self.green) && Self::is_identity(self.blue)
     }
 }
 
@@ -1299,6 +1314,10 @@ mod tests {
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects
     )]
+    // These tests assert a float equals the exact literal the code under test was
+    // handed. That is the assertion meant: a tolerance would let a value that has
+    // drifted pass as one that has not.
+    #![allow(clippy::float_cmp)]
 
     use super::*;
 

@@ -132,7 +132,9 @@ impl Workspace {
     /// Unique app IDs in this workspace.
     pub fn app_ids(&self) -> Vec<&str> {
         let mut ids: Vec<&str> = self.windows.iter().map(|w| w.app_id.as_str()).collect();
-        ids.sort();
+        // Unstable: equal &str are indistinguishable, so stability buys
+        // nothing and costs a scratch allocation.
+        ids.sort_unstable();
         ids.dedup();
         ids
     }

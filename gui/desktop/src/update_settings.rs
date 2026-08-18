@@ -533,7 +533,7 @@ impl UpdateSettingsUI {
             1 => self.render_schedule_tab(&mut cmds, x + pad, cy, inner),
             2 => self.render_history_tab(&mut cmds, x + pad, cy, inner),
             _ => {}
-        };
+        }
 
         cmds
     }
@@ -1200,7 +1200,7 @@ mod tests {
 
     #[test]
     fn format_size_units() {
-        assert!(format_size(500).contains("B"));
+        assert!(format_size(500).contains('B'));
         assert!(format_size(5_000_000).contains("MB"));
     }
 

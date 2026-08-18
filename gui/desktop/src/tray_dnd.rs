@@ -1096,7 +1096,7 @@ mod tests {
         config.set_start_in_tray("app_c", true);
 
         let mut enabled = config.enabled_apps();
-        enabled.sort();
+        enabled.sort_unstable();
         assert_eq!(enabled, vec!["app_a", "app_c"]);
     }
 

@@ -506,7 +506,7 @@ impl PrivacySettingsUI {
             1 => self.render_activity_tab(&mut cmds, x + pad, cy, inner),
             2 => self.render_general_tab(&mut cmds, x + pad, cy, inner),
             _ => {}
-        };
+        }
 
         cmds
     }

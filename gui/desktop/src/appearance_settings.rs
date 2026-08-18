@@ -350,7 +350,7 @@ impl AppearanceSettingsUI {
                     width: swatch_size + 6.0,
                     height: swatch_size + 6.0,
                     color: TEXT,
-                    corner_radii: CornerRadii::all((swatch_size + 6.0) / 2.0),
+                    corner_radii: CornerRadii::all(swatch_size.midpoint(6.0)),
                     line_width: 2.0,
                 });
             }

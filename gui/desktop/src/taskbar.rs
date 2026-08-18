@@ -1214,6 +1214,11 @@ mod tests {
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects
     )]
+    // These tests search the render output for a rectangle of an exact size —
+    // a literal the renderer writes and the test reads back with no arithmetic
+    // in between. Exact equality is the assertion meant; a tolerance here would
+    // let a 3.0-tall indicator pass as a 3.4-tall one.
+    #![allow(clippy::float_cmp)]
 
     use super::*;
 

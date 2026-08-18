@@ -35229,25 +35229,56 @@ Scratch also accumulates unattended: `os-lane-a/build/` held 1.16 GB of
 logs left by earlier sessions. That directory is gitignored, so nothing ever
 prompts anyone to look at it. Pruned by hand on 2026-08-18; it will refill.
 
-### Proper fix
+### Fix, part 1 — landed 2026-08-18: `scripts/reclaim-space.py`
 
-Two pieces, neither written yet:
+Run `python scripts/reclaim-space.py` for a dry run, `--yes` to act, `--need N`
+to set the target in GiB (default 20, the boot test's floor).
 
-1. **A reclaim helper** — `scripts/reclaim-space.py <n_gib>` that frees space
-   without guessing. It must establish *idleness* rather than infer it: check
-   for a live `cargo`/`rustc`/`qemu` process, and take the same lock
-   `scripts/boot-test.sh` uses to serialise QEMU, so it cannot race a boot test.
-   Prune in a defined order — this lane's `build/` scratch older than N days
-   first, then `target/` directories belonging to worktrees with no live build,
-   integration checkout first. Never touch a source tree.
-2. **A retention rule for `build/`** — the scratch directory has no policy at
-   all. Either the helper ages files out of it, or the boot test prints its size
-   when it exceeds a threshold, so it stops being invisible.
+It answers "is this directory in use?" with a **fact rather than a heuristic**:
+it *renames* the directory before deleting anything. Windows refuses to rename a
+directory that has any file open inside it, and the rename is atomic, so a
+success proves nothing held it at that instant and no observer ever sees a
+half-deleted tree; a failure means "in use" and the candidate is skipped rather
+than forced. That replaces the idleness check this entry originally proposed —
+checking for a live `cargo`/`rustc` process — which was tried first and does not
+work: `os/target` showed 122 s of write-idleness and was still locked 13 minutes
+later, because a QEMU boot phase writes nothing to `target/` for ~8 minutes.
 
-Until then the workaround is manual: measure with
-`Get-ChildItem -Recurse -File | Measure-Object -Property Length -Sum`, confirm
-no live build with `Get-CimInstance Win32_Process -Filter "Name='cargo.exe'"`,
-and prune `os/target` only when the integration checkout is genuinely idle.
+Order of attack: this lane's `build/` scratch older than `--scratch-age-days`
+(default 3), then the integration checkout's `target/`, then **our own**, and
+only with `--allow-lane-targets` any other lane's. Ours precedes theirs
+deliberately: another lane's `target/` is that lane's rebuild exactly as ours is
+ours, so a default run can only ever cost this lane and the integration tree.
+Nothing outside a worktree root is touched and nothing git does not consider
+ignored is touched; both are asserted rather than assumed, and the ignore query
+is issued from the worktree that *owns* the path (`git check-ignore` fails
+outright on a sibling worktree's path, which would otherwise read as "not
+ignored").
+
+Two things it deliberately keeps: `build/*.elf` (a `kernel-kasan-capture.elf` is
+the symbol table an open bug's backtrace decodes against, and the commit that
+produced it is gone from every build tree) and the boot test's disk images.
+
+### Fix, part 2 — still to do: a retention rule for `build/`
+
+`--scratch-age-days` prunes top-level `build/` files on demand, but only when
+someone runs the script. The directory still has no standing policy, so it
+refills silently between runs. Either the boot test should print `build/`'s size
+when it exceeds a threshold, or it should age the directory out itself on every
+run, so the accumulation stops being invisible.
+
+### Status
+
+**Status:** PARTIALLY FIXED — 2026-08-18. The reclaim helper exists and works;
+the retention rule does not.
+
+The underlying scarcity is not fixed and cannot be fixed by a script: three
+lanes building concurrently consumed ~250 MB/min on 2026-08-18 and drove free
+space from 19 GiB down to 14 GiB *while* the helper was retrying, with all four
+`target/` directories locked the whole time. The helper's honest answer in that
+window is "everything else is in use or not ours", and waiting is then the
+correct behaviour — the space came back (14 GiB → 32 GiB) the moment the other
+lanes' test runs finished.
 
 **Severity:** high — it does not corrupt anything by itself (the guard sees to
 that), but it stops the one test that gates merging to `main`, and the failure

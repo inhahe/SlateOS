@@ -15,6 +15,7 @@ mod features;
 
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::history::SampleHistory;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
@@ -336,69 +337,18 @@ pub struct SystemInfo {
 // Graph history — ring buffer of f32 samples
 // ============================================================================
 
-/// Ring buffer holding the last `GRAPH_HISTORY_LEN` samples for a
-/// time-series value (CPU %, bandwidth, etc.).
-#[derive(Clone, Debug)]
-pub struct GraphHistory {
-    /// Fixed-size sample buffer.
-    samples: Vec<f32>,
-    /// Write cursor (next position to overwrite).
-    cursor: usize,
-    /// Number of samples written so far (clamped to capacity).
-    count: usize,
-}
-
-impl GraphHistory {
-    /// Create a new history buffer pre-filled with zeroes.
-    pub fn new() -> Self {
-        Self {
-            samples: vec![0.0; GRAPH_HISTORY_LEN],
-            cursor: 0,
-            count: 0,
-        }
-    }
-
-    /// Push a new sample, overwriting the oldest if full.
-    pub fn push(&mut self, value: f32) {
-        if let Some(slot) = self.samples.get_mut(self.cursor) {
-            *slot = value;
-        }
-        self.cursor = (self.cursor + 1) % GRAPH_HISTORY_LEN;
-        if self.count < GRAPH_HISTORY_LEN {
-            self.count += 1;
-        }
-    }
-
-    /// Iterate over samples from oldest to newest.
-    pub fn iter_oldest_first(&self) -> impl Iterator<Item = f32> + '_ {
-        let start = if self.count < GRAPH_HISTORY_LEN {
-            0
-        } else {
-            self.cursor
-        };
-        let len = self.count;
-        (0..len).map(move |i| {
-            let idx = (start + i) % GRAPH_HISTORY_LEN;
-            self.samples.get(idx).copied().unwrap_or(0.0)
-        })
-    }
-
-    /// Number of recorded samples (up to `GRAPH_HISTORY_LEN`).
-    pub fn len(&self) -> usize {
-        self.count
-    }
-
-    /// Whether the buffer is empty.
-    pub fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-}
-
-impl Default for GraphHistory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// The sample history behind each of this program's time-series graphs.
+///
+/// This used to be a ring buffer written out here — a sample vector, a cursor
+/// wrapped with `% GRAPH_HISTORY_LEN`, and a count that stopped climbing once
+/// the vector was full. The resource monitor in the shell and the other of
+/// these two programs each had their own copy of the same thing, and the three
+/// had already drifted: one advanced its cursor with `+ 1` and another with
+/// `wrapping_add(1)`, and `max_value` folded from zero here while the shell's
+/// `peak` folded from negative infinity, so identical samples gave different
+/// answers. It lives in [`guitk::history`] now; the only thing left for this
+/// program to decide is how many samples wide its graphs are.
+pub type GraphHistory = SampleHistory;
 
 // ============================================================================
 // Tabs, columns, sort, context menu, view mode
@@ -689,11 +639,11 @@ impl ProcessExplorerState {
             filter_focused: false,
             context_menu: None,
             system_info,
-            cpu_history: GraphHistory::new(),
+            cpu_history: GraphHistory::new(GRAPH_HISTORY_LEN),
             core_histories: Vec::new(),
             connections: Vec::new(),
-            net_in_history: GraphHistory::new(),
-            net_out_history: GraphHistory::new(),
+            net_in_history: GraphHistory::new(GRAPH_HISTORY_LEN),
+            net_out_history: GraphHistory::new(GRAPH_HISTORY_LEN),
             refresh_interval: RefreshInterval::TwoSeconds,
             ms_since_refresh: 0,
             status_message: String::new(),
@@ -852,7 +802,8 @@ impl ProcessExplorerState {
 
         // Ensure per-core histories match the core count.
         while self.core_histories.len() < self.system_info.cpu_per_core.len() {
-            self.core_histories.push(GraphHistory::new());
+            self.core_histories
+                .push(GraphHistory::new(GRAPH_HISTORY_LEN));
         }
         for (i, &usage) in self.system_info.cpu_per_core.iter().enumerate() {
             if let Some(hist) = self.core_histories.get_mut(i) {

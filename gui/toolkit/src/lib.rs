@@ -36,6 +36,7 @@ pub mod event;
 pub mod filetypes;
 pub mod fontdb;
 pub mod grid;
+pub mod history;
 pub mod layout;
 pub mod listview;
 pub mod menu;

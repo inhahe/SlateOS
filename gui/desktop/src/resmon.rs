@@ -37,6 +37,7 @@
 //! ```
 
 use guitk::color::Color;
+use guitk::history::SampleHistory;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -96,6 +97,21 @@ pub enum ResourceType {
 }
 
 impl ResourceType {
+    /// Every resource the monitor graphs, in the order it shows them.
+    ///
+    /// Written here so the tests and any future menu iterate the same list.
+    /// Adding a variant without adding it here is caught by
+    /// `every_resource_type_appears_in_all_exactly_once`, which matches
+    /// exhaustively.
+    pub const ALL: [Self; 6] = [
+        Self::Cpu,
+        Self::Memory,
+        Self::Disk,
+        Self::Network,
+        Self::Gpu,
+        Self::Temperature,
+    ];
+
     /// Display label for this resource type.
     pub fn label(self) -> &'static str {
         match self {
@@ -125,105 +141,15 @@ impl ResourceType {
 // Circular graph data buffer
 // ============================================================================
 
-/// Fixed-size circular buffer of f32 samples for graph rendering.
+/// The sample history behind each of this monitor's graphs.
 ///
-/// Stores the most recent `GRAPH_BUFFER_SIZE` values. Older values are
-/// silently overwritten when the buffer wraps.
-#[derive(Clone, Debug)]
-pub struct GraphData {
-    /// Storage for samples. Always has length `GRAPH_BUFFER_SIZE`.
-    samples: [f32; GRAPH_BUFFER_SIZE],
-    /// Write cursor — next index to overwrite.
-    write_pos: usize,
-    /// Number of samples pushed so far (saturates at `GRAPH_BUFFER_SIZE`).
-    count: usize,
-}
-
-impl GraphData {
-    /// Create an empty graph buffer (all zeros).
-    pub fn new() -> Self {
-        Self {
-            samples: [0.0; GRAPH_BUFFER_SIZE],
-            write_pos: 0,
-            count: 0,
-        }
-    }
-
-    /// Push a new sample into the buffer, overwriting the oldest if full.
-    pub fn push(&mut self, value: f32) {
-        self.samples[self.write_pos] = value;
-        self.write_pos = (self.write_pos + 1) % GRAPH_BUFFER_SIZE;
-        if self.count < GRAPH_BUFFER_SIZE {
-            self.count += 1;
-        }
-    }
-
-    /// Number of valid samples currently in the buffer.
-    pub fn len(&self) -> usize {
-        self.count
-    }
-
-    /// Whether the buffer contains no samples.
-    pub fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    /// Most recently pushed sample, or `0.0` if empty.
-    pub fn latest(&self) -> f32 {
-        if self.count == 0 {
-            return 0.0;
-        }
-        // write_pos points to the *next* slot, so the latest is one behind.
-        let idx = if self.write_pos == 0 {
-            GRAPH_BUFFER_SIZE - 1
-        } else {
-            self.write_pos - 1
-        };
-        self.samples[idx]
-    }
-
-    /// Arithmetic mean of all valid samples, or `0.0` if empty.
-    pub fn average(&self) -> f32 {
-        if self.count == 0 {
-            return 0.0;
-        }
-        let sum: f32 = self.valid_samples().iter().copied().sum();
-        sum / self.count as f32
-    }
-
-    /// Maximum value among all valid samples, or `0.0` if empty.
-    pub fn peak(&self) -> f32 {
-        if self.count == 0 {
-            return 0.0;
-        }
-        self.valid_samples()
-            .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max)
-    }
-
-    /// Return valid samples in chronological order (oldest first).
-    ///
-    /// The returned `Vec` has exactly `self.count` elements.
-    pub fn valid_samples(&self) -> Vec<f32> {
-        let mut out = Vec::with_capacity(self.count);
-        if self.count < GRAPH_BUFFER_SIZE {
-            // Buffer hasn't wrapped yet — samples start at index 0.
-            out.extend_from_slice(&self.samples[..self.count]);
-        } else {
-            // Wrapped — oldest sample is at write_pos.
-            out.extend_from_slice(&self.samples[self.write_pos..]);
-            out.extend_from_slice(&self.samples[..self.write_pos]);
-        }
-        out
-    }
-}
-
-impl Default for GraphData {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// This used to be a `GraphData` written out here: an array, a write cursor
+/// wrapped with `% GRAPH_BUFFER_SIZE`, and a count that stopped climbing once
+/// the array was full. The process explorer and the system monitor each had
+/// their own copy of the same thing, and the three had already drifted apart in
+/// how they advanced the cursor and what `peak` returned. It lives in
+/// [`guitk::history`] now; only the length is this monitor's business.
+pub type GraphData = SampleHistory;
 
 // ============================================================================
 // Info structs — per-resource-type detailed metrics
@@ -384,12 +310,12 @@ impl ResourceMonitor {
             width,
             height,
             mode: DisplayMode::Compact,
-            cpu_data: GraphData::new(),
-            mem_data: GraphData::new(),
-            disk_data: GraphData::new(),
-            net_data: GraphData::new(),
-            gpu_data: GraphData::new(),
-            temp_data: GraphData::new(),
+            cpu_data: GraphData::new(GRAPH_BUFFER_SIZE),
+            mem_data: GraphData::new(GRAPH_BUFFER_SIZE),
+            disk_data: GraphData::new(GRAPH_BUFFER_SIZE),
+            net_data: GraphData::new(GRAPH_BUFFER_SIZE),
+            gpu_data: GraphData::new(GRAPH_BUFFER_SIZE),
+            temp_data: GraphData::new(GRAPH_BUFFER_SIZE),
             last_snapshot: None,
             net_peak_bps: 1,
         }
@@ -686,7 +612,7 @@ impl ResourceMonitor {
         h: f32,
         color: Color,
     ) {
-        let samples = data.valid_samples();
+        let samples = data.to_vec();
         let count = samples.len();
         if count < 2 || w < MIN_SPARKLINE_WIDTH || h < 2.0 {
             return;
@@ -727,7 +653,7 @@ impl ResourceMonitor {
         h: f32,
         color: Color,
     ) {
-        let samples = data.valid_samples();
+        let samples = data.to_vec();
         let count = samples.len();
         if count == 0 || w < 1.0 || h < 1.0 {
             return;
@@ -837,14 +763,14 @@ mod tests {
 
     #[test]
     fn test_graph_data_new_is_empty() {
-        let data = GraphData::new();
+        let data = GraphData::new(GRAPH_BUFFER_SIZE);
         assert!(data.is_empty());
         assert_eq!(data.len(), 0);
     }
 
     #[test]
     fn test_graph_data_push_single() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         data.push(42.0);
         assert_eq!(data.len(), 1);
         assert!(!data.is_empty());
@@ -853,7 +779,7 @@ mod tests {
 
     #[test]
     fn test_graph_data_push_multiple() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         data.push(10.0);
         data.push(20.0);
         data.push(30.0);
@@ -863,7 +789,7 @@ mod tests {
 
     #[test]
     fn test_graph_data_wraps_at_capacity() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         for i in 0..GRAPH_BUFFER_SIZE + 10 {
             data.push(i as f32);
         }
@@ -873,26 +799,26 @@ mod tests {
 
     #[test]
     fn test_graph_data_latest_empty() {
-        let data = GraphData::new();
+        let data = GraphData::new(GRAPH_BUFFER_SIZE);
         assert_eq!(data.latest(), 0.0);
     }
 
     #[test]
     fn test_graph_data_average_empty() {
-        let data = GraphData::new();
+        let data = GraphData::new(GRAPH_BUFFER_SIZE);
         assert_eq!(data.average(), 0.0);
     }
 
     #[test]
     fn test_graph_data_average_single() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         data.push(50.0);
         assert_eq!(data.average(), 50.0);
     }
 
     #[test]
     fn test_graph_data_average_multiple() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         data.push(10.0);
         data.push(20.0);
         data.push(30.0);
@@ -902,13 +828,13 @@ mod tests {
 
     #[test]
     fn test_graph_data_peak_empty() {
-        let data = GraphData::new();
+        let data = GraphData::new(GRAPH_BUFFER_SIZE);
         assert_eq!(data.peak(), 0.0);
     }
 
     #[test]
     fn test_graph_data_peak() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         data.push(10.0);
         data.push(99.0);
         data.push(30.0);
@@ -917,7 +843,7 @@ mod tests {
 
     #[test]
     fn test_graph_data_peak_after_wrap() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         // Fill buffer with 50, then overwrite with lower values.
         for _ in 0..GRAPH_BUFFER_SIZE {
             data.push(50.0);
@@ -932,21 +858,21 @@ mod tests {
 
     #[test]
     fn test_graph_data_valid_samples_chronological() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         data.push(1.0);
         data.push(2.0);
         data.push(3.0);
-        let samples = data.valid_samples();
+        let samples = data.to_vec();
         assert_eq!(samples, vec![1.0, 2.0, 3.0]);
     }
 
     #[test]
     fn test_graph_data_valid_samples_after_wrap() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         for i in 0..(GRAPH_BUFFER_SIZE + 5) {
             data.push(i as f32);
         }
-        let samples = data.valid_samples();
+        let samples = data.to_vec();
         assert_eq!(samples.len(), GRAPH_BUFFER_SIZE);
         // Oldest should be 5, newest should be GRAPH_BUFFER_SIZE + 4.
         assert_eq!(samples[0], 5.0);
@@ -956,10 +882,42 @@ mod tests {
         );
     }
 
+    /// How the buffer behaves is `guitk::history`'s business and is tested
+    /// there. The one thing this module still decides is how long it is, and
+    /// every graph in the monitor has to agree on that or they would scroll at
+    /// different rates across the same window of time.
     #[test]
-    fn test_graph_data_default() {
-        let data = GraphData::default();
-        assert!(data.is_empty());
+    fn every_graph_in_the_monitor_keeps_the_same_length_of_history() {
+        let monitor = ResourceMonitor::new(400.0, 300.0);
+        for resource in ResourceType::ALL {
+            let data = monitor.graph_data(resource);
+            assert!(data.is_empty(), "{resource:?}");
+            assert_eq!(data.capacity(), GRAPH_BUFFER_SIZE, "{resource:?}");
+        }
+    }
+
+    /// `ALL` is a hand-written list, so something has to notice a variant that
+    /// is added to the enum and not to it. The exhaustive match below does:
+    /// adding a variant stops this compiling until the position is filled in.
+    #[test]
+    fn every_resource_type_appears_in_all_exactly_once() {
+        fn position(resource: ResourceType) -> usize {
+            match resource {
+                ResourceType::Cpu => 0,
+                ResourceType::Memory => 1,
+                ResourceType::Disk => 2,
+                ResourceType::Network => 3,
+                ResourceType::Gpu => 4,
+                ResourceType::Temperature => 5,
+            }
+        }
+
+        let mut seen = [false; ResourceType::ALL.len()];
+        for (index, resource) in ResourceType::ALL.iter().enumerate() {
+            assert_eq!(position(*resource), index, "{resource:?} is out of order");
+            seen[index] = true;
+        }
+        assert!(seen.iter().all(|s| *s), "every variant must be listed");
     }
 
     // ======================================================================
@@ -978,14 +936,7 @@ mod tests {
 
     #[test]
     fn test_resource_type_colors_distinct() {
-        let types = [
-            ResourceType::Cpu,
-            ResourceType::Memory,
-            ResourceType::Disk,
-            ResourceType::Network,
-            ResourceType::Gpu,
-            ResourceType::Temperature,
-        ];
+        let types = ResourceType::ALL;
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(
@@ -1305,7 +1256,7 @@ mod tests {
 
     #[test]
     fn test_render_bar_graph_produces_rects() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         data.push(25.0);
         data.push(50.0);
         data.push(75.0);
@@ -1322,7 +1273,7 @@ mod tests {
 
     #[test]
     fn test_render_bar_graph_empty_data() {
-        let data = GraphData::new();
+        let data = GraphData::new(GRAPH_BUFFER_SIZE);
         let mut cmds = Vec::new();
         ResourceMonitor::render_bar_graph(&mut cmds, &data, 0.0, 0.0, 100.0, 50.0, theme::CPU);
         assert!(cmds.is_empty(), "Empty data should produce no bar commands");
@@ -1334,7 +1285,7 @@ mod tests {
 
     #[test]
     fn test_sparkline_single_sample_no_lines() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         data.push(50.0);
 
         let mut cmds = Vec::new();
@@ -1345,7 +1296,7 @@ mod tests {
 
     #[test]
     fn test_sparkline_two_samples_one_line() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         data.push(25.0);
         data.push(75.0);
 
@@ -1357,7 +1308,7 @@ mod tests {
 
     #[test]
     fn test_sparkline_values_clamped() {
-        let mut data = GraphData::new();
+        let mut data = GraphData::new(GRAPH_BUFFER_SIZE);
         data.push(-10.0);
         data.push(150.0);
 

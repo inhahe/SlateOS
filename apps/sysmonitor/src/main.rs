@@ -36,6 +36,7 @@
 
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::history::SampleHistory;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -114,85 +115,18 @@ const ALERT_MAX_ROWS: usize = 5;
 // Ring buffer for time-series data
 // ============================================================================
 
-/// Ring buffer holding the last `GRAPH_HISTORY_LEN` samples for a
-/// time-series value (CPU %, bandwidth, etc.).
-#[derive(Clone, Debug)]
-pub struct GraphHistory {
-    samples: Vec<f32>,
-    cursor: usize,
-    count: usize,
-}
-
-impl GraphHistory {
-    /// Create a new history buffer pre-filled with zeroes.
-    pub fn new() -> Self {
-        Self {
-            samples: vec![0.0; GRAPH_HISTORY_LEN],
-            cursor: 0,
-            count: 0,
-        }
-    }
-
-    /// Push a new sample, overwriting the oldest if full.
-    pub fn push(&mut self, value: f32) {
-        if let Some(slot) = self.samples.get_mut(self.cursor) {
-            *slot = value;
-        }
-        self.cursor = (self.cursor.wrapping_add(1)) % GRAPH_HISTORY_LEN;
-        if self.count < GRAPH_HISTORY_LEN {
-            self.count = self.count.saturating_add(1);
-        }
-    }
-
-    /// Iterate over samples from oldest to newest.
-    pub fn iter_oldest_first(&self) -> impl Iterator<Item = f32> + '_ {
-        let start = if self.count < GRAPH_HISTORY_LEN {
-            0
-        } else {
-            self.cursor
-        };
-        let len = self.count;
-        (0..len).map(move |i| {
-            let idx = (start.wrapping_add(i)) % GRAPH_HISTORY_LEN;
-            self.samples.get(idx).copied().unwrap_or(0.0)
-        })
-    }
-
-    /// Number of recorded samples (up to `GRAPH_HISTORY_LEN`).
-    pub fn len(&self) -> usize {
-        self.count
-    }
-
-    /// Whether the buffer is empty.
-    pub fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    /// Latest pushed sample.
-    pub fn last(&self) -> f32 {
-        if self.count == 0 {
-            return 0.0;
-        }
-        let idx = if self.cursor == 0 {
-            GRAPH_HISTORY_LEN.saturating_sub(1)
-        } else {
-            self.cursor.saturating_sub(1)
-        };
-        self.samples.get(idx).copied().unwrap_or(0.0)
-    }
-
-    /// Maximum value in the buffer.
-    pub fn max_value(&self) -> f32 {
-        self.iter_oldest_first()
-            .fold(0.0f32, |acc, v| if v > acc { v } else { acc })
-    }
-}
-
-impl Default for GraphHistory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// The sample history behind each of this program's time-series graphs.
+///
+/// This used to be a ring buffer written out here — a sample vector, a cursor
+/// wrapped with `% GRAPH_HISTORY_LEN`, and a count that stopped climbing once
+/// the vector was full. The resource monitor in the shell and the other of
+/// these two programs each had their own copy of the same thing, and the three
+/// had already drifted: one advanced its cursor with `+ 1` and another with
+/// `wrapping_add(1)`, and `max_value` folded from zero here while the shell's
+/// `peak` folded from negative infinity, so identical samples gave different
+/// answers. It lives in [`guitk::history`] now; the only thing left for this
+/// program to decide is how many samples wide its graphs are.
+pub type GraphHistory = SampleHistory;
 
 // ============================================================================
 // Tab definitions
@@ -666,8 +600,8 @@ impl SysMonitorState {
             window_height: 720,
             active_tab: Tab::Overview,
             system_info,
-            cpu_history: GraphHistory::new(),
-            mem_history: GraphHistory::new(),
+            cpu_history: GraphHistory::new(GRAPH_HISTORY_LEN),
+            mem_history: GraphHistory::new(GRAPH_HISTORY_LEN),
             cores: Vec::new(),
             disks: Vec::new(),
             interfaces: Vec::new(),
@@ -1724,10 +1658,8 @@ impl SysMonitorState {
                 self.active_alerts.len()
             };
             let rows = if overflowing { ALERT_MAX_ROWS } else { shown };
-            let alert_h = ALERT_ROW_HEIGHT.mul_add(
-                rows as f32,
-                ALERT_PANEL_HEADER + ALERT_PANEL_FOOTER,
-            );
+            let alert_h =
+                ALERT_ROW_HEIGHT.mul_add(rows as f32, ALERT_PANEL_HEADER + ALERT_PANEL_FOOTER);
             self.render_card(tree, CONTENT_PAD, cur_y, content_w, alert_h);
             render_bold_text(tree, CONTENT_PAD + 12.0, cur_y + 8.0, "Alerts", RED, 13.0);
             let mut alert_y = cur_y + ALERT_PANEL_HEADER;
@@ -2384,8 +2316,8 @@ impl SysMonitorState {
 
             let max_io = disk
                 .read_history
-                .max_value()
-                .max(disk.write_history.max_value())
+                .peak()
+                .max(disk.write_history.peak())
                 .max(1.0);
 
             self.render_mini_graph(
@@ -2507,8 +2439,8 @@ impl SysMonitorState {
 
             let max_traffic = iface
                 .rx_history
-                .max_value()
-                .max(iface.tx_history.max_value())
+                .peak()
+                .max(iface.tx_history.peak())
                 .max(1.0);
 
             self.render_mini_graph(
@@ -2795,28 +2727,28 @@ impl SysMonitorState {
                 usage_percent: 12.0,
                 frequency_mhz: 3600,
                 temperature_c: 52.0,
-                history: GraphHistory::new(),
+                history: GraphHistory::new(GRAPH_HISTORY_LEN),
             },
             CpuCoreInfo {
                 core_id: 1,
                 usage_percent: 45.0,
                 frequency_mhz: 3600,
                 temperature_c: 58.0,
-                history: GraphHistory::new(),
+                history: GraphHistory::new(GRAPH_HISTORY_LEN),
             },
             CpuCoreInfo {
                 core_id: 2,
                 usage_percent: 8.0,
                 frequency_mhz: 2400,
                 temperature_c: 48.0,
-                history: GraphHistory::new(),
+                history: GraphHistory::new(GRAPH_HISTORY_LEN),
             },
             CpuCoreInfo {
                 core_id: 3,
                 usage_percent: 67.0,
                 frequency_mhz: 3600,
                 temperature_c: 64.0,
-                history: GraphHistory::new(),
+                history: GraphHistory::new(GRAPH_HISTORY_LEN),
             },
         ];
 
@@ -2830,8 +2762,8 @@ impl SysMonitorState {
                 write_bytes_sec: 10_485_760,
                 read_iops: 1200,
                 write_iops: 350,
-                read_history: GraphHistory::new(),
-                write_history: GraphHistory::new(),
+                read_history: GraphHistory::new(GRAPH_HISTORY_LEN),
+                write_history: GraphHistory::new(GRAPH_HISTORY_LEN),
             },
             DiskInfo {
                 name: "sdb".to_string(),
@@ -2842,8 +2774,8 @@ impl SysMonitorState {
                 write_bytes_sec: 2_621_440,
                 read_iops: 200,
                 write_iops: 80,
-                read_history: GraphHistory::new(),
-                write_history: GraphHistory::new(),
+                read_history: GraphHistory::new(GRAPH_HISTORY_LEN),
+                write_history: GraphHistory::new(GRAPH_HISTORY_LEN),
             },
         ];
 
@@ -2855,8 +2787,8 @@ impl SysMonitorState {
                 tx_packets_sec: 450,
                 rx_packets_sec: 3200,
                 connection_count: 42,
-                tx_history: GraphHistory::new(),
-                rx_history: GraphHistory::new(),
+                tx_history: GraphHistory::new(GRAPH_HISTORY_LEN),
+                rx_history: GraphHistory::new(GRAPH_HISTORY_LEN),
             },
             NetworkInterface {
                 name: "lo".to_string(),
@@ -2865,8 +2797,8 @@ impl SysMonitorState {
                 tx_packets_sec: 120,
                 rx_packets_sec: 120,
                 connection_count: 8,
-                tx_history: GraphHistory::new(),
-                rx_history: GraphHistory::new(),
+                tx_history: GraphHistory::new(GRAPH_HISTORY_LEN),
+                rx_history: GraphHistory::new(GRAPH_HISTORY_LEN),
             },
         ];
 
@@ -3357,9 +3289,7 @@ mod tests {
         let text_i = tree
             .commands
             .iter()
-            .position(
-                |c| matches!(c, RenderCommand::Text { text, .. } if *text == app.filter_text),
-            )
+            .position(|c| matches!(c, RenderCommand::Text { text, .. } if *text == app.filter_text))
             .expect("filter text not drawn");
         let text_origin = match tree.commands.get(text_i) {
             Some(RenderCommand::Text { x, .. }) => *x,
@@ -3388,14 +3318,14 @@ mod tests {
 
     #[test]
     fn test_graph_history_new_is_empty() {
-        let h = GraphHistory::new();
+        let h = GraphHistory::new(GRAPH_HISTORY_LEN);
         assert!(h.is_empty());
         assert_eq!(h.len(), 0);
     }
 
     #[test]
     fn test_graph_history_push_and_len() {
-        let mut h = GraphHistory::new();
+        let mut h = GraphHistory::new(GRAPH_HISTORY_LEN);
         h.push(1.0);
         h.push(2.0);
         assert_eq!(h.len(), 2);
@@ -3404,28 +3334,28 @@ mod tests {
 
     #[test]
     fn test_graph_history_last() {
-        let mut h = GraphHistory::new();
-        assert!((h.last() - 0.0).abs() < f32::EPSILON);
+        let mut h = GraphHistory::new(GRAPH_HISTORY_LEN);
+        assert!((h.latest() - 0.0).abs() < f32::EPSILON);
         h.push(42.0);
-        assert!((h.last() - 42.0).abs() < f32::EPSILON);
+        assert!((h.latest() - 42.0).abs() < f32::EPSILON);
         h.push(99.0);
-        assert!((h.last() - 99.0).abs() < f32::EPSILON);
+        assert!((h.latest() - 99.0).abs() < f32::EPSILON);
     }
 
     #[test]
     fn test_graph_history_wraps_around() {
-        let mut h = GraphHistory::new();
+        let mut h = GraphHistory::new(GRAPH_HISTORY_LEN);
         for i in 0..GRAPH_HISTORY_LEN + 10 {
             h.push(i as f32);
         }
         assert_eq!(h.len(), GRAPH_HISTORY_LEN);
-        let last = h.last();
+        let last = h.latest();
         assert!((last - (GRAPH_HISTORY_LEN as f32 + 9.0)).abs() < f32::EPSILON);
     }
 
     #[test]
     fn test_graph_history_iter_oldest_first() {
-        let mut h = GraphHistory::new();
+        let mut h = GraphHistory::new(GRAPH_HISTORY_LEN);
         h.push(1.0);
         h.push(2.0);
         h.push(3.0);
@@ -3435,22 +3365,22 @@ mod tests {
 
     #[test]
     fn test_graph_history_max_value() {
-        let mut h = GraphHistory::new();
+        let mut h = GraphHistory::new(GRAPH_HISTORY_LEN);
         h.push(10.0);
         h.push(50.0);
         h.push(30.0);
-        assert!((h.max_value() - 50.0).abs() < f32::EPSILON);
+        assert!((h.peak() - 50.0).abs() < f32::EPSILON);
     }
 
     #[test]
     fn test_graph_history_max_value_empty() {
-        let h = GraphHistory::new();
-        assert!((h.max_value() - 0.0).abs() < f32::EPSILON);
+        let h = GraphHistory::new(GRAPH_HISTORY_LEN);
+        assert!((h.peak() - 0.0).abs() < f32::EPSILON);
     }
 
     #[test]
     fn test_graph_history_default() {
-        let h = GraphHistory::default();
+        let h = GraphHistory::new(GRAPH_HISTORY_LEN);
         assert!(h.is_empty());
     }
 
@@ -3604,8 +3534,8 @@ mod tests {
             write_bytes_sec: 0,
             read_iops: 0,
             write_iops: 0,
-            read_history: GraphHistory::new(),
-            write_history: GraphHistory::new(),
+            read_history: GraphHistory::new(GRAPH_HISTORY_LEN),
+            write_history: GraphHistory::new(GRAPH_HISTORY_LEN),
         };
         assert!((disk.usage_fraction() - 0.7).abs() < f32::EPSILON);
     }
@@ -3621,8 +3551,8 @@ mod tests {
             write_bytes_sec: 0,
             read_iops: 0,
             write_iops: 0,
-            read_history: GraphHistory::new(),
-            write_history: GraphHistory::new(),
+            read_history: GraphHistory::new(GRAPH_HISTORY_LEN),
+            write_history: GraphHistory::new(GRAPH_HISTORY_LEN),
         };
         assert!((disk.usage_fraction() - 0.0).abs() < f32::EPSILON);
     }
@@ -3741,7 +3671,9 @@ mod tests {
             .filter_map(|&i| s.processes.get(i).map(|p| p.cpu_percent))
             .collect();
         for window in cpus.windows(2) {
-            assert!(window.first().copied().unwrap_or(0.0) >= window.get(1).copied().unwrap_or(0.0));
+            assert!(
+                window.first().copied().unwrap_or(0.0) >= window.get(1).copied().unwrap_or(0.0)
+            );
         }
     }
 
@@ -3966,9 +3898,7 @@ mod tests {
                 .commands
                 .iter()
                 .find_map(|c| match c {
-                    RenderCommand::Text { y, text, .. }
-                        if text.starts_with("Synthetic alert ") =>
-                    {
+                    RenderCommand::Text { y, text, .. } if text.starts_with("Synthetic alert ") => {
                         Some(*y)
                     }
                     _ => None,

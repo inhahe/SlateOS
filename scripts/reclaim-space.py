@@ -30,7 +30,14 @@ Order of attack (cheapest and most clearly disposable first):
 
   1. this worktree's `build/` scratch older than --scratch-age-days,
   2. the integration checkout's `target/` (nobody develops there),
-  3. every other worktree's `target/`  -- only with --allow-lane-targets.
+  3. *our own* `target/`  -- we pay for our own rebuild before anyone else's,
+  4. every other worktree's `target/`  -- only with --allow-lane-targets.
+
+Step 3 comes before step 4 deliberately.  Every `target/` costs its owner the
+same rebuild, so there is no lane whose tree is free to take; the only honest
+tie-break is that the lane running the script is the one that chose to free
+space and should therefore be the one to pay for it.  A run left at its
+defaults can only ever cost this lane and the integration tree.
 
 Nothing outside a worktree root is ever touched, and nothing that git does not
 consider ignored is ever touched: both are asserted, not assumed.
@@ -250,8 +257,9 @@ def main(argv=None):
     ap.add_argument(
         "--allow-lane-targets",
         action="store_true",
-        help="also consider other lanes' target/ dirs, not just the integration "
-        "checkout's (they are still skipped if anything holds them open)",
+        help="also consider *other* lanes' target/ dirs. Without it a run can "
+        "only cost the integration checkout and this worktree (they are still "
+        "skipped if anything holds them open)",
     )
     args = ap.parse_args(argv)
 
@@ -289,12 +297,13 @@ def main(argv=None):
 
     # The integration checkout is the safest target/ to prune: no lane develops
     # there, it only merges, and a merge rebuild costs time and nothing else.
-    # Ours goes last -- pruning it means we rebuild too, which is a cost we can
-    # choose to pay but should not pay before someone else's free lunch.
-    order = [main_tree]
+    # Ours is next, and specifically *before* any other lane's: another lane's
+    # target/ is not a free lunch, it is that lane's rebuild, exactly as ours is
+    # ours.  Spending our own first is the only ordering that cannot be read as
+    # helping ourselves at a neighbour's expense.
+    order = [main_tree, root]
     if args.allow_lane_targets:
         order += [p for p, _b in trees[1:]]
-        order.append(root)
     seen, unique = set(), []
     for tree in order:
         key = os.path.normcase(os.path.normpath(tree))

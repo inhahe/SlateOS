@@ -1310,7 +1310,8 @@ fn parse_element(c: &mut XmlCursor) -> Result<XmlElement, SvgError> {
         if matches!(c.peek(), None | Some(b'/' | b'>')) {
             break;
         }
-        let name = c.take_while(|b| b != b'=' && !b.is_ascii_whitespace() && b != b'>' && b != b'/');
+        let name =
+            c.take_while(|b| b != b'=' && !b.is_ascii_whitespace() && b != b'>' && b != b'/');
         c.skip_whitespace();
         if c.eat(b'=') {
             c.skip_whitespace();
@@ -2848,7 +2849,10 @@ mod tests {
 
     #[test]
     fn a_viewbox_is_four_numbers_and_nothing_else() {
-        assert_eq!(parse_viewbox("0 0 100 50").unwrap(), (0.0, 0.0, 100.0, 50.0));
+        assert_eq!(
+            parse_viewbox("0 0 100 50").unwrap(),
+            (0.0, 0.0, 100.0, 50.0)
+        );
         assert_eq!(
             parse_viewbox("-1,-2, 3 ,4").unwrap(),
             (-1.0, -2.0, 3.0, 4.0)
@@ -2892,7 +2896,11 @@ mod tests {
         // 2^MAX_SUBDIVISIONS chords is the worst case; anything more means the
         // budget stopped bounding the recursion.
         assert!(out.len() <= 1usize << MAX_SUBDIVISIONS);
-        assert_eq!(out.last().copied(), Some((0.0, 0.0)), "ends at the endpoint");
+        assert_eq!(
+            out.last().copied(),
+            Some((0.0, 0.0)),
+            "ends at the endpoint"
+        );
     }
 
     #[test]

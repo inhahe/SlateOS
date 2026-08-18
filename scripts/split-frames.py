@@ -4,6 +4,8 @@
     python scripts/split-frames.py --file kernel/src/eventlog.rs --fn self_test
     python scripts/split-frames.py --file ... --fn ... --dry-run
     python scripts/split-frames.py --file ... --fn ... --param u32_ptr:u64
+    python scripts/split-frames.py --file kernel/src/kshell.rs --fn cmd_oci \
+        --arms --param 'parts=&parts:&[&str]'
     python scripts/split-frames.py --check      # self-test the transformer
 
 Why this exists
@@ -62,10 +64,19 @@ with `--param NAME:TYPE`, which threads it through as an argument to the cases
 that mention it.  Pass cheap handles only: a fixture passed by value is copied
 into the case frame, which is the cost this tool exists to remove.
 
-Functions whose cases are `match` arms (`kshell::cmd_oci`) remain out of scope.
-So do functions with **flat** bodies -- `eventlog::self_test` and
+`--arms` handles the other shape this kernel produces: a kshell dispatcher,
+whose cases are the arms of one `match cmd { "inspect" => { ... }, ... }`.  The
+arm's own braces are kept -- they carry the `pat =>` and the trailing `,` -- and
+only its body moves into the `fn`.  Its safety argument is not the same one:
+arms reject bad arguments with a bare `return;`, which means *leave the
+command*, and inside a nested `fn` it would mean *leave this case*.  Those
+coincide exactly when there is nothing after the match to fall back into, so
+`--arms` requires a unit return type and a match in tail position, and asserts
+both rather than trusting them.
+
+Functions with **flat** bodies stay out of scope: `eventlog::self_test` and
 `self_test_sysv_ipc_mqueue` are long runs of `let a = ..; if dispatch(..) {..}`
-with no block structure -- because splitting those means inventing the case
+with no block structure, and splitting those means inventing the case
 boundaries, which is a decision about what the test's units are.
 
 Then measure with `stack-frames.py --peak`, not the ranking

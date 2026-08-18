@@ -339,7 +339,7 @@ impl MenuBar {
             // Try submenu chain first (take it out to avoid borrow conflict).
             if let Some(mut sub) = self.open_submenu.take() {
                 let result =
-                    click_in_submenu_chain(&self.items[top_idx].children, &mut sub, mx, my);
+                    click_in_submenu_chain(children_of(&self.items, top_idx), &mut sub, mx, my);
                 match result {
                     SubmenuClickResult::Activated(act) => {
                         self.apply_activation(act);
@@ -377,7 +377,7 @@ impl MenuBar {
             // Try the primary dropdown.
             let dd = self.dropdown_rect(top_idx);
             if mx >= dd.0 && mx < dd.0 + dd.2 && my >= dd.1 && my < dd.1 + dd.3 {
-                let children = &self.items[top_idx].children;
+                let children = children_of(&self.items, top_idx);
                 if let Some(item_idx) = item_index_at_y(children, my - dd.1 - DROPDOWN_VPAD) {
                     self.activate_entry(top_idx, item_idx);
                 }
@@ -413,7 +413,7 @@ impl MenuBar {
             // Check submenu chain first (take to avoid borrow conflict).
             if let Some(mut sub) = self.open_submenu.take() {
                 let in_sub =
-                    hover_in_submenu_chain(&self.items[top_idx].children, &mut sub, mx, my);
+                    hover_in_submenu_chain(children_of(&self.items, top_idx), &mut sub, mx, my);
                 self.open_submenu = Some(sub);
                 if in_sub {
                     self.dropdown_hover = None;
@@ -424,41 +424,21 @@ impl MenuBar {
             let dd = self.dropdown_rect(top_idx);
             if mx >= dd.0 && mx < dd.0 + dd.2 && my >= dd.1 && my < dd.1 + dd.3 {
                 let new_hover =
-                    item_index_at_y(&self.items[top_idx].children, my - dd.1 - DROPDOWN_VPAD);
+                    item_index_at_y(children_of(&self.items, top_idx), my - dd.1 - DROPDOWN_VPAD);
                 self.dropdown_hover = new_hover;
 
-                // Open / close submenu on hover.
-                if let Some(hi) = new_hover {
-                    let is_submenu = matches!(
-                        self.items[top_idx].children.get(hi),
-                        Some(MenuBarEntry::SubMenu { .. })
-                    );
-                    let already_open = self
+                // Open / close submenu on hover. Re-hovering the row whose
+                // submenu is already showing must leave it alone; for every
+                // other row `submenu_at` answers both questions at once, since
+                // it is `None` for an entry that is not a submenu — which is
+                // exactly when an open submenu should close.
+                if let Some(hi) = new_hover
+                    && self
                         .open_submenu
                         .as_ref()
-                        .is_some_and(|s| s.parent_index == hi);
-
-                    if is_submenu && !already_open {
-                        if let Some(MenuBarEntry::SubMenu { children: sc, .. }) =
-                            self.items[top_idx].children.get(hi)
-                        {
-                            let sub_x = dd.0 + dd.2;
-                            let sub_y = dd.1
-                                + DROPDOWN_VPAD
-                                + y_offset_for_index(&self.items[top_idx].children, hi);
-                            let sub_w = calculate_dropdown_width(sc);
-                            self.open_submenu = Some(Box::new(OpenSubmenu {
-                                parent_index: hi,
-                                x: sub_x,
-                                y: sub_y,
-                                width: sub_w,
-                                hover_index: None,
-                                child: None,
-                            }));
-                        }
-                    } else if !is_submenu {
-                        self.open_submenu = None;
-                    }
+                        .is_none_or(|s| s.parent_index != hi)
+                {
+                    self.open_submenu = self.submenu_at(top_idx, hi).map(Box::new);
                 }
                 return EventResult::Consumed;
             }
@@ -512,12 +492,7 @@ impl MenuBar {
                 if self.open_submenu.is_some() {
                     self.open_submenu = None;
                 } else {
-                    let new = if top_idx == 0 {
-                        self.items.len().saturating_sub(1)
-                    } else {
-                        top_idx - 1
-                    };
-                    self.open_menu(new);
+                    self.open_menu(index_before(self.items.len(), top_idx));
                 }
                 EventResult::Consumed
             }
@@ -526,40 +501,22 @@ impl MenuBar {
                 // If hover is on a submenu entry in the primary dropdown, open it.
                 if self.open_submenu.is_none()
                     && let Some(hi) = self.dropdown_hover
-                    && let Some(MenuBarEntry::SubMenu { children, .. }) =
-                        self.items[top_idx].children.get(hi)
+                    && let Some(sub) = self.submenu_at(top_idx, hi)
                 {
-                    let dd = self.dropdown_rect(top_idx);
-                    let sub_x = dd.0 + dd.2;
-                    let sub_y = dd.1
-                        + DROPDOWN_VPAD
-                        + y_offset_for_index(&self.items[top_idx].children, hi);
-                    let sub_w = calculate_dropdown_width(children);
-                    self.open_submenu = Some(Box::new(OpenSubmenu {
-                        parent_index: hi,
-                        x: sub_x,
-                        y: sub_y,
-                        width: sub_w,
-                        hover_index: None,
-                        child: None,
-                    }));
+                    self.open_submenu = Some(Box::new(sub));
                     return EventResult::Consumed;
                 }
 
                 // Otherwise move to the next top-level menu.
-                let new = if top_idx + 1 >= self.items.len() {
-                    0
-                } else {
-                    top_idx + 1
-                };
-                self.open_menu(new);
+                self.open_menu(index_after(self.items.len(), top_idx));
                 EventResult::Consumed
             }
 
             Key::Up => {
                 if let Some(ref mut sub) = self.open_submenu {
                     let deepest = deepest_submenu_mut(sub);
-                    let entries = resolve_submenu_entries(&self.items[top_idx].children, deepest);
+                    let entries =
+                        resolve_submenu_entries(children_of(&self.items, top_idx), deepest);
                     deepest.hover_index = next_selectable(&entries, deepest.hover_index, -1);
                 } else {
                     self.move_dropdown_hover(-1, top_idx);
@@ -570,7 +527,8 @@ impl MenuBar {
             Key::Down => {
                 if let Some(ref mut sub) = self.open_submenu {
                     let deepest = deepest_submenu_mut(sub);
-                    let entries = resolve_submenu_entries(&self.items[top_idx].children, deepest);
+                    let entries =
+                        resolve_submenu_entries(children_of(&self.items, top_idx), deepest);
                     deepest.hover_index = next_selectable(&entries, deepest.hover_index, 1);
                 } else {
                     self.move_dropdown_hover(1, top_idx);
@@ -583,7 +541,7 @@ impl MenuBar {
                     let deepest = find_deepest(sub);
                     if let Some(hi) = deepest.hover_index {
                         let entries =
-                            resolve_submenu_entries(&self.items[top_idx].children, deepest);
+                            resolve_submenu_entries(children_of(&self.items, top_idx), deepest);
                         if let Some(act) = try_activate_entry(&entries, hi) {
                             self.apply_activation(act);
                         }
@@ -600,10 +558,10 @@ impl MenuBar {
                     if let Some(ref mut sub) = self.open_submenu {
                         let deepest = deepest_submenu_mut(sub);
                         let entries =
-                            resolve_submenu_entries(&self.items[top_idx].children, deepest);
+                            resolve_submenu_entries(children_of(&self.items, top_idx), deepest);
                         deepest.hover_index = jump_to_letter(&entries, ch);
                     } else {
-                        let children = &self.items[top_idx].children;
+                        let children = children_of(&self.items, top_idx);
                         self.dropdown_hover = jump_to_letter(children, ch);
                     }
                     return EventResult::Consumed;
@@ -712,7 +670,7 @@ impl MenuBar {
 
     fn render_dropdown(&self, cmds: &mut Vec<RenderCommand>, top_idx: usize) {
         let (dd_x, dd_y, dd_w, dd_h) = self.dropdown_rect(top_idx);
-        let children = &self.items[top_idx].children;
+        let children = children_of(&self.items, top_idx);
 
         render_panel(cmds, dd_x, dd_y, dd_w, dd_h);
         render_entries(cmds, children, dd_x, dd_y, dd_w, self.dropdown_hover);
@@ -729,7 +687,7 @@ impl MenuBar {
         sub: &OpenSubmenu,
         top_idx: usize,
     ) {
-        let entries = resolve_submenu_entries(&self.items[top_idx].children, sub);
+        let entries = resolve_submenu_entries(children_of(&self.items, top_idx), sub);
         let height = dropdown_content_height(&entries) + DROPDOWN_VPAD * 2.0;
 
         render_panel(cmds, sub.x, sub.y, sub.width, height);
@@ -768,7 +726,7 @@ impl MenuBar {
     fn dropdown_rect(&self, idx: usize) -> (f32, f32, f32, f32) {
         let x = self.label_metrics.get(idx).map_or(0.0, |m| m.0);
         let y = BAR_HEIGHT;
-        let children = &self.items[idx].children;
+        let children = children_of(&self.items, idx);
         let w = calculate_dropdown_width(children);
         let h = dropdown_content_height(children) + DROPDOWN_VPAD * 2.0;
         (x, y, w, h)
@@ -784,26 +742,45 @@ impl MenuBar {
 
     /// Activate an entry in the primary dropdown.
     fn activate_entry(&mut self, top_idx: usize, item_idx: usize) {
-        let children = &self.items[top_idx].children;
-        if let Some(act) = try_activate_entry(children, item_idx) {
+        if let Some(act) = try_activate_entry(children_of(&self.items, top_idx), item_idx) {
             self.apply_activation(act);
             return;
         }
-        // If it's a submenu, open it.
-        if let Some(MenuBarEntry::SubMenu { children: sc, .. }) = children.get(item_idx) {
-            let dd = self.dropdown_rect(top_idx);
-            let sub_x = dd.0 + dd.2;
-            let sub_y = dd.1 + DROPDOWN_VPAD + y_offset_for_index(children, item_idx);
-            let sub_w = calculate_dropdown_width(sc);
-            self.open_submenu = Some(Box::new(OpenSubmenu {
-                parent_index: item_idx,
-                x: sub_x,
-                y: sub_y,
-                width: sub_w,
-                hover_index: None,
-                child: None,
-            }));
+        // Not activatable: if it is a submenu, open it instead.
+        if let Some(sub) = self.submenu_at(top_idx, item_idx) {
+            self.open_submenu = Some(Box::new(sub));
         }
+    }
+
+    /// The submenu that entry `item_idx` of top-level menu `top_idx` would
+    /// open, or `None` if that entry is not a submenu.
+    ///
+    /// This placement — panel to the right of the dropdown, top aligned with
+    /// the parent row — was written out three times: once for a click, once for
+    /// Right-arrow, once for hover. Three copies of a geometry calculation are
+    /// three chances for it to drift, and the copies were what forced each site
+    /// to reach back into `self.items` for the entry list a second time.
+    ///
+    /// Being the sole constructor of a primary-level [`OpenSubmenu`] also makes
+    /// `parent_index` mean something it only happened to mean before: it always
+    /// names an entry that *is* a submenu.
+    fn submenu_at(&self, top_idx: usize, item_idx: usize) -> Option<OpenSubmenu> {
+        let children = children_of(&self.items, top_idx);
+        let MenuBarEntry::SubMenu {
+            children: nested, ..
+        } = children.get(item_idx)?
+        else {
+            return None;
+        };
+        let (dd_x, dd_y, dd_w, _) = self.dropdown_rect(top_idx);
+        Some(OpenSubmenu {
+            parent_index: item_idx,
+            x: dd_x + dd_w,
+            y: dd_y + DROPDOWN_VPAD + y_offset_for_index(children, item_idx),
+            width: calculate_dropdown_width(nested),
+            hover_index: None,
+            child: None,
+        })
     }
 
     fn apply_activation(&mut self, act: ActivatedEntry) {
@@ -820,12 +797,30 @@ impl MenuBar {
     }
 
     fn move_dropdown_hover(&mut self, dir: i32, top_idx: usize) {
-        let children = &self.items[top_idx].children;
+        let children = children_of(&self.items, top_idx);
         self.dropdown_hover = next_selectable(children, self.dropdown_hover, dir);
     }
 }
 
 // ─── Free-standing helpers (no &self borrows) ──────────────────────────────
+
+/// The dropdown entries of top-level menu `idx`.
+///
+/// Every caller wants the entries; not one wants the [`MenuBarItem`] that holds
+/// them. Handing a caller an index to re-index with is what made this file
+/// write `self.items[top_idx]` nineteen separate times, each against a bound
+/// proved in some earlier statement — `dropdown_rect` held both beliefs at
+/// once, reading `label_metrics` through `.get()` and `items` through `[]` two
+/// lines apart. An index with no menu behind it now reads as a menu with no
+/// entries, which renders nothing and activates nothing.
+///
+/// It takes the item slice rather than `&self` so that it borrows exactly what
+/// the indexing it replaces borrowed: four callers hold a `&mut` into
+/// `open_submenu` across the call, and only a disjoint field borrow is allowed
+/// to coexist with that.
+fn children_of(items: &[MenuBarItem], idx: usize) -> &[MenuBarEntry] {
+    items.get(idx).map_or(&[], |item| &item.children)
+}
 
 /// Try to activate an entry. Returns `None` for separators, disabled items,
 /// and submenus (submenus need to be opened, not "activated").
@@ -1093,49 +1088,81 @@ fn y_offset_for_index(entries: &[MenuBarEntry], target: usize) -> f32 {
     offset
 }
 
+/// Whether an entry can take the hover highlight.
+///
+/// Matched exhaustively rather than with a `_` arm: a new [`MenuBarEntry`]
+/// variant should be a compile error here, not a row the keyboard silently
+/// refuses to land on.
+fn is_selectable(entry: &MenuBarEntry) -> bool {
+    match entry {
+        MenuBarEntry::Action { enabled, .. } => *enabled,
+        MenuBarEntry::Check { .. } | MenuBarEntry::SubMenu { .. } => true,
+        MenuBarEntry::Separator => false,
+    }
+}
+
+/// The index one place before `from` in a list of `len`, wrapping round to the
+/// last. `from` is assumed to be in range.
+fn index_before(len: usize, from: usize) -> usize {
+    from.checked_sub(1).unwrap_or_else(|| len.saturating_sub(1))
+}
+
+/// The index one place after `from` in a list of `len`, wrapping round to the
+/// first. `from` is assumed to be in range.
+fn index_after(len: usize, from: usize) -> usize {
+    match from.checked_add(1) {
+        Some(next) if next < len => next,
+        _ => 0,
+    }
+}
+
+/// The `len` indices of a list, visited once each in cyclic order from `start`,
+/// going forwards or backwards.
+///
+/// The wrap is modular arithmetic on `usize`, so an index cannot leave the
+/// range in the first place. What this replaced stepped a signed cursor off the
+/// end and pushed it back with an `if` at the top of the *next* iteration —
+/// meaning the cursor was out of range by design, and the proof that it was
+/// back in range by the time it was used lived in a different statement from
+/// the use.
+///
+/// `step` is always below `len`, so the `saturating_sub` is exact; `checked_rem`
+/// is what carries the "`len` is not zero" condition into the expression that
+/// depends on it, rather than leaving it behind in a guard further up.
+fn cyclic_from(len: usize, start: usize, forward: bool) -> impl Iterator<Item = usize> {
+    let start = start.checked_rem(len).unwrap_or(0);
+    (0..len).filter_map(move |step| {
+        let delta = if forward {
+            step
+        } else {
+            len.saturating_sub(step)
+        };
+        start.saturating_add(delta).checked_rem(len)
+    })
+}
+
 /// Move hover in `direction` (+1 or -1), skipping separators and disabled items.
 fn next_selectable(
     entries: &[MenuBarEntry],
     current: Option<usize>,
     direction: i32,
 ) -> Option<usize> {
-    let count = entries.len();
-    if count == 0 {
+    let len = entries.len();
+    if len == 0 {
         return None;
     }
+    let forward = direction >= 0;
 
+    // Where the walk begins: one place beyond the current hover in the
+    // direction of travel, or the near end of the list when nothing is hovered.
     let start = match current {
-        Some(idx) => idx as i32 + direction,
-        None => {
-            if direction > 0 {
-                0
-            } else {
-                count as i32 - 1
-            }
-        }
+        Some(idx) if forward => index_after(len, idx),
+        Some(idx) => index_before(len, idx),
+        None if forward => 0,
+        None => len.saturating_sub(1),
     };
 
-    let mut pos = start;
-    for _ in 0..count {
-        if pos < 0 {
-            pos = count as i32 - 1;
-        } else if pos >= count as i32 {
-            pos = 0;
-        }
-
-        let idx = pos as usize;
-        let selectable = match entries.get(idx) {
-            Some(MenuBarEntry::Action { enabled, .. }) => *enabled,
-            Some(MenuBarEntry::Check { .. }) | Some(MenuBarEntry::SubMenu { .. }) => true,
-            _ => false,
-        };
-
-        if selectable {
-            return Some(idx);
-        }
-        pos += direction;
-    }
-    None
+    cyclic_from(len, start, forward).find(|idx| entries.get(*idx).is_some_and(is_selectable))
 }
 
 /// Jump to the first entry whose label starts with `ch`.
@@ -1834,5 +1861,117 @@ mod tests {
         let item_y = dd.1 + DROPDOWN_VPAD + ITEM_HEIGHT + ITEM_HEIGHT / 2.0;
         bar.handle_mouse_event(&mouse_move(dd.0 + 40.0, item_y));
         assert_eq!(bar.dropdown_hover, Some(1)); // "Open"
+    }
+
+    // ── Invariants the shared helpers are there to hold ─────────────────
+
+    /// A submenu must land in the same place however it was opened. The
+    /// placement used to be written out once per input path, and nothing
+    /// checked that the three copies agreed.
+    #[test]
+    fn a_submenu_opens_in_the_same_place_by_click_arrow_and_hover() {
+        // "&View" is top-level index 2 and its entry 0 is the "Zoom" submenu.
+        let geometry = |bar: &MenuBar| {
+            let sub = bar.open_submenu.as_ref().expect("a submenu is open");
+            (sub.parent_index, sub.x, sub.y, sub.width)
+        };
+        let dd = make_bar().dropdown_rect(2);
+        let (row_x, row_y) = (dd.0 + 5.0, dd.1 + DROPDOWN_VPAD + ITEM_HEIGHT / 2.0);
+
+        let by_click = {
+            let mut bar = make_bar();
+            bar.open_menu(2);
+            bar.handle_mouse_event(&click(row_x, row_y));
+            geometry(&bar)
+        };
+        let by_arrow = {
+            let mut bar = make_bar();
+            bar.open_menu(2);
+            bar.handle_key_event(&press(Key::Down)); // hover lands on entry 0
+            bar.handle_key_event(&press(Key::Right));
+            geometry(&bar)
+        };
+        let by_hover = {
+            let mut bar = make_bar();
+            bar.open_menu(2);
+            bar.handle_mouse_event(&mouse_move(row_x, row_y));
+            geometry(&bar)
+        };
+
+        assert_eq!(by_click.0, 0, "the submenu hangs off entry 0");
+        assert_eq!(by_click, by_arrow, "click and Right-arrow must agree");
+        assert_eq!(by_click, by_hover, "click and hover must agree");
+    }
+
+    /// `set_items` closes the bar, so `open_index` should never name a menu
+    /// that is not there. If it ever did, the bar must come out empty rather
+    /// than panicking — nineteen sites used to index straight into `items`.
+    #[test]
+    fn a_top_level_index_with_no_menu_behind_it_is_inert() {
+        let mut bar = make_bar();
+        bar.open_index = Some(99);
+        bar.dropdown_hover = Some(3);
+
+        let _ = bar.render(800);
+        bar.activate_entry(99, 3);
+
+        assert!(children_of(&bar.items, 99).is_empty());
+        assert!(bar.drain_events().is_empty(), "no entry can be activated");
+        assert!(bar.open_submenu.is_none(), "no submenu can be opened");
+    }
+
+    /// The walk behind Up/Down must reach every row once and stop, whichever
+    /// row it starts from and whichever way it goes.
+    #[test]
+    fn the_cyclic_walk_covers_every_index_exactly_once() {
+        for len in 1..8_usize {
+            for start in 0..len {
+                for forward in [true, false] {
+                    let visited: Vec<usize> = cyclic_from(len, start, forward).collect();
+                    let mut distinct = visited.clone();
+                    distinct.sort_unstable();
+                    distinct.dedup();
+                    assert_eq!(visited.len(), len, "len={len} start={start}");
+                    assert_eq!(visited[0], start, "the walk begins where it was told");
+                    assert_eq!(distinct.len(), len, "len={len} start={start} fwd={forward}");
+                }
+            }
+        }
+        assert_eq!(
+            cyclic_from(0, 0, true).count(),
+            0,
+            "no indices in an empty list"
+        );
+    }
+
+    /// A dropdown with no row the keyboard can land on must say so, not circle.
+    #[test]
+    fn a_dropdown_with_no_selectable_row_yields_no_hover() {
+        let separators = vec![MenuBarEntry::Separator; 3];
+        assert_eq!(next_selectable(&separators, None, 1), None);
+        assert_eq!(next_selectable(&separators, None, -1), None);
+        assert_eq!(next_selectable(&separators, Some(1), 1), None);
+        assert_eq!(next_selectable(&[], None, 1), None);
+    }
+
+    #[test]
+    fn stepping_off_either_end_of_the_bar_wraps_round() {
+        assert_eq!(index_before(3, 0), 2);
+        assert_eq!(index_after(3, 2), 0);
+        assert_eq!(index_before(3, 1), 0);
+        assert_eq!(index_after(3, 1), 2);
+        // An empty bar has nowhere to step to, and must not underflow.
+        assert_eq!(index_before(0, 0), 0);
+        assert_eq!(index_after(0, 0), 0);
+    }
+
+    #[test]
+    fn left_from_the_first_menu_opens_the_last() {
+        let mut bar = make_bar();
+        bar.open_menu(0);
+        bar.handle_key_event(&press(Key::Left));
+        assert_eq!(bar.open_index, Some(2));
+        bar.handle_key_event(&press(Key::Right));
+        assert_eq!(bar.open_index, Some(0), "and Right comes back round");
     }
 }

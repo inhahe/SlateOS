@@ -8,3 +8,6 @@ description = "SlateOS GUI toolkit — widget library with Flexbox/Grid layout e
 osfont = { path = "../font" }
 textfmt = { path = "../../textfmt" }
 textfind = { path = "../../textfind" }
+
+[lints]
+workspace = true

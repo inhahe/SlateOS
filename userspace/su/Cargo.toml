@@ -3,4 +3,13 @@ name = "su"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS user switch and sudo"
+
+# `userdb` for `/etc/users.yaml`. This crate carried its own parser, which
+# looked for `home:` — a field neither writer of the file has ever written —
+# and its own `sha256(salt + password)`, which no writer has ever produced.
+# See `design-decisions.md` §330.
 [dependencies]
+userdb = { path = "../userdb" }
+
+[lints]
+workspace = true

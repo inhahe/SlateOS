@@ -215,18 +215,14 @@ impl UserAccount {
     /// Name shown on the login screen, falling back to the login name so that
     /// a record without one is not drawn as a blank tile.
     fn display_name(&self) -> String {
-        match self.record.get(userdb::field::DISPLAY_NAME) {
-            Some(name) if !name.is_empty() => name,
-            _ => self.username(),
-        }
+        self.record.display_name().unwrap_or_default()
     }
 
-    /// The user's preferred shell.
+    /// The user's preferred shell, defaulting to this system's own.
     fn shell(&self) -> String {
-        match self.record.get(userdb::field::SHELL) {
-            Some(shell) if !shell.is_empty() => shell,
-            _ => "/bin/nush".to_string(),
-        }
+        self.record
+            .shell()
+            .unwrap_or_else(|| "/bin/nush".to_string())
     }
 
     /// Home directory.

@@ -288,6 +288,33 @@ impl Record {
         self.get(field::USERNAME)
     }
 
+    /// The name shown to a human, falling back to the login name.
+    ///
+    /// The fallback is here rather than at each call site because a record
+    /// with no `display_name` is normal — `useradd` does not require one — and
+    /// a caller that forgot the fallback would print an empty column.
+    #[must_use]
+    pub fn display_name(&self) -> Option<String> {
+        match self.get(field::DISPLAY_NAME) {
+            Some(name) if !name.is_empty() => Some(name),
+            _ => self.username(),
+        }
+    }
+
+    /// The login shell.
+    ///
+    /// Returns `None` rather than a default: the sensible default differs by
+    /// caller — `su` wants the target's shell or `/bin/sh`, a display manager
+    /// wants the session's — and a default baked in here would be invisible at
+    /// the point where it mattered.
+    #[must_use]
+    pub fn shell(&self) -> Option<String> {
+        match self.get(field::SHELL) {
+            Some(shell) if !shell.is_empty() => Some(shell),
+            _ => None,
+        }
+    }
+
     /// The home directory, under either spelling.
     #[must_use]
     pub fn home(&self) -> Option<String> {
@@ -386,6 +413,49 @@ impl Record {
         }
         buf.push(']');
         self.set_bare(field::GROUPS, &buf);
+    }
+
+    /// Whether this account logs in without being asked.
+    #[must_use]
+    pub fn auto_login(&self) -> bool {
+        self.get(field::AUTO_LOGIN)
+            .is_some_and(|v| v.trim() == "true")
+    }
+
+    /// Set the auto-login flag.
+    pub fn set_auto_login(&mut self, auto: bool) {
+        self.set_bare(field::AUTO_LOGIN, if auto { "true" } else { "false" });
+    }
+
+    /// Unix timestamp of the last successful login, or 0 if never.
+    #[must_use]
+    pub fn last_login(&self) -> u64 {
+        self.get(field::LAST_LOGIN)
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Total successful logins.
+    #[must_use]
+    pub fn login_count(&self) -> u32 {
+        self.get(field::LOGIN_COUNT)
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Record a successful login at `timestamp`.
+    ///
+    /// The count saturates rather than wrapping: a counter that returns to
+    /// zero after four billion logins is worse than one that stops, because a
+    /// reader cannot tell the two apart.
+    pub fn record_login(&mut self, timestamp: u64) {
+        let mut buf = String::new();
+        let _ = write!(buf, "{timestamp}");
+        self.set_bare(field::LAST_LOGIN, &buf);
+        let next = self.login_count().saturating_add(1);
+        buf.clear();
+        let _ = write!(buf, "{next}");
+        self.set_bare(field::LOGIN_COUNT, &buf);
     }
 
     // ---- Passwords ----

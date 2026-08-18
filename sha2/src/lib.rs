@@ -2,28 +2,44 @@
 //!
 //! # Why this crate exists
 //!
-//! At the time of writing, **26 files in this tree contain their own SHA-256**
-//! — the same round constants, the same eight initial words, the same message
-//! schedule, pasted 26 times. `apps/backup`, `apps/diskimager`,
-//! `apps/lockscreen`, `gui/credentials`, `init/login`, `kernel/build.rs`,
-//! `kernel/src/crypto.rs`, `posix/src/sha2.rs`, and eighteen tools under
-//! `userspace/` each have one.
+//! When this crate was written, **26 files in this tree contained their own
+//! SHA-256** — the same round constants, the same eight initial words, the
+//! same message schedule, pasted 26 times, across all three lanes.
 //!
-//! Every copy is correct today. That is the problem: it is 26 pieces of luck
-//! rather than one piece of design. A cryptographic hash is exactly the kind
-//! of code where "correct today" is not the same as "correct", because the
-//! failure mode is silent. A SHA-256 with a wrong constant still produces
-//! 32 plausible-looking bytes for every input; it just produces the *wrong*
-//! ones, and nothing downstream can tell. Passwords stop verifying against
-//! stored hashes, backup manifests stop matching the files they describe, and
-//! the package store's content addresses stop addressing content — all with no
-//! error anywhere. The only thing standing between the tree and that outcome
-//! is that someone typed 64 hexadecimal constants correctly, 26 times.
+//! Every copy was correct. That was the problem: 26 pieces of luck rather than
+//! one piece of design. A cryptographic hash is exactly the kind of code where
+//! "correct today" is not the same as "correct", because the failure mode is
+//! silent. A SHA-256 with a wrong constant still produces 32 plausible-looking
+//! bytes for every input; it just produces the *wrong* ones, and nothing
+//! downstream can tell. Passwords stop verifying against stored hashes, backup
+//! manifests stop matching the files they describe, and the package store's
+//! content addresses stop addressing content — all with no error anywhere. The
+//! only thing standing between the tree and that outcome was that someone had
+//! typed 64 hexadecimal constants correctly, 26 times.
 //!
-//! It is also 26 places to fix anything. The three lanes' copies have already
-//! drifted in shape — one is a one-shot function, one is a streaming struct,
-//! one returns hex and one returns bytes — so a fix found in any of them has
-//! to be re-derived for the others rather than merged.
+//! It was also 26 places to fix anything. The copies had already drifted in
+//! *shape* — one a one-shot function, one a streaming struct, one returning
+//! hex and one returning bytes — so a fix found in any of them had to be
+//! re-derived for the others rather than merged.
+//!
+//! ## Where that count stands
+//!
+//! The argument above does not depend on the number being current, but the
+//! number is easy to check and so is stated as of a date rather than left to
+//! rot. **As of 2026-08-18, three SHA-256 round-constant tables remain outside
+//! this crate**, found by grepping the tree for `0x428a_2f98`:
+//!
+//! | File | Why it is still there |
+//! |---|---|
+//! | `posix/src/sha2.rs` | backs SHA-crypt (`$5$`/`$6$`), which needs SHA-512 and MD5 as well; folding out only its SHA-256 third would leave one file depending on a crate for one of three primitives — more seams, not fewer. A deliberate exception, not a straggler. |
+//! | `kernel/src/crypto.rs` | lane A's; the crate is `no_std` with no `alloc` specifically so the kernel *can* adopt it, but that is lane A's call and is not blocking anything. |
+//! | `kernel/build.rs` | likewise — a host-side build script, so it is the least costly of the three to leave alone. |
+//!
+//! Everything else migrated: lane C's four (`apps/backup`, `apps/diskimager`,
+//! `apps/lockscreen`, `gui/credentials`) and lane B's ten under `userspace/`,
+//! which took about 1250 lines of round constants with them. The remaining
+//! duplication in the tree is of *other* algorithms — SHA-1, SHA-512, MD5 —
+//! which this crate deliberately does not provide (see below).
 //!
 //! # What this crate is not
 //!

@@ -524,17 +524,14 @@ impl AlertDialog {
         match event.key {
             Key::Tab => {
                 // Cycle focus through buttons.
-                if !self.buttons.is_empty() {
-                    if event.modifiers.shift {
-                        self.focused_button = if self.focused_button == 0 {
-                            self.buttons.len() - 1
-                        } else {
-                            self.focused_button - 1
-                        };
-                    } else {
-                        self.focused_button = (self.focused_button + 1) % self.buttons.len();
-                    }
-                }
+                // The fifth copy of the wrap `cycle` was extracted to own; see
+                // its module doc. Both ends of the list are inside the helper,
+                // so an empty button row needs no guard here either.
+                self.focused_button = if event.modifiers.shift {
+                    crate::cycle::before(self.buttons.len(), self.focused_button)
+                } else {
+                    crate::cycle::after(self.buttons.len(), self.focused_button)
+                };
                 EventResult::Consumed
             }
             Key::Enter | Key::Space => {
@@ -1071,10 +1068,15 @@ impl InputDialog {
             }
             // The caret's offset is a *byte* offset: `String::insert` and
             // `String::remove` index by bytes, and both panic outright on an
-            // offset that is not a character boundary. Every edit below is
-            // therefore by the width of a character in bytes rather than by
-            // one — a one-byte step lands inside an `é` and the next edit takes
-            // the dialog, and the process, down.
+            // offset that is not a character boundary. So every edit below moves
+            // the caret with `TextCursor::prev_in`/`next_in`, which answer with
+            // an offset the text itself named. Spelling that out here as "slice
+            // the text before me, take the last character, subtract its UTF-8
+            // width" is the same answer reached by a route with two hazards on
+            // it — the slice panics on a cursor that has drifted off a boundary,
+            // and the subtraction is safe only because of a test in an earlier
+            // statement — which is why the toolkit owns the step and this
+            // dialog no longer computes one.
             //
             // Deleting is a *logical* edit and stays logical: backspace removes
             // the character before this one in the string, which is what a
@@ -1082,14 +1084,9 @@ impl InputDialog {
             // on the right. The arrows below are the opposite — they are about
             // the screen — and that asymmetry is deliberate.
             Key::Backspace => {
-                if let Some(ch) = self
-                    .input_text
-                    .get(..self.cursor.byte())
-                    .and_then(|before| before.chars().next_back())
-                {
-                    let at = self.cursor.byte() - ch.len_utf8();
-                    self.input_text.remove(at);
-                    self.cursor = TextCursor::from(at);
+                if let Some(prev) = self.cursor.prev_in(&self.input_text) {
+                    self.input_text.remove(prev.byte());
+                    self.cursor = prev;
                     self.validation_error = None;
                 }
             }
@@ -1115,7 +1112,12 @@ impl InputDialog {
                     && !ch.is_control()
                 {
                     self.input_text.insert(self.cursor.byte(), ch);
-                    self.cursor = TextCursor::from(self.cursor.byte() + ch.len_utf8());
+                    // The boundary after the caret, once the text has the new
+                    // character in it, is where the typing left the caret.
+                    self.cursor = self
+                        .cursor
+                        .next_in(&self.input_text)
+                        .unwrap_or_else(|| TextCursor::from(self.input_text.len()));
                     self.validation_error = None;
                 }
             }
@@ -1151,22 +1153,16 @@ impl InputDialog {
     /// layout of the hidden text would scatter the caret among identical marks
     /// with nothing on screen to explain the jumps.
     fn move_caret(&mut self, right: bool) {
-        let at = self.cursor.byte();
-        // By a whole character's width in bytes, never by one: `String::remove`
-        // and `insert` panic on an offset inside a character.
+        // A whole character at a time, never a byte: `String::remove` and
+        // `insert` panic on an offset inside one. `prev_in`/`next_in` return
+        // offsets the text named, so there is no width to add or subtract.
         let stepped = if right {
-            self.input_text
-                .get(at..)
-                .and_then(|after| after.chars().next())
-                .map(|ch| at + ch.len_utf8())
+            self.cursor.next_in(&self.input_text)
         } else {
-            self.input_text
-                .get(..at)
-                .and_then(|before| before.chars().next_back())
-                .map(|ch| at - ch.len_utf8())
+            self.cursor.prev_in(&self.input_text)
         };
         if let Some(next) = stepped {
-            self.cursor = TextCursor::from(next);
+            self.cursor = next;
         }
     }
 
@@ -3096,6 +3092,69 @@ mod tests {
         });
         dialog.handle_event(&event);
         assert!(!dialog.has_validation_error());
+    }
+
+    #[test]
+    fn tab_walks_the_button_row_and_wraps_at_both_ends() {
+        fn tab(shift: bool) -> Event {
+            Event::Key(KeyEvent {
+                key: Key::Tab,
+                pressed: true,
+                modifiers: if shift {
+                    Modifiers {
+                        shift: true,
+                        ..Modifiers::NONE
+                    }
+                } else {
+                    Modifiers::NONE
+                },
+                text: None,
+            })
+        }
+
+        let mut dialog = AlertDialog::yes_no_cancel("Save?", "Save before closing?");
+        dialog.show();
+        assert_eq!(dialog.buttons().len(), 3);
+        assert_eq!(dialog.focused_button(), 0);
+
+        // Forward off the end comes back to the first — the wrap that used to
+        // be `(focused + 1) % len`, guarded by an emptiness test one statement
+        // above it.
+        for expected in [1, 2, 0, 1] {
+            dialog.handle_event(&tab(false));
+            assert_eq!(dialog.focused_button(), expected);
+        }
+        // And backward off the front reaches the last.
+        for expected in [0, 2, 1, 0] {
+            dialog.handle_event(&tab(true));
+            assert_eq!(dialog.focused_button(), expected);
+        }
+    }
+
+    #[test]
+    fn tabbing_a_dialog_with_no_buttons_is_not_fatal() {
+        // `cycle` answers 0 for an empty list, which is the only index that
+        // could mean anything; what matters is that neither direction
+        // subtracts from a zero length.
+        let mut dialog = AlertDialog::info("Note", "No buttons here")
+            .with_buttons(ButtonSet::custom(Vec::new()));
+        dialog.show();
+        for shift in [false, true] {
+            dialog.handle_event(&Event::Key(KeyEvent {
+                key: Key::Tab,
+                pressed: true,
+                modifiers: if shift {
+                    Modifiers {
+                        shift: true,
+                        ..Modifiers::NONE
+                    }
+                } else {
+                    Modifiers::NONE
+                },
+                text: None,
+            }));
+            assert_eq!(dialog.focused_button(), 0);
+        }
     }
 
     #[test]

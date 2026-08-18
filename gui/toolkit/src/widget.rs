@@ -806,25 +806,26 @@ impl Widget {
                     value.insert(cursor.byte(), ch);
                     // Typing lands the caret after what was typed, which is the
                     // downstream side of the new boundary whichever way the
-                    // surrounding text runs.
-                    *cursor = TextCursor::from(cursor.byte() + ch.len_utf8());
+                    // surrounding text runs — and, now that the text contains
+                    // the character, the next boundary the text itself names.
+                    *cursor = cursor
+                        .next_in(value)
+                        .unwrap_or_else(|| TextCursor::from(value.len()));
                     return EventResult::Consumed;
                 }
                 match key.key {
                     // Backspace is a *logical* edit, not a visual move: it
                     // deletes the character before this one in the string,
                     // which is what a reader of that script expects even where
-                    // that character is drawn to the right. So this one still
-                    // steps by bytes — and by a whole character's worth, since
-                    // `String::remove` panics on an offset mid-character.
+                    // that character is drawn to the right. `prev_in` is that
+                    // step, and it is the toolkit's rather than this widget's
+                    // because `String::remove` panics on an offset
+                    // mid-character and there is no reason for four widgets to
+                    // each own a way of not producing one.
                     crate::event::Key::Backspace => {
-                        if let Some(ch) = value
-                            .get(..cursor.byte())
-                            .and_then(|before| before.chars().next_back())
-                        {
-                            let at = cursor.byte() - ch.len_utf8();
-                            value.remove(at);
-                            *cursor = TextCursor::from(at);
+                        if let Some(prev) = cursor.prev_in(value) {
+                            value.remove(prev.byte());
+                            *cursor = prev;
                         }
                         EventResult::Consumed
                     }
@@ -852,20 +853,14 @@ impl Widget {
                     // place this widget never drew it. Do not make that switch
                     // without an answer.
                     crate::event::Key::Left => {
-                        if let Some(ch) = value
-                            .get(..cursor.byte())
-                            .and_then(|before| before.chars().next_back())
-                        {
-                            *cursor = TextCursor::from(cursor.byte() - ch.len_utf8());
+                        if let Some(prev) = cursor.prev_in(value) {
+                            *cursor = prev;
                         }
                         EventResult::Consumed
                     }
                     crate::event::Key::Right => {
-                        if let Some(ch) = value
-                            .get(cursor.byte()..)
-                            .and_then(|after| after.chars().next())
-                        {
-                            *cursor = TextCursor::from(cursor.byte() + ch.len_utf8());
+                        if let Some(next) = cursor.next_in(value) {
+                            *cursor = next;
                         }
                         EventResult::Consumed
                     }

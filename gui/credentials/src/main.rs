@@ -33,7 +33,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{eq_constant_time, sha256};
 
 // Likewise the password generator's xorshift, which reduced with `% bound`.
-use randrange::{RandomSource, SeededRng};
+use randrange::{RandomSource, SecretSource, SystemRandom};
+// Only the tests name a seeded generator: the service itself must never be
+// able to reach one, which is the whole point of `PasswordRandom::Seeded`
+// being `#[cfg(test)]`.
+#[cfg(test)]
+use randrange::SeededRng;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -458,28 +463,120 @@ pub enum PasswordStrength {
     VeryStrong,
 }
 
-/// Generate a random password with the specified character classes.
+/// Where a generated password's randomness comes from.
 ///
-/// # This does not produce unguessable passwords
+/// Two live variants and deliberately no fallback between them. A fallback is
+/// how the original defect survives its own fix: the user is handed a password
+/// that looks exactly as good as a real one and is not. The same shape as
+/// `apps/passwordgen`'s `AppRandom` and `apps/credmanager`'s `CredRandom`, on
+/// purpose — one pattern, so the next reviewer recognises it.
 ///
-/// `seed` is supplied by the caller, and in practice that caller passes a
-/// timestamp — so the output is a deterministic function of roughly twenty
-/// bits of real entropy, and an attacker who knows the day a password was
-/// generated can enumerate every password it could have been. The generator
-/// itself is sound as a generator; it is a *pseudo*-random one, which is the
-/// wrong tool for the one job on this page that needs unpredictability.
+/// The variants stay in this crate rather than moving to `randrange` beside
+/// [`SecretSource`] because [`Self::Seeded`] is `#[cfg(test)]`, and `cfg(test)`
+/// does not cross a crate boundary: a seeded variant defined in `randrange`
+/// would be reachable from production code here, which is the one thing this
+/// type exists to prevent.
+#[derive(Debug)]
+enum PasswordRandom {
+    /// The kernel CSPRNG — the only source a password may come from. Boxed
+    /// because its refill buffer dwarfs the other variants.
+    System(Box<SystemRandom>),
+    /// A named sequence, so a test can assert on the password it produced.
+    /// Never reachable from the running service.
+    #[cfg(test)]
+    Seeded(SeededRng),
+    /// The kernel had no entropy to give. Generating is refused outright.
+    Unavailable,
+}
+
+impl PasswordRandom {
+    fn from_system() -> Self {
+        match SystemRandom::open() {
+            Ok(source) => Self::System(Box::new(source)),
+            Err(_) => Self::Unavailable,
+        }
+    }
+}
+
+impl RandomSource for PasswordRandom {
+    fn next_u64(&mut self) -> u64 {
+        match self {
+            Self::System(source) => source.next_u64(),
+            #[cfg(test)]
+            Self::Seeded(source) => source.next_u64(),
+            // Visibly not random. `secret` refuses before this is ever read, so
+            // it is the belt to that braces rather than a fallback.
+            Self::Unavailable => 0,
+        }
+    }
+}
+
+impl SecretSource for PasswordRandom {
+    fn is_trustworthy(&self) -> bool {
+        match self {
+            Self::System(source) => source.is_healthy(),
+            #[cfg(test)]
+            Self::Seeded(_) => true,
+            Self::Unavailable => false,
+        }
+    }
+}
+
+/// What a caller should show the user when generation is refused.
+pub const NO_ENTROPY_MESSAGE: &str =
+    "Cannot generate: the system random number generator is unavailable";
+
+/// Generate an unguessable password with the specified character classes.
 ///
-/// This cannot be fixed inside lane C: entropy comes from the kernel. See
-/// `requests/c-a-userspace-entropy-syscall.md` and `known-issues.md` →
-/// `C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE`. When that syscall lands,
-/// `seed` goes away and this function reads from it directly.
+/// Returns `None` if the kernel's random number generator could not be reached,
+/// or failed part-way through the draw. **A caller must render that as a
+/// refusal** — show [`NO_ENTROPY_MESSAGE`], not a password from somewhere else.
+/// There is deliberately no weaker source to fall back to: nobody can tell a
+/// predictable password from an unpredictable one by looking at it, which is
+/// what makes a silent fallback worse than a visible failure.
+///
+/// # What this used to be
+///
+/// It took the seed as a `u64` *parameter*, and its own documentation said the
+/// caller would pass a timestamp — roughly twenty bits of real entropy, so an
+/// attacker who knew the day a password was made could enumerate every password
+/// it could have been. That was the third generator in this tree with the same
+/// defect (`apps/passwordgen` and `apps/credmanager` were the first two) and the
+/// only one that had not yet acquired a caller. It is fixed before it gets one.
+///
+/// The old comment also said the fix was impossible inside lane C, because
+/// entropy comes from the kernel. That was true while the only wrapper for the
+/// kernel CSPRNG lived inside the GUI toolkit, which this headless service must
+/// not link; it stopped being true when that wrapper moved into `randrange`,
+/// which this crate already depended on. See `design-decisions.md` §463.
+#[must_use]
 pub fn generate_password(
     length: usize,
     include_uppercase: bool,
     include_digits: bool,
     include_symbols: bool,
-    seed: u64,
-) -> String {
+) -> Option<String> {
+    generate_password_from(
+        &mut PasswordRandom::from_system(),
+        length,
+        include_uppercase,
+        include_digits,
+        include_symbols,
+    )
+}
+
+/// [`generate_password`], against a source the caller names.
+///
+/// The seam the tests drive: the shipped path and the tested path differ only
+/// in where the bits come from, so a test cannot accidentally exercise code the
+/// service does not run.
+fn generate_password_from(
+    rng: &mut PasswordRandom,
+    length: usize,
+    include_uppercase: bool,
+    include_digits: bool,
+    include_symbols: bool,
+) -> Option<String> {
     let mut charset = Vec::new();
 
     // Always include lowercase
@@ -506,24 +603,29 @@ pub fn generate_password(
     }
 
     if charset.is_empty() {
-        return String::new();
+        return None;
     }
 
-    let mut rng = SeededRng::new(seed);
-    (0..length)
-        .map(|_| {
-            // `choose` reduces by taking the high half of a widening
-            // multiply, which is very nearly unbiased. The `% charset.len()`
-            // this replaced skewed towards the front of the alphabet by about
-            // one part in 2^58 — far too small to matter, and not why the
-            // change was made. It was made because there is no reason for a
-            // second private generator to exist when `randrange` is right
-            // there, and every private copy is a place for the *serious*
-            // version of this bug to reappear (see `randrange`'s module docs:
-            // `% bound` on a power-of-two bound returns a short cycle).
-            rng.choose(&charset).copied().unwrap_or('a')
-        })
-        .collect()
+    // `secret` checks the source on both sides of the draw, so a kernel that
+    // declines a refill half-way through a twenty-character password yields a
+    // refusal rather than a password whose tail is a run of `a`s.
+    rng.secret(|source| {
+        (0..length)
+            .map(|_| {
+                // `choose` reduces by taking the high half of a widening
+                // multiply with a rejection step, so it is exactly uniform. The
+                // `% charset.len()` this replaced skewed towards the front of
+                // the alphabet by about one part in 2^58 — far too small to
+                // matter, and not why the change was made. It was made because
+                // there is no reason for a private generator to exist when
+                // `randrange` is right there, and every private copy is a place
+                // for the *serious* version of this bug to reappear (see
+                // `randrange`'s module docs: `% bound` on a power-of-two bound
+                // returns a short cycle).
+                source.choose(&charset).copied().unwrap_or('a')
+            })
+            .collect()
+    })
 }
 
 /// Estimate password strength based on length and character class diversity.
@@ -2108,22 +2210,27 @@ mod tests {
 
     // -- Password generator tests --
 
+    /// A generator drawing from a named sequence, for tests only.
+    fn seeded(seed: u64) -> PasswordRandom {
+        PasswordRandom::Seeded(SeededRng::new(seed))
+    }
+
     #[test]
     fn test_generate_password_length() {
-        let pw = generate_password(20, true, true, true, 42);
+        let pw = generate_password_from(&mut seeded(42), 20, true, true, true).unwrap();
         assert_eq!(pw.len(), 20);
     }
 
     #[test]
     fn test_generate_password_lowercase_only() {
-        let pw = generate_password(16, false, false, false, 123);
+        let pw = generate_password_from(&mut seeded(123), 16, false, false, false).unwrap();
         assert!(pw.chars().all(|c| c.is_ascii_lowercase()));
     }
 
     #[test]
     fn test_generate_password_all_classes() {
         // With a large enough password, we should get all classes
-        let pw = generate_password(100, true, true, true, 999);
+        let pw = generate_password_from(&mut seeded(999), 100, true, true, true).unwrap();
         let has_lower = pw.chars().any(|c| c.is_ascii_lowercase());
         let has_upper = pw.chars().any(|c| c.is_ascii_uppercase());
         let has_digit = pw.chars().any(|c| c.is_ascii_digit());
@@ -2132,6 +2239,75 @@ mod tests {
         assert!(has_upper);
         assert!(has_digit);
         assert!(has_symbol);
+    }
+
+    /// The property the old signature could not have: without entropy there is
+    /// no password, rather than a password derived from whatever the caller
+    /// happened to pass as a seed.
+    #[test]
+    fn generating_without_entropy_is_refused_rather_than_guessed() {
+        let mut dead = PasswordRandom::Unavailable;
+        assert!(generate_password_from(&mut dead, 20, true, true, true).is_none());
+    }
+
+    /// The shipped entry point on a host build, where there is no Slate kernel
+    /// to ask. It must refuse — not fall back to a seed, and not panic.
+    #[test]
+    #[cfg(not(unix))]
+    fn the_shipped_generator_refuses_when_the_kernel_is_out_of_reach() {
+        assert!(generate_password(20, true, true, true).is_none());
+    }
+
+    /// Two draws from the same source must not agree. This is the assertion the
+    /// old function could not make at all: called twice with the same seed it
+    /// returned the same password, and the caller was documented to pass a
+    /// timestamp.
+    #[test]
+    fn two_passwords_from_one_source_differ() {
+        let mut rng = seeded(2024);
+        let first = generate_password_from(&mut rng, 24, true, true, true).unwrap();
+        let second = generate_password_from(&mut rng, 24, true, true, true).unwrap();
+        assert_ne!(first, second);
+    }
+
+    /// A source that goes bad half-way through must discard the whole password.
+    /// A twelve-character password whose last six characters are all `a` is not
+    /// a password, and looks like one.
+    #[test]
+    fn a_source_that_dies_mid_password_yields_no_password() {
+        /// Healthy for `good_draws` draws, then permanently not.
+        struct Dying {
+            inner: SeededRng,
+            good_draws: usize,
+            healthy: bool,
+        }
+        impl RandomSource for Dying {
+            fn next_u64(&mut self) -> u64 {
+                if self.good_draws == 0 {
+                    self.healthy = false;
+                    return 0;
+                }
+                self.good_draws -= 1;
+                self.inner.next_u64()
+            }
+        }
+        impl SecretSource for Dying {
+            fn is_trustworthy(&self) -> bool {
+                self.healthy
+            }
+        }
+
+        let mut dying = Dying {
+            inner: SeededRng::new(5),
+            good_draws: 6,
+            healthy: true,
+        };
+        let drawn = dying.secret(|source| {
+            (0..12)
+                .map(|_| source.choose(&['a', 'b', 'c', 'd']).copied().unwrap_or('a'))
+                .collect::<String>()
+        });
+        assert!(drawn.is_none());
     }
 
     #[test]

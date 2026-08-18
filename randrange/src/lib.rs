@@ -548,6 +548,74 @@ fn fill_from_kernel(_buffer: &mut [u8]) -> Result<(), EntropyError> {
     Err(EntropyError::Unavailable)
 }
 
+// ---------------------------------------------------------------------------
+// Drawing something that has to be unguessable
+// ---------------------------------------------------------------------------
+
+/// A source fit to draw a secret from, and the rule for drawing one.
+///
+/// # Why this is a trait and not just a method on [`SystemRandom`]
+///
+/// Three crates independently wrote the same wrapper: `apps/passwordgen`'s
+/// `AppRandom::secret`, `apps/credmanager`'s `CredRandom::secret`, and the
+/// credential service's password generator. Each was an enum over "the kernel",
+/// "a named sequence, tests only" and "the kernel said no", and each carried
+/// its own copy of the *reasoning* below. A rule about secrets that is written
+/// out once per crate is a rule that will be written out slightly wrong.
+///
+/// The enum itself has to stay in the crate that owns it, because its seeded
+/// variant is `#[cfg(test)]` and `cfg(test)` does not cross a crate boundary —
+/// a variant defined here as "tests only" would be reachable from every caller
+/// in production, which is the property the enums exist to prevent. So the
+/// *variants* stay local and the *rule* moves here, where it is stated once and
+/// tested once.
+///
+/// # The rule
+///
+/// A secret is only worth drawing if the source is trustworthy **before and
+/// after** the draw. [`SystemRandom`] refills from the kernel in the middle of
+/// a long draw, and that refill can fail; a password whose second half is
+/// zeroes is not a password, and no user can tell it from one by looking.
+/// Checking on the way out is what turns a partial failure into a refusal.
+///
+/// # Implementing
+///
+/// Supply [`is_trustworthy`](Self::is_trustworthy). Do not override
+/// [`secret`](Self::secret) — the whole point is that there is one copy of it.
+pub trait SecretSource: RandomSource {
+    /// Whether a value drawn from this source may be handed to a user as a
+    /// secret.
+    ///
+    /// Must be *latching* for a fallible source: once false, never true again.
+    /// A source that could recover would let a draw straddling the failure pass
+    /// both checks.
+    fn is_trustworthy(&self) -> bool;
+
+    /// Run `make` only if the source is trustworthy, and keep its result only
+    /// if the source is *still* trustworthy afterwards.
+    ///
+    /// Returns `None` if either check fails — which callers must render as a
+    /// refusal, never as a reason to fall back to a [`SeededRng`]. A fallback
+    /// is how the original defect survives the fix: the user is handed a
+    /// password that looks exactly as good as a real one.
+    fn secret<T>(&mut self, make: impl FnOnce(&mut Self) -> T) -> Option<T>
+    where
+        Self: Sized,
+    {
+        if !self.is_trustworthy() {
+            return None;
+        }
+        let value = make(self);
+        self.is_trustworthy().then_some(value)
+    }
+}
+
+impl SecretSource for SystemRandom {
+    fn is_trustworthy(&self) -> bool {
+        self.is_healthy()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // A test that indexes out of range should fail loudly and point at the line
@@ -1067,4 +1135,92 @@ mod tests {
             "{message}"
         );
     }
+
+    // -- SecretSource ------------------------------------------------------
+
+    /// A source that goes bad after `good_draws`, the way a [`SystemRandom`]
+    /// does when the kernel declines a refill part-way through a long draw.
+    struct FailsAfter {
+        inner: SeededRng,
+        good_draws: usize,
+        healthy: bool,
+    }
+
+    impl RandomSource for FailsAfter {
+        fn next_u64(&mut self) -> u64 {
+            if self.good_draws == 0 {
+                self.healthy = false;
+                return 0;
+            }
+            self.good_draws -= 1;
+            self.inner.next_u64()
+        }
+    }
+
+    impl SecretSource for FailsAfter {
+        fn is_trustworthy(&self) -> bool {
+            self.healthy
+        }
+    }
+
+    /// The check on the way *out* is the one that is easy to leave out, and the
+    /// one that matters: a source healthy at the start and broken by the end
+    /// produced a password whose tail was zeroes, indistinguishable to the user
+    /// from a real one.
+    #[test]
+    fn a_source_that_fails_part_way_through_a_draw_yields_no_secret() {
+        let mut source = FailsAfter {
+            inner: SeededRng::new(7),
+            good_draws: 4,
+            healthy: true,
+        };
+        let drawn = source.secret(|rng| {
+            let mut out = [0u64; 8];
+            for slot in &mut out {
+                *slot = rng.next_u64();
+            }
+            out
+        });
+        assert!(drawn.is_none(), "a half-random secret must be refused");
+    }
+
+    #[test]
+    fn a_healthy_source_yields_its_secret() {
+        let mut source = FailsAfter {
+            inner: SeededRng::new(7),
+            good_draws: 64,
+            healthy: true,
+        };
+        let drawn = source.secret(|rng| rng.next_u64());
+        assert!(drawn.is_some());
+    }
+
+    /// Refusing before the draw, not merely after it, is what stops `make`
+    /// running at all on a dead source -- so a caller cannot observe a
+    /// zero-filled buffer even by capturing it out of the closure.
+    #[test]
+    fn a_dead_source_never_runs_the_draw() {
+        let mut source = FailsAfter {
+            inner: SeededRng::new(7),
+            good_draws: 0,
+            healthy: false,
+        };
+        let mut ran = false;
+        let drawn = source.secret(|_| {
+            ran = true;
+        });
+        assert!(drawn.is_none());
+        assert!(!ran, "the draw must not run on a source known to be bad");
+    }
+
+    /// The host build has no kernel to ask, so this is the shape every caller
+    /// on the host sees: opening fails, and nothing is drawn.
+    #[test]
+    fn the_system_source_on_a_host_build_refuses_rather_than_inventing() {
+        #[cfg(not(unix))]
+        {
+            assert!(SystemRandom::open().is_err());
+        }
+    }
+
 }

@@ -22,7 +22,7 @@
 
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{RandomSource, SeededRng, SystemRandom};
+use guitk::rng::{RandomSource, SecretSource, SeededRng, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -417,14 +417,17 @@ impl AppRandom {
         Self::Seeded(SeededRng::new(seed))
     }
 
-    /// Whether output from this source may be presented as a secret.
-    ///
+}
+
+/// Both sides of the draw are checked by [`SecretSource::secret`], which is
+/// where the rule now lives — this crate, `apps/credmanager` and
+/// `gui/credentials` each used to carry their own copy of it.
+impl SecretSource for AppRandom {
     /// False for [`Self::Unavailable`], and false for a [`Self::System`]
     /// source whose refill has failed at any point — including part-way
-    /// through the secret currently being built, which is why callers check
+    /// through the secret currently being built, which is why `secret` checks
     /// this *after* generating as well as before.
-    #[must_use]
-    pub const fn is_trustworthy(&self) -> bool {
+    fn is_trustworthy(&self) -> bool {
         match self {
             Self::System(source) => source.is_healthy(),
             // A seeded generator always produces what it promises; it is just
@@ -433,19 +436,6 @@ impl AppRandom {
             Self::Seeded(_) => true,
             Self::Unavailable => false,
         }
-    }
-
-    /// Produce a secret with `make`, or `None` if this source is not fit to.
-    ///
-    /// The check happens on both sides of the draw so that a source which
-    /// fails half-way through a password discards the whole thing rather than
-    /// handing back a partly-predictable one.
-    pub fn secret<T>(&mut self, make: impl FnOnce(&mut Self) -> T) -> Option<T> {
-        if !self.is_trustworthy() {
-            return None;
-        }
-        let value = make(self);
-        self.is_trustworthy().then_some(value)
     }
 }
 

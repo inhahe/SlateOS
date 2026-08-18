@@ -25,7 +25,7 @@ use guitk::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[cfg(test)]
 use guitk::rng::SeededRng;
-use guitk::rng::{RandomSource, SystemRandom};
+use guitk::rng::{RandomSource, SecretSource, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -789,29 +789,21 @@ impl CredRandom {
         }
     }
 
+}
+
+/// The both-sides-of-the-draw rule lives in [`SecretSource::secret`]. This
+/// crate, `apps/passwordgen` and `gui/credentials` each carried their own copy
+/// of it before that; a rule about secrets restated once per crate is one that
+/// will eventually be restated slightly wrong.
+impl SecretSource for CredRandom {
     /// Whether a secret drawn from this source may be handed to the user.
-    const fn is_trustworthy(&self) -> bool {
+    fn is_trustworthy(&self) -> bool {
         match self {
             Self::System(source) => source.is_healthy(),
             #[cfg(test)]
             Self::Seeded(_) => true,
             Self::Unavailable => false,
         }
-    }
-
-    /// Run `make` only if the source is trustworthy, and keep its result only
-    /// if the source is *still* trustworthy afterwards.
-    ///
-    /// Both checks matter: the kernel can fail on a refill partway through a
-    /// draw, and a password whose second half is zeroes is not a password.
-    /// The check on the way out is what turns that into a refusal rather than
-    /// a weak secret the user has no way to tell apart from a strong one.
-    fn secret<T>(&mut self, make: impl FnOnce(&mut Self) -> T) -> Option<T> {
-        if !self.is_trustworthy() {
-            return None;
-        }
-        let value = make(self);
-        self.is_trustworthy().then_some(value)
     }
 }
 

@@ -300,13 +300,20 @@ impl EventStore {
         }
     }
 
-    /// Add a new event, assigning it a unique ID. Returns the assigned ID.
-    pub fn add_event(&mut self, mut event: CalendarEvent) -> u64 {
+    /// Add a new event, assigning it a unique ID. Returns the assigned ID,
+    /// or `None` if the ID space is exhausted.
+    ///
+    /// Refusing is the only answer that keeps IDs unique. Wrapping or
+    /// saturating the counter would hand out an ID some existing event
+    /// already holds, and every lookup in this module -- `remove_event`,
+    /// `update_event`, `ReminderManager` -- is by ID, so the two events
+    /// would thereafter be one event to every caller.
+    pub fn add_event(&mut self, mut event: CalendarEvent) -> Option<u64> {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.checked_add(1)?;
         event.id = id;
         self.events.push(event);
-        id
+        Some(id)
     }
 
     /// Remove an event by ID. Returns `true` if the event was found and removed.
@@ -353,7 +360,7 @@ impl EventStore {
             Some(ts) => ts,
             None => return Vec::new(),
         };
-        let day_end = day_start + SECS_PER_DAY;
+        let day_end = day_start.saturating_add(SECS_PER_DAY);
         self.events_for_range(day_start, day_end)
     }
 
@@ -433,7 +440,12 @@ impl EventStore {
     /// Import events from the text format produced by [`export_text`].
     /// Returns the number of events successfully imported.
     pub fn import_text(&mut self, text: &str) -> usize {
-        let mut count = 0;
+        // Counting what the store actually gained, rather than incrementing
+        // a tally beside each `add_event` call. The two `count += 1` this
+        // replaces sat at the ends of two different code paths — the
+        // mid-input flush and the final one — and had to be kept in step
+        // with the `add_event` calls they were meant to be counting.
+        let before = self.events.len();
         let mut title = String::new();
         let mut start: u64 = 0;
         let mut end: u64 = 0;
@@ -448,7 +460,10 @@ impl EventStore {
             if trimmed == "EVENT" {
                 // If we were already in an event, save the previous one.
                 if in_event {
-                    self.add_event(CalendarEvent {
+                    // A refused event is one the store did not gain, and the
+                    // returned count is derived from the store's length, so
+                    // ignoring the result here still reports it correctly.
+                    let _ = self.add_event(CalendarEvent {
                         id: 0,
                         title: core::mem::take(&mut title),
                         start_timestamp: start,
@@ -458,7 +473,6 @@ impl EventStore {
                         color,
                         description: core::mem::take(&mut description),
                     });
-                    count += 1;
                 }
                 // Reset for new event.
                 title = String::new();
@@ -501,7 +515,8 @@ impl EventStore {
 
         // Don't forget the last event.
         if in_event {
-            self.add_event(CalendarEvent {
+            // As above: not gaining the event is what the count measures.
+            let _ = self.add_event(CalendarEvent {
                 id: 0,
                 title,
                 start_timestamp: start,
@@ -511,10 +526,9 @@ impl EventStore {
                 color,
                 description,
             });
-            count += 1;
         }
 
-        count
+        self.events.len().saturating_sub(before)
     }
 }
 
@@ -665,7 +679,8 @@ impl ReminderManager {
         event_start: u64,
         lead_minutes: u32,
     ) {
-        let fire_at = event_start.saturating_sub(lead_minutes as u64 * SECS_PER_MIN);
+        let fire_at =
+            event_start.saturating_sub((lead_minutes as u64).saturating_mul(SECS_PER_MIN));
         self.reminders.push(Reminder {
             event_id,
             event_title: event_title.to_string(),
@@ -687,7 +702,7 @@ impl ReminderManager {
     pub fn snooze(&mut self, event_id: u64, duration: SnoozeDuration) {
         for r in &mut self.reminders {
             if r.event_id == event_id && !r.dismissed {
-                r.fire_at += duration.secs();
+                r.fire_at = r.fire_at.saturating_add(duration.secs());
                 break;
             }
         }
@@ -818,15 +833,15 @@ impl ClockDisplay {
                 format!("{hour:02}:{min:02}")
             }
         } else {
-            let (h12, ampm) = if hour == 0 {
-                (12, "AM")
-            } else if hour < 12 {
-                (hour, "AM")
-            } else if hour == 12 {
-                (12, "PM")
-            } else {
-                (hour - 12, "PM")
+            // The 12-hour clock is "the hour modulo 12, with 0 written as
+            // 12" -- one formula, where this was a four-armed ladder whose
+            // last arm subtracted. Three of those arms existed only to keep
+            // that subtraction from being reached with `hour < 12`.
+            let h12 = match hour % 12 {
+                0 => 12,
+                h => h,
             };
+            let ampm = if hour < 12 { "AM" } else { "PM" };
             if self.show_seconds {
                 format!("{h12}:{min:02}:{sec:02} {ampm}")
             } else {
@@ -973,7 +988,7 @@ impl CalendarView {
 
     /// Set today from a UTC timestamp and local offset.
     pub fn set_today_from_timestamp(&mut self, utc_now: u64, local_offset: i64) {
-        let adjusted = (utc_now as i64 + local_offset).max(0) as u64;
+        let adjusted = (utc_now as i64).saturating_add(local_offset).max(0) as u64;
         let (y, m, d, _, _, _) = timestamp_to_date(adjusted);
         self.set_today(y, m, d);
     }
@@ -1085,15 +1100,16 @@ impl CalendarView {
         self.view_month = month;
     }
 
-    /// Compute the week number for the first day in a given row (0..6).
-    fn week_number_for_row(&self, grid: &[GridCell], row: usize) -> u32 {
-        let idx = row * 7;
-        if let Some(cell) = grid.get(idx) {
-            let (_, wn) = iso_week_number(cell.year, cell.month, cell.day);
-            wn
-        } else {
-            0
-        }
+    /// The ISO week number of a row of the grid, taken from its first day.
+    ///
+    /// Takes the row itself rather than the whole grid and an index into it.
+    /// The caller had the row already — it was iterating them — and passing
+    /// the index instead meant recomputing `row * 7` here and checking the
+    /// result against `get`, in a second place from the one that rendered
+    /// the cells.
+    fn week_number_for(week: &[GridCell]) -> u32 {
+        week.first()
+            .map_or(0, |cell| iso_week_number(cell.year, cell.month, cell.day).1)
     }
 
     // ========================================================================
@@ -1169,11 +1185,15 @@ impl CalendarView {
         cy += DOW_HEADER_HEIGHT;
 
         // Grid.
+        // The grid is 42 cells meaning six weeks of seven. `chunks` states
+        // that once, where `row * 7` and `row * 7 + col` stated it at each of
+        // the two places that indexed back in — and each of those then had to
+        // re-check the result it had just computed against `get`.
         let grid = self.generate_grid();
-        for row in 0..6 {
+        for (row, week) in grid.chunks(7).enumerate() {
             // Week number column.
             if self.config.show_week_numbers {
-                let wn = self.week_number_for_row(&grid, row);
+                let wn = Self::week_number_for(week);
                 cmds.push(RenderCommand::Text {
                     x: content_x,
                     y: cy + row as f32 * CELL_SIZE + 12.0,
@@ -1186,13 +1206,10 @@ impl CalendarView {
                 });
             }
 
-            for col in 0..7 {
-                let idx = row * 7 + col;
-                if let Some(cell) = grid.get(idx) {
-                    let cx = content_x + wn_extra + col as f32 * CELL_SIZE;
-                    let cell_y = cy + row as f32 * CELL_SIZE;
-                    self.render_day_cell(&mut cmds, cx, cell_y, cell, store);
-                }
+            for (col, cell) in week.iter().enumerate() {
+                let cx = content_x + wn_extra + col as f32 * CELL_SIZE;
+                let cell_y = cy + row as f32 * CELL_SIZE;
+                self.render_day_cell(&mut cmds, cx, cell_y, cell, store);
             }
         }
 
@@ -1464,7 +1481,7 @@ impl CalendarView {
 
         // "N more..." if truncated.
         if events.len() > MAX_VISIBLE_EVENTS {
-            let more = events.len() - MAX_VISIBLE_EVENTS;
+            let more = events.len().saturating_sub(MAX_VISIBLE_EVENTS);
             let my = y + header_h + visible_count as f32 * EVENT_ROW_HEIGHT;
             cmds.push(RenderCommand::Text {
                 x: x + PADDING + 10.0,
@@ -1557,14 +1574,15 @@ impl CalendarView {
         });
         cy += NAV_HEIGHT;
 
-        // Render 12 mini months.
-        for row in 0..3 {
-            for col in 0..4 {
-                let month = (row * 4 + col + 1) as u32;
-                let mx = x + PADDING + col as f32 * (mini_month_w + 8.0);
-                let my = cy + row as f32 * (mini_month_h + 8.0);
-                self.render_mini_month(&mut cmds, mx, my, self.view_year, month);
-            }
+        // Render 12 mini months, four to a row. Iterating the months and
+        // deriving the cell keeps "there are twelve of them" the fact being
+        // stated, rather than a 3x4 loop that happens to produce 1..=12.
+        for (cell, month) in (1..=12u32).enumerate() {
+            let col = cell % 4;
+            let row = cell / 4;
+            let mx = x + PADDING + col as f32 * (mini_month_w + 8.0);
+            let my = cy + row as f32 * (mini_month_h + 8.0);
+            self.render_mini_month(&mut cmds, mx, my, self.view_year, month);
         }
 
         cmds
@@ -1594,21 +1612,24 @@ impl CalendarView {
         });
 
         let grid_y = y + MINI_MONTH_LABEL_HEIGHT;
-        let first_dow = day_of_week(year, month, 1);
-        let offset = match self.config.first_day_of_week {
-            FirstDayOfWeek::Sunday => first_dow,
-            FirstDayOfWeek::Monday => {
-                if first_dow == 0 {
-                    6
-                } else {
-                    first_dow - 1
-                }
-            }
-        };
-        let total_days = days_in_month(year, month);
 
-        for d in 1..=total_days {
-            let pos = (offset + d - 1) as usize;
+        // The same `month_grid` the full month view is built from, rather
+        // than the second implementation that used to live here: a
+        // `day_of_week` call, its own Sunday/Monday shift, and
+        // `offset + d - 1`. Two answers to "which cell does this day fall
+        // in" is one too many — this one would have disagreed with the main
+        // grid the moment either changed, and the mini months are drawn
+        // right beside it.
+        for (pos, date) in Date::from_ymd(year, month, 1)
+            .month_grid(self.week_start())
+            .enumerate()
+        {
+            let (cell_year, cell_month, d) = date.ymd();
+            if cell_year != year || cell_month != month {
+                // Lead-in and spill-over cells belong to the neighbouring
+                // months; a mini month shows only its own days.
+                continue;
+            }
             let col = pos % 7;
             let row = pos / 7;
             let cx = x + col as f32 * MINI_CELL;
@@ -1906,6 +1927,111 @@ mod tests {
         assert_eq!(grid[0].day, 1);
     }
 
+    /// Which grid cell each day of `month` lands in, as the mini month now
+    /// computes it: from the shared `month_grid`.
+    fn mini_month_cells(cal: &CalendarView, year: i32, month: u32) -> Vec<(u32, usize)> {
+        Date::from_ymd(year, month, 1)
+            .month_grid(cal.week_start())
+            .enumerate()
+            .filter_map(|(pos, date)| {
+                let (y, m, d) = date.ymd();
+                (y == year && m == month).then_some((d, pos))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_mini_month_puts_each_day_in_the_same_cell_as_the_full_grid() {
+        // The mini month used to compute its cells from its own `day_of_week`
+        // call, its own Sunday/Monday shift, and `offset + d - 1`. Two
+        // answers to "which cell does this day fall in", drawn side by side
+        // in the year view. Check they agree, for both week starts and for
+        // every month of a leap year and a common one.
+        for first_day in [FirstDayOfWeek::Sunday, FirstDayOfWeek::Monday] {
+            let config = CalendarConfig {
+                first_day_of_week: first_day,
+                ..Default::default()
+            };
+            let mut cal = CalendarView::new(config);
+            for year in [2023, 2024] {
+                for month in 1..=12 {
+                    cal.view_year = year;
+                    cal.view_month = month;
+                    let full: Vec<(u32, usize)> = cal
+                        .generate_grid()
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(pos, c)| c.current_month.then_some((c.day, pos)))
+                        .collect();
+                    assert_eq!(
+                        mini_month_cells(&cal, year, month),
+                        full,
+                        "{year}-{month:02} with {first_day:?} first"
+                    );
+                    assert_eq!(
+                        full.len() as u32,
+                        days_in_month(year, month),
+                        "{year}-{month:02} lost a day"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_of_the_grid_is_seven_consecutive_days() {
+        // `chunks(7)` replaced `row * 7 + col`; a row must still be a week.
+        let mut cal = CalendarView::new(CalendarConfig::default());
+        cal.view_year = 2024;
+        cal.view_month = 3;
+        let grid = cal.generate_grid();
+        assert_eq!(grid.len(), 42);
+        let rows: Vec<&[GridCell]> = grid.chunks(7).collect();
+        assert_eq!(rows.len(), 6, "six weeks");
+        for week in &rows {
+            assert_eq!(week.len(), 7);
+            // The week number is read from the row's first cell, so every
+            // row must have one.
+            assert!(week.first().is_some());
+        }
+        // And consecutive rows are seven days apart.
+        for pair in rows.windows(2) {
+            let (Some(a), Some(b)) = (
+                pair.first().and_then(|w| w.first()),
+                pair.get(1).and_then(|w| w.first()),
+            ) else {
+                panic!("every row has a first cell");
+            };
+            let a_date = Date::from_ymd(a.year, a.month, a.day);
+            let b_date = Date::from_ymd(b.year, b.month, b.day);
+            assert_eq!(a_date.add_days(7), b_date, "rows are one week apart");
+        }
+    }
+
+    #[test]
+    fn the_twelve_hour_clock_reads_the_same_at_every_hour_of_the_day() {
+        // The `hour % 12` formula replaced a four-armed ladder that existed
+        // to keep its own last arm from subtracting below zero. Walk the day.
+        let expected: [(u64, &str, &str); 6] = [
+            (0, "12", "AM"),
+            (1, "1", "AM"),
+            (11, "11", "AM"),
+            (12, "12", "PM"),
+            (13, "1", "PM"),
+            (23, "11", "PM"),
+        ];
+        let clock = ClockDisplay {
+            use_24h: false,
+            show_seconds: false,
+            extra_timezones: Vec::new(),
+        };
+        for (hour, h12, ampm) in expected {
+            let ts = hour * SECS_PER_HOUR;
+            let text = clock.format_time(ts, &Tz::UTC);
+            assert_eq!(text, format!("{h12}:00 {ampm}"), "hour {hour}");
+        }
+    }
+
     #[test]
     fn grid_leading_trailing_days() {
         let mut cal = CalendarView::new(CalendarConfig::default());
@@ -2014,6 +2140,17 @@ mod tests {
     // EventStore CRUD tests
     // ========================================================================
 
+    /// Add an event, insisting the store could mint an ID for it.
+    ///
+    /// `add_event` returns an `Option` now, and a test that wrote
+    /// `let _ = store.add_event(..)` at each of its twenty-odd setup sites
+    /// would be discarding exactly the signal those sites depend on.
+    fn add(store: &mut EventStore, event: CalendarEvent) -> u64 {
+        store
+            .add_event(event)
+            .expect("a store with a handful of events can still mint an ID")
+    }
+
     fn make_event(title: &str, start: u64, end: u64) -> CalendarEvent {
         CalendarEvent {
             id: 0,
@@ -2030,8 +2167,8 @@ mod tests {
     #[test]
     fn event_store_add_assigns_ids() {
         let mut store = EventStore::new();
-        let id1 = store.add_event(make_event("A", 100, 200));
-        let id2 = store.add_event(make_event("B", 300, 400));
+        let id1 = add(&mut store, make_event("A", 100, 200));
+        let id2 = add(&mut store, make_event("B", 300, 400));
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(store.len(), 2);
@@ -2040,7 +2177,7 @@ mod tests {
     #[test]
     fn event_store_remove() {
         let mut store = EventStore::new();
-        let id = store.add_event(make_event("A", 100, 200));
+        let id = add(&mut store, make_event("A", 100, 200));
         assert!(store.remove_event(id));
         assert!(store.is_empty());
         // Removing again should return false.
@@ -2050,7 +2187,7 @@ mod tests {
     #[test]
     fn event_store_update() {
         let mut store = EventStore::new();
-        let id = store.add_event(make_event("Old Title", 100, 200));
+        let id = add(&mut store, make_event("Old Title", 100, 200));
         let updated = store.update_event(id, |e| {
             e.title = "New Title".to_string();
         });
@@ -2067,7 +2204,7 @@ mod tests {
     #[test]
     fn event_store_get() {
         let mut store = EventStore::new();
-        let id = store.add_event(make_event("Test", 100, 200));
+        let id = add(&mut store, make_event("Test", 100, 200));
         assert!(store.get_event(id).is_some());
         assert!(store.get_event(999).is_none());
     }
@@ -2078,7 +2215,7 @@ mod tests {
         // Event on 2024-06-15 at 10:00-11:00 UTC.
         let start = date_to_timestamp(2024, 6, 15, 10, 0, 0).expect("valid");
         let end = start + 3600;
-        store.add_event(make_event("Meeting", start, end));
+        add(&mut store, make_event("Meeting", start, end));
 
         let found = store.events_for_date(2024, 6, 15);
         assert_eq!(found.len(), 1);
@@ -2095,7 +2232,7 @@ mod tests {
         // Event from June 15 23:00 to June 16 01:00.
         let start = date_to_timestamp(2024, 6, 15, 23, 0, 0).expect("valid");
         let end = date_to_timestamp(2024, 6, 16, 1, 0, 0).expect("valid");
-        store.add_event(make_event("Late Night", start, end));
+        add(&mut store, make_event("Late Night", start, end));
 
         // Should appear on both days.
         assert_eq!(store.events_for_date(2024, 6, 15).len(), 1);
@@ -2108,9 +2245,9 @@ mod tests {
         let ts1 = date_to_timestamp(2024, 6, 10, 9, 0, 0).expect("valid");
         let ts2 = date_to_timestamp(2024, 6, 15, 9, 0, 0).expect("valid");
         let ts3 = date_to_timestamp(2024, 6, 20, 9, 0, 0).expect("valid");
-        store.add_event(make_event("A", ts1, ts1 + 3600));
-        store.add_event(make_event("B", ts2, ts2 + 3600));
-        store.add_event(make_event("C", ts3, ts3 + 3600));
+        add(&mut store, make_event("A", ts1, ts1 + 3600));
+        add(&mut store, make_event("B", ts2, ts2 + 3600));
+        add(&mut store, make_event("C", ts3, ts3 + 3600));
 
         let range_start = date_to_timestamp(2024, 6, 12, 0, 0, 0).expect("valid");
         let range_end = date_to_timestamp(2024, 6, 18, 0, 0, 0).expect("valid");
@@ -2122,17 +2259,20 @@ mod tests {
     #[test]
     fn search_case_insensitive() {
         let mut store = EventStore::new();
-        store.add_event(CalendarEvent {
-            id: 0,
-            title: "Team Meeting".to_string(),
-            start_timestamp: 1000,
-            end_timestamp: 2000,
-            all_day: false,
-            repeat: None,
-            color: theme::BLUE,
-            description: "Weekly standup with the engineering team".to_string(),
-        });
-        store.add_event(make_event("Lunch", 3000, 4000));
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Team Meeting".to_string(),
+                start_timestamp: 1000,
+                end_timestamp: 2000,
+                all_day: false,
+                repeat: None,
+                color: theme::BLUE,
+                description: "Weekly standup with the engineering team".to_string(),
+            },
+        );
+        add(&mut store, make_event("Lunch", 3000, 4000));
 
         let results = store.search("meeting");
         assert_eq!(results.len(), 1);
@@ -2153,16 +2293,19 @@ mod tests {
     fn recurring_daily() {
         let mut store = EventStore::new();
         let start = date_to_timestamp(2024, 6, 1, 10, 0, 0).expect("valid");
-        store.add_event(CalendarEvent {
-            id: 0,
-            title: "Daily Standup".to_string(),
-            start_timestamp: start,
-            end_timestamp: start + 1800, // 30 min
-            all_day: false,
-            repeat: Some(Recurrence::Daily),
-            color: theme::GREEN,
-            description: String::new(),
-        });
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Daily Standup".to_string(),
+                start_timestamp: start,
+                end_timestamp: start + 1800, // 30 min
+                all_day: false,
+                repeat: Some(Recurrence::Daily),
+                color: theme::GREEN,
+                description: String::new(),
+            },
+        );
 
         // Check June 1-5 (5 days).
         let range_start = date_to_timestamp(2024, 6, 1, 0, 0, 0).expect("valid");
@@ -2176,16 +2319,19 @@ mod tests {
         let mut store = EventStore::new();
         // Starting on a Monday (2024-06-03).
         let start = date_to_timestamp(2024, 6, 3, 14, 0, 0).expect("valid");
-        store.add_event(CalendarEvent {
-            id: 0,
-            title: "Weekly Review".to_string(),
-            start_timestamp: start,
-            end_timestamp: start + 3600,
-            all_day: false,
-            repeat: Some(Recurrence::Weekly),
-            color: theme::PEACH,
-            description: String::new(),
-        });
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Weekly Review".to_string(),
+                start_timestamp: start,
+                end_timestamp: start + 3600,
+                all_day: false,
+                repeat: Some(Recurrence::Weekly),
+                color: theme::PEACH,
+                description: String::new(),
+            },
+        );
 
         // Check entire month of June.
         let range_start = date_to_timestamp(2024, 6, 1, 0, 0, 0).expect("valid");
@@ -2199,16 +2345,19 @@ mod tests {
     fn recurring_monthly() {
         let mut store = EventStore::new();
         let start = date_to_timestamp(2024, 1, 15, 9, 0, 0).expect("valid");
-        store.add_event(CalendarEvent {
-            id: 0,
-            title: "Monthly Report".to_string(),
-            start_timestamp: start,
-            end_timestamp: start + 7200,
-            all_day: false,
-            repeat: Some(Recurrence::Monthly),
-            color: theme::YELLOW,
-            description: String::new(),
-        });
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Monthly Report".to_string(),
+                start_timestamp: start,
+                end_timestamp: start + 7200,
+                all_day: false,
+                repeat: Some(Recurrence::Monthly),
+                color: theme::YELLOW,
+                description: String::new(),
+            },
+        );
 
         // Check Jan-June (6 months).
         let range_start = date_to_timestamp(2024, 1, 1, 0, 0, 0).expect("valid");
@@ -2222,16 +2371,19 @@ mod tests {
         let mut store = EventStore::new();
         // Start on Jan 31.
         let start = date_to_timestamp(2024, 1, 31, 10, 0, 0).expect("valid");
-        store.add_event(CalendarEvent {
-            id: 0,
-            title: "Payday".to_string(),
-            start_timestamp: start,
-            end_timestamp: start + 3600,
-            all_day: false,
-            repeat: Some(Recurrence::Monthly),
-            color: theme::GREEN,
-            description: String::new(),
-        });
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Payday".to_string(),
+                start_timestamp: start,
+                end_timestamp: start + 3600,
+                all_day: false,
+                repeat: Some(Recurrence::Monthly),
+                color: theme::GREEN,
+                description: String::new(),
+            },
+        );
 
         // February 2024 has 29 days; the event should appear on Feb 29.
         let feb_events = store.events_for_date(2024, 2, 29);
@@ -2250,16 +2402,19 @@ mod tests {
     fn recurring_yearly() {
         let mut store = EventStore::new();
         let start = date_to_timestamp(2020, 3, 14, 0, 0, 0).expect("valid");
-        store.add_event(CalendarEvent {
-            id: 0,
-            title: "Pi Day".to_string(),
-            start_timestamp: start,
-            end_timestamp: start + SECS_PER_DAY,
-            all_day: true,
-            repeat: Some(Recurrence::Yearly),
-            color: theme::LAVENDER,
-            description: String::new(),
-        });
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Pi Day".to_string(),
+                start_timestamp: start,
+                end_timestamp: start + SECS_PER_DAY,
+                all_day: true,
+                repeat: Some(Recurrence::Yearly),
+                color: theme::LAVENDER,
+                description: String::new(),
+            },
+        );
 
         // Should appear in 2024.
         let found = store.events_for_date(2024, 3, 14);
@@ -2506,26 +2661,32 @@ mod tests {
     #[test]
     fn export_import_roundtrip() {
         let mut store = EventStore::new();
-        store.add_event(CalendarEvent {
-            id: 0,
-            title: "Team Meeting".to_string(),
-            start_timestamp: 1_700_000_000,
-            end_timestamp: 1_700_003_600,
-            all_day: false,
-            repeat: Some(Recurrence::Weekly),
-            color: Color::from_hex(0xA6E3A1),
-            description: "Weekly sync".to_string(),
-        });
-        store.add_event(CalendarEvent {
-            id: 0,
-            title: "Holiday".to_string(),
-            start_timestamp: 1_700_100_000,
-            end_timestamp: 1_700_186_400,
-            all_day: true,
-            repeat: None,
-            color: Color::from_hex(0xF9E2AF),
-            description: "Day off".to_string(),
-        });
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Team Meeting".to_string(),
+                start_timestamp: 1_700_000_000,
+                end_timestamp: 1_700_003_600,
+                all_day: false,
+                repeat: Some(Recurrence::Weekly),
+                color: Color::from_hex(0xA6E3A1),
+                description: "Weekly sync".to_string(),
+            },
+        );
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Holiday".to_string(),
+                start_timestamp: 1_700_100_000,
+                end_timestamp: 1_700_186_400,
+                all_day: true,
+                repeat: None,
+                color: Color::from_hex(0xF9E2AF),
+                description: "Day off".to_string(),
+            },
+        );
 
         let exported = store.export_text();
 
@@ -2580,16 +2741,19 @@ description: Just a test";
     #[test]
     fn export_color_hex_format() {
         let mut store = EventStore::new();
-        store.add_event(CalendarEvent {
-            id: 0,
-            title: "Test".to_string(),
-            start_timestamp: 0,
-            end_timestamp: 100,
-            all_day: false,
-            repeat: None,
-            color: Color::from_hex(0xF38BA8),
-            description: String::new(),
-        });
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Test".to_string(),
+                start_timestamp: 0,
+                end_timestamp: 100,
+                all_day: false,
+                repeat: None,
+                color: Color::from_hex(0xF38BA8),
+                description: String::new(),
+            },
+        );
 
         let text = store.export_text();
         assert!(
@@ -2671,7 +2835,7 @@ description: Just a test";
 
         let mut store = EventStore::new();
         let start = date_to_timestamp(2026, 5, 18, 10, 0, 0).expect("valid");
-        store.add_event(make_event("Test Event", start, start + 3600));
+        add(&mut store, make_event("Test Event", start, start + 3600));
 
         let cmds = cal.render(0.0, 0.0, &store);
         // Should contain at least one small dot-sized FillRect.
@@ -2694,16 +2858,19 @@ description: Just a test";
 
         let mut store = EventStore::new();
         let start = date_to_timestamp(2026, 5, 18, 10, 0, 0).expect("valid");
-        store.add_event(CalendarEvent {
-            id: 0,
-            title: "Visible Event".to_string(),
-            start_timestamp: start,
-            end_timestamp: start + 3600,
-            all_day: false,
-            repeat: None,
-            color: theme::PEACH,
-            description: String::new(),
-        });
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Visible Event".to_string(),
+                start_timestamp: start,
+                end_timestamp: start + 3600,
+                all_day: false,
+                repeat: None,
+                color: theme::PEACH,
+                description: String::new(),
+            },
+        );
 
         let cmds = cal.render(0.0, 0.0, &store);
         // Should contain a text command with the event title.
@@ -2814,16 +2981,19 @@ description: Just a test";
     fn recurring_event_does_not_appear_before_start() {
         let mut store = EventStore::new();
         let start = date_to_timestamp(2024, 6, 15, 10, 0, 0).expect("valid");
-        store.add_event(CalendarEvent {
-            id: 0,
-            title: "Future Weekly".to_string(),
-            start_timestamp: start,
-            end_timestamp: start + 3600,
-            all_day: false,
-            repeat: Some(Recurrence::Weekly),
-            color: theme::BLUE,
-            description: String::new(),
-        });
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Future Weekly".to_string(),
+                start_timestamp: start,
+                end_timestamp: start + 3600,
+                all_day: false,
+                repeat: Some(Recurrence::Weekly),
+                color: theme::BLUE,
+                description: String::new(),
+            },
+        );
 
         // Query a range entirely before the start date.
         let range_start = date_to_timestamp(2024, 5, 1, 0, 0, 0).expect("valid");

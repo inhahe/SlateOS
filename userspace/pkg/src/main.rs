@@ -59,149 +59,18 @@ const DEFAULT_REPO: &str = "https://repo.slateos.org/stable";
 const CONFIG_PATH: &str = "/etc/pkg.conf";
 
 // ============================================================================
-// SHA-256 (inline, no external crate)
+// SHA-256
 // ============================================================================
-
-struct Sha256 {
-    state: [u32; 8],
-    buffer: [u8; 64],
-    buffer_len: usize,
-    total_len: u64,
-}
-
-const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-    0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-    0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-    0xc67178f2,
-];
-
-impl Sha256 {
-    fn new() -> Self {
-        Self {
-            state: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
-                0x1f83d9ab, 0x5be0cd19,
-            ],
-            buffer: [0; 64],
-            buffer_len: 0,
-            total_len: 0,
-        }
-    }
-
-    fn update(&mut self, data: &[u8]) {
-        let mut offset = 0;
-        self.total_len += data.len() as u64;
-
-        if self.buffer_len > 0 {
-            let space = 64 - self.buffer_len;
-            let copy = space.min(data.len());
-            self.buffer[self.buffer_len..self.buffer_len + copy].copy_from_slice(&data[..copy]);
-            self.buffer_len += copy;
-            offset = copy;
-
-            if self.buffer_len == 64 {
-                let block = self.buffer;
-                self.compress(&block);
-                self.buffer_len = 0;
-            }
-        }
-
-        while offset + 64 <= data.len() {
-            let mut block = [0u8; 64];
-            block.copy_from_slice(&data[offset..offset + 64]);
-            self.compress(&block);
-            offset += 64;
-        }
-
-        if offset < data.len() {
-            let remaining = data.len() - offset;
-            self.buffer[..remaining].copy_from_slice(&data[offset..]);
-            self.buffer_len = remaining;
-        }
-    }
-
-    fn compress(&mut self, block: &[u8; 64]) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                block[i * 4],
-                block[i * 4 + 1],
-                block[i * 4 + 2],
-                block[i * 4 + 3],
-            ]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
-
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = h
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(SHA256_K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        self.state[0] = self.state[0].wrapping_add(a);
-        self.state[1] = self.state[1].wrapping_add(b);
-        self.state[2] = self.state[2].wrapping_add(c);
-        self.state[3] = self.state[3].wrapping_add(d);
-        self.state[4] = self.state[4].wrapping_add(e);
-        self.state[5] = self.state[5].wrapping_add(f);
-        self.state[6] = self.state[6].wrapping_add(g);
-        self.state[7] = self.state[7].wrapping_add(h);
-    }
-
-    fn finalize(mut self) -> [u8; 32] {
-        let bit_len = self.total_len * 8;
-        let mut padding = vec![0x80u8];
-        let pad_len = (55 - self.buffer_len as isize).rem_euclid(64) as usize;
-        padding.extend(vec![0u8; pad_len]);
-        padding.extend_from_slice(&bit_len.to_be_bytes());
-        self.update(&padding);
-
-        let mut hash = [0u8; 32];
-        for (i, &word) in self.state.iter().enumerate() {
-            hash[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
-        }
-        hash
-    }
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let hash = hasher.finalize();
-    hash.iter().map(|b| format!("{b:02x}")).collect()
-}
+//
+// Provided by the shared `sha2` crate rather than transcribed here. The copy
+// that used to sit at this spot had no known-answer test — it was checked only
+// for being deterministic and for producing 64 hex characters, which is true
+// of any function anyone would write by accident. For a content-addressed
+// store that is the worst place for such a gap: a blob's name *is* its digest,
+// so a wrong hash is not a failed check but a store whose names mean something
+// nobody else can reproduce. `sha2` is checked against the FIPS 180-4 vectors.
+// See `design-decisions.md` §329 for how the same gap played out in
+// `/etc/shadow`.
 
 // ============================================================================
 // Version parsing and comparison
@@ -391,7 +260,7 @@ struct PackageManifest {
     authors: Vec<String>,
     homepage: String,
     depends: Vec<Dependency>,
-    provides: Vec<String>,       // paths this package provides
+    provides: Vec<String>,         // paths this package provides
     capabilities: Vec<Capability>, // capabilities this package needs
     files: Vec<PackageFile>,
     /// SHA-256 of the entire package archive.
@@ -699,14 +568,15 @@ impl PkgConfig {
             if let Some(rest) = trimmed.strip_prefix("repo:") {
                 // Save previous repo
                 if let Some(ref name) = current_name
-                    && !current_url.is_empty() {
-                        repos.push(RepoConfig {
-                            name: name.clone(),
-                            url: current_url.clone(),
-                            priority: current_priority,
-                            enabled: current_enabled,
-                        });
-                    }
+                    && !current_url.is_empty()
+                {
+                    repos.push(RepoConfig {
+                        name: name.clone(),
+                        url: current_url.clone(),
+                        priority: current_priority,
+                        enabled: current_enabled,
+                    });
+                }
                 current_name = Some(rest.trim().to_string());
                 current_url.clear();
                 current_priority = 500;
@@ -725,14 +595,15 @@ impl PkgConfig {
 
         // Save last repo
         if let Some(ref name) = current_name
-            && !current_url.is_empty() {
-                repos.push(RepoConfig {
-                    name: name.clone(),
-                    url: current_url,
-                    priority: current_priority,
-                    enabled: current_enabled,
-                });
-            }
+            && !current_url.is_empty()
+        {
+            repos.push(RepoConfig {
+                name: name.clone(),
+                url: current_url,
+                priority: current_priority,
+                enabled: current_enabled,
+            });
+        }
 
         if repos.is_empty() {
             return None;
@@ -833,7 +704,7 @@ impl ContentStore {
 
     /// Store data and return its SHA-256 hash.
     fn put(&self, data: &[u8]) -> io::Result<String> {
-        let hash = sha256_hex(data);
+        let hash = sha2::sha256_hex(data).to_string();
         let path = self.blob_path(&hash);
         if !path.exists() {
             if let Some(parent) = path.parent() {
@@ -893,7 +764,7 @@ impl ContentStore {
     /// Verify a blob's integrity.
     fn verify(&self, hash: &str) -> io::Result<bool> {
         let data = self.get(hash)?;
-        Ok(sha256_hex(&data) == hash)
+        Ok(sha2::sha256_hex(&data).as_str() == hash)
     }
 
     /// Total size of all blobs (used by gc reporting).
@@ -987,10 +858,7 @@ impl ContentStore {
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "  warning: failed to deploy {}: {e}",
-                        file.dst
-                    );
+                    eprintln!("  warning: failed to deploy {}: {e}", file.dst);
                     stats.failed += 1;
                 }
             }
@@ -1028,25 +896,23 @@ impl ContentStore {
 
             // Check if this is a config file that might be user-modified
             if conffile_set.contains(file.dst.as_str())
-                && let Some(&old_hash) = old_hashes.get(file.dst.as_str()) {
-                    match ConfigFileTracker::deploy_config(self, &file.hash, dst, old_hash) {
-                        Ok(replaced) => {
-                            stats.deployed += 1;
-                            stats.total_bytes += file.size;
-                            if !replaced {
-                                stats.config_preserved += 1;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "  warning: failed to deploy config {}: {e}",
-                                file.dst
-                            );
-                            stats.failed += 1;
+                && let Some(&old_hash) = old_hashes.get(file.dst.as_str())
+            {
+                match ConfigFileTracker::deploy_config(self, &file.hash, dst, old_hash) {
+                    Ok(replaced) => {
+                        stats.deployed += 1;
+                        stats.total_bytes += file.size;
+                        if !replaced {
+                            stats.config_preserved += 1;
                         }
                     }
-                    continue;
+                    Err(e) => {
+                        eprintln!("  warning: failed to deploy config {}: {e}", file.dst);
+                        stats.failed += 1;
+                    }
                 }
+                continue;
+            }
 
             // Normal file deployment
             match self.deploy_hardlink(&file.hash, dst) {
@@ -1074,10 +940,7 @@ impl ContentStore {
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "  warning: failed to deploy {}: {e}",
-                        file.dst
-                    );
+                    eprintln!("  warning: failed to deploy {}: {e}", file.dst);
                     stats.failed += 1;
                 }
             }
@@ -1272,8 +1135,7 @@ impl Generation {
                     "explicit" => current_explicit = val == "yes",
                     "file" => {
                         if let Some((path, hash)) = val.split_once(' ') {
-                            current_files
-                                .push((path.trim().to_string(), hash.trim().to_string()));
+                            current_files.push((path.trim().to_string(), hash.trim().to_string()));
                         }
                     }
                     _ => {}
@@ -1351,9 +1213,8 @@ impl PackageDb {
     fn load_generation(&self, id: u64) -> io::Result<Generation> {
         let path = self.gen_dir.join(format!("{id}.gen"));
         let text = fs::read_to_string(&path)?;
-        Generation::parse(&text).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid generation file")
-        })
+        Generation::parse(&text)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid generation file"))
     }
 
     /// Save a generation.
@@ -1389,9 +1250,10 @@ impl PackageDb {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if let Some(id_str) = name.strip_suffix(".gen")
-                    && let Ok(id) = id_str.parse::<u64>() {
-                        ids.push(id);
-                    }
+                    && let Ok(id) = id_str.parse::<u64>()
+                {
+                    ids.push(id);
+                }
             }
         }
         ids.sort();
@@ -1672,10 +1534,9 @@ impl TransactionLog {
         let mut end = 0;
         let bytes = rest.as_bytes();
         while end < bytes.len() {
-            if bytes[end] == b'"'
-                && (end == 0 || bytes[end - 1] != b'\\') {
-                    break;
-                }
+            if bytes[end] == b'"' && (end == 0 || bytes[end - 1] != b'\\') {
+                break;
+            }
             end += 1;
         }
         Some(rest[..end].replace("\\\"", "\"").replace("\\\\", "\\"))
@@ -1752,7 +1613,7 @@ impl ConfigFileTracker {
             return false;
         }
         match fs::read(path) {
-            Ok(data) => sha256_hex(&data) != expected_hash,
+            Ok(data) => sha2::sha256_hex(&data).as_str() != expected_hash,
             Err(_) => false, // file doesn't exist or unreadable — not "modified"
         }
     }
@@ -1762,7 +1623,12 @@ impl ConfigFileTracker {
     /// If the file already exists and has been modified by the user,
     /// save the new version as `<path>.pkg-new` and print a notice.
     /// Otherwise deploy normally.
-    fn deploy_config(cas: &ContentStore, hash: &str, dst: &Path, old_hash: &str) -> io::Result<bool> {
+    fn deploy_config(
+        cas: &ContentStore,
+        hash: &str,
+        dst: &Path,
+        old_hash: &str,
+    ) -> io::Result<bool> {
         if dst.exists() && Self::is_user_modified(dst, old_hash) {
             // User modified the config — don't clobber it
             let new_path = PathBuf::from(format!("{}.pkg-new", dst.display()));
@@ -2000,7 +1866,11 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
                 println!("\nCapabilities requested:");
                 has_caps = true;
             }
-            let caps: Vec<&str> = manifest.capabilities.iter().map(|c| c.name.as_str()).collect();
+            let caps: Vec<&str> = manifest
+                .capabilities
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect();
             println!("  {}: {}", manifest.name, caps.join(", "));
         }
     }
@@ -2113,11 +1983,17 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
                     }
                 }
                 Err(e) => {
-                    eprintln!("  warning: file deployment error for {}: {e}", manifest.name);
+                    eprintln!(
+                        "  warning: file deployment error for {}: {e}",
+                        manifest.name
+                    );
                 }
             }
         } else {
-            println!("  Installed {} {} (metadata only)", manifest.name, manifest.version);
+            println!(
+                "  Installed {} {} (metadata only)",
+                manifest.name, manifest.version
+            );
         }
 
         // Run post-install hook if defined
@@ -2127,7 +2003,10 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
                 Ok(true) => println!("  post-install hook OK for {}", manifest.name),
                 Ok(false) => {}
                 Err(e) => {
-                    eprintln!("  warning: {}: post-install hook failed: {e}", manifest.name);
+                    eprintln!(
+                        "  warning: {}: post-install hook failed: {e}",
+                        manifest.name
+                    );
                     // Post-install hook failure is not fatal — package is already installed
                 }
             }
@@ -2139,7 +2018,10 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
         Ok(()) => {
             if let Err(e) = db.set_current_generation(new_gen.id) {
                 eprintln!("pkg: CRITICAL — saved generation but failed to update pointer: {e}");
-                eprintln!("pkg: manually run: echo {} > {}/current", new_gen.id, GEN_DIR);
+                eprintln!(
+                    "pkg: manually run: echo {} > {}/current",
+                    new_gen.id, GEN_DIR
+                );
                 process::exit(1);
             }
             log_transaction(
@@ -2149,10 +2031,7 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
                 &to_install,
                 &desc,
             );
-            println!(
-                "\nDone. Generation {} created.",
-                new_gen.id
-            );
+            println!("\nDone. Generation {} created.", new_gen.id);
         }
         Err(e) => {
             eprintln!("pkg: failed to save generation: {e}");
@@ -2189,10 +2068,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
         if let Some(manifest) = repo_index.iter().find(|m| m.name == *name) {
             for dep in &manifest.depends {
                 if removing.contains(dep.name.as_str()) {
-                    eprintln!(
-                        "pkg: cannot remove {}: required by {name}",
-                        dep.name
-                    );
+                    eprintln!("pkg: cannot remove {}: required by {name}", dep.name);
                     process::exit(1);
                 }
             }
@@ -2225,18 +2101,19 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Run pre-remove hook if we can find the manifest in CAS
         if let Some(pkg) = current.packages.get(name)
             && let Ok(manifest_data) = db.cas.get(&pkg.manifest_hash)
-                && let Ok(text) = String::from_utf8(manifest_data)
-                    && let Some(manifest) = PackageManifest::parse(&text)
-                        && !manifest.hook_pre_remove.is_empty() {
-                            let ver_str = pkg.version.to_string();
-                            match PackageHooks::run(&manifest.hook_pre_remove, name, &ver_str) {
-                                Ok(true) => println!("  pre-remove hook OK for {name}"),
-                                Ok(false) => {}
-                                Err(e) => {
-                                    eprintln!("  warning: {name}: pre-remove hook failed: {e}");
-                                }
-                            }
-                        }
+            && let Ok(text) = String::from_utf8(manifest_data)
+            && let Some(manifest) = PackageManifest::parse(&text)
+            && !manifest.hook_pre_remove.is_empty()
+        {
+            let ver_str = pkg.version.to_string();
+            match PackageHooks::run(&manifest.hook_pre_remove, name, &ver_str) {
+                Ok(true) => println!("  pre-remove hook OK for {name}"),
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("  warning: {name}: pre-remove hook failed: {e}");
+                }
+            }
+        }
 
         // Undeploy files from the filesystem before removing from generation
         if let Some(pkg) = current.packages.get(name) {
@@ -2252,30 +2129,25 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Run post-remove hook
         if let Some(pkg) = current.packages.get(name)
             && let Ok(manifest_data) = db.cas.get(&pkg.manifest_hash)
-                && let Ok(text) = String::from_utf8(manifest_data)
-                    && let Some(manifest) = PackageManifest::parse(&text)
-                        && !manifest.hook_post_remove.is_empty() {
-                            let ver_str = pkg.version.to_string();
-                            match PackageHooks::run(&manifest.hook_post_remove, name, &ver_str) {
-                                Ok(true) => println!("  post-remove hook OK for {name}"),
-                                Ok(false) => {}
-                                Err(e) => {
-                                    eprintln!("  warning: {name}: post-remove hook failed: {e}");
-                                }
-                            }
-                        }
+            && let Ok(text) = String::from_utf8(manifest_data)
+            && let Some(manifest) = PackageManifest::parse(&text)
+            && !manifest.hook_post_remove.is_empty()
+        {
+            let ver_str = pkg.version.to_string();
+            match PackageHooks::run(&manifest.hook_post_remove, name, &ver_str) {
+                Ok(true) => println!("  post-remove hook OK for {name}"),
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("  warning: {name}: post-remove hook failed: {e}");
+                }
+            }
+        }
     }
 
     match db.save_generation(&new_gen) {
         Ok(()) => {
             let _ = db.set_current_generation(new_gen.id);
-            log_transaction(
-                TxOperation::Remove,
-                new_gen.id,
-                current.id,
-                packages,
-                &desc,
-            );
+            log_transaction(TxOperation::Remove, new_gen.id, current.id, packages, &desc);
             println!("\nDone. Generation {} created.", new_gen.id);
         }
         Err(e) => {
@@ -2293,10 +2165,7 @@ fn cmd_list(db: &PackageDb, installed_only: bool) {
             println!("No packages installed.");
             return;
         }
-        println!(
-            "{:<30} {:<15} {:<10}",
-            "PACKAGE", "VERSION", "STATUS"
-        );
+        println!("{:<30} {:<15} {:<10}", "PACKAGE", "VERSION", "STATUS");
         for (name, pkg) in &current.packages {
             let status = if pkg.explicit { "explicit" } else { "auto" };
             println!("{:<30} {:<15} {:<10}", name, pkg.version, status);
@@ -2349,10 +2218,7 @@ fn cmd_search(db: &PackageDb, query: &str) {
                 } else {
                     ""
                 };
-                println!(
-                    "{} {} {status}",
-                    pkg.name, pkg.version
-                );
+                println!("{} {} {status}", pkg.name, pkg.version);
                 if !pkg.description.is_empty() {
                     println!("  {}", pkg.description);
                 }
@@ -2387,26 +2253,27 @@ fn cmd_info(db: &PackageDb, name: &str) {
         // Try to get full manifest from CAS for more details
         if let Ok(data) = db.cas.get(&pkg.manifest_hash)
             && let Ok(text) = String::from_utf8(data)
-                && let Some(manifest) = PackageManifest::parse(&text) {
-                    if !manifest.description.is_empty() {
-                        println!("Desc:      {}", manifest.description);
-                    }
-                    if !manifest.license.is_empty() {
-                        println!("License:   {}", manifest.license);
-                    }
-                    if !manifest.depends.is_empty() {
-                        println!("Depends:");
-                        for dep in &manifest.depends {
-                            println!("  {dep}");
-                        }
-                    }
-                    if !manifest.capabilities.is_empty() {
-                        println!("Capabilities:");
-                        for cap in &manifest.capabilities {
-                            println!("  {}", cap.name);
-                        }
-                    }
+            && let Some(manifest) = PackageManifest::parse(&text)
+        {
+            if !manifest.description.is_empty() {
+                println!("Desc:      {}", manifest.description);
+            }
+            if !manifest.license.is_empty() {
+                println!("License:   {}", manifest.license);
+            }
+            if !manifest.depends.is_empty() {
+                println!("Depends:");
+                for dep in &manifest.depends {
+                    println!("  {dep}");
                 }
+            }
+            if !manifest.capabilities.is_empty() {
+                println!("Capabilities:");
+                for cap in &manifest.capabilities {
+                    println!("  {}", cap.name);
+                }
+            }
+        }
         return;
     }
 
@@ -2463,10 +2330,7 @@ fn cmd_generations(db: &PackageDb) {
                 println!("No generations recorded.");
                 return;
             }
-            println!(
-                "{:<6} {:<20} {:<8} DESCRIPTION",
-                "GEN", "DATE", "PKGS"
-            );
+            println!("{:<6} {:<20} {:<8} DESCRIPTION", "GEN", "DATE", "PKGS");
             for id in &ids {
                 if let Ok(g) = db.load_generation(*id) {
                     let marker = if *id == current_id { " *" } else { "" };
@@ -2573,7 +2437,10 @@ fn cmd_gc(db: &PackageDb, keep: usize) {
     };
 
     if all_ids.len() <= keep {
-        println!("Nothing to garbage-collect ({} generation(s), keeping {keep}).", all_ids.len());
+        println!(
+            "Nothing to garbage-collect ({} generation(s), keeping {keep}).",
+            all_ids.len()
+        );
         return;
     }
 
@@ -2581,12 +2448,7 @@ fn cmd_gc(db: &PackageDb, keep: usize) {
     let mut keep_hashes: HashSet<String> = HashSet::new();
     let mut remove_ids = Vec::new();
 
-    let keep_ids: HashSet<u64> = all_ids
-        .iter()
-        .rev()
-        .take(keep)
-        .copied()
-        .collect();
+    let keep_ids: HashSet<u64> = all_ids.iter().rev().take(keep).copied().collect();
 
     // Always keep current
     let mut keep_ids = keep_ids;
@@ -2607,10 +2469,7 @@ fn cmd_gc(db: &PackageDb, keep: usize) {
         return;
     }
 
-    println!(
-        "Removing {} old generation(s)...",
-        remove_ids.len()
-    );
+    println!("Removing {} old generation(s)...", remove_ids.len());
 
     // Remove generation files
     for id in &remove_ids {
@@ -2681,8 +2540,8 @@ fn cmd_verify(db: &PackageDb, packages: &[String]) {
 
     for (name, pkg) in &to_verify {
         // Verify manifest blob
-        let manifest_ok = db.cas.has(&pkg.manifest_hash)
-            && db.cas.verify(&pkg.manifest_hash).unwrap_or(false);
+        let manifest_ok =
+            db.cas.has(&pkg.manifest_hash) && db.cas.verify(&pkg.manifest_hash).unwrap_or(false);
 
         if !manifest_ok {
             println!("CORRUPT: {name} — manifest blob missing or corrupted");
@@ -2779,14 +2638,15 @@ fn cmd_rdeps(db: &PackageDb, target: &str) {
             // Try to load manifest from CAS
             if let Ok(data) = db.cas.get(&pkg.manifest_hash)
                 && let Ok(text) = String::from_utf8(data)
-                    && let Some(manifest) = PackageManifest::parse(&text) {
-                        for dep in &manifest.depends {
-                            if dep.name == target {
-                                rdeps.push((name.as_str(), &pkg.version));
-                                break;
-                            }
-                        }
+                && let Some(manifest) = PackageManifest::parse(&text)
+            {
+                for dep in &manifest.depends {
+                    if dep.name == target {
+                        rdeps.push((name.as_str(), &pkg.version));
+                        break;
                     }
+                }
+            }
         }
     }
 
@@ -2796,10 +2656,7 @@ fn cmd_rdeps(db: &PackageDb, target: &str) {
         println!("Packages depending on {target}:");
         rdeps.sort_by_key(|(name, _)| *name);
         for (name, ver) in &rdeps {
-            let explicit = current
-                .packages
-                .get(*name)
-                .is_some_and(|p| p.explicit);
+            let explicit = current.packages.get(*name).is_some_and(|p| p.explicit);
             let marker = if explicit { "" } else { " (dependency)" };
             println!("  {name} {ver}{marker}");
         }
@@ -2828,10 +2685,7 @@ fn cmd_libs(db: &PackageDb) {
 
     libs.sort();
 
-    println!(
-        "{:<50} {:<20} VERSION",
-        "LIBRARY", "PACKAGE"
-    );
+    println!("{:<50} {:<20} VERSION", "LIBRARY", "PACKAGE");
     for (path, pkg, ver) in &libs {
         println!("{:<50} {:<20} {ver}", path, pkg);
     }
@@ -2843,9 +2697,10 @@ fn is_shared_lib_path(path: &str) -> bool {
     // Match patterns like: libfoo.dso, libfoo.so, libfoo.so.1, libfoo.so.1.2.3
     if let Some(filename) = path.rsplit('/').next()
         && filename.starts_with("lib")
-            && (filename.contains(".dso") || filename.contains(".so")) {
-                return true;
-            }
+        && (filename.contains(".dso") || filename.contains(".so"))
+    {
+        return true;
+    }
     false
 }
 
@@ -2912,7 +2767,10 @@ fn cmd_upgrade_lib(db: &PackageDb, lib_name: &str, dry_run: bool) {
         .filter(|f| is_shared_lib_path(&f.dst) || f.dst.ends_with(".dso"))
         .collect();
 
-    println!("Library upgrade: {lib_name} {installed_ver} → {}", latest.version);
+    println!(
+        "Library upgrade: {lib_name} {installed_ver} → {}",
+        latest.version
+    );
     if !lib_files.is_empty() {
         println!("\n  Shared library files:");
         for f in &lib_files {
@@ -2924,7 +2782,10 @@ fn cmd_upgrade_lib(db: &PackageDb, lib_name: &str, dry_run: bool) {
         println!("\n  No installed packages depend on {lib_name}.");
     } else {
         affected.sort();
-        println!("\n  Packages that will use the new library ({}):", affected.len());
+        println!(
+            "\n  Packages that will use the new library ({}):",
+            affected.len()
+        );
         for name in &affected {
             if let Some(pkg) = current.packages.get(name) {
                 println!("    {name} {}", pkg.version);
@@ -2974,9 +2835,10 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
             .iter()
             .filter(|p| p.name == **name)
             .max_by(|a, b| a.version.cmp(&b.version))
-            && latest.version > installed.version {
-                upgrades.push((name, &installed.version, &latest.version));
-            }
+            && latest.version > installed.version
+        {
+            upgrades.push((name, &installed.version, &latest.version));
+        }
     }
 
     if upgrades.is_empty() {
@@ -3059,10 +2921,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
             }
         };
 
-        let old_explicit = new_gen
-            .packages
-            .get(*name)
-            .is_none_or(|p| p.explicit);
+        let old_explicit = new_gen.packages.get(*name).is_none_or(|p| p.explicit);
 
         // Get old file hashes for config-aware deployment
         let old_file_hashes: Vec<(String, String)> = current
@@ -3079,11 +2938,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
 
         // Remove files from the old version that are not in the new version.
         // Build a set of new destination paths for quick lookup.
-        let new_dsts: HashSet<&str> = manifest
-            .files
-            .iter()
-            .map(|f| f.dst.as_str())
-            .collect();
+        let new_dsts: HashSet<&str> = manifest.files.iter().map(|f| f.dst.as_str()).collect();
 
         let mut removed_stale = 0u64;
         for (old_dst, _) in &old_file_hashes {
@@ -3102,11 +2957,17 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
 
         // Deploy new files with config-aware upgrade logic
         if !manifest.files.is_empty() && !manifest.archive_hash.is_empty() {
-            match db.cas.deploy_package_files_upgrade(manifest, &old_file_hashes) {
+            match db
+                .cas
+                .deploy_package_files_upgrade(manifest, &old_file_hashes)
+            {
                 Ok(stats) => {
                     let mut extras = Vec::new();
                     if stats.dedup_bytes > 0 {
-                        extras.push(format!("{} saved via dedup", format_size(stats.dedup_bytes)));
+                        extras.push(format!(
+                            "{} saved via dedup",
+                            format_size(stats.dedup_bytes)
+                        ));
                     }
                     if stats.config_preserved > 0 {
                         extras.push(format!("{} config(s) preserved", stats.config_preserved));
@@ -3133,7 +2994,10 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
                     }
                 }
                 Err(e) => {
-                    eprintln!("  warning: file deployment error for {}: {e}", manifest.name);
+                    eprintln!(
+                        "  warning: file deployment error for {}: {e}",
+                        manifest.name
+                    );
                 }
             }
         } else {
@@ -3168,7 +3032,10 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
                 Ok(true) => println!("  post-install hook OK for {}", manifest.name),
                 Ok(false) => {}
                 Err(e) => {
-                    eprintln!("  warning: {}: post-install hook failed: {e}", manifest.name);
+                    eprintln!(
+                        "  warning: {}: post-install hook failed: {e}",
+                        manifest.name
+                    );
                 }
             }
         }
@@ -3177,13 +3044,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
     match db.save_generation(&new_gen) {
         Ok(()) => {
             let _ = db.set_current_generation(new_gen.id);
-            log_transaction(
-                TxOperation::Upgrade,
-                new_gen.id,
-                current.id,
-                &names,
-                &desc,
-            );
+            log_transaction(TxOperation::Upgrade, new_gen.id, current.id, &names, &desc);
             println!("\nDone. Generation {} created.", new_gen.id);
             if total_config_preserved > 0 {
                 println!(
@@ -3404,10 +3265,7 @@ fn cmd_repo_list() {
         return;
     }
 
-    println!(
-        "{:<20} {:<8} {:<8} URL",
-        "REPOSITORY", "PRIO", "STATUS"
-    );
+    println!("{:<20} {:<8} {:<8} URL", "REPOSITORY", "PRIO", "STATUS");
     for repo in &config.repos {
         let status = if repo.enabled { "enabled" } else { "disabled" };
         println!(
@@ -3491,17 +3349,13 @@ fn cmd_download(db: &PackageDb, name: &str, version: &str) -> Result<String, Str
     let repos = config.enabled_repos();
 
     // Look up expected hash from the repository index
-    let expected_hash = db
-        .find_in_repo(name)
-        .ok()
-        .flatten()
-        .and_then(|m| {
-            if m.version.to_string() == version {
-                Some(m.archive_hash.clone())
-            } else {
-                None
-            }
-        });
+    let expected_hash = db.find_in_repo(name).ok().flatten().and_then(|m| {
+        if m.version.to_string() == version {
+            Some(m.archive_hash.clone())
+        } else {
+            None
+        }
+    });
 
     // Try each repository in priority order
     let mut last_error = String::from("no repositories configured");
@@ -3519,15 +3373,17 @@ fn cmd_download(db: &PackageDb, name: &str, version: &str) -> Result<String, Str
 
                 // Verify hash against the index manifest if we have an expected hash
                 if let Some(ref expected) = expected_hash
-                    && !expected.is_empty() && hash != *expected {
-                        let _ = db.cas.remove(&hash);
-                        // Don't give up — might be in another repo with the right content
-                        last_error = format!(
-                            "hash mismatch from {}: expected {expected}, got {hash}",
-                            repo.name
-                        );
-                        continue;
-                    }
+                    && !expected.is_empty()
+                    && hash != *expected
+                {
+                    let _ = db.cas.remove(&hash);
+                    // Don't give up — might be in another repo with the right content
+                    last_error = format!(
+                        "hash mismatch from {}: expected {expected}, got {hash}",
+                        repo.name
+                    );
+                    continue;
+                }
 
                 println!(
                     "Downloaded {name} {version}: {} (sha256: {:.12}...)",
@@ -3542,7 +3398,9 @@ fn cmd_download(db: &PackageDb, name: &str, version: &str) -> Result<String, Str
         }
     }
 
-    Err(format!("download failed from all repositories: {last_error}"))
+    Err(format!(
+        "download failed from all repositories: {last_error}"
+    ))
 }
 
 /// Fetch a package and store it in CAS without installing.
@@ -3581,7 +3439,10 @@ fn cmd_fetch(db: &PackageDb, packages: &[String]) {
 
         // Check if we already have it in CAS
         if !manifest.archive_hash.is_empty() && db.cas.has(&manifest.archive_hash) {
-            println!("{name} {version_str}: already in CAS (sha256: {:.12}...)", manifest.archive_hash);
+            println!(
+                "{name} {version_str}: already in CAS (sha256: {:.12}...)",
+                manifest.archive_hash
+            );
             continue;
         }
 
@@ -3728,9 +3589,10 @@ fn response_is_complete(data: &[u8]) -> bool {
     for line in header_str.lines() {
         let lower = line.to_ascii_lowercase();
         if let Some(rest) = lower.strip_prefix("content-length:")
-            && let Ok(len) = rest.trim().parse::<usize>() {
-                return data.len() >= body_start + len;
-            }
+            && let Ok(len) = rest.trim().parse::<usize>()
+        {
+            return data.len() >= body_start + len;
+        }
     }
 
     // No Content-Length and not chunked — we can't tell, so assume complete
@@ -3790,8 +3652,8 @@ fn parse_pkg_archive(data: &[u8]) -> Result<(PackageManifest, PkgFileBlobs), Str
 
     // Parse manifest text
     let manifest_bytes = &after_magic[..sep_pos];
-    let manifest_text = core::str::from_utf8(manifest_bytes)
-        .map_err(|e| format!("invalid manifest UTF-8: {e}"))?;
+    let manifest_text =
+        core::str::from_utf8(manifest_bytes).map_err(|e| format!("invalid manifest UTF-8: {e}"))?;
     let manifest = PackageManifest::parse(manifest_text)
         .ok_or_else(|| "failed to parse manifest from .pkg file".to_string())?;
 
@@ -3863,7 +3725,7 @@ fn create_pkg_archive(manifest: &PackageManifest, base_dir: &Path) -> io::Result
             )
         })?;
 
-        let hash = sha256_hex(&data);
+        let hash = sha2::sha256_hex(&data).to_string();
         let header = format!("{} {}\n", hash, data.len());
         output.extend_from_slice(header.as_bytes());
         output.extend_from_slice(&data);
@@ -3940,7 +3802,11 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
                 println!("\nCapabilities requested:");
                 has_caps = true;
             }
-            let caps: Vec<&str> = manifest.capabilities.iter().map(|c| c.name.as_str()).collect();
+            let caps: Vec<&str> = manifest
+                .capabilities
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect();
             println!("  {}: {}", manifest.name, caps.join(", "));
         }
     }
@@ -3960,8 +3826,8 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
         let mut store_errors = 0u32;
         for (hash, data) in files {
             // Verify the hash matches the actual data
-            let computed = sha256_hex(data);
-            if computed != *hash {
+            let computed = sha2::sha256_hex(data);
+            if computed.as_str() != hash.as_str() {
                 eprintln!(
                     "  warning: {}: file hash mismatch (archive says {hash}, data hashes to {computed})",
                     manifest.name
@@ -4031,7 +3897,10 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
                     }
                 }
                 Err(e) => {
-                    eprintln!("  warning: file deployment error for {}: {e}", manifest.name);
+                    eprintln!(
+                        "  warning: file deployment error for {}: {e}",
+                        manifest.name
+                    );
                 }
             }
         } else {
@@ -4048,7 +3917,10 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
         Ok(()) => {
             if let Err(e) = db.set_current_generation(new_gen.id) {
                 eprintln!("pkg: CRITICAL — saved generation but failed to update pointer: {e}");
-                eprintln!("pkg: manually run: echo {} > {}/current", new_gen.id, GEN_DIR);
+                eprintln!(
+                    "pkg: manually run: echo {} > {}/current",
+                    new_gen.id, GEN_DIR
+                );
                 process::exit(1);
             }
             let pkg_names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
@@ -4078,7 +3950,10 @@ fn cmd_pack(manifest_path: &Path, output_path: Option<&Path>) {
     let manifest_text = match fs::read_to_string(manifest_path) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("pkg: failed to read manifest {}: {e}", manifest_path.display());
+            eprintln!(
+                "pkg: failed to read manifest {}: {e}",
+                manifest_path.display()
+            );
             process::exit(1);
         }
     };
@@ -4091,9 +3966,7 @@ fn cmd_pack(manifest_path: &Path, output_path: Option<&Path>) {
         }
     };
 
-    let base_dir = manifest_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let base_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
 
     // Compute hashes for all files and update the manifest entries
     let mut updated_files = Vec::new();
@@ -4109,7 +3982,7 @@ fn cmd_pack(manifest_path: &Path, output_path: Option<&Path>) {
                 process::exit(1);
             }
         };
-        let hash = sha256_hex(&data);
+        let hash = sha2::sha256_hex(&data).to_string();
         let size = data.len() as u64;
         updated_files.push(PackageFile {
             src: file.src.clone(),
@@ -4131,7 +4004,7 @@ fn cmd_pack(manifest_path: &Path, output_path: Option<&Path>) {
     };
 
     // Compute archive hash and update manifest
-    let archive_hash = sha256_hex(&archive);
+    let archive_hash = sha2::sha256_hex(&archive).to_string();
     let archive_size = archive.len() as u64;
 
     // Determine output path
@@ -4146,7 +4019,8 @@ fn cmd_pack(manifest_path: &Path, output_path: Option<&Path>) {
                 format_size(archive_size),
                 archive_hash
             );
-            println!("  {} {} — {} files packed",
+            println!(
+                "  {} {} — {} files packed",
                 manifest.name,
                 manifest.version,
                 manifest.files.len()
@@ -4361,22 +4235,20 @@ fn cmd_snapshot_export(db: &PackageDb, output_path: Option<&Path>) {
     let snapshot_text = serialize_snapshot(&entries, &current);
 
     match output_path {
-        Some(path) => {
-            match fs::write(path, &snapshot_text) {
-                Ok(()) => {
-                    println!(
-                        "Snapshot exported to {} ({} packages, {} bytes)",
-                        path.display(),
-                        entries.len(),
-                        snapshot_text.len()
-                    );
-                }
-                Err(e) => {
-                    eprintln!("pkg: failed to write snapshot: {e}");
-                    process::exit(1);
-                }
+        Some(path) => match fs::write(path, &snapshot_text) {
+            Ok(()) => {
+                println!(
+                    "Snapshot exported to {} ({} packages, {} bytes)",
+                    path.display(),
+                    entries.len(),
+                    snapshot_text.len()
+                );
             }
-        }
+            Err(e) => {
+                eprintln!("pkg: failed to write snapshot: {e}");
+                process::exit(1);
+            }
+        },
         None => {
             // Print to stdout
             print!("{snapshot_text}");
@@ -4407,8 +4279,11 @@ fn cmd_snapshot_diff(db: &PackageDb, snapshot_path: &Path) {
     // Build lookup for snapshot and current
     let snap_map: BTreeMap<&str, &SnapshotEntry> =
         entries.iter().map(|e| (e.name.as_str(), e)).collect();
-    let curr_map: BTreeMap<&str, &InstalledPackage> =
-        current.packages.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    let curr_map: BTreeMap<&str, &InstalledPackage> = current
+        .packages
+        .iter()
+        .map(|(k, v)| (k.as_str(), v))
+        .collect();
 
     let mut added = Vec::new(); // In current but not in snapshot
     let mut removed = Vec::new(); // In snapshot but not in current
@@ -4581,10 +4456,11 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
     for entry in &entries {
         // If already at the right version, keep it
         if let Some(curr) = current.packages.get(&entry.name)
-            && curr.version == entry.version {
-                // Keep the existing entry unchanged
-                continue;
-            }
+            && curr.version == entry.version
+        {
+            // Keep the existing entry unchanged
+            continue;
+        }
 
         // Find the package in the repo index
         let manifest = available
@@ -4628,7 +4504,10 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
                         }
                     }
                 } else {
-                    println!("  Installed {} {} (metadata only)", entry.name, entry.version);
+                    println!(
+                        "  Installed {} {} (metadata only)",
+                        entry.name, entry.version
+                    );
                 }
 
                 let file_hashes: Vec<(String, String)> = manifest
@@ -4657,7 +4536,10 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
                 if let Some(curr) = current.packages.get(&entry.name) {
                     // Keep existing — don't remove it just because the exact version isn't
                     // in the current repo index. The CAS might still have the data.
-                    new_gen.packages.entry(entry.name.clone()).or_insert_with(|| curr.clone());
+                    new_gen
+                        .packages
+                        .entry(entry.name.clone())
+                        .or_insert_with(|| curr.clone());
                 }
             }
         }
@@ -4866,8 +4748,9 @@ fn main() {
             // Detect if any argument is a local .pkg file path.
             // A local path is identified by: ending in ".pkg", starting with "/" or "./",
             // or containing a path separator and pointing to an existing file.
-            let (local_paths, repo_names): (Vec<String>, Vec<String>) =
-                rest_filtered.into_iter().partition(|arg| is_local_pkg_path(arg));
+            let (local_paths, repo_names): (Vec<String>, Vec<String>) = rest_filtered
+                .into_iter()
+                .partition(|arg| is_local_pkg_path(arg));
 
             if !local_paths.is_empty() {
                 let paths: Vec<PathBuf> = local_paths.iter().map(PathBuf::from).collect();
@@ -5001,4 +4884,120 @@ fn is_local_pkg_path(arg: &str) -> bool {
         return Path::new(arg).exists();
     }
     false
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The store's blob names are SHA-256 digests, so what they are *is* part
+    /// of the on-disk format: a store written by a build whose hash differs by
+    /// one bit is a store no other build can look anything up in. These pin
+    /// the naming to the FIPS 180-4 vectors rather than to whatever the code
+    /// happens to compute — the distinction that the hand-rolled copy this
+    /// crate used to carry had no way of making.
+    const ABC_DIGEST: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const EMPTY_DIGEST: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    fn temp_store_root(tag: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("pkg-cas-test-{tag}-{}-{unique}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn a_blob_is_named_by_its_published_digest() {
+        let root = temp_store_root("named");
+        let store = ContentStore::new(&root);
+        store.ensure_dirs();
+
+        let hash = store.put(b"abc").expect("put");
+        assert_eq!(hash, ABC_DIGEST);
+
+        let empty = store.put(b"").expect("put empty");
+        assert_eq!(empty, EMPTY_DIGEST);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The two-character prefix directory is part of the layout, not an
+    /// implementation detail: a reader that split at a different offset would
+    /// look in the wrong directory for every blob.
+    #[test]
+    fn a_blob_path_splits_after_two_characters() {
+        let root = temp_store_root("path");
+        let store = ContentStore::new(&root);
+        let path = store.blob_path(ABC_DIGEST);
+        assert_eq!(
+            path,
+            root.join(&ABC_DIGEST[..2]).join(&ABC_DIGEST[2..]),
+            "{path:?}"
+        );
+    }
+
+    /// A hash shorter than the split point must not panic — `split_at` on a
+    /// character boundary past the end would. Corrupt manifests reach here.
+    #[test]
+    fn a_short_hash_does_not_panic_the_path_builder() {
+        let root = temp_store_root("short");
+        let store = ContentStore::new(&root);
+        assert_eq!(store.blob_path(""), root.clone());
+        assert_eq!(store.blob_path("a"), root.join("a"));
+    }
+
+    #[test]
+    fn a_stored_blob_reads_back_and_verifies() {
+        let root = temp_store_root("roundtrip");
+        let store = ContentStore::new(&root);
+        store.ensure_dirs();
+
+        let payload = b"the quick brown fox".as_slice();
+        let hash = store.put(payload).expect("put");
+        assert!(store.has(&hash));
+        assert_eq!(store.get(&hash).expect("get"), payload);
+        assert!(store.verify(&hash).expect("verify"));
+
+        store.remove(&hash).expect("remove");
+        assert!(!store.has(&hash));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `verify` must answer "no" for a blob whose contents were edited under
+    /// it, which is the only thing it exists to detect.
+    #[test]
+    fn verify_rejects_a_blob_whose_contents_changed() {
+        let root = temp_store_root("tamper");
+        let store = ContentStore::new(&root);
+        store.ensure_dirs();
+
+        let hash = store.put(b"original").expect("put");
+        fs::write(store.blob_path(&hash), b"tampered").expect("overwrite");
+        assert!(!store.verify(&hash).expect("verify"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Storing the same bytes twice is one blob, not two — the property that
+    /// makes the store content-addressed rather than merely hash-named.
+    #[test]
+    fn identical_content_stores_once() {
+        let root = temp_store_root("dedupe");
+        let store = ContentStore::new(&root);
+        store.ensure_dirs();
+
+        let first = store.put(b"same bytes").expect("put");
+        let second = store.put(b"same bytes").expect("put again");
+        assert_eq!(first, second);
+        assert_eq!(store.list_blobs().expect("list"), vec![first]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

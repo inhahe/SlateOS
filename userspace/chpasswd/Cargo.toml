@@ -3,4 +3,13 @@ name = "chpasswd"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS chpasswd - batch password change (chpasswd/passwd)"
+
+# The libc's `crypt(3)`. `chpasswd`, `passwd` and `login` read and write the
+# same `/etc/shadow`, and while each implemented the hash format itself they
+# disagreed — this tool labelled its output `$5$`, the standard identifier
+# for SHA-256 crypt, over a hash that was not SHA-crypt at all. The format
+# now has exactly one implementation, and this dependency is what makes that
+# true rather than aspirational. See
+# `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
 [dependencies]
+posix = { path = "../../posix" }

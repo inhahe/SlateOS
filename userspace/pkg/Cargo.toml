@@ -3,5 +3,12 @@ name = "pkg"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS package manager — content-addressed store with atomic generations"
+
+# The shared SHA-256. `pkg` is a content-addressed store: a blob's name *is*
+# its digest, so a digest differing from everyone else's by one bit is a store
+# that cannot be verified or shared, and nothing would say so. This crate
+# carried its own transcription with no known-answer test — the same shape as
+# the `/etc/shadow` bug in `design-decisions.md` §329.
 [dependencies]
 httpclient = { path = "../../net/httpclient" }
+sha2 = { path = "../../sha2" }

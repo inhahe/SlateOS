@@ -139,9 +139,10 @@ fn lookup_passwd(username: &str) -> Option<PasswdEntry> {
             continue;
         }
         if let Some(entry) = parse_passwd_entry(line)
-            && entry.username == username {
-                return Some(entry);
-            }
+            && entry.username == username
+        {
+            return Some(entry);
+        }
     }
     None
 }
@@ -154,86 +155,89 @@ fn lookup_shadow(username: &str) -> Option<ShadowEntry> {
             continue;
         }
         if let Some(entry) = parse_shadow_entry(line)
-            && entry.username == username {
-                return Some(entry);
-            }
+            && entry.username == username
+        {
+            return Some(entry);
+        }
     }
     None
 }
 
 // ---------------------------------------------------------------------------
-// Password hashing (simplified)
+// Password verification
 // ---------------------------------------------------------------------------
+//
+// All of it is `posix::crypt`, and deliberately none of it is here.  This
+// file used to carry its own `simple_hash` — the SHA-256 initial vector
+// followed by two arithmetic operations per byte, one pass, no iteration —
+// and `passwd` wrote entries with a genuine SHA-256 under a `$sha256$`
+// label.  The two produced strings of the same length and never the same
+// contents, so `login` rejected the correct password for every account
+// `passwd` had touched, and no test caught it because no test crossed the
+// two tools.  See `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
+//
+// The lesson is not "we picked the wrong hash": it is that three programs
+// sharing one file each implemented the format separately.  So this file no
+// longer implements it at all.  `crypt::verify` takes the stored entry as
+// the setting, which is what makes a stored hash self-describing, and the
+// comparison it performs is the only one there is.
 
-/// Simple password verification.
-/// In a real system this would use crypt(3) with the appropriate algorithm
-/// (SHA-512, bcrypt, etc.). Here we implement a basic SHA-256 comparison.
-fn verify_password(password: &str, hash: &str) -> bool {
-    if hash == "!" || hash == "!!" || hash == "*" {
-        // Locked account: never authenticates regardless of supplied password.
-        return false;
+/// The outcome of checking a supplied password against a stored entry.
+///
+/// Four cases rather than a `bool`, because the caller must treat two of
+/// them the same way toward the user (say "Login incorrect", learn nothing)
+/// and differently toward the administrator: an entry nothing can verify is
+/// a broken system, not a mistyped password, and saying so is the only way
+/// anyone finds out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasswordCheck {
+    /// The supplied password reproduces the stored entry.
+    Accepted,
+    /// The entry is one we can recompute, and the password does not match.
+    Rejected,
+    /// The entry is a lock marker (`!`, `!!`, `*`, or a `!`-prefixed hash).
+    /// The account was deliberately disabled; no password opens it.
+    Locked,
+    /// The entry is in no format this system can recompute, so no password
+    /// can ever match it.  That includes `x` (a `passwd(5)` marker that has
+    /// no meaning in `shadow(5)`), a hash whose field lengths do not match
+    /// the method it names — which is how the entries this tree wrote before
+    /// it called `crypt` are recognised — and anything else unparseable.
+    Unusable,
+}
+
+/// Check `password` against a `shadow(5)` password field.
+fn check_password(password: &str, hash: &str) -> PasswordCheck {
+    // A leading `!` or `*` marks the account disabled.  `!` is conventionally
+    // *prefixed* to an otherwise-valid hash so the password survives an
+    // unlock, so this is a prefix test and not an equality test: `!$6$…`
+    // must not fall through and be verified as if the `!` were salt.
+    if hash.starts_with('!') || hash.starts_with('*') {
+        return PasswordCheck::Locked;
     }
 
-    if hash == "x" {
-        // Password in shadow file - this shouldn't happen if we already have the hash
-        return false;
-    }
-
-    // Empty hash = no password required (traditional Unix passwordless account).
-    // An empty supplied password authenticates; a non-empty one does not.
+    // Traditional Unix passwordless account: the empty password, and only
+    // the empty password, authenticates.
     if hash.is_empty() {
-        return password.is_empty();
+        return if password.is_empty() {
+            PasswordCheck::Accepted
+        } else {
+            PasswordCheck::Rejected
+        };
     }
 
-    // Parse crypt-style hash: $algorithm$salt$hash
-    if hash.starts_with('$') {
-        let parts: Vec<&str> = hash.splitn(4, '$').collect();
-        if parts.len() >= 4 {
-            let _algo = parts[1];
-            let salt = parts[2];
-            let expected = parts[3];
-
-            // Compute hash with salt
-            let salted = format!("{salt}${password}");
-            let computed = simple_hash(&salted);
-
-            // Compare (constant-time comparison for security)
-            return constant_time_eq(computed.as_bytes(), expected.as_bytes());
-        }
+    // Asked *before* verifying, so that an entry which can never verify is
+    // reported as broken rather than counted as a wrong password.  There is
+    // no cleartext fallback: an entry that is not a hash is not a password.
+    if posix::crypt::stored_method(hash.as_bytes()).is_none() {
+        return PasswordCheck::Unusable;
     }
 
-    // Plain text comparison (insecure, but handles legacy entries)
-    constant_time_eq(password.as_bytes(), hash.as_bytes())
-}
-
-/// Constant-time byte comparison to prevent timing attacks
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+    if posix::crypt::verify(password.as_bytes(), hash.as_bytes()) {
+        PasswordCheck::Accepted
+    } else {
+        PasswordCheck::Rejected
     }
-    let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
-    }
-    result == 0
-}
-
-/// Simple hash function (placeholder for proper crypt(3))
-fn simple_hash(input: &str) -> String {
-    // SHA-256-like hash using a simple algorithm
-    // In production, this would use proper SHA-256/SHA-512/bcrypt
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    ];
-
-    for (i, byte) in input.bytes().enumerate() {
-        let idx = i % 8;
-        h[idx] = h[idx].wrapping_mul(31).wrapping_add(u32::from(byte));
-        h[(idx + 1) % 8] ^= h[idx].rotate_left(7);
-    }
-
-    h.iter().map(|v| format!("{v:08x}")).collect::<String>()
 }
 
 // ---------------------------------------------------------------------------
@@ -303,19 +307,13 @@ fn check_account_expired(shadow: &ShadowEntry) -> Result<(), LoginError> {
         // Would check against current time
         // For now, just check if it's set to a very old date
         if shadow.expire_date == 1 {
-            return Err(LoginError::AccountLocked(
-                "account has expired".to_string(),
-            ));
+            return Err(LoginError::AccountLocked("account has expired".to_string()));
         }
     }
 
     // Check if password is locked
-    if shadow.password_hash.starts_with('!')
-        || shadow.password_hash.starts_with('*')
-    {
-        return Err(LoginError::AccountLocked(
-            "account is locked".to_string(),
-        ));
+    if shadow.password_hash.starts_with('!') || shadow.password_hash.starts_with('*') {
+        return Err(LoginError::AccountLocked("account is locked".to_string()));
     }
 
     Ok(())
@@ -360,10 +358,7 @@ fn build_environment(user: &PasswdEntry, preserve_env: bool) -> HashMap<String, 
     }
 
     // Mail
-    env_map.insert(
-        "MAIL".to_string(),
-        format!("{MAIL_DIR}/{}", user.username),
-    );
+    env_map.insert("MAIL".to_string(), format!("{MAIL_DIR}/{}", user.username));
 
     env_map
 }
@@ -371,9 +366,10 @@ fn build_environment(user: &PasswdEntry, preserve_env: bool) -> HashMap<String, 
 /// Display message of the day
 fn display_motd(writer: &mut dyn Write) -> io::Result<()> {
     if let Ok(content) = std::fs::read_to_string(MOTD_FILE)
-        && !content.is_empty() {
-            write!(writer, "{content}")?;
-        }
+        && !content.is_empty()
+    {
+        write!(writer, "{content}")?;
+    }
     Ok(())
 }
 
@@ -420,17 +416,15 @@ fn record_faillog(username: &str, tty: &str) {
 // Configuration
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct Config {
     username: Option<String>,
-    force_login: bool,       // -f: skip authentication
+    force_login: bool,        // -f: skip authentication
     hostname: Option<String>, // -h: remote host
-    preserve_env: bool,      // -p: preserve environment
+    preserve_env: bool,       // -p: preserve environment
     show_help: bool,
     show_version: bool,
 }
-
 
 fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut cfg = Config::default();
@@ -490,7 +484,9 @@ fn do_login(
             name.clone()
         } else {
             write!(writer, "login: ").map_err(|e| LoginError::SystemError(e.to_string()))?;
-            writer.flush().map_err(|e| LoginError::SystemError(e.to_string()))?;
+            writer
+                .flush()
+                .map_err(|e| LoginError::SystemError(e.to_string()))?;
 
             let mut buf = String::new();
             reader
@@ -512,7 +508,9 @@ fn do_login(
                 if !cfg.force_login {
                     write!(writer, "Password: ")
                         .map_err(|e| LoginError::SystemError(e.to_string()))?;
-                    writer.flush().map_err(|e| LoginError::SystemError(e.to_string()))?;
+                    writer
+                        .flush()
+                        .map_err(|e| LoginError::SystemError(e.to_string()))?;
                     let mut _discard = String::new();
                     let _ = reader.read_line(&mut _discard);
                 }
@@ -545,9 +543,10 @@ fn do_login(
 
             // Authenticate (unless -f for forced login)
             if !cfg.force_login {
-                write!(writer, "Password: ")
+                write!(writer, "Password: ").map_err(|e| LoginError::SystemError(e.to_string()))?;
+                writer
+                    .flush()
                     .map_err(|e| LoginError::SystemError(e.to_string()))?;
-                writer.flush().map_err(|e| LoginError::SystemError(e.to_string()))?;
 
                 let mut password = String::new();
                 reader
@@ -555,11 +554,27 @@ fn do_login(
                     .map_err(|e| LoginError::SystemError(e.to_string()))?;
                 let password = password.trim_end_matches('\n').trim_end_matches('\r');
 
-                if !verify_password(password, &shadow.password_hash) {
+                let outcome = check_password(password, &shadow.password_hash);
+                if outcome != PasswordCheck::Accepted {
                     attempts = attempts.saturating_add(1);
                     writeln!(writer, "Login incorrect")
                         .map_err(|e| LoginError::SystemError(e.to_string()))?;
                     record_faillog(&username, &tty);
+
+                    // The user is told only "Login incorrect", whatever the
+                    // reason — but an entry nothing can verify is a broken
+                    // system rather than a wrong password, and if login says
+                    // nothing about it the administrator's only symptom is a
+                    // user who insists their password is right.  It leaks
+                    // nothing exploitable: the account cannot be entered
+                    // either way, and the remedy needs root.
+                    if outcome == PasswordCheck::Unusable {
+                        eprintln!(
+                            "login: the password entry for `{username}' is not in a format \
+                             this system can verify, so no password will be accepted for it; \
+                             reset it with `passwd {username}' as root"
+                        );
+                    }
 
                     if attempts >= MAX_LOGIN_ATTEMPTS {
                         return Err(LoginError::AuthFailed(
@@ -567,25 +582,54 @@ fn do_login(
                         ));
                     }
                     if cfg.username.is_some() {
-                        return Err(LoginError::AuthFailed(
-                            "authentication failure".to_string(),
-                        ));
+                        return Err(LoginError::AuthFailed("authentication failure".to_string()));
                     }
                     continue;
                 }
             }
         } else if !cfg.force_login {
-            // No shadow entry — check if passwd has a password field
-            // In most systems, the password field in passwd is 'x' meaning check shadow
-            write!(writer, "Password: ")
+            // No shadow entry.  This branch used to prompt for a password,
+            // discard it, and log the user in — an unconditional
+            // authentication bypass for any account missing from
+            // `/etc/shadow`, and for *every* account if the file itself was
+            // absent or unreadable.  `PasswdEntry` does not even carry the
+            // `passwd(5)` password column, so there was nothing here to
+            // check against; the prompt was decoration.
+            //
+            // An account with no verifiable secret is an account that cannot
+            // be authenticated, so it is not entered.  The prompt is still
+            // shown and the answer still read, so that a missing entry takes
+            // the same path — and the same time — as a wrong password, and
+            // cannot be used to enumerate which users have shadow entries.
+            write!(writer, "Password: ").map_err(|e| LoginError::SystemError(e.to_string()))?;
+            writer
+                .flush()
                 .map_err(|e| LoginError::SystemError(e.to_string()))?;
-            writer.flush().map_err(|e| LoginError::SystemError(e.to_string()))?;
 
             let mut password = String::new();
             reader
                 .read_line(&mut password)
                 .map_err(|e| LoginError::SystemError(e.to_string()))?;
-            // Without shadow, accept any password (insecure fallback)
+            drop(password);
+
+            attempts = attempts.saturating_add(1);
+            writeln!(writer, "Login incorrect")
+                .map_err(|e| LoginError::SystemError(e.to_string()))?;
+            record_faillog(&username, &tty);
+            eprintln!(
+                "login: no `/etc/shadow' entry for `{username}', so there is no password \
+                 to check; create one with `passwd {username}' as root"
+            );
+
+            if attempts >= MAX_LOGIN_ATTEMPTS {
+                return Err(LoginError::AuthFailed(
+                    "too many failed attempts".to_string(),
+                ));
+            }
+            if cfg.username.is_some() {
+                return Err(LoginError::AuthFailed("authentication failure".to_string()));
+            }
+            continue;
         }
 
         // Build environment
@@ -672,7 +716,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                 user.uid,
                 user.gid
             );
-            eprintln!("login: environment: HOME={}", env_map.get("HOME").unwrap_or(&String::new()));
+            eprintln!(
+                "login: environment: HOME={}",
+                env_map.get("HOME").unwrap_or(&String::new())
+            );
             0
         }
         Err(e) => {
@@ -729,11 +776,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_dashdash() {
-        let args = vec![
-            "login".to_string(),
-            "--".to_string(),
-            "-user".to_string(),
-        ];
+        let args = vec!["login".to_string(), "--".to_string(), "-user".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.username, Some("-user".to_string()));
     }
@@ -803,44 +846,111 @@ mod tests {
         assert_eq!(entry.password_hash, "!");
     }
 
-    #[test]
-    fn test_verify_password_locked() {
-        assert!(!verify_password("anything", "!"));
-        assert!(!verify_password("anything", "!!"));
-        assert!(!verify_password("anything", "*"));
+    /// Hash `password` the way `passwd` and `chpasswd` now do, so the tests
+    /// below check the entry those tools actually write rather than one
+    /// hand-assembled here.
+    fn shadow_entry_for(password: &str) -> String {
+        let mut sb = posix::crypt::buf();
+        let setting =
+            posix::crypt::setting_into(posix::crypt::Method::Sha512, b"0123456789abcdef", &mut sb)
+                .expect("setting");
+        let mut hb = posix::crypt::buf();
+        posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hb)
+            .expect("hash")
+            .to_string()
     }
 
     #[test]
-    fn test_verify_password_empty_hash() {
-        assert!(verify_password("", ""));
+    fn test_check_password_locked() {
+        assert_eq!(check_password("anything", "!"), PasswordCheck::Locked);
+        assert_eq!(check_password("anything", "!!"), PasswordCheck::Locked);
+        assert_eq!(check_password("anything", "*"), PasswordCheck::Locked);
+    }
+
+    /// A `!`-prefixed hash is the shadow-suite's way of locking an account
+    /// without discarding its password.  It must not authenticate — and in
+    /// particular the `!` must not be mistaken for part of the setting.
+    #[test]
+    fn test_check_password_locked_hash_does_not_authenticate() {
+        let locked = format!("!{}", shadow_entry_for("correct horse"));
+        assert_eq!(
+            check_password("correct horse", &locked),
+            PasswordCheck::Locked
+        );
     }
 
     #[test]
-    fn test_verify_password_plain() {
-        assert!(verify_password("secret", "secret"));
-        assert!(!verify_password("wrong", "secret"));
+    fn test_check_password_empty_hash() {
+        assert_eq!(check_password("", ""), PasswordCheck::Accepted);
+        assert_eq!(check_password("anything", ""), PasswordCheck::Rejected);
     }
 
+    /// There is no cleartext fallback: an entry that is not a hash cannot
+    /// authenticate anything, least of all itself.
     #[test]
-    fn test_constant_time_eq() {
-        assert!(constant_time_eq(b"hello", b"hello"));
-        assert!(!constant_time_eq(b"hello", b"world"));
-        assert!(!constant_time_eq(b"hello", b"hell"));
-        assert!(constant_time_eq(b"", b""));
+    fn test_check_password_has_no_cleartext_path() {
+        assert_eq!(check_password("secret", "secret"), PasswordCheck::Unusable);
+        assert_eq!(check_password("wrong", "secret"), PasswordCheck::Unusable);
+        assert_eq!(check_password("x", "x"), PasswordCheck::Unusable);
     }
 
+    /// The regression for `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`:
+    /// the entry `passwd` writes must be the entry `login` accepts.  Before
+    /// the fix each tool implemented the format itself and the correct
+    /// password was rejected.
     #[test]
-    fn test_simple_hash_deterministic() {
-        let h1 = simple_hash("test");
-        let h2 = simple_hash("test");
-        assert_eq!(h1, h2);
+    fn test_a_password_set_by_passwd_is_accepted_by_login() {
+        let stored = shadow_entry_for("correct horse");
+        assert!(stored.starts_with("$6$"));
+        assert_eq!(
+            check_password("correct horse", &stored),
+            PasswordCheck::Accepted
+        );
+        assert_eq!(
+            check_password("correct hors", &stored),
+            PasswordCheck::Rejected
+        );
+        assert_eq!(check_password("", &stored), PasswordCheck::Rejected);
     }
 
+    /// The two formats this tree wrote before it called `crypt`: `passwd`'s
+    /// invented `$sha256$`, and `chpasswd`'s 64 hex digits mislabelled `$5$`.
+    /// Neither can ever verify, and both must be reported as broken rather
+    /// than counted as a wrong password — otherwise the administrator's only
+    /// symptom is a user who insists their password is right.
     #[test]
-    fn test_simple_hash_different() {
-        let h1 = simple_hash("test1");
-        let h2 = simple_hash("test2");
-        assert_ne!(h1, h2);
+    fn test_check_password_reports_the_obsolete_formats_as_unusable() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for prefix in ["$sha256$", "$5$", "$6$", "$1$"] {
+            let stored = format!("{prefix}0123456789abcdef${digest}");
+            assert_eq!(
+                check_password("correct horse", &stored),
+                PasswordCheck::Unusable,
+                "{stored}"
+            );
+        }
+    }
+
+    /// A published vector, checked through the exact path `login` uses.
+    ///
+    /// This replaces two tests that asserted only that the old `simple_hash`
+    /// was deterministic and that two inputs gave two outputs.  Both are
+    /// true of every function anyone would write by accident, which is
+    /// precisely why they passed while the thing under test was not a hash
+    /// at all.  A known answer is the only test that can tell an algorithm
+    /// from something that merely looks like one, so this file now carries
+    /// one — from Ulrich Drepper's SHA-crypt specification.
+    #[test]
+    fn test_login_verifies_against_a_published_vector() {
+        const VECTOR: &str = "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1";
+        assert_eq!(
+            check_password("Hello world!", VECTOR),
+            PasswordCheck::Accepted
+        );
+        assert_eq!(
+            check_password("Hello world", VECTOR),
+            PasswordCheck::Rejected
+        );
     }
 
     #[test]
@@ -1004,15 +1114,44 @@ mod tests {
         assert_eq!(cfg.username, Some("admin".to_string()));
     }
 
+    /// Every method a `shadow(5)` entry can name must round-trip, so that
+    /// upgrading the default (or reading a file another system wrote) does
+    /// not quietly stop authenticating.
     #[test]
-    fn test_verify_password_crypt_style() {
-        // Test that crypt-style hashes are processed
-        let password = "test";
-        let salt = "mysalt";
-        let salted = format!("{salt}${password}");
-        let hash_val = simple_hash(&salted);
-        let full_hash = format!("$6${salt}${hash_val}");
-        assert!(verify_password(password, &full_hash));
-        assert!(!verify_password("wrong", &full_hash));
+    fn test_check_password_accepts_every_supported_method() {
+        for method in [
+            posix::crypt::Method::Md5,
+            posix::crypt::Method::Sha256,
+            posix::crypt::Method::Sha512,
+        ] {
+            let mut sb = posix::crypt::buf();
+            let setting = posix::crypt::setting_into(method, b"mysalt", &mut sb)
+                .unwrap_or_else(|| panic!("{method:?} setting"));
+            let mut hb = posix::crypt::buf();
+            let stored = posix::crypt::hash_into(b"test", setting.as_bytes(), &mut hb)
+                .unwrap_or_else(|| panic!("{method:?} hash"));
+            assert!(stored.starts_with(method.prefix()), "{stored}");
+            assert_eq!(check_password("test", stored), PasswordCheck::Accepted);
+            assert_eq!(check_password("wrong", stored), PasswordCheck::Rejected);
+        }
+    }
+
+    /// An explicit `rounds=` field is part of the format and must survive
+    /// verification: the setting is read back out of the stored entry, so a
+    /// parser that lost the field would recompute a different hash.
+    #[test]
+    fn test_check_password_honours_an_explicit_rounds_field() {
+        let mut hb = posix::crypt::buf();
+        let stored =
+            posix::crypt::hash_into(b"test", b"$6$rounds=1234$mysalt$", &mut hb).expect("hash");
+        assert!(stored.starts_with("$6$rounds=1234$mysalt$"), "{stored}");
+        // The same password and salt at the default round count is a
+        // *different* entry, which is the whole purpose of the field.
+        let mut db = posix::crypt::buf();
+        let default_rounds =
+            posix::crypt::hash_into(b"test", b"$6$mysalt$", &mut db).expect("hash");
+        assert_ne!(stored, default_rounds);
+        assert_eq!(check_password("test", stored), PasswordCheck::Accepted);
+        assert_eq!(check_password("wrong", stored), PasswordCheck::Rejected);
     }
 }

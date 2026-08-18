@@ -3,5 +3,15 @@ name = "login"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS Login Manager — display manager and session launcher"
+
+# `userdb` for `/etc/users.yaml`: the format, the parser and the password hash.
+# This crate carried its own of each, and so did `userspace/useradm`, in
+# versions that disagreed about the name of the salt field and about what was
+# hashed — so an account created with `useradm` could not log in here. See
+# `design-decisions.md` §330.
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+userdb = { path = "../../userspace/userdb" }
+
+[lints]
+workspace = true

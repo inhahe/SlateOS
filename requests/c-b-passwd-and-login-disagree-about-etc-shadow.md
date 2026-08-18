@@ -1,5 +1,31 @@
 # c → b: a password set with `passwd` cannot be used to log in
 
+**Status:** ✅ **LANDED 2026-08-17 by lane B.** All three tools now call
+`posix/src/crypt.rs`, which gained a safe Rust API for the purpose (`Method`,
+`hash_into`, `setting_into`, `verify`, `stored_method`); new passwords are
+`$6$` SHA-512, and `login` has a named regression test that a password set
+through `passwd`'s code path is accepted by `login`'s. Rationale, alternatives
+and the two further `login` bypasses found on the way: `design-decisions.md`
+§329, summarised in `known-issues.md`. Kept, not deleted, per `roadmap.md`
+rule 2.
+
+**Two corrections to the report, both minor and neither changing its
+conclusion:**
+
+1. **`crypt_str` does not exist.** It is a test helper inside `crypt.rs`'s own
+   `mod tests`. Everything public was C ABI — `crypt`, `crypt_r`, `encrypt`,
+   `setkey` — over a `static mut CRYPT_BUF`, which three Rust callers cannot
+   share safely. Hence a new safe API in `crypt.rs` rather than a wrapper on
+   the caller side.
+2. **The migration question turned out to have no tradeoff in its detection
+   half.** Genuine crypt hash fields are 22/43/86 crypt-base-64 characters;
+   every entry this tree wrote is 64 hex digits. The two populations cannot be
+   confused, so no heuristic and no operator arbitration was needed to decide
+   *which* entries are broken. Only the policy remained — refuse them (chosen,
+   with an explicit "run `passwd <user>` as root" diagnostic) versus a
+   compatibility path — and that is filed as `open-questions.md` B-Q3 in case
+   the operator prefers the other answer.
+
 **From:** lane C · **To:** lane B (`userspace/**`, `posix/**`) · **2026-08-17**
 **Severity:** High — an account-lockout bug and a password-storage bug, in the
 same three files.

@@ -20541,3 +20541,357 @@ exists: when that driver lands it is one more `impl Present`, and `Server`,
 framebuffer turns out to need something `show(pixels, w, h)` cannot express —
 a page flip that hands over buffer *ownership* rather than copying is the
 plausible one, and would make `show` take something like a `&mut Frame` instead.
+
+---
+
+## §329 — The three shadow-file tools call libc's `crypt`, and entries in the two invented formats fail closed
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** Three programs — `login`, `passwd` and `chpasswd` — all read and
+write the one file that stores users' passwords, `/etc/shadow`, and each of
+them scrambled the password a different way before storing it. The result was
+that a password you set with `passwd` could not be used to log in: `login`
+scrambled the typed password by a different rule and concluded it was wrong.
+Two things had to be decided. First, *where* the one true scrambling rule
+should live — in a library the three tools share, and if so which one. Second,
+what to do about passwords already stored in the wrong formats: refuse them and
+make an administrator reset them, or keep the old rules alive so those users
+can still log in. We made the three tools call the copy already in the `posix`
+crate, and we made old entries fail closed with an explicit message naming the
+fix.
+
+**Terms.** *Hashing* a password means running it through a one-way scramble so
+the file stores something an attacker cannot reverse into the password.
+`crypt(3)` is the C library function every Unix uses for this; its output is
+self-describing — a stored entry like `$6$salt$hash…` names its own method
+(`$6$` = SHA-512) and carries its own *salt* (a per-user random string that
+stops two users with the same password having the same entry). *Failing
+closed* means that when the system cannot tell whether a password is right, it
+answers "no" rather than "yes".
+
+### What was actually wrong
+
+Lane C found it and filed
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`. Verified against
+the code before anything was changed:
+
+| Tool | Wrote / read | Was it a hash? |
+|---|---|---|
+| `passwd` | `$sha256$salt$…` | A real SHA-256, but one pass, no work factor, and `$sha256$` is not a crypt identifier any other tool knows |
+| `login` | verified with a local `simple_hash` | No. `simple_hash` was an invented mixing function |
+| `chpasswd` | `$5$`/`$6$`/`$1$` | No. The same invented function, wearing the *standard* labels |
+
+`chpasswd` is the worst of the three: an entry it wrote is indistinguishable
+*by its label* from a genuine SHA-512 entry, so a future reader that trusted
+the label would compute the real algorithm and get a different answer.
+
+### Decision 1 — the rule lives in `posix`, not in a new shared crate
+
+`posix/src/crypt.rs` was already a correct and complete SHA-crypt:
+`$1$`/`$5$`/`$6$`, the `rounds=` field, the crypt base-64 alphabet, and
+Drepper's published test vectors. The alternative considered was extracting it
+into a new root crate, alongside the existing `yamldoc`, `textfmt`, `textfind`,
+`byteread`, `randrange` and `sha2`.
+
+*Against the extraction, decisively:* root `sha2/` implements **SHA-256 only**.
+`crypt.rs` needs SHA-512 and MD5 as well, so extracting it would have meant
+migrating two more cores first — a large change made only to avoid a dependency
+that is, on inspection, the correct one.
+
+*For depending on `posix`:* `crypt` **is** a libc function. Real shadow-utils
+link against libc and call it. A userspace tool depending on this project's
+libc crate is the arrangement every other Unix has, not a compromise. `posix`
+is already a workspace member with `crate-type = ["staticlib", "rlib"]` and
+`#![cfg_attr(target_os = "none", no_std)]`, so it builds against std on the
+host and the three tools' tests run unchanged.
+
+### Decision 2 — a safe Rust API, because the C ABI was not callable
+
+The request recommended calling `crypt_str`. That function does not exist — it
+is a *test helper* inside `crypt.rs`'s own `mod tests`. Everything public was
+C ABI: `crypt`, `crypt_r`, `encrypt`, `setkey`, raw pointers, NUL termination,
+and a `static mut CRYPT_BUF`. Three Rust callers sharing one mutable static is
+not an interface; it is a data race waiting for a second thread.
+
+So `crypt.rs` gained a safe section: `Method` (`Md5`/`Sha256`/`Sha512`, each
+knowing its own prefix, hash length and salt maximum), `hash_into`,
+`setting_into`, `verify` and `stored_method`, all writing into a caller-owned
+`HashBuf` with no shared state. The new tests deliberately do **not** take the
+existing `CRYPT_TEST_LOCK`; a test that needed it would be evidence of a bug.
+
+`verify(key, stored)` exists as one function on purpose. crypt's
+self-describing property means the stored entry *is* a valid setting: re-run
+crypt on it and a correct password reproduces it byte for byte. So
+verification needs no salt parsing, no method dispatch, and no slicing — which
+is exactly where all three tools went wrong. The constant-time comparison now
+sits inside `verify`, next to the value it compares against, where a caller
+cannot reach past it and compare something else. (`passwd` had its own
+`constant_time_eq`; it is deleted.)
+
+### Decision 3 — old entries fail closed
+
+**The detection half is not a judgment call, which is what dissolved the
+tradeoff the request expected.** Genuine crypt hash fields are a fixed length
+in crypt base-64 — MD5 22 characters, SHA-256 43, SHA-512 86. Every entry this
+tree ever wrote carries **64 hex digits**. `stored_method()` therefore
+separates the two populations exactly, with no false positive in either
+direction. No heuristic, no ambiguity, and nothing for the operator to
+arbitrate.
+
+That leaves only the policy: what to do with an entry once identified as
+unverifiable.
+
+| Option | *What changes* |
+|---|---|
+| **Fail closed (chosen)** | Those users cannot log in until root runs `passwd <user>`. `login` prints a message naming that command. |
+| Compatibility path | Those users log in as before, and `login` silently rewrites their entry in the real format on the way through. |
+
+Chosen fail closed, because the compatibility path requires keeping the
+invented non-hash alive *inside the authentication path* — the one place in the
+system where a wrong answer is a breach — and requires `login` to rewrite
+`/etc/shadow` opportunistically, which is a privilege question (`login` at that
+moment has not yet dropped to the user) and an atomicity question (a rewrite
+interrupted by power loss, against the file that gates all logins). Neither
+cost buys anything except avoiding a `passwd` command. This tree has never
+shipped, so the population of affected entries is developer test accounts.
+
+The message is explicit rather than a generic "Login incorrect", because the
+failure is an administrator's to fix and an unexplained permanent rejection is
+the kind of thing that gets diagnosed as a broken keyboard. `passwd` prints the
+equivalent when asked for an old password it cannot check.
+
+### Two further bugs found in `login` while in the file
+
+Both fixed here rather than filed, because both are authentication bypasses:
+
+1. **A cleartext fallback.** `verify_password` split the stored entry on `$`
+   and, if the shape did not match, compared the typed password against the
+   stored field *directly*. Any entry not in the expected shape authenticated
+   anyone who typed its literal contents.
+2. **No entry meant no password.** If a user had no `/etc/shadow` line — or the
+   file was missing or unreadable — `login` prompted for a password, discarded
+   it, and logged the user in. That is an unconditional bypass for every
+   account whenever the shadow file is absent. It now counts the attempt,
+   prints the same "Login incorrect", records the faillog and continues,
+   preserving timing and enumeration parity with a wrong password. Checked
+   `init/` and `scripts/` first: nothing creates `/etc/shadow`, so no boot path
+   depended on the old behaviour.
+
+Also fixed: `login`'s lock check was an equality test against `!`, so an entry
+`!$6$…` fell through to verification with `!` as the salt. It is a prefix test
+now.
+
+### Two salt bugs, in the tools that generate them
+
+- `passwd` generated **32 hex characters**. SHA-crypt truncates a salt over 16
+  characters when hashing but stores what it was given, so the entry could
+  never verify against itself. The salt length now comes from
+  `Method::salt_max()`, so it cannot disagree with the method again.
+- `chpasswd` seeded a linear congruential generator with the literal `42` and
+  stirred in `/proc/uptime` — a file this OS does not have — plus the pid. On
+  the real system, one `chpasswd` run therefore salted **every account in its
+  input identically**.
+
+Both tools read `/dev/urandom` now, and **neither has a fallback**: without it
+they refuse to write a password and say so. A fallback generator is a salt in
+shape only — whatever seeds it is public, so the whole salt follows from it,
+and one precomputed table covers every account salted alongside it, which is
+the exact property a salt exists to deny. A password file that cannot be
+attacked is worth more than a `passwd` that always succeeds. (`passwd` briefly
+kept a day-number fallback for the sake of its own tests on a host with no
+`/dev/urandom`; the tests now drive the encoder directly over all 256 byte
+values, which is both a stronger test and no reason to weaken production.)
+
+### Why the existing tests passed the whole time
+
+The old tests asserted determinism (`h(x) == h(x)`), difference
+(`h(a) != h(b)`), and the shape of the output. **All three are true of any
+function written by accident**, which is why they were green while the thing
+under test was not a hash. A known-answer vector is the only test that
+distinguishes an algorithm from something that resembles one; each of the three
+tools now verifies a published Drepper vector, and `login` has a named
+regression test that a password set through `passwd`'s code path is accepted by
+`login`'s.
+
+**Revisit if** the operator prefers the transparent-rehash path after all
+(recorded in `open-questions.md`), or if a real user population ever exists
+whose entries predate this change — at which point a one-shot offline
+converter, run by an administrator with the file quiescent, is the safe shape,
+not a rewrite from inside `login`.
+
+## §330 — `/etc/users.yaml` gets one implementation, `userdb`, which preserves fields it does not understand
+
+**Date:** 2026-08-17
+**Decided by:** Claude (autonomous)
+
+**In short:** Two programs write the file that lists the machine's user
+accounts, `/etc/users.yaml`: the account-management tool `useradm` and the
+login screen. Each had written its own reader and its own writer, and the two
+disagreed — about what the password's *salt* field is called, about what
+exactly gets scrambled, and about which fields exist at all. A password set
+with `useradm passwd` therefore could not be used to log in, and whichever
+program saved the file last deleted every field the other one had written.
+Both now go through one shared crate, `userdb`, which keeps each account's
+text as it found it and rewrites only the field it was asked to change. This
+is §329's fix applied to the *second* password store — the same class of bug,
+found in a different file, three days later.
+
+**Terms.** A *salt* is a per-user random string mixed into a password before
+it is scrambled, so that two users with the same password do not get the same
+stored entry. `crypt(3)` is the C library function Unix uses to do the
+scrambling; its output is *self-describing*, meaning the stored entry names
+its own method and carries its own salt, so verifying a password needs no
+parsing at all — just re-run `crypt` on the stored entry and compare.
+*Round-tripping* a file means reading it and writing it back out unchanged.
+
+### What was actually wrong
+
+| | `useradm` wrote | `init/login` wrote |
+|---|---|---|
+| Salt field | `salt:` | `password_salt:` |
+| What was hashed | the salt's **hex text** + password | the salt's **decoded bytes** + password |
+| Home directory | `home_dir:` | `home_dir:` (but `su`/`sudo` read `home:`) |
+| Admin flag | `is_admin:` | `is_admin:` |
+| On save | rebuilt the file from its own struct | rebuilt the file from its own struct |
+
+Two consequences, both silent:
+
+1. **Neither could verify the other's passwords.** Different field name,
+   different pre-image; each concluded the other's entries were wrong
+   passwords.
+2. **Each save deleted the other's fields.** Both serialised from a struct
+   holding only the fields that program modelled, so anything the other had
+   written — and anything a future version might write — vanished on the next
+   write from either side. The file could not accumulate a field.
+
+### Decision 1 — a new crate, rather than pointing both at `posix::crypt`
+
+§329 resolved the *hashing* half of an identical bug by having three tools
+call `posix::crypt`. That is necessary here too, and `userdb` does exactly
+that — but it is not sufficient, because `/etc/users.yaml` is a *structured*
+file with fifteen-odd fields, where `/etc/shadow` is a colon-separated line.
+Sharing only the hash would have left two parsers and two serialisers still
+free to disagree about everything else, which is where half the damage was.
+
+The alternative considered was parsing through the root `yamldoc` crate,
+which already exists and already preserves comments and formatting — the
+property the design spec requires of configuration files. **It does not fit:**
+`yamldoc` addresses a value by a path of *mapping keys*, so inside a sequence
+of mappings — which is precisely the shape of `users:` — an element has no
+name. `users[2].uid` is unaddressable. Extending `yamldoc` with sequence
+indices was considered and rejected for now: it is a change to a crate three
+lanes depend on, made to serve one caller, and the caller's real requirement
+is narrower than general indexing.
+
+So `userdb` keeps each record's raw lines and rewrites in place. It is not a
+general YAML editor and does not pretend to be; it is an editor for one file
+whose shape is known.
+
+### Decision 2 — a write updates *every* spelling of a field, not the first
+
+The two writers had named the same facts differently: `home_dir`/`home`,
+`is_admin`/`admin`, `avatar_path`/`avatar`, `password_salt`/`salt`. Records
+in the wild therefore carry one spelling, the other, or both.
+
+| Option | *What changes* |
+|---|---|
+| Write the canonical spelling only | A record that had the alias ends up with both, saying different things; a reader that consults the alias acts on the stale value. |
+| Write the first spelling found | Same, mirrored. |
+| **Write every spelling present (chosen)** | A record can never contradict itself. A record with neither gets the canonical name. |
+
+Chosen the third. Preserving a field the program does not understand is the
+whole point of the crate, and a preserved field that has been allowed to go
+stale is worse than a deleted one — it looks current. `set_any` therefore
+updates all matching keys and appends the canonical name only when none was
+present.
+
+The aliases are **not** normalised away on save. Rewriting a spelling is a
+change to a line the caller did not ask to change, and the five read-only
+parsers not yet migrated (`su`, `sudo`, `polkit`, `chown`, `chroot`) still
+look for the old names; silently renaming their field would break them at the
+moment the file was touched by something else entirely.
+
+### Decision 3 — a file that cannot be read is an error, not an empty database
+
+Both writers had `Err(_) => Vec::new()`. So a permission error, an I/O error
+or a full disk produced an *empty* user database, which the next save then
+wrote over the real file. One unreadable read deleted every account on the
+machine. `UserDb::load` now returns an empty database only for
+`ErrorKind::NotFound` and propagates everything else.
+
+The login screen's version of this was worse than data loss: on an unreadable
+file it fell back to its **built-in default accounts**, which include a root
+account whose password is in the source. A permission error opened the machine
+up. It now yields no accounts, which fails closed.
+
+`UserDb::save` writes a sibling temporary and renames it over the target. A
+truncated `/etc/users.yaml` is a machine with no accounts, and the previous
+code truncated in place.
+
+### Decision 4 — the built-in accounts keep a fixed salt, and nothing else may
+
+§329 established that a salt with a fallback generator is a salt in shape
+only, and that a tool without `/dev/urandom` must refuse to set a password
+rather than invent one. `userdb` holds to that.
+
+The one exception is the two built-in accounts the login screen synthesises
+when no database exists — `root` and `guest`. They are salted with a literal
+constant. This is not a weakening: their passwords are published in the source
+of this repository, so there is nothing a salt could protect. Making them
+require `/dev/urandom` would mean a machine with no entropy source cannot
+present a login screen at all, which trades a real failure for an imaginary
+protection.
+
+### Why the existing tests passed the whole time
+
+The same reason as §329, and it is worth stating twice because the two code
+bases were written months apart and arrived at the same non-test
+independently. The tests asserted that hashing was deterministic, that
+different passwords hashed differently, and that the output was 64 hex
+characters. **Every one of those is true of any function written by
+accident.** A known-answer vector is the only test that distinguishes an
+algorithm from something that resembles one.
+
+So the deleted tests are not ported. Reconstructing them against the new code
+would reconstruct the blind spot. `userdb` verifies against `posix::crypt`'s
+published vectors, and each migrated tool has a named test that a password set
+through its own code path is accepted through the shared one.
+
+### Five further defects fixed while migrating
+
+Found by the rewrite rather than looked for; all in `useradm` unless noted:
+
+1. `userdel` guessed the home directory as `/home/<name>` instead of reading
+   the record's own `home_dir`, so a relocated home was left on disk while an
+   unrelated path was considered for deletion.
+2. `useradd --uid` accepted a non-numeric value and a duplicate uid.
+3. `usermod --admin` set the flag but not the `admin` group. The flag is what
+   the login screen and the settings app read; the group is what `sudo` reads.
+   Setting one made the machine disagree with itself about who is an
+   administrator. Both are set now.
+4. `useradm list` truncated display names by **byte**, panicking on a
+   multi-byte name at the boundary. It truncates by character.
+5. (`init/login`) A passwordless account could lock its screen and never
+   unlock it — the unlock path required a password the account did not have.
+   Refusing did not protect the session; it stranded it, so a locked guest
+   screen was a dead end that only a reboot cleared.
+
+And in the authentication path itself: `login` reported a *locked* account and
+an account with an unverifiable stale hash both as "Invalid password", which
+meant repeated attempts against an already-locked account extended its
+lockout. The four outcomes are now distinct.
+
+**Still to do,** tracked in `known-issues.md`: the five read-only parsers
+listed above still carry their own copies. `su` and `sudo` read `home:` while
+both writers write `home_dir:`, so they are already reading the wrong field on
+any file this tree has written — the migration is a bug fix for them, not
+housekeeping.
+
+**Revisit if** `yamldoc` gains addressing for sequence elements, at which
+point `userdb`'s line-level record editing could sit on top of it and inherit
+comment preservation for free; or if the operator settles the open question of
+whether `/etc/users.yaml` or `/etc/shadow` is the system's one account
+database, in which case one of the two stores — and one of §329 and §330 —
+becomes redundant.

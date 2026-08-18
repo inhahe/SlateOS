@@ -1,0 +1,19 @@
+[package]
+name = "userdb"
+version = "0.1.0"
+edition = "2024"
+description = "The SlateOS user database, /etc/users.yaml — one parser, one password hash"
+
+[lib]
+path = "src/lib.rs"
+
+# `posix` for `crypt(3)`. The native user database and `/etc/shadow` are two
+# different files, but there is no reason for one system to contain two
+# password-hash constructions — and it previously contained three, none of
+# which agreed. See `design-decisions.md` §329 for the `/etc/shadow` half of
+# the same story.
+[dependencies]
+posix = { path = "../../posix" }
+
+[lints]
+workspace = true

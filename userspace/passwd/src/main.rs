@@ -237,165 +237,110 @@ fn find_or_create_shadow(entries: &mut Vec<ShadowEntry>, username: &str) -> usiz
 }
 
 // ============================================================================
-// SHA-256 implementation
+// SHA-256 implementation — deleted
 // ============================================================================
-
-/// SHA-256 round constants.
-const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-];
-
-/// Compute SHA-256 and return the hex digest string.
-fn sha256_hex(data: &[u8]) -> String {
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    ];
-
-    // Padding.
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut padded = data.to_vec();
-    padded.push(0x80);
-    while (padded.len() % 64) != 56 {
-        padded.push(0);
-    }
-    padded.extend_from_slice(&bit_len.to_be_bytes());
-
-    // Process 64-byte blocks.
-    for chunk in padded.chunks(64) {
-        let mut w = [0u32; 64];
-        for (w_slot, word_bytes) in w.iter_mut().take(16).zip(chunk.chunks_exact(4)) {
-            // chunks_exact(4) yields a &[u8] of length 4; try_into is infallible.
-            let arr: [u8; 4] = word_bytes.try_into().unwrap_or([0; 4]);
-            *w_slot = u32::from_be_bytes(arr);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7)
-                ^ w[i - 15].rotate_right(18)
-                ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17)
-                ^ w[i - 2].rotate_right(19)
-                ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(SHA256_K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    h.iter().map(|v| format!("{v:08x}")).collect()
-}
+//
+// This file used to carry a full, genuine SHA-256 (round constants, FIPS
+// vectors and all) and use it to write `/etc/shadow` entries in a format it
+// invented: `$sha256$<salt>$<64 hex digits>`.  Everything about it was
+// right except the two things that mattered.
+//
+// It was the wrong *format*: `$5$` and `$6$` are the crypt(3) identifiers
+// for SHA-crypt, and a reader that follows the standard — a real libc, or
+// `posix/src/crypt.rs` — parses `$sha256$` as an unknown method and refuses
+// it.  `login`, which read the same file, refused it too, so a password set
+// with `passwd` could not be used to log in.
+//
+// And it was the wrong *construction*: one pass of SHA-256 over
+// `salt$password` has no work factor.  Every real crypt(3) scheme iterates
+// thousands of rounds so that testing a guess costs the attacker what one
+// login costs the user; a single pass costs the attacker nothing.
+//
+// Both are fixed by not implementing any of it here.  See
+// `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
 
 // ============================================================================
 // Password hashing and salt generation
 // ============================================================================
 
-/// Hash a password with the given salt using SHA-256.
-/// Format: `$sha256$<salt>$<hash>`
-fn hash_password(password: &str, salt: &str) -> String {
-    let input = format!("{salt}${password}");
-    let digest = sha256_hex(input.as_bytes());
-    format!("$sha256${salt}${digest}")
+/// The method `passwd` selects for a new password.
+///
+/// SHA-512 because that is what the shadow suite defaults to, and because
+/// the three tools that share `/etc/shadow` must agree: an entry written
+/// here is read by `login` and rewritten by `chpasswd`, and the cheapest
+/// way to keep them consistent is for all of them to name the same default.
+const NEW_PASSWORD_METHOD: posix::crypt::Method = posix::crypt::Method::Sha512;
+
+/// Hash `password` under a fresh setting built from `salt`.
+///
+/// Returns `None` for a salt `crypt` cannot carry verbatim — one that is
+/// empty, too long for the method, or contains a character outside the
+/// crypt base-64 alphabet.  [`generate_salt`] cannot produce such a salt,
+/// so in practice this is `None` only if a caller invents one; it is a
+/// `Result`-shaped answer rather than a silent truncation because a
+/// truncated salt would mean the entry stored is not the entry asked for.
+fn hash_password(password: &str, salt: &str) -> Option<String> {
+    let mut setting_buf = posix::crypt::buf();
+    let setting =
+        posix::crypt::setting_into(NEW_PASSWORD_METHOD, salt.as_bytes(), &mut setting_buf)?;
+    let mut hash_buf = posix::crypt::buf();
+    Some(
+        posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hash_buf)?
+            .to_string(),
+    )
 }
 
-/// Generate a random salt by reading `/dev/urandom`.
-fn generate_salt() -> String {
-    let mut bytes = [0u8; 16];
-
-    if let Ok(data) = fs::read("/dev/urandom") {
-        for (i, b) in data.iter().take(16).enumerate() {
-            bytes[i] = *b;
-        }
-    } else {
-        // Fallback: use a time-based seed (not cryptographically ideal).
-        let seed = current_day() as u64;
-        for (i, b) in bytes.iter_mut().enumerate() {
-            let mixed = seed.wrapping_mul(6364136223846793005)
-                .wrapping_add(i as u64);
-            *b = (mixed >> 32) as u8;
-        }
-    }
-
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+/// Encode random bytes as a salt in the crypt base-64 alphabet.
+///
+/// `& 0x3f` is an unbiased reduction here and not the usual modulo mistake:
+/// 256 is exactly four times 64, so every alphabet character is the image
+/// of exactly four byte values.
+fn encode_salt(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    bytes
+        .iter()
+        .map(|b| char::from(ALPHABET[usize::from(*b & 0x3f)]))
+        .collect()
 }
 
-/// Verify a password against a stored hash string.
-/// Supports the `$sha256$<salt>$<hash>` format and also bare hex hashes
-/// with a separate salt (legacy format from useradm).
+/// Generate a random salt for a new password, or `None` if the system has no
+/// randomness to draw it from.
+///
+/// The output is characters of the crypt base-64 alphabet, not hex, and is
+/// exactly [`posix::crypt::Method::salt_max`] of them.  Both details matter:
+/// SHA-crypt truncates a longer salt when hashing but stores what it was
+/// given, so a 32-character hex salt — which is what this function used to
+/// return — produces an entry that can never verify against itself.
+///
+/// **There is deliberately no fallback.**  An earlier version fell back to a
+/// day-number generator, which is a salt in shape only: the day is public, so
+/// the whole salt follows from it, every account given a password on the same
+/// day shares it, and one precomputed table covers them all — the exact
+/// property a salt exists to deny.  A password file that cannot be attacked
+/// is worth more than a `passwd` that always succeeds, so this refuses and
+/// says why, as `chpasswd` already did.  Tests pass their own salt to
+/// [`hash_password`] rather than being served by a weakened production path.
+fn generate_salt() -> Option<String> {
+    let len = NEW_PASSWORD_METHOD.salt_max();
+    let data = fs::read("/dev/urandom").ok()?;
+    Some(encode_salt(data.get(..len)?))
+}
+
+/// Verify a password against a stored `/etc/shadow` entry.
+///
+/// Deliberately holds no knowledge of the format: the stored entry is
+/// itself the setting, so `crypt` reads the method, the rounds and the salt
+/// back out of it.  The previous version parsed `$sha256$<salt>$<hash>` by
+/// hand and returned `false` for everything else, which is how it came to
+/// disagree with `login` about the same file.
 fn verify_password(password: &str, stored_hash: &str) -> bool {
-    if let Some(rest) = stored_hash.strip_prefix("$sha256$") {
-        // Modern format: $sha256$<salt>$<hash>
-        if let Some(dollar_pos) = rest.find('$') {
-            let salt = &rest[..dollar_pos];
-            let expected = hash_password(password, salt);
-            return constant_time_eq(stored_hash.as_bytes(), expected.as_bytes());
-        }
-    }
-
-    // Legacy format: bare hex hash (salt stored separately in users.yaml).
-    // Not directly verifiable here without the salt, so return false.
-    false
+    posix::crypt::verify(password.as_bytes(), stored_hash.as_bytes())
 }
 
-/// Constant-time byte comparison to prevent timing attacks.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
+// The constant-time comparison that stood here went with the hand-written
+// format parsing that was its only caller.  It now lives inside
+// `posix::crypt::verify`, next to the value it compares against, where a
+// caller cannot reach past it and compare something else.
 
 // ============================================================================
 // Password strength checking
@@ -699,6 +644,21 @@ fn cmd_change_password(target: &str, caller_uid: u32) -> i32 {
                     }
                 };
                 if !verify_password(&old_pw, &entry.hash) {
+                    // An entry in a format nothing can recompute is not a
+                    // wrong password, and telling the user "authentication
+                    // failure" would send them away retyping a password
+                    // that was never going to work.  The remedy is root
+                    // setting a new one, so say so.  Only the account's own
+                    // owner reaches this branch — root skips the old-password
+                    // check entirely — so it discloses nothing.
+                    if posix::crypt::stored_method(entry.hash.as_bytes()).is_none() {
+                        eprintln!(
+                            "passwd: the stored password for `{target}' is not in a format \
+                             this system can verify, so it cannot be confirmed; ask an \
+                             administrator to run `passwd {target}' as root"
+                        );
+                        return 1;
+                    }
                     eprintln!("passwd: authentication failure");
                     return 1;
                 }
@@ -741,9 +701,24 @@ fn cmd_change_password(target: &str, caller_uid: u32) -> i32 {
         return 1;
     }
 
-    // Hash and store.
-    let salt = generate_salt();
-    let hashed = hash_password(&new_pw, &salt);
+    // Hash and store.  A salt this build cannot carry verbatim would mean
+    // writing an entry that is not the one asked for, so it aborts rather
+    // than storing a truncated one — and since `generate_salt` draws from a
+    // fixed alphabet at the method's own maximum length, reaching this is a
+    // bug here, not bad input.
+    let Some(salt) = generate_salt() else {
+        eprintln!(
+            "passwd: cannot read `/dev/urandom', so there is no random salt to \
+             store this password with; refusing to write a password without one"
+        );
+        return 1;
+    };
+    let Some(hashed) = hash_password(&new_pw, &salt) else {
+        eprintln!(
+            "passwd: internal error: generated salt is not usable with {NEW_PASSWORD_METHOD:?}"
+        );
+        return 1;
+    };
 
     let mut entries = read_shadow();
     let idx = find_or_create_shadow(&mut entries, target);
@@ -888,7 +863,10 @@ fn cmd_set_min_days(target: &str, days: i64) -> i32 {
         return 1;
     }
 
-    eprintln!("passwd: minimum password age for '{}' set to {} day(s)", target, days);
+    eprintln!(
+        "passwd: minimum password age for '{}' set to {} day(s)",
+        target, days
+    );
     0
 }
 
@@ -904,7 +882,10 @@ fn cmd_set_max_days(target: &str, days: i64) -> i32 {
         return 1;
     }
 
-    eprintln!("passwd: maximum password age for '{}' set to {} day(s)", target, days);
+    eprintln!(
+        "passwd: maximum password age for '{}' set to {} day(s)",
+        target, days
+    );
     0
 }
 
@@ -1025,8 +1006,8 @@ fn main() {
 
     // Permission check: non-root users can only change their own password
     // (the default ChangePassword action, no flags).
-    let changing_own = parsed.target_user.is_none()
-        || current_username().as_deref() == Some(target.as_str());
+    let changing_own =
+        parsed.target_user.is_none() || current_username().as_deref() == Some(target.as_str());
 
     if !is_root() && !changing_own {
         eprintln!("passwd: only root may change another user's password");
@@ -1063,124 +1044,189 @@ fn main() {
 mod tests {
     use super::*;
 
-    // ---- SHA-256 tests ----
-
-    #[test]
-    fn sha256_empty_string() {
-        let result = sha256_hex(b"");
-        assert_eq!(
-            result,
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-    }
-
-    #[test]
-    fn sha256_abc() {
-        let result = sha256_hex(b"abc");
-        assert_eq!(
-            result,
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-
-    #[test]
-    fn sha256_longer_input() {
-        let result = sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
-        assert_eq!(
-            result,
-            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
-        );
-    }
-
-    #[test]
-    fn sha256_single_byte() {
-        let result = sha256_hex(b"a");
-        assert_eq!(
-            result,
-            "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
-        );
-    }
-
     // ---- Password hashing tests ----
+    //
+    // The SHA-256 known-answer tests that stood here went with the SHA-256
+    // implementation they checked. Their vectors were correct and they
+    // passed; what they could not tell anyone was that the correct digest
+    // was being put into an invented format, under no key-stretching, in a
+    // file two other programs also wrote. The tests below check that
+    // instead, because that is where this file was actually wrong.
 
+    /// A salt `crypt` can carry verbatim, in the alphabet `generate_salt`
+    /// draws from.
+    const SALT: &str = "abcdef0123456789";
+
+    /// The entry written must be one a standard reader recognises: the
+    /// `$6$` identifier, the salt as given, and an 86-character SHA-512
+    /// crypt hash. The old format, `$sha256$<salt>$<64 hex>`, satisfied
+    /// none of that, which is why `login` could not read it.
     #[test]
-    fn hash_password_format() {
-        let hashed = hash_password("test123", "abcdef");
-        assert!(hashed.starts_with("$sha256$abcdef$"));
+    fn hash_password_writes_a_standard_crypt_entry() {
+        let hashed = hash_password("test123", SALT).expect("hash");
+        assert!(hashed.starts_with("$6$abcdef0123456789$"), "{hashed}");
+        assert_eq!(
+            posix::crypt::stored_method(hashed.as_bytes()),
+            Some(posix::crypt::Method::Sha512),
+            "{hashed}"
+        );
+        assert!(!hashed.contains("$sha256$"), "{hashed}");
     }
 
     #[test]
     fn hash_password_deterministic() {
-        let h1 = hash_password("mypassword", "salt123");
-        let h2 = hash_password("mypassword", "salt123");
+        let h1 = hash_password("mypassword", SALT).expect("hash");
+        let h2 = hash_password("mypassword", SALT).expect("hash");
         assert_eq!(h1, h2);
     }
 
     #[test]
     fn hash_password_different_salts() {
-        let h1 = hash_password("mypassword", "salt1");
-        let h2 = hash_password("mypassword", "salt2");
+        let h1 = hash_password("mypassword", "salt1").expect("hash");
+        let h2 = hash_password("mypassword", "salt2").expect("hash");
         assert_ne!(h1, h2);
     }
 
     #[test]
     fn hash_password_different_passwords() {
-        let h1 = hash_password("password1", "samesalt");
-        let h2 = hash_password("password2", "samesalt");
+        let h1 = hash_password("password1", "samesalt").expect("hash");
+        let h2 = hash_password("password2", "samesalt").expect("hash");
         assert_ne!(h1, h2);
     }
 
     #[test]
     fn hash_password_empty_password() {
-        let hashed = hash_password("", "salt");
-        assert!(hashed.starts_with("$sha256$salt$"));
-        assert!(hashed.len() > "$sha256$salt$".len());
+        let hashed = hash_password("", "salt").expect("hash");
+        assert!(hashed.starts_with("$6$salt$"), "{hashed}");
+        assert!(verify_password("", &hashed));
+        assert!(!verify_password("x", &hashed));
+    }
+
+    /// A salt the format cannot carry is refused rather than truncated or
+    /// silently reinterpreted: `$` would end the salt early, so the entry
+    /// stored would not be the entry asked for.
+    #[test]
+    fn hash_password_refuses_a_salt_it_cannot_store() {
+        assert_eq!(hash_password("pw", ""), None);
+        assert_eq!(hash_password("pw", "has$dollar"), None);
+        assert_eq!(hash_password("pw", "has space"), None);
+        // 17 characters, one past SHA-crypt's maximum.
+        assert_eq!(hash_password("pw", "abcdefghijklmnopq"), None);
+    }
+
+    /// The salt must be usable as-is by the method `passwd` writes with.
+    /// It used to be 32 hex characters — twice SHA-crypt's maximum — which
+    /// hashing truncates while storing what it was given, producing an entry
+    /// that cannot verify against itself.
+    ///
+    /// Driven through [`encode_salt`] rather than through [`generate_salt`],
+    /// because the development host has no `/dev/urandom` and, more to the
+    /// point, a randomness source cannot be asked to produce its own worst
+    /// case.  Every one of the 256 byte values is covered here; the hashing
+    /// round-trip below needs only one salt, since the property that could
+    /// break is the *encoding*, not the hash.
+    #[test]
+    fn every_byte_encodes_to_a_character_crypt_can_carry() {
+        let len = NEW_PASSWORD_METHOD.salt_max();
+        for start in 0..=u8::MAX {
+            let bytes: Vec<u8> = (0..len).map(|i| start.wrapping_add(i as u8)).collect();
+            let salt = encode_salt(&bytes);
+            assert_eq!(salt.len(), len, "{salt}");
+            assert!(
+                salt.bytes()
+                    .all(|b| b == b'.' || b == b'/' || b.is_ascii_alphanumeric()),
+                "{salt}"
+            );
+        }
+    }
+
+    /// An encoded salt of the length `passwd` generates is stored verbatim and
+    /// verifies against itself — the property the old 32-hex-character salt
+    /// broke.
+    #[test]
+    fn an_encoded_salt_round_trips_through_the_stored_entry() {
+        let len = NEW_PASSWORD_METHOD.salt_max();
+        let salt = encode_salt(&(0..len).map(|i| i as u8).collect::<Vec<_>>());
+        let hashed = hash_password("correct horse", &salt).expect("hash");
+        assert!(hashed.starts_with(&format!("$6${salt}$")), "{hashed}");
+        assert!(verify_password("correct horse", &hashed));
+    }
+
+    /// `passwd` refuses rather than substituting a predictable salt when the
+    /// system has no randomness.  On a host with `/dev/urandom` this checks
+    /// the salt it produced; on one without — which includes the development
+    /// host — it checks that the answer is `None` and not a weak salt.
+    #[test]
+    fn generate_salt_either_draws_from_urandom_or_refuses() {
+        match generate_salt() {
+            Some(salt) => {
+                assert_eq!(salt.len(), NEW_PASSWORD_METHOD.salt_max(), "{salt}");
+                assert!(hash_password("pw", &salt).is_some(), "{salt}");
+            }
+            None => assert!(
+                fs::read("/dev/urandom")
+                    .map(|d| d.len() < NEW_PASSWORD_METHOD.salt_max())
+                    .unwrap_or(true),
+                "refused a salt despite /dev/urandom being readable"
+            ),
+        }
     }
 
     // ---- Verify password tests ----
 
     #[test]
     fn verify_correct_password() {
-        let hashed = hash_password("correct_horse", "battery_staple");
+        let hashed = hash_password("correct_horse", SALT).expect("hash");
         assert!(verify_password("correct_horse", &hashed));
     }
 
     #[test]
     fn verify_wrong_password() {
-        let hashed = hash_password("correct_horse", "battery_staple");
+        let hashed = hash_password("correct_horse", SALT).expect("hash");
         assert!(!verify_password("wrong_horse", &hashed));
     }
 
     #[test]
     fn verify_empty_hash() {
         assert!(!verify_password("anything", ""));
+        assert!(!verify_password("", ""));
     }
 
     #[test]
     fn verify_malformed_hash() {
         assert!(!verify_password("test", "$sha256$noseparator"));
+        assert!(!verify_password("test", "$6$noseparator"));
+        assert!(!verify_password("test", "not a hash at all"));
+        // No cleartext path: an entry that is not a hash matches nothing,
+        // including itself.
+        assert!(!verify_password("secret", "secret"));
     }
 
-    // ---- Constant-time comparison tests ----
-
+    /// A published SHA-crypt vector, checked through the function that
+    /// verifies `/etc/shadow`. This is the test the old code could not
+    /// have: its format had no specification and so no known answer.
     #[test]
-    fn constant_time_eq_same() {
-        assert!(constant_time_eq(b"hello", b"hello"));
+    fn verify_accepts_a_published_vector() {
+        const VECTOR: &str = "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1";
+        assert!(verify_password("Hello world!", VECTOR));
+        assert!(!verify_password("Hello world", VECTOR));
     }
 
+    /// The entries this tree wrote before `passwd` called `crypt` — its own
+    /// `$sha256$`, and `chpasswd`'s 64 hex digits mislabelled `$5$` — can
+    /// never verify, and are recognisable as such by shape.
     #[test]
-    fn constant_time_eq_different() {
-        assert!(!constant_time_eq(b"hello", b"world"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_lengths() {
-        assert!(!constant_time_eq(b"short", b"longer"));
-    }
-
-    #[test]
-    fn constant_time_eq_empty() {
-        assert!(constant_time_eq(b"", b""));
+    fn the_obsolete_formats_are_recognisable_and_unverifiable() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for prefix in ["$sha256$", "$5$", "$6$", "$1$"] {
+            let stored = format!("{prefix}{SALT}${digest}");
+            assert_eq!(
+                posix::crypt::stored_method(stored.as_bytes()),
+                None,
+                "{stored}"
+            );
+            assert!(!verify_password("correct horse", &stored), "{stored}");
+        }
     }
 
     // ---- Password strength tests ----
@@ -1259,9 +1305,8 @@ mod tests {
 
     #[test]
     fn shadow_parse_full_line() {
-        let entry = ShadowEntry::parse(
-            "alice:$sha256$salt$hash:19500:0:99999:7:30:20000:"
-        ).expect("should parse");
+        let entry = ShadowEntry::parse("alice:$sha256$salt$hash:19500:0:99999:7:30:20000:")
+            .expect("should parse");
         assert_eq!(entry.username, "alice");
         assert_eq!(entry.hash, "$sha256$salt$hash");
         assert_eq!(entry.last_changed, 19500);
@@ -1463,7 +1508,10 @@ mod tests {
     #[test]
     fn args_min_days() {
         let args = vec![
-            "passwd".to_string(), "-n".to_string(), "5".to_string(), "bob".to_string(),
+            "passwd".to_string(),
+            "-n".to_string(),
+            "5".to_string(),
+            "bob".to_string(),
         ];
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::SetMinDays(5)));
@@ -1472,7 +1520,10 @@ mod tests {
     #[test]
     fn args_max_days() {
         let args = vec![
-            "passwd".to_string(), "-x".to_string(), "90".to_string(), "bob".to_string(),
+            "passwd".to_string(),
+            "-x".to_string(),
+            "90".to_string(),
+            "bob".to_string(),
         ];
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::SetMaxDays(90)));
@@ -1481,7 +1532,10 @@ mod tests {
     #[test]
     fn args_warn_days() {
         let args = vec![
-            "passwd".to_string(), "-w".to_string(), "14".to_string(), "bob".to_string(),
+            "passwd".to_string(),
+            "-w".to_string(),
+            "14".to_string(),
+            "bob".to_string(),
         ];
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::SetWarnDays(14)));
@@ -1490,7 +1544,10 @@ mod tests {
     #[test]
     fn args_inactive_days() {
         let args = vec![
-            "passwd".to_string(), "-i".to_string(), "30".to_string(), "bob".to_string(),
+            "passwd".to_string(),
+            "-i".to_string(),
+            "30".to_string(),
+            "bob".to_string(),
         ];
         let parsed = parse_args(&args).unwrap();
         assert!(matches!(parsed.action, Action::SetInactiveDays(30)));
@@ -1516,9 +1573,7 @@ mod tests {
 
     #[test]
     fn args_duplicate_username() {
-        let args = vec![
-            "passwd".to_string(), "alice".to_string(), "bob".to_string(),
-        ];
+        let args = vec!["passwd".to_string(), "alice".to_string(), "bob".to_string()];
         assert!(parse_args(&args).is_err());
     }
 
@@ -1586,10 +1641,7 @@ mod tests {
 
     #[test]
     fn find_or_create_existing() {
-        let mut entries = vec![
-            ShadowEntry::new("alice"),
-            ShadowEntry::new("bob"),
-        ];
+        let mut entries = vec![ShadowEntry::new("alice"), ShadowEntry::new("bob")];
         let idx = find_or_create_shadow(&mut entries, "alice");
         assert_eq!(idx, 0);
         assert_eq!(entries.len(), 2);
@@ -1604,14 +1656,12 @@ mod tests {
         assert_eq!(entries[1].username, "charlie");
     }
 
-    // ---- Salt generation test ----
-
-    #[test]
-    fn salt_is_hex_and_right_length() {
-        let salt = generate_salt();
-        assert_eq!(salt.len(), 32); // 16 bytes * 2 hex chars each
-        assert!(salt.chars().all(|c| c.is_ascii_hexdigit()));
-    }
+    // (The salt's shape is checked by
+    // `generated_salt_is_usable_with_the_method_passwd_writes` above, which
+    // asserts the property that matters — that the salt can be stored
+    // verbatim by the method in use — rather than a length and an alphabet
+    // chosen independently of it. The old test asserted 32 hex characters,
+    // which was internally consistent and twice what SHA-crypt can carry.)
 
     // ---- Integration: hash + verify round-trip ----
 
@@ -1619,7 +1669,7 @@ mod tests {
     fn hash_verify_round_trip() {
         let password = "S3cur3!Pass";
         let salt = "0123456789abcdef";
-        let hashed = hash_password(password, salt);
+        let hashed = hash_password(password, salt).expect("hash");
         assert!(verify_password(password, &hashed));
         assert!(!verify_password("wrong", &hashed));
     }

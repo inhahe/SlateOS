@@ -34265,3 +34265,215 @@ python scripts/qemu-probe.py --device ati-vga,model=rv100 -- "info pci"
 **If you are about to hand-roll a QEMU invocation that is not the boot test, use
 this instead.** If it genuinely cannot be used, at minimum run through
 `scripts/run-timeout.py` so the Job Object still bounds the damage.
+
+---
+
+## [B] FIXED — `passwd`, `login` and `chpasswd` now share one `crypt(3)`; entries written before this need a root reset
+
+**Fixed:** 2026-08-17 (lane B). Closes lane C's report above and
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`. Rationale and
+the alternatives considered: `design-decisions.md` §329. The one remaining
+policy choice is `open-questions.md` B-Q3.
+
+**What changed.** `posix/src/crypt.rs` gained a safe Rust API — `Method`,
+`hash_into`, `setting_into`, `verify`, `stored_method` — and all three tools
+call it. They now agree by construction: a password set with `passwd` is
+accepted by `login`, which has a named regression test
+(`test_a_password_set_by_passwd_is_accepted_by_login`). New passwords are
+SHA-512 (`$6$`).
+
+Lane C's recommended entry point, `crypt_str`, does not exist — it is a test
+helper inside `crypt.rs`'s own `mod tests`. Everything public was C ABI over a
+`static mut CRYPT_BUF`, which three Rust callers cannot share safely, hence the
+new safe section rather than a caller-side wrapper.
+
+**Operational consequence — read this if a login stops working.** Any account
+whose `/etc/shadow` entry was written by the old code (`$sha256$…`, or a
+`$5$`/`$6$`/`$1$` entry whose hash field is 64 hex digits) can no longer be
+logged into. This is deliberate, not a regression: those entries were never
+verifiable by anything. `login` prints a message naming the fix, and the fix is
+
+```
+passwd <username>          # as root
+```
+
+Genuine and bogus entries are distinguishable with certainty — real hash fields
+are 22/43/86 crypt-base-64 characters, the bogus ones are 64 hex digits — so
+`stored_method()` separates them with no false positives in either direction.
+
+**Two authentication bypasses found in `login` while fixing this, both now
+closed.** Neither was in lane C's report; both were worse than the bug that was:
+
+1. `verify_password` fell through to a **cleartext comparison** whenever the
+   stored entry did not split into the expected `$`-delimited shape. Anyone who
+   typed the entry's literal contents was authenticated.
+2. A user with **no `/etc/shadow` entry was logged in without a password** —
+   which, when the file itself was missing or unreadable, meant *every* user.
+   `login` prompted, discarded the answer, and proceeded.
+
+Also: the lock check was `hash == "!"` rather than a prefix test, so `!$6$…`
+was verified with `!` as the salt.
+
+**Two salt bugs, also fixed.** `passwd` emitted 32 hex characters — twice
+SHA-crypt's 16-character maximum, which stores what it is given but truncates
+what it hashes, so its own entries could not verify against themselves.
+`chpasswd` seeded an LCG with the literal `42` plus `/proc/uptime` (a file this
+OS does not have) and the pid, so on the real system a single `chpasswd` run
+gave **every account in its input the same salt**.
+
+**Neither tool has a fallback when `/dev/urandom` cannot be read; both refuse
+to write a password at all.** `passwd` briefly kept a day-number generator for
+that case, which is a salt in shape only — the day is public, so the whole salt
+follows from it and one precomputed table covers every account changed that
+day, which is the exact property a salt exists to deny. It was there only
+because the development host has no `/dev/urandom`; the tests drive
+`encode_salt` over all 256 byte values instead, so production code no longer
+carries a test affordance.
+
+### Notes for whoever reads this next
+
+- **Why the old tests never caught any of this.** They asserted determinism
+  (`h(x) == h(x)`), difference (`h(a) != h(b)`), and output shape — all of
+  which are true of any function written by accident. A known-answer vector is
+  the only test that separates an algorithm from something that resembles one.
+  Each tool now checks a published Drepper vector. *Worth applying to any other
+  transcribed algorithm in this tree* — see lane C's §4 SHA-256 audit; `passwd`,
+  `chpasswd` and `login`'s hand-rolled copies are deleted, and
+  `userspace/backup`, `pkg`, `rsync`, `ssh` and `useradm` still carry
+  unvectored ones.
+
+---
+
+## [B] `/etc/users.yaml` has two writers with incompatible schemas, so a password set by `useradm` is rejected by the login screen (2026-08-17)
+
+**In short:** SlateOS keeps its own user database at `/etc/users.yaml`, separate
+from the POSIX `/etc/shadow`. Seven programs read it and two of them write it —
+`init/login` (the graphical login manager) and `userspace/useradm` (the account
+management CLI) — and the two disagree about what the file looks like. Setting
+a password with `useradm passwd` produces an entry the login screen cannot
+authenticate against, and each tool silently deletes the fields the other owns
+when it rewrites the file. **This is the same bug lane C reported for
+`/etc/shadow` (fixed, `design-decisions.md` §329), one level up: same file,
+different tools, no agreement, and no test that compares them.**
+
+### The disagreements, measured against the code
+
+| | `useradm` | `init/login` |
+|---|---|---|
+| Salt field | `salt:` | `password_salt:` |
+| What is hashed | `sha256(hex_text_of_salt ‖ password)` | `sha256(raw_salt_bytes ‖ password)` |
+| Avatar | `avatar:` | `avatar_path:` |
+| Home | `home:` | `home_dir:` |
+| Admin flag | `admin:` | `is_admin:` |
+| Only in `useradm` | `groups:`, `locked:` | — |
+| Only in `init/login` | — | `auto_login:`, `last_login_timestamp:`, `login_count:` |
+
+Two independent reasons a `useradm`-set password fails at the login screen:
+`init/login` looks for `password_salt:` and finds only `salt:`, so it hashes
+with an *empty* salt; and even given the salt it would hash the decoded bytes
+where `useradm` hashed the hex text. Either alone is fatal.
+
+The field-set difference is a data-loss bug in both directions. Each writer
+emits exactly its own fields, so `useradm mod` on a database the login manager
+wrote drops `auto_login`, `last_login_timestamp` and `login_count`, and the
+login manager writing back drops `groups` and `locked` — including the group
+memberships that `sudo` and `polkit` make authorisation decisions from.
+
+`init/login/src/main.rs`: `hash_password` ~379, `authenticate` ~982,
+`serialize_users_yaml` ~514, `parse_users_yaml` ~541.
+`userspace/useradm/src/main.rs`: `hash_password` ~177, `read_users` ~86,
+`write_users` ~144.
+
+### The other five readers
+
+`su`, `sudo`, `polkit`, `chown` and `chroot` each carry their own parser of the
+same file — seven hand-written parsers of one format, which is how the two
+schemas were able to drift apart without anything failing to compile. They are
+read-only, so they cannot corrupt the file, but each silently gets `None` for
+any field named the way the *other* writer names it.
+
+### The password hash itself
+
+Both constructions are `sha256(salt ‖ password)` in one pass: no work factor,
+so an attacker with the file tries passwords as fast as they can hash, which is
+billions per second. `/etc/shadow` no longer has this problem — §329 moved it to
+SHA-512-crypt with 5000 rounds via `posix::crypt`. The native database should
+use the same implementation; there is no reason for this OS to contain two
+password-hash constructions, let alone three.
+
+### Proper fix
+
+One shared implementation of the format — record type, parser, serialiser that
+round-trips *every* field including ones the caller does not know about, and
+authentication via `posix::crypt` — used by both writers and, in time, the five
+readers. This is the §329 fix applied to the second password store.
+
+**Not blocked on the open architectural question** (`open-questions.md`, whether
+`/etc/users.yaml` or `/etc/shadow` is the system's one account database):
+whichever wins, the tools that write a file today must agree about it today, and
+one parser is easier to delete later than seven.
+
+### FIXED, 2026-08-17 (`cc0fa5da9`, `5ab46559a`, `3a3321a76`)
+
+Both writers now go through one crate, `userspace/userdb`. It parses records
+into raw lines and rewrites only the field asked for, so neither program can
+delete a field it does not model; it writes passwords with `posix::crypt`
+(SHA-512-crypt, 5000 rounds) and verifies with `crypt`'s self-describing
+property, so the salt-name and pre-image disagreements have nothing left to
+disagree about; and where the two writers used different names for the same
+fact (`home_dir`/`home`, `is_admin`/`admin`, `avatar_path`/`avatar`,
+`password_salt`/`salt`), a write updates **every** spelling the record
+carries, so a preserved field cannot go stale. 23 tests in `userdb`, 5 new in
+`useradm`, 44 green in `login`. Reasoning in `design-decisions.md` §330.
+
+`hash_password`, `read_users`, `write_users`, `generate_salt`, `sha256_hex`
+and the local SHA-256 are deleted from `useradm`; `hash_password`,
+`serialize_users_yaml`, `parse_users_yaml`, `sha256`, `bytes_to_hex` and
+`hex_to_bytes` are deleted from `init/login`.
+
+Eight collateral defects fixed in passing, listed in §330 — the two that
+matter most: a read failure produced an *empty* database that the next save
+wrote over the real file (both writers), and in `login` that same failure
+substituted the built-in defaults, which include a root account whose password
+is in the source, so a permission error opened the machine up rather than
+closing it.
+
+**Still open — the five read-only parsers.** `su`, `sudo`, `polkit`, `chown`
+and `chroot` have not been migrated and still carry their own copies. `su` and
+`sudo` read `home:`, which *neither* writer has ever written, so they are
+reading a field that is not there on every file this tree has produced;
+migrating them is a bug fix, not housekeeping. Tracked as the remainder of
+this entry rather than a new one, because it is the same defect with the same
+fix.
+
+---
+
+## [B] The login screen ignores `avatar_path` and always draws initials (2026-08-17)
+
+**In short:** An account can name a picture to show next to it on the login
+screen — the `avatar_path:` field in `/etc/users.yaml`, which `useradm mod
+--avatar` sets. The login screen never looks at it. It draws a coloured circle
+with the user's initials for every account, so setting an avatar appears to
+work, reports success, and changes nothing anyone can see.
+
+`init/login/src/main.rs`: `UserAccount::avatar_path` carries an
+`#[allow(dead_code)]` precisely because no drawing code calls it; the avatar is
+rendered by the initials-and-circle path in the user-tile drawing code, with no
+branch on whether a path is set.
+
+### Proper fix
+
+Load the named image and draw it clipped to the circle, falling back to the
+initials when the field is unset, the file is missing, or it does not decode.
+The fallback is not optional: an avatar path can point at a file on a
+filesystem that is not mounted yet at login time, and a login screen that
+refuses to draw a user it cannot find a picture for is a login screen that
+cannot log that user in.
+
+Needs an image decoder reachable from `init/` — lane C owns `gui/`, so if the
+decoder lives there this becomes a request rather than a local change. Check
+what `gui/toolkit` exposes before assuming.
+
+**Severity:** cosmetic, but it is a silent no-op in a command that reports
+success, which is the kind of thing that gets diagnosed as a broken file
+rather than a missing feature.

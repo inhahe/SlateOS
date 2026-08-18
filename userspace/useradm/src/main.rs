@@ -1,8 +1,16 @@
 //! Slate OS User Account Management
 //!
 //! Unified tool for creating, modifying, and deleting user accounts.
-//! Manages /etc/users.yaml (our OS's user database format) and
-//! user home directories.
+//! Manages `/etc/users.yaml` (our OS's user database format) and user home
+//! directories.
+//!
+//! The format itself — the parser, the serialiser and the password hash —
+//! lives in the [`userdb`] crate, not here. It used to live here *as well as*
+//! in the login manager, in two versions that disagreed about the name of the
+//! salt field and about what was hashed, with the result that an account
+//! created with `useradm add` could not log in. A file format with two
+//! implementations is a file format with no definition; see
+//! `design-decisions.md` §330.
 //!
 //! # Usage
 //!
@@ -23,275 +31,119 @@ use std::fs;
 use std::io::{self, Write};
 use std::process;
 
-// ============================================================================
-// User data model
-// ============================================================================
-
-#[derive(Clone)]
-struct User {
-    uid: u32,
-    username: String,
-    display_name: String,
-    password_hash: String,
-    salt: String,
-    shell: String,
-    home: String,
-    groups: Vec<String>,
-    admin: bool,
-    locked: bool,
-    avatar: String,
-}
-
-impl User {
-    fn new(uid: u32, username: &str) -> Self {
-        User {
-            uid,
-            username: username.to_string(),
-            display_name: username.to_string(),
-            password_hash: String::new(),
-            salt: String::new(),
-            shell: "/bin/sh".to_string(),
-            home: format!("/home/{username}"),
-            groups: vec!["users".to_string()],
-            admin: false,
-            locked: false,
-            avatar: String::new(),
-        }
-    }
-}
+use userdb::{Record, UserDb, field};
 
 // ============================================================================
-// YAML user database
+// The database
 // ============================================================================
 
-const USER_DB_PATH: &str = "/etc/users.yaml";
-
-/// Read all users from /etc/users.yaml.
+/// Load the database, or exit.
 ///
-/// Our format (simplified YAML):
-/// ```yaml
-/// users:
-///   - uid: 0
-///     username: root
-///     display_name: "System Administrator"
-///     password_hash: "..."
-///     salt: "..."
-///     shell: /bin/sh
-///     home: /root
-///     groups: [root, admin]
-///     admin: true
-///     locked: false
-/// ```
-fn read_users() -> Vec<User> {
-    let content = match fs::read_to_string(USER_DB_PATH) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut users = Vec::new();
-    let mut current: Option<User> = None;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with("- uid:") || trimmed.starts_with("-  uid:") {
-            // New user entry.
-            if let Some(user) = current.take() {
-                users.push(user);
-            }
-            let uid: u32 = trimmed.split(':')
-                .nth(1)
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(0);
-            current = Some(User::new(uid, ""));
-        } else if let Some(ref mut user) = current {
-            if let Some(val) = trimmed.strip_prefix("username:") {
-                user.username = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("display_name:") {
-                user.display_name = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("password_hash:") {
-                user.password_hash = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("salt:") {
-                user.salt = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("shell:") {
-                user.shell = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("home:") {
-                user.home = val.trim().trim_matches('"').to_string();
-            } else if let Some(val) = trimmed.strip_prefix("groups:") {
-                let val = val.trim().trim_matches(|c: char| c == '[' || c == ']');
-                user.groups = val.split(',')
-                    .map(|g| g.trim().trim_matches('"').to_string())
-                    .filter(|g| !g.is_empty())
-                    .collect();
-            } else if let Some(val) = trimmed.strip_prefix("admin:") {
-                user.admin = val.trim() == "true";
-            } else if let Some(val) = trimmed.strip_prefix("locked:") {
-                user.locked = val.trim() == "true";
-            } else if let Some(val) = trimmed.strip_prefix("avatar:") {
-                user.avatar = val.trim().trim_matches('"').to_string();
-            }
+/// An unreadable database is a hard error rather than an empty one. The
+/// previous code returned an empty `Vec` for *any* read failure, and every
+/// command that writes would then have saved that empty database over the real
+/// one — so running `useradm lock alice` without permission to read
+/// `/etc/users.yaml` would have deleted every account on the machine if it
+/// could write.
+fn load_db() -> UserDb {
+    match UserDb::load(userdb::DEFAULT_PATH) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!(
+                "error: cannot read {}: {e}\n\
+                 refusing to continue, because writing now would replace the \
+                 user database with an empty one",
+                userdb::DEFAULT_PATH
+            );
+            process::exit(1);
         }
     }
-
-    if let Some(user) = current {
-        users.push(user);
-    }
-
-    users
 }
 
-/// Write all users back to /etc/users.yaml.
-fn write_users(users: &[User]) -> Result<(), String> {
-    let mut yaml = String::from("# Slate OS user database\n# Managed by useradm — do not edit manually\nusers:\n");
+/// Save the database, or exit.
+fn save_db(db: &UserDb) {
+    if let Err(e) = db.save(userdb::DEFAULT_PATH) {
+        eprintln!("error writing {}: {e}", userdb::DEFAULT_PATH);
+        process::exit(1);
+    }
+}
 
-    for user in users {
-        yaml.push_str(&format!("  - uid: {}\n", user.uid));
-        yaml.push_str(&format!("    username: \"{}\"\n", user.username));
-        yaml.push_str(&format!("    display_name: \"{}\"\n", user.display_name));
-        yaml.push_str(&format!("    password_hash: \"{}\"\n", user.password_hash));
-        yaml.push_str(&format!("    salt: \"{}\"\n", user.salt));
-        yaml.push_str(&format!("    shell: \"{}\"\n", user.shell));
-        yaml.push_str(&format!("    home: \"{}\"\n", user.home));
-
-        let groups_str: Vec<String> = user.groups.iter()
-            .map(|g| format!("\"{g}\""))
-            .collect();
-        yaml.push_str(&format!("    groups: [{}]\n", groups_str.join(", ")));
-        yaml.push_str(&format!("    admin: {}\n", user.admin));
-        yaml.push_str(&format!("    locked: {}\n", user.locked));
-
-        if !user.avatar.is_empty() {
-            yaml.push_str(&format!("    avatar: \"{}\"\n", user.avatar));
+/// The record for `username`, or exit with the standard message.
+fn require_user<'a>(db: &'a UserDb, username: &str) -> &'a Record {
+    match db.find(username) {
+        Some(r) => r,
+        None => {
+            eprintln!("error: user '{username}' not found");
+            process::exit(1);
         }
     }
+}
 
-    fs::write(USER_DB_PATH, yaml).map_err(|e| format!("write error: {e}"))
+/// The mutable record for `username`, or exit with the standard message.
+fn require_user_mut<'a>(db: &'a mut UserDb, username: &str) -> &'a mut Record {
+    if db.find(username).is_none() {
+        eprintln!("error: user '{username}' not found");
+        process::exit(1);
+    }
+    match db.find_mut(username) {
+        Some(r) => r,
+        // Unreachable: the immutable lookup above just succeeded, and nothing
+        // mutates the database in between.
+        None => process::exit(1),
+    }
+}
+
+/// A record's display name, falling back to the login name.
+fn display_name(record: &Record) -> String {
+    record
+        .get(field::DISPLAY_NAME)
+        .or_else(|| record.username())
+        .unwrap_or_default()
 }
 
 // ============================================================================
-// Password hashing
+// Passwords
 // ============================================================================
 
-/// Simple password hash using SHA-256 with salt.
-/// Returns (hash_hex, salt_hex).
-fn hash_password(password: &str, salt: &str) -> String {
-    // SHA-256 of salt + password (simplified — real implementation would
-    // use PBKDF2 or Argon2, but we only have std available).
-    let input = format!("{salt}{password}");
-    sha256_hex(input.as_bytes())
+/// Prompt for a line on stdin.
+///
+/// The password is echoed, which it should not be. Turning echo off needs the
+/// termios ioctls, which the kernel does not yet serve; `userspace/passwd` has
+/// the same limitation and the same note, and both will move to one helper
+/// when the ioctl lands.
+fn prompt(text: &str) -> String {
+    print!("{text}");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line).is_err() {
+        eprintln!("error reading input");
+        process::exit(1);
+    }
+    line.trim().to_string()
 }
 
-/// Generate a random salt by reading /dev/urandom.
-fn generate_salt() -> String {
-    let mut bytes = [0u8; 16];
-
-    if let Ok(data) = fs::read("/dev/urandom") {
-        for (i, b) in data.iter().take(16).enumerate() {
-            bytes[i] = *b;
-        }
-    } else {
-        // Fallback: use uptime as entropy source (not cryptographically secure).
-        if let Ok(uptime) = fs::read_to_string("/proc/uptime") {
-            let hash_input = format!("salt-{uptime}");
-            let hex = sha256_hex(hash_input.as_bytes());
-            return hex[..32].to_string();
-        }
+/// Prompt for a new password twice and store it in `record`.
+///
+/// Hashing happens through [`userdb`], which means through `crypt(3)` — the
+/// same call the login manager verifies with. Nothing here composes a hash out
+/// of a salt and a password by hand, which is what the three previous
+/// implementations each did differently.
+fn set_new_password(record: &mut Record, username: &str) {
+    let password = prompt(&format!("New password for {username}: "));
+    if password.is_empty() {
+        eprintln!("error: password cannot be empty");
+        process::exit(1);
+    }
+    let confirm = prompt("Confirm password: ");
+    if password != confirm {
+        eprintln!("error: passwords do not match");
+        process::exit(1);
     }
 
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// SHA-256 hash (minimal implementation for password hashing).
-fn sha256_hex(data: &[u8]) -> String {
-    // SHA-256 constants.
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-    ];
-
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    ];
-
-    // Padding.
-    let bit_len = (data.len() as u64) * 8;
-    let mut padded = data.to_vec();
-    padded.push(0x80);
-    while (padded.len() % 64) != 56 {
-        padded.push(0);
+    if let Err(e) = record.set_password(&password) {
+        eprintln!("error: {e}");
+        process::exit(1);
     }
-    padded.extend_from_slice(&bit_len.to_be_bytes());
-
-    // Process 64-byte blocks.
-    for chunk in padded.chunks(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    h.iter().map(|v| format!("{v:08x}")).collect()
 }
 
 // ============================================================================
@@ -299,10 +151,10 @@ fn sha256_hex(data: &[u8]) -> String {
 // ============================================================================
 
 fn cmd_add(username: &str, args: &[String]) {
-    let mut users = read_users();
+    let mut db = load_db();
 
-    if users.iter().any(|u| u.username == username) {
-        eprintln!("error: user '{}' already exists", username);
+    if db.find(username).is_some() {
+        eprintln!("error: user '{username}' already exists");
         process::exit(1);
     }
 
@@ -311,292 +163,303 @@ fn cmd_add(username: &str, args: &[String]) {
         eprintln!("error: username must be 1-32 characters");
         process::exit(1);
     }
-    if !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+    if !username
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
         eprintln!("error: username must be alphanumeric (plus _ - .)");
         process::exit(1);
     }
 
-    // Next UID.
-    let uid = users.iter().map(|u| u.uid).max().unwrap_or(999) + 1;
-    let uid = if uid < 1000 { 1000 } else { uid };
+    // Next UID: one past the highest in use, and never below 1000, which is
+    // where the system accounts stop.
+    let next_uid = db
+        .records()
+        .iter()
+        .filter_map(Record::uid)
+        .max()
+        .unwrap_or(999)
+        .saturating_add(1)
+        .max(1000);
 
-    let mut user = User::new(uid, username);
+    let mut record = Record::new();
+    record.set_uid(next_uid);
+    record.set(field::USERNAME, username);
+    record.set(field::DISPLAY_NAME, username);
+    record.set(field::SHELL, "/bin/sh");
+    record.set_home(&format!("/home/{username}"));
+    record.set_groups(&["users".to_string()]);
+    record.set_admin(false);
+    record.set_locked(false);
 
     // Parse optional arguments.
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--shell" | "-s" => {
-                if i + 1 < args.len() {
-                    user.shell = args[i + 1].clone();
-                    i += 2;
-                } else { i += 1; }
+        let Some(flag) = args.get(i).map(String::as_str) else {
+            break;
+        };
+        let value = args.get(i.saturating_add(1));
+        match (flag, value) {
+            ("--shell" | "-s", Some(v)) => {
+                record.set(field::SHELL, v);
+                i = i.saturating_add(2);
             }
-            "--home" | "-d" => {
-                if i + 1 < args.len() {
-                    user.home = args[i + 1].clone();
-                    i += 2;
-                } else { i += 1; }
+            ("--home" | "-d", Some(v)) => {
+                record.set_home(v);
+                i = i.saturating_add(2);
             }
-            "--name" | "-c" => {
-                if i + 1 < args.len() {
-                    user.display_name = args[i + 1].clone();
-                    i += 2;
-                } else { i += 1; }
+            ("--name" | "-c", Some(v)) => {
+                record.set(field::DISPLAY_NAME, v);
+                i = i.saturating_add(2);
             }
-            "--groups" | "-G" => {
-                if i + 1 < args.len() {
-                    user.groups = args[i + 1].split(',')
-                        .map(|g| g.trim().to_string())
-                        .collect();
-                    i += 2;
-                } else { i += 1; }
+            ("--groups" | "-G", Some(v)) => {
+                record.set_groups(&split_groups(v));
+                i = i.saturating_add(2);
             }
-            "--admin" => {
-                user.admin = true;
-                if !user.groups.contains(&"admin".to_string()) {
-                    user.groups.push("admin".to_string());
+            ("--uid" | "-u", Some(v)) => {
+                match v.parse::<u32>() {
+                    Ok(uid) => record.set_uid(uid),
+                    Err(_) => {
+                        eprintln!("error: --uid expects a number, got '{v}'");
+                        process::exit(1);
+                    }
                 }
-                i += 1;
+                i = i.saturating_add(2);
             }
-            "--uid" | "-u" => {
-                if i + 1 < args.len() {
-                    user.uid = args[i + 1].parse().unwrap_or(uid);
-                    i += 2;
-                } else { i += 1; }
+            ("--admin", _) => {
+                grant_admin(&mut record);
+                i = i.saturating_add(1);
             }
-            _ => i += 1,
+            _ => i = i.saturating_add(1),
         }
     }
 
-    // Prompt for password.
-    print!("Password for {username}: ");
-    let _ = io::stdout().flush();
-    let mut password = String::new();
-    if io::stdin().read_line(&mut password).is_err() {
-        eprintln!("error reading password");
-        process::exit(1);
-    }
-    let password = password.trim();
-
-    if password.is_empty() {
-        eprintln!("error: password cannot be empty");
+    if let Some(uid) = record.uid()
+        && let Some(existing) = db.find_uid(uid)
+    {
+        eprintln!(
+            "error: uid {uid} is already used by '{}'",
+            existing.username().unwrap_or_default()
+        );
         process::exit(1);
     }
 
-    let salt = generate_salt();
-    user.password_hash = hash_password(password, &salt);
-    user.salt = salt;
+    set_new_password(&mut record, username);
 
-    users.push(user.clone());
-
-    if let Err(e) = write_users(&users) {
-        eprintln!("error writing user database: {e}");
-        process::exit(1);
-    }
+    let home = record.home().unwrap_or_default();
+    let uid = record.uid().unwrap_or_default();
+    db.push(record);
+    save_db(&db);
 
     // Create home directory.
-    if let Err(e) = fs::create_dir_all(&user.home) {
-        eprintln!("warning: could not create home directory {}: {e}", user.home);
+    if let Err(e) = fs::create_dir_all(&home) {
+        eprintln!("warning: could not create home directory {home}: {e}");
     }
 
-    println!("Created user '{}' (uid={}, home={})", user.username, user.uid, user.home);
+    println!("Created user '{username}' (uid={uid}, home={home})");
+}
+
+/// Split a comma-separated `--groups` value.
+fn split_groups(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|g| g.trim().to_string())
+        .filter(|g| !g.is_empty())
+        .collect()
+}
+
+/// Mark a record as an administrator, and put it in the `admin` group.
+///
+/// Both, because they are two different questions: the flag is what the login
+/// manager and the settings app read, and the group is what `sudo` reads.
+fn grant_admin(record: &mut Record) {
+    record.set_admin(true);
+    let mut groups = record.groups();
+    if !groups.iter().any(|g| g == "admin") {
+        groups.push("admin".to_string());
+        record.set_groups(&groups);
+    }
 }
 
 fn cmd_del(username: &str) {
-    let mut users = read_users();
-    let before = users.len();
-
     // Prevent deleting root.
     if username == "root" {
         eprintln!("error: cannot delete root user");
         process::exit(1);
     }
 
-    users.retain(|u| u.username != username);
+    let mut db = load_db();
+    let home = require_user(&db, username).home();
 
-    if users.len() == before {
-        eprintln!("error: user '{}' not found", username);
+    if !db.remove(username) {
+        eprintln!("error: user '{username}' not found");
         process::exit(1);
     }
+    save_db(&db);
 
-    if let Err(e) = write_users(&users) {
-        eprintln!("error writing user database: {e}");
-        process::exit(1);
-    }
-
-    // Optionally remove home directory.
-    let home = format!("/home/{username}");
-    if std::path::Path::new(&home).exists() {
-        print!("Remove home directory {}? [y/N] ", home);
-        let _ = io::stdout().flush();
-        let mut answer = String::new();
-        if io::stdin().read_line(&mut answer).is_ok()
-            && answer.trim().to_lowercase() == "y" {
-                if let Err(e) = fs::remove_dir_all(&home) {
-                    eprintln!("warning: could not remove {home}: {e}");
-                } else {
-                    println!("Removed {home}");
-                }
+    // Optionally remove home directory. The record's own home is used rather
+    // than a guess at `/home/<name>`, so an account with a home somewhere else
+    // does not leave its files behind while the prompt asks about a directory
+    // that was never its.
+    if let Some(home) = home
+        && std::path::Path::new(&home).exists()
+    {
+        let answer = prompt(&format!("Remove home directory {home}? [y/N] "));
+        if answer.eq_ignore_ascii_case("y") {
+            match fs::remove_dir_all(&home) {
+                Ok(()) => println!("Removed {home}"),
+                Err(e) => eprintln!("warning: could not remove {home}: {e}"),
             }
+        }
     }
 
-    println!("Deleted user '{}'", username);
+    println!("Deleted user '{username}'");
 }
 
 fn cmd_passwd(username: &str) {
-    let mut users = read_users();
-
-    let user = match users.iter_mut().find(|u| u.username == username) {
-        Some(u) => u,
-        None => {
-            eprintln!("error: user '{}' not found", username);
-            process::exit(1);
-        }
-    };
-
-    print!("New password for {username}: ");
-    let _ = io::stdout().flush();
-    let mut password = String::new();
-    if io::stdin().read_line(&mut password).is_err() {
-        eprintln!("error reading password");
-        process::exit(1);
-    }
-    let password = password.trim();
-
-    if password.is_empty() {
-        eprintln!("error: password cannot be empty");
-        process::exit(1);
-    }
-
-    print!("Confirm password: ");
-    let _ = io::stdout().flush();
-    let mut confirm = String::new();
-    if io::stdin().read_line(&mut confirm).is_err() {
-        eprintln!("error reading confirmation");
-        process::exit(1);
-    }
-
-    if password != confirm.trim() {
-        eprintln!("error: passwords do not match");
-        process::exit(1);
-    }
-
-    let salt = generate_salt();
-    user.password_hash = hash_password(password, &salt);
-    user.salt = salt;
-
-    if let Err(e) = write_users(&users) {
-        eprintln!("error writing user database: {e}");
-        process::exit(1);
-    }
-
-    println!("Password updated for '{}'", username);
+    let mut db = load_db();
+    let record = require_user_mut(&mut db, username);
+    set_new_password(record, username);
+    save_db(&db);
+    println!("Password updated for '{username}'");
 }
 
 fn cmd_list() {
-    let users = read_users();
+    let db = load_db();
 
-    if users.is_empty() {
-        println!("No users found (is {} readable?)", USER_DB_PATH);
+    if db.records().is_empty() {
+        println!("No users found (is {} readable?)", userdb::DEFAULT_PATH);
         return;
     }
 
-    println!("{:<6} {:<16} {:<24} {:<16} {:<6} Groups",
-        "UID", "Username", "Display Name", "Shell", "Admin");
-    println!("{:<6} {:<16} {:<24} {:<16} {:<6} ------",
-        "---", "--------", "------------", "-----", "-----");
+    println!(
+        "{:<6} {:<16} {:<24} {:<16} {:<6} Groups",
+        "UID", "Username", "Display Name", "Shell", "Admin"
+    );
+    println!(
+        "{:<6} {:<16} {:<24} {:<16} {:<6} ------",
+        "---", "--------", "------------", "-----", "-----"
+    );
 
-    for user in &users {
-        let admin = if user.admin { "yes" } else { "no" };
-        let locked = if user.locked { " (locked)" } else { "" };
-        println!("{:<6} {:<16} {:<24} {:<16} {:<6} {}{}",
-            user.uid,
-            user.username,
-            if user.display_name.len() > 22 {
-                &user.display_name[..22]
-            } else {
-                &user.display_name
-            },
-            user.shell,
-            admin,
-            user.groups.join(", "),
-            locked,
+    for record in db.records() {
+        let uid = record
+            .uid()
+            .map_or_else(|| "?".to_string(), |u| u.to_string());
+        println!(
+            "{:<6} {:<16} {:<24} {:<16} {:<6} {}{}",
+            uid,
+            record.username().unwrap_or_default(),
+            // Truncated by characters, not by bytes: slicing a UTF-8 display
+            // name at byte 22 panics if a character straddles the boundary.
+            display_name(record).chars().take(22).collect::<String>(),
+            record.get(field::SHELL).unwrap_or_default(),
+            if record.is_admin() { "yes" } else { "no" },
+            record.groups().join(", "),
+            if record.is_locked() { " (locked)" } else { "" },
         );
     }
 }
 
 fn cmd_info(username: &str) {
-    let users = read_users();
+    let db = load_db();
+    let record = require_user(&db, username);
 
-    let user = match users.iter().find(|u| u.username == username) {
-        Some(u) => u,
-        None => {
-            eprintln!("error: user '{}' not found", username);
-            process::exit(1);
-        }
-    };
-
-    println!("Username:     {}", user.username);
-    println!("UID:          {}", user.uid);
-    println!("Display name: {}", user.display_name);
-    println!("Home:         {}", user.home);
-    println!("Shell:        {}", user.shell);
-    println!("Groups:       {}", user.groups.join(", "));
-    println!("Admin:        {}", if user.admin { "yes" } else { "no" });
-    println!("Locked:       {}", if user.locked { "yes" } else { "no" });
-    if !user.avatar.is_empty() {
-        println!("Avatar:       {}", user.avatar);
+    println!("Username:     {}", record.username().unwrap_or_default());
+    println!(
+        "UID:          {}",
+        record
+            .uid()
+            .map_or_else(|| "(none)".to_string(), |u| u.to_string())
+    );
+    println!("Display name: {}", display_name(record));
+    println!("Home:         {}", record.home().unwrap_or_default());
+    println!(
+        "Shell:        {}",
+        record.get(field::SHELL).unwrap_or_default()
+    );
+    println!("Groups:       {}", record.groups().join(", "));
+    println!("Admin:        {}", yes_no(record.is_admin()));
+    println!("Locked:       {}", yes_no(record.is_locked()));
+    if let Some(avatar) = record.avatar() {
+        println!("Avatar:       {avatar}");
     }
+    // Worth saying plainly: an entry in one of the two formats that predate
+    // the shared implementation is not a password that happens to be wrong,
+    // it is a password that cannot be checked at all, and the account is
+    // unreachable until root sets a new one.
+    if record.has_legacy_password() {
+        println!(
+            "Password:     stored in a format that predates the shared hash \
+             and cannot be verified — run `useradm passwd {username}' to reset it"
+        );
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn cmd_lock(username: &str) {
-    let mut users = read_users();
-    let user = match users.iter_mut().find(|u| u.username == username) {
-        Some(u) => u,
-        None => {
-            eprintln!("error: user '{}' not found", username);
-            process::exit(1);
-        }
-    };
-
-    user.locked = true;
-    if let Err(e) = write_users(&users) {
-        eprintln!("error: {e}");
-        process::exit(1);
-    }
-    println!("Locked account '{}'", username);
+    let mut db = load_db();
+    require_user_mut(&mut db, username).set_locked(true);
+    save_db(&db);
+    println!("Locked account '{username}'");
 }
 
 fn cmd_unlock(username: &str) {
-    let mut users = read_users();
-    let user = match users.iter_mut().find(|u| u.username == username) {
-        Some(u) => u,
-        None => {
-            eprintln!("error: user '{}' not found", username);
-            process::exit(1);
-        }
-    };
-
-    user.locked = false;
-    if let Err(e) = write_users(&users) {
-        eprintln!("error: {e}");
-        process::exit(1);
-    }
-    println!("Unlocked account '{}'", username);
+    let mut db = load_db();
+    require_user_mut(&mut db, username).set_locked(false);
+    save_db(&db);
+    println!("Unlocked account '{username}'");
 }
 
 fn cmd_groups(username: &str) {
-    let users = read_users();
-    let user = match users.iter().find(|u| u.username == username) {
-        Some(u) => u,
-        None => {
-            eprintln!("error: user '{}' not found", username);
-            process::exit(1);
-        }
-    };
+    let db = load_db();
+    let record = require_user(&db, username);
+    println!(
+        "{}: {}",
+        record.username().unwrap_or_default(),
+        record.groups().join(" ")
+    );
+}
 
-    println!("{}: {}", user.username, user.groups.join(" "));
+fn cmd_mod(username: &str, args: &[String]) {
+    let mut db = load_db();
+    let record = require_user_mut(&mut db, username);
+
+    let mut i = 0;
+    while i < args.len() {
+        let Some(flag) = args.get(i).map(String::as_str) else {
+            break;
+        };
+        let value = args.get(i.saturating_add(1));
+        match (flag, value) {
+            ("--shell" | "-s", Some(v)) => {
+                record.set(field::SHELL, v);
+                i = i.saturating_add(2);
+            }
+            ("--home" | "-d", Some(v)) => {
+                record.set_home(v);
+                i = i.saturating_add(2);
+            }
+            ("--name" | "-c", Some(v)) => {
+                record.set(field::DISPLAY_NAME, v);
+                i = i.saturating_add(2);
+            }
+            ("--groups" | "-G", Some(v)) => {
+                record.set_groups(&split_groups(v));
+                i = i.saturating_add(2);
+            }
+            ("--admin", _) => {
+                grant_admin(record);
+                i = i.saturating_add(1);
+            }
+            _ => i = i.saturating_add(1),
+        }
+    }
+
+    save_db(&db);
+    println!("Modified user '{username}'");
 }
 
 // ============================================================================
@@ -631,123 +494,151 @@ fn print_usage() {
     println!("  --uid, -u <uid>     Set specific UID");
 }
 
+/// The username argument, or exit with the standard message.
+fn require_username<'a>(args: &'a [String], command: &str) -> &'a str {
+    match args.get(2) {
+        Some(name) => name.as_str(),
+        None => {
+            eprintln!("error: '{command}' requires a username");
+            process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 2 {
+    let Some(command) = args.get(1).map(String::as_str) else {
         print_usage();
         process::exit(0);
-    }
+    };
 
-    match args[1].as_str() {
-        "add" | "useradd" | "create" => {
-            if args.len() < 3 {
-                eprintln!("error: 'add' requires a username");
-                process::exit(1);
-            }
-            cmd_add(&args[2], &args[3..]);
-        }
-        "del" | "userdel" | "delete" | "rm" => {
-            if args.len() < 3 {
-                eprintln!("error: 'del' requires a username");
-                process::exit(1);
-            }
-            cmd_del(&args[2]);
-        }
-        "mod" | "usermod" | "modify" => {
-            if args.len() < 3 {
-                eprintln!("error: 'mod' requires a username");
-                process::exit(1);
-            }
-            // Modify reuses add logic on existing user.
-            let mut users = read_users();
-            let idx = match users.iter().position(|u| u.username == args[2]) {
-                Some(i) => i,
-                None => {
-                    eprintln!("error: user '{}' not found", args[2]);
-                    process::exit(1);
-                }
-            };
+    let rest = args.get(3..).unwrap_or(&[]);
 
-            let mut i = 3;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--shell" | "-s" if i + 1 < args.len() => {
-                        users[idx].shell = args[i + 1].clone();
-                        i += 2;
-                    }
-                    "--home" | "-d" if i + 1 < args.len() => {
-                        users[idx].home = args[i + 1].clone();
-                        i += 2;
-                    }
-                    "--name" | "-c" if i + 1 < args.len() => {
-                        users[idx].display_name = args[i + 1].clone();
-                        i += 2;
-                    }
-                    "--groups" | "-G" if i + 1 < args.len() => {
-                        users[idx].groups = args[i + 1].split(',')
-                            .map(|g| g.trim().to_string())
-                            .collect();
-                        i += 2;
-                    }
-                    "--admin" => {
-                        users[idx].admin = true;
-                        if !users[idx].groups.contains(&"admin".to_string()) {
-                            users[idx].groups.push("admin".to_string());
-                        }
-                        i += 1;
-                    }
-                    _ => i += 1,
-                }
-            }
-
-            if let Err(e) = write_users(&users) {
-                eprintln!("error: {e}");
-                process::exit(1);
-            }
-            println!("Modified user '{}'", args[2]);
-        }
-        "passwd" | "password" => {
-            if args.len() < 3 {
-                eprintln!("error: 'passwd' requires a username");
-                process::exit(1);
-            }
-            cmd_passwd(&args[2]);
-        }
+    match command {
+        "add" | "useradd" | "create" => cmd_add(require_username(&args, "add"), rest),
+        "del" | "userdel" | "delete" | "rm" => cmd_del(require_username(&args, "del")),
+        "mod" | "usermod" | "modify" => cmd_mod(require_username(&args, "mod"), rest),
+        "passwd" | "password" => cmd_passwd(require_username(&args, "passwd")),
         "list" | "ls" => cmd_list(),
-        "info" | "show" => {
-            if args.len() < 3 {
-                eprintln!("error: 'info' requires a username");
-                process::exit(1);
-            }
-            cmd_info(&args[2]);
-        }
-        "lock" => {
-            if args.len() < 3 {
-                eprintln!("error: 'lock' requires a username");
-                process::exit(1);
-            }
-            cmd_lock(&args[2]);
-        }
-        "unlock" => {
-            if args.len() < 3 {
-                eprintln!("error: 'unlock' requires a username");
-                process::exit(1);
-            }
-            cmd_unlock(&args[2]);
-        }
-        "groups" => {
-            if args.len() < 3 {
-                eprintln!("error: 'groups' requires a username");
-                process::exit(1);
-            }
-            cmd_groups(&args[2]);
-        }
+        "info" | "show" => cmd_info(require_username(&args, "info")),
+        "lock" => cmd_lock(require_username(&args, "lock")),
+        "unlock" => cmd_unlock(require_username(&args, "unlock")),
+        "groups" => cmd_groups(require_username(&args, "groups")),
         "help" | "--help" | "-h" => print_usage(),
         other => {
             eprintln!("unknown command: {other}");
             eprintln!("Run 'useradm help' for usage.");
             process::exit(1);
         }
+    }
+}
+
+// The workspace's defensive lints are for production code; a test that indexes
+// a fixture it just built is asserting, and an assertion that fails by
+// panicking is a test doing its job.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The one thing this whole change is for: an account created the way
+    /// `useradm add` creates one authenticates the way the login manager
+    /// authenticates. Both sides go through `userdb`, so this is now a
+    /// statement about one implementation rather than a hope about two.
+    #[test]
+    fn an_account_created_here_authenticates() {
+        let mut record = Record::new();
+        record.set_uid(1000);
+        record.set(field::USERNAME, "alice");
+        record
+            .set_password_with_salt("correct horse", "abcdefgh")
+            .expect("hash");
+
+        let mut db = UserDb::new();
+        db.push(record);
+
+        let reparsed = UserDb::parse(&db.to_text());
+        let stored = reparsed.find("alice").expect("alice");
+        assert_eq!(
+            stored.check_password("correct horse"),
+            userdb::Auth::Accepted
+        );
+        assert_eq!(stored.check_password("wrong"), userdb::Auth::Rejected);
+    }
+
+    #[test]
+    fn granting_admin_sets_both_the_flag_and_the_group() {
+        let mut record = Record::new();
+        record.set_groups(&["users".to_string()]);
+        grant_admin(&mut record);
+        assert!(record.is_admin());
+        assert_eq!(
+            record.groups(),
+            vec!["users".to_string(), "admin".to_string()]
+        );
+
+        // Twice is the same as once.
+        grant_admin(&mut record);
+        assert_eq!(
+            record.groups(),
+            vec!["users".to_string(), "admin".to_string()]
+        );
+    }
+
+    #[test]
+    fn group_lists_ignore_stray_separators() {
+        assert_eq!(
+            split_groups("users, admin , ,video"),
+            vec![
+                "users".to_string(),
+                "admin".to_string(),
+                "video".to_string()
+            ]
+        );
+        assert!(split_groups("").is_empty());
+    }
+
+    /// A modification must not delete the fields `useradm` has no field for.
+    /// The old serialiser rebuilt the file from its own struct, so a record
+    /// the login manager had written lost `auto_login`, `login_count` and
+    /// `last_login_timestamp` the first time anyone ran `useradm mod`.
+    #[test]
+    fn a_modification_keeps_fields_useradm_does_not_model() {
+        let text = "users:\n  \
+            - uid: 1000\n    \
+            username: \"alice\"\n    \
+            home_dir: \"/home/alice\"\n    \
+            auto_login: false\n    \
+            login_count: 42\n    \
+            last_login_timestamp: 1700000000\n";
+        let mut db = UserDb::parse(text);
+        db.find_mut("alice")
+            .expect("alice")
+            .set(field::SHELL, "/bin/osh");
+
+        let out = db.to_text();
+        assert!(out.contains("login_count: 42"), "{out}");
+        assert!(out.contains("last_login_timestamp: 1700000000"), "{out}");
+        assert!(out.contains("auto_login: false"), "{out}");
+        assert!(out.contains("shell: \"/bin/osh\""), "{out}");
+    }
+
+    /// A display name long enough to need truncating is cut on a character
+    /// boundary. The previous `&name[..22]` panicked on any name whose 22nd
+    /// byte fell inside a multi-byte character.
+    #[test]
+    fn a_long_multibyte_display_name_does_not_panic() {
+        let mut record = Record::new();
+        record.set(field::USERNAME, "yuki");
+        record.set(field::DISPLAY_NAME, &"é".repeat(40));
+        let shown: String = display_name(&record).chars().take(22).collect();
+        assert_eq!(shown.chars().count(), 22);
     }
 }

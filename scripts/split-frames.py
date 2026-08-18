@@ -1294,7 +1294,10 @@ def rewrite(
     # A fixture's call expression defaults to its own name; `--param` lets it
     # differ, so a `Vec` local can be handed to a `&[T]` parameter.
     params = [(p[0], p[1], p[2] if len(p) > 2 else p[0]) for p in (params or [])]
-    assert "\r\n" not in text, "file has CRLF; this transformer assumes LF"
+    # An internal invariant, not a limitation on what the tool accepts: `main`
+    # normalises CRLF on read and restores it on write.  Kept as an assertion
+    # because everything below indexes offsets produced by splitting on "\n".
+    assert "\r\n" not in text, "rewrite() takes LF text; normalise before calling"
     lines = text.split("\n")
     starts = line_starts(lines)
     depth, code, lits = scan(text)
@@ -2384,6 +2387,29 @@ def main() -> int:
 
     with io.open(args.file, encoding="utf-8", newline="") as f:
         text = f.read()
+    # `rewrite` is a pure LF function -- it splits on "\n", indexes by the
+    # offsets that produces, and emits "\n" at a couple of dozen sites -- so
+    # the ending is normalised here, at the one boundary, rather than threaded
+    # through the transformer.  27 of the kernel's sources are CRLF in the
+    # working tree (they were written by something that opened them in text
+    # mode on Windows) while every blob in the repository is LF, because
+    # `core.autocrlf=input` normalises on check-in and never converts on
+    # checkout.  Git therefore calls both clean and the difference is invisible
+    # until a line-based tool trips over it -- which is precisely what an
+    # assertion inside `rewrite` did, refusing `fs/handle.rs` and its 12 288-byte
+    # self-test for a reason that has nothing to do with the refactor.
+    #
+    # A *mixed* file is refused rather than unified: unifying it would smuggle a
+    # whole-file whitespace change into a commit whose subject is a stack frame.
+    crlf = text.count("\r\n")
+    if crlf:
+        if crlf != text.count("\n"):
+            ap.error(
+                f"{args.file} mixes CRLF and LF line endings; normalise it "
+                "first -- rewriting it here would bury a whole-file whitespace "
+                "change inside a refactor commit"
+            )
+        text = text.replace("\r\n", "\n")
     if args.arms and args.flat:
         ap.error("--arms and --flat are different shapes; pick one")
     out, cases = rewrite(
@@ -2421,7 +2447,11 @@ def main() -> int:
         print("  (dry run; nothing written)")
         return 0
     with io.open(args.file, "w", encoding="utf-8", newline="") as f:
-        f.write(out)
+        # Put back whatever the file had.  Writing LF into a CRLF file would be
+        # a correct-looking edit that shows up as a whole-file diff on any
+        # checkout whose git is configured to convert, and there is no reason
+        # for a stack-frame refactor to have an opinion about line endings.
+        f.write(out.replace("\n", "\r\n") if crlf else out)
     print(f"  wrote {args.file}")
     return 0
 

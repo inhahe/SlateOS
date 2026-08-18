@@ -35283,3 +35283,86 @@ lanes' test runs finished.
 **Severity:** high — it does not corrupt anything by itself (the guard sees to
 that), but it stops the one test that gates merging to `main`, and the failure
 mode it guards against has already destroyed a source file once.
+
+---
+
+## A-27-KERNEL-SOURCES-ARE-CRLF-IN-THE-WORKING-TREE-WHILE-EVERY-BLOB-IS-LF (lane A, 2026-08-18) — **tooling fixed; the divergence itself remains**
+
+**In short:** twenty-seven of the kernel's `.rs` files end their lines with
+carriage-return + newline; every other file, and every version of *all* of them
+stored in git, ends with newline alone. Git is configured in a way that makes
+both spellings look identical to it, so `git status` is clean, `git diff` is
+empty, and the compiler does not care. Nothing is broken until a tool reads the
+files line by line — at which point it silently sees a stray `\r` glued to the
+end of every line.
+
+### How the two spellings coexist without git noticing
+
+`core.autocrlf` is `input` in these worktrees. That setting converts CRLF to LF
+**on check-in** and never converts anything **on checkout**. So:
+
+- every blob in the repository is LF (verified: `git show HEAD:kernel/src/fs/handle.rs`
+  contains 2044 LF and zero CRLF);
+- a working-tree file that is LF hashes to that blob — clean;
+- a working-tree file that is CRLF *also* hashes to that blob, because the
+  check-in conversion strips the `\r` before hashing — also clean.
+
+Both therefore report clean, forever, and no amount of `git status`/`git diff`
+will ever surface the difference. Normalising the working copies produces a
+**zero-line diff** for the same reason.
+
+The 27 files were almost certainly written by something that opened them in
+Python text mode on Windows, where `open(p, "w")` translates `\n` to `\r\n` on
+write. That is a guess about provenance; the file list is not:
+
+`lockdep.rs`, `drm/driver.rs`, `drm/ati/backend.rs`, `drm/ati/tests.rs`, and
+under `fs/`: `atime.rs`, `bookmarks.rs`, `clipboard.rs`, `columnview.rs`,
+`directio.rs`, `dragdrop.rs`, `fileinfo.rs`, `fileops.rs`, `findex.rs`,
+`freeze.rs`, `fstrim.rs`, `handle.rs`, `pathbar.rs`, `prefetch.rs`,
+`preview.rs`, `profile.rs`, `recent.rs`, `sealing.rs`, `sparse.rs`,
+`templates.rs`, `thumbcache.rs`, `viewstate.rs`, `ext4/driver.rs`.
+
+Each is *uniformly* CRLF — no file mixes the two, which is what makes the tool
+fix below safe.
+
+### How it showed up
+
+`scripts/split-frames.py` refused `kernel/src/fs/handle.rs` outright with
+`AssertionError: file has CRLF; this transformer assumes LF`, blocking the split
+of that file's 12 288-byte `self_test` frame. The assertion was doing its job —
+the transformer indexes offsets produced by `text.split("\n")` and emits `"\n"`
+at a couple of dozen sites, so running it on CRLF text would have produced a
+file with mixed endings — but it stated an internal invariant as if it were a
+limit on what the tool accepts.
+
+### Fixed in the tool (2026-08-18)
+
+`split-frames.py` now normalises at its I/O boundary: `main` strips CRLF on read
+and restores it on write, leaving `rewrite()` the pure LF function its assertion
+describes. A file that *mixes* the two endings is still refused, deliberately —
+unifying it would bury a whole-file whitespace change inside a commit whose
+subject is a stack frame. `--check` still passes 23/23 and `fs/handle.rs` is now
+accepted.
+
+`rustfmt` was never affected: its default `newline_style = "Auto"` preserves
+whatever a file already uses.
+
+### Still to do
+
+The tool is fixed; the condition is not, and it can recur — anything that writes
+a kernel source through Python text mode on Windows re-creates it, and the next
+line-based tool will hit the same wall with a less obvious error message. Two
+candidate fixes, neither done:
+
+1. **Normalise the 27 files.** Costs nothing in git terms (zero-line diff, per
+   above) and makes the crate internally consistent. Does not prevent
+   recurrence.
+2. **Add a root `.gitattributes`** (`*.rs text eol=lf`) so checkout enforces the
+   policy rather than leaving it to whatever wrote the file last. This is the
+   durable fix, but `.gitattributes` is a repository-root file shared by all
+   three lanes, and adding it would make every lane's CRLF working copies
+   convert on their next checkout. It needs to be coordinated, not dropped in by
+   one lane — file a request or raise it in `open-questions.md` first.
+
+**Severity:** low — invisible to git, the compiler, and rustfmt; it costs a
+confusing failure in a line-based script roughly once per script.

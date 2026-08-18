@@ -32202,7 +32202,7 @@ you what it accepts, check the request against it rather than printing both and
 trusting the constant.
 
 
-## A-INTERMITTENT-STACK-CANARY-HALT-AT-REAP-TIME (lane A, 2026-08-17) - **instrumented, root cause not yet proven**
+## A-INTERMITTENT-STACK-CANARY-HALT-AT-REAP-TIME (lane A, 2026-08-17) - **ROOT CAUSE FOUND AND FIXED 2026-08-17**
 
 **In short:** roughly one boot in ten dies with `FATAL: Stack canary
 corrupted`, naming a task that exited tens of thousands of log lines
@@ -32352,3 +32352,206 @@ plausible, they want opposite fixes, and picking one on a hunch had an even
 chance of hardening the wrong path while leaving the real one live. The
 evidence needed to choose was cheap - it was sitting unread in a sentinel
 pattern the kernel already paints on every stack.
+
+---
+
+### RESOLVED 2026-08-17 - hypothesis (a) was right, and the cause was one field
+
+Everything above stands as written except its conclusion.  Hypothesis (a)
+(a real marginal overflow on the spawn path) is now **proven**, and the
+reason 23 KiB of headroom was not in fact enough is a single struct field.
+
+**In short:** `Task` embedded its 4096-byte FPU save area *by value*.  That
+made `Task` a ~4.4 KiB type, and in Rust a by-value move of a large type is
+a `memcpy` through a stack temporary.  The spawn path performs several such
+moves back to back, and at `opt-level = 0` - which is what
+`scripts/boot-test.sh` builds by default, and the profile every observed
+halt came from - the compiler elides none of them.  Three frames on one
+call chain therefore claimed **40 640 bytes of a 64 KiB stack** for nothing
+but copies of a zeroed 4 KiB array.
+
+#### How it was found
+
+A watermark says *which task* came closest to its canary.  It structurally
+cannot say *which function* put it there.  That gap is what kept the bug
+alive for as long as it did, and it is now closed by a new tool,
+**`scripts/stack-frames.py`**, which disassembles the built kernel and
+reports, per function, the stack its prologue claims.
+
+Two traps in writing that tool are worth recording, because either one
+alone would have produced a confident wrong answer:
+
+1. **Stack-probe chains.**  A function needing more than a page does not
+   emit one `sub $N, %rsp`.  It emits `sub $0x1000, %rsp; movq $0, (%rsp)`
+   repeated a page at a time, so a guard page can never be jumped over
+   untouched.  A naive "first `sub` in the prologue" reading therefore
+   reports **exactly 4096 for every large function** - hiding precisely the
+   ones worth finding.  The first version of the tool did exactly this, and
+   the uniform 4096s looked like a clean bill of health.  The chain must be
+   summed.
+2. **Profile matters enormously.**  Measuring the release build and
+   concluding the kernel is fine is a real way to be wrong here: the same
+   spawn path measured **40 640 bytes in debug and 8 960 in release**.
+
+#### The measurement
+
+Static, debug profile, before and after boxing `FpuState`:
+
+| Frame | before | after |
+|---|---:|---:|
+| `FpuState::new_default` | 8 320 | off path |
+| `Task::new_kernel` | 9 600 | 1 256 |
+| `sched::spawn_inner::{{closure}}` | 22 720 | 2 000 |
+| **total on one call chain** | **40 640** | **3 256** |
+
+40 640 bytes is **93% of the 43 896-byte peak the census measured**, in
+three frames.  There was never 23 KiB of headroom to spend on an unlucky
+interrupt; the frames themselves had already spent it.
+
+Two independent confirmations, taken before any fix:
+
+- **Static:** the identical source measured 40 640 in debug and 8 960 in
+  release - a 4.5x profile gap that only a by-value-copy explanation
+  accounts for.
+- **Runtime:** booting release instead of debug moved the census peak from
+  43 896 (66%) to 13 560 (20%), and `kworker` from 42 424 (64%) to
+  10 200 (15%).
+
+#### The fix
+
+`Task::fpu_state` is now `Box<FpuState>`, built by a new
+`FpuState::new_default_boxed()` that allocates zeroed memory and patches
+the 14 non-zero bytes **in place**.  This detail is the whole point:
+`Box::new(FpuState::new_default())` would have fixed *nothing*, because it
+builds the value in the caller's frame and only then copies it to the heap.
+Only allocate-then-initialise-in-place keeps it off the stack.
+
+A second instance of the same defect was found by the same tool and fixed
+in the same way: `KernelFdTable` is `[Option<FdEntry>; 256]` = 8192 bytes,
+and was likewise built by value and then `Box::new`'d, at two sites.  It
+now has `new_boxed()` / `with_stdio_boxed()`.  (`alloc_zeroed` is
+deliberately *not* used there - `Option<FdEntry>`'s `None` is not
+guaranteed to be all-zero bytes, a layout detail Rust does not promise.
+`Box::new_uninit()` plus an explicit per-element `write(None)` is.)
+
+Together the two fixes removed roughly **85 KiB of stack claims across nine
+functions**:
+
+| Function | before | after |
+|---|---:|---:|
+| `sched::spawn_inner::{{closure}}` | 22 720 | 2 000 |
+| `proc::pcb::fork_create::{{closure}}` | 16 624 | 0 |
+| `Task::new_kernel` | 9 600 | 1 256 |
+| `sched::init` | 9 344 | 0 |
+| `sched::register_ap_idle` | 9 216 | 0 |
+| `proc::pcb::linux_fd_install_stdio` | 8 336 | 0 |
+| `Result::<Task, _>::branch` | 4 608 | 0 |
+| `Task::new_ap_idle` | 4 352 | 0 |
+| `Task::new_idle` | 4 352 | 0 |
+
+`linux_fd_install_stdio` also stopped allocating while holding
+`PROCESS_TABLE`'s spinlock, which is a separate latent bug (see the Q24
+allocation-under-spinlock sweep) fixed incidentally by the same change.
+
+#### Runtime confirmation
+
+Debug boot, after both fixes (boot 81, PASS, streak 8):
+
+```
+[sched]   Stack peak this boot: 38280 bytes (58% of 65536) by task 283 (spawn-test-glibc-forkexec)
+[sched]   Stack census: 5 live task(s) with allocated stacks, deepest first
+[sched]     task 397  kworker                    7664 bytes ( 11% of 65536)
+[sched]     task 396  kswapd                     5048 bytes (  7% of 65536)
+[sched]     task 406  efd-to-test                4904 bytes (  7% of 65536)
+[sched]     task 407  svc-accept                 4552 bytes (  6% of 65536)
+[sched]     task 408  cgroup-e2e                 4200 bytes (  6% of 65536)
+```
+
+`kworker` - the long-lived task that sat at **64%** for the whole boot, and
+the one whose 23 KiB of remaining headroom the entry above worried about -
+is now at **11%**.  That is 34.8 KiB freed on a permanent kernel thread, a
+5.5x drop, and headroom from 23 KiB to 57 KiB.  This is the number that
+closes the bug: `spawn_inner` runs on the *caller's* stack, and the caller
+is `kworker`.
+
+The **peak** moved less - 43 896 to 38 280 - and this is expected rather
+than disappointing.  The peak belongs to task 283's own stack, so it
+measures code running *inside* the spawned task, not the spawn machinery.
+See the follow-on entry below for what is still down there.
+
+#### Generalisation (added to the two rules above)
+
+**A large struct destined for the heap must never be built by value.**
+This is recorded as `design-decisions.md` §226 with the pattern to use.
+The rule has teeth because the failure is invisible in release builds and
+invisible in code review: `Box::new(Big::new())` reads exactly like
+heap allocation, and is not.
+
+**A watermark localises a symptom to a task; only static frame analysis
+localises it to a function.** The census was a real improvement and still
+could not have found this. `scripts/stack-frames.py` is now part of the
+tree; run it after any change to a spawn, fork, or context-switch path.
+
+---
+
+## A-LARGE-KERNEL-STACK-FRAMES-REMAIN-IN-SELF-TESTS-AND-KSHELL (lane A, 2026-08-17) - **open, low severity**
+
+**In short:** after the two fixes above, the biggest remaining stack frames
+in the kernel are no longer on core paths - they are in boot self-tests and
+in `kshell` command handlers.  None is currently close to overflowing, but
+several are large enough that adding a few locals to one could push it
+over, and they are the reason the boot's peak is still 38 280 bytes rather
+than something in the low thousands.
+
+Measured with `python scripts/stack-frames.py --profile debug` on the debug
+kernel after both fixes landed (top offenders, bytes claimed by the
+prologue):
+
+| Function | bytes |
+|---|---:|
+| `self_test_prctl_dispatch` | 32 160 |
+| `kshell::cmd_oci` | 31 760 |
+| `linux_fd::self_test` | 28 224 |
+| `kshell::cmd_container` | 27 432 |
+| `eventlog::self_test` | 26 720 |
+| `scfilter::init` | 21 872 |
+| `kernel_main` | 19 776 |
+| `self_test_numa_sched_landlock` | 19 664 |
+| `test_per_cpu_work_stealing` | 19 504 |
+| `self_test_legacy_deprecated_syscalls` | 18 832 |
+| `PerCpuScheduler::new_const` | 18 752 |
+| `net::httpd::self_test` | 17 152 |
+| `xhci::init` | 15 504 |
+| `oci::build_one_stage_inner` | 15 000 |
+
+Plus some large stack *locals* found by inspection rather than by the tool:
+
+- `kernel/src/audio_notify.rs:133` - `[0u8; 8192]`
+- `kernel/src/audio_mixer.rs:420,425` - ~12 KiB combined
+- `kernel/src/syscall/linux.rs:80592` - `[0u8; 4096]`
+- `kernel/src/kshell.rs:106303-4`
+
+And one core-path remnant: `proc::pcb::fork_create` itself is still 6 328
+bytes, because it builds a ~35-field tuple by value.
+
+**Why this is low severity, not zero severity.** These frames are real but
+they do not nest: a self-test is called from `kernel_main`'s test runner at
+shallow depth, and a `kshell` handler from the shell loop.  The census
+after both fixes shows the deepest live stack at 11% and the boot peak at
+58%, so nothing is near the canary today.  The risk is that 32 KiB is half
+a stack, and the next person to add a buffer to `self_test_prctl_dispatch`
+has no warning that they are spending the second half.
+
+**Proper fix.** Not "make the tests smaller" one at a time - the pattern is
+the bug.  These functions accumulate dozens of independent test fixtures as
+distinct locals in one frame, and at `opt-level = 0` every one of them is
+live for the whole function.  Either split each self-test into
+`#[inline(never)]` per-case functions so the fixtures' frames are disjoint,
+or move the fixtures behind boxed allocation as `FpuState` now is.  The
+first is preferable: it costs nothing at runtime and the frames genuinely
+do not overlap in time.
+
+**How to reproduce / verify.** `python scripts/stack-frames.py --profile
+debug --top 40`, and `--diff BEFORE_ELF AFTER_ELF` to check a change.
+Note the profile: these numbers are debug, which is what `boot-test.sh`
+builds and therefore what any canary halt will come from.

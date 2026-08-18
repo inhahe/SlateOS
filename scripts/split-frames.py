@@ -74,10 +74,23 @@ coincide exactly when there is nothing after the match to fall back into, so
 `--arms` requires a unit return type and a match in tail position, and asserts
 both rather than trusting them.
 
-Functions with **flat** bodies stay out of scope: `eventlog::self_test` and
-`self_test_sysv_ipc_mqueue` are long runs of `let a = ..; if dispatch(..) {..}`
-with no block structure, and splitting those means inventing the case
-boundaries, which is a decision about what the test's units are.
+`--flat [MIN_LINES]` handles the third shape: a **flat** body, a long run of
+`let a = ..; if dispatch(..) {..}` with no block structure at all
+(`eventlog::self_test`, `self_test_sysv_ipc_mqueue`).  An earlier note put
+these out of scope, on the grounds that splitting one means inventing the case
+boundaries -- a decision about what the test's units are, which is not a
+transformer's to make.  That was right about the principle and wrong about the
+facts: the boundaries are already there.  The author of such a body separates
+each case with a blank line and heads it with `// Test 7: ...`; the structure
+is simply not written in *braces*, which is all the default mode can see.  So
+`--flat` cuts at the blank lines and nowhere else, and each paragraph becomes a
+case if it is at least MIN_LINES long, reads no local bound before it, and
+binds nothing read after it.  The last two are `E0434` and `E0425` -- the
+compiler is the actual safety net, and these checks only save it the trouble.
+
+It refuses to write a **one-case** split, because that cannot help: the peak
+becomes `outer + case`, which is what it already was.  Two is the minimum at
+which `max` beats `sum`.
 
 Then measure with `stack-frames.py --peak`, not the ranking
 -------------------------------------------------------------
@@ -587,6 +600,214 @@ def _arm_block_ok(
     return not _masked(text, code, open_off + 1, starts[o_line + 1] - 1).strip()
 
 
+IDENT = re.compile(r"[A-Za-z_]\w*")
+LET = re.compile(r"\blet\b")
+NOT_A_BINDING = {"mut", "ref", "box"}
+
+
+def statements(
+    lines: list[str],
+    depth: list[int],
+    code: bytearray,
+    starts: list[int],
+    text: str,
+    open_idx: int,
+    close_idx: int,
+    body: int,
+) -> list[tuple[int, int]]:
+    """Top-level statements of a block, as inclusive line ranges.
+
+    A statement ends at a `;` that leaves the depth at `body`, or at the `}`
+    that closes a block form (`if`, `match`, `for`, `unsafe`) used as a
+    statement.  Each range starts at the line after the previous statement's
+    end, so a statement absorbs the blank lines and the `// Test 4:` comment
+    above it -- which is what keeps a split readable.
+
+    Anything after the last statement (typically the trailing `Ok(())`) is not
+    returned, and is left where it is.
+    """
+    ends: list[int] = []
+    lo, hi = starts[open_idx + 1], starts[close_idx]
+    for p in range(lo, hi):
+        if not code[p]:
+            continue
+        c = text[p]
+        if not ((c == ";" and depth[p] == body) or (c == "}" and depth[p] == body + 1)):
+            continue
+        e = _line_of(starts, p)
+        # The statement must end its line; one that shares a line with the next
+        # is not something this can cut between.
+        if _masked(text, code, p + 1, starts[e + 1] - 1).strip():
+            continue
+        ends.append(e)
+    out = []
+    prev = open_idx
+    for e in ends:
+        out.append((prev + 1, e))
+        prev = e
+    return out
+
+
+def _binds(masked: str) -> set[str]:
+    """Names a statement's `let`s introduce -- over-approximated on purpose.
+
+    Over-approximating *bindings* only ever makes the chunker more cautious:
+    a spurious name is one more thing that must not cross a boundary.  Under-
+    approximating would let a real one cross, so the two directions are not
+    symmetric and this leans the safe way.
+
+    Uppercase-initial identifiers are dropped because `let Some(ev) = ..` and
+    `let Foo { a } = ..` would otherwise put `Some` and `Foo` in the set, and
+    every later statement mentioning them would become unchunkable.  Rust's
+    naming convention makes that reliable, and where it is not, the compiler
+    still is.
+    """
+    out: set[str] = set()
+    for m in LET.finditer(masked):
+        seg, d = [], 0
+        for ch in masked[m.end() :]:
+            if ch in "([{":
+                d += 1
+            elif ch in ")]}":
+                d -= 1
+            elif d == 0 and (ch == "=" or ch == ";" or ch == ":"):
+                break
+            seg.append(ch)
+        for name in IDENT.findall("".join(seg)):
+            if name not in NOT_A_BINDING and not name[:1].isupper():
+                out.add(name)
+    return out
+
+
+def _first_code_line(lines: list[str], span: tuple[int, int]) -> int:
+    """The first non-blank line of a statement range.
+
+    A range begins where the previous one ended, so it opens with whatever
+    blank lines separated them.  Those stay outside the case; the comment that
+    heads a statement does not, because it describes the statement.
+    """
+    top = span[0]
+    while top < span[1] and not lines[top].strip():
+        top += 1
+    return top
+
+
+def paragraphs(
+    lines: list[str], stmts: list[tuple[int, int]]
+) -> list[list[tuple[int, int]]]:
+    """Group top-level statements the way the author already grouped them.
+
+    A blank line between two statements starts a new group.  This is the whole
+    idea behind `--flat`, and the reason it is not the "inventing case
+    boundaries" that the earlier note refused to do: in a body like
+    `eventlog::self_test` the cases are already marked out -- a blank line and
+    a `// Test 7: ...` header before each -- they simply are not marked out
+    with *braces*, which is all `find_cases` can see.  Reading the blank lines
+    recovers the author's own structure rather than imposing one.
+
+    A blank line *inside* a statement (in the middle of a long `if` body) is
+    not a boundary, because only lines above a statement's first line of code
+    are considered.
+    """
+    groups: list[list[tuple[int, int]]] = []
+    for k, s in enumerate(stmts):
+        blank_above = any(
+            not lines[t].strip() for t in range(s[0], _first_code_line(lines, s))
+        )
+        if k == 0 or blank_above:
+            groups.append([])
+        groups[-1].append(s)
+    return groups
+
+
+def find_flat_cases(
+    lines: list[str],
+    depth: list[int],
+    code: bytearray,
+    starts: list[int],
+    text: str,
+    open_idx: int,
+    close_idx: int,
+    body: int,
+    min_lines: int,
+    outer: set[str],
+    declared: set[str],
+) -> tuple[list[tuple[int, int]], int]:
+    """Turn each blank-line-separated paragraph of a flat body into a case.
+
+    `eventlog::self_test` and its kind have no block structure for
+    `find_cases` to exploit -- a few hundred statements in a row -- but they do
+    have paragraphs, so `paragraphs` supplies the boundaries and this decides
+    which of them are legal and worth taking.  A paragraph is taken when:
+
+    * it is at least `min_lines` long (a two-line case moves nothing);
+    * it reads no local bound before it -- that would be `E0434`, since a
+      nested `fn` cannot capture.  `--param` exempts a name by threading it
+      through as an argument, which is what `declared` holds;
+    * nothing it binds is read after it -- that would be `E0425`.
+
+    Both compiler errors are the safety net rather than the mechanism: getting
+    a boundary wrong fails the build, it does not miscompile.  The checks here
+    exist so the common cases do not have to fail the build first.
+
+    Note what is *not* checked: whether the split is worth doing.  A single
+    case is always a no-op -- the peak becomes `outer + case`, which is what it
+    already was -- so that judgement lives in `apply`, which refuses to write
+    one, and ultimately in `stack-frames.py --peak`.
+    """
+    stmts = statements(lines, depth, code, starts, text, open_idx, close_idx, body)
+    if not stmts:
+        return [], 0
+    groups = paragraphs(lines, stmts)
+
+    masked = {s: _masked(text, code, starts[s[0]], starts[s[1] + 1] - 1) for s in stmts}
+    binds = {s: _binds(masked[s]) for s in stmts}
+    uses = {s: set(IDENT.findall(masked[s])) for s in stmts}
+    tail = _masked(text, code, starts[stmts[-1][1] + 1], starts[close_idx + 1] - 1)
+    tail_uses = set(IDENT.findall(tail))
+
+    g_binds = [set().union(*(binds[s] for s in g)) for g in groups]
+    g_uses = [set().union(*(uses[s] for s in g)) for g in groups]
+
+    # `live_after[k]` = every name read at or beyond group k, plus the trailing
+    # `Ok(())` and anything else after the last statement.  Names read strictly
+    # after group k are therefore `live_after[k + 1]`.
+    live_after = [tail_uses]
+    for u in reversed(g_uses):
+        live_after.append(live_after[-1] | u)
+    live_after.reverse()
+
+    cases: list[tuple[int, int]] = []
+    skipped = 0
+    before = set(outer) - declared
+    for k, g in enumerate(groups):
+        top, end = _first_code_line(lines, g[0]), g[-1][1]
+        long_enough = end - top + 1 >= min_lines
+        if (
+            long_enough
+            and not (g_uses[k] & before)
+            and not (g_binds[k] & live_after[k + 1])
+        ):
+            cases.append((top, end))
+        elif long_enough:
+            skipped += 1
+        before |= g_binds[k] - declared
+    return cases, skipped
+
+
+def _sig_params(sig: str) -> set[str]:
+    """Parameter names of a signature, so a chunk reading one is not attempted."""
+    a, b = sig.find("("), sig.rfind(")")
+    if a < 0 or b < a:
+        return set()
+    out: set[str] = set()
+    for part in sig[a + 1 : b].split(","):
+        name = part.split(":")[0].strip().lstrip("&").strip()
+        if IDENT.fullmatch(name) and not name[:1].isupper():
+            out.add(name)
+    return out
+
+
 def _needs_result(text: str, code: bytearray, lo: int, hi: int) -> bool:
     """Does this case body actually use `?` or `return`?
 
@@ -671,6 +892,7 @@ def rewrite(
     fn_name: str,
     params: list[tuple[str, ...]] | None = None,
     arms: bool = False,
+    flat: int = 0,
 ) -> tuple[str, list[tuple[int, int]]]:
     # A fixture's call expression defaults to its own name; `--param` lets it
     # differ, so a `Vec` local can be handed to a `&[T]` parameter.
@@ -710,10 +932,18 @@ def rewrite(
         open_idx = container(lines, depth, code, starts, b_open, text)
         inner = _depth_inside(lines, depth, code, starts, open_idx)
         close_idx = _matching_close(lines, depth, starts, open_idx, inner, text, code)
-        cases, skipped = find_cases(
-            lines, depth, code, starts, text, open_idx, close_idx, inner
-        )
-        noun = "`{` that is not a bare statement block"
+        if flat:
+            declared = {p[0] for p in params}
+            cases, skipped = find_flat_cases(
+                lines, depth, code, starts, text, open_idx, close_idx, inner,
+                flat, _sig_params(sig), declared,
+            )
+            noun = "paragraph that reads an outer local, or binds one read later"
+        else:
+            cases, skipped = find_cases(
+                lines, depth, code, starts, text, open_idx, close_idx, inner
+            )
+            noun = "`{` that is not a bare statement block"
 
     if skipped:
         print(f"  note: skipped {skipped} {noun}")
@@ -748,14 +978,18 @@ def rewrite(
             head = lines[i]
             pad = head[: len(head) - len(head.lstrip())]  # the `{`'s own indent
             inner_pad = pad + "    "
+            # A flat chunk has no braces of its own: the case body is the
+            # statements themselves, and the wrapping block is new.
+            lo_off = starts[i] if flat else starts[i + 1]
+            hi_off = starts[c + 1] - 1 if flat else starts[c]
             if arms:
                 # `return;` stays a `return;`, and the tail-position check in
                 # `find_match` is what makes that faithful.
                 fallible = False
             else:
-                _check_returns(text, code, starts, starts[i + 1], starts[c])
-                fallible = _needs_result(text, code, starts[i + 1], starts[c])
-            take = _used_params(text, code, starts[i + 1], starts[c], params)
+                _check_returns(text, code, starts, lo_off, hi_off)
+                fallible = _needs_result(text, code, lo_off, hi_off)
+            take = _used_params(text, code, lo_off, hi_off, params)
             decl = ", ".join(f"{n}: {t}" for n, t, _ in take)
             pass_ = ", ".join(e for _, _, e in take)
             ret = f" -> {RET_TYPE}" if fallible else ""
@@ -764,16 +998,21 @@ def rewrite(
             out.append(head if arms else f"{pad}{{")
             out.append(f"{inner_pad}#[inline(never)]")
             out.append(f"{inner_pad}fn case({decl}){ret} {{")
-            for b in lines[i + 1 : c]:
-                out.append(("    " + b) if b.strip() else b)
+            # A block's contents were already one level in; a flat paragraph
+            # was not, and gains two levels (the generated `{` and the `fn`).
+            step = "        " if flat else "    "
+            for b in lines[i : c + 1] if flat else lines[i + 1 : c]:
+                out.append((step + b) if b.strip() else b)
             if fallible:
                 out.append(f"{inner_pad}    Ok(())")
             out.append(f"{inner_pad}}}")
             out.append(f"{inner_pad}case({pass_}){'?' if fallible else ''};")
             out.append(lines[c] if arms else f"{pad}}}")
             # Fallible: 2 fn-header lines + `Ok(())` + the fn close + the call
-            # = 5.  Infallible: the same without the `Ok(())` = 4.
-            expect += 5 if fallible else 4
+            # = 5.  Infallible: the same without the `Ok(())` = 4.  A flat
+            # chunk consumes no lines of its own, so its `{` and `}` are two
+            # more.
+            expect += (5 if fallible else 4) + (2 if flat else 0)
             i = c + 1
             continue
         out.append(lines[i])
@@ -793,11 +1032,11 @@ def rewrite(
 # `git show HEAD:...` and diffing against the working tree -- only holds until
 # the rewrite is committed, and stops being a test the moment it is.
 # --------------------------------------------------------------------------
-CASES: list[tuple[str, str, str, list[tuple[str, ...]], bool]] = []
+CASES: list[tuple[str, str, str, list[tuple[str, ...]], bool, int]] = []
 
 
-def _case(name: str, src: str, want, params=(), arms: bool = False) -> None:
-    CASES.append((name, src, want, list(params), arms))
+def _case(name: str, src: str, want, params=(), arms: bool = False, flat: int = 0) -> None:
+    CASES.append((name, src, want, list(params), arms, flat))
 
 
 _case(
@@ -1259,12 +1498,172 @@ _case(
 )
 
 
+_case(
+    # `eventlog::self_test`'s shape: `// Test N:` groups whose locals die with
+    # them.  The boundaries are derived, not invented -- `t` is read only
+    # inside the first group, `r` only inside the second.
+    "a flat body is cut where no local crosses",
+    """fn self_test() -> KernelResult<()> {
+    serial_println!("[t] start");
+
+    // Test 1.
+    emit_one();
+    let t = total();
+    if t != 1 {
+        return Err(KernelError::InternalError);
+    }
+
+    // Test 2.
+    emit_two();
+    let r = query();
+    if r.matched != 2 {
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+""",
+    """fn self_test() -> KernelResult<()> {
+    serial_println!("[t] start");
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 1.
+            emit_one();
+            let t = total();
+            if t != 1 {
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 2.
+            emit_two();
+            let r = query();
+            if r.matched != 2 {
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+    Ok(())
+}
+""",
+    flat=5,
+)
+
+_case(
+    # The property the whole mode rests on: a local read after the cut keeps
+    # the cut from happening there.  `saved` is restored at the very end, so
+    # no chunk may hold it and no chunk may read it.
+    "a local read later is not cut across",
+    """fn self_test() -> KernelResult<()> {
+    let saved = total();
+
+    emit_one();
+    let t = total();
+    if t != 1 {
+        return Err(KernelError::InternalError);
+    }
+
+    restore(saved);
+    Ok(())
+}
+""",
+    """fn self_test() -> KernelResult<()> {
+    let saved = total();
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            emit_one();
+            let t = total();
+            if t != 1 {
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+
+    restore(saved);
+    Ok(())
+}
+""",
+    flat=4,
+)
+
+_case(
+    # Only blank lines *above* a statement's first line of code are boundaries.
+    # A blank line inside an `if` body is one the author put there to space out
+    # a case's own guts, and cutting there would split a case in half -- and,
+    # since the second half would open with `report(); }`, produce a paragraph
+    # whose braces do not balance.  This also covers the two kinds of case
+    # side by side: the first cannot fail, so it gets a plain `fn case()`.
+    "a blank line inside a statement is not a boundary",
+    """fn self_test() -> KernelResult<()> {
+    serial_println!("[t] start");
+
+    emit_one();
+    if check() {
+
+        report();
+    }
+
+    emit_two();
+    let r = query();
+    if r != 2 {
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+""",
+    """fn self_test() -> KernelResult<()> {
+    serial_println!("[t] start");
+
+    {
+        #[inline(never)]
+        fn case() {
+            emit_one();
+            if check() {
+
+                report();
+            }
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            emit_two();
+            let r = query();
+            if r != 2 {
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+    Ok(())
+}
+""",
+    flat=5,
+)
+
+
 def self_check() -> int:
     """Run the regression suite.  Returns 0 iff every case behaves."""
     failed = 0
-    for name, src, want, params, arms in CASES:
+    for name, src, want, params, arms, flat in CASES:
         try:
-            got, cases = rewrite(src, "self_test", params, arms)
+            got, cases = rewrite(src, "self_test", params, arms, flat)
         except AssertionError as exc:
             if want is AssertionError:
                 print(f"ok   {name} (refused: {exc})")
@@ -1331,9 +1730,28 @@ def main() -> int:
         "still mean `return;` once the arm is a call.",
     )
     ap.add_argument(
+        "--flat",
+        type=int,
+        nargs="?",
+        const=8,
+        default=0,
+        metavar="MIN_LINES",
+        help="split a body that has no block structure at all -- a long run "
+        "of statements, like eventlog::self_test -- into its blank-line-"
+        "separated paragraphs. A paragraph becomes a case when it is at least "
+        "MIN_LINES lines (default 8), reads no local bound before it, and "
+        "binds nothing read after it.",
+    )
+    ap.add_argument(
         "--dry-run",
         action="store_true",
         help="report what would change without writing",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="write even a one-case split, which normally cannot help: the "
+        "peak is `outer + case` either way",
     )
     ap.add_argument(
         "--check",
@@ -1360,14 +1778,37 @@ def main() -> int:
 
     with io.open(args.file, encoding="utf-8", newline="") as f:
         text = f.read()
-    out, cases = rewrite(text, args.fn_name, params, args.arms)
+    if args.arms and args.flat:
+        ap.error("--arms and --flat are different shapes; pick one")
+    out, cases = rewrite(text, args.fn_name, params, args.arms, args.flat)
     if not cases:
-        what = "match arms with block bodies" if args.arms else "bare sibling blocks"
+        what = (
+            "match arms with block bodies"
+            if args.arms
+            else "paragraphs no local crosses"
+            if args.flat
+            else "bare sibling blocks"
+        )
         print(f"{args.fn_name}: no {what} found; nothing to do")
         return 0
     span = sum(c - o + 1 for o, c in cases)
     grew = len(out.split("\n")) - len(text.split("\n"))
     print(f"{args.fn_name}: {len(cases)} case(s), {span} lines, +{grew} lines")
+    if len(cases) < 2 and not args.force:
+        # Only one case is arithmetically a no-op.  Splitting moves a case's
+        # locals out of the outer frame, but what is on the stack while the
+        # case runs is `outer + case` -- so with a single case the peak is what
+        # it always was, and the per-symbol ranking merely *reports* a smaller
+        # outer.  That flattering-but-wrong reading is exactly why the
+        # `linux_fd::self_test` split was made and then reverted (28 224 ->
+        # 18 896 by the ranking, 28 224 -> 28 240 by `--peak`).  Two cases are
+        # the minimum that can help, because only then does `max` beat `sum`.
+        print(
+            "  refusing to write a one-case split: the peak would stay "
+            "`outer + case`, which is what it already is. Lower --flat's "
+            "minimum, or pass --force if you have a reason."
+        )
+        return 1
     if args.dry_run:
         print("  (dry run; nothing written)")
         return 0

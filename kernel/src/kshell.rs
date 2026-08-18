@@ -90147,6 +90147,591 @@ fn cmd_docker(args: &str) {
     }
 }
 
+/// Every optional flag `oci run` / `oci create` accepts, as parsed out of the
+/// command line by [`OciRunFlags::parse`].
+///
+/// # Why the flags live in a struct rather than in the caller
+///
+/// The parser and the container setup were one function until this type
+/// existed.  At `opt-level = 0` LLVM gives every temporary its own stack slot
+/// and reuses none of them, so the ~410 lines of flag parsing charged their
+/// caller for every `console_println!` argument pack and every intermediate
+/// they built -- and went on charging for the ~660 further lines of image
+/// extraction, overlay setup and container creation that follow and touch none
+/// of those temporaries.  The combined function measured 18 304 bytes of
+/// stack, the largest frame in the kernel, against a 32 KiB kernel task stack.
+/// Parsed in its own function the slots are released before the setup begins,
+/// so the two no longer sum.
+///
+/// The borrowed fields point into the caller's argv slice, hence the lifetime.
+struct OciRunFlags<'a> {
+    /// `--name`/`-n NAME`: container name.  Defaults to the image directory.
+    name: Option<&'a str>,
+    /// `--net IP[,gw=..,dns=..]`: static addressing on the container bridge.
+    net_ip: Option<[u8; 4]>,
+    /// Gateway from `--net ...,gw=`.
+    net_gw: Option<[u8; 4]>,
+    /// DNS server from `--net ...,dns=`.
+    net_dns: Option<[u8; 4]>,
+    /// `--network NAME`: attach to a user-defined network, drawing a
+    /// conflict-free IP from its IPAM (Docker `docker run --network`).
+    net_name: Option<&'a str>,
+    /// `--network-alias NAME` (repeatable): extra embedded-DNS names the
+    /// container answers to on its network, alongside its name/hostname.
+    net_aliases: alloc::vec::Vec<&'a str>,
+    /// Volume mounts as (host_target, guest_prefix, read_only) triples from
+    /// `-v host:guest` (Docker order).  The host target is either an absolute
+    /// host path (bind mount) or a named volume's backing path (resolved at
+    /// parse time), so the tuple owns its strings rather than borrowing the raw
+    /// argv.  Installed after the container is created (while still in Created
+    /// state).
+    volumes: alloc::vec::Vec<(PathBuf, PathBuf, bool)>,
+    /// Published ports as (proto, host_port, container_port) from
+    /// `-p host:container[/tcp|/udp]` (Docker order, default tcp).  Installed
+    /// after the container is created (Created state).
+    ports: alloc::vec::Vec<(crate::net::nat::NatProto, u16, u16)>,
+    /// Tmpfs (in-memory) mounts as absolute guest paths from `--tmpfs /guest`.
+    /// Installed after the container is created (Created state); each backs an
+    /// ephemeral writable memfs.
+    tmpfs: alloc::vec::Vec<alloc::string::String>,
+    /// Extra `KEY=value` environment entries from `-e`/`--env`.  These override
+    /// the image's declared ENV (Docker semantics) and are merged at launch.
+    extra_env: alloc::vec::Vec<&'a str>,
+    /// `KEY=value` entries read from `--env-file FILE`.  Stored as raw bytes
+    /// (env values may contain non-UTF-8 data, which we must not corrupt) and
+    /// owned because they come from file contents, not from `parts`.
+    /// Precedence: image ENV < env-file < CLI `-e`.
+    env_file_entries: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+    /// `--memory`/`-m <size>` (bytes, with optional k/m/g suffix) converted to
+    /// 16 KiB frames.  Applied to the container cgroup at create time.
+    mem_frames: Option<u64>,
+    /// `--cpus <N[.M]>` (fractional cores) as a percent of one core, e.g.
+    /// 1.5 -> 150.  Applied to the container cgroup at create time.
+    cpu_percent: Option<u64>,
+    /// Docker `--read-only`: mount the container rootfs read-only so writes
+    /// that don't land in a writable (`:rw`) volume are denied with EROFS.
+    read_only_root: bool,
+    /// Docker `--restart POLICY`: auto-restart policy for the init process
+    /// (no|always|unless-stopped|on-failure[:N]).
+    restart_policy: Option<crate::container::RestartPolicy>,
+    /// Docker `--rm`: auto-delete the container when its init exits.
+    auto_remove: bool,
+    /// Docker `--workdir`/`-w`: initial working directory of the init process
+    /// (a guest path resolved under the container jail).  When unset, the
+    /// image's `WorkingDir` config is used, else `/`.
+    workdir: Option<&'a str>,
+    /// Docker `--user`/`-u uid[:gid]`: numeric user/group the init process runs
+    /// as.  When unset, the image's `User` config is used, else root (0:0).
+    /// Only numeric ids are supported (a name has no /etc/passwd to resolve
+    /// against in this minimal runtime).
+    user: Option<&'a str>,
+    /// Docker `--entrypoint EXE`: override the image's ENTRYPOINT.  An empty
+    /// value (`--entrypoint ""`) clears it (CMD then becomes the whole command
+    /// line), matching Docker.
+    entrypoint_override: Option<&'a str>,
+    /// Docker `--hostname`/`-h NAME`: the UTS hostname the container's init
+    /// process sees via uname(2), independent of any rootfs jail.  Truncated to
+    /// 64 bytes by the container layer.
+    hostname: Option<&'a str>,
+    /// Docker `--label`/`-l KEY=VALUE`: arbitrary metadata `(key, value)` pairs
+    /// stored on the container (no runtime behavior).  A bare KEY (no `=`) gets
+    /// an empty value, matching Docker.
+    labels: alloc::vec::Vec<(&'a str, &'a str)>,
+    /// Docker `--label-file FILE`: KEY=VALUE lines (same format as
+    /// `--env-file`).  Owned because they come from file contents.
+    /// Precedence: `--label-file` < CLI `--label` (CLI wins).
+    label_file_entries: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>,
+    /// Docker trailing `IMAGE [COMMAND] [ARG...]`: positional tokens after the
+    /// image dir override the image's CMD (the ENTRYPOINT is kept unless
+    /// `--entrypoint` is also given).  The first non-option token starts the
+    /// command; everything after it is taken literally (no further option
+    /// parsing), matching Docker's argument model.
+    cmd_override: alloc::vec::Vec<&'a str>,
+}
+
+impl<'a> OciRunFlags<'a> {
+    /// Parse `parts[2..]` -- everything after `oci run <image-dir>`.
+    ///
+    /// A malformed flag is reported and skipped rather than failing the whole
+    /// command: an unusable `-p` should not stop the container from starting,
+    /// and the shell has no exit status for a caller to inspect anyway.  The
+    /// first token that is not an option ends option parsing and begins the
+    /// CMD override, which is Docker's argument model.
+    ///
+    /// `#[inline(never)]` so the stack split this type exists for survives a
+    /// change of optimisation level.
+    #[inline(never)]
+    fn parse(parts: &[&'a str]) -> Self {
+        use crate::oci;
+
+        let mut name: Option<&str> = None;
+        let mut net_ip: Option<[u8; 4]> = None;
+        let mut net_gw: Option<[u8; 4]> = None;
+        let mut net_dns: Option<[u8; 4]> = None;
+        let mut net_name: Option<&str> = None;
+        let mut net_aliases: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+        let mut volumes: alloc::vec::Vec<(PathBuf, PathBuf, bool)> = alloc::vec::Vec::new();
+        let mut ports: alloc::vec::Vec<(crate::net::nat::NatProto, u16, u16)> =
+            alloc::vec::Vec::new();
+        let mut tmpfs: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+        let mut extra_env: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+        let mut env_file_entries: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+        let mut mem_frames: Option<u64> = None;
+        let mut cpu_percent: Option<u64> = None;
+        let mut read_only_root = false;
+        let mut restart_policy: Option<crate::container::RestartPolicy> = None;
+        let mut auto_remove = false;
+        let mut workdir: Option<&str> = None;
+        let mut user: Option<&str> = None;
+        let mut entrypoint_override: Option<&str> = None;
+        let mut hostname: Option<&str> = None;
+        let mut labels: alloc::vec::Vec<(&str, &str)> = alloc::vec::Vec::new();
+        let mut label_file_entries: alloc::vec::Vec<(
+            alloc::string::String,
+            alloc::string::String,
+        )> = alloc::vec::Vec::new();
+        let mut cmd_override: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+        let mut i = 2;
+        while i < parts.len() {
+            match parts[i] {
+                "--memory" | "-m" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        match parse_mem_size_to_frames(spec) {
+                            Some(frames) => mem_frames = Some(frames),
+                            None => crate::console_println!(
+                                "[oci] Ignoring memory '{}': expected SIZE[k|m|g] (e.g. 512m)",
+                                spec
+                            ),
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--cpus" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        match parse_cpus_to_percent(spec) {
+                            Some(pct) => cpu_percent = Some(pct),
+                            None => crate::console_println!(
+                                "[oci] Ignoring cpus '{}': expected a positive number (e.g. 1.5)",
+                                spec
+                            ),
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--env" | "-e" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        // Require KEY=value: a bare `-e KEY` would mean
+                        // "inherit the host's KEY" in Docker, but a
+                        // container has no host environment to inherit, so
+                        // reject it rather than silently pass an empty var.
+                        if let Some((key, _)) = spec.split_once('=') {
+                            if key.is_empty() {
+                                crate::console_println!(
+                                    "[oci] Ignoring env '{}': empty key",
+                                    spec
+                                );
+                            } else {
+                                extra_env.push(spec);
+                            }
+                        } else {
+                            crate::console_println!(
+                                "[oci] Ignoring env '{}': expected KEY=value",
+                                spec
+                            );
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--env-file" => {
+                    if let Some(&path) = parts.get(i.saturating_add(1)) {
+                        match crate::fs::vfs::Vfs::read_file(path) {
+                            Ok(bytes) => {
+                                // Parse KEY=value lines as raw bytes (see
+                                // `oci::parse_env_file`). Report rejected
+                                // lines but keep the valid entries.
+                                let parsed = oci::parse_env_file(&bytes);
+                                for n in &parsed.rejected_lines {
+                                    crate::console_println!(
+                                        "[oci] Ignoring env-file '{}' line {}: expected KEY=value",
+                                        path,
+                                        n
+                                    );
+                                }
+                                env_file_entries.extend(parsed.entries);
+                            }
+                            Err(e) => crate::console_println!(
+                                "[oci] Could not read env-file '{}': {:?}",
+                                path,
+                                e
+                            ),
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--publish" | "-p" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        // Format: host:container[/proto]. Split the proto
+                        // suffix first, then the host:container pair.
+                        let (pair, proto) = match spec.split_once('/') {
+                            Some((p, "tcp")) => (p, crate::net::nat::NatProto::Tcp),
+                            Some((p, "udp")) => (p, crate::net::nat::NatProto::Udp),
+                            Some((_, other)) => {
+                                crate::console_println!(
+                                    "[oci] Ignoring port '{}': unknown protocol '{}' (use tcp/udp)",
+                                    spec,
+                                    other
+                                );
+                                i = i.saturating_add(2);
+                                continue;
+                            }
+                            None => (spec, crate::net::nat::NatProto::Tcp),
+                        };
+                        match pair.split_once(':') {
+                            Some((h, c)) => match (h.parse::<u16>(), c.parse::<u16>()) {
+                                (Ok(hp), Ok(cp)) if hp != 0 && cp != 0 => {
+                                    ports.push((proto, hp, cp));
+                                }
+                                _ => crate::console_println!(
+                                    "[oci] Ignoring port '{}': expected host:container with nonzero ports",
+                                    spec
+                                ),
+                            },
+                            None => crate::console_println!(
+                                "[oci] Ignoring port '{}': expected host:container",
+                                spec
+                            ),
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--volume" | "-v" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        // Docker `-v source:guest[:mode]`.  The guest is an
+                        // absolute Unix path; an optional third field is the
+                        // access mode (`ro` = read-only, `rw` = read-write,
+                        // the default).  The source is one of two forms,
+                        // distinguished exactly as Docker does — by whether
+                        // it starts with `/`:
+                        //   * absolute path (`/host/path`)  -> bind mount
+                        //   * bare name    (`myvol`)        -> named volume,
+                        //     created on demand under VOLUMES_ROOT and its
+                        //     backing directory bind-mounted in.
+                        // Split into at most three colon-separated segments.
+                        let mut segs = spec.splitn(3, ':');
+                        let source = segs.next().unwrap_or("");
+                        let guest = segs.next().unwrap_or("");
+                        let mode = segs.next();
+                        let read_only = match mode {
+                            None | Some("rw") => Some(false),
+                            Some("ro") => Some(true),
+                            Some(other) => {
+                                crate::console_println!(
+                                    "[oci] Ignoring volume '{}': unknown mode '{}' (expected ro or rw)",
+                                    spec,
+                                    other
+                                );
+                                None
+                            }
+                        };
+                        if let Some(ro) = read_only {
+                            if !guest.starts_with('/') {
+                                crate::console_println!(
+                                    "[oci] Ignoring volume '{}': guest path must be absolute (source:/guest[:ro|:rw])",
+                                    spec
+                                );
+                            } else if source.starts_with('/') {
+                                // Host bind mount: use the absolute host path.
+                                volumes.push((PathBuf::from(source), PathBuf::from(guest), ro));
+                            } else if source.is_empty() {
+                                crate::console_println!(
+                                    "[oci] Ignoring volume '{}': empty source (want /host:/guest or name:/guest)",
+                                    spec
+                                );
+                            } else {
+                                // Named volume: create-on-demand and mount
+                                // its backing directory.
+                                match crate::volume::ensure(source) {
+                                    Ok(backing) => {
+                                        volumes.push((backing, PathBuf::from(guest), ro));
+                                    }
+                                    Err(e) => {
+                                        crate::console_println!(
+                                            "[oci] Ignoring volume '{}': cannot create named volume '{}': {:?}",
+                                            spec,
+                                            source,
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--tmpfs" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        // Docker `--tmpfs /guest[:options]`. The guest is an
+                        // absolute Unix path; Docker also accepts mount
+                        // options after a `:` (size=, mode=, …). Our memfs
+                        // does not yet enforce size/mode quotas, so rather
+                        // than silently ignore them (an unbounded tmpfs is a
+                        // containment/DoS gap), reject a spec that carries
+                        // options — the honest failure mode until quota
+                        // enforcement lands.
+                        if let Some((path, opts)) = spec.split_once(':') {
+                            crate::console_println!(
+                                "[oci] Ignoring tmpfs '{}': mount options ('{}') not yet supported (want --tmpfs /guest)",
+                                spec,
+                                opts
+                            );
+                            let _ = path;
+                        } else if !spec.starts_with('/') || spec == "/" {
+                            crate::console_println!(
+                                "[oci] Ignoring tmpfs '{}': guest path must be absolute and not '/'",
+                                spec
+                            );
+                        } else {
+                            tmpfs.push(alloc::string::String::from(spec));
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--read-only" => {
+                    // Flag (no argument): make the container rootfs RO.
+                    read_only_root = true;
+                    i = i.saturating_add(1);
+                }
+                "--rm" => {
+                    // Flag (no argument): auto-remove on init exit.
+                    auto_remove = true;
+                    i = i.saturating_add(1);
+                }
+                "--restart" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        match crate::container::parse_restart_policy(spec) {
+                            Some(p) => restart_policy = Some(p),
+                            None => crate::console_println!(
+                                "[oci] Ignoring restart '{}': want no|always|unless-stopped|on-failure[:N]",
+                                spec
+                            ),
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--workdir" | "-w" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        // Must be an absolute guest path; a relative
+                        // workdir is rejected (Docker requires absolute).
+                        if spec.starts_with('/') {
+                            workdir = Some(spec);
+                        } else {
+                            crate::console_println!(
+                                "[oci] Ignoring workdir '{}': must be an absolute path",
+                                spec
+                            );
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--user" | "-u" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        user = Some(spec);
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--name" | "-n" => {
+                    if let Some(&n) = parts.get(i.saturating_add(1)) {
+                        name = Some(n);
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--net" => {
+                    if let Some(&net_str) = parts.get(i.saturating_add(1)) {
+                        let net_parts: alloc::vec::Vec<&str> = net_str.split(',').collect();
+                        if let Some(ip) =
+                            parse_ipv4_octets(net_parts.first().copied().unwrap_or(""))
+                        {
+                            net_ip = Some(ip);
+                            for &part in net_parts.iter().skip(1) {
+                                if let Some(gw) = part.strip_prefix("gw=") {
+                                    net_gw = parse_ipv4_octets(gw);
+                                } else if let Some(dns) = part.strip_prefix("dns=") {
+                                    net_dns = parse_ipv4_octets(dns);
+                                }
+                            }
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--network" => {
+                    if let Some(&nn) = parts.get(i.saturating_add(1)) {
+                        net_name = Some(nn);
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--network-alias" => {
+                    if let Some(&al) = parts.get(i.saturating_add(1)) {
+                        if !al.is_empty() {
+                            net_aliases.push(al);
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--entrypoint" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        entrypoint_override = Some(spec);
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--hostname" | "-h" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        hostname = Some(spec);
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--label" | "-l" => {
+                    if let Some(&spec) = parts.get(i.saturating_add(1)) {
+                        // KEY=VALUE; a bare KEY gets an empty value.
+                        let (key, value) = match spec.split_once('=') {
+                            Some((k, v)) => (k, v),
+                            None => (spec, ""),
+                        };
+                        if key.is_empty() {
+                            crate::console_println!(
+                                "[oci] Ignoring label '{}': empty key",
+                                spec
+                            );
+                        } else {
+                            labels.push((key, value));
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                "--label-file" => {
+                    if let Some(&path) = parts.get(i.saturating_add(1)) {
+                        match crate::fs::vfs::Vfs::read_file(path) {
+                            Ok(bytes) => {
+                                // Reuse the env-file line parser (same
+                                // KEY=VALUE format). Labels must be UTF-8
+                                // (they are stored as strings), so reject
+                                // (rather than corrupt) any non-UTF-8 line.
+                                let parsed = oci::parse_env_file(&bytes);
+                                for n in &parsed.rejected_lines {
+                                    crate::console_println!(
+                                        "[oci] Ignoring label-file '{}' line {}: expected KEY=VALUE",
+                                        path,
+                                        n
+                                    );
+                                }
+                                for entry in &parsed.entries {
+                                    let key_bytes = oci::env_entry_key(entry);
+                                    let val_bytes = entry
+                                        .get(key_bytes.len().saturating_add(1)..)
+                                        .unwrap_or(&[]);
+                                    match (
+                                        core::str::from_utf8(key_bytes),
+                                        core::str::from_utf8(val_bytes),
+                                    ) {
+                                        (Ok(k), Ok(v)) => label_file_entries.push((
+                                            alloc::string::String::from(k),
+                                            alloc::string::String::from(v),
+                                        )),
+                                        _ => crate::console_println!(
+                                            "[oci] Ignoring label-file '{}': non-UTF-8 label entry",
+                                            path
+                                        ),
+                                    }
+                                }
+                            }
+                            Err(e) => crate::console_println!(
+                                "[oci] Could not read label-file '{}': {:?}",
+                                path,
+                                e
+                            ),
+                        }
+                        i = i.saturating_add(2);
+                    } else {
+                        i = i.saturating_add(1);
+                    }
+                }
+                tok if tok.starts_with('-') => {
+                    // Unknown option: skip it (and don't consume a value,
+                    // since we don't know its arity).
+                    i = i.saturating_add(1);
+                }
+                _ => {
+                    // First positional token after the image dir: this and
+                    // every remaining token form the CMD override. Stop
+                    // option parsing (Docker treats the rest literally).
+                    if let Some(rest) = parts.get(i..) {
+                        cmd_override.extend_from_slice(rest);
+                    }
+                    break;
+                }
+            }
+        }
+        Self {
+            name,
+            net_ip,
+            net_gw,
+            net_dns,
+            net_name,
+            net_aliases,
+            volumes,
+            ports,
+            tmpfs,
+            extra_env,
+            env_file_entries,
+            mem_frames,
+            cpu_percent,
+            read_only_root,
+            restart_policy,
+            auto_remove,
+            workdir,
+            user,
+            entrypoint_override,
+            hostname,
+            labels,
+            label_file_entries,
+            cmd_override,
+        }
+    }
+}
+
 /// `oci` — OCI container image management.
 ///
 /// Subcommands:
@@ -90317,506 +90902,36 @@ fn cmd_oci(args: &str) {
                     return;
                 };
 
-                // Parse optional flags.
-                let mut name: Option<&str> = None;
-                let mut net_ip: Option<[u8; 4]> = None;
-                let mut net_gw: Option<[u8; 4]> = None;
-                let mut net_dns: Option<[u8; 4]> = None;
+                // Parse the optional flags.  They come back from a separate
+                // function, rather than being filled by a loop here, to keep the
+                // parser's stack slots out of this frame -- see [`OciRunFlags`].
+                let OciRunFlags {
+                    name,
+                    mut net_ip,
+                    mut net_gw,
+                    net_dns,
+                    net_name,
+                    net_aliases,
+                    volumes,
+                    ports,
+                    tmpfs,
+                    extra_env,
+                    env_file_entries,
+                    mem_frames,
+                    cpu_percent,
+                    read_only_root,
+                    restart_policy,
+                    auto_remove,
+                    workdir,
+                    user,
+                    entrypoint_override,
+                    hostname,
+                    labels,
+                    label_file_entries,
+                    cmd_override,
+                } = OciRunFlags::parse(parts);
+                // Not a flag: seeded below from a `--network` IPAM lease.
                 let mut net_mask: Option<[u8; 4]> = None;
-                // `--network NAME`: attach to a user-defined network, drawing a
-                // conflict-free IP from its IPAM (Docker `docker run --network`).
-                let mut net_name: Option<&str> = None;
-                // `--network-alias NAME` (repeatable): extra embedded-DNS names the
-                // container answers to on its network, alongside its name/hostname.
-                let mut net_aliases: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-                // Volume mounts as (host_target, guest_prefix, read_only) triples
-                // from `-v host:guest` (Docker order). The host target is either an
-                // absolute host path (bind mount) or a named volume's backing path
-                // (resolved at parse time), so the tuple owns its strings rather
-                // than borrowing the raw argv. Installed after the container is
-                // created (while still in Created state).
-                let mut volumes: alloc::vec::Vec<(PathBuf, PathBuf, bool)> = alloc::vec::Vec::new();
-                // Published ports as (proto, host_port, container_port) from
-                // `-p host:container[/tcp|/udp]` (Docker order, default tcp).
-                // Installed after the container is created (Created state).
-                let mut ports: alloc::vec::Vec<(crate::net::nat::NatProto, u16, u16)> =
-                    alloc::vec::Vec::new();
-                // Tmpfs (in-memory) mounts as absolute guest paths from
-                // `--tmpfs /guest`. Installed after the container is created
-                // (Created state); each backs an ephemeral writable memfs.
-                let mut tmpfs: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-                // Extra `KEY=value` environment entries from `-e`/`--env`. These
-                // override the image's declared ENV (Docker semantics) and are
-                // merged at launch (see the env construction below).
-                let mut extra_env: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-                // `KEY=value` entries read from `--env-file FILE`. Stored as raw
-                // bytes (env values may contain non-UTF-8 data, which we must not
-                // corrupt) and owned because they come from file contents, not
-                // from `parts`. Precedence: image ENV < env-file < CLI `-e`.
-                let mut env_file_entries: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
-                // Resource limits from `--memory`/`-m <size>` (bytes, with optional
-                // k/m/g suffix → 16 KiB frames) and `--cpus <N[.M]>` (fractional
-                // cores → percent of one core, e.g. 1.5 → 150%). Applied to the
-                // container cgroup at create time (Step 4 below).
-                let mut mem_frames: Option<u64> = None;
-                let mut cpu_percent: Option<u64> = None;
-                // Docker `--read-only`: mount the container rootfs read-only so
-                // writes that don't land in a writable (`:rw`) volume are denied
-                // with EROFS. Applied to the container at create time (Step 4).
-                let mut read_only_root = false;
-                // Docker `--restart POLICY`: auto-restart policy for the init
-                // process (no|always|unless-stopped|on-failure[:N]). Applied to the
-                // container config at create time.
-                let mut restart_policy: Option<crate::container::RestartPolicy> = None;
-                // Docker `--rm`: auto-delete the container when its init exits.
-                let mut auto_remove = false;
-                // Docker `--workdir`/`-w`: initial working directory of the init
-                // process (a guest path resolved under the container jail). When
-                // unset, the image's `WorkingDir` config is used, else `/`.
-                let mut workdir: Option<&str> = None;
-                // Docker `--user`/`-u uid[:gid]`: numeric user/group the init
-                // process runs as. When unset, the image's `User` config is used,
-                // else root (0:0). Only numeric ids are supported (a name has no
-                // /etc/passwd to resolve against in this minimal runtime).
-                let mut user: Option<&str> = None;
-                // Docker `--entrypoint EXE`: override the image's ENTRYPOINT. An
-                // empty value (`--entrypoint ""`) clears it (CMD then becomes the
-                // whole command line), matching Docker.
-                let mut entrypoint_override: Option<&str> = None;
-                // Docker `--hostname`/`-h NAME`: the UTS hostname the container's
-                // init process sees via uname(2), independent of any rootfs jail.
-                // Truncated to 64 bytes by the container layer.
-                let mut hostname: Option<&str> = None;
-                // Docker `--label`/`-l KEY=VALUE`: arbitrary metadata `(key, value)`
-                // pairs stored on the container (no runtime behavior). A bare KEY
-                // (no `=`) gets an empty value, matching Docker.
-                let mut labels: alloc::vec::Vec<(&str, &str)> = alloc::vec::Vec::new();
-                // Docker `--label-file FILE`: KEY=VALUE lines (same format as
-                // --env-file). Owned because they come from file contents.
-                // Precedence: --label-file < CLI --label (CLI wins).
-                let mut label_file_entries: alloc::vec::Vec<(
-                    alloc::string::String,
-                    alloc::string::String,
-                )> = alloc::vec::Vec::new();
-                // Docker trailing `IMAGE [COMMAND] [ARG...]`: positional tokens
-                // after the image dir override the image's CMD (the ENTRYPOINT is
-                // kept unless --entrypoint is also given). The first non-option
-                // token starts the command; everything after it is taken literally
-                // (no further option parsing), matching Docker's argument model.
-                let mut cmd_override: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-                let mut i = 2;
-                while i < parts.len() {
-                    match parts[i] {
-                        "--memory" | "-m" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                match parse_mem_size_to_frames(spec) {
-                                    Some(frames) => mem_frames = Some(frames),
-                                    None => crate::console_println!(
-                                        "[oci] Ignoring memory '{}': expected SIZE[k|m|g] (e.g. 512m)",
-                                        spec
-                                    ),
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--cpus" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                match parse_cpus_to_percent(spec) {
-                                    Some(pct) => cpu_percent = Some(pct),
-                                    None => crate::console_println!(
-                                        "[oci] Ignoring cpus '{}': expected a positive number (e.g. 1.5)",
-                                        spec
-                                    ),
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--env" | "-e" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                // Require KEY=value: a bare `-e KEY` would mean
-                                // "inherit the host's KEY" in Docker, but a
-                                // container has no host environment to inherit, so
-                                // reject it rather than silently pass an empty var.
-                                if let Some((key, _)) = spec.split_once('=') {
-                                    if key.is_empty() {
-                                        crate::console_println!(
-                                            "[oci] Ignoring env '{}': empty key",
-                                            spec
-                                        );
-                                    } else {
-                                        extra_env.push(spec);
-                                    }
-                                } else {
-                                    crate::console_println!(
-                                        "[oci] Ignoring env '{}': expected KEY=value",
-                                        spec
-                                    );
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--env-file" => {
-                            if let Some(&path) = parts.get(i.saturating_add(1)) {
-                                match crate::fs::vfs::Vfs::read_file(path) {
-                                    Ok(bytes) => {
-                                        // Parse KEY=value lines as raw bytes (see
-                                        // `oci::parse_env_file`). Report rejected
-                                        // lines but keep the valid entries.
-                                        let parsed = oci::parse_env_file(&bytes);
-                                        for n in &parsed.rejected_lines {
-                                            crate::console_println!(
-                                                "[oci] Ignoring env-file '{}' line {}: expected KEY=value",
-                                                path,
-                                                n
-                                            );
-                                        }
-                                        env_file_entries.extend(parsed.entries);
-                                    }
-                                    Err(e) => crate::console_println!(
-                                        "[oci] Could not read env-file '{}': {:?}",
-                                        path,
-                                        e
-                                    ),
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--publish" | "-p" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                // Format: host:container[/proto]. Split the proto
-                                // suffix first, then the host:container pair.
-                                let (pair, proto) = match spec.split_once('/') {
-                                    Some((p, "tcp")) => (p, crate::net::nat::NatProto::Tcp),
-                                    Some((p, "udp")) => (p, crate::net::nat::NatProto::Udp),
-                                    Some((_, other)) => {
-                                        crate::console_println!(
-                                            "[oci] Ignoring port '{}': unknown protocol '{}' (use tcp/udp)",
-                                            spec,
-                                            other
-                                        );
-                                        i = i.saturating_add(2);
-                                        continue;
-                                    }
-                                    None => (spec, crate::net::nat::NatProto::Tcp),
-                                };
-                                match pair.split_once(':') {
-                                    Some((h, c)) => match (h.parse::<u16>(), c.parse::<u16>()) {
-                                        (Ok(hp), Ok(cp)) if hp != 0 && cp != 0 => {
-                                            ports.push((proto, hp, cp));
-                                        }
-                                        _ => crate::console_println!(
-                                            "[oci] Ignoring port '{}': expected host:container with nonzero ports",
-                                            spec
-                                        ),
-                                    },
-                                    None => crate::console_println!(
-                                        "[oci] Ignoring port '{}': expected host:container",
-                                        spec
-                                    ),
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--volume" | "-v" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                // Docker `-v source:guest[:mode]`.  The guest is an
-                                // absolute Unix path; an optional third field is the
-                                // access mode (`ro` = read-only, `rw` = read-write,
-                                // the default).  The source is one of two forms,
-                                // distinguished exactly as Docker does — by whether
-                                // it starts with `/`:
-                                //   * absolute path (`/host/path`)  -> bind mount
-                                //   * bare name    (`myvol`)        -> named volume,
-                                //     created on demand under VOLUMES_ROOT and its
-                                //     backing directory bind-mounted in.
-                                // Split into at most three colon-separated segments.
-                                let mut segs = spec.splitn(3, ':');
-                                let source = segs.next().unwrap_or("");
-                                let guest = segs.next().unwrap_or("");
-                                let mode = segs.next();
-                                let read_only = match mode {
-                                    None | Some("rw") => Some(false),
-                                    Some("ro") => Some(true),
-                                    Some(other) => {
-                                        crate::console_println!(
-                                            "[oci] Ignoring volume '{}': unknown mode '{}' (expected ro or rw)",
-                                            spec,
-                                            other
-                                        );
-                                        None
-                                    }
-                                };
-                                if let Some(ro) = read_only {
-                                    if !guest.starts_with('/') {
-                                        crate::console_println!(
-                                            "[oci] Ignoring volume '{}': guest path must be absolute (source:/guest[:ro|:rw])",
-                                            spec
-                                        );
-                                    } else if source.starts_with('/') {
-                                        // Host bind mount: use the absolute host path.
-                                        volumes.push((PathBuf::from(source), PathBuf::from(guest), ro));
-                                    } else if source.is_empty() {
-                                        crate::console_println!(
-                                            "[oci] Ignoring volume '{}': empty source (want /host:/guest or name:/guest)",
-                                            spec
-                                        );
-                                    } else {
-                                        // Named volume: create-on-demand and mount
-                                        // its backing directory.
-                                        match crate::volume::ensure(source) {
-                                            Ok(backing) => {
-                                                volumes.push((backing, PathBuf::from(guest), ro));
-                                            }
-                                            Err(e) => {
-                                                crate::console_println!(
-                                                    "[oci] Ignoring volume '{}': cannot create named volume '{}': {:?}",
-                                                    spec,
-                                                    source,
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--tmpfs" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                // Docker `--tmpfs /guest[:options]`. The guest is an
-                                // absolute Unix path; Docker also accepts mount
-                                // options after a `:` (size=, mode=, …). Our memfs
-                                // does not yet enforce size/mode quotas, so rather
-                                // than silently ignore them (an unbounded tmpfs is a
-                                // containment/DoS gap), reject a spec that carries
-                                // options — the honest failure mode until quota
-                                // enforcement lands.
-                                if let Some((path, opts)) = spec.split_once(':') {
-                                    crate::console_println!(
-                                        "[oci] Ignoring tmpfs '{}': mount options ('{}') not yet supported (want --tmpfs /guest)",
-                                        spec,
-                                        opts
-                                    );
-                                    let _ = path;
-                                } else if !spec.starts_with('/') || spec == "/" {
-                                    crate::console_println!(
-                                        "[oci] Ignoring tmpfs '{}': guest path must be absolute and not '/'",
-                                        spec
-                                    );
-                                } else {
-                                    tmpfs.push(alloc::string::String::from(spec));
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--read-only" => {
-                            // Flag (no argument): make the container rootfs RO.
-                            read_only_root = true;
-                            i = i.saturating_add(1);
-                        }
-                        "--rm" => {
-                            // Flag (no argument): auto-remove on init exit.
-                            auto_remove = true;
-                            i = i.saturating_add(1);
-                        }
-                        "--restart" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                match crate::container::parse_restart_policy(spec) {
-                                    Some(p) => restart_policy = Some(p),
-                                    None => crate::console_println!(
-                                        "[oci] Ignoring restart '{}': want no|always|unless-stopped|on-failure[:N]",
-                                        spec
-                                    ),
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--workdir" | "-w" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                // Must be an absolute guest path; a relative
-                                // workdir is rejected (Docker requires absolute).
-                                if spec.starts_with('/') {
-                                    workdir = Some(spec);
-                                } else {
-                                    crate::console_println!(
-                                        "[oci] Ignoring workdir '{}': must be an absolute path",
-                                        spec
-                                    );
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--user" | "-u" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                user = Some(spec);
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--name" | "-n" => {
-                            if let Some(&n) = parts.get(i.saturating_add(1)) {
-                                name = Some(n);
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--net" => {
-                            if let Some(&net_str) = parts.get(i.saturating_add(1)) {
-                                let net_parts: alloc::vec::Vec<&str> = net_str.split(',').collect();
-                                if let Some(ip) =
-                                    parse_ipv4_octets(net_parts.first().copied().unwrap_or(""))
-                                {
-                                    net_ip = Some(ip);
-                                    for &part in net_parts.iter().skip(1) {
-                                        if let Some(gw) = part.strip_prefix("gw=") {
-                                            net_gw = parse_ipv4_octets(gw);
-                                        } else if let Some(dns) = part.strip_prefix("dns=") {
-                                            net_dns = parse_ipv4_octets(dns);
-                                        }
-                                    }
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--network" => {
-                            if let Some(&nn) = parts.get(i.saturating_add(1)) {
-                                net_name = Some(nn);
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--network-alias" => {
-                            if let Some(&al) = parts.get(i.saturating_add(1)) {
-                                if !al.is_empty() {
-                                    net_aliases.push(al);
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--entrypoint" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                entrypoint_override = Some(spec);
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--hostname" | "-h" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                hostname = Some(spec);
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--label" | "-l" => {
-                            if let Some(&spec) = parts.get(i.saturating_add(1)) {
-                                // KEY=VALUE; a bare KEY gets an empty value.
-                                let (key, value) = match spec.split_once('=') {
-                                    Some((k, v)) => (k, v),
-                                    None => (spec, ""),
-                                };
-                                if key.is_empty() {
-                                    crate::console_println!(
-                                        "[oci] Ignoring label '{}': empty key",
-                                        spec
-                                    );
-                                } else {
-                                    labels.push((key, value));
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        "--label-file" => {
-                            if let Some(&path) = parts.get(i.saturating_add(1)) {
-                                match crate::fs::vfs::Vfs::read_file(path) {
-                                    Ok(bytes) => {
-                                        // Reuse the env-file line parser (same
-                                        // KEY=VALUE format). Labels must be UTF-8
-                                        // (they are stored as strings), so reject
-                                        // (rather than corrupt) any non-UTF-8 line.
-                                        let parsed = oci::parse_env_file(&bytes);
-                                        for n in &parsed.rejected_lines {
-                                            crate::console_println!(
-                                                "[oci] Ignoring label-file '{}' line {}: expected KEY=VALUE",
-                                                path,
-                                                n
-                                            );
-                                        }
-                                        for entry in &parsed.entries {
-                                            let key_bytes = oci::env_entry_key(entry);
-                                            let val_bytes = entry
-                                                .get(key_bytes.len().saturating_add(1)..)
-                                                .unwrap_or(&[]);
-                                            match (
-                                                core::str::from_utf8(key_bytes),
-                                                core::str::from_utf8(val_bytes),
-                                            ) {
-                                                (Ok(k), Ok(v)) => label_file_entries.push((
-                                                    alloc::string::String::from(k),
-                                                    alloc::string::String::from(v),
-                                                )),
-                                                _ => crate::console_println!(
-                                                    "[oci] Ignoring label-file '{}': non-UTF-8 label entry",
-                                                    path
-                                                ),
-                                            }
-                                        }
-                                    }
-                                    Err(e) => crate::console_println!(
-                                        "[oci] Could not read label-file '{}': {:?}",
-                                        path,
-                                        e
-                                    ),
-                                }
-                                i = i.saturating_add(2);
-                            } else {
-                                i = i.saturating_add(1);
-                            }
-                        }
-                        tok if tok.starts_with('-') => {
-                            // Unknown option: skip it (and don't consume a value,
-                            // since we don't know its arity).
-                            i = i.saturating_add(1);
-                        }
-                        _ => {
-                            // First positional token after the image dir: this and
-                            // every remaining token form the CMD override. Stop
-                            // option parsing (Docker treats the rest literally).
-                            if let Some(rest) = parts.get(i..) {
-                                cmd_override.extend_from_slice(rest);
-                            }
-                            break;
-                        }
-                    }
-                }
 
                 // Step 1: Load OCI image metadata. `dir` may be an on-disk OCI
                 // layout directory or a named-store reference (`name:tag`);

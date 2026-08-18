@@ -28539,7 +28539,7 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 17 of 85 converted)**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 18 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
 `cat --squeeze` means `--squeeze-blank`, `ls --col` means `--color`. Ours accepts
@@ -29454,6 +29454,68 @@ five of which the harness found and the sixth of which it structurally cannot:
   uncapped, because GNU grinds on a huge SET1 too and parity is the goal.
 
 35 unit tests, clippy clean.
+
+### Progress (appended 2026-08-18, `od`)
+
+`od` is the eighteenth (`scripts/od-diff.sh`: 266 passed, 0 differed, 4 differ
+on purpose — the `--help` referral tail, the `--version` banner, and `-w0` and
+`-w-4`, on which GNU 9.4 `abort()`s; see below).
+
+The shipped version was a 251-line toy: `-t` accepted a single conversion,
+there was no `-A`, no `-j`, no `-N`, no `-S`, no `-w`, no `--endian`, no `z`
+trailer, no duplicate-line elision, and none of the traditional
+`od -c file +20` grammar. It is now ~1500 lines and matches GNU on every case
+the harness puts to it. Six things worth carrying forward:
+
+- **A module can be right at its exit and wrong at its entrance.**
+  `od -t fF` on the bytes `fc fd fe ff` printed `nan` where GNU prints `-nan`.
+  `extfloat`'s renderer was *not* at fault — it has had
+  `assert_eq!(f("%Lf", -ExtF80::NAN), "-nan")` since it landed. The bug was
+  `ExtF80::from_f32`/`from_f64`, which returned the bare `ExtF80::NAN` constant
+  for any NaN and so dropped the caller's sign bit on the way *in*. Widening to
+  `long double` is an x87 `FLD`, which copies the sign through. The general
+  lesson: a module test that builds its input from the module's own constants
+  never exercises the conversion the callers actually use, and that conversion
+  is where the sign went. Both directions now have tests
+  (`widening_carries_the_sign_of_a_nan`).
+- **gnulib's `ftoastr` never looks at `errno`, and that is load-bearing.** It
+  is the shortest `%.*g` that reads back equal, and its precision floor drops
+  from 18 to **1** for a subnormal. Our first cut checked the round trip with
+  `extfloat::xstrtold`, which rejects a `range_error` — and every subnormal
+  underflows, so the check said "did not round-trip" for the exact values the
+  floor exists to serve. The loop then ran out to its bound and printed
+  `3.6451995318824746025e-4951` where GNU prints `4e-4951`. Upstream uses plain
+  `STRTOF` and compares only the value. The strict wrapper was the wrong tool:
+  it answers "is this a valid complete numeral?", not "does this text denote
+  this number?".
+- **A NUL inside a diagnostic is invisible to `$(...)`.** `od -A ''` reports
+  `invalid output address radix ''; it must be one character from [doxn]` with
+  the *rejected byte* interpolated — and that byte is NUL. Comparing
+  `$(cat ours.err)` against `$(cat gnu.err)` drops it from both sides, with a
+  bash warning, so the harness was silently not testing the one character the
+  case exists to test. The comparison is now `cmp -s` on the files, with the
+  text forms kept only for the failure report. Any harness for a utility that
+  echoes a caller's byte back should do the same.
+- **Do not edit a shell script while a run of it is in flight.** Bash reads a
+  script incrementally by byte offset, so inserting a function above the point
+  it has reached shifts everything below and it resumes mid-token: run 2 died
+  with `syntax error near unexpected token 'in'` in a file that `bash -n`
+  passes. Copy to a scratch path and run the copy, which is what run 3 did.
+- **An `xfail` on `--help` must not swallow the body.** GNU's last five lines
+  name the GNU project, its bug address and its manual, so they must differ —
+  but xfailing the whole option leaves the other 73 lines (every option's
+  spelling and indent, the SIZE and BYTES paragraphs) unchecked, which is
+  precisely the part a hand-written help text gets wrong. `help_body` strips
+  the tail and compares the rest byte for byte; the tail alone is the xfail.
+- **Two deliberate divergences, both narrow.** GNU 9.4 writes
+  `if (s_err != LONGINT_OK || w_tmp <= 0) xstrtol_fatal (s_err, …)`, so a
+  *well-formed* non-positive width reaches `xstrtol_fatal` with `LONGINT_OK`
+  and it `abort()`s — `od -w0` dies of SIGABRT with no message. We print the
+  diagnostic upstream evidently meant. And the block buffers are obtained with
+  `try_reserve_exact`, so an absurd `-w` is `memory exhausted` (upstream's own
+  `xalloc_die` wording) rather than an abort.
+
+21 unit tests, clippy clean with `--all-targets`.
 
 ## TD-PRINTF-BUILDS-THE-WHOLE-FIELD-IN-MEMORY (lane B, 2026-08-17) — **open, low priority**
 

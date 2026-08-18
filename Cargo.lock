@@ -5607,6 +5607,7 @@ name = "lockscreen"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "pwkdf",
  "sha2",
 ]
 
@@ -8448,6 +8449,14 @@ version = "0.1.0"
 [[package]]
 name = "pv"
 version = "0.1.0"
+
+[[package]]
+name = "pwkdf"
+version = "0.1.0"
+dependencies = [
+ "randrange",
+ "sha2",
+]
 
 [[package]]
 name = "pybullet-cli"

@@ -8,6 +8,10 @@ guitk = { path = "../../gui/toolkit" }
 # The password hash, and the constant-time comparison it is checked with. This
 # file used to carry its own copy of both.
 sha2 = { path = "../../sha2" }
+# The password derivation: salt, stretching, and the stored verifier. This
+# file used to keep a bare unsalted SHA-256 of the password, which is both
+# weaker than and incompatible with what the credential store produces.
+pwkdf = { path = "../../pwkdf" }
 
 [lints]
 workspace = true

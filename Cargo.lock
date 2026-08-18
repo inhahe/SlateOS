@@ -11179,6 +11179,13 @@ name = "useradm"
 version = "0.1.0"
 
 [[package]]
+name = "userdb"
+version = "0.1.0"
+dependencies = [
+ "posix",
+]
+
+[[package]]
 name = "usql"
 version = "0.1.0"
 

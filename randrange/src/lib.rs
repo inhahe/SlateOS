@@ -616,6 +616,68 @@ impl SecretSource for SystemRandom {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Drawing something that only has to be *different*
+// ---------------------------------------------------------------------------
+
+/// A fast generator seeded from the kernel, falling back to `fallback` when the
+/// kernel cannot be reached.
+///
+/// # Choosing between this and [`SecretSource::secret`]
+///
+/// These are the two halves of one rule, and the choice between them is the
+/// whole design. Ask what an adversary gains by predicting the value:
+///
+/// | If predicting it costs the user… | Use | On no entropy |
+/// |---|---|---|
+/// | their secrets — a password, a key, a salt, a nonce | [`SystemRandom`] + [`SecretSource::secret`] | **refuse** |
+/// | only novelty — a maze layout, a shuffle, a screensaver | this function | fall back |
+///
+/// A game that refused to start because the entropy pool was empty would be a
+/// worse failure than a game whose first board repeats. A password generator
+/// that quietly produced a guessable password would be a worse failure than one
+/// that refuses. The asymmetry is not about how much randomness each needs —
+/// both want the same quality — it is about which failure the user can survive.
+///
+/// # Why the fallback seed is a parameter and not a constant
+///
+/// So that the call site has to name it, and in naming it, decide. A crate that
+/// writes `seeded_from_system(SOME_SEED)` has stated on the record that it can
+/// live with a repeat; a crate that cannot must not be able to reach that
+/// behaviour by accident. Distinct constants per crate also keep two programs
+/// that both lose entropy on the same boot from producing correlated streams,
+/// which a shared default would guarantee.
+///
+/// # Why the fallback is not the clock
+///
+/// It could be, and for these callers it would even be a small improvement. It
+/// is not, because a clock-seeded generator *looks* unpredictable — the values
+/// differ every run — while carrying perhaps twenty bits of real entropy. That
+/// appearance is exactly what let the original defect survive review in three
+/// password generators. A visibly fixed seed cannot be mistaken for entropy by
+/// the next reader, and this function's whole contract is that the caller
+/// already decided predictability is acceptable.
+///
+/// # Examples
+///
+/// ```
+/// use randrange::{seeded_from_system, RandomSource};
+///
+/// // "MAZE" in ASCII: any constant will do, but a memorable one documents
+/// // itself in a stack trace.
+/// let mut rng = seeded_from_system(0x4D41_5A45);
+/// let wall = rng.below(4);
+/// assert!(wall < 4);
+/// ```
+#[must_use]
+pub fn seeded_from_system(fallback: u64) -> SeededRng {
+    match SystemRandom::open() {
+        Ok(mut kernel) => SeededRng::new(kernel.next_u64()),
+        // The kernel is out of reach: a fixed board beats no board at all.
+        Err(_) => SeededRng::new(fallback),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // A test that indexes out of range should fail loudly and point at the line
@@ -1223,4 +1285,46 @@ mod tests {
         }
     }
 
+    // ── seeded_from_system ─────────────────────────────────────────────────
+
+    /// The point of the function: it always yields a working generator, on any
+    /// host, whether or not a kernel answered. This is the property a game
+    /// needs and a password generator must not have.
+    #[test]
+    fn a_session_generator_always_exists_and_generates() {
+        let mut rng = seeded_from_system(0x1234_5678_9ABC_DEF0);
+        let mut seen = [false; 8];
+        for _ in 0..400 {
+            seen[rng.below(8)] = true;
+        }
+        assert!(
+            seen.iter().all(|&hit| hit),
+            "every value in the bound should appear over 400 draws"
+        );
+    }
+
+    /// On a host with no kernel the fallback is taken verbatim, so the caller
+    /// gets exactly the stream its constant names — which is what makes the
+    /// degraded mode reproducible instead of merely broken.
+    #[test]
+    #[cfg(not(unix))]
+    fn without_a_kernel_the_fallback_seed_is_used_exactly() {
+        const SEED: u64 = 0x0BAD_C0DE_0BAD_C0DE;
+        let mut fallen_back = seeded_from_system(SEED);
+        let mut named = SeededRng::new(SEED);
+        for _ in 0..8 {
+            assert_eq!(fallen_back.next_u64(), named.next_u64());
+        }
+    }
+
+    /// Two crates that pick different constants do not produce the same stream
+    /// when they both lose entropy on the same boot. This is the reason the
+    /// seed is a parameter rather than a shared default.
+    #[test]
+    #[cfg(not(unix))]
+    fn two_fallback_constants_do_not_collide() {
+        let mut a = seeded_from_system(0x4D41_5A45);
+        let mut b = seeded_from_system(0x5449_4C45);
+        assert_ne!(a.next_u64(), b.next_u64());
+    }
 }

@@ -25,7 +25,7 @@
 //! ball launching.
 
 use guitk::color::Color;
-use randrange::{RandomSource, SeededRng, SystemRandom};
+use randrange::{seeded_from_system, RandomSource, SeededRng};
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Event, Key, KeyEvent};
@@ -147,15 +147,15 @@ const OVERLAY_FONT_SIZE: f32 = 18.0;
 /// that multiball throws its extra balls the same way it did last time. A
 /// machine that refused to start because the entropy source was down would be
 /// the worse failure, so this is a deliberate exception to the fail-closed rule
-/// [`SystemRandom`] exists to enforce. "PINBALL!" in ASCII.
+/// [`randrange::SecretSource`] exists to enforce. "PINBALL!" in ASCII.
 const FALLBACK_SEED: u64 = 0x5049_4E42_414C_4C21;
 
 /// A generator for one session's tables, from the kernel where possible.
+///
+/// The body of this used to live here; it now lives in
+/// [`randrange::seeded_from_system`], because sixteen crates had written it.
 fn session_rng() -> SeededRng {
-    match SystemRandom::open() {
-        Ok(mut kernel) => SeededRng::new(kernel.next_u64()),
-        Err(_) => SeededRng::new(FALLBACK_SEED),
-    }
+    seeded_from_system(FALLBACK_SEED)
 }
 
 // ── 2D Vector ──────────────────────────────────────────────────────

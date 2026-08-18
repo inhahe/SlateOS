@@ -21,7 +21,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{RandomSource, SeededRng, SystemRandom};
+use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -218,15 +218,14 @@ fn standard_deck() -> Vec<Card> {
 type Rng = SeededRng;
 
 /// A generator for a whole session, seeded from the kernel where possible.
+///
+/// Without kernel entropy the deal falls back to a fixed sequence, so every
+/// launch on this machine plays the same first hand until entropy is
+/// available. Nothing here is confidential, so this degrades the game rather
+/// than compromising it; the reasoning is written out once, at
+/// [`guitk::rng::seeded_from_system`].
 fn session_rng() -> Rng {
-    match SystemRandom::open() {
-        Ok(mut kernel) => Rng::new(kernel.next_u64()),
-        // No kernel entropy: the deal falls back to a fixed sequence, so every
-        // launch on this machine will play the same first hand until entropy
-        // is available. Nothing here is confidential, so this degrades the
-        // game rather than compromising it.
-        Err(_) => Rng::new(FALLBACK_SEED),
-    }
+    seeded_from_system(FALLBACK_SEED)
 }
 
 /// The seed used when the kernel has no entropy to give. Arbitrary.

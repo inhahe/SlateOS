@@ -2028,53 +2028,61 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 28: Access log ring buffer push and recent.
     {
-        let mut log = AccessLog::new();
-        log.push(AccessLogEntry {
-            method: String::from("GET"),
-            path: String::from("/a"),
-            status: 200,
-            body_size: 100,
-            duration_us: 0,
-        });
-        log.push(AccessLogEntry {
-            method: String::from("HEAD"),
-            path: String::from("/b"),
-            status: 304,
-            body_size: 0,
-            duration_us: 0,
-        });
-        let recent = log.recent(10);
-        assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].path, "/a");
-        assert_eq!(recent[1].path, "/b");
+        #[inline(never)]
+        fn case() {
+            let mut log = AccessLog::new();
+            log.push(AccessLogEntry {
+                method: String::from("GET"),
+                path: String::from("/a"),
+                status: 200,
+                body_size: 100,
+                duration_us: 0,
+            });
+            log.push(AccessLogEntry {
+                method: String::from("HEAD"),
+                path: String::from("/b"),
+                status: 304,
+                body_size: 0,
+                duration_us: 0,
+            });
+            let recent = log.recent(10);
+            assert_eq!(recent.len(), 2);
+            assert_eq!(recent[0].path, "/a");
+            assert_eq!(recent[1].path, "/b");
 
-        // Request only last 1 entry.
-        let last = log.recent(1);
-        assert_eq!(last.len(), 1);
-        assert_eq!(last[0].path, "/b");
+            // Request only last 1 entry.
+            let last = log.recent(1);
+            assert_eq!(last.len(), 1);
+            assert_eq!(last[0].path, "/b");
+        }
+        case();
     }
     serial_println!("[httpd]   Access log ring buffer: OK");
 
     // Test 29: Access log ring buffer wraps correctly.
     {
-        let mut log = AccessLog::new();
-        // Fill past capacity to verify wrapping.
-        for i in 0..ACCESS_LOG_SIZE + 5 {
-            log.push(AccessLogEntry {
-                method: String::from("GET"),
-                path: format!("/{}", i),
-                status: 200,
-                body_size: i,
-                duration_us: 0,
-            });
+        #[inline(never)]
+        fn case() {
+            let mut log = AccessLog::new();
+            // Fill past capacity to verify wrapping.
+            for i in 0..ACCESS_LOG_SIZE + 5 {
+                log.push(AccessLogEntry {
+                    method: String::from("GET"),
+                    path: format!("/{}", i),
+                    status: 200,
+                    body_size: i,
+                    duration_us: 0,
+                });
+            }
+            let recent = log.recent(ACCESS_LOG_SIZE);
+            assert_eq!(recent.len(), ACCESS_LOG_SIZE);
+            // Oldest entry should be #5 (indices 0-4 were overwritten).
+            assert_eq!(recent[0].path, "/5");
+            // Newest should be ACCESS_LOG_SIZE + 4.
+            let expected_last = format!("/{}", ACCESS_LOG_SIZE + 4);
+            assert_eq!(recent[ACCESS_LOG_SIZE - 1].path, expected_last);
         }
-        let recent = log.recent(ACCESS_LOG_SIZE);
-        assert_eq!(recent.len(), ACCESS_LOG_SIZE);
-        // Oldest entry should be #5 (indices 0-4 were overwritten).
-        assert_eq!(recent[0].path, "/5");
-        // Newest should be ACCESS_LOG_SIZE + 4.
-        let expected_last = format!("/{}", ACCESS_LOG_SIZE + 4);
-        assert_eq!(recent[ACCESS_LOG_SIZE - 1].path, expected_last);
+        case();
     }
     serial_println!("[httpd]   Access log wrap: OK");
 
@@ -2086,125 +2094,149 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 31: Rate limiting — first requests should pass.
     {
-        // Temporarily enable rate limiting for the test.
-        let was_enabled = RATE_LIMIT_ENABLED.load(Ordering::Relaxed);
-        RATE_LIMIT_ENABLED.store(true, Ordering::Relaxed);
+        #[inline(never)]
+        fn case() {
+            // Temporarily enable rate limiting for the test.
+            let was_enabled = RATE_LIMIT_ENABLED.load(Ordering::Relaxed);
+            RATE_LIMIT_ENABLED.store(true, Ordering::Relaxed);
 
-        let test_ip = [192, 168, 99, 99];
-        // First request should always succeed (new IP gets full bucket).
-        assert!(check_rate_limit(test_ip));
-        serial_println!("[httpd]   Rate limit initial allow: OK");
+            let test_ip = [192, 168, 99, 99];
+            // First request should always succeed (new IP gets full bucket).
+            assert!(check_rate_limit(test_ip));
+            serial_println!("[httpd]   Rate limit initial allow: OK");
 
-        // Restore previous state.
-        RATE_LIMIT_ENABLED.store(was_enabled, Ordering::Relaxed);
+            // Restore previous state.
+            RATE_LIMIT_ENABLED.store(was_enabled, Ordering::Relaxed);
+        }
+        case();
     }
 
     // Test 32: Rate limiting — disabled returns true.
     {
-        RATE_LIMIT_ENABLED.store(false, Ordering::Relaxed);
-        assert!(check_rate_limit([10, 0, 0, 1]));
-        RATE_LIMIT_ENABLED.store(true, Ordering::Relaxed);
-        serial_println!("[httpd]   Rate limit disabled bypass: OK");
+        #[inline(never)]
+        fn case() {
+            RATE_LIMIT_ENABLED.store(false, Ordering::Relaxed);
+            assert!(check_rate_limit([10, 0, 0, 1]));
+            RATE_LIMIT_ENABLED.store(true, Ordering::Relaxed);
+            serial_println!("[httpd]   Rate limit disabled bypass: OK");
+        }
+        case();
     }
 
     // Test 33: 429 response format.
     {
-        let resp = too_many_requests_response();
-        let resp_str = core::str::from_utf8(&resp).unwrap_or("");
-        assert!(resp_str.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
-        assert!(resp_str.contains("Retry-After: 1\r\n"));
-        serial_println!("[httpd]   429 response format: OK");
+        #[inline(never)]
+        fn case() {
+            let resp = too_many_requests_response();
+            let resp_str = core::str::from_utf8(&resp).unwrap_or("");
+            assert!(resp_str.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
+            assert!(resp_str.contains("Retry-After: 1\r\n"));
+            serial_println!("[httpd]   429 response format: OK");
+        }
+        case();
     }
 
     // Test 34: accepts_gzip helper.
     {
-        assert!(accepts_gzip(&Some(String::from("gzip, deflate, br"))));
-        assert!(accepts_gzip(&Some(String::from("gzip"))));
-        assert!(!accepts_gzip(&Some(String::from("deflate, br"))));
-        assert!(!accepts_gzip(&None));
-        serial_println!("[httpd]   accepts_gzip: OK");
+        #[inline(never)]
+        fn case() {
+            assert!(accepts_gzip(&Some(String::from("gzip, deflate, br"))));
+            assert!(accepts_gzip(&Some(String::from("gzip"))));
+            assert!(!accepts_gzip(&Some(String::from("deflate, br"))));
+            assert!(!accepts_gzip(&None));
+            serial_println!("[httpd]   accepts_gzip: OK");
+        }
+        case();
     }
 
     // Test 35: is_compressible helper.
     {
-        assert!(is_compressible("text/html; charset=utf-8"));
-        assert!(is_compressible("text/css"));
-        assert!(is_compressible("application/json"));
-        assert!(is_compressible("application/javascript"));
-        assert!(is_compressible("image/svg+xml"));
-        assert!(!is_compressible("image/png"));
-        assert!(!is_compressible("application/octet-stream"));
-        serial_println!("[httpd]   is_compressible: OK");
+        #[inline(never)]
+        fn case() {
+            assert!(is_compressible("text/html; charset=utf-8"));
+            assert!(is_compressible("text/css"));
+            assert!(is_compressible("application/json"));
+            assert!(is_compressible("application/javascript"));
+            assert!(is_compressible("image/svg+xml"));
+            assert!(!is_compressible("image/png"));
+            assert!(!is_compressible("application/octet-stream"));
+            serial_println!("[httpd]   is_compressible: OK");
+        }
+        case();
     }
 
     // Test 36: gzip compression helpers and response building.
     {
-        // Use a highly compressible body (1024 bytes of repeated pattern).
-        // This guarantees compression ratio > 2:1, overcoming gzip's 18-byte
-        // header/trailer overhead.
-        let mut body = Vec::with_capacity(1024);
-        for _ in 0..64 {
-            body.extend_from_slice(b"ABCDEFGHIJKLMNOP");
-        }
+        #[inline(never)]
+        fn case() {
+            // Use a highly compressible body (1024 bytes of repeated pattern).
+            // This guarantees compression ratio > 2:1, overcoming gzip's 18-byte
+            // header/trailer overhead.
+            let mut body = Vec::with_capacity(1024);
+            for _ in 0..64 {
+                body.extend_from_slice(b"ABCDEFGHIJKLMNOP");
+            }
 
-        let compressed = crate::fs::compress::gzip(&body);
-        let ratio_pct = body
-            .len()
-            .saturating_mul(100)
-            .checked_div(compressed.len().max(1))
-            .unwrap_or(0);
-        serial_println!(
-            "[httpd]   gzip: {}B → {}B ({}% ratio)",
-            body.len(),
-            compressed.len(),
-            ratio_pct
-        );
-
-        if compressed.len() < body.len() {
-            // Compression worked — verify the response builder uses it.
-            let resp = build_response_gzip(200, "OK", "text/html", &body);
-            // Headers are ASCII, but the gzip body is binary.  Find the
-            // end-of-headers marker and check only the header portion.
-            let header_end = resp
-                .windows(4)
-                .position(|w| w == b"\r\n\r\n")
-                .map(|p| p.saturating_add(4))
-                .unwrap_or(resp.len());
-            let header_str = core::str::from_utf8(&resp[..header_end]).unwrap_or("");
-            assert!(
-                header_str.contains("Content-Encoding: gzip\r\n"),
-                "gzip response should contain Content-Encoding header"
-            );
-            assert!(
-                header_str.contains("Vary: Accept-Encoding\r\n"),
-                "gzip response should contain Vary header"
-            );
-            // Verify the compressed response is smaller than uncompressed.
-            let uncompressed = build_response(200, "OK", "text/html", &body);
-            assert!(
-                resp.len() < uncompressed.len(),
-                "gzip ({}) should be smaller than plain ({})",
-                resp.len(),
-                uncompressed.len()
-            );
+            let compressed = crate::fs::compress::gzip(&body);
+            let ratio_pct = body
+                .len()
+                .saturating_mul(100)
+                .checked_div(compressed.len().max(1))
+                .unwrap_or(0);
             serial_println!(
-                "[httpd]   gzip response: OK ({}B vs {}B uncompressed)",
-                resp.len(),
-                uncompressed.len()
-            );
-        } else {
-            // Compression didn't help — verify the fallback works.
-            let resp = build_response_gzip(200, "OK", "text/html", &body);
-            assert!(
-                resp.starts_with(b"HTTP/1.1 200 OK\r\n"),
-                "fallback response should be valid HTTP"
-            );
-            serial_println!(
-                "[httpd]   gzip response: OK (fallback, {}B ≥ {}B)",
+                "[httpd]   gzip: {}B → {}B ({}% ratio)",
+                body.len(),
                 compressed.len(),
-                body.len()
+                ratio_pct
             );
+
+            if compressed.len() < body.len() {
+                // Compression worked — verify the response builder uses it.
+                let resp = build_response_gzip(200, "OK", "text/html", &body);
+                // Headers are ASCII, but the gzip body is binary.  Find the
+                // end-of-headers marker and check only the header portion.
+                let header_end = resp
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map(|p| p.saturating_add(4))
+                    .unwrap_or(resp.len());
+                let header_str = core::str::from_utf8(&resp[..header_end]).unwrap_or("");
+                assert!(
+                    header_str.contains("Content-Encoding: gzip\r\n"),
+                    "gzip response should contain Content-Encoding header"
+                );
+                assert!(
+                    header_str.contains("Vary: Accept-Encoding\r\n"),
+                    "gzip response should contain Vary header"
+                );
+                // Verify the compressed response is smaller than uncompressed.
+                let uncompressed = build_response(200, "OK", "text/html", &body);
+                assert!(
+                    resp.len() < uncompressed.len(),
+                    "gzip ({}) should be smaller than plain ({})",
+                    resp.len(),
+                    uncompressed.len()
+                );
+                serial_println!(
+                    "[httpd]   gzip response: OK ({}B vs {}B uncompressed)",
+                    resp.len(),
+                    uncompressed.len()
+                );
+            } else {
+                // Compression didn't help — verify the fallback works.
+                let resp = build_response_gzip(200, "OK", "text/html", &body);
+                assert!(
+                    resp.starts_with(b"HTTP/1.1 200 OK\r\n"),
+                    "fallback response should be valid HTTP"
+                );
+                serial_println!(
+                    "[httpd]   gzip response: OK (fallback, {}B ≥ {}B)",
+                    compressed.len(),
+                    body.len()
+                );
+            }
         }
+        case();
     }
 
     serial_println!("[httpd] Self-test PASSED (36 tests)");

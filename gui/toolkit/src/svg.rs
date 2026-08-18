@@ -102,48 +102,54 @@ pub fn parse_color(s: &str) -> Result<SvgPaint, SvgError> {
 }
 
 fn parse_hex_color(hex: &str) -> Result<Color, SvgError> {
-    match hex.len() {
-        3 => {
-            // #rgb -> #rrggbb
-            let r = u8_from_hex_char(hex.as_bytes()[0])?;
-            let g = u8_from_hex_char(hex.as_bytes()[1])?;
-            let b = u8_from_hex_char(hex.as_bytes()[2])?;
+    // Matching the bytes rather than testing `hex.len()` and then indexing:
+    // the length check and the reads become one expression, so the six-digit
+    // arm cannot be edited into reading a seventh byte.
+    match *hex.as_bytes() {
+        // #rgb is shorthand for #rrggbb: each digit is doubled, so #f0a is
+        // #ff00aa.
+        [r, g, b] => {
+            let r = u8_from_hex_char(r)?;
+            let g = u8_from_hex_char(g)?;
+            let b = u8_from_hex_char(b)?;
             Ok(Color::rgb(r | (r << 4), g | (g << 4), b | (b << 4)))
         }
-        6 => {
-            let r = u8_from_hex_pair(hex.as_bytes()[0], hex.as_bytes()[1])?;
-            let g = u8_from_hex_pair(hex.as_bytes()[2], hex.as_bytes()[3])?;
-            let b = u8_from_hex_pair(hex.as_bytes()[4], hex.as_bytes()[5])?;
-            Ok(Color::rgb(r, g, b))
-        }
-        8 => {
-            let r = u8_from_hex_pair(hex.as_bytes()[0], hex.as_bytes()[1])?;
-            let g = u8_from_hex_pair(hex.as_bytes()[2], hex.as_bytes()[3])?;
-            let b = u8_from_hex_pair(hex.as_bytes()[4], hex.as_bytes()[5])?;
-            let a = u8_from_hex_pair(hex.as_bytes()[6], hex.as_bytes()[7])?;
-            Ok(Color::rgba(r, g, b, a))
-        }
+        [rh, rl, gh, gl, bh, bl] => Ok(Color::rgb(
+            u8_from_hex_pair(rh, rl)?,
+            u8_from_hex_pair(gh, gl)?,
+            u8_from_hex_pair(bh, bl)?,
+        )),
+        [rh, rl, gh, gl, bh, bl, ah, al] => Ok(Color::rgba(
+            u8_from_hex_pair(rh, rl)?,
+            u8_from_hex_pair(gh, gl)?,
+            u8_from_hex_pair(bh, bl)?,
+            u8_from_hex_pair(ah, al)?,
+        )),
         _ => Err(SvgError::InvalidColor(format!("bad hex length: #{hex}"))),
     }
 }
 
 fn u8_from_hex_char(c: u8) -> Result<u8, SvgError> {
-    match c {
-        b'0'..=b'9' => Ok(c - b'0'),
-        b'a'..=b'f' => Ok(c - b'a' + 10),
-        b'A'..=b'F' => Ok(c - b'A' + 10),
-        // `c` is a *byte* of the colour string, and the bytes that reach this
-        // arm are by definition the non-hex ones — including the continuation
-        // bytes of a multi-byte character.  `c as char` would reinterpret such
-        // a byte as Latin-1 and name a character the author never wrote (the
-        // first byte of "ÿ" would be reported as "Ã"), so report the byte value
-        // for anything outside printable ASCII.
-        _ => Err(SvgError::InvalidColor(if c.is_ascii_graphic() {
-            format!("bad hex char: {}", c as char)
-        } else {
-            format!("bad hex byte: {c:#04x}")
-        })),
+    // `to_digit` rather than three ranged subtractions: it is the same
+    // conversion without the arithmetic, and — being one call rather than a
+    // match arm plus a subtraction that must agree with it — it cannot be made
+    // to disagree with its own range check.
+    if let Some(digit) = char::from(c).to_digit(16) {
+        if let Ok(v) = u8::try_from(digit) {
+            return Ok(v);
+        }
     }
+    // `c` is a *byte* of the colour string, and the bytes that reach here are
+    // by definition the non-hex ones — including the continuation bytes of a
+    // multi-byte character. `char::from(c)` would reinterpret such a byte as
+    // Latin-1 and name a character the author never wrote (the first byte of
+    // "ÿ" would be reported as "Ã"), so report the byte value for anything
+    // outside printable ASCII.
+    Err(SvgError::InvalidColor(if c.is_ascii_graphic() {
+        format!("bad hex char: {}", char::from(c))
+    } else {
+        format!("bad hex byte: {c:#04x}")
+    }))
 }
 
 fn u8_from_hex_pair(hi: u8, lo: u8) -> Result<u8, SvgError> {
@@ -152,28 +158,32 @@ fn u8_from_hex_pair(hi: u8, lo: u8) -> Result<u8, SvgError> {
 
 fn parse_rgb_func(inner: &str) -> Result<Color, SvgError> {
     let parts: Vec<&str> = inner.split(',').collect();
-    if parts.len() != 3 {
+    // The `else` arm carries the same condition the old `parts.len() != 3`
+    // stated, but the three bindings come from the pattern that proved it
+    // rather than from three separate indexes below.
+    let [r, g, b] = parts.as_slice() else {
         return Err(SvgError::InvalidColor(format!(
             "rgb() expects 3 values: {inner}"
         )));
-    }
-    let r = parse_u8_component(parts[0])?;
-    let g = parse_u8_component(parts[1])?;
-    let b = parse_u8_component(parts[2])?;
-    Ok(Color::rgb(r, g, b))
+    };
+    Ok(Color::rgb(
+        parse_u8_component(r)?,
+        parse_u8_component(g)?,
+        parse_u8_component(b)?,
+    ))
 }
 
 fn parse_rgba_func(inner: &str) -> Result<Color, SvgError> {
     let parts: Vec<&str> = inner.split(',').collect();
-    if parts.len() != 4 {
+    let [r_str, g_str, b_str, a_str] = parts.as_slice() else {
         return Err(SvgError::InvalidColor(format!(
             "rgba() expects 4 values: {inner}"
         )));
-    }
-    let r = parse_u8_component(parts[0])?;
-    let g = parse_u8_component(parts[1])?;
-    let b = parse_u8_component(parts[2])?;
-    let a_str = parts[3].trim();
+    };
+    let r = parse_u8_component(r_str)?;
+    let g = parse_u8_component(g_str)?;
+    let b = parse_u8_component(b_str)?;
+    let a_str = a_str.trim();
     // Alpha can be 0.0-1.0 or 0-255
     let a = if a_str.contains('.') {
         let f: f32 = a_str
@@ -349,16 +359,20 @@ pub fn parse_transform(s: &str) -> Result<Transform, SvgError> {
             break;
         }
 
-        // Find function name
-        let paren_pos = remaining
-            .find('(')
+        // Split at the parentheses rather than searching for both from the
+        // start and slicing between the two offsets. The old form called
+        // `find(')')` on the *whole* remainder, so an input whose ')' came
+        // before its '(' — `)x(1,2)` — produced a start index past its end and
+        // panicked inside the slice. Splitting makes the ordering structural:
+        // the closing paren is looked for only in what follows the opening one.
+        let (head, after_open) = remaining
+            .split_once('(')
             .ok_or_else(|| SvgError::InvalidTransform(format!("expected '(' in: {remaining}")))?;
-        let func_name = remaining[..paren_pos].trim();
-        let close_pos = remaining
-            .find(')')
+        let func_name = head.trim();
+        let (args_str, after_close) = after_open
+            .split_once(')')
             .ok_or_else(|| SvgError::InvalidTransform(format!("expected ')' in: {remaining}")))?;
-        let args_str = &remaining[paren_pos + 1..close_pos];
-        remaining = &remaining[close_pos + 1..];
+        remaining = after_close;
 
         // Skip optional comma/whitespace separators between transforms
         remaining = remaining.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
@@ -378,10 +392,11 @@ pub fn parse_transform(s: &str) -> Result<Transform, SvgError> {
             }
             "rotate" => {
                 let angle = args.first().copied().unwrap_or(0.0) * PI / 180.0;
-                if args.len() >= 3 {
-                    // rotate(angle, cx, cy) — rotate around point
-                    let cx = args[1];
-                    let cy = args[2];
+                // `rotate(angle, cx, cy)` turns about a point; `rotate(angle)`
+                // turns about the origin. Reading the centre out of the slice
+                // pattern ties the "are there three?" test to the two values
+                // that test is there to justify.
+                if let [_, cx, cy, ..] = *args.as_slice() {
                     Transform::translate(cx, cy)
                         .then(Transform::rotate(angle))
                         .then(Transform::translate(-cx, -cy))
@@ -390,12 +405,12 @@ pub fn parse_transform(s: &str) -> Result<Transform, SvgError> {
                 }
             }
             "matrix" => {
-                if args.len() < 6 {
+                let [a, b, c, d, tx, ty, ..] = *args.as_slice() else {
                     return Err(SvgError::InvalidTransform(
                         "matrix() requires 6 values".into(),
                     ));
-                }
-                Transform::matrix(args[0], args[1], args[2], args[3], args[4], args[5])
+                };
+                Transform::matrix(a, b, c, d, tx, ty)
             }
             "skewX" => {
                 let angle = args.first().copied().unwrap_or(0.0) * PI / 180.0;
@@ -498,7 +513,117 @@ pub enum PathCommand {
     Close,
 }
 
+/// A cursor over the tokens of a path `d` attribute.
+///
+/// The parser used to carry a bare `let mut i = 0` beside the token slice and
+/// move it by hand: `i += 1` appeared twenty-four times, and every read was a
+/// `tokens[i]` that was in bounds only because a `while i < tokens.len()`
+/// several lines above said so — a proof living in a different statement from
+/// the code it justifies, which a later edit is free to invalidate silently.
+///
+/// That is the same shape as the wire-decode cursor in `guiremote`, and it has
+/// the same fix: one type that owns the position, hands out only
+/// bounds-checked reads, and is the only thing that may advance it.
+struct PathTokens<'a> {
+    tokens: &'a [String],
+    at: usize,
+}
+
+impl<'a> PathTokens<'a> {
+    fn new(tokens: &'a [String]) -> Self {
+        Self { tokens, at: 0 }
+    }
+
+    /// The token under the cursor, without consuming it.
+    fn peek(&self) -> Option<&'a str> {
+        self.tokens.get(self.at).map(String::as_str)
+    }
+
+    /// The token under the cursor, consuming it.
+    fn next_token(&mut self) -> Option<&'a str> {
+        let token = self.peek()?;
+        self.bump();
+        Some(token)
+    }
+
+    /// Move past the token that was just read.
+    ///
+    /// `saturating_add` is a formality — the cursor is only ever compared
+    /// against a `Vec` length, which cannot reach `usize::MAX` — but it means
+    /// this is not the place an overflow could occur.
+    fn bump(&mut self) {
+        self.at = self.at.saturating_add(1);
+    }
+
+    /// Is the next token a number?
+    ///
+    /// This is what continues a command's implicit-repetition loop: `L 1 2 3 4`
+    /// is two linetos, and `M 1 2 3 4` is a moveto followed by one.
+    fn at_number(&self) -> bool {
+        self.peek().is_some_and(is_number_token)
+    }
+
+    /// Consume exactly `N` numbers.
+    ///
+    /// Returning `[f32; N]` rather than `Vec<f32>` is the point. The helper
+    /// this replaces returned a `Vec`, so every caller had to take it back
+    /// apart by index — `(vals[0], vals[1], vals[2], vals[3])` appeared eight
+    /// times and the six-element form six more — and nothing but a runtime
+    /// bound tied the count the caller asked for to the count it then read.
+    /// With an array the two cannot disagree: the length is in the type, and
+    /// destructuring it is exhaustive.
+    ///
+    /// A failure leaves the cursor wherever it stopped, which is harmless
+    /// because the error aborts the whole parse.
+    fn take_numbers<const N: usize>(&mut self, what: &str) -> Result<[f32; N], SvgError> {
+        let mut out = [0.0f32; N];
+        for (found, slot) in out.iter_mut().enumerate() {
+            let Some(token) = self.peek().filter(|t| is_number_token(t)) else {
+                return Err(SvgError::InvalidPathData(format!(
+                    "{what}: expected {N} numbers, found {found}"
+                )));
+            };
+            *slot = parse_path_number(token)?;
+            self.bump();
+        }
+        Ok(out)
+    }
+}
+
+/// Resolve a coordinate pair against the current point.
+///
+/// Relative commands (the lowercase letters) treat their arguments as offsets
+/// from where the pen is; absolute ones replace it. Spelling that out once
+/// removes six copies of the same six-line `if is_relative` block, one of
+/// which had to repeat `cursor_x + vals[n]` three times over.
+fn resolve(is_relative: bool, from_x: f32, from_y: f32, x: f32, y: f32) -> (f32, f32) {
+    if is_relative {
+        (from_x + x, from_y + y)
+    } else {
+        (x, y)
+    }
+}
+
+/// The single letter of a one-character token, if that is what it is.
+///
+/// The old form tested `token.len() == 1 && token.as_bytes()[0].is_ascii_alphabetic()`
+/// and then indexed `token.as_bytes()[0]` a second time to read the byte back
+/// out. A slice pattern states the length check and the read as one thing, so
+/// they cannot drift apart.
+fn single_ascii_alphabetic(token: &str) -> Option<u8> {
+    match token.as_bytes() {
+        [only] if only.is_ascii_alphabetic() => Some(*only),
+        _ => None,
+    }
+}
+
 /// Parse an SVG path `d` attribute into a list of absolute `PathCommand`s.
+///
+/// # Errors
+///
+/// Returns [`SvgError::InvalidPathData`] if the data contains an unknown
+/// command letter, a token that is neither a command nor a number, or a
+/// command with fewer arguments than it requires.
 pub fn parse_path_data(d: &str) -> Result<Vec<PathCommand>, SvgError> {
     let mut commands = Vec::new();
     let mut cursor_x: f32 = 0.0;
@@ -507,240 +632,153 @@ pub fn parse_path_data(d: &str) -> Result<Vec<PathCommand>, SvgError> {
     let mut start_y: f32 = 0.0;
 
     let tokens = tokenize_path(d);
-    let mut i = 0;
+    let mut t = PathTokens::new(&tokens);
 
-    while i < tokens.len() {
-        let token = &tokens[i];
-        if token.len() == 1 && token.as_bytes()[0].is_ascii_alphabetic() {
-            let cmd_char = token.as_bytes()[0];
-            i += 1;
-            let is_relative = cmd_char.is_ascii_lowercase();
-            let cmd_upper = cmd_char.to_ascii_uppercase();
-
-            match cmd_upper {
-                b'M' => {
-                    // MoveTo (first pair is moveto, subsequent are lineto)
-                    let mut first = true;
-                    while i < tokens.len() && is_number_token(&tokens[i]) {
-                        let x_raw = parse_path_number(&tokens[i])?;
-                        i += 1;
-                        let y_raw = parse_path_number(tokens.get(i).ok_or_else(|| {
-                            SvgError::InvalidPathData("M needs y coordinate".into())
-                        })?)?;
-                        i += 1;
-
-                        let (x, y) = if is_relative {
-                            (cursor_x + x_raw, cursor_y + y_raw)
-                        } else {
-                            (x_raw, y_raw)
-                        };
-
-                        if first {
-                            commands.push(PathCommand::MoveTo { x, y });
-                            start_x = x;
-                            start_y = y;
-                            first = false;
-                        } else {
-                            commands.push(PathCommand::LineTo { x, y });
-                        }
-                        cursor_x = x;
-                        cursor_y = y;
-                    }
-                }
-                b'L' => {
-                    while i < tokens.len() && is_number_token(&tokens[i]) {
-                        let x_raw = parse_path_number(&tokens[i])?;
-                        i += 1;
-                        let y_raw = parse_path_number(tokens.get(i).ok_or_else(|| {
-                            SvgError::InvalidPathData("L needs y coordinate".into())
-                        })?)?;
-                        i += 1;
-
-                        let (x, y) = if is_relative {
-                            (cursor_x + x_raw, cursor_y + y_raw)
-                        } else {
-                            (x_raw, y_raw)
-                        };
-                        commands.push(PathCommand::LineTo { x, y });
-                        cursor_x = x;
-                        cursor_y = y;
-                    }
-                }
-                b'H' => {
-                    while i < tokens.len() && is_number_token(&tokens[i]) {
-                        let x_raw = parse_path_number(&tokens[i])?;
-                        i += 1;
-                        let x = if is_relative { cursor_x + x_raw } else { x_raw };
-                        commands.push(PathCommand::HorizontalLineTo { x });
-                        cursor_x = x;
-                    }
-                }
-                b'V' => {
-                    while i < tokens.len() && is_number_token(&tokens[i]) {
-                        let y_raw = parse_path_number(&tokens[i])?;
-                        i += 1;
-                        let y = if is_relative { cursor_y + y_raw } else { y_raw };
-                        commands.push(PathCommand::VerticalLineTo { y });
-                        cursor_y = y;
-                    }
-                }
-                b'C' => {
-                    while i < tokens.len() && is_number_token(&tokens[i]) {
-                        let vals = consume_n_numbers(&tokens, &mut i, 6)?;
-                        let (x1, y1, x2, y2, x, y) = if is_relative {
-                            (
-                                cursor_x + vals[0],
-                                cursor_y + vals[1],
-                                cursor_x + vals[2],
-                                cursor_y + vals[3],
-                                cursor_x + vals[4],
-                                cursor_y + vals[5],
-                            )
-                        } else {
-                            (vals[0], vals[1], vals[2], vals[3], vals[4], vals[5])
-                        };
-                        commands.push(PathCommand::CubicBezier {
-                            x1,
-                            y1,
-                            x2,
-                            y2,
-                            x,
-                            y,
-                        });
-                        cursor_x = x;
-                        cursor_y = y;
-                    }
-                }
-                b'S' => {
-                    while i < tokens.len() && is_number_token(&tokens[i]) {
-                        let vals = consume_n_numbers(&tokens, &mut i, 4)?;
-                        let (x2, y2, x, y) = if is_relative {
-                            (
-                                cursor_x + vals[0],
-                                cursor_y + vals[1],
-                                cursor_x + vals[2],
-                                cursor_y + vals[3],
-                            )
-                        } else {
-                            (vals[0], vals[1], vals[2], vals[3])
-                        };
-                        commands.push(PathCommand::SmoothCubic { x2, y2, x, y });
-                        cursor_x = x;
-                        cursor_y = y;
-                    }
-                }
-                b'Q' => {
-                    while i < tokens.len() && is_number_token(&tokens[i]) {
-                        let vals = consume_n_numbers(&tokens, &mut i, 4)?;
-                        let (x1, y1, x, y) = if is_relative {
-                            (
-                                cursor_x + vals[0],
-                                cursor_y + vals[1],
-                                cursor_x + vals[2],
-                                cursor_y + vals[3],
-                            )
-                        } else {
-                            (vals[0], vals[1], vals[2], vals[3])
-                        };
-                        commands.push(PathCommand::QuadraticBezier { x1, y1, x, y });
-                        cursor_x = x;
-                        cursor_y = y;
-                    }
-                }
-                b'T' => {
-                    while i < tokens.len() && is_number_token(&tokens[i]) {
-                        let vals = consume_n_numbers(&tokens, &mut i, 2)?;
-                        let (x, y) = if is_relative {
-                            (cursor_x + vals[0], cursor_y + vals[1])
-                        } else {
-                            (vals[0], vals[1])
-                        };
-                        commands.push(PathCommand::SmoothQuadratic { x, y });
-                        cursor_x = x;
-                        cursor_y = y;
-                    }
-                }
-                b'A' => {
-                    while i < tokens.len() && is_number_token(&tokens[i]) {
-                        let rx = parse_path_number(&tokens[i])?.abs();
-                        i += 1;
-                        let ry =
-                            parse_path_number(tokens.get(i).ok_or_else(|| {
-                                SvgError::InvalidPathData("A: missing ry".into())
-                            })?)?
-                            .abs();
-                        i += 1;
-                        let x_rotation = parse_path_number(tokens.get(i).ok_or_else(|| {
-                            SvgError::InvalidPathData("A: missing x-rotation".into())
-                        })?)?;
-                        i += 1;
-                        let large_arc = parse_path_number(tokens.get(i).ok_or_else(|| {
-                            SvgError::InvalidPathData("A: missing large-arc flag".into())
-                        })?)?
-                            != 0.0;
-                        i += 1;
-                        let sweep = parse_path_number(tokens.get(i).ok_or_else(|| {
-                            SvgError::InvalidPathData("A: missing sweep flag".into())
-                        })?)?
-                            != 0.0;
-                        i += 1;
-                        let x_raw =
-                            parse_path_number(tokens.get(i).ok_or_else(|| {
-                                SvgError::InvalidPathData("A: missing x".into())
-                            })?)?;
-                        i += 1;
-                        let y_raw =
-                            parse_path_number(tokens.get(i).ok_or_else(|| {
-                                SvgError::InvalidPathData("A: missing y".into())
-                            })?)?;
-                        i += 1;
-
-                        let (x, y) = if is_relative {
-                            (cursor_x + x_raw, cursor_y + y_raw)
-                        } else {
-                            (x_raw, y_raw)
-                        };
-                        commands.push(PathCommand::Arc {
-                            rx,
-                            ry,
-                            x_rotation,
-                            large_arc,
-                            sweep,
-                            x,
-                            y,
-                        });
-                        cursor_x = x;
-                        cursor_y = y;
-                    }
-                }
-                b'Z' => {
-                    commands.push(PathCommand::Close);
-                    cursor_x = start_x;
-                    cursor_y = start_y;
-                }
-                _ => {
-                    return Err(SvgError::InvalidPathData(format!(
-                        "unknown command: {}",
-                        cmd_char as char
-                    )));
-                }
-            }
-        } else {
-            // Implicit lineto (bare numbers after initial moveto)
-            if is_number_token(token) {
-                let x_raw = parse_path_number(token)?;
-                i += 1;
-                let y_raw =
-                    parse_path_number(tokens.get(i).ok_or_else(|| {
-                        SvgError::InvalidPathData("implicit lineto needs y".into())
-                    })?)?;
-                i += 1;
-                commands.push(PathCommand::LineTo { x: x_raw, y: y_raw });
-                cursor_x = x_raw;
-                cursor_y = y_raw;
-            } else {
+    while let Some(token) = t.next_token() {
+        let Some(cmd_char) = single_ascii_alphabetic(token) else {
+            // Bare numbers where a command letter was expected: an implicit
+            // lineto. Note these are taken as absolute regardless of the
+            // preceding command's case, which is what this parser has always
+            // done; the case that reaches here is numbers at the very start of
+            // the data or straight after a `Z`, neither of which the grammar
+            // actually allows, so there is no "preceding command" to inherit
+            // relativity from.
+            if !is_number_token(token) {
                 return Err(SvgError::InvalidPathData(format!(
                     "unexpected token: {token}"
+                )));
+            }
+            let x = parse_path_number(token)?;
+            let [y] = t.take_numbers("implicit lineto")?;
+            commands.push(PathCommand::LineTo { x, y });
+            cursor_x = x;
+            cursor_y = y;
+            continue;
+        };
+
+        let is_relative = cmd_char.is_ascii_lowercase();
+
+        match cmd_char.to_ascii_uppercase() {
+            b'M' => {
+                // The first pair is the moveto; any that follow it are implicit
+                // linetos (SVG 1.1 section 8.3.2).
+                let mut first = true;
+                while t.at_number() {
+                    let [x_raw, y_raw] = t.take_numbers("M")?;
+                    let (x, y) = resolve(is_relative, cursor_x, cursor_y, x_raw, y_raw);
+                    if first {
+                        commands.push(PathCommand::MoveTo { x, y });
+                        start_x = x;
+                        start_y = y;
+                        first = false;
+                    } else {
+                        commands.push(PathCommand::LineTo { x, y });
+                    }
+                    cursor_x = x;
+                    cursor_y = y;
+                }
+            }
+            b'L' => {
+                while t.at_number() {
+                    let [x_raw, y_raw] = t.take_numbers("L")?;
+                    let (x, y) = resolve(is_relative, cursor_x, cursor_y, x_raw, y_raw);
+                    commands.push(PathCommand::LineTo { x, y });
+                    cursor_x = x;
+                    cursor_y = y;
+                }
+            }
+            b'H' => {
+                while t.at_number() {
+                    let [x_raw] = t.take_numbers("H")?;
+                    let x = if is_relative { cursor_x + x_raw } else { x_raw };
+                    commands.push(PathCommand::HorizontalLineTo { x });
+                    cursor_x = x;
+                }
+            }
+            b'V' => {
+                while t.at_number() {
+                    let [y_raw] = t.take_numbers("V")?;
+                    let y = if is_relative { cursor_y + y_raw } else { y_raw };
+                    commands.push(PathCommand::VerticalLineTo { y });
+                    cursor_y = y;
+                }
+            }
+            b'C' => {
+                while t.at_number() {
+                    let [x1r, y1r, x2r, y2r, xr, yr] = t.take_numbers("C")?;
+                    let (x1, y1) = resolve(is_relative, cursor_x, cursor_y, x1r, y1r);
+                    let (x2, y2) = resolve(is_relative, cursor_x, cursor_y, x2r, y2r);
+                    let (x, y) = resolve(is_relative, cursor_x, cursor_y, xr, yr);
+                    commands.push(PathCommand::CubicBezier {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x,
+                        y,
+                    });
+                    cursor_x = x;
+                    cursor_y = y;
+                }
+            }
+            b'S' => {
+                while t.at_number() {
+                    let [x2r, y2r, xr, yr] = t.take_numbers("S")?;
+                    let (x2, y2) = resolve(is_relative, cursor_x, cursor_y, x2r, y2r);
+                    let (x, y) = resolve(is_relative, cursor_x, cursor_y, xr, yr);
+                    commands.push(PathCommand::SmoothCubic { x2, y2, x, y });
+                    cursor_x = x;
+                    cursor_y = y;
+                }
+            }
+            b'Q' => {
+                while t.at_number() {
+                    let [x1r, y1r, xr, yr] = t.take_numbers("Q")?;
+                    let (x1, y1) = resolve(is_relative, cursor_x, cursor_y, x1r, y1r);
+                    let (x, y) = resolve(is_relative, cursor_x, cursor_y, xr, yr);
+                    commands.push(PathCommand::QuadraticBezier { x1, y1, x, y });
+                    cursor_x = x;
+                    cursor_y = y;
+                }
+            }
+            b'T' => {
+                while t.at_number() {
+                    let [xr, yr] = t.take_numbers("T")?;
+                    let (x, y) = resolve(is_relative, cursor_x, cursor_y, xr, yr);
+                    commands.push(PathCommand::SmoothQuadratic { x, y });
+                    cursor_x = x;
+                    cursor_y = y;
+                }
+            }
+            b'A' => {
+                while t.at_number() {
+                    let [rx, ry, x_rotation, large_arc, sweep, xr, yr] = t.take_numbers("A")?;
+                    let (x, y) = resolve(is_relative, cursor_x, cursor_y, xr, yr);
+                    commands.push(PathCommand::Arc {
+                        // A negative radius is out of range rather than a parse
+                        // error: SVG 1.1 section 8.3.8 says to take its absolute
+                        // value and carry on, not to reject the path.
+                        rx: rx.abs(),
+                        ry: ry.abs(),
+                        x_rotation,
+                        large_arc: large_arc != 0.0,
+                        sweep: sweep != 0.0,
+                        x,
+                        y,
+                    });
+                    cursor_x = x;
+                    cursor_y = y;
+                }
+            }
+            b'Z' => {
+                commands.push(PathCommand::Close);
+                cursor_x = start_x;
+                cursor_y = start_y;
+            }
+            _ => {
+                return Err(SvgError::InvalidPathData(format!(
+                    "unknown command: {}",
+                    char::from(cmd_char)
                 )));
             }
         }
@@ -754,70 +792,58 @@ pub fn parse_path_data(d: &str) -> Result<Vec<PathCommand>, SvgError> {
 fn tokenize_path(d: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
-    let bytes = d.as_bytes();
-    let mut i = 0;
 
-    while i < bytes.len() {
-        let c = bytes[i];
+    // A byte iterator rather than a hand-moved index. The loop only ever went
+    // forward one byte at a time and never looked back, so the index bought
+    // nothing at all — it just added an `i += 1` to every one of eight arms
+    // (an omission in any of which is an infinite loop) and a `bytes[i]` that
+    // the iterator makes unnecessary.
+    for c in d.bytes() {
         match c {
-            // Command characters always start a new token
+            // A command letter always starts a new token.
             b'M' | b'm' | b'L' | b'l' | b'H' | b'h' | b'V' | b'v' | b'C' | b'c' | b'S' | b's'
             | b'Q' | b'q' | b'T' | b't' | b'A' | b'a' | b'Z' | b'z' => {
                 if !current.is_empty() {
                     tokens.push(core::mem::take(&mut current));
                 }
-                tokens.push(String::from(c as char));
-                i += 1;
+                tokens.push(String::from(char::from(c)));
             }
-            // Separators
+            // Separators.
             b',' | b' ' | b'\t' | b'\n' | b'\r' => {
                 if !current.is_empty() {
                     tokens.push(core::mem::take(&mut current));
                 }
-                i += 1;
             }
-            // Minus sign can be separator (start of negative number)
+            // A minus doubles as a separator: `10-5` is two numbers.
             b'-' => {
                 if !current.is_empty() {
                     tokens.push(core::mem::take(&mut current));
                 }
                 current.push('-');
-                i += 1;
             }
-            // Dot can start a new number if we already have a dot
+            // So does a second dot: `.5.5` is two numbers.
             b'.' => {
                 if current.contains('.') {
                     tokens.push(core::mem::take(&mut current));
                 }
                 current.push('.');
-                i += 1;
             }
-            // Digits and 'e'/'E' for scientific notation
-            b'0'..=b'9' => {
-                current.push(c as char);
-                i += 1;
-            }
-            b'e' | b'E' => {
-                current.push(c as char);
-                i += 1;
-            }
+            // Digits, and `e`/`E` for scientific notation.
+            b'0'..=b'9' | b'e' | b'E' => current.push(char::from(c)),
             b'+' => {
-                // Plus after 'e' is part of scientific notation
+                // A plus is part of an exponent (`1e+3`); anywhere else it
+                // introduces a new number.
                 if current.ends_with('e') || current.ends_with('E') {
                     current.push('+');
-                } else {
-                    if !current.is_empty() {
-                        tokens.push(core::mem::take(&mut current));
-                    }
+                } else if !current.is_empty() {
+                    tokens.push(core::mem::take(&mut current));
                 }
-                i += 1;
             }
+            // Anything else: skip it, but end whatever was in progress.
             _ => {
-                // Skip unknown characters
                 if !current.is_empty() {
                     tokens.push(core::mem::take(&mut current));
                 }
-                i += 1;
             }
         }
     }
@@ -829,32 +855,19 @@ fn tokenize_path(d: &str) -> Vec<String> {
     tokens
 }
 
+/// Could this token begin a number? (Whether it *is* one is
+/// [`parse_path_number`]'s question.)
 fn is_number_token(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
-    }
-    let first = s.as_bytes()[0];
-    first == b'-' || first == b'+' || first == b'.' || first.is_ascii_digit()
+    // A slice pattern rather than an emptiness check followed by `[0]`: the
+    // guard and the read are one expression, so there is no way to reach the
+    // read without the guard.
+    matches!(s.as_bytes(), [first, ..]
+        if *first == b'-' || *first == b'+' || *first == b'.' || first.is_ascii_digit())
 }
 
 fn parse_path_number(s: &str) -> Result<f32, SvgError> {
     s.parse::<f32>()
         .map_err(|_| SvgError::InvalidPathData(format!("bad number: {s}")))
-}
-
-fn consume_n_numbers(tokens: &[String], i: &mut usize, n: usize) -> Result<Vec<f32>, SvgError> {
-    let mut vals = Vec::with_capacity(n);
-    for _ in 0..n {
-        if *i >= tokens.len() || !is_number_token(&tokens[*i]) {
-            return Err(SvgError::InvalidPathData(format!(
-                "expected {n} numbers, got {}",
-                vals.len()
-            )));
-        }
-        vals.push(parse_path_number(&tokens[*i])?);
-        *i += 1;
-    }
-    Ok(vals)
 }
 
 // ─── SVG Node Tree ───────────────────────────────────────────────────────────
@@ -2741,7 +2754,33 @@ fn collect_render_commands(
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
+
+    #[test]
+    fn a_transform_with_a_close_paren_before_the_open_one_is_an_error() {
+        // `find(')')` used to search the whole string rather than the part
+        // after the '(', so this input produced a start index past its end and
+        // panicked inside the slice. SVG is a file format — a malformed
+        // attribute must be an error, never a crash.
+        assert!(parse_transform(")x(1,2)").is_err());
+        assert!(parse_transform("translate)1,2(").is_err());
+        // The well-formed cases still parse, including several in sequence.
+        let t = parse_transform("translate(10,20) scale(2)").unwrap();
+        assert_eq!(t.apply(0.0, 0.0), (10.0, 20.0));
+        assert_eq!(t.apply(1.0, 1.0), (12.0, 22.0));
+    }
 
     // --- XML parsing tests ---
 

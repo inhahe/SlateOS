@@ -32759,16 +32759,20 @@ in this canary that was not there.
 
 ---
 
-## A-BENCH-PAGE-ALLOC-ZEROED-FREE-HAS-LEFT-ITS-HISTORICAL-RANGE (lane A, 2026-08-18) - **open, unattributed**
+## A-BENCH-PAGE-ALLOC-ZEROED-FREE-IS-AN-UNSTABLE-MEASUREMENT, NOT A REGRESSION (lane A, 2026-08-18) - **open; my own earlier headline here was wrong, see the correction at the end**
 
-**In short:** one benchmark, `page_alloc_zeroed_free`, is now measuring about
-80% slower than it used to and is well outside the range it has held for the
-last eight runs.  It is the *only* benchmark that was flagged in both of the
-back-to-back identical-binary runs described in the entry above, so unlike the
-other nineteen it is not obviously noise.  It is also not yet attributable to
-any code change, and the evidence for that is specific rather than a shrug.
+**In short:** one benchmark, `page_alloc_zeroed_free`, sometimes reports a
+number about 40-80% higher than usual.  It looked like a slowdown that had
+"left its historical range", and this entry originally said so.  **That was
+wrong** - reading all 29 runs instead of the last few shows the same unchanged
+binary producing both the normal and the elevated number, so the benchmark is
+an unreliable ruler rather than a record of code getting slower.  Nothing needs
+to be fixed in the allocator; the *measurement* needs fixing.  **Read the
+CORRECTION section at the end of this entry before using anything above it** -
+the original numbers below are left in place because the correction only makes
+sense next to the claim it corrects.
 
-### The numbers
+### The numbers (as originally recorded - see the CORRECTION below)
 
 | run | value | own recent range | median over 8 runs |
 |---|---:|---|---:|
@@ -32808,6 +32812,107 @@ runs.  Alternating matters: consecutive runs share whatever the host was doing,
 which is exactly the confound above.  Until that is done this stays open and
 unattributed - and specifically must **not** be quoted as evidence that the
 boxing changes cost anything, because it is not.
+
+
+### CORRECTION 2026-08-17 - the headline above was overstated
+
+I wrote the heading "has left its historical range" from three consecutive
+runs. Reading the *entire* release-profile series (n = 29) instead of the tail
+does not support it. The number the scorecard reports and that drives verdicts
+is the `entries` field; `mean_ns` is a separate, far noisier statistic.
+
+**`entries`, every release run, oldest to newest:**
+
+```
+3631 3626 3502 3473 3687 3585 3647 5114 3558 3609 3659 3595 3734 3636 3643
+3645 3642 3533 3557 5230 3570 5117 3553 3593 3632 3658 3680 5125 6652
+```
+
+n=29, min 3473, median 3636, max 6652.
+
+**The three claims in the original entry, checked:**
+
+| Claim | Verdict |
+|---|---|
+| 5125 is outside the historical range | **False.** 5114 (`d542299e2`) and 5230 / 5117 (`f61bc4e71`) all predate the boxing commits. |
+| The series ramps 3680 -> 5125 -> 6652 | **True but meaningless** - see the same-binary spreads below. |
+| 6652 is a new maximum | **True.** It is the only genuinely new value, and it is one sample. |
+
+**The finding that actually matters - identical binaries land in both modes:**
+
+| Commit | `entries` across repeat runs | spread |
+|---|---|---|
+| `f61bc4e71` | 5230, 5117, 3593, 3658 | **1.5x** |
+| `d542299e2` | 5114, 3558 | **1.4x** |
+| `53cb74578` | 3557, 3570, 3553, 3632 | 1.0x |
+| `602fc62e0` | 3502, 3473 | 1.0x |
+
+`f61bc4e71` produced both 5230 and 3593 from **the same binary**. A benchmark
+that swings 1.5x with the code held constant cannot support a 1.4x per-commit
+attribution, which is precisely what the original heading was doing. The right
+description is an unstable measurement with an occasional elevated mode, not a
+regression that needs a culprit.
+
+**`mean_ns` has two distinct high populations**, which is worth recording
+because it shows the elevated `entries` and the huge means are not one
+phenomenon:
+
+| Population | `mean_ns` | `entries` | Runs |
+|---|---|---|---|
+| A | ~65k-68k | **normal** (3502-3734) | `602fc62e0`, `9ecef3188`, `e3ae7bae1` |
+| B | ~131k-135k | **elevated** (5114-6652) | `d542299e2`, `37d1a4bb1`, `e5a6b2183` |
+
+So a run can have a 17x mean with a perfectly ordinary reported figure. Any
+future work here should treat `mean_ns` as diagnostic only. The mean of a
+heavy-tailed sample is the wrong estimator, which is exactly why
+`ab_interleaved` takes a **minimum** over 500 rounds elsewhere in `bench.rs`.
+
+### The orphaned QEMU spinner - a real factor, but NOT the explanation
+
+`A-ADHOC-QEMU-PROBES-LEAK-THE-EMULATOR-ABOUT-TWO-THIRDS-OF-THE-TIME` records a
+leaked QEMU that burned 729 s of CPU on this host. Checking the clock rather
+than assuming (history timestamps are **UTC**; the host runs EDT = UTC-4):
+
+* Spinner alive: 2026-08-17 01:04 EDT until killed ~22:02 EDT (~21 h).
+* `37d1a4bb1` ran 2026-08-18T00:49Z = 08-17 **20:49 EDT** - spinner alive.
+* `e5a6b2183` ran 2026-08-18T01:13Z = 08-17 **21:13 EDT** - spinner alive.
+
+Tempting, and wrong to stop there. Two facts kill it as *the* cause:
+
+* `d542299e2` (entries 5114) ran 08-16 22:49 EDT, **before the spinner existed**.
+* `f61bc4e71` produced its two *low* readings (3593, 3658) at 15:43 / 15:50 EDT,
+    with the spinner alive the whole time.
+
+So the spinner was present for both elevated and normal readings, and one
+elevated reading predates it entirely. It is a genuine contaminant that should
+never have been running, but it does not explain this benchmark's bimodality.
+
+### Falsifiable prediction, recorded before the run that tests it
+
+The `--bench` run started 2026-08-17 22:10 EDT for the SCHED lock-order hoists
+is the first benchmark run on this host since the spinner was killed.
+
+* **If the spinner mattered**, `page_alloc_zeroed_free` returns to the ~3600
+    cluster.
+* **If it does not**, the value is a coin-flip over the historical
+    distribution - roughly a 5/29 chance of landing >= 5000 regardless.
+
+Either way **one run decides nothing**, which is the whole point of
+`A-BENCH-THE-HOST-IS-A-DESKTOP-SO-A-SINGLE-RUN-IS-NEVER-A-VERDICT`. Recorded in
+advance so the result cannot be read backwards into whichever story fits.
+
+### What to do
+
+* **Do not cite this benchmark as evidence for or against any commit**,
+    including the `FpuState` / `KernelFdTable` boxing. It cannot carry that
+    weight.
+* The proper fix is in the instrument: report a **minimum or median** over
+    rounds rather than a mean, matching `ab_interleaved`. Until then its
+    verdicts should be treated as advisory.
+* If someone does want to settle whether the elevated mode is real, the
+    experiment is alternating runs of two commits, three each, comparing
+    medians - not consecutive runs of successive commits.
+
 ## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17)
 
 **In short:** the 1-pixel line the compositor draws around a window is drawn

@@ -92879,13 +92879,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // glibc / OpenSSL / Go's crypto/rand to loop for what
             // should be a single syscall.
             {
+                // `GRND_INSECURE` for the same reason as the block above: this
+                // battery runs before `rng::init`, and what it is testing is
+                // the *length* contract — that a 2048-byte request returns
+                // 2048 rather than the old 256-byte cap — not the quality of
+                // the bytes.  Without the flag every call here is correctly
+                // refused with EAGAIN, which is what this test first did.
+                const INSECURE: u64 = 0x4;
                 let large_buf = [0u8; 2048];
                 let large_ptr = large_buf.as_ptr() as u64;
                 for &len in &[257usize, 512, 1024, 2048] {
                     let a = SyscallArgs {
                         arg0: large_ptr,
                         arg1: len as u64,
-                        arg2: 0,
+                        arg2: INSECURE,
                         arg3: 0,
                         arg4: 0,
                         arg5: 0,
@@ -92893,7 +92900,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     let r = dispatch_linux(nr::GETRANDOM, &a).value;
                     if r != len as i64 {
                         serial_println!(
-                            "[syscall/linux]   FAIL: getrandom({},0) returned {} (expected {})",
+                            "[syscall/linux]   FAIL: getrandom({}, INSECURE) returned {} (expected {})",
                             len,
                             r,
                             len

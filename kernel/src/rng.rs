@@ -371,6 +371,21 @@ static LAST_DELTA2: AtomicU64 = AtomicU64::new(0);
 /// Interrupts whose timing was credited (diagnostic).
 static CREDITED_IRQS: AtomicU64 = AtomicU64::new(0);
 
+/// [`ENTROPY_COUNT`] sampled at the instant the pool became ready.
+///
+/// Recorded at the transition rather than read when the readiness message is
+/// printed, because those are not the same moment and reading it late is
+/// actively misleading. The message is emitted from a work item, and the
+/// workqueue worker is spawned very late in boot — on the first boot to carry
+/// this code the item sat queued from the moment of readiness until the worker
+/// started, by which time `ENTROPY_COUNT` had reached 29 287 and the line
+/// claimed "32 of 29287 interrupts qualified". The true denominator was the
+/// handful of ticks it actually took.
+static READY_AT_IRQ: AtomicU64 = AtomicU64::new(0);
+
+/// HPET nanoseconds at the instant the pool became ready (0 if not yet).
+static READY_AT_NS: AtomicU64 = AtomicU64::new(0);
+
 /// Credit `bits` of entropy to the pool.
 ///
 /// Saturates at [`CREDIT_TARGET_BITS`]; safe to call from hard IRQ context
@@ -735,6 +750,12 @@ pub fn add_interrupt_entropy(timestamp: u64) {
     let bits = min_delta.ilog2().min(8);
     CREDITED_IRQS.fetch_add(1, Ordering::Relaxed);
     if credit_entropy(bits) {
+        // Snapshot the counters *here*, at the transition.  By the time the
+        // work item below actually runs they will have moved on — see
+        // `READY_AT_IRQ`.  `hpet::elapsed_ns` is a counter read, safe from ISR
+        // context.
+        READY_AT_IRQ.store(ENTROPY_COUNT.load(Ordering::Relaxed), Ordering::Relaxed);
+        READY_AT_NS.store(crate::hpet::elapsed_ns(), Ordering::Relaxed);
         // Report from a work item, not from here.  `serial_println!` takes the
         // serial spinlock, and this is hard IRQ context: if the interrupted
         // task happened to hold that lock, printing would spin against itself
@@ -755,12 +776,17 @@ pub fn add_interrupt_entropy(timestamp: u64) {
 /// Runs in task context (see the call site in [`add_interrupt_entropy`]), so
 /// taking the serial lock here is safe.
 fn report_crng_ready(_arg: u64) {
+    // Every number here is the snapshot taken at the transition, not a live
+    // read: this runs from a work item, which can be an arbitrarily long time
+    // later (the worker task is spawned late in boot), and live reads would
+    // describe that later moment while appearing to describe this one.
     serial_println!(
-        "[rng] crng init done ({} bits credited from interrupt timing; {} of \
-         {} interrupts qualified)",
+        "[rng] crng init done ({} bits credited from interrupt timing; \
+         {} of the first {} interrupts qualified; ready {} ms into boot)",
         CREDIT_TARGET_BITS,
         CREDITED_IRQS.load(Ordering::Relaxed),
-        ENTROPY_COUNT.load(Ordering::Relaxed),
+        READY_AT_IRQ.load(Ordering::Relaxed),
+        READY_AT_NS.load(Ordering::Relaxed).saturating_div(1_000_000),
     );
 }
 
@@ -998,11 +1024,13 @@ pub fn self_test() {
     // readiness itself).
     if is_ready() {
         serial_println!(
-            "[rng]   Credited: READY ({}/{} bits; {} of {} interrupts qualified)",
+            "[rng]   Credited: READY ({}/{} bits; {} of the first {} interrupts \
+             qualified; ready {} ms into boot)",
             credited_bits(),
             credit_target_bits(),
             credited_interrupts(),
-            entropy_contributions(),
+            READY_AT_IRQ.load(Ordering::Relaxed),
+            READY_AT_NS.load(Ordering::Relaxed).saturating_div(1_000_000),
         );
     } else {
         serial_println!(

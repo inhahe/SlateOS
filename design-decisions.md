@@ -20883,11 +20883,34 @@ an account with an unverifiable stale hash both as "Invalid password", which
 meant repeated attempts against an already-locked account extended its
 lockout. The four outcomes are now distinct.
 
-**Still to do,** tracked in `known-issues.md`: the five read-only parsers
-listed above still carry their own copies. `su` and `sudo` read `home:` while
-both writers write `home_dir:`, so they are already reading the wrong field on
-any file this tree has written — the migration is a bug fix for them, not
-housekeeping.
+**Done, 2026-08-17/18.** All five readers now go through the crate:
+`init/login` (`3a3321a76`), `userspace/su` and `userspace/sudo`
+(`c49964b56`, `65dca4eba`), `userspace/polkit` (`da340eb15`),
+`userspace/chown` and `userspace/chroot` (`e101e6d04`). Every one of them was
+a bug fix rather than housekeeping — none was reading a file any writer of
+this tree had ever produced:
+
+| Crate | What its own parser did |
+|---|---|
+| `su` | read `home:`; both writers write `home_dir:` |
+| `sudo` | discarded the password entirely, and admitted *everyone* when the file was absent |
+| `polkit` | read `admin:`; both writers write `is_admin:`, so it saw a machine with no administrators |
+| `chown`, `chroot` | read only `uid`/`username`/`groups`, so `is_admin` never became group membership |
+
+Three defects were common to more than one of them and are now fixed once, in
+the crate or in the callers:
+
+1. **An administrator is a member of `wheel`.** The database records
+   administrator-ness as a flag; every policy file in the wild — sudoers,
+   polkit rules, `chgrp wheel` — is written against the group. `sudo`,
+   `polkit`, `chown` and `chroot` now fold the flag into the group list.
+2. **`home_dir` is the home directory.** `polkit`'s `pkexec` composed
+   `/home/<name>`, so a command run as root got `/home/root`.
+3. **A password test that never serialises proves nothing.** `polkit`'s six
+   password tests all passed against a hash function no writer used. Each
+   migrated crate now has at least one test that writes the database out and
+   reads it back, which is the only step at which a reader and a writer that
+   disagree can be seen to disagree.
 
 **Revisit if** `yamldoc` gains addressing for sequence elements, at which
 point `userdb`'s line-level record editing could sit on top of it and inherit
@@ -20895,6 +20918,338 @@ comment preservation for free; or if the operator settles the open question of
 whether `/etc/users.yaml` or `/etc/shadow` is the system's one account
 database, in which case one of the two stores — and one of §329 and §330 —
 becomes redundant.
+
+## §331 — Lane B's ten SHA-256 copies fold into the shared `sha2` crate; the SHA-1 and SHA-512 beside them stay put
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** Ten programs under `userspace/` each contained their own copy of
+SHA-256 — the same 64 magic numbers and the same arithmetic, typed out ten
+times. A checksum is only useful if two programs computing it agree, so ten
+private copies is ten chances to disagree, and a disagreement would be silent:
+a wrong SHA-256 still returns 32 normal-looking bytes, so a backup would simply
+stop matching the files it describes with no error anywhere. All ten now call
+one shared crate that already existed for this purpose. The copies of *other*
+hashes sitting next to them — SHA-1 and SHA-512 — were left alone, because the
+shared crate deliberately does not offer those.
+
+### What was there
+
+Root `sha2/` was written to be the tree's single SHA-256 and had two consumers.
+Meanwhile lane B's tree had ten more implementations, none of them using it:
+
+| Crate | What the digest is for | Cost of a divergence |
+|---|---|---|
+| `backup` | manifest hashes | a manifest nothing else in the tree can check |
+| `rsync` | `-c` file comparison | two identical files declared different, or worse |
+| `ssh`, `sshd` | KEX, HMAC, host-key fingerprints | a handshake that fails against every implementation *except its own twin* |
+| `cryptsetup` | PBKDF2-SHA256 key derivation | a key that never opens the disk it just encrypted |
+| `doas` | password hashing | header claimed it "matches passwd utility"; nothing checked that |
+| `fio` | data-integrity verification | the verifier is the thing being verified |
+| `sha256sum`, `coreutils/sha256sum` | *the entire output of the program* | the least defensible copy of all |
+| `ssh-keygen` | key fingerprints, signature digests | a fingerprint a human compares against another tool's |
+
+Together they were ~1250 lines of round constants and compression function.
+Every one was correct. That is the point: correctness by ten repetitions of a
+64-constant table is luck, not design, and the failure mode gives no signal.
+
+### What stays, and why
+
+*`posix/src/sha2.rs` stays.* It backs SHA-crypt (`$5$`/`$6$`), which needs
+SHA-512 and MD5 as well; root `sha2/` is SHA-256 only. Folding just the
+SHA-256 half out of a file whose other half must remain would leave that file
+depending on a crate for one of its three primitives — more seams, not fewer.
+§329 already reached the same conclusion from the other direction.
+
+*The SHA-1 in `sha256sum` and the SHA-512 in `sha256sum` and `ssh-keygen`
+stay,* for the same reason: the shared crate does not provide them. Ed25519
+needs SHA-512 by definition, so `ssh-keygen` cannot drop it.
+
+The result is that root `sha2/` is now the SHA-256 for all of lane B's
+userland, and the remaining duplication in this lane is of *other* algorithms —
+which is a smaller and much more visible problem than ten copies of one
+algorithm scattered across ten programs that all have to agree.
+
+### The alternative that was rejected
+
+*Extend `sha2` to cover SHA-1 and SHA-512 too, then fold everything.* It is the
+tidier end state and should probably happen eventually. It was not done here
+because it would have mixed two changes: a mechanical consolidation whose
+correctness is checked by the existing FIPS vectors in each crate, and the
+authoring of two new primitives, which is not mechanical at all. The vectors
+that used to check ten private copies now check the shared one — `fio` and
+`coreutils/sha256sum` in particular kept their full FIPS test batteries, so the
+shared implementation is now the thing those vectors are pointed at. Whether
+this project should hand-write cryptographic primitives at all remains
+`open-questions.md` → C-Q5, and is untouched by this.
+
+---
+
+## §332 — The sudoers parser errors where the grammar is ground truth and warns where our own table is; `=` on a list setting replaces rather than adds
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** `sudo` reads a policy file, `/etc/sudoers`, that says who may run
+what as another user. Until now our parser accepted every line of it: a typo
+like `Defaults timestamp_timout=5` was stored under that misspelled name, did
+nothing, and was never mentioned — including by `visudo -c`, the tool whose
+whole job is to say "this file is wrong" before an administrator installs it.
+The parser now rejects malformed lines. Two choices inside that were not
+obvious, and this entry records them: what to do about a setting name our table
+has simply never heard of, and what `env_keep = "X"` should mean when
+`env_keep` already has a value.
+
+### Error where you have ground truth, warn where you have a list
+
+Real sudo rejects an unknown `Defaults` name outright, because its catalogue of
+settings is complete — it is the same program that implements them. Ours is
+not. `KNOWN_DEFAULTS` in `userspace/sudo/src/main.rs` lists ~58 settings, real
+sudo has more, and the list grows with each sudo release. A name missing from
+our table is therefore not evidence that the name is wrong; it is evidence that
+our table is short.
+
+So the two kinds of complaint are separated by *what is actually known*:
+
+| Situation | What we know | Report |
+|---|---|---|
+| A listed setting used with an operator its shape forbids — `Defaults requiretty=5`, `Defaults secure_path` with no value, `Defaults env_keep` used as a flag | A fact about the grammar. `requiretty` is a boolean; it cannot take a value under any version of sudo | **Error** |
+| A name that is not in `KNOWN_DEFAULTS` at all | A fact about *our table*, which is knowingly incomplete | **Warning** |
+| A name that is listed but that this implementation does not yet act on | A fact about our implementation | **Warning**, and only under `visudo --strict` |
+
+*What changes:* `visudo -c` on a file using a setting we have not catalogued
+prints a warning and still reports the file usable, while a file that misuses a
+setting we *do* know is rejected with an exit status.
+
+The alternative — error on every unknown name, matching real sudo — was
+rejected because its failure mode is unfixable by the person who hits it. An
+administrator writing a perfectly valid sudoers file, using a setting real sudo
+documents and we have not listed, would be told the file is invalid, with no
+way to proceed except editing our source. A validator that refuses correct
+input is worse than the silence it replaced: the silence merely failed to help,
+whereas this actively blocks. The opposite alternative — keep checking nothing,
+on the grounds that our table is incomplete — was rejected because
+incompleteness of the *name* list says nothing about the *shape* rules, which
+are the part that catches real typos.
+
+The two lists (`KNOWN_DEFAULTS` and `HONOURED_DEFAULTS`, the settings actually
+acted on) are kept from drifting apart by a test, `honoured_defaults_are_all_known`.
+Two hand-maintained lists that must agree is the defect shape this tree keeps
+rediscovering; the test is the cheapest available answer to it.
+
+### `=` replaces, `+=` adds — and the existing test said otherwise
+
+sudoers gives list settings four operators: `=` sets the list, `+=` appends,
+`-=` removes, `!` disables. Our parser implemented `=` as append, and the
+pre-existing test `env_keep_extended` asserted exactly that: it wrote
+`Defaults env_keep="CUSTOM_VAR"` and then checked that `TERM` — a default —
+was *still* kept.
+
+*What changes:* a file that writes `Defaults env_keep="CUSTOM_VAR"` now keeps
+`CUSTOM_VAR` and nothing else, where before it kept `CUSTOM_VAR` plus the whole
+built-in list.
+
+This is a behaviour change to a security policy, so it is worth being explicit
+about the direction of the error. `env_keep` is the list of environment
+variables passed through to the privileged command; everything not on it is
+stripped. An administrator who writes `env_keep = "..."` is stating the whole
+list, and the usual reason to do so is to make it *shorter* than the default.
+Treating that as an append means a file written to narrow what crosses the
+privilege boundary does not narrow it — the variables the author intended to
+strip keep flowing. Being wrong in the other direction (stripping a variable
+the author wanted kept) makes a command fail visibly and gets fixed. So the old
+behaviour was wrong in the direction that fails silently, and the test that
+encoded it was rewritten rather than preserved, with a dated in-test comment
+recording why the assertion was inverted.
+
+Nothing in the tree ships an `/etc/sudoers` (`git grep -ln "etc/sudoers"` finds
+none), so no existing configuration changes meaning as a result of either
+decision.
+
+### Why the operator is now kept instead of folded into the name
+
+Adjacent to both, and not really a decision so much as a defect worth
+recording, because its shape recurs. The parser took the setting name to be
+everything before the first `=`, so `env_keep += "X"` was stored under the name
+`env_keep +`. Two consumers compensated by matching three spellings each
+(`env_keep`, `env_keep+=`, `env_keep+`); a third, `get_default`, had no such
+workaround, so `timestamp_timeout` and `env_reset` written with `+=` were never
+seen at all.
+
+That is band-aid accumulation in miniature: one defect in one place, paid for
+separately at each consumer, with the consumer nobody thought to patch simply
+broken. The operator is now parsed into a `DefaultOp` and carried alongside the
+name, the triple matches are deleted, and the operators are applied in written
+order — which is also what makes `=`/`+=`/`-=` distinguishable at all.
+
+## §333 — Backreferences get a second, budgeted engine rather than a refusal, and every matching call becomes fallible
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** A handful of classic shell one-liners use a regular expression
+that says "match the same text this earlier part matched" — written `\1`. Ours
+refused those outright, so `sed '$!N;/^\(.*\)\n\1$/!P;D'` (drop adjacent
+duplicate lines) printed an error where GNU prints the file. It refused for a
+real reason: the matcher we use physically cannot express that construct. The
+fix is to keep that matcher for everything it can do, and hand the few patterns
+it cannot to a second, slower one — which can, on a shaped input, take
+effectively for ever, so it is given a step budget and allowed to give up.
+"I gave up" is a third answer beside "matched" and "did not match", and the
+consequence of that is the visible part of this decision: **every call that asks
+whether a pattern matches now returns a `Result`**, in the engine and in the
+five programs that use it.
+
+### The constraint
+
+`ere`'s matcher is a **Pike VM** (a matcher that walks all the alternatives of a
+pattern side by side, one input character at a time). That is what buys the
+crate its headline property: no catastrophic backtracking, cost bounded by
+`O(len(subject) × len(program))` whatever the pattern.
+
+A backreference cannot be an instruction in such a machine, and this is not an
+omission to be filled in later — it is the shape of the machine. Because every
+alternative advances together, at the moment a `\1` is reached there is no
+single "the" text group 1 captured (each live alternative has its own), and no
+single width to advance the input by. The instruction would have to ask "which
+of my simultaneous selves am I?", which the design has no way to answer.
+
+So the choice was never "add `\1` to the Pike VM". It was between refusing the
+construct and running a *different* matcher for the patterns that use it.
+
+### The decision
+
+Do what glibc does: **compile every pattern the same way, and choose the matcher
+once, at compile time, on whether the pattern contains a backreference.**
+Patterns without one — every pattern in every script in this tree today — take
+the Pike VM and keep its guarantee untouched, bit for bit. Patterns with one
+take a backtracker with an explicit stack and a step budget.
+
+| Option | *What changes:* |
+|---|---|
+| **Refuse `\1`–`\9`** (status quo ante) | `sed '$!N;/^\(.*\)\n\1$/!P;D'` prints `backreference \1 is not supported` and exits 1. |
+| **Second engine, budgeted** (chosen) | The same command prints the de-duplicated file, and a *deliberately* pathological pattern stops with a diagnostic instead of running for ever. |
+| **Second engine, unbudgeted** | The same command works; a pathological pattern wedges the process until it is killed. |
+
+The second engine is a genuine cost and it is worth naming plainly: **matching a
+backreference is NP-hard**, so for the patterns that take it the crate's
+no-blowup promise does not hold. It holds for every other pattern, which is what
+makes the trade acceptable — the property is not weakened globally, it is
+switched off for the constructs that cannot have it in the first place. A
+pattern that wants the guarantee keeps it by not using `\1`, and
+`Regex::has_backref` reports which engine a pattern got, so a caller that must
+have the bound can check rather than guess.
+
+Rejected on the way:
+
+- **Memoize the backtracker.** Sound for a plain regex; not sound with
+  backreferences, because "the same position in the same instruction" is no
+  longer the same state — the captured text is part of the state, and it is
+  unbounded. It would give wrong answers, which is worse than slow ones.
+- **Refuse only the patterns that could blow up.** There is no such test. The
+  blowup depends on the subject as much as the pattern, and patterns that are
+  merely polynomial (not exponential) still take minutes on a large file while
+  passing any static screen.
+
+### Why the budget forced the API to change, which is the part with teeth
+
+A budget means a search can end **without an answer**. Somebody has to be told,
+and the only place to tell them is the return value.
+
+The tempting shape — keep `fn is_match(&self) -> bool` and return `false` when
+the budget runs out — is exactly the failure this crate was written to end.
+`sed '/re/!d'` **deletes every line the pattern does not match**. `grep -v`
+feeding an `xargs rm` deletes every file whose name did not match. Reporting an
+abandoned search as "did not match" destroys the user's data on the strength of
+a question we refused to answer, silently, with exit status 0. So:
+
+```rust
+pub fn is_match(&self, text: BStr<'_>) -> Result<bool, MatchLimit>
+```
+
+and the same for `captures`, `find`, `find_at`, `capture_spans` and
+`capture_spans_at`; `find_iter` and `capture_spans_iter` yield `Result` items.
+
+Also rejected here:
+
+- **Infallible spellings beside `try_` twins.** A footgun with a friendly name:
+  the short spelling is the one that gets typed, and it is the one that is
+  wrong. There is no call site in this tree where "treat it as no match" is
+  correct.
+- **A flag on the `Regex`, checked afterwards.** Requires interior mutability,
+  which costs `Regex` its `Sync`, and it is opt-in error checking — the caller
+  who forgets gets the silent wrong answer, which is the case we are trying to
+  make unrepresentable.
+
+Each of the five callers maps `MatchLimit` onto the failure channel it already
+has, and none of them maps it onto "no match":
+
+| Caller | Where it lands |
+|---|---|
+| `grep` | an I/O-class error for that file: diagnostic, non-zero status |
+| `sed` | a new `Stop::Limit`, distinct from `Stop::Io` so the message is not "couldn't write" |
+| `awk` | `Fatal` — via `From<MatchLimit>`; the run ends with a diagnostic and status 2 |
+| `expr` | `Fail`, the same channel a bad pattern uses |
+| `osh`'s `[[ =~ ]]` | `cond_regex_error`: status **2**, which bash already distinguishes from the 1 that means "no match" |
+
+Threading it through cost `awk` a small refactor — `FS` and `RS` are regexes the
+program chose, so splitting a record is fallible, and `ensure_split`,
+`get_field`/`set_field` and `get_var`/`set_var` became fallible with it. That is
+the honest shape: a field split that gave up halfway would misnumber every field
+on the line, and `$2` reading a value out of a split that never finished is a
+wrong answer, not an error-free one.
+
+### The budget, and two things it is not
+
+`BACKTRACK_BUDGET_BASE` (1e6) `+ 1000 ×` subject length, capped at 1e8 steps —
+generous enough that no honest pattern reaches it (a 20 000-character subject
+matched against `^(a)\1*$` finishes well inside it) and small enough that a
+pattern built to blow up stops in well under a second. A backreference also
+charges its own length to the budget, so a long comparison cannot be free.
+
+The budget is **not** a security boundary — a pattern is not usually
+attacker-supplied — and it is **not** a substitute for `MAX_PROG`, which still
+bounds compiled program size. It is the thing that turns "this hangs" into "this
+says why it stopped".
+
+Two details in the backtracker are worth recording, because getting either wrong
+is a crash rather than a wrong answer:
+
+- **Frames live in a `Vec`, not on the call stack.** Recursion depth would grow
+  with the number of repetitions matched, so `\(a\)\1a*` against a megabyte of
+  `a` would be a stack overflow — in `grep`, `sed`, `awk`, `expr` and the shell
+  at once.
+- **A backward jump is refused twice at the same input position on one path.**
+  Without it `\(a*\)*` loops for ever having consumed nothing. Refusing it is
+  also the answer Perl gives: an iteration that consumed nothing ends the loop.
+
+And one POSIX detail that is a wrong answer rather than a crash: a reference to
+a group that did not participate **fails**, it does not match the empty string.
+`^\(\(a\)\|b\)\2$` must not match `b`.
+
+### `\1` is honoured in *extended* expressions too, which gawk does not do
+
+POSIX puts backreferences in basic expressions only and leaves `\1` in an
+extended one **undefined**. There is therefore no "correct" reading to defer to,
+only two extensions in the field: GNU `grep -E` treats it as a backreference,
+and `gawk` treats it as the octal escape `\001`.
+
+We take `grep -E`'s. Two reasons, in order of weight:
+
+1. **`bre` is a translator, not a second parser.** A basic expression is
+   rewritten into the extended dialect and compiled by the one engine — the
+   whole point of `design-decisions.md` §322, so that `[a-z]` cannot mean two
+   things in two programs. If the extended parser refused `\1`, the translated
+   basic expression would be refused too, and the feature would exist nowhere.
+2. **Five programs share the engine.** `grep`, `sed`, `expr`, `awk` and the
+   shell's `[[ =~ ]]` would otherwise disagree about one pattern, which is the
+   state §322 was written to leave behind.
+
+The cost is a new deliberate divergence from `gawk --posix`: `awk '/(.)\1/'`
+selects a line with a doubled character here and a line containing byte 0x01
+there. It is recorded in `awk`'s module docs and pinned by an `xfail_case` in
+`scripts/awk-diff.sh`, so if `gawk` ever changes, the harness says so.
 
 ---
 

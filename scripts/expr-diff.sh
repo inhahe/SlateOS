@@ -261,9 +261,14 @@ run_case '(' 42 ')'
 run_case hello
 run_case 42
 
+# --- backreferences ---------------------------------------------------------
+run_case abc : '\(a\)\1'
+run_case aab : '\(a\)\1'
+run_case abcabcx : '\(abc\)\1'
+run_case aa : '\(a*\)\1'
+run_case a2 : '\(a\)\2'
+
 # --- where we differ on purpose ---------------------------------------------
-xfail_case 'a backreference needs a backtracking matcher; the Pike VM refuses rather than reading \1 as a literal 1' \
-  abc : '\(a\)\1'
 xfail_case 'a stacked quantifier is refused; GNU folds a** to a*' \
   abc : 'a**'
 

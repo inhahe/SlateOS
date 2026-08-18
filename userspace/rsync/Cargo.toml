@@ -3,4 +3,9 @@ name = "rsync"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS rsync - file synchronization (rsync/scp)"
+
+# `sha2` for `-c` checksum comparison. This crate carried its own SHA-256, and
+# `-c` is precisely a comparison against a digest computed somewhere else --
+# so a private implementation decides whether two files count as identical.
 [dependencies]
+sha2 = { path = "../../sha2" }

@@ -2,7 +2,12 @@
 name = "cryptsetup"
 version = "0.1.0"
 edition = "2024"
+
+# `sha2` for PBKDF2-SHA256 key derivation. This crate carried its own
+# SHA-256, where a divergence does not misbehave visibly: it derives a key
+# that never opens the disk it just encrypted.
 [dependencies]
+sha2 = { path = "../../sha2" }
 
 [build-dependencies]
 embed-manifest = "1.5.0"

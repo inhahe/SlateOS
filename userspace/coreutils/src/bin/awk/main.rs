@@ -57,7 +57,7 @@
 //! ## Where this deliberately differs from gawk
 //!
 //! `scripts/awk-diff.sh` runs both awks over the same inputs and requires them
-//! to agree. Nine cases are exempted there, and these are they — each is a
+//! to agree. Ten cases are exempted there, and these are they — each is a
 //! decision, not an omission, and the script reports if one stops being true.
 //!
 //! | Case | Ours | `gawk --posix` |
@@ -65,6 +65,7 @@
 //! | `length`, `substr`, `index`, `toupper` on non-ASCII text | counts and maps characters | counts and maps bytes, in the C locale |
 //! | `printf "%c"` of a code point above 255 | that character | the low byte |
 //! | `printf "%s"` with no argument left | empty, as in bwk and mawk | fatal |
+//! | `\1`–`\9` in a pattern | a backreference, as in GNU `grep -E` | the octal escape `\001` |
 //! | an undefined function is called | refused before the program runs | fatal when first reached |
 //! | a name used as both an array and a scalar | refused before the program runs | fatal when first reached |
 //! | a built-in given the wrong number of arguments | refused before the program runs | fatal when first reached |
@@ -77,6 +78,15 @@
 //! instead of after. That costs the gawk exit code for those cases (1 rather
 //! than 2), which is the right trade: exit 1 already means "this program will
 //! not run" and that is exactly what has happened.
+//!
+//! The backreference row is inherited rather than chosen for awk: `ere` grew
+//! backreferences because `sed` and `grep` need them (`design-decisions.md`
+//! §333), and all five programs share one engine so that a pattern means one
+//! thing across them. gawk's reading is not POSIX either — POSIX leaves `\1` in
+//! an ERE undefined — so the choice is between two extensions, and the one that
+//! agrees with the other four programs on this system wins. A pattern whose
+//! backreference search exceeds the engine's budget is a fatal error here, not
+//! a non-match; see [`interp`]'s `From<ere::MatchLimit> for Fatal`.
 
 mod ast;
 mod fmt;

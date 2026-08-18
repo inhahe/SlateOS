@@ -60,7 +60,11 @@
 //!   *or* one undecodable byte. `osh`'s `bytes` module re-exports it, so there
 //!   is exactly one definition and the shell cannot drift from the utilities.
 //! * [`engine`]'s [`Regex`] — a Pike VM (no catastrophic backtracking) for
-//!   POSIX **Extended** regular expressions, with captures.
+//!   POSIX **Extended** regular expressions, with captures. A pattern that uses
+//!   a backreference (`\1`–`\9`) cannot be expressed as a Pike VM program at
+//!   all, so those — and only those — take a budgeted backtracker instead,
+//!   which is why every matching call returns a `Result`: it can decline to
+//!   answer, and saying so is the difference between "no match" and "gave up".
 //! * [`bre`] — POSIX **Basic** regular expressions, translated to Extended and
 //!   handed to the same engine. BRE is what `grep`, `sed` and `expr` use when
 //!   no `-E` is given, and it is *not* a subset of ERE: `a+b` is three literal
@@ -72,4 +76,4 @@ pub mod ch;
 pub mod engine;
 
 pub use ch::{BStr, Ch, Str, chars, from_chars};
-pub use engine::{CaptureMatches, EreError, Matches, Regex};
+pub use engine::{CaptureMatches, EreError, GroupSpans, MatchLimit, Matches, Regex};

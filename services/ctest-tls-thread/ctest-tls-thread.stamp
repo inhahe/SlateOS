@@ -9,5 +9,5 @@
 version 2
 input  build.py sha256 66c8e0e6b9bcf96ec549edf51a86b047dba80f662825cf17577b28b98473bfb2
 input  main.c sha256 25792f81bd44ab78746e0e22533b08ac694c355e4d6e688fe834319329c27675
-input  toolchain/sysroot/lib/libc.a sha256 e322989bd7e095a57d7962f39236d31722cf3a5fbfa1d8c157ef49bad1b91c95
-output ctest-tls-thread.elf sha256 72f2a53ef1bc16f7746026583b369b33e7e28f834d550fd6c5e3836f6536433b size 2567048
+input  toolchain/sysroot/lib/libc.a sha256 a2dbcc11a19b4cd7b9301fdf988d4f86db642726ccf5c38b5a669006686f5e4a
+output ctest-tls-thread.elf sha256 80790a31f1424e249a6d7a1794bb3e3cfe48dc41b3d21b497d0ba54563bb040b size 2628696

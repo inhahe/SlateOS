@@ -3,4 +3,9 @@ name = "backup"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS backup utility — snapshot-based with full and incremental backup modes"
+
+# `sha2` for the manifest hashes. This crate carried its own SHA-256, which is
+# the thing that crate exists to stop: a manifest whose hashes come from a
+# private implementation is one nothing else in the tree can check.
 [dependencies]
+sha2 = { path = "../../sha2" }

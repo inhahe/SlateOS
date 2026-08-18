@@ -3,7 +3,13 @@ name = "sshd"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS sshd - SSH server daemon"
+
+# `sha2` for the key exchange, HMAC and fingerprints. This crate carried its
+# own SHA-256, as does the client in `userspace/ssh` -- two implementations of
+# one digest on the two ends of a connection, which is the arrangement where a
+# divergence hides best.
 [dependencies]
+sha2 = { path = "../../sha2" }
 
 [lints]
 workspace = true

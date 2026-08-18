@@ -955,6 +955,146 @@ tools depend on libc) and two authentication bypasses found in `login` while
 fixing this.
 
 
+## B-Q4 — [B] The system has two separate lists of who its users are, and nothing keeps them in step. A user created in one is invisible to the other. Which one is the real one? — Status: OPEN
+
+**In short:** There are two files on this system that each claim to be *the*
+list of user accounts: `/etc/users.yaml` and the pair `/etc/passwd` +
+`/etc/shadow`. Twenty-three programs read one or the other, and **not a single
+line of code copies anything between them.** So if you create a user with
+`useradd`, they can log in at a text console and over SSH, but the graphical
+login screen does not know they exist; if you create the same user with
+`useradm`, the graphical screen shows them and `sudo` works, but `ssh` and
+`passwd` say "no such user". Both halves work perfectly, on different lists of
+people. I need to know which list wins before I make either of them better,
+because every hour spent on the losing one is thrown away.
+
+**Terms:**
+
+- **`/etc/passwd`** — the classic Unix account list: one line per user, colon
+  separated, world-readable. Contains no passwords despite the name.
+- **`/etc/shadow`** — its companion, holding one scrambled password per user,
+  readable only by root.
+- **`/etc/users.yaml`** — this project's own account file, in YAML, holding
+  everything (name, password, home, groups, avatar, admin flag) in one place.
+- **POSIX compatibility** — the promise that software written for Unix runs
+  here unmodified. Such software calls `getpwnam()`, which by long habit means
+  "read `/etc/passwd`".
+
+### The two camps, as they stand today
+
+| | `/etc/users.yaml` | `/etc/passwd` + `/etc/shadow` |
+|---|---|---|
+| Programs using it | 7 | 16 |
+| Which ones | `useradm`, the graphical login screen, `su`, `sudo`, `polkit`, `chown`, `chroot` | `useradd`, `passwd`, the text-console `login`, `chage`, `chpasswd`, `doas`, `sshd`, `ftpd`, `getent`, `w`, `who`, `last`, `loginctl`, `lsns`, `fuser`, `mktemp` |
+| Creates accounts with | `useradm add` | `useradd` |
+| Sets passwords with | `useradm passwd` | `passwd`, `chpasswd` |
+| Grants admin rights via | `is_admin: true` in the record | membership of `wheel` in `/etc/group` |
+| State of the code | one shared implementation as of today (§330); five separate broken parsers before that | one shared implementation as of yesterday (§329); three separate broken hashers before that |
+
+The duplication is not merely wasteful — it has already produced two of the
+worst defects found in this tree. `sudo` and `doas` are the same program for
+the same purpose, and they answer "is this person an administrator?" from
+different files. So do the two `login`s. A machine can genuinely believe an
+account is an administrator at the graphical prompt and not exist at all over
+SSH.
+
+### The options
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **A. `/etc/users.yaml` wins.** Delete `/etc/passwd` and `/etc/shadow`; port the 16 programs onto `userdb`. | `cat /etc/passwd` says "no such file". `getent passwd alice` still answers, reading YAML. | It is what `design.txt` asks for — "configuration files will be yaml" (line 1108). One file rather than three. Records carry fields Unix has nowhere to put (avatar, auto-login, last-login count) without a parallel file. Already the format the graphical desktop uses. | Every piece of software ever ported here that calls `getpwnam()` and reads the file directly breaks. We do not yet know how many of those there will be, and the answer arrives with each new port, not now. |
+| **B. `/etc/passwd` + `/etc/shadow` win.** Delete `/etc/users.yaml`; port the 7 programs onto the classic files. | `useradm` writes colon-separated lines. The graphical login screen loses avatars and auto-login unless a second file is added for them. | Ported software works untouched. Administrators already know the format. Every Unix tool that manipulates accounts — including ones we have not written — works by construction. | Contradicts `design.txt`'s YAML rule for the most security-sensitive file on the system. The desktop's extra fields need a second file anyway, which re-creates the split this option was meant to end. |
+| **C. One store, two faces.** `/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow` are *generated* from it on every change, read-only, for compatibility. | Both files exist and always agree. Writing to `/etc/passwd` by hand is silently undone at the next `useradm` run. | Nothing breaks now and nothing breaks later. This is roughly what macOS does (its truth is a database; the flat files are vestigial). | Two of the 16 programs *write* accounts (`useradd`, `passwd`) — they must be redirected to the YAML, or the generated file is stale the moment anyone uses them. A file that looks writable and is not surprises people. |
+| **D. Leave it.** | Nothing. Two disjoint sets of users, indefinitely. | No work. | This is the current state and it is a live defect, not a design. Two programs answering "who may become root?" differently is the exact shape of the `is_admin`/`admin` bug §330 just fixed one level down, and of the two-`sudo`-binaries problem in `known-issues.md`. |
+
+**Recommendation: C.** It is the only option that does not choose between
+`design.txt` and every future port, and the redirect work it needs (pointing
+`useradd` and `passwd` at the YAML) is work option A needs anyway. If C turns
+out to be more machinery than it is worth, it degrades gracefully into A —
+stop generating the flat files and the truth is unchanged.
+
+**If this is never answered:** it does not get worse on its own, but every
+account-related task from here on has to guess, and half of them will guess
+wrong. Concretely blocked right now: I cannot finish the "two `sudo` binaries"
+cleanup in `known-issues.md`, because which one to delete depends on which file
+is authoritative; and I should not spend more effort improving either account
+stack until the losing one is known.
+
+
+## B-Q5 — [B] 70 compiled programs are stored in git, and they go out of date without git noticing. Keep storing them, or rebuild them on demand? — Status: OPEN
+
+**In short:** The test programs this OS runs at boot are compiled on a
+developer machine and then the *compiled result* is saved into git, alongside
+the source it came from. That works right up until the system library they were
+compiled against changes — because that library is **not** in git, so nothing
+compares the two, and the saved programs quietly become tests of a system that
+no longer exists. This has now happened three times, each time costing a lane
+most of a cycle. I have just made it announce itself instead of hiding, which
+removes the danger; the question left is whether to stop storing the compiled
+programs at all and rebuild them when needed, which removes the situation.
+
+**Terms:**
+
+- **ELF** — the file format of a compiled, runnable program on this OS. One per
+  test; 70 of them are stored in git today (~226 MB of working-tree bytes).
+- **`libc.a`** — the C standard library every one of those programs is compiled
+  into. It is built from `posix/src`, and it is **deliberately not stored in
+  git** — it is a build output, regenerated in ~40 seconds.
+- **stale** — a saved program built before a change it should have picked up.
+  It still runs, still passes, and is testing the previous version of the system.
+- **ctest fixture** — one of nine small C programs (`services/ctest-*`) that the
+  boot test runs to check the C library works. The other 61 ELFs are Python
+  programs compiled the same way.
+
+### What actually goes wrong
+
+Only source files are in git, so git can tell you `posix/src/crypt.rs` changed.
+It cannot tell you `libc.a` is now behind, because it has never heard of
+`libc.a`. And the saved ELFs are checked against `libc.a` — so once `libc.a` is
+behind, every check compares two stale things to each other and reports
+agreement.
+
+The failure is worse than merely silent: **being diligent makes it quieter.**
+Rebuild the nine fixtures on a tree whose `libc.a` is behind and every
+checksum lines up again — because they now agree about a stale input. That is
+what produced three separate incidents:
+
+| When | What happened |
+|---|---|
+| 2026-08-15 | Nine fixtures on `main` linked a `libc` that `main` could no longer build (`requests/a-b-nine-ctest-fixtures-on-main-...`) |
+| 2026-08-16 | A rebuild was correct on lane C and wrong on `main` at the same moment (`requests/a-c-fixture-rebuild-was-correct-on-lane-c-and-wrong-on-main.md`) |
+| 2026-08-16 | Lane A could not boot-test at all until B rebuilt them (the request this entry answers) |
+
+Today (2026-08-17) it was live again: eight files under `posix/src` were newer
+than `libc.a`, and `ctest-fixtures.py check` reported `ok` for all nine
+fixtures. Lane A's request says outright that a third recurrence should become
+a question here rather than a fourth round of manual rebuilds.
+
+**What I have already done, so this is not urgent:** `check` now compares
+`libc.a` against `posix/src` before it says anything about a fixture, and
+fails loudly on it. The trap is sprung, not hidden. This question is about
+whether the arrangement should exist at all.
+
+### The options
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **A. Keep storing them.** Status quo, now with the staleness gate. | Nothing visible. `git clone` still gives you runnable tests. | Anyone can build the boot image without a working `zig`/WSL toolchain — which matters, because not every lane has one set up and would otherwise be blocked on the one that does. The boot test is reproducible from a clone. | The compiled result of tracked source against an untracked input is inherently unverifiable by git; the gate catches the known shape, not the next one. Binaries keep accumulating in history at ~2 MB a rebuild. |
+| **B. Stop storing them; build on demand.** `.gitignore` the 70 ELFs, exactly as `libc.a` already is; the boot test builds what is missing. | `git clone` then boot-test now needs `zig` + fastpy installed; the first boot test after a clone takes a few minutes longer. | The problem cannot recur — there is no saved artifact to be stale. Consistent with `libc.a`, which is the same kind of thing and is already handled this way. History stops growing binaries. | Every lane needs the full toolchain to run a boot test. A toolchain break then blocks *testing*, not just building. Loses the ability to bisect against a known-good binary. |
+| **C. Store them, but record the `libc.a` identity in git.** Keep the ELFs; also commit a small text file holding the checksum of the `libc.a` each was built against, and have the gate compare that to a freshly built one. | Same as A, plus a `libc.a.id` file in git that changes on every sysroot rebuild. | Makes the invisible dependency visible to git without storing 12 MB of it. Bisect still works. | Only correct if `libc.a` builds byte-reproducibly from the same source — I have not verified that it does, and if it does not, the file churns meaninglessly and everyone learns to ignore it. |
+
+**Recommendation: A for now, B once every lane has the toolchain.** The
+staleness gate closes the actual injury, and B's cost lands squarely on the
+lanes that cannot currently build a fixture — which would convert an
+occasional stale binary into a standing inability to test. C is attractive but
+rests on a reproducibility claim I would have to establish first, and it is
+strictly more machinery than B for the same guarantee.
+
+**If this is never answered:** nothing breaks. The gate means a fourth
+recurrence announces itself in one line instead of costing a cycle. It stays a
+small recurring maintenance cost — a rebuild-and-commit after any change to
+`posix/src` — and the git history keeps growing binaries slowly.
+
 ---
 
 # Resolved

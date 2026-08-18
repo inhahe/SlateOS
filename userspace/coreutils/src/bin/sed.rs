@@ -1048,6 +1048,33 @@ struct RangeState {
     end_line: Option<usize>,
 }
 
+/// What stopped a cycle before it finished.
+///
+/// Two things can, and they need different diagnostics: a write that failed,
+/// and a regex search that gave up. The second is why this is an enum rather
+/// than a bare [`io::Error`] — a match limit reported as "couldn't write" would
+/// send the reader to the disk. Only a pattern holding a backreference can
+/// produce one, and reporting it as "did not match" is not an option: `/re/!d`
+/// deletes every line the pattern does *not* match.
+enum Stop {
+    Io(io::Error),
+    Limit(ere::MatchLimit),
+}
+
+impl From<io::Error> for Stop {
+    fn from(e: io::Error) -> Stop {
+        Stop::Io(e)
+    }
+}
+
+impl From<ere::MatchLimit> for Stop {
+    fn from(e: ere::MatchLimit) -> Stop {
+        Stop::Limit(e)
+    }
+}
+
+type Run<T> = Result<T, Stop>;
+
 struct Exec {
     pattern: Vec<u8>,
     hold: Vec<u8>,
@@ -1124,8 +1151,8 @@ impl Exec {
         Some(re)
     }
 
-    fn addr_match(&mut self, a: &Addr, input: &mut Input) -> bool {
-        match a {
+    fn addr_match(&mut self, a: &Addr, input: &mut Input) -> Run<bool> {
+        Ok(match a {
             Addr::Line(n) => self.line_num == *n,
             Addr::Last => input.at_end(),
             Addr::Step(first, step) => {
@@ -1137,28 +1164,28 @@ impl Exec {
                 }
             }
             Addr::Re(r) => match self.resolve(r.as_ref()) {
-                Some(re) => re.find(&self.pattern).is_some(),
+                Some(re) => re.find(&self.pattern)?.is_some(),
                 None => false,
             },
-        }
+        })
     }
 
-    fn range_select(&mut self, pc: usize, a1: &Addr, a2: &EndAddr, input: &mut Input) -> bool {
+    fn range_select(&mut self, pc: usize, a1: &Addr, a2: &EndAddr, input: &mut Input) -> Run<bool> {
         if !self.ranges.get(pc).is_some_and(|r| r.active) {
-            if !self.addr_match(a1, input) {
-                return false;
+            if !self.addr_match(a1, input)? {
+                return Ok(false);
             }
             // A range whose end is already behind us selects this line alone.
             let end = match a2 {
                 EndAddr::Addr(Addr::Line(n)) => {
                     if *n <= self.line_num {
-                        return true;
+                        return Ok(true);
                     }
                     Some(*n)
                 }
-                EndAddr::Plus(0) => return true,
+                EndAddr::Plus(0) => return Ok(true),
                 EndAddr::Plus(n) => Some(self.line_num.saturating_add(*n)),
-                EndAddr::Multiple(0) => return true,
+                EndAddr::Multiple(0) => return Ok(true),
                 // "on to the next line number that is a multiple of N" — the
                 // *next* one, so `4,~4` on five lines runs 4 to the end rather
                 // than stopping on the 4 it started on.
@@ -1175,13 +1202,13 @@ impl Exec {
                 r.active = true;
                 r.end_line = end;
             }
-            return true;
+            return Ok(true);
         }
 
         let close = match a2 {
             EndAddr::Addr(Addr::Last) => input.at_end(),
             EndAddr::Addr(Addr::Re(r)) => match self.resolve(r.as_ref()) {
-                Some(re) => re.find(&self.pattern).is_some(),
+                Some(re) => re.find(&self.pattern)?.is_some(),
                 None => true,
             },
             EndAddr::Addr(Addr::Step(_, _)) => false,
@@ -1194,16 +1221,16 @@ impl Exec {
             r.active = false;
             r.end_line = None;
         }
-        true
+        Ok(true)
     }
 
-    fn selected(&mut self, pc: usize, cmd: &Command, input: &mut Input) -> bool {
+    fn selected(&mut self, pc: usize, cmd: &Command, input: &mut Input) -> Run<bool> {
         let hit = match &cmd.sel {
             Sel::Always => true,
-            Sel::One(a) => self.addr_match(a, input),
-            Sel::Range(a1, a2) => self.range_select(pc, a1, a2, input),
+            Sel::One(a) => self.addr_match(a, input)?,
+            Sel::Range(a1, a2) => self.range_select(pc, a1, a2, input)?,
         };
-        hit != cmd.negated
+        Ok(hit != cmd.negated)
     }
 
     fn write_wfile(&mut self, idx: usize, bytes: &[u8], out: &mut Out<'_>) -> io::Result<()> {
@@ -1265,9 +1292,9 @@ impl Exec {
     }
 
     /// Apply one `s` command; returns whether anything was replaced.
-    fn substitute(&mut self, sub: &Subst) -> bool {
+    fn substitute(&mut self, sub: &Subst) -> Run<bool> {
         let Some(re) = self.resolve(sub.re.as_ref()) else {
-            return false;
+            return Ok(false);
         };
         let hay = std::mem::take(&mut self.pattern);
         let mut out: Vec<u8> = Vec::with_capacity(hay.len());
@@ -1276,6 +1303,16 @@ impl Exec {
         let mut did = false;
 
         for caps in re.capture_spans_iter(&hay) {
+            // The pattern space is restored before the error leaves, so a
+            // caller that catches it still sees the line it was given rather
+            // than the half-built replacement.
+            let caps = match caps {
+                Ok(c) => c,
+                Err(e) => {
+                    self.pattern = hay;
+                    return Err(Stop::Limit(e));
+                }
+            };
             let Some((s, e)) = caps.first().copied().flatten() else {
                 break;
             };
@@ -1298,14 +1335,14 @@ impl Exec {
         }
         out.extend_from_slice(hay.get(last..).unwrap_or_default());
         self.pattern = out;
-        did
+        Ok(did)
     }
 
     #[allow(clippy::too_many_lines)] // One dispatch over sed's command set; splitting it would hide the table.
-    fn run(&mut self, cmds: &[Command], input: &mut Input, out: &mut Out<'_>) -> io::Result<Flow> {
+    fn run(&mut self, cmds: &[Command], input: &mut Input, out: &mut Out<'_>) -> Run<Flow> {
         let mut pc = 0usize;
         while let Some(cmd) = cmds.get(pc) {
-            if !self.selected(pc, cmd, input) {
+            if !self.selected(pc, cmd, input)? {
                 pc = match cmd.act {
                     Action::Block(after) => after,
                     _ => pc.saturating_add(1),
@@ -1334,7 +1371,7 @@ impl Exec {
                     }
                 }
                 Action::Subst(sub) => {
-                    if self.substitute(sub) {
+                    if self.substitute(sub)? {
                         self.sub_made = true;
                         if sub.print {
                             out.line(&self.pattern.clone(), true)?;
@@ -1465,7 +1502,7 @@ impl Exec {
         cmds: &[Command],
         input: &mut Input,
         out: &mut Out<'_>,
-    ) -> io::Result<Option<i32>> {
+    ) -> Run<Option<i32>> {
         while let Some(line) = input.next_line() {
             self.pattern = line.bytes;
             self.had_sep = line.had_sep;
@@ -1803,13 +1840,19 @@ fn run_one(
     };
     let quit = match exec.cycle(&script.cmds, input, &mut out) {
         Ok(q) => q,
-        Err(e) => {
+        Err(Stop::Io(e)) => {
             // A closed pipe is how `sed … | head` ends, and is not a failure.
             if e.kind() != io::ErrorKind::BrokenPipe {
                 eprintln!("sed: couldn't write: {}", strerror(&e));
                 return (Some(4), true);
             }
             None
+        }
+        // Not "couldn't write": the run stopped because a search was
+        // abandoned, and sending the reader to the disk would waste their time.
+        Err(Stop::Limit(e)) => {
+            eprintln!("sed: {e}");
+            return (Some(4), true);
         }
     };
     (quit, exec.had_error)
@@ -1967,6 +2010,44 @@ mod tests {
             run_opts("s/(a+)(b+)/[\\2\\1]/", "aaabb\n", false, true),
             "[bbaaa]\n"
         );
+    }
+
+    #[test]
+    fn a_backreference_works_in_the_pattern_and_not_only_the_replacement() {
+        // `\1` on the left of the `/` is a different feature from `\1` on the
+        // right: it asks the *matcher* to compare against what the group took.
+        assert_eq!(run(r"s/\(ab\)\1/X/", "abab\n"), "X\n");
+        assert_eq!(run(r"s/\(ab\)\1/X/", "abcd\n"), "abcd\n");
+        assert_eq!(run(r"/\(.\)\1/d", "aa\nab\n"), "ab\n");
+
+        // The classic "squeeze repeated lines" one-liner, which is the reason
+        // this was implemented: it holds two lines and deletes the first when
+        // the second repeats it. GNU sed prints `x` then `y`.
+        assert_eq!(run(r"$!N;/^\(.*\)\n\1$/!P;D", "x\nx\ny\n"), "x\ny\n");
+    }
+
+    #[test]
+    fn a_pathological_backreference_stops_rather_than_hanging() {
+        // The matcher spends a budget and then declines to answer. `sed` must
+        // not read that as "did not match": `/re/!d` deletes every line the
+        // pattern does *not* match, so a wrong answer here destroys data.
+        let pat = r"/\(a*\)\(a*\)\(a*\)\(a*\)\(a*\)\1\2\3\4\5b/!d";
+        let compiled = compile_script(pat.as_bytes(), false).unwrap();
+        let line = format!("{}\n", "a".repeat(300));
+        let mut sink: Vec<u8> = Vec::new();
+        let mut inp = Input {
+            paths: Vec::new(),
+            next_path: 0,
+            cur: Some(Box::new(BufReader::new(io::Cursor::new(
+                line.into_bytes(),
+            )))),
+            peeked: None,
+            sep: b'\n',
+            had_error: false,
+        };
+        let (status, _) = run_one(&compiled, &mut inp, &mut sink, false, b'\n');
+        assert_eq!(status, Some(4), "a declined search must fail the run");
+        assert!(sink.is_empty(), "nothing may be printed on a declined search");
     }
 
     #[test]

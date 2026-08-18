@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -198,6 +199,63 @@ def reclaim_dir(path, dry_run, sizes, log):
     return freed
 
 
+STAGED = re.compile(r"\.reclaim-\d+$")
+
+
+def reclaim_staged(trees, dry_run, log):
+    """Finish deletions a previous run started and could not complete.
+
+    `reclaim_dir` renames before it deletes, and when the delete then fails --
+    a stray handle can outlive the rename and block individual unlinks -- it
+    logs "remove it by hand" and moves on.  Nothing ever did.  `os-lane-b` was
+    found holding an entire orphaned `target.reclaim-74628`, invisible to every
+    later run because it no longer matched the name those runs look for, while
+    the volume it sat on was under the boot test's free-space floor.
+
+    That makes this the cheapest and most clearly disposable thing the script
+    can touch -- more so than `build/` scratch, which at least might be wanted.
+    A `.reclaim-<pid>` directory is not a build tree that happens to be idle;
+    it is one whose owner already renamed it *for deletion* and then died
+    trying.  Finishing that deletion cannot cost anyone more than the original
+    `rmtree` would have.
+
+    The two safety properties still hold and are still checked: the name must
+    be one this script itself generates, and the path it was staged from must
+    be git-ignored.  A live run's own staging is skipped by pid, so two
+    concurrent runs cannot fight over one tree.
+    """
+    freed = 0.0
+    mine = ".reclaim-%d" % os.getpid()
+    for tree in trees:
+        try:
+            names = sorted(os.listdir(tree))
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(tree, name)
+            if not STAGED.search(name) or name.endswith(mine):
+                continue
+            if not os.path.isdir(path):
+                continue
+            # Ask about the path it was staged *from*: `target.reclaim-74628`
+            # is not itself in any .gitignore, but `target/` is, and that is
+            # the interlock that says this is build output.
+            if not is_ignored_dir(tree, STAGED.sub("", name)):
+                log("  REFUSING %s: its origin is not git-ignored" % path)
+                continue
+            if dry_run:
+                log("  WOULD finish   %s  (orphaned by an earlier run)" % path)
+                continue
+            before = free_gib(tree)
+            log("  finishing      %s" % path)
+            shutil.rmtree(path, ignore_errors=True)
+            if os.path.exists(path):
+                log("  WARNING: %s still will not delete; a process holds it "
+                    "open" % path)
+            freed += free_gib(tree) - before
+    return freed
+
+
 def reclaim_scratch(root, age_days, dry_run, log):
     """Delete aged files directly under `<root>/build`.
 
@@ -300,6 +358,18 @@ def main(argv=None):
         sys.stderr.write("could not enumerate worktrees\n")
         return 2
     main_tree = trees[0][0]
+
+    # Before anything anyone might still want: finish the deletions a previous
+    # run abandoned half-way.  This runs across *every* worktree regardless of
+    # --allow-lane-targets, because an orphaned staging directory is not a
+    # lane's build tree -- it is the wreckage of one that lane already agreed
+    # to destroy, and leaving it costs that lane nothing but costs everyone the
+    # space.
+    log("Step 0: staging directories orphaned by earlier runs")
+    reclaim_staged([p for p, _b in trees], dry, log)
+    if not dry and free_gib(root) >= args.need:
+        log("Done: %.1f GiB free." % free_gib(root))
+        return 0
 
     log("Step 1: scratch under %s/build older than %.0f days"
         % (root, args.scratch_age_days))

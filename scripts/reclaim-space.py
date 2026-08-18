@@ -156,6 +156,65 @@ def is_ignored_dir(tree, relpath):
     return rc == 0
 
 
+def attribute_holder(path, log):
+    """Name what is holding `path`, on the rename-veto path only.
+
+    A bare "SKIP (in use)" is where this investigation went to die once already
+    (`known-issues.md` -> `A-RECLAIM-SPACE-CANNOT-FREE-A-LANE'S-OWN-TARGET`):
+    the message states the conclusion and discards the evidence, and by the
+    time anyone reads the log the holder has usually exited.  The one moment
+    the answer is obtainable is right now, so it is obtained right now.
+
+    Deliberately not run on the success path: the scan costs seconds, and a
+    veto is rare.
+
+    Failures here are reported, never raised.  This is diagnostics attached to
+    a veto that has already been decided -- it must not be able to turn a
+    partial reclaim into no reclaim at all.
+    """
+    try:
+        import importlib.util
+
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "who-holds-dir.py")
+        spec = importlib.util.spec_from_file_location("who_holds_dir", src)
+        if spec is None or spec.loader is None:
+            log("    (cannot attribute: %s is not importable)" % src)
+            return
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        root = os.path.abspath(path)
+        found = 0
+        unreadable = 0
+        for pid, image, paths, err in mod.scan(True):
+            if err is not None:
+                unreadable += 1
+            if not paths:
+                continue
+            hits = []
+            for kind, p in paths:
+                try:
+                    rp = os.path.abspath(p)
+                except OSError:
+                    continue
+                if rp == root or rp.startswith(root + os.sep):
+                    hits.append((kind, rp))
+            if hits:
+                found += 1
+                log("    HELD BY pid %s  %s" % (pid, image))
+                for kind, rp in sorted(set(hits)):
+                    log("        %6s  %s" % (kind, rp))
+        if found == 0:
+            # Not "nothing holds it" -- the rename just proved something does.
+            # This is the diagnostic failing to see it, which is a fact about
+            # the diagnostic and is reported as such.
+            log("    (no holder visible; %d process(es) could not be inspected, "
+                "so this is inconclusive, not empty)" % unreadable)
+    except Exception as exc:  # noqa: BLE001 - see docstring: never raise here
+        log("    (cannot attribute: %s: %s)" % (type(exc).__name__, exc))
+
+
 def reclaim_dir(path, dry_run, sizes, log):
     """Delete `path` iff nothing holds a file open inside it.
 
@@ -176,6 +235,7 @@ def reclaim_dir(path, dry_run, sizes, log):
         os.rename(path, staged)
     except OSError as exc:
         log("  SKIP (in use)  %s  [%s]" % (path, exc.strerror))
+        attribute_holder(path, log)
         return 0.0
     if dry_run:
         # The rename is the whole test, and it is reversible: put it straight

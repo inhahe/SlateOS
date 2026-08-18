@@ -15,6 +15,7 @@
 
 #![allow(dead_code)]
 
+use core::cmp::Reverse;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -411,21 +412,18 @@ impl ScalableValue {
         match self {
             Self::Fixed(v) => *v,
             Self::Scaled(base) => base * scale,
-            Self::Stepped(table) => {
-                if table.is_empty() {
-                    return 0.0;
-                }
-                // Find the last entry whose threshold <= scale.
-                let mut result = table[0].1;
-                for &(threshold, value) in table {
-                    if scale >= threshold {
-                        result = value;
-                    } else {
-                        break;
-                    }
-                }
-                result
-            }
+            // The last entry whose threshold <= scale. `take_while` is the
+            // `break` — the table is sorted ascending, so the first entry that
+            // fails the test is the end of the run — and `.or(first)` is the
+            // documented "below the first threshold, use the first value".
+            // Written as one expression the empty table needs no separate
+            // guard: it simply has no first entry.
+            Self::Stepped(table) => table
+                .iter()
+                .take_while(|&&(threshold, _)| scale >= threshold)
+                .last()
+                .or_else(|| table.first())
+                .map_or(0.0, |&(_, value)| value),
         }
     }
 }
@@ -434,27 +432,29 @@ impl ScalableValue {
 // Image scaling helpers
 // ---------------------------------------------------------------------------
 
+/// The smallest standard icon size, and so the answer for any target at or
+/// below it — including 0.
+const SMALLEST_ICON_SIZE: u32 = 16;
+
 /// Standard icon sizes available in icon themes (in physical pixels).
-const STANDARD_ICON_SIZES: &[u32] = &[16, 24, 32, 48, 64, 128, 256];
+const STANDARD_ICON_SIZES: &[u32] = &[SMALLEST_ICON_SIZE, 24, 32, 48, 64, 128, 256];
 
 /// Snap a target pixel size to the nearest standard icon size.
 ///
 /// If the target is exactly between two sizes, rounds up (prefer the larger
-/// icon to avoid downscaling artifacts).
+/// icon to avoid downscaling artifacts) — which is what the `Reverse(size)`
+/// half of the sort key says: among equal distances, the larger size sorts
+/// first. Stating the whole rule as the key means there is no seed value to
+/// keep in step with the list, and no `[1..]` slice that assumes one.
 pub fn nearest_icon_size(target: u32) -> u32 {
-    if target == 0 {
-        return STANDARD_ICON_SIZES[0];
-    }
-    let mut best = STANDARD_ICON_SIZES[0];
-    let mut best_dist = (target as i64 - best as i64).unsigned_abs();
-    for &size in &STANDARD_ICON_SIZES[1..] {
-        let dist = (target as i64 - size as i64).unsigned_abs();
-        if dist < best_dist || (dist == best_dist && size > best) {
-            best = size;
-            best_dist = dist;
-        }
-    }
-    best
+    STANDARD_ICON_SIZES
+        .iter()
+        .copied()
+        .min_by_key(|&size| (target.abs_diff(size), Reverse(size)))
+        // Unreachable while the list above is non-empty; an empty list would
+        // mean no icon sizes exist at all, for which the smallest is the only
+        // honest answer.
+        .unwrap_or(SMALLEST_ICON_SIZE)
 }
 
 /// Strategy for scaling images/icons.
@@ -513,22 +513,35 @@ pub fn set_global_scale(factor: f32) {
     SCALE_TABLE[0].store(clamped.to_bits(), Ordering::Relaxed);
 }
 
+/// The slot holding `monitor_id`'s override, or `None` if we don't track it.
+///
+/// Both the `+ 1` and the range check live here, in the same expression that
+/// produces the slot, because separating them is what made the old code wrong:
+/// it computed `monitor_id.wrapping_add(1)` and then rejected `slot >
+/// MAX_MONITORS`, so a `monitor_id` of `usize::MAX` wrapped to slot **0** —
+/// the global fallback — and sailed past a check that was only ever looking
+/// upward. A caller passing a garbage id silently rewrote the scale factor
+/// every other monitor falls back to. `checked_add` refuses the wrap and
+/// `get` carries the bound into the access itself.
+fn monitor_slot(monitor_id: usize) -> Option<&'static AtomicU32> {
+    SCALE_TABLE.get(monitor_id.checked_add(1)?)
+}
+
 /// Set the scale factor for a specific monitor.
 ///
 /// `monitor_id` should be in range 0..MAX_MONITORS. Out-of-range IDs are
 /// silently ignored. Pass 0.0 to clear the override (falls back to global).
 pub fn set_monitor_scale(monitor_id: usize, factor: f32) {
-    let slot = monitor_id.wrapping_add(1);
-    if slot > MAX_MONITORS {
+    let Some(slot) = monitor_slot(monitor_id) else {
         return;
-    }
-    if factor <= 0.0 {
-        // Clear override — store 0 bits (which isn't a valid positive scale).
-        SCALE_TABLE[slot].store(0, Ordering::Relaxed);
+    };
+    // 0 bits is not a valid positive scale, so it doubles as "no override".
+    let bits = if factor <= 0.0 {
+        0
     } else {
-        let clamped = factor.clamp(0.25, 8.0);
-        SCALE_TABLE[slot].store(clamped.to_bits(), Ordering::Relaxed);
-    }
+        factor.clamp(0.25, 8.0).to_bits()
+    };
+    slot.store(bits, Ordering::Relaxed);
 }
 
 /// Get the effective scale factor for a monitor.
@@ -536,15 +549,12 @@ pub fn set_monitor_scale(monitor_id: usize, factor: f32) {
 /// Returns the per-monitor override if set, otherwise falls back to the
 /// global scale.
 pub fn get_effective_scale(monitor_id: usize) -> f32 {
-    let slot = monitor_id.wrapping_add(1);
-    if slot <= MAX_MONITORS {
-        let bits = SCALE_TABLE[slot].load(Ordering::Relaxed);
-        if bits != 0 {
-            return f32::from_bits(bits);
-        }
+    let bits = monitor_slot(monitor_id).map_or(0, |slot| slot.load(Ordering::Relaxed));
+    if bits == 0 {
+        // No override — or no such monitor.
+        return get_global_scale();
     }
-    // Fallback to global.
-    f32::from_bits(SCALE_TABLE[0].load(Ordering::Relaxed))
+    f32::from_bits(bits)
 }
 
 /// Get the global scale factor (ignoring per-monitor overrides).
@@ -704,6 +714,47 @@ mod tests {
         assert_eq!(v.resolve(1.0), 10.0);
     }
 
+    #[test]
+    fn a_stepped_table_answers_on_and_between_every_threshold() {
+        // Every boundary in one table, so a rewrite of the search cannot pass
+        // by getting the interior right and an end wrong. The table's own
+        // thresholds are the interesting inputs: each is tested exactly, just
+        // below, and just above.
+        let steps = [(1.0, 10.0), (1.5, 20.0), (2.0, 30.0)];
+        let v = ScalableValue::Stepped(steps.to_vec());
+        for (i, &(threshold, value)) in steps.iter().enumerate() {
+            assert_eq!(v.resolve(threshold), value, "at threshold {threshold}");
+            assert_eq!(
+                v.resolve(threshold + 0.01),
+                value,
+                "just above threshold {threshold}"
+            );
+            // Just below a threshold is the previous entry's value — except
+            // below the very first, which is documented to clamp upward.
+            let expected = if i == 0 {
+                value
+            } else {
+                steps.get(i - 1).map_or(0.0, |&(_, prev)| prev)
+            };
+            assert_eq!(
+                v.resolve(threshold - 0.01),
+                expected,
+                "just below threshold {threshold}"
+            );
+        }
+        // Far outside in both directions.
+        assert_eq!(v.resolve(0.0), 10.0);
+        assert_eq!(v.resolve(100.0), 30.0);
+    }
+
+    #[test]
+    fn a_stepped_table_of_one_entry_answers_that_entry_everywhere() {
+        let v = ScalableValue::Stepped(vec![(2.0, 7.0)]);
+        assert_eq!(v.resolve(0.5), 7.0);
+        assert_eq!(v.resolve(2.0), 7.0);
+        assert_eq!(v.resolve(9.0), 7.0);
+    }
+
     // --- Standard dimension scaling ---
 
     #[test]
@@ -762,6 +813,29 @@ mod tests {
     #[test]
     fn nearest_icon_size_zero() {
         assert_eq!(nearest_icon_size(0), 16);
+    }
+
+    #[test]
+    fn every_midpoint_between_two_standard_sizes_rounds_up() {
+        // The tie-break is the half of this function most likely to be lost in
+        // a rewrite, and it has to hold at *every* adjacent pair, not just the
+        // 16/24 one an earlier test happened to pick.
+        for pair in STANDARD_ICON_SIZES.windows(2) {
+            let &[small, large] = pair else {
+                unreachable!("windows(2) yields pairs")
+            };
+            if (small + large) % 2 != 0 {
+                continue; // no exact midpoint in integers
+            }
+            let midpoint = small.midpoint(large);
+            assert_eq!(
+                nearest_icon_size(midpoint),
+                large,
+                "midpoint {midpoint} between {small} and {large}"
+            );
+            assert_eq!(nearest_icon_size(midpoint - 1), small);
+            assert_eq!(nearest_icon_size(midpoint + 1), large);
+        }
     }
 
     #[test]
@@ -919,6 +993,43 @@ mod tests {
         assert_eq!(get_effective_scale(2), 3.0);
         set_monitor_scale(2, 0.0); // clear override
         assert_eq!(get_effective_scale(2), 1.5);
+    }
+
+    #[test]
+    fn a_monitor_id_that_would_wrap_cannot_touch_the_global_scale() {
+        // `usize::MAX + 1` wraps to 0, which is the global slot. The old code
+        // computed that index with `wrapping_add` and then only checked it
+        // against the upper bound, so this call used to overwrite the fallback
+        // scale that every monitor without an override reads.
+        let _guard = ScaleGuard::new();
+        set_global_scale(1.5);
+        set_monitor_scale(usize::MAX, 4.0);
+        assert_eq!(get_global_scale(), 1.5, "global scale was overwritten");
+        assert_eq!(get_effective_scale(usize::MAX), 1.5);
+        assert_eq!(get_effective_scale(0), 1.5);
+    }
+
+    #[test]
+    fn an_out_of_range_monitor_reads_and_writes_nothing() {
+        let _guard = ScaleGuard::new();
+        set_global_scale(2.0);
+        // The last id with a slot, and the first without.
+        set_monitor_scale(MAX_MONITORS - 1, 3.0);
+        assert_eq!(get_effective_scale(MAX_MONITORS - 1), 3.0);
+        set_monitor_scale(MAX_MONITORS, 4.0);
+        assert_eq!(get_effective_scale(MAX_MONITORS), 2.0);
+        // …and the write above must not have landed on a neighbour.
+        assert_eq!(get_effective_scale(MAX_MONITORS - 1), 3.0);
+        assert_eq!(get_global_scale(), 2.0);
+    }
+
+    #[test]
+    fn a_per_monitor_override_is_clamped_like_the_global_one() {
+        let _guard = ScaleGuard::new();
+        set_monitor_scale(3, 100.0);
+        assert_eq!(get_effective_scale(3), 8.0);
+        set_monitor_scale(3, 0.01);
+        assert_eq!(get_effective_scale(3), 0.25);
     }
 
     // --- Geometry type conversions ---

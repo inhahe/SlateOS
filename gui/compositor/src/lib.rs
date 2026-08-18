@@ -703,12 +703,12 @@ impl Window {
     pub fn client_geometry_for_frame(&self, area: Rect) -> (i32, i32, u32, u32) {
         let (top, side, bottom) = self.frame_insets();
         (
-            area.x.saturating_add(i32::try_from(side).unwrap_or(i32::MAX)),
-            area.y.saturating_add(i32::try_from(top).unwrap_or(i32::MAX)),
+            area.x
+                .saturating_add(i32::try_from(side).unwrap_or(i32::MAX)),
+            area.y
+                .saturating_add(i32::try_from(top).unwrap_or(i32::MAX)),
             area.width.saturating_sub(side.saturating_mul(2)),
-            area.height
-                .saturating_sub(top)
-                .saturating_sub(bottom),
+            area.height.saturating_sub(top).saturating_sub(bottom),
         )
     }
 
@@ -764,9 +764,9 @@ impl Window {
             .saturating_sub(TITLE_BUTTON_SIZE as i32)
             .saturating_sub(TITLE_BUTTON_SPACING as i32)
             .saturating_sub((slot as i32).saturating_mul(step));
-        let btn_y = title_rect
-            .y
-            .saturating_add((title_rect.height as i32).saturating_sub(TITLE_BUTTON_SIZE as i32) / 2);
+        let btn_y = title_rect.y.saturating_add(
+            (title_rect.height as i32).saturating_sub(TITLE_BUTTON_SIZE as i32) / 2,
+        );
         Some(Rect::new(
             btn_x,
             btn_y,
@@ -1373,7 +1373,12 @@ impl Framebuffer {
         // saturating forms are exact and merely make that visible.
         let src_off = src_off.saturating_add((x_lo as usize).saturating_sub(dst_x));
         let count = (x_hi.saturating_sub(x_lo)) as usize;
-        let row = Self::row_range(self.width as usize, y as usize, x_lo as usize, x_hi as usize);
+        let row = Self::row_range(
+            self.width as usize,
+            y as usize,
+            x_lo as usize,
+            x_hi as usize,
+        );
         if let (Some(dst), Some(s)) = (
             self.back.get_mut(row),
             src.get(src_off..src_off.saturating_add(count)),
@@ -1535,12 +1540,8 @@ impl Framebuffer {
             };
             // `sy >= by0` was established above, so the row is band-local.
             let band_row = sy.saturating_sub(by0) as usize;
-            let dst_span = Self::row_range(
-                width_usize,
-                band_row,
-                dst_x,
-                dst_x.saturating_add(count),
-            );
+            let dst_span =
+                Self::row_range(width_usize, band_row, dst_x, dst_x.saturating_add(count));
             if let (Some(dst), Some(s)) = (
                 band.get_mut(dst_span),
                 src.get(src_off..src_off.saturating_add(count)),
@@ -1566,7 +1567,12 @@ impl Framebuffer {
         let Some((x_lo, x_hi)) = self.clip_span(y, x_start, x_end) else {
             return;
         };
-        let row = Self::row_range(self.width as usize, y as usize, x_lo as usize, x_hi as usize);
+        let row = Self::row_range(
+            self.width as usize,
+            y as usize,
+            x_lo as usize,
+            x_hi as usize,
+        );
         if let Some(span) = self.back.get_mut(row) {
             span.fill(color | 0xFF_00_00_00);
         }
@@ -1593,7 +1599,12 @@ impl Framebuffer {
             (src_color >> 8) as u8,
             src_color as u8,
         );
-        let row = Self::row_range(self.width as usize, y as usize, x_lo as usize, x_hi as usize);
+        let row = Self::row_range(
+            self.width as usize,
+            y as usize,
+            x_lo as usize,
+            x_hi as usize,
+        );
         if let Some(span) = self.back.get_mut(row) {
             for pixel in span {
                 let dst = *pixel;
@@ -1733,7 +1744,9 @@ impl DisplayManager {
         let Some(first) = rest.next() else {
             return Rect::new(0, 0, 0, 0);
         };
-        rest.fold(first.bounds(), |bounds, display| bounds.union(&display.bounds()))
+        rest.fold(first.bounds(), |bounds, display| {
+            bounds.union(&display.bounds())
+        })
     }
 
     /// Get all displays.
@@ -2133,7 +2146,9 @@ impl Edge {
             Self::Far => i64::from(delta),
             Self::Near => i64::from(delta).saturating_neg(),
         };
-        i64::from(start).saturating_add(delta).clamp(0, i64::from(u32::MAX)) as u32
+        i64::from(start)
+            .saturating_add(delta)
+            .clamp(0, i64::from(u32::MAX)) as u32
     }
 
     /// Where the origin ends up, given the extent the window *settled* on.
@@ -2843,8 +2858,16 @@ impl RenderEngine {
         if let Some(c) = clip {
             x_lo = x_lo.max(i64::from(c.x));
             y_lo = y_lo.max(i64::from(c.y));
-            x_hi = x_hi.min(i64::from(c.x).saturating_add(i64::from(c.width)).saturating_sub(1));
-            y_hi = y_hi.min(i64::from(c.y).saturating_add(i64::from(c.height)).saturating_sub(1));
+            x_hi = x_hi.min(
+                i64::from(c.x)
+                    .saturating_add(i64::from(c.width))
+                    .saturating_sub(1),
+            );
+            y_hi = y_hi.min(
+                i64::from(c.y)
+                    .saturating_add(i64::from(c.height))
+                    .saturating_sub(1),
+            );
         }
         (x_lo, x_hi, y_lo, y_hi)
     }
@@ -2954,7 +2977,11 @@ impl RenderEngine {
         for k in k_lo..=k_hi {
             let major = major_0.saturating_add(major_dir.saturating_mul(k as i64));
             let minor = minor_0.saturating_add(minor_dir.saturating_mul(q as i64));
-            let (px, py) = if x_major { (major, minor) } else { (minor, major) };
+            let (px, py) = if x_major {
+                (major, minor)
+            } else {
+                (minor, major)
+            };
             Self::plot_line_pixel(fb, px, py, clip.as_ref(), color, opacity);
 
             rem = rem.saturating_add(step);
@@ -6150,7 +6177,10 @@ mod tests {
         });
         comp.handle_mouse_move(i32::MAX, i32::MAX);
         let win = comp.window_ref(id).expect("window survived");
-        assert_eq!((win.width, win.height), (MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT));
+        assert_eq!(
+            (win.width, win.height),
+            (MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+        );
     }
 
     #[test]

@@ -407,73 +407,105 @@ fn match_directory_pattern(pattern: &str, path: &str) -> bool {
     }
 }
 
-/// Simple glob matching supporting `*` as a wildcard.
+/// Glob matching, where `*` stands for any run of characters including none.
 ///
 /// - `"*"` matches any string.
 /// - `"*.ext"` matches any string ending with `.ext`.
 /// - `"prefix*"` matches any string starting with `prefix`.
 /// - `"pre*suf"` matches strings starting with `pre` and ending with `suf`.
-/// - Exact match otherwise.
+/// - A pattern with no `*` must match exactly. Case-sensitive, per the design
+///   spec's case-sensitive filesystem.
+///
+/// # How
+///
+/// One `*` is speculative: it starts by matching nothing, and if what follows
+/// it fails, it is given one more character and the rest is tried again. That
+/// retry point — the pattern after the star and the text it had reached — is
+/// the whole state of the match, so it is kept as a pair of slices and
+/// resuming is an assignment.
+///
+/// This replaced a fast path per pattern shape (`*suf`, `pre*`, `pre*suf`,
+/// no-star) sitting in front of a recursive matcher for everything else. The
+/// fast paths were four more definitions of what a glob means, each free to
+/// disagree with the general one; and the general one tried every suffix of
+/// the text at every star, which is exponential on a pattern like `*a*a*a*b`.
+/// Walking each of the pattern and the text once, with one retry point, is
+/// both the only definition and the faster of the two.
 fn glob_match(pattern: &str, text: &str) -> bool {
-    if pattern == "*" {
-        return true;
-    }
+    let mut pattern = pattern.as_bytes();
+    let mut text = text.as_bytes();
+    let mut retry: Option<(&[u8], &[u8])> = None;
 
-    // Count wildcards. We support a single `*` for simplicity.
-    let star_count = pattern.chars().filter(|&c| c == '*').count();
-    if star_count == 0 {
-        // Exact match (case-sensitive, per OS design spec).
-        return pattern == text;
-    }
+    loop {
+        if let Some((&b'*', after_star)) = pattern.split_first() {
+            // The star matches nothing to begin with. Remember where to come
+            // back to if that turns out to be too little.
+            retry = Some((after_star, text));
+            pattern = after_star;
+            continue;
+        }
 
-    if star_count == 1 {
-        if let Some(suffix) = pattern.strip_prefix('*') {
-            // Pattern like `*.rs` — match suffix.
-            return text.ends_with(suffix);
+        // Equal leading bytes consume one of each.
+        if let (Some((p, pattern_rest)), Some((t, text_rest))) =
+            (pattern.split_first(), text.split_first())
+            && p == t
+        {
+            pattern = pattern_rest;
+            text = text_rest;
+            continue;
         }
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            // Pattern like `Makefile*` — match prefix.
-            return text.starts_with(prefix);
-        }
-        // Pattern like `pre*suf` — split and check both.
-        if let Some(star_pos) = pattern.find('*') {
-            let prefix = &pattern[..star_pos];
-            let suffix = &pattern[star_pos + 1..];
-            return text.starts_with(prefix)
-                && text.ends_with(suffix)
-                && text.len() >= prefix.len() + suffix.len();
-        }
-    }
 
-    // Multiple wildcards: use a recursive approach.
-    glob_match_recursive(pattern.as_bytes(), text.as_bytes())
-}
-
-/// Recursive glob matching for patterns with multiple `*` wildcards.
-fn glob_match_recursive(pattern: &[u8], text: &[u8]) -> bool {
-    if pattern.is_empty() {
-        return text.is_empty();
-    }
-    if pattern[0] == b'*' {
-        // `*` can match zero or more characters.
-        // Try matching rest of pattern against each suffix of text.
-        let rest_pattern = &pattern[1..];
-        for i in 0..=text.len() {
-            if glob_match_recursive(rest_pattern, &text[i..]) {
-                return true;
-            }
+        if pattern.is_empty() && text.is_empty() {
+            return true;
         }
-        false
-    } else if text.is_empty() {
-        false
-    } else if pattern[0] == text[0] {
-        glob_match_recursive(&pattern[1..], &text[1..])
-    } else {
-        false
+
+        // Mismatch: widen the most recent star by one character and resume
+        // after it. With no star to widen, or no character left to give it,
+        // the pattern cannot match.
+        let Some((resume_pattern, resume_text)) = retry else {
+            return false;
+        };
+        let Some((_, wider)) = resume_text.split_first() else {
+            return false;
+        };
+        pattern = resume_pattern;
+        text = wider;
+        retry = Some((resume_pattern, wider));
     }
 }
 
 // ─── Context menu building ─────────────────────────────────────────────────
+
+/// Hands out the menu item IDs for one built menu.
+///
+/// The counter behind this was advanced by hand at three points of one
+/// function, and a fourth builder zipped a range instead — four places that
+/// each had to remember both where the range starts and that the ID they had
+/// just used was now spent. Yielding and advancing in one call, an ID cannot
+/// be used twice or skipped, and the reserved base is written once.
+struct MenuIds(u64);
+
+impl MenuIds {
+    /// Extension IDs start high so they cannot collide with the host
+    /// application's own menu items, which number from zero.
+    const FIRST: u64 = 10_000;
+
+    fn new() -> Self {
+        Self(Self::FIRST)
+    }
+
+    /// The next unused ID.
+    ///
+    /// Saturating rather than wrapping: a menu long enough to exhaust a `u64`
+    /// would, on wrapping, hand an extension an ID inside the host's reserved
+    /// range and so make one of its items fire the wrong action. Repeating the
+    /// last ID is the milder wrong answer, and is not reachable anyway.
+    fn next_id(&mut self) -> u64 {
+        let id = self.0;
+        self.0 = self.0.saturating_add(1);
+        id
+    }
+}
 
 /// A tracking entry for timeout monitoring during menu construction.
 #[derive(Clone, Debug)]
@@ -547,17 +579,16 @@ pub fn build_context_menu(
     }
 
     // Add regular extension items.
-    let mut menu_id_counter: u64 = 10_000; // Start extension IDs high to avoid conflicts.
+    let mut ids = MenuIds::new();
     for ext in &regular_items {
         result.push(MenuItem::Action {
-            id: menu_id_counter,
+            id: ids.next_id(),
             label: ext.label.clone(),
             shortcut: None,
             icon: ext.icon.clone(),
             enabled: true,
             checked: None,
         });
-        menu_id_counter += 1;
     }
 
     // Build "Open with..." submenu if there are matching extensions with submenus.
@@ -567,31 +598,29 @@ pub fn build_context_menu(
             if let Some(sub_items) = &ext.submenu {
                 for sub_item in sub_items {
                     open_with_children.push(MenuItem::Action {
-                        id: menu_id_counter,
+                        id: ids.next_id(),
                         label: sub_item.label.clone(),
                         shortcut: None,
                         icon: sub_item.icon.clone(),
                         enabled: sub_item.enabled,
                         checked: None,
                     });
-                    menu_id_counter += 1;
                 }
             } else {
                 // Extension without explicit submenu items gets a single entry.
                 open_with_children.push(MenuItem::Action {
-                    id: menu_id_counter,
+                    id: ids.next_id(),
                     label: ext.label.clone(),
                     shortcut: None,
                     icon: ext.icon.clone(),
                     enabled: true,
                     checked: None,
                 });
-                menu_id_counter += 1;
             }
         }
 
         result.push(MenuItem::Submenu {
-            id: menu_id_counter,
+            id: ids.next_id(),
             label: "Open with...".to_string(),
             icon: None,
             enabled: true,
@@ -629,9 +658,10 @@ pub fn build_context_menu_for_selection(
         result.push(MenuItem::Separator);
     }
 
-    for (menu_id_counter, ext) in (10_000_u64..).zip(sorted.iter()) {
+    let mut ids = MenuIds::new();
+    for ext in &sorted {
         result.push(MenuItem::Action {
-            id: menu_id_counter,
+            id: ids.next_id(),
             label: ext.label.clone(),
             shortcut: None,
             icon: ext.icon.clone(),
@@ -875,6 +905,87 @@ mod tests {
         assert!(glob_match("test*file", "test_my_file"));
         assert!(glob_match("test*file", "testfile"));
         assert!(!glob_match("test*file", "test_my_files"));
+    }
+
+    /// Every shape of pattern, against the same matcher. Each of these used to
+    /// have a fast path of its own in front of the general case, so agreeing
+    /// with the general case was something nothing checked.
+    #[test]
+    fn a_star_matches_any_run_of_characters_including_none() {
+        // No star: exact, and case-sensitive.
+        assert!(glob_match("Makefile", "Makefile"));
+        assert!(!glob_match("Makefile", "makefile"));
+        assert!(!glob_match("Makefile", "Makefile2"));
+        assert!(!glob_match("Makefile", "Makefil"));
+
+        // A star on its own matches anything at all, including nothing.
+        assert!(glob_match("*", ""));
+        assert!(glob_match("*", "anything"));
+        assert!(!glob_match("", "anything"));
+        assert!(glob_match("", ""));
+
+        // Leading star: a suffix match.
+        assert!(glob_match("*.rs", "main.rs"));
+        assert!(glob_match("*.rs", ".rs"));
+        assert!(!glob_match("*.rs", "rs"));
+        assert!(!glob_match("*.rs", "main.rs.bak"));
+
+        // Trailing star: a prefix match.
+        assert!(glob_match("Makefile*", "Makefile"));
+        assert!(glob_match("Makefile*", "Makefile.am"));
+        assert!(!glob_match("Makefile*", "GNUmakefile"));
+
+        // A star between two literals, which must not be allowed to overlap.
+        assert!(glob_match("pre*suf", "presuf"));
+        assert!(glob_match("pre*suf", "pre_middle_suf"));
+        assert!(!glob_match("presuf", "presu"));
+        assert!(!glob_match("ab*ab", "aba"));
+
+        // Several stars.
+        assert!(glob_match("*a*b*", "xxaxxbxx"));
+        assert!(glob_match("*a*b*", "ab"));
+        assert!(!glob_match("*a*b*", "ba"));
+        assert!(glob_match("a*b*c*d", "abcd"));
+        assert!(!glob_match("a*b*c*d", "abdc"));
+    }
+
+    /// A pattern of alternating stars and literals, against text that nearly
+    /// matches, is where a matcher that tries every suffix at every star goes
+    /// combinatorial: the recursive one this replaced would have explored on
+    /// the order of C(216, 16) ways to distribute these 200 characters among
+    /// these sixteen stars before reporting no match. Walking each string once
+    /// with a single retry point, it returns immediately — so this test is
+    /// also a timeout, and would hang rather than fail if the old shape ever
+    /// came back.
+    #[test]
+    fn a_pattern_full_of_stars_does_not_take_exponential_time() {
+        let pattern = "*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b";
+        let text = "a".repeat(200);
+        assert!(!glob_match(pattern, &text), "no trailing b, so no match");
+
+        let with_b = format!("{text}b");
+        assert!(glob_match(pattern, &with_b));
+    }
+
+    /// A star may fall inside a multi-byte character, and the answer must
+    /// still be the one a reader would give reading characters.
+    #[test]
+    fn a_star_spanning_multibyte_text_matches_as_written() {
+        assert!(glob_match("*.rs", "日本語.rs"));
+        assert!(glob_match("日*語", "日本語"));
+        assert!(glob_match("日*語", "日語"));
+        assert!(!glob_match("日*語", "日本"));
+    }
+
+    /// Every ID in a built menu is distinct, and above the range the host
+    /// application uses for its own items.
+    #[test]
+    fn built_menu_ids_are_distinct_and_out_of_the_hosts_way() {
+        let mut ids = MenuIds::new();
+        let handed: Vec<u64> = (0..5).map(|_| ids.next_id()).collect();
+
+        assert_eq!(handed, vec![10_000, 10_001, 10_002, 10_003, 10_004]);
+        assert!(handed.iter().all(|id| *id >= MenuIds::FIRST));
     }
 
     #[test]
@@ -1471,7 +1582,9 @@ mod tests {
                 assert_eq!(file_paths.len(), 1);
                 assert_eq!(action, Some("compile".to_string()));
             }
-            _ => panic!("Wrong variant"),
+            // Named rather than `_`, so a new variant is a compile error here
+            // and not a test that quietly stops checking anything.
+            ExtensionEvent::LoadTimeout { .. } => panic!("Wrong variant"),
         }
     }
 

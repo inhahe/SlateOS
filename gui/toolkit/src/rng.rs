@@ -104,6 +104,28 @@ pub trait RandomSource {
         }
     }
 
+    /// `true` with the given `probability`, which is a fraction in `0.0..=1.0`.
+    ///
+    /// The two certainties are answered without drawing, so they are exactly
+    /// certain: a probability of `1.0` is always `true` and `0.0` always
+    /// `false`, however coarse the underlying draw is. Written as a bare
+    /// `draw() < probability` they would not be — `next_f32` never reaches
+    /// `1.0`, so `< 1.0` is merely very likely, and callers that build a
+    /// probability by arithmetic can land just outside the range. Anything
+    /// outside `0.0..=1.0`, NaN included, is clamped to the nearer certainty.
+    fn chance(&mut self, probability: f32) -> bool {
+        if probability >= 1.0 {
+            return true;
+        }
+        // `!(probability > 0.0)` would read better but trips a lint; going
+        // through `partial_cmp` makes the NaN answer — `false`, no chance —
+        // deliberate rather than a side effect of comparison order.
+        match probability.partial_cmp(&0.0) {
+            Some(core::cmp::Ordering::Greater) => self.next_f32() < probability,
+            _ => false,
+        }
+    }
+
     /// One of `items`, or `None` if there are none.
     fn pick<'a, T>(&mut self, items: &'a [T]) -> Option<&'a T> {
         if items.is_empty() {
@@ -530,6 +552,43 @@ mod tests {
             assert!(
                 count.abs_diff(expected) * 10 < expected,
                 "{order:?} came up {count} times, expected about {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_certainties_are_certain() {
+        // A bare `draw() < probability` gets neither end right: `next_f32`
+        // never reaches 1.0, so `< 1.0` is merely near-certain, and a
+        // probability that arithmetic pushed slightly outside the range would
+        // be answered by the draw rather than by the bound.
+        let mut rng = SeededRng::new(1);
+        for _ in 0..1000 {
+            assert!(rng.chance(1.0), "a certainty must not depend on the draw");
+            assert!(!rng.chance(0.0), "an impossibility must never happen");
+            assert!(rng.chance(1.5), "above certain is still certain");
+            assert!(!rng.chance(-0.5), "below impossible is still impossible");
+            assert!(!rng.chance(f32::NAN), "no probability is no chance");
+        }
+    }
+
+    #[test]
+    fn a_chance_comes_up_about_as_often_as_it_says() {
+        // Wide bounds: this is checking that the probability is used at all
+        // and the right way round, not measuring the generator's quality.
+        const DRAWS: u32 = 20_000;
+        let mut rng = SeededRng::new(0xC0FF_EE00_1234_5678);
+        for (probability, low, high) in [
+            (0.1_f32, 0.07_f64, 0.13_f64),
+            (0.25, 0.21, 0.29),
+            (0.5, 0.46, 0.54),
+            (0.9, 0.87, 0.93),
+        ] {
+            let hits = (0..DRAWS).filter(|_| rng.chance(probability)).count();
+            let rate = hits as f64 / f64::from(DRAWS);
+            assert!(
+                (low..high).contains(&rate),
+                "a {probability} chance came up {rate} of the time"
             );
         }
     }

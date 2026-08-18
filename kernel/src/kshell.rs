@@ -15280,177 +15280,205 @@ fn cmd_fsearch(args: &str) {
 
     match sub {
         "name" => {
-            // fsearch name <pattern> [path]
-            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
-            let pattern = tok.first().copied().unwrap_or("");
-            let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
+            #[inline(never)]
+            fn case(rest: &str) {
+                // fsearch name <pattern> [path]
+                let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+                let pattern = tok.first().copied().unwrap_or("");
+                let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
 
-            if pattern.is_empty() {
-                shell_println!("Usage: fsearch name <pattern> [path]");
-                return;
-            }
-
-            match search::Query::new()
-                .name_contains(pattern)
-                .limit(50)
-                .execute(root)
-            {
-                Ok(results) => {
-                    shell_println!("Found {} result(s):", results.len());
-                    for r in &results {
-                        let typ = match r.entry_type {
-                            crate::fs::EntryType::File => "F",
-                            crate::fs::EntryType::Directory => "D",
-                            _ => "?",
-                        };
-                        shell_println!("  [{}] {:>8} {}", typ, r.size, r.path.display());
-                    }
+                if pattern.is_empty() {
+                    shell_println!("Usage: fsearch name <pattern> [path]");
+                    return;
                 }
-                Err(e) => shell_println!("Search error: {:?}", e),
+
+                match search::Query::new()
+                    .name_contains(pattern)
+                    .limit(50)
+                    .execute(root)
+                {
+                    Ok(results) => {
+                        shell_println!("Found {} result(s):", results.len());
+                        for r in &results {
+                            let typ = match r.entry_type {
+                                crate::fs::EntryType::File => "F",
+                                crate::fs::EntryType::Directory => "D",
+                                _ => "?",
+                            };
+                            shell_println!("  [{}] {:>8} {}", typ, r.size, r.path.display());
+                        }
+                    }
+                    Err(e) => shell_println!("Search error: {:?}", e),
+                }
             }
+            case(rest);
         }
         "glob" => {
-            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
-            let pattern = tok.first().copied().unwrap_or("");
-            let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
+            #[inline(never)]
+            fn case(rest: &str) {
+                let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+                let pattern = tok.first().copied().unwrap_or("");
+                let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
 
-            if pattern.is_empty() {
-                shell_println!("Usage: fsearch glob <pattern> [path]");
-                return;
-            }
-
-            match search::Query::new()
-                .name_glob(pattern)
-                .limit(50)
-                .execute(root)
-            {
-                Ok(results) => {
-                    shell_println!("Found {} result(s):", results.len());
-                    for r in &results {
-                        let typ = match r.entry_type {
-                            crate::fs::EntryType::File => "F",
-                            crate::fs::EntryType::Directory => "D",
-                            _ => "?",
-                        };
-                        shell_println!("  [{}] {:>8} {}", typ, r.size, r.path.display());
-                    }
+                if pattern.is_empty() {
+                    shell_println!("Usage: fsearch glob <pattern> [path]");
+                    return;
                 }
-                Err(e) => shell_println!("Search error: {:?}", e),
+
+                match search::Query::new()
+                    .name_glob(pattern)
+                    .limit(50)
+                    .execute(root)
+                {
+                    Ok(results) => {
+                        shell_println!("Found {} result(s):", results.len());
+                        for r in &results {
+                            let typ = match r.entry_type {
+                                crate::fs::EntryType::File => "F",
+                                crate::fs::EntryType::Directory => "D",
+                                _ => "?",
+                            };
+                            shell_println!("  [{}] {:>8} {}", typ, r.size, r.path.display());
+                        }
+                    }
+                    Err(e) => shell_println!("Search error: {:?}", e),
+                }
             }
+            case(rest);
         }
         "ext" => {
-            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
-            let ext = tok.first().copied().unwrap_or("");
-            let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
+            #[inline(never)]
+            fn case(rest: &str) {
+                let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+                let ext = tok.first().copied().unwrap_or("");
+                let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
 
-            if ext.is_empty() {
-                shell_println!("Usage: fsearch ext <extension> [path]");
-                return;
-            }
-
-            match search::Query::new().extension(ext).limit(50).execute(root) {
-                Ok(results) => {
-                    shell_println!("Found {} .{} file(s):", results.len(), ext);
-                    for r in &results {
-                        shell_println!("  {:>8} {}", r.size, r.path.display());
-                    }
+                if ext.is_empty() {
+                    shell_println!("Usage: fsearch ext <extension> [path]");
+                    return;
                 }
-                Err(e) => shell_println!("Search error: {:?}", e),
+
+                match search::Query::new().extension(ext).limit(50).execute(root) {
+                    Ok(results) => {
+                        shell_println!("Found {} .{} file(s):", results.len(), ext);
+                        for r in &results {
+                            shell_println!("  {:>8} {}", r.size, r.path.display());
+                        }
+                    }
+                    Err(e) => shell_println!("Search error: {:?}", e),
+                }
             }
+            case(rest);
         }
         "size" => {
-            // fsearch size <min> [max] [path]
-            let tok: Vec<&str> = rest.split_whitespace().collect();
-            if tok.is_empty() {
-                shell_println!("Usage: fsearch size <min> [max] [path]");
-                return;
-            }
-
-            let min: u64 = match tok[0].parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid min size: {}", tok[0]);
+            #[inline(never)]
+            fn case(rest: &str) {
+                // fsearch size <min> [max] [path]
+                let tok: Vec<&str> = rest.split_whitespace().collect();
+                if tok.is_empty() {
+                    shell_println!("Usage: fsearch size <min> [max] [path]");
                     return;
                 }
-            };
 
-            let mut max: Option<u64> = None;
-            let mut root = "/";
-
-            if tok.len() >= 2 {
-                if let Ok(v) = tok[1].parse::<u64>() {
-                    max = Some(v);
-                    if tok.len() >= 3 {
-                        root = tok[2];
+                let min: u64 = match tok[0].parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        shell_println!("Invalid min size: {}", tok[0]);
+                        return;
                     }
-                } else {
-                    root = tok[1];
-                }
-            }
+                };
 
-            let mut q = search::Query::new().size_min(min).files_only().limit(50);
-            if let Some(mx) = max {
-                q = q.size_max(mx);
-            }
+                let mut max: Option<u64> = None;
+                let mut root = "/";
 
-            match q.execute(root) {
-                Ok(results) => {
-                    shell_println!("Found {} file(s) >= {} bytes:", results.len(), min);
-                    for r in &results {
-                        shell_println!("  {:>8} {}", r.size, r.path.display());
+                if tok.len() >= 2 {
+                    if let Ok(v) = tok[1].parse::<u64>() {
+                        max = Some(v);
+                        if tok.len() >= 3 {
+                            root = tok[2];
+                        }
+                    } else {
+                        root = tok[1];
                     }
                 }
-                Err(e) => shell_println!("Search error: {:?}", e),
+
+                let mut q = search::Query::new().size_min(min).files_only().limit(50);
+                if let Some(mx) = max {
+                    q = q.size_max(mx);
+                }
+
+                match q.execute(root) {
+                    Ok(results) => {
+                        shell_println!("Found {} file(s) >= {} bytes:", results.len(), min);
+                        for r in &results {
+                            shell_println!("  {:>8} {}", r.size, r.path.display());
+                        }
+                    }
+                    Err(e) => shell_println!("Search error: {:?}", e),
+                }
             }
+            case(rest);
         }
         "type" => {
-            let tok: Vec<&str> = rest.splitn(2, ' ').collect();
-            let typ = tok.first().copied().unwrap_or("");
-            let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
+            #[inline(never)]
+            fn case(rest: &str) {
+                let tok: Vec<&str> = rest.splitn(2, ' ').collect();
+                let typ = tok.first().copied().unwrap_or("");
+                let root = if tok.len() > 1 { tok[1].trim() } else { "/" };
 
-            let q = match typ {
-                "file" | "f" => search::Query::new().files_only().limit(50),
-                "dir" | "d" => search::Query::new().dirs_only().limit(50),
-                _ => {
-                    shell_println!("Usage: fsearch type <file|dir> [path]");
-                    return;
-                }
-            };
-
-            match q.execute(root) {
-                Ok(results) => {
-                    shell_println!("Found {} result(s):", results.len());
-                    for r in &results {
-                        let t = match r.entry_type {
-                            crate::fs::EntryType::File => "F",
-                            crate::fs::EntryType::Directory => "D",
-                            _ => "?",
-                        };
-                        shell_println!("  [{}] {:>8} {}", t, r.size, r.path.display());
+                let q = match typ {
+                    "file" | "f" => search::Query::new().files_only().limit(50),
+                    "dir" | "d" => search::Query::new().dirs_only().limit(50),
+                    _ => {
+                        shell_println!("Usage: fsearch type <file|dir> [path]");
+                        return;
                     }
+                };
+
+                match q.execute(root) {
+                    Ok(results) => {
+                        shell_println!("Found {} result(s):", results.len());
+                        for r in &results {
+                            let t = match r.entry_type {
+                                crate::fs::EntryType::File => "F",
+                                crate::fs::EntryType::Directory => "D",
+                                _ => "?",
+                            };
+                            shell_println!("  [{}] {:>8} {}", t, r.size, r.path.display());
+                        }
+                    }
+                    Err(e) => shell_println!("Search error: {:?}", e),
                 }
-                Err(e) => shell_println!("Search error: {:?}", e),
             }
+            case(rest);
         }
         "stats" => {
-            let (searches, results) = search::stats();
-            shell_println!("File Search Statistics:");
-            shell_println!("  total searches: {}", searches);
-            shell_println!("  total results:  {}", results);
-            if searches > 0 {
-                shell_println!("  avg results:    {}", results / searches);
+            #[inline(never)]
+            fn case() {
+                let (searches, results) = search::stats();
+                shell_println!("File Search Statistics:");
+                shell_println!("  total searches: {}", searches);
+                shell_println!("  total results:  {}", results);
+                if searches > 0 {
+                    shell_println!("  avg results:    {}", results / searches);
+                }
             }
+            case();
         }
         _ => {
-            shell_println!("Usage: fsearch <name|glob|ext|size|type|stats> [args...]");
-            shell_println!();
-            shell_println!("Subcommands:");
-            shell_println!("  name <pattern> [path]   Search by name substring");
-            shell_println!("  glob <pattern> [path]   Search by glob pattern");
-            shell_println!("  ext <extension> [path]  Search by file extension");
-            shell_println!("  size <min> [max] [path] Search by size range");
-            shell_println!("  type <file|dir> [path]  Search by entry type");
-            shell_println!("  stats                   Show search statistics");
+            #[inline(never)]
+            fn case() {
+                shell_println!("Usage: fsearch <name|glob|ext|size|type|stats> [args...]");
+                shell_println!();
+                shell_println!("Subcommands:");
+                shell_println!("  name <pattern> [path]   Search by name substring");
+                shell_println!("  glob <pattern> [path]   Search by glob pattern");
+                shell_println!("  ext <extension> [path]  Search by file extension");
+                shell_println!("  size <min> [max] [path] Search by size range");
+                shell_println!("  type <file|dir> [path]  Search by entry type");
+                shell_println!("  stats                   Show search statistics");
+            }
+            case();
         }
     }
 }
@@ -27535,382 +27563,476 @@ fn cmd_useracct(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "list" | "ls" => {
-            let users = useracct::list_users();
-            if users.is_empty() {
-                shell_println!("No users");
-            } else {
-                for u in &users {
-                    let t = match u.account_type {
-                        useracct::AccountType::Administrator => "admin",
-                        useracct::AccountType::Standard => "standard",
-                        useracct::AccountType::Guest => "guest",
-                        useracct::AccountType::System => "system",
-                    };
-                    let s = if u.locked {
-                        "locked"
-                    } else if !u.enabled {
-                        "disabled"
-                    } else {
-                        "active"
-                    };
-                    shell_println!(
-                        "  uid={} {} ({}) [{}] home={}",
-                        u.uid,
-                        u.username,
-                        t,
-                        s,
-                        u.home_dir
-                    );
+            #[inline(never)]
+            fn case() {
+                let users = useracct::list_users();
+                if users.is_empty() {
+                    shell_println!("No users");
+                } else {
+                    for u in &users {
+                        let t = match u.account_type {
+                            useracct::AccountType::Administrator => "admin",
+                            useracct::AccountType::Standard => "standard",
+                            useracct::AccountType::Guest => "guest",
+                            useracct::AccountType::System => "system",
+                        };
+                        let s = if u.locked {
+                            "locked"
+                        } else if !u.enabled {
+                            "disabled"
+                        } else {
+                            "active"
+                        };
+                        shell_println!(
+                            "  uid={} {} ({}) [{}] home={}",
+                            u.uid,
+                            u.username,
+                            t,
+                            s,
+                            u.home_dir
+                        );
+                    }
                 }
             }
+            case();
         }
         "add" | "create" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: useracct add <username> <password> [admin|standard|guest]");
-            } else {
-                let name = parts[1];
-                let pass = parts[2];
-                let acct_type = match parts.get(3).copied().unwrap_or("standard") {
-                    "admin" | "administrator" => useracct::AccountType::Administrator,
-                    "guest" => useracct::AccountType::Guest,
-                    _ => useracct::AccountType::Standard,
-                };
-                match useracct::create_user(name, name, pass, acct_type) {
-                    Ok(uid) => shell_println!("Created user '{}' (uid={})", name, uid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!(
+                        "Usage: useracct add <username> <password> [admin|standard|guest]"
+                    );
+                } else {
+                    let name = parts[1];
+                    let pass = parts[2];
+                    let acct_type = match parts.get(3).copied().unwrap_or("standard") {
+                        "admin" | "administrator" => useracct::AccountType::Administrator,
+                        "guest" => useracct::AccountType::Guest,
+                        _ => useracct::AccountType::Standard,
+                    };
+                    match useracct::create_user(name, name, pass, acct_type) {
+                        Ok(uid) => shell_println!("Created user '{}' (uid={})", name, uid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "remove" | "rm" | "del" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: useracct remove <uid>");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(uid) => match useracct::remove_user(uid) {
-                        Ok(()) => shell_println!("Removed user uid={}", uid),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    Err(_) => shell_println!("Invalid uid"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: useracct remove <uid>");
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(uid) => match useracct::remove_user(uid) {
+                            Ok(()) => shell_println!("Removed user uid={}", uid),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid uid"),
+                    }
                 }
             }
+            case(&parts);
         }
         "info" | "show" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: useracct info <uid|username>");
-            } else {
-                let result = if let Ok(uid) = parts[1].parse::<u64>() {
-                    useracct::get_user(uid)
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: useracct info <uid|username>");
                 } else {
-                    useracct::get_user_by_name(parts[1])
-                };
-                match result {
-                    Ok(u) => {
-                        let t = match u.account_type {
-                            useracct::AccountType::Administrator => "Administrator",
-                            useracct::AccountType::Standard => "Standard",
-                            useracct::AccountType::Guest => "Guest",
-                            useracct::AccountType::System => "System",
-                        };
-                        let m = match u.login_method {
-                            useracct::LoginMethod::Password => "password",
-                            useracct::LoginMethod::Pin => "pin",
-                            useracct::LoginMethod::Fingerprint => "fingerprint",
-                            useracct::LoginMethod::NoPassword => "none",
-                        };
-                        shell_println!("User: {} (uid={})", u.username, u.uid);
-                        shell_println!("  Display name: {}", u.display_name);
-                        shell_println!("  Type:         {}", t);
-                        shell_println!("  Login method: {}", m);
-                        shell_println!("  Home:         {}", u.home_dir);
-                        shell_println!("  Shell:        {}", u.shell);
-                        shell_println!(
-                            "  Avatar:       {}",
-                            if u.avatar.is_empty() {
-                                "(default)"
-                            } else {
-                                &u.avatar
-                            }
-                        );
-                        shell_println!("  Auto-login:   {}", u.auto_login);
-                        shell_println!("  Enabled:      {}", u.enabled);
-                        shell_println!("  Locked:       {}", u.locked);
-                        shell_println!("  Groups:       {:?}", u.groups);
+                    let result = if let Ok(uid) = parts[1].parse::<u64>() {
+                        useracct::get_user(uid)
+                    } else {
+                        useracct::get_user_by_name(parts[1])
+                    };
+                    match result {
+                        Ok(u) => {
+                            let t = match u.account_type {
+                                useracct::AccountType::Administrator => "Administrator",
+                                useracct::AccountType::Standard => "Standard",
+                                useracct::AccountType::Guest => "Guest",
+                                useracct::AccountType::System => "System",
+                            };
+                            let m = match u.login_method {
+                                useracct::LoginMethod::Password => "password",
+                                useracct::LoginMethod::Pin => "pin",
+                                useracct::LoginMethod::Fingerprint => "fingerprint",
+                                useracct::LoginMethod::NoPassword => "none",
+                            };
+                            shell_println!("User: {} (uid={})", u.username, u.uid);
+                            shell_println!("  Display name: {}", u.display_name);
+                            shell_println!("  Type:         {}", t);
+                            shell_println!("  Login method: {}", m);
+                            shell_println!("  Home:         {}", u.home_dir);
+                            shell_println!("  Shell:        {}", u.shell);
+                            shell_println!(
+                                "  Avatar:       {}",
+                                if u.avatar.is_empty() {
+                                    "(default)"
+                                } else {
+                                    &u.avatar
+                                }
+                            );
+                            shell_println!("  Auto-login:   {}", u.auto_login);
+                            shell_println!("  Enabled:      {}", u.enabled);
+                            shell_println!("  Locked:       {}", u.locked);
+                            shell_println!("  Groups:       {:?}", u.groups);
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
+            case(&parts);
         }
         "whoami" => match useracct::current_user() {
             Some(u) => shell_println!("{} (uid={})", u.username, u.uid),
             None => shell_println!("No active session"),
         },
         "login" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: useracct login <username> <password>");
-            } else {
-                match useracct::authenticate(parts[1], parts[2]) {
-                    Ok(sid) => shell_println!("Logged in as '{}' (session={})", parts[1], sid),
-                    Err(e) => shell_println!("Auth failed: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: useracct login <username> <password>");
+                } else {
+                    match useracct::authenticate(parts[1], parts[2]) {
+                        Ok(sid) => shell_println!("Logged in as '{}' (session={})", parts[1], sid),
+                        Err(e) => shell_println!("Auth failed: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "logout" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: useracct logout <session_id>");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(sid) => match useracct::logout(sid) {
-                        Ok(()) => shell_println!("Logged out session {}", sid),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    Err(_) => shell_println!("Invalid session id"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: useracct logout <session_id>");
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(sid) => match useracct::logout(sid) {
+                            Ok(()) => shell_println!("Logged out session {}", sid),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid session id"),
+                    }
                 }
             }
+            case(&parts);
         }
         "sessions" | "sess" => {
-            let sessions = useracct::list_sessions();
-            if sessions.is_empty() {
-                shell_println!("No active sessions");
-            } else {
-                for s in &sessions {
-                    shell_println!(
-                        "  session={} uid={} user={} active={}",
-                        s.session_id,
-                        s.uid,
-                        s.username,
-                        s.active
-                    );
+            #[inline(never)]
+            fn case() {
+                let sessions = useracct::list_sessions();
+                if sessions.is_empty() {
+                    shell_println!("No active sessions");
+                } else {
+                    for s in &sessions {
+                        shell_println!(
+                            "  session={} uid={} user={} active={}",
+                            s.session_id,
+                            s.uid,
+                            s.username,
+                            s.active
+                        );
+                    }
                 }
             }
+            case();
         }
         "passwd" | "password" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: useracct passwd <uid> <new_password>");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(uid) => match useracct::change_password(uid, parts[2]) {
-                        Ok(()) => shell_println!("Password changed for uid={}", uid),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    Err(_) => shell_println!("Invalid uid"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: useracct passwd <uid> <new_password>");
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(uid) => match useracct::change_password(uid, parts[2]) {
+                            Ok(()) => shell_println!("Password changed for uid={}", uid),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid uid"),
+                    }
                 }
             }
+            case(&parts);
         }
         "enable" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: useracct enable <uid>");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(uid) => match useracct::set_enabled(uid, true) {
-                        Ok(()) => shell_println!("Enabled uid={}", uid),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    Err(_) => shell_println!("Invalid uid"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: useracct enable <uid>");
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(uid) => match useracct::set_enabled(uid, true) {
+                            Ok(()) => shell_println!("Enabled uid={}", uid),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid uid"),
+                    }
                 }
             }
+            case(&parts);
         }
         "disable" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: useracct disable <uid>");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(uid) => match useracct::set_enabled(uid, false) {
-                        Ok(()) => shell_println!("Disabled uid={}", uid),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    Err(_) => shell_println!("Invalid uid"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: useracct disable <uid>");
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(uid) => match useracct::set_enabled(uid, false) {
+                            Ok(()) => shell_println!("Disabled uid={}", uid),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid uid"),
+                    }
                 }
             }
+            case(&parts);
         }
         "unlock" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: useracct unlock <uid>");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(uid) => match useracct::unlock(uid) {
-                        Ok(()) => shell_println!("Unlocked uid={}", uid),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    Err(_) => shell_println!("Invalid uid"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: useracct unlock <uid>");
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(uid) => match useracct::unlock(uid) {
+                            Ok(()) => shell_println!("Unlocked uid={}", uid),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid uid"),
+                    }
                 }
             }
+            case(&parts);
         }
         "type" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: useracct type <uid> <admin|standard|guest>");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(uid) => {
-                        let acct_type = match parts[2] {
-                            "admin" | "administrator" => useracct::AccountType::Administrator,
-                            "guest" => useracct::AccountType::Guest,
-                            "system" => useracct::AccountType::System,
-                            _ => useracct::AccountType::Standard,
-                        };
-                        match useracct::set_account_type(uid, acct_type) {
-                            Ok(()) => shell_println!("Set type for uid={}", uid),
-                            Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: useracct type <uid> <admin|standard|guest>");
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(uid) => {
+                            let acct_type = match parts[2] {
+                                "admin" | "administrator" => useracct::AccountType::Administrator,
+                                "guest" => useracct::AccountType::Guest,
+                                "system" => useracct::AccountType::System,
+                                _ => useracct::AccountType::Standard,
+                            };
+                            match useracct::set_account_type(uid, acct_type) {
+                                Ok(()) => shell_println!("Set type for uid={}", uid),
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
                         }
+                        Err(_) => shell_println!("Invalid uid"),
                     }
-                    Err(_) => shell_println!("Invalid uid"),
                 }
             }
+            case(&parts);
         }
         "display" | "dname" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: useracct display <uid> <name...>");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(uid) => {
-                        let name = parts[2..].join(" ");
-                        match useracct::set_display_name(uid, &name) {
-                            Ok(()) => shell_println!("Set display name for uid={}", uid),
-                            Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: useracct display <uid> <name...>");
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(uid) => {
+                            let name = parts[2..].join(" ");
+                            match useracct::set_display_name(uid, &name) {
+                                Ok(()) => shell_println!("Set display name for uid={}", uid),
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
                         }
+                        Err(_) => shell_println!("Invalid uid"),
                     }
-                    Err(_) => shell_println!("Invalid uid"),
                 }
             }
+            case(&parts);
         }
         "avatar" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: useracct avatar <uid> <path>");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(uid) => match useracct::set_avatar(uid, parts[2]) {
-                        Ok(()) => shell_println!("Set avatar for uid={}", uid),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    Err(_) => shell_println!("Invalid uid"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: useracct avatar <uid> <path>");
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(uid) => match useracct::set_avatar(uid, parts[2]) {
+                            Ok(()) => shell_println!("Set avatar for uid={}", uid),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid uid"),
+                    }
                 }
             }
+            case(&parts);
         }
         "autologin" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: useracct autologin <uid> <on|off>");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(uid) => {
-                        let on = matches!(parts[2], "on" | "true" | "yes" | "1");
-                        match useracct::set_auto_login(uid, on) {
-                            Ok(()) => shell_println!(
-                                "Auto-login {} for uid={}",
-                                if on { "enabled" } else { "disabled" },
-                                uid
-                            ),
-                            Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: useracct autologin <uid> <on|off>");
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(uid) => {
+                            let on = matches!(parts[2], "on" | "true" | "yes" | "1");
+                            match useracct::set_auto_login(uid, on) {
+                                Ok(()) => shell_println!(
+                                    "Auto-login {} for uid={}",
+                                    if on { "enabled" } else { "disabled" },
+                                    uid
+                                ),
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
                         }
+                        Err(_) => shell_println!("Invalid uid"),
                     }
-                    Err(_) => shell_println!("Invalid uid"),
                 }
             }
+            case(&parts);
         }
         "groups" | "grp" => {
-            let groups = useracct::list_groups();
-            if groups.is_empty() {
-                shell_println!("No groups");
-            } else {
-                for g in &groups {
-                    let kind = if g.system_group { "system" } else { "user" };
-                    shell_println!("  gid={} {} ({}) — {}", g.gid, g.name, kind, g.description);
+            #[inline(never)]
+            fn case() {
+                let groups = useracct::list_groups();
+                if groups.is_empty() {
+                    shell_println!("No groups");
+                } else {
+                    for g in &groups {
+                        let kind = if g.system_group { "system" } else { "user" };
+                        shell_println!("  gid={} {} ({}) — {}", g.gid, g.name, kind, g.description);
+                    }
                 }
             }
+            case();
         }
         "addgroup" | "gadd" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: useracct addgroup <name> [description] [--system]");
-            } else {
-                let sys = parts.contains(&"--system");
-                let desc = parts.get(2).copied().unwrap_or("");
-                match useracct::create_group(parts[1], desc, sys) {
-                    Ok(gid) => shell_println!("Created group '{}' (gid={})", parts[1], gid),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: useracct addgroup <name> [description] [--system]");
+                } else {
+                    let sys = parts.contains(&"--system");
+                    let desc = parts.get(2).copied().unwrap_or("");
+                    match useracct::create_group(parts[1], desc, sys) {
+                        Ok(gid) => shell_println!("Created group '{}' (gid={})", parts[1], gid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "rmgroup" | "gdel" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: useracct rmgroup <gid>");
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(gid) => match useracct::remove_group(gid) {
-                        Ok(()) => shell_println!("Removed group gid={}", gid),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    Err(_) => shell_println!("Invalid gid"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: useracct rmgroup <gid>");
+                } else {
+                    match parts[1].parse::<u64>() {
+                        Ok(gid) => match useracct::remove_group(gid) {
+                            Ok(()) => shell_println!("Removed group gid={}", gid),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid gid"),
+                    }
                 }
             }
+            case(&parts);
         }
         "join" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: useracct join <uid> <gid>");
-            } else {
-                match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
-                    (Ok(uid), Ok(gid)) => match useracct::add_to_group(uid, gid) {
-                        Ok(()) => shell_println!("Added uid={} to gid={}", uid, gid),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    _ => shell_println!("Invalid uid/gid"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: useracct join <uid> <gid>");
+                } else {
+                    match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
+                        (Ok(uid), Ok(gid)) => match useracct::add_to_group(uid, gid) {
+                            Ok(()) => shell_println!("Added uid={} to gid={}", uid, gid),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        _ => shell_println!("Invalid uid/gid"),
+                    }
                 }
             }
+            case(&parts);
         }
         "leave" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: useracct leave <uid> <gid>");
-            } else {
-                match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
-                    (Ok(uid), Ok(gid)) => match useracct::remove_from_group(uid, gid) {
-                        Ok(()) => shell_println!("Removed uid={} from gid={}", uid, gid),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    _ => shell_println!("Invalid uid/gid"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: useracct leave <uid> <gid>");
+                } else {
+                    match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
+                        (Ok(uid), Ok(gid)) => match useracct::remove_from_group(uid, gid) {
+                            Ok(()) => shell_println!("Removed uid={} from gid={}", uid, gid),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        _ => shell_println!("Invalid uid/gid"),
+                    }
                 }
             }
+            case(&parts);
         }
         "stats" => {
-            let (uc, gc, sc, lc) = useracct::stats();
-            shell_println!(
-                "Users: {}  Groups: {}  Sessions: {}  Total logins: {}",
-                uc,
-                gc,
-                sc,
-                lc
-            );
+            #[inline(never)]
+            fn case() {
+                let (uc, gc, sc, lc) = useracct::stats();
+                shell_println!(
+                    "Users: {}  Groups: {}  Sessions: {}  Total logins: {}",
+                    uc,
+                    gc,
+                    sc,
+                    lc
+                );
+            }
+            case();
         }
         "init" => {
-            useracct::init_defaults();
-            shell_println!("User accounts initialized with defaults");
+            #[inline(never)]
+            fn case() {
+                useracct::init_defaults();
+                shell_println!("User accounts initialized with defaults");
+            }
+            case();
         }
         "test" => match useracct::self_test() {
             Ok(()) => shell_println!("useracct: all tests passed"),
             Err(e) => shell_println!("useracct: test FAILED: {:?}", e),
         },
         _ => {
-            shell_println!("useracct — user accounts, groups, sessions");
-            shell_println!("  list|ls          List users");
-            shell_println!("  add <user> <pw> [type]  Create user");
-            shell_println!("  remove <uid>     Remove user");
-            shell_println!("  info <uid|name>  Show user details");
-            shell_println!("  whoami           Current user");
-            shell_println!("  login <u> <pw>   Authenticate");
-            shell_println!("  logout <sid>     End session");
-            shell_println!("  sessions         List sessions");
-            shell_println!("  passwd <uid> <pw> Change password");
-            shell_println!("  enable <uid>     Enable account");
-            shell_println!("  disable <uid>    Disable account");
-            shell_println!("  unlock <uid>     Unlock account");
-            shell_println!("  type <uid> <t>   Set account type");
-            shell_println!("  display <uid> <n> Set display name");
-            shell_println!("  avatar <uid> <p> Set avatar path");
-            shell_println!("  autologin <uid> <on|off>  Toggle auto-login");
-            shell_println!("  groups           List groups");
-            shell_println!("  addgroup <name>  Create group");
-            shell_println!("  rmgroup <gid>    Remove group");
-            shell_println!("  join <uid> <gid> Add user to group");
-            shell_println!("  leave <uid> <gid> Remove from group");
-            shell_println!("  stats            Show statistics");
-            shell_println!("  init             Load defaults");
-            shell_println!("  test             Run self-tests");
+            #[inline(never)]
+            fn case() {
+                shell_println!("useracct — user accounts, groups, sessions");
+                shell_println!("  list|ls          List users");
+                shell_println!("  add <user> <pw> [type]  Create user");
+                shell_println!("  remove <uid>     Remove user");
+                shell_println!("  info <uid|name>  Show user details");
+                shell_println!("  whoami           Current user");
+                shell_println!("  login <u> <pw>   Authenticate");
+                shell_println!("  logout <sid>     End session");
+                shell_println!("  sessions         List sessions");
+                shell_println!("  passwd <uid> <pw> Change password");
+                shell_println!("  enable <uid>     Enable account");
+                shell_println!("  disable <uid>    Disable account");
+                shell_println!("  unlock <uid>     Unlock account");
+                shell_println!("  type <uid> <t>   Set account type");
+                shell_println!("  display <uid> <n> Set display name");
+                shell_println!("  avatar <uid> <p> Set avatar path");
+                shell_println!("  autologin <uid> <on|off>  Toggle auto-login");
+                shell_println!("  groups           List groups");
+                shell_println!("  addgroup <name>  Create group");
+                shell_println!("  rmgroup <gid>    Remove group");
+                shell_println!("  join <uid> <gid> Add user to group");
+                shell_println!("  leave <uid> <gid> Remove from group");
+                shell_println!("  stats            Show statistics");
+                shell_println!("  init             Load defaults");
+                shell_println!("  test             Run self-tests");
+            }
+            case();
         }
     }
 }
@@ -27922,469 +28044,578 @@ fn cmd_progmgr(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "list" | "ls" => {
-            let progs = progmgr::list_programs();
-            if progs.is_empty() {
-                shell_println!("No programs registered");
-            } else {
-                for p in &progs {
-                    let prio = match p.priority {
-                        progmgr::PriorityLevel::Idle => "idle",
-                        progmgr::PriorityLevel::BelowNormal => "below",
-                        progmgr::PriorityLevel::Normal => "normal",
-                        progmgr::PriorityLevel::AboveNormal => "above",
-                        progmgr::PriorityLevel::High => "high",
-                        progmgr::PriorityLevel::Realtime => "rt",
-                    };
-                    let status = if p.installed { "installed" } else { "removed" };
-                    shell_println!(
-                        "  {} v{} [{}] prio={} caps={}",
-                        p.app_id,
-                        p.version,
-                        status,
-                        prio,
-                        p.capabilities.len()
-                    );
+            #[inline(never)]
+            fn case() {
+                let progs = progmgr::list_programs();
+                if progs.is_empty() {
+                    shell_println!("No programs registered");
+                } else {
+                    for p in &progs {
+                        let prio = match p.priority {
+                            progmgr::PriorityLevel::Idle => "idle",
+                            progmgr::PriorityLevel::BelowNormal => "below",
+                            progmgr::PriorityLevel::Normal => "normal",
+                            progmgr::PriorityLevel::AboveNormal => "above",
+                            progmgr::PriorityLevel::High => "high",
+                            progmgr::PriorityLevel::Realtime => "rt",
+                        };
+                        let status = if p.installed { "installed" } else { "removed" };
+                        shell_println!(
+                            "  {} v{} [{}] prio={} caps={}",
+                            p.app_id,
+                            p.version,
+                            status,
+                            prio,
+                            p.capabilities.len()
+                        );
+                    }
                 }
             }
+            case();
         }
         "installed" => {
-            let progs = progmgr::list_installed();
-            if progs.is_empty() {
-                shell_println!("No installed programs");
-            } else {
-                for p in &progs {
-                    shell_println!("  {} — {} v{}", p.app_id, p.name, p.version);
+            #[inline(never)]
+            fn case() {
+                let progs = progmgr::list_installed();
+                if progs.is_empty() {
+                    shell_println!("No installed programs");
+                } else {
+                    for p in &progs {
+                        shell_println!("  {} — {} v{}", p.app_id, p.name, p.version);
+                    }
                 }
             }
+            case();
         }
         "info" | "show" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: progmgr info <app_id>");
-            } else {
-                match progmgr::get_program(parts[1]) {
-                    Ok(p) => {
-                        let prio = match p.priority {
-                            progmgr::PriorityLevel::Idle => "Idle",
-                            progmgr::PriorityLevel::BelowNormal => "Below Normal",
-                            progmgr::PriorityLevel::Normal => "Normal",
-                            progmgr::PriorityLevel::AboveNormal => "Above Normal",
-                            progmgr::PriorityLevel::High => "High",
-                            progmgr::PriorityLevel::Realtime => "Realtime",
-                        };
-                        shell_println!("Program: {} ({})", p.name, p.app_id);
-                        shell_println!("  Version:    {}", p.version);
-                        shell_println!("  Install:    {}", p.install_dir);
-                        shell_println!("  Settings:   {}", p.settings_dir);
-                        shell_println!("  Data:       {}", p.data_dir);
-                        shell_println!("  Priority:   {}", prio);
-                        shell_println!("  Caps:       {}", p.capabilities.len());
-                        shell_println!("  Notifs:     {}", p.notifications.len());
-                        shell_println!("  Size:       {} bytes", p.size_bytes);
-                        shell_println!("  Installed:  {}", p.installed);
-                        shell_println!("  Compilable: {}", p.compilable);
-                        shell_println!("  Snapshots:  {}", p.snapshots.len());
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: progmgr info <app_id>");
+                } else {
+                    match progmgr::get_program(parts[1]) {
+                        Ok(p) => {
+                            let prio = match p.priority {
+                                progmgr::PriorityLevel::Idle => "Idle",
+                                progmgr::PriorityLevel::BelowNormal => "Below Normal",
+                                progmgr::PriorityLevel::Normal => "Normal",
+                                progmgr::PriorityLevel::AboveNormal => "Above Normal",
+                                progmgr::PriorityLevel::High => "High",
+                                progmgr::PriorityLevel::Realtime => "Realtime",
+                            };
+                            shell_println!("Program: {} ({})", p.name, p.app_id);
+                            shell_println!("  Version:    {}", p.version);
+                            shell_println!("  Install:    {}", p.install_dir);
+                            shell_println!("  Settings:   {}", p.settings_dir);
+                            shell_println!("  Data:       {}", p.data_dir);
+                            shell_println!("  Priority:   {}", prio);
+                            shell_println!("  Caps:       {}", p.capabilities.len());
+                            shell_println!("  Notifs:     {}", p.notifications.len());
+                            shell_println!("  Size:       {} bytes", p.size_bytes);
+                            shell_println!("  Installed:  {}", p.installed);
+                            shell_println!("  Compilable: {}", p.compilable);
+                            shell_println!("  Snapshots:  {}", p.snapshots.len());
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
+            case(&parts);
         }
         "register" | "reg" => {
-            if parts.len() < 4 {
-                shell_println!("Usage: progmgr register <app_id> <name> <install_dir> [size]");
-            } else {
-                let size = parts
-                    .get(4)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                match progmgr::register(parts[1], parts[2], "1.0.0", parts[3], size) {
-                    Ok(()) => shell_println!("Registered '{}'", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 4 {
+                    shell_println!("Usage: progmgr register <app_id> <name> <install_dir> [size]");
+                } else {
+                    let size = parts
+                        .get(4)
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    match progmgr::register(parts[1], parts[2], "1.0.0", parts[3], size) {
+                        Ok(()) => shell_println!("Registered '{}'", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "uninstall" | "uninst" => {
-            if parts.len() < 2 {
-                shell_println!(
-                    "Usage: progmgr uninstall <app_id> [full|keepfiles|keepsettings|keepall]"
-                );
-            } else {
-                let opt = match parts.get(2).copied().unwrap_or("full") {
-                    "keepfiles" | "keep-files" => progmgr::UninstallOption::KeepFiles,
-                    "keepsettings" | "keep-settings" => progmgr::UninstallOption::KeepSettings,
-                    "keepall" | "keep-all" => progmgr::UninstallOption::KeepAll,
-                    _ => progmgr::UninstallOption::Full,
-                };
-                match progmgr::uninstall(parts[1], opt) {
-                    Ok(()) => shell_println!("Uninstalled '{}'", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!(
+                        "Usage: progmgr uninstall <app_id> [full|keepfiles|keepsettings|keepall]"
+                    );
+                } else {
+                    let opt = match parts.get(2).copied().unwrap_or("full") {
+                        "keepfiles" | "keep-files" => progmgr::UninstallOption::KeepFiles,
+                        "keepsettings" | "keep-settings" => progmgr::UninstallOption::KeepSettings,
+                        "keepall" | "keep-all" => progmgr::UninstallOption::KeepAll,
+                        _ => progmgr::UninstallOption::Full,
+                    };
+                    match progmgr::uninstall(parts[1], opt) {
+                        Ok(()) => shell_println!("Uninstalled '{}'", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "priority" | "prio" => {
-            if parts.len() < 3 {
-                shell_println!(
-                    "Usage: progmgr priority <app_id> <idle|below|normal|above|high|rt>"
-                );
-            } else {
-                let prio = match parts[2] {
-                    "idle" => progmgr::PriorityLevel::Idle,
-                    "below" => progmgr::PriorityLevel::BelowNormal,
-                    "above" => progmgr::PriorityLevel::AboveNormal,
-                    "high" => progmgr::PriorityLevel::High,
-                    "rt" | "realtime" => progmgr::PriorityLevel::Realtime,
-                    _ => progmgr::PriorityLevel::Normal,
-                };
-                match progmgr::set_priority(parts[1], prio) {
-                    Ok(()) => shell_println!("Priority set for '{}'", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!(
+                        "Usage: progmgr priority <app_id> <idle|below|normal|above|high|rt>"
+                    );
+                } else {
+                    let prio = match parts[2] {
+                        "idle" => progmgr::PriorityLevel::Idle,
+                        "below" => progmgr::PriorityLevel::BelowNormal,
+                        "above" => progmgr::PriorityLevel::AboveNormal,
+                        "high" => progmgr::PriorityLevel::High,
+                        "rt" | "realtime" => progmgr::PriorityLevel::Realtime,
+                        _ => progmgr::PriorityLevel::Normal,
+                    };
+                    match progmgr::set_priority(parts[1], prio) {
+                        Ok(()) => shell_println!("Priority set for '{}'", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "grant" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: progmgr grant <app_id> <cap>");
-                shell_println!("  Caps: network, filesystem, removable, audio, camera, location,");
-                shell_println!("  notifications, autostart, system, crossapp, background,");
-                shell_println!("  hardware, install, usermgmt, clipboard");
-            } else {
-                let cap = match parts[2] {
-                    "network" | "net" => Some(progmgr::ProgCapability::Network),
-                    "filesystem" | "fs" => Some(progmgr::ProgCapability::FilesystemFull),
-                    "removable" => Some(progmgr::ProgCapability::RemovableMedia),
-                    "audio" => Some(progmgr::ProgCapability::Audio),
-                    "camera" => Some(progmgr::ProgCapability::Camera),
-                    "location" => Some(progmgr::ProgCapability::Location),
-                    "notifications" | "notif" => Some(progmgr::ProgCapability::Notifications),
-                    "autostart" => Some(progmgr::ProgCapability::Autostart),
-                    "system" => Some(progmgr::ProgCapability::SystemSettings),
-                    "crossapp" => Some(progmgr::ProgCapability::CrossAppData),
-                    "background" | "bg" => Some(progmgr::ProgCapability::Background),
-                    "hardware" | "hw" => Some(progmgr::ProgCapability::Hardware),
-                    "install" => Some(progmgr::ProgCapability::InstallSoftware),
-                    "usermgmt" => Some(progmgr::ProgCapability::UserManagement),
-                    "clipboard" | "clip" => Some(progmgr::ProgCapability::Clipboard),
-                    _ => None,
-                };
-                match cap {
-                    Some(c) => match progmgr::grant_capability(parts[1], c) {
-                        Ok(()) => shell_println!("Granted '{}' to '{}'", parts[2], parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    None => shell_println!("Unknown capability: {}", parts[2]),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: progmgr grant <app_id> <cap>");
+                    shell_println!(
+                        "  Caps: network, filesystem, removable, audio, camera, location,"
+                    );
+                    shell_println!("  notifications, autostart, system, crossapp, background,");
+                    shell_println!("  hardware, install, usermgmt, clipboard");
+                } else {
+                    let cap = match parts[2] {
+                        "network" | "net" => Some(progmgr::ProgCapability::Network),
+                        "filesystem" | "fs" => Some(progmgr::ProgCapability::FilesystemFull),
+                        "removable" => Some(progmgr::ProgCapability::RemovableMedia),
+                        "audio" => Some(progmgr::ProgCapability::Audio),
+                        "camera" => Some(progmgr::ProgCapability::Camera),
+                        "location" => Some(progmgr::ProgCapability::Location),
+                        "notifications" | "notif" => Some(progmgr::ProgCapability::Notifications),
+                        "autostart" => Some(progmgr::ProgCapability::Autostart),
+                        "system" => Some(progmgr::ProgCapability::SystemSettings),
+                        "crossapp" => Some(progmgr::ProgCapability::CrossAppData),
+                        "background" | "bg" => Some(progmgr::ProgCapability::Background),
+                        "hardware" | "hw" => Some(progmgr::ProgCapability::Hardware),
+                        "install" => Some(progmgr::ProgCapability::InstallSoftware),
+                        "usermgmt" => Some(progmgr::ProgCapability::UserManagement),
+                        "clipboard" | "clip" => Some(progmgr::ProgCapability::Clipboard),
+                        _ => None,
+                    };
+                    match cap {
+                        Some(c) => match progmgr::grant_capability(parts[1], c) {
+                            Ok(()) => shell_println!("Granted '{}' to '{}'", parts[2], parts[1]),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        None => shell_println!("Unknown capability: {}", parts[2]),
+                    }
                 }
             }
+            case(&parts);
         }
         "revoke" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: progmgr revoke <app_id> <cap>");
-            } else {
-                let cap = match parts[2] {
-                    "network" | "net" => Some(progmgr::ProgCapability::Network),
-                    "filesystem" | "fs" => Some(progmgr::ProgCapability::FilesystemFull),
-                    "removable" => Some(progmgr::ProgCapability::RemovableMedia),
-                    "audio" => Some(progmgr::ProgCapability::Audio),
-                    "camera" => Some(progmgr::ProgCapability::Camera),
-                    "location" => Some(progmgr::ProgCapability::Location),
-                    "notifications" | "notif" => Some(progmgr::ProgCapability::Notifications),
-                    "autostart" => Some(progmgr::ProgCapability::Autostart),
-                    "system" => Some(progmgr::ProgCapability::SystemSettings),
-                    "crossapp" => Some(progmgr::ProgCapability::CrossAppData),
-                    "background" | "bg" => Some(progmgr::ProgCapability::Background),
-                    "hardware" | "hw" => Some(progmgr::ProgCapability::Hardware),
-                    "install" => Some(progmgr::ProgCapability::InstallSoftware),
-                    "usermgmt" => Some(progmgr::ProgCapability::UserManagement),
-                    "clipboard" | "clip" => Some(progmgr::ProgCapability::Clipboard),
-                    _ => None,
-                };
-                match cap {
-                    Some(c) => match progmgr::revoke_capability(parts[1], c) {
-                        Ok(()) => shell_println!("Revoked '{}' from '{}'", parts[2], parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    None => shell_println!("Unknown capability: {}", parts[2]),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: progmgr revoke <app_id> <cap>");
+                } else {
+                    let cap = match parts[2] {
+                        "network" | "net" => Some(progmgr::ProgCapability::Network),
+                        "filesystem" | "fs" => Some(progmgr::ProgCapability::FilesystemFull),
+                        "removable" => Some(progmgr::ProgCapability::RemovableMedia),
+                        "audio" => Some(progmgr::ProgCapability::Audio),
+                        "camera" => Some(progmgr::ProgCapability::Camera),
+                        "location" => Some(progmgr::ProgCapability::Location),
+                        "notifications" | "notif" => Some(progmgr::ProgCapability::Notifications),
+                        "autostart" => Some(progmgr::ProgCapability::Autostart),
+                        "system" => Some(progmgr::ProgCapability::SystemSettings),
+                        "crossapp" => Some(progmgr::ProgCapability::CrossAppData),
+                        "background" | "bg" => Some(progmgr::ProgCapability::Background),
+                        "hardware" | "hw" => Some(progmgr::ProgCapability::Hardware),
+                        "install" => Some(progmgr::ProgCapability::InstallSoftware),
+                        "usermgmt" => Some(progmgr::ProgCapability::UserManagement),
+                        "clipboard" | "clip" => Some(progmgr::ProgCapability::Clipboard),
+                        _ => None,
+                    };
+                    match cap {
+                        Some(c) => match progmgr::revoke_capability(parts[1], c) {
+                            Ok(()) => shell_println!("Revoked '{}' from '{}'", parts[2], parts[1]),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        None => shell_println!("Unknown capability: {}", parts[2]),
+                    }
                 }
             }
+            case(&parts);
         }
         "addnotif" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: progmgr addnotif <app_id> <name>");
-            } else {
-                match progmgr::add_notification(parts[1], parts[2]) {
-                    Ok(()) => shell_println!("Added notification '{}' to '{}'", parts[2], parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: progmgr addnotif <app_id> <name>");
+                } else {
+                    match progmgr::add_notification(parts[1], parts[2]) {
+                        Ok(()) => {
+                            shell_println!("Added notification '{}' to '{}'", parts[2], parts[1])
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "rmnotif" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: progmgr rmnotif <app_id> <name>");
-            } else {
-                match progmgr::remove_notification(parts[1], parts[2]) {
-                    Ok(()) => {
-                        shell_println!("Removed notification '{}' from '{}'", parts[2], parts[1])
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: progmgr rmnotif <app_id> <name>");
+                } else {
+                    match progmgr::remove_notification(parts[1], parts[2]) {
+                        Ok(()) => {
+                            shell_println!(
+                                "Removed notification '{}' from '{}'",
+                                parts[2],
+                                parts[1]
+                            )
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
+            case(&parts);
         }
         "notifcfg" => {
-            if parts.len() < 4 {
-                shell_println!(
-                    "Usage: progmgr notifcfg <app_id> <name> <show|sound|banner|lock> <value>"
-                );
-            } else {
-                let val = parts.get(4).copied().unwrap_or("");
-                match parts[3] {
-                    "show" => {
-                        let v = matches!(val, "on" | "true" | "yes" | "1");
-                        match progmgr::set_notification_config(
-                            parts[1],
-                            parts[2],
-                            Some(v),
-                            None,
-                            None,
-                            None,
-                        ) {
-                            Ok(()) => {
-                                shell_println!("Set show={} for {}/{}", v, parts[1], parts[2])
-                            }
-                            Err(e) => shell_println!("Error: {:?}", e),
-                        }
-                    }
-                    "sound" => {
-                        match progmgr::set_notification_config(
-                            parts[1],
-                            parts[2],
-                            None,
-                            Some(val),
-                            None,
-                            None,
-                        ) {
-                            Ok(()) => {
-                                shell_println!("Set sound='{}' for {}/{}", val, parts[1], parts[2])
-                            }
-                            Err(e) => shell_println!("Error: {:?}", e),
-                        }
-                    }
-                    "banner" => {
-                        let v = matches!(val, "on" | "true" | "yes" | "1");
-                        match progmgr::set_notification_config(
-                            parts[1],
-                            parts[2],
-                            None,
-                            None,
-                            Some(v),
-                            None,
-                        ) {
-                            Ok(()) => {
-                                shell_println!("Set banner={} for {}/{}", v, parts[1], parts[2])
-                            }
-                            Err(e) => shell_println!("Error: {:?}", e),
-                        }
-                    }
-                    "lock" => {
-                        let v = matches!(val, "on" | "true" | "yes" | "1");
-                        match progmgr::set_notification_config(
-                            parts[1],
-                            parts[2],
-                            None,
-                            None,
-                            None,
-                            Some(v),
-                        ) {
-                            Ok(()) => shell_println!(
-                                "Set lock_screen={} for {}/{}",
-                                v,
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 4 {
+                    shell_println!(
+                        "Usage: progmgr notifcfg <app_id> <name> <show|sound|banner|lock> <value>"
+                    );
+                } else {
+                    let val = parts.get(4).copied().unwrap_or("");
+                    match parts[3] {
+                        "show" => {
+                            let v = matches!(val, "on" | "true" | "yes" | "1");
+                            match progmgr::set_notification_config(
                                 parts[1],
-                                parts[2]
-                            ),
-                            Err(e) => shell_println!("Error: {:?}", e),
+                                parts[2],
+                                Some(v),
+                                None,
+                                None,
+                                None,
+                            ) {
+                                Ok(()) => {
+                                    shell_println!("Set show={} for {}/{}", v, parts[1], parts[2])
+                                }
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
                         }
+                        "sound" => {
+                            match progmgr::set_notification_config(
+                                parts[1],
+                                parts[2],
+                                None,
+                                Some(val),
+                                None,
+                                None,
+                            ) {
+                                Ok(()) => {
+                                    shell_println!(
+                                        "Set sound='{}' for {}/{}",
+                                        val,
+                                        parts[1],
+                                        parts[2]
+                                    )
+                                }
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
+                        }
+                        "banner" => {
+                            let v = matches!(val, "on" | "true" | "yes" | "1");
+                            match progmgr::set_notification_config(
+                                parts[1],
+                                parts[2],
+                                None,
+                                None,
+                                Some(v),
+                                None,
+                            ) {
+                                Ok(()) => {
+                                    shell_println!("Set banner={} for {}/{}", v, parts[1], parts[2])
+                                }
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
+                        }
+                        "lock" => {
+                            let v = matches!(val, "on" | "true" | "yes" | "1");
+                            match progmgr::set_notification_config(
+                                parts[1],
+                                parts[2],
+                                None,
+                                None,
+                                None,
+                                Some(v),
+                            ) {
+                                Ok(()) => shell_println!(
+                                    "Set lock_screen={} for {}/{}",
+                                    v,
+                                    parts[1],
+                                    parts[2]
+                                ),
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
+                        }
+                        _ => shell_println!("Unknown field: {}", parts[3]),
                     }
-                    _ => shell_println!("Unknown field: {}", parts[3]),
                 }
             }
+            case(&parts);
         }
         "snap" => {
-            if parts.len() < 3 {
-                shell_println!(
-                    "Usage: progmgr snap <app_id> <name> [full|settings|data] [parent_id]"
-                );
-            } else {
-                let scope = match parts.get(3).copied().unwrap_or("full") {
-                    "settings" => progmgr::SnapshotScope::SettingsOnly,
-                    "data" => progmgr::SnapshotScope::DataOnly,
-                    _ => progmgr::SnapshotScope::Full,
-                };
-                let parent = parts
-                    .get(4)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                match progmgr::create_snapshot(parts[1], parts[2], scope, parent) {
-                    Ok(id) => shell_println!("Created snapshot {} for '{}'", id, parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!(
+                        "Usage: progmgr snap <app_id> <name> [full|settings|data] [parent_id]"
+                    );
+                } else {
+                    let scope = match parts.get(3).copied().unwrap_or("full") {
+                        "settings" => progmgr::SnapshotScope::SettingsOnly,
+                        "data" => progmgr::SnapshotScope::DataOnly,
+                        _ => progmgr::SnapshotScope::Full,
+                    };
+                    let parent = parts
+                        .get(4)
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    match progmgr::create_snapshot(parts[1], parts[2], scope, parent) {
+                        Ok(id) => shell_println!("Created snapshot {} for '{}'", id, parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "rmsnap" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: progmgr rmsnap <app_id> <snap_id>");
-            } else {
-                match parts[2].parse::<u64>() {
-                    Ok(id) => match progmgr::delete_snapshot(parts[1], id) {
-                        Ok(()) => shell_println!("Deleted snapshot {}", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    Err(_) => shell_println!("Invalid snapshot id"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: progmgr rmsnap <app_id> <snap_id>");
+                } else {
+                    match parts[2].parse::<u64>() {
+                        Ok(id) => match progmgr::delete_snapshot(parts[1], id) {
+                            Ok(()) => shell_println!("Deleted snapshot {}", id),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid snapshot id"),
+                    }
                 }
             }
+            case(&parts);
         }
         "snaps" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: progmgr snaps <app_id>");
-            } else {
-                match progmgr::list_snapshots(parts[1]) {
-                    Ok(snaps) => {
-                        if snaps.is_empty() {
-                            shell_println!("No snapshots");
-                        } else {
-                            for s in &snaps {
-                                let scope = match s.scope {
-                                    progmgr::SnapshotScope::Full => "full",
-                                    progmgr::SnapshotScope::SettingsOnly => "settings",
-                                    progmgr::SnapshotScope::DataOnly => "data",
-                                };
-                                shell_println!(
-                                    "  id={} '{}' parent={} scope={} size={}",
-                                    s.id,
-                                    s.name,
-                                    s.parent_id,
-                                    scope,
-                                    s.size_bytes
-                                );
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: progmgr snaps <app_id>");
+                } else {
+                    match progmgr::list_snapshots(parts[1]) {
+                        Ok(snaps) => {
+                            if snaps.is_empty() {
+                                shell_println!("No snapshots");
+                            } else {
+                                for s in &snaps {
+                                    let scope = match s.scope {
+                                        progmgr::SnapshotScope::Full => "full",
+                                        progmgr::SnapshotScope::SettingsOnly => "settings",
+                                        progmgr::SnapshotScope::DataOnly => "data",
+                                    };
+                                    shell_println!(
+                                        "  id={} '{}' parent={} scope={} size={}",
+                                        s.id,
+                                        s.name,
+                                        s.parent_id,
+                                        scope,
+                                        s.size_bytes
+                                    );
+                                }
                             }
                         }
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
+            case(&parts);
         }
         "rollback" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: progmgr rollback <app_id> <snap_id>");
-            } else {
-                match parts[2].parse::<u64>() {
-                    Ok(id) => match progmgr::rollback(parts[1], id) {
-                        Ok(snap) => {
-                            shell_println!("Rollback to '{}' (scope={:?})", snap.name, snap.scope)
-                        }
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    Err(_) => shell_println!("Invalid snapshot id"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: progmgr rollback <app_id> <snap_id>");
+                } else {
+                    match parts[2].parse::<u64>() {
+                        Ok(id) => match progmgr::rollback(parts[1], id) {
+                            Ok(snap) => {
+                                shell_println!(
+                                    "Rollback to '{}' (scope={:?})",
+                                    snap.name,
+                                    snap.scope
+                                )
+                            }
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid snapshot id"),
+                    }
                 }
             }
+            case(&parts);
         }
         "compile" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: progmgr compile <app_id> <source_dir> [params]");
-            } else {
-                let params = if parts.len() > 3 {
-                    parts[3..].join(" ")
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: progmgr compile <app_id> <source_dir> [params]");
                 } else {
-                    String::new()
-                };
-                match progmgr::set_compilable(parts[1], parts[2], &params) {
-                    Ok(()) => {
-                        shell_println!("Marked '{}' as compilable from {}", parts[1], parts[2])
+                    let params = if parts.len() > 3 {
+                        parts[3..].join(" ")
+                    } else {
+                        String::new()
+                    };
+                    match progmgr::set_compilable(parts[1], parts[2], &params) {
+                        Ok(()) => {
+                            shell_println!("Marked '{}' as compilable from {}", parts[1], parts[2])
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
+            case(&parts);
         }
         "buildparams" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: progmgr buildparams <app_id> <params...>");
-            } else {
-                let params = parts[2..].join(" ");
-                match progmgr::set_build_params(parts[1], &params) {
-                    Ok(()) => shell_println!("Build params updated for '{}'", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: progmgr buildparams <app_id> <params...>");
+                } else {
+                    let params = parts[2..].join(" ");
+                    match progmgr::set_build_params(parts[1], &params) {
+                        Ok(()) => shell_println!("Build params updated for '{}'", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "wipedata" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: progmgr wipedata <app_id>");
-            } else {
-                match progmgr::wipe_data(parts[1]) {
-                    Ok(dir) => shell_println!("Wiped data directory: {}", dir),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: progmgr wipedata <app_id>");
+                } else {
+                    match progmgr::wipe_data(parts[1]) {
+                        Ok(dir) => shell_println!("Wiped data directory: {}", dir),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "wipesettings" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: progmgr wipesettings <app_id>");
-            } else {
-                match progmgr::wipe_settings(parts[1]) {
-                    Ok(dir) => shell_println!("Wiped settings directory: {}", dir),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: progmgr wipesettings <app_id>");
+                } else {
+                    match progmgr::wipe_settings(parts[1]) {
+                        Ok(dir) => shell_println!("Wiped settings directory: {}", dir),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "version" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: progmgr version <app_id> <version>");
-            } else {
-                match progmgr::set_version(parts[1], parts[2]) {
-                    Ok(()) => shell_println!("Version set for '{}'", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: progmgr version <app_id> <version>");
+                } else {
+                    match progmgr::set_version(parts[1], parts[2]) {
+                        Ok(()) => shell_println!("Version set for '{}'", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "stats" => {
-            let (total, installed, snaps, ops) = progmgr::stats();
-            shell_println!(
-                "Programs: {} ({} installed)  Snapshots: {}  Operations: {}",
-                total,
-                installed,
-                snaps,
-                ops
-            );
+            #[inline(never)]
+            fn case() {
+                let (total, installed, snaps, ops) = progmgr::stats();
+                shell_println!(
+                    "Programs: {} ({} installed)  Snapshots: {}  Operations: {}",
+                    total,
+                    installed,
+                    snaps,
+                    ops
+                );
+            }
+            case();
         }
         "init" => {
-            progmgr::init_defaults();
-            shell_println!("Program manager initialized with defaults");
+            #[inline(never)]
+            fn case() {
+                progmgr::init_defaults();
+                shell_println!("Program manager initialized with defaults");
+            }
+            case();
         }
         "test" => match progmgr::self_test() {
             Ok(()) => shell_println!("progmgr: all tests passed"),
             Err(e) => shell_println!("progmgr: test FAILED: {:?}", e),
         },
         _ => {
-            shell_println!("progmgr — program management settings");
-            shell_println!("  list|ls          List all programs");
-            shell_println!("  installed        List installed only");
-            shell_println!("  info <id>        Show program details");
-            shell_println!("  register <id> <name> <dir>  Register");
-            shell_println!("  uninstall <id> [opt]  Uninstall");
-            shell_println!("  priority <id> <lvl>   Set priority");
-            shell_println!("  grant <id> <cap>      Grant capability");
-            shell_println!("  revoke <id> <cap>     Revoke capability");
-            shell_println!("  addnotif <id> <name>  Add notification type");
-            shell_println!("  rmnotif <id> <name>   Remove notification");
-            shell_println!("  notifcfg <id> <n> <k> <v>  Configure");
-            shell_println!("  snap <id> <name>      Create snapshot");
-            shell_println!("  rmsnap <id> <sid>     Delete snapshot");
-            shell_println!("  snaps <id>            List snapshots");
-            shell_println!("  rollback <id> <sid>   Rollback to snapshot");
-            shell_println!("  compile <id> <src>    Mark compilable");
-            shell_println!("  buildparams <id> <p>  Set build params");
-            shell_println!("  wipedata <id>         Wipe program data");
-            shell_println!("  wipesettings <id>     Wipe settings");
-            shell_println!("  version <id> <ver>    Set version");
-            shell_println!("  stats                 Show statistics");
-            shell_println!("  init                  Load defaults");
-            shell_println!("  test                  Run self-tests");
+            #[inline(never)]
+            fn case() {
+                shell_println!("progmgr — program management settings");
+                shell_println!("  list|ls          List all programs");
+                shell_println!("  installed        List installed only");
+                shell_println!("  info <id>        Show program details");
+                shell_println!("  register <id> <name> <dir>  Register");
+                shell_println!("  uninstall <id> [opt]  Uninstall");
+                shell_println!("  priority <id> <lvl>   Set priority");
+                shell_println!("  grant <id> <cap>      Grant capability");
+                shell_println!("  revoke <id> <cap>     Revoke capability");
+                shell_println!("  addnotif <id> <name>  Add notification type");
+                shell_println!("  rmnotif <id> <name>   Remove notification");
+                shell_println!("  notifcfg <id> <n> <k> <v>  Configure");
+                shell_println!("  snap <id> <name>      Create snapshot");
+                shell_println!("  rmsnap <id> <sid>     Delete snapshot");
+                shell_println!("  snaps <id>            List snapshots");
+                shell_println!("  rollback <id> <sid>   Rollback to snapshot");
+                shell_println!("  compile <id> <src>    Mark compilable");
+                shell_println!("  buildparams <id> <p>  Set build params");
+                shell_println!("  wipedata <id>         Wipe program data");
+                shell_println!("  wipesettings <id>     Wipe settings");
+                shell_println!("  version <id> <ver>    Set version");
+                shell_println!("  stats                 Show statistics");
+                shell_println!("  init                  Load defaults");
+                shell_println!("  test                  Run self-tests");
+            }
+            case();
         }
     }
 }
@@ -31155,35 +31386,43 @@ fn cmd_schedtune(args: &str) {
 
     match sub {
         "init" => {
-            schedtune::init_defaults();
-            shell_println!("Initialised default scheduler profiles.");
+            #[inline(never)]
+            fn case() {
+                schedtune::init_defaults();
+                shell_println!("Initialised default scheduler profiles.");
+            }
+            case();
         }
         "list" | "ls" => {
-            let profiles = schedtune::list_profiles();
-            if profiles.is_empty() {
-                shell_println!("No scheduler profiles configured.");
-                return;
-            }
-            shell_println!(
-                "{:<4} {:<25} {:<12} {:<18} {:<8} {}",
-                "ID",
-                "NAME",
-                "WORKLOAD",
-                "MODEL",
-                "ACTIVE",
-                "PREEMPT"
-            );
-            for p in &profiles {
+            #[inline(never)]
+            fn case() {
+                let profiles = schedtune::list_profiles();
+                if profiles.is_empty() {
+                    shell_println!("No scheduler profiles configured.");
+                    return;
+                }
                 shell_println!(
-                    "{:<4} {:<25} {:<12} {:<18} {:<8} {:?}",
-                    p.id,
-                    p.name,
-                    format!("{:?}", p.workload),
-                    format!("{:?}", p.model),
-                    p.active,
-                    p.preempt
+                    "{:<4} {:<25} {:<12} {:<18} {:<8} {}",
+                    "ID",
+                    "NAME",
+                    "WORKLOAD",
+                    "MODEL",
+                    "ACTIVE",
+                    "PREEMPT"
                 );
+                for p in &profiles {
+                    shell_println!(
+                        "{:<4} {:<25} {:<12} {:<18} {:<8} {:?}",
+                        p.id,
+                        p.name,
+                        format!("{:?}", p.workload),
+                        format!("{:?}", p.model),
+                        p.active,
+                        p.preempt
+                    );
+                }
             }
+            case();
         }
         "active" | "show" => match schedtune::active_profile() {
             Ok(a) => {
@@ -31216,338 +31455,398 @@ fn cmd_schedtune(args: &str) {
             Err(_) => shell_println!("No active profile."),
         },
         "get" => {
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: schedtune get <id>");
-                    return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: schedtune get <id>");
+                        return;
+                    }
+                };
+                match schedtune::get_profile(id) {
+                    Ok(p) => {
+                        shell_println!("ID:            {}", p.id);
+                        shell_println!("Name:          {}", p.name);
+                        shell_println!("Workload:      {:?}", p.workload);
+                        shell_println!("Model:         {:?}", p.model);
+                        shell_println!("Preempt:       {:?}", p.preempt);
+                        shell_println!("Timeslice:     {} us", p.timeslice_us);
+                        shell_println!("Min gran:      {} us", p.min_granularity_us);
+                        shell_println!("Target lat:    {} us", p.target_latency_us);
+                        shell_println!("Priorities:    {}", p.priority_levels);
+                        shell_println!("Interactive:   {}", p.interactive_boost);
+                        shell_println!("Affinity:      {}", p.affinity_strictness);
+                        shell_println!(
+                            "Balance:       {:?} ({}ms)",
+                            p.balance_strategy,
+                            p.balance_interval_ms
+                        );
+                        shell_println!("Per-CPU:       {}", p.per_cpu_queues);
+                        shell_println!("NUMA:          {}", p.numa_aware);
+                        shell_println!("Migration:     {} us", p.migration_cost_us);
+                        shell_println!("Prio inherit:  {}", p.priority_inheritance);
+                        shell_println!("Idle save:     {}", p.idle_powersave);
+                        shell_println!("Built-in:      {}", p.builtin);
+                        shell_println!("Active:        {}", p.active);
+                        shell_println!("Recompile:     {}", p.requires_recompile);
+                        shell_println!("Reboot:        {}", p.requires_reboot);
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match schedtune::get_profile(id) {
-                Ok(p) => {
-                    shell_println!("ID:            {}", p.id);
-                    shell_println!("Name:          {}", p.name);
-                    shell_println!("Workload:      {:?}", p.workload);
-                    shell_println!("Model:         {:?}", p.model);
-                    shell_println!("Preempt:       {:?}", p.preempt);
-                    shell_println!("Timeslice:     {} us", p.timeslice_us);
-                    shell_println!("Min gran:      {} us", p.min_granularity_us);
-                    shell_println!("Target lat:    {} us", p.target_latency_us);
-                    shell_println!("Priorities:    {}", p.priority_levels);
-                    shell_println!("Interactive:   {}", p.interactive_boost);
-                    shell_println!("Affinity:      {}", p.affinity_strictness);
-                    shell_println!(
-                        "Balance:       {:?} ({}ms)",
-                        p.balance_strategy,
-                        p.balance_interval_ms
-                    );
-                    shell_println!("Per-CPU:       {}", p.per_cpu_queues);
-                    shell_println!("NUMA:          {}", p.numa_aware);
-                    shell_println!("Migration:     {} us", p.migration_cost_us);
-                    shell_println!("Prio inherit:  {}", p.priority_inheritance);
-                    shell_println!("Idle save:     {}", p.idle_powersave);
-                    shell_println!("Built-in:      {}", p.builtin);
-                    shell_println!("Active:        {}", p.active);
-                    shell_println!("Recompile:     {}", p.requires_recompile);
-                    shell_println!("Reboot:        {}", p.requires_reboot);
-                }
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "create" => {
-            if parts.len() < 4 {
-                shell_println!("Usage: schedtune create <name> <workload> <model>");
-                shell_println!("Workloads: desktop, server, gaming, dev, realtime, lowpower");
-                shell_println!("Models: prr, cfs, eevdf, bfs, rtfifo");
-                return;
-            }
-            let name = parts[1];
-            let workload = match parts[2] {
-                "desktop" => schedtune::WorkloadType::Desktop,
-                "server" => schedtune::WorkloadType::Server,
-                "gaming" => schedtune::WorkloadType::Gaming,
-                "dev" | "development" => schedtune::WorkloadType::Development,
-                "realtime" | "rt" => schedtune::WorkloadType::Realtime,
-                "lowpower" | "lp" => schedtune::WorkloadType::LowPower,
-                _ => {
-                    shell_println!("Unknown workload type.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 4 {
+                    shell_println!("Usage: schedtune create <name> <workload> <model>");
+                    shell_println!("Workloads: desktop, server, gaming, dev, realtime, lowpower");
+                    shell_println!("Models: prr, cfs, eevdf, bfs, rtfifo");
                     return;
                 }
-            };
-            let model = match parts[3] {
-                "prr" => schedtune::SchedModel::PriorityRoundRobin,
-                "cfs" => schedtune::SchedModel::Cfs,
-                "eevdf" => schedtune::SchedModel::Eevdf,
-                "bfs" => schedtune::SchedModel::Bfs,
-                "rtfifo" | "rt" => schedtune::SchedModel::RtFifo,
-                _ => {
-                    shell_println!("Unknown model.");
-                    return;
+                let name = parts[1];
+                let workload = match parts[2] {
+                    "desktop" => schedtune::WorkloadType::Desktop,
+                    "server" => schedtune::WorkloadType::Server,
+                    "gaming" => schedtune::WorkloadType::Gaming,
+                    "dev" | "development" => schedtune::WorkloadType::Development,
+                    "realtime" | "rt" => schedtune::WorkloadType::Realtime,
+                    "lowpower" | "lp" => schedtune::WorkloadType::LowPower,
+                    _ => {
+                        shell_println!("Unknown workload type.");
+                        return;
+                    }
+                };
+                let model = match parts[3] {
+                    "prr" => schedtune::SchedModel::PriorityRoundRobin,
+                    "cfs" => schedtune::SchedModel::Cfs,
+                    "eevdf" => schedtune::SchedModel::Eevdf,
+                    "bfs" => schedtune::SchedModel::Bfs,
+                    "rtfifo" | "rt" => schedtune::SchedModel::RtFifo,
+                    _ => {
+                        shell_println!("Unknown model.");
+                        return;
+                    }
+                };
+                match schedtune::create_profile(name, workload, model) {
+                    Ok(id) => shell_println!("Created profile {} (id={}).", name, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match schedtune::create_profile(name, workload, model) {
-                Ok(id) => shell_println!("Created profile {} (id={}).", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "remove" | "rm" => {
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: schedtune remove <id>");
-                    return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: schedtune remove <id>");
+                        return;
+                    }
+                };
+                match schedtune::remove_profile(id) {
+                    Ok(()) => shell_println!("Removed profile {}.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match schedtune::remove_profile(id) {
-                Ok(()) => shell_println!("Removed profile {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "apply" => {
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: schedtune apply <id>");
-                    return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: schedtune apply <id>");
+                        return;
+                    }
+                };
+                match schedtune::apply_profile(id) {
+                    Ok(()) => shell_println!("Applied profile {}.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match schedtune::apply_profile(id) {
-                Ok(()) => shell_println!("Applied profile {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "timeslice" | "ts" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: schedtune timeslice <id> <us>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: schedtune timeslice <id> <us>");
                     return;
                 }
-            };
-            let us: u32 = match parts.get(2).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid microseconds.");
-                    return;
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let us: u32 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid microseconds.");
+                        return;
+                    }
+                };
+                match schedtune::set_timeslice(id, us) {
+                    Ok(()) => shell_println!("Set timeslice to {} us.", us),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match schedtune::set_timeslice(id, us) {
-                Ok(()) => shell_println!("Set timeslice to {} us.", us),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "preempt" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: schedtune preempt <id> <none|voluntary|full|realtime>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: schedtune preempt <id> <none|voluntary|full|realtime>");
                     return;
                 }
-            };
-            let pm = match parts[2] {
-                "none" => schedtune::PreemptModel::None,
-                "voluntary" | "vol" => schedtune::PreemptModel::Voluntary,
-                "full" => schedtune::PreemptModel::Full,
-                "realtime" | "rt" => schedtune::PreemptModel::RealTime,
-                _ => {
-                    shell_println!("Unknown model.");
-                    return;
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let pm = match parts[2] {
+                    "none" => schedtune::PreemptModel::None,
+                    "voluntary" | "vol" => schedtune::PreemptModel::Voluntary,
+                    "full" => schedtune::PreemptModel::Full,
+                    "realtime" | "rt" => schedtune::PreemptModel::RealTime,
+                    _ => {
+                        shell_println!("Unknown model.");
+                        return;
+                    }
+                };
+                match schedtune::set_preempt(id, pm) {
+                    Ok(()) => shell_println!("Set preemption model."),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match schedtune::set_preempt(id, pm) {
-                Ok(()) => shell_println!("Set preemption model."),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "latency" | "lat" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: schedtune latency <id> <us>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: schedtune latency <id> <us>");
                     return;
                 }
-            };
-            let us: u32 = match parts.get(2).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid microseconds.");
-                    return;
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let us: u32 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid microseconds.");
+                        return;
+                    }
+                };
+                match schedtune::set_target_latency(id, us) {
+                    Ok(()) => shell_println!("Set target latency to {} us.", us),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match schedtune::set_target_latency(id, us) {
-                Ok(()) => shell_println!("Set target latency to {} us.", us),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "interactive" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: schedtune interactive <id> <on|off>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: schedtune interactive <id> <on|off>");
                     return;
                 }
-            };
-            let on = parts[2] == "on" || parts[2] == "true";
-            match schedtune::set_interactive_boost(id, on) {
-                Ok(()) => {
-                    shell_println!("Set interactive boost {}.", if on { "on" } else { "off" })
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let on = parts[2] == "on" || parts[2] == "true";
+                match schedtune::set_interactive_boost(id, on) {
+                    Ok(()) => {
+                        shell_println!("Set interactive boost {}.", if on { "on" } else { "off" })
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "affinity" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: schedtune affinity <id> <0-100>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: schedtune affinity <id> <0-100>");
                     return;
                 }
-            };
-            let v: u8 = match parts.get(2).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid value.");
-                    return;
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let v: u8 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid value.");
+                        return;
+                    }
+                };
+                match schedtune::set_affinity(id, v) {
+                    Ok(()) => shell_println!("Set affinity strictness to {}.", v),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match schedtune::set_affinity(id, v) {
-                Ok(()) => shell_println!("Set affinity strictness to {}.", v),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "balance" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: schedtune balance <id> <steal|push|hybrid|pinned>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: schedtune balance <id> <steal|push|hybrid|pinned>");
                     return;
                 }
-            };
-            let bs = match parts[2] {
-                "steal" | "workstealing" => schedtune::BalanceStrategy::WorkStealing,
-                "push" => schedtune::BalanceStrategy::PushMigration,
-                "hybrid" => schedtune::BalanceStrategy::Hybrid,
-                "pinned" | "none" => schedtune::BalanceStrategy::Pinned,
-                _ => {
-                    shell_println!("Unknown strategy.");
-                    return;
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let bs = match parts[2] {
+                    "steal" | "workstealing" => schedtune::BalanceStrategy::WorkStealing,
+                    "push" => schedtune::BalanceStrategy::PushMigration,
+                    "hybrid" => schedtune::BalanceStrategy::Hybrid,
+                    "pinned" | "none" => schedtune::BalanceStrategy::Pinned,
+                    _ => {
+                        shell_println!("Unknown strategy.");
+                        return;
+                    }
+                };
+                match schedtune::set_balance_strategy(id, bs) {
+                    Ok(()) => shell_println!("Set balance strategy."),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match schedtune::set_balance_strategy(id, bs) {
-                Ok(()) => shell_println!("Set balance strategy."),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "numa" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: schedtune numa <id> <on|off>");
-                return;
-            }
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: schedtune numa <id> <on|off>");
                     return;
                 }
-            };
-            let on = parts[2] == "on" || parts[2] == "true";
-            match schedtune::set_numa_aware(id, on) {
-                Ok(()) => shell_println!("Set NUMA-aware {}.", if on { "on" } else { "off" }),
-                Err(e) => shell_println!("Error: {:?}", e),
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid id.");
+                        return;
+                    }
+                };
+                let on = parts[2] == "on" || parts[2] == "true";
+                match schedtune::set_numa_aware(id, on) {
+                    Ok(()) => shell_println!("Set NUMA-aware {}.", if on { "on" } else { "off" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
+            case(&parts);
         }
         "tradeoffs" | "pros" => {
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: schedtune tradeoffs <id>");
-                    return;
-                }
-            };
-            match schedtune::tradeoffs(id) {
-                Ok(info) => {
-                    shell_println!("{}", info.label);
-                    shell_println!();
-                    shell_println!("Advantages:");
-                    for a in &info.advantages {
-                        shell_println!("  + {}", a);
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: schedtune tradeoffs <id>");
+                        return;
                     }
-                    shell_println!();
-                    shell_println!("Disadvantages:");
-                    for d in &info.disadvantages {
-                        shell_println!("  - {}", d);
+                };
+                match schedtune::tradeoffs(id) {
+                    Ok(info) => {
+                        shell_println!("{}", info.label);
+                        shell_println!();
+                        shell_println!("Advantages:");
+                        for a in &info.advantages {
+                            shell_println!("  + {}", a);
+                        }
+                        shell_println!();
+                        shell_println!("Disadvantages:");
+                        for d in &info.disadvantages {
+                            shell_println!("  - {}", d);
+                        }
                     }
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "stats" => {
-            let (total, active, tradeoffs, ops) = schedtune::stats();
-            shell_println!("Profiles:    {}", total);
-            shell_println!("Active:      {}", active);
-            shell_println!("Tradeoffs:   {}", tradeoffs);
-            shell_println!("Operations:  {}", ops);
+            #[inline(never)]
+            fn case() {
+                let (total, active, tradeoffs, ops) = schedtune::stats();
+                shell_println!("Profiles:    {}", total);
+                shell_println!("Active:      {}", active);
+                shell_println!("Tradeoffs:   {}", tradeoffs);
+                shell_println!("Operations:  {}", ops);
+            }
+            case();
         }
         "clear" => {
-            schedtune::clear_all();
-            shell_println!("Cleared all scheduler profiles.");
+            #[inline(never)]
+            fn case() {
+                schedtune::clear_all();
+                shell_println!("Cleared all scheduler profiles.");
+            }
+            case();
         }
         "test" => match schedtune::self_test() {
             Ok(()) => shell_println!("schedtune: all tests passed."),
             Err(e) => shell_println!("schedtune: test failed: {:?}", e),
         },
         _ => {
-            shell_println!("schedtune — scheduler tuning parameters");
-            shell_println!();
-            shell_println!("Subcommands:");
-            shell_println!("  init                          Load default profiles");
-            shell_println!("  list / ls                     List all profiles");
-            shell_println!("  active / show                 Show active profile details");
-            shell_println!("  get <id>                      Show profile details");
-            shell_println!("  create <name> <wl> <model>    Create custom profile");
-            shell_println!("  remove / rm <id>              Remove custom profile");
-            shell_println!("  apply <id>                    Activate a profile");
-            shell_println!("  timeslice <id> <us>           Set time slice");
-            shell_println!("  preempt <id> <model>          Set preemption model");
-            shell_println!("  latency <id> <us>             Set target latency");
-            shell_println!("  interactive <id> <on|off>     Toggle interactive boost");
-            shell_println!("  affinity <id> <0-100>         Set CPU affinity strictness");
-            shell_println!("  balance <id> <strategy>       Set load balance strategy");
-            shell_println!("  numa <id> <on|off>            Toggle NUMA-aware scheduling");
-            shell_println!("  tradeoffs <id>                Show pros/cons");
-            shell_println!("  stats                         Show statistics");
-            shell_println!("  clear                         Clear all profiles");
-            shell_println!("  test                          Run self-tests");
-            shell_println!();
-            shell_println!("Workloads: desktop, server, gaming, dev, realtime, lowpower");
-            shell_println!("Models: prr, cfs, eevdf, bfs, rtfifo");
-            shell_println!("Preempt: none, voluntary, full, realtime");
-            shell_println!("Balance: steal, push, hybrid, pinned");
-            shell_println!("Alias: stune");
+            #[inline(never)]
+            fn case() {
+                shell_println!("schedtune — scheduler tuning parameters");
+                shell_println!();
+                shell_println!("Subcommands:");
+                shell_println!("  init                          Load default profiles");
+                shell_println!("  list / ls                     List all profiles");
+                shell_println!("  active / show                 Show active profile details");
+                shell_println!("  get <id>                      Show profile details");
+                shell_println!("  create <name> <wl> <model>    Create custom profile");
+                shell_println!("  remove / rm <id>              Remove custom profile");
+                shell_println!("  apply <id>                    Activate a profile");
+                shell_println!("  timeslice <id> <us>           Set time slice");
+                shell_println!("  preempt <id> <model>          Set preemption model");
+                shell_println!("  latency <id> <us>             Set target latency");
+                shell_println!("  interactive <id> <on|off>     Toggle interactive boost");
+                shell_println!("  affinity <id> <0-100>         Set CPU affinity strictness");
+                shell_println!("  balance <id> <strategy>       Set load balance strategy");
+                shell_println!("  numa <id> <on|off>            Toggle NUMA-aware scheduling");
+                shell_println!("  tradeoffs <id>                Show pros/cons");
+                shell_println!("  stats                         Show statistics");
+                shell_println!("  clear                         Clear all profiles");
+                shell_println!("  test                          Run self-tests");
+                shell_println!();
+                shell_println!("Workloads: desktop, server, gaming, dev, realtime, lowpower");
+                shell_println!("Models: prr, cfs, eevdf, bfs, rtfifo");
+                shell_println!("Preempt: none, voluntary, full, realtime");
+                shell_println!("Balance: steal, push, hybrid, pinned");
+                shell_println!("Alias: stune");
+            }
+            case();
         }
     }
 }
@@ -32110,410 +32409,498 @@ fn cmd_capsettings(args: &str) {
 
     match sub {
         "init" => {
-            capsettings::init_defaults();
-            shell_println!("Initialised default capability settings.");
+            #[inline(never)]
+            fn case() {
+                capsettings::init_defaults();
+                shell_println!("Initialised default capability settings.");
+            }
+            case();
         }
         "groups" | "lg" => {
-            let groups = capsettings::list_groups();
-            if groups.is_empty() {
-                shell_println!("No capability groups.");
-                return;
-            }
-            shell_println!(
-                "{:<4} {:<20} {:<8} {:<8} {}",
-                "ID",
-                "NAME",
-                "CAPS",
-                "BUILTIN",
-                "DESCRIPTION"
-            );
-            for g in &groups {
+            #[inline(never)]
+            fn case() {
+                let groups = capsettings::list_groups();
+                if groups.is_empty() {
+                    shell_println!("No capability groups.");
+                    return;
+                }
                 shell_println!(
                     "{:<4} {:<20} {:<8} {:<8} {}",
-                    g.id,
-                    g.name,
-                    g.caps.len(),
-                    g.builtin,
-                    g.description
+                    "ID",
+                    "NAME",
+                    "CAPS",
+                    "BUILTIN",
+                    "DESCRIPTION"
                 );
+                for g in &groups {
+                    shell_println!(
+                        "{:<4} {:<20} {:<8} {:<8} {}",
+                        g.id,
+                        g.name,
+                        g.caps.len(),
+                        g.builtin,
+                        g.description
+                    );
+                }
             }
+            case();
         }
         "group" => {
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: capsettings group <id>");
-                    return;
-                }
-            };
-            match capsettings::get_group(id) {
-                Ok(g) => {
-                    shell_println!("ID:          {}", g.id);
-                    shell_println!("Name:        {}", g.name);
-                    shell_println!("Description: {}", g.description);
-                    shell_println!("Built-in:    {}", g.builtin);
-                    shell_println!("Capabilities:");
-                    for cap in &g.caps {
-                        shell_println!("  {:?}", cap);
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: capsettings group <id>");
+                        return;
                     }
+                };
+                match capsettings::get_group(id) {
+                    Ok(g) => {
+                        shell_println!("ID:          {}", g.id);
+                        shell_println!("Name:        {}", g.name);
+                        shell_println!("Description: {}", g.description);
+                        shell_println!("Built-in:    {}", g.builtin);
+                        shell_println!("Capabilities:");
+                        for cap in &g.caps {
+                            shell_println!("  {:?}", cap);
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "mkgroup" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: capsettings mkgroup <name> <desc>");
-                return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: capsettings mkgroup <name> <desc>");
+                    return;
+                }
+                let name = parts[1];
+                let desc = parts[2..].join(" ");
+                match capsettings::create_group(name, &desc, &[]) {
+                    Ok(id) => shell_println!("Created group {} (id={}).", name, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
-            let name = parts[1];
-            let desc = parts[2..].join(" ");
-            match capsettings::create_group(name, &desc, &[]) {
-                Ok(id) => shell_println!("Created group {} (id={}).", name, id),
-                Err(e) => shell_println!("Error: {:?}", e),
-            }
+            case(&parts);
         }
         "rmgroup" => {
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: capsettings rmgroup <id>");
-                    return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: capsettings rmgroup <id>");
+                        return;
+                    }
+                };
+                match capsettings::remove_group(id) {
+                    Ok(()) => shell_println!("Removed group {}.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match capsettings::remove_group(id) {
-                Ok(()) => shell_println!("Removed group {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "gadd" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: capsettings gadd <group_id> <capability>");
-                return;
-            }
-            let gid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid group id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: capsettings gadd <group_id> <capability>");
                     return;
                 }
-            };
-            let cap = match parse_capability(parts[2]) {
-                Some(c) => c,
-                None => {
-                    shell_println!("Unknown capability: {}", parts[2]);
-                    return;
+                let gid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid group id.");
+                        return;
+                    }
+                };
+                let cap = match parse_capability(parts[2]) {
+                    Some(c) => c,
+                    None => {
+                        shell_println!("Unknown capability: {}", parts[2]);
+                        return;
+                    }
+                };
+                match capsettings::group_add_cap(gid, cap) {
+                    Ok(()) => shell_println!("Added {:?} to group {}.", cap, gid),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match capsettings::group_add_cap(gid, cap) {
-                Ok(()) => shell_println!("Added {:?} to group {}.", cap, gid),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "grm" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: capsettings grm <group_id> <capability>");
-                return;
-            }
-            let gid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid group id.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: capsettings grm <group_id> <capability>");
                     return;
                 }
-            };
-            let cap = match parse_capability(parts[2]) {
-                Some(c) => c,
-                None => {
-                    shell_println!("Unknown capability: {}", parts[2]);
-                    return;
+                let gid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid group id.");
+                        return;
+                    }
+                };
+                let cap = match parse_capability(parts[2]) {
+                    Some(c) => c,
+                    None => {
+                        shell_println!("Unknown capability: {}", parts[2]);
+                        return;
+                    }
+                };
+                match capsettings::group_remove_cap(gid, cap) {
+                    Ok(()) => shell_println!("Removed {:?} from group {}.", cap, gid),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match capsettings::group_remove_cap(gid, cap) {
-                Ok(()) => shell_println!("Removed {:?} from group {}.", cap, gid),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "users" | "lu" => {
-            let users = capsettings::list_user_assignments();
-            if users.is_empty() {
-                shell_println!("No user capability assignments.");
-                return;
-            }
-            shell_println!(
-                "{:<6} {:<15} {:<8} {:<8} {}",
-                "UID",
-                "USERNAME",
-                "GROUPS",
-                "EXTRA",
-                "DENIED"
-            );
-            for u in &users {
+            #[inline(never)]
+            fn case() {
+                let users = capsettings::list_user_assignments();
+                if users.is_empty() {
+                    shell_println!("No user capability assignments.");
+                    return;
+                }
                 shell_println!(
                     "{:<6} {:<15} {:<8} {:<8} {}",
-                    u.uid,
-                    u.username,
-                    u.groups.len(),
-                    u.extra_caps.len(),
-                    u.denied_caps.len()
+                    "UID",
+                    "USERNAME",
+                    "GROUPS",
+                    "EXTRA",
+                    "DENIED"
                 );
+                for u in &users {
+                    shell_println!(
+                        "{:<6} {:<15} {:<8} {:<8} {}",
+                        u.uid,
+                        u.username,
+                        u.groups.len(),
+                        u.extra_caps.len(),
+                        u.denied_caps.len()
+                    );
+                }
             }
+            case();
         }
         "user" => {
-            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: capsettings user <uid>");
-                    return;
-                }
-            };
-            match capsettings::get_user_assignment(uid) {
-                Ok(a) => {
-                    shell_println!("UID:     {}", a.uid);
-                    shell_println!("Name:    {}", a.username);
-                    shell_println!("Groups:  {:?}", a.groups);
-                    shell_println!("Extra:   {:?}", a.extra_caps);
-                    shell_println!("Denied:  {:?}", a.denied_caps);
-                    match capsettings::user_effective_caps(uid) {
-                        Ok(caps) => {
-                            shell_println!("Effective capabilities:");
-                            for cap in &caps {
-                                shell_println!("  {:?}", cap);
-                            }
-                        }
-                        Err(e) => shell_println!("Error resolving caps: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: capsettings user <uid>");
+                        return;
                     }
+                };
+                match capsettings::get_user_assignment(uid) {
+                    Ok(a) => {
+                        shell_println!("UID:     {}", a.uid);
+                        shell_println!("Name:    {}", a.username);
+                        shell_println!("Groups:  {:?}", a.groups);
+                        shell_println!("Extra:   {:?}", a.extra_caps);
+                        shell_println!("Denied:  {:?}", a.denied_caps);
+                        match capsettings::user_effective_caps(uid) {
+                            Ok(caps) => {
+                                shell_println!("Effective capabilities:");
+                                for cap in &caps {
+                                    shell_println!("  {:?}", cap);
+                                }
+                            }
+                            Err(e) => shell_println!("Error resolving caps: {:?}", e),
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "adduser" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: capsettings adduser <uid> <username>");
-                return;
-            }
-            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid uid.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: capsettings adduser <uid> <username>");
                     return;
                 }
-            };
-            match capsettings::assign_user(uid, parts[2]) {
-                Ok(id) => shell_println!("Created user assignment (id={}).", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid uid.");
+                        return;
+                    }
+                };
+                match capsettings::assign_user(uid, parts[2]) {
+                    Ok(id) => shell_println!("Created user assignment (id={}).", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
+            case(&parts);
         }
         "ugroup" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: capsettings ugroup <uid> <group_id>");
-                return;
-            }
-            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid uid.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: capsettings ugroup <uid> <group_id>");
                     return;
                 }
-            };
-            let gid: u64 = match parts.get(2).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid group id.");
-                    return;
+                let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid uid.");
+                        return;
+                    }
+                };
+                let gid: u64 = match parts.get(2).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid group id.");
+                        return;
+                    }
+                };
+                match capsettings::user_add_group(uid, gid) {
+                    Ok(()) => shell_println!("Added user {} to group {}.", uid, gid),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match capsettings::user_add_group(uid, gid) {
-                Ok(()) => shell_println!("Added user {} to group {}.", uid, gid),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "ucap" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: capsettings ucap <uid> <capability>");
-                return;
-            }
-            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid uid.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: capsettings ucap <uid> <capability>");
                     return;
                 }
-            };
-            let cap = match parse_capability(parts[2]) {
-                Some(c) => c,
-                None => {
-                    shell_println!("Unknown capability.");
-                    return;
+                let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid uid.");
+                        return;
+                    }
+                };
+                let cap = match parse_capability(parts[2]) {
+                    Some(c) => c,
+                    None => {
+                        shell_println!("Unknown capability.");
+                        return;
+                    }
+                };
+                match capsettings::user_add_cap(uid, cap) {
+                    Ok(()) => shell_println!("Added {:?} to user {}.", cap, uid),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match capsettings::user_add_cap(uid, cap) {
-                Ok(()) => shell_println!("Added {:?} to user {}.", cap, uid),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "udeny" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: capsettings udeny <uid> <capability>");
-                return;
-            }
-            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid uid.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: capsettings udeny <uid> <capability>");
                     return;
                 }
-            };
-            let cap = match parse_capability(parts[2]) {
-                Some(c) => c,
-                None => {
-                    shell_println!("Unknown capability.");
-                    return;
+                let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid uid.");
+                        return;
+                    }
+                };
+                let cap = match parse_capability(parts[2]) {
+                    Some(c) => c,
+                    None => {
+                        shell_println!("Unknown capability.");
+                        return;
+                    }
+                };
+                match capsettings::user_deny_cap(uid, cap) {
+                    Ok(()) => shell_println!("Denied {:?} for user {}.", cap, uid),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match capsettings::user_deny_cap(uid, cap) {
-                Ok(()) => shell_println!("Denied {:?} for user {}.", cap, uid),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "check" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: capsettings check <uid> <path>");
-                return;
-            }
-            let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Invalid uid.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: capsettings check <uid> <path>");
                     return;
                 }
-            };
-            match capsettings::check_access(uid, parts[2]) {
-                Ok(true) => shell_println!("Access GRANTED for user {} to {}", uid, parts[2]),
-                Ok(false) => shell_println!("Access DENIED for user {} to {}", uid, parts[2]),
-                Err(e) => shell_println!("Error: {:?}", e),
+                let uid: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Invalid uid.");
+                        return;
+                    }
+                };
+                match capsettings::check_access(uid, parts[2]) {
+                    Ok(true) => shell_println!("Access GRANTED for user {} to {}", uid, parts[2]),
+                    Ok(false) => shell_println!("Access DENIED for user {} to {}", uid, parts[2]),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
+            case(&parts);
         }
         "programs" | "lp" => {
-            let progs = capsettings::list_programs();
-            if progs.is_empty() {
-                shell_println!("No program capability assignments.");
-                return;
+            #[inline(never)]
+            fn case() {
+                let progs = capsettings::list_programs();
+                if progs.is_empty() {
+                    shell_println!("No program capability assignments.");
+                    return;
+                }
+                shell_println!("{:<30} {:<8} {:<8} {}", "PROGRAM", "REQ", "MAX", "SANDBOX");
+                for p in &progs {
+                    shell_println!(
+                        "{:<30} {:<8} {:<8} {}",
+                        p.program,
+                        p.required_caps.len(),
+                        p.max_caps.len(),
+                        p.sandboxed
+                    );
+                }
             }
-            shell_println!("{:<30} {:<8} {:<8} {}", "PROGRAM", "REQ", "MAX", "SANDBOX");
-            for p in &progs {
-                shell_println!(
-                    "{:<30} {:<8} {:<8} {}",
-                    p.program,
-                    p.required_caps.len(),
-                    p.max_caps.len(),
-                    p.sandboxed
-                );
-            }
+            case();
         }
         "paths" => {
-            let reqs = capsettings::list_path_requirements();
-            if reqs.is_empty() {
-                shell_println!("No path capability requirements.");
-                return;
+            #[inline(never)]
+            fn case() {
+                let reqs = capsettings::list_path_requirements();
+                if reqs.is_empty() {
+                    shell_println!("No path capability requirements.");
+                    return;
+                }
+                shell_println!("{:<4} {:<30} {:<8} {}", "ID", "PATH", "CAPS", "RECURSIVE");
+                for r in &reqs {
+                    shell_println!(
+                        "{:<4} {:<30} {:<8} {}",
+                        r.id,
+                        r.path,
+                        r.required_caps.len(),
+                        r.recursive
+                    );
+                }
             }
-            shell_println!("{:<4} {:<30} {:<8} {}", "ID", "PATH", "CAPS", "RECURSIVE");
-            for r in &reqs {
-                shell_println!(
-                    "{:<4} {:<30} {:<8} {}",
-                    r.id,
-                    r.path,
-                    r.required_caps.len(),
-                    r.recursive
-                );
-            }
+            case();
         }
         "addpath" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: capsettings addpath <path> <capability> [recursive]");
-                return;
-            }
-            let cap = match parse_capability(parts[2]) {
-                Some(c) => c,
-                None => {
-                    shell_println!("Unknown capability.");
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: capsettings addpath <path> <capability> [recursive]");
                     return;
                 }
-            };
-            let recursive =
-                parts.get(3).copied() == Some("recursive") || parts.get(3).copied() == Some("r");
-            match capsettings::set_path_requirement(parts[1], &[cap], recursive) {
-                Ok(id) => shell_println!("Created path requirement (id={}).", id),
-                Err(e) => shell_println!("Error: {:?}", e),
+                let cap = match parse_capability(parts[2]) {
+                    Some(c) => c,
+                    None => {
+                        shell_println!("Unknown capability.");
+                        return;
+                    }
+                };
+                let recursive = parts.get(3).copied() == Some("recursive")
+                    || parts.get(3).copied() == Some("r");
+                match capsettings::set_path_requirement(parts[1], &[cap], recursive) {
+                    Ok(id) => shell_println!("Created path requirement (id={}).", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
+            case(&parts);
         }
         "rmpath" => {
-            let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
-                Some(v) => v,
-                None => {
-                    shell_println!("Usage: capsettings rmpath <id>");
-                    return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id: u64 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                    Some(v) => v,
+                    None => {
+                        shell_println!("Usage: capsettings rmpath <id>");
+                        return;
+                    }
+                };
+                match capsettings::remove_path_requirement(id) {
+                    Ok(()) => shell_println!("Removed path requirement {}.", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-            };
-            match capsettings::remove_path_requirement(id) {
-                Ok(()) => shell_println!("Removed path requirement {}.", id),
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "caplist" => {
-            shell_println!("Available capabilities:");
-            shell_println!("  fileread, filewrite, execute, network, bindlowport,");
-            shell_println!("  rawsocket, mount, useradmin, packageinstall, systemconfig,");
-            shell_println!("  hardwareaccess, debugprocess, chown, dacoverride,");
-            shell_println!("  setclock, reboot, moduleload, auditread, auditwrite,");
-            shell_println!("  capadmin");
+            #[inline(never)]
+            fn case() {
+                shell_println!("Available capabilities:");
+                shell_println!("  fileread, filewrite, execute, network, bindlowport,");
+                shell_println!("  rawsocket, mount, useradmin, packageinstall, systemconfig,");
+                shell_println!("  hardwareaccess, debugprocess, chown, dacoverride,");
+                shell_println!("  setclock, reboot, moduleload, auditread, auditwrite,");
+                shell_println!("  capadmin");
+            }
+            case();
         }
         "stats" => {
-            let (groups, users, programs, paths, ops) = capsettings::stats();
-            shell_println!("Groups:      {}", groups);
-            shell_println!("Users:       {}", users);
-            shell_println!("Programs:    {}", programs);
-            shell_println!("Path reqs:   {}", paths);
-            shell_println!("Operations:  {}", ops);
+            #[inline(never)]
+            fn case() {
+                let (groups, users, programs, paths, ops) = capsettings::stats();
+                shell_println!("Groups:      {}", groups);
+                shell_println!("Users:       {}", users);
+                shell_println!("Programs:    {}", programs);
+                shell_println!("Path reqs:   {}", paths);
+                shell_println!("Operations:  {}", ops);
+            }
+            case();
         }
         "clear" => {
-            capsettings::clear_all();
-            shell_println!("Cleared all capability settings.");
+            #[inline(never)]
+            fn case() {
+                capsettings::clear_all();
+                shell_println!("Cleared all capability settings.");
+            }
+            case();
         }
         "test" => match capsettings::self_test() {
             Ok(()) => shell_println!("capsettings: all tests passed."),
             Err(e) => shell_println!("capsettings: test failed: {:?}", e),
         },
         _ => {
-            shell_println!("capsettings — capability groups and assignments");
-            shell_println!();
-            shell_println!("Groups:");
-            shell_println!("  groups / lg                   List all groups");
-            shell_println!("  group <id>                    Show group details");
-            shell_println!("  mkgroup <name> <desc>         Create group");
-            shell_println!("  rmgroup <id>                  Remove group");
-            shell_println!("  gadd <gid> <cap>              Add cap to group");
-            shell_println!("  grm <gid> <cap>               Remove cap from group");
-            shell_println!();
-            shell_println!("Users:");
-            shell_println!("  users / lu                    List user assignments");
-            shell_println!("  user <uid>                    Show user caps");
-            shell_println!("  adduser <uid> <name>          Create user assignment");
-            shell_println!("  ugroup <uid> <gid>            Add user to group");
-            shell_println!("  ucap <uid> <cap>              Add extra cap to user");
-            shell_println!("  udeny <uid> <cap>             Deny cap for user");
-            shell_println!("  check <uid> <path>            Check access");
-            shell_println!();
-            shell_println!("Programs & Paths:");
-            shell_println!("  programs / lp                 List program caps");
-            shell_println!("  paths                         List path requirements");
-            shell_println!("  addpath <path> <cap> [r]      Add path requirement");
-            shell_println!("  rmpath <id>                   Remove path requirement");
-            shell_println!();
-            shell_println!("Other:");
-            shell_println!("  caplist                       List all capabilities");
-            shell_println!("  init                          Load defaults");
-            shell_println!("  stats / clear / test");
-            shell_println!("Alias: caps");
+            #[inline(never)]
+            fn case() {
+                shell_println!("capsettings — capability groups and assignments");
+                shell_println!();
+                shell_println!("Groups:");
+                shell_println!("  groups / lg                   List all groups");
+                shell_println!("  group <id>                    Show group details");
+                shell_println!("  mkgroup <name> <desc>         Create group");
+                shell_println!("  rmgroup <id>                  Remove group");
+                shell_println!("  gadd <gid> <cap>              Add cap to group");
+                shell_println!("  grm <gid> <cap>               Remove cap from group");
+                shell_println!();
+                shell_println!("Users:");
+                shell_println!("  users / lu                    List user assignments");
+                shell_println!("  user <uid>                    Show user caps");
+                shell_println!("  adduser <uid> <name>          Create user assignment");
+                shell_println!("  ugroup <uid> <gid>            Add user to group");
+                shell_println!("  ucap <uid> <cap>              Add extra cap to user");
+                shell_println!("  udeny <uid> <cap>             Deny cap for user");
+                shell_println!("  check <uid> <path>            Check access");
+                shell_println!();
+                shell_println!("Programs & Paths:");
+                shell_println!("  programs / lp                 List program caps");
+                shell_println!("  paths                         List path requirements");
+                shell_println!("  addpath <path> <cap> [r]      Add path requirement");
+                shell_println!("  rmpath <id>                   Remove path requirement");
+                shell_println!();
+                shell_println!("Other:");
+                shell_println!("  caplist                       List all capabilities");
+                shell_println!("  init                          Load defaults");
+                shell_println!("  stats / clear / test");
+                shell_println!("Alias: caps");
+            }
+            case();
         }
     }
 }
@@ -34353,372 +34740,458 @@ fn cmd_netsettings(args: &str) {
 
     match sub {
         "list" | "ifaces" => {
-            let ifaces = netsettings::list_interfaces();
-            if ifaces.is_empty() {
-                shell_println!("No interfaces");
-            } else {
-                shell_println!(
-                    "{:<8} {:<12} {:<10} {:<8} {:<16} {}",
-                    "Name",
-                    "Type",
-                    "State",
-                    "Speed",
-                    "IPv4",
-                    "MAC"
-                );
-                for i in &ifaces {
-                    let speed = if i.speed_mbps > 0 {
-                        alloc::format!("{}M", i.speed_mbps)
-                    } else {
-                        String::from("-")
-                    };
+            #[inline(never)]
+            fn case() {
+                let ifaces = netsettings::list_interfaces();
+                if ifaces.is_empty() {
+                    shell_println!("No interfaces");
+                } else {
                     shell_println!(
                         "{:<8} {:<12} {:<10} {:<8} {:<16} {}",
-                        i.name,
-                        alloc::format!("{:?}", i.iface_type),
-                        alloc::format!("{:?}", i.link_state),
-                        speed,
-                        i.ipv4.address,
-                        i.mac_address
+                        "Name",
+                        "Type",
+                        "State",
+                        "Speed",
+                        "IPv4",
+                        "MAC"
                     );
+                    for i in &ifaces {
+                        let speed = if i.speed_mbps > 0 {
+                            alloc::format!("{}M", i.speed_mbps)
+                        } else {
+                            String::from("-")
+                        };
+                        shell_println!(
+                            "{:<8} {:<12} {:<10} {:<8} {:<16} {}",
+                            i.name,
+                            alloc::format!("{:?}", i.iface_type),
+                            alloc::format!("{:?}", i.link_state),
+                            speed,
+                            i.ipv4.address,
+                            i.mac_address
+                        );
+                    }
                 }
             }
+            case();
         }
         "show" | "info" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: netsettings show <interface>");
-            } else {
-                match netsettings::get_interface(parts[1]) {
-                    Ok(i) => {
-                        shell_println!("Interface: {} ({})", i.display_name, i.name);
-                        shell_println!("Type:      {:?}", i.iface_type);
-                        shell_println!("State:     {:?}", i.link_state);
-                        shell_println!("MAC:       {}", i.mac_address);
-                        shell_println!("MTU:       {}", i.mtu);
-                        shell_println!("Speed:     {} Mbps", i.speed_mbps);
-                        shell_println!("\nIPv4:");
-                        shell_println!("  Method:  {:?}", i.ipv4.method);
-                        shell_println!("  Address: {}", i.ipv4.address);
-                        shell_println!("  Netmask: {}", i.ipv4.netmask);
-                        shell_println!("  Gateway: {}", i.ipv4.gateway);
-                        shell_println!("\nIPv6:");
-                        shell_println!("  Method:  {:?}", i.ipv6.method);
-                        shell_println!("  Address: {}", i.ipv6.address);
-                        shell_println!("  Prefix:  /{}", i.ipv6.prefix_len);
-                        shell_println!("  Privacy: {}", i.ipv6.privacy_extensions);
-                        shell_println!("\nDNS:");
-                        shell_println!("  Auto:    {}", i.dns.auto_dns);
-                        if !i.dns.servers.is_empty() {
-                            shell_println!("  Servers: {}", i.dns.servers.join(", "));
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: netsettings show <interface>");
+                } else {
+                    match netsettings::get_interface(parts[1]) {
+                        Ok(i) => {
+                            shell_println!("Interface: {} ({})", i.display_name, i.name);
+                            shell_println!("Type:      {:?}", i.iface_type);
+                            shell_println!("State:     {:?}", i.link_state);
+                            shell_println!("MAC:       {}", i.mac_address);
+                            shell_println!("MTU:       {}", i.mtu);
+                            shell_println!("Speed:     {} Mbps", i.speed_mbps);
+                            shell_println!("\nIPv4:");
+                            shell_println!("  Method:  {:?}", i.ipv4.method);
+                            shell_println!("  Address: {}", i.ipv4.address);
+                            shell_println!("  Netmask: {}", i.ipv4.netmask);
+                            shell_println!("  Gateway: {}", i.ipv4.gateway);
+                            shell_println!("\nIPv6:");
+                            shell_println!("  Method:  {:?}", i.ipv6.method);
+                            shell_println!("  Address: {}", i.ipv6.address);
+                            shell_println!("  Prefix:  /{}", i.ipv6.prefix_len);
+                            shell_println!("  Privacy: {}", i.ipv6.privacy_extensions);
+                            shell_println!("\nDNS:");
+                            shell_println!("  Auto:    {}", i.dns.auto_dns);
+                            if !i.dns.servers.is_empty() {
+                                shell_println!("  Servers: {}", i.dns.servers.join(", "));
+                            }
+                            if !i.dns.doh_url.is_empty() {
+                                shell_println!("  DoH:     {}", i.dns.doh_url);
+                            }
+                            if !i.connected_ssid.is_empty() {
+                                shell_println!("\nWi-Fi:     {}", i.connected_ssid);
+                            }
                         }
-                        if !i.dns.doh_url.is_empty() {
-                            shell_println!("  DoH:     {}", i.dns.doh_url);
-                        }
-                        if !i.connected_ssid.is_empty() {
-                            shell_println!("\nWi-Fi:     {}", i.connected_ssid);
-                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
-                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
+            case(&parts);
         }
         "add" => {
-            if parts.len() < 4 {
-                shell_println!("Usage: netsettings add <name> <type> <mac>");
-                shell_println!("Types: ethernet, wifi, loopback, virtual, vpn");
-            } else {
-                let it = match parts[2] {
-                    "ethernet" | "eth" => Some(netsettings::InterfaceType::Ethernet),
-                    "wifi" | "wlan" => Some(netsettings::InterfaceType::Wifi),
-                    "loopback" | "lo" => Some(netsettings::InterfaceType::Loopback),
-                    "virtual" | "virt" => Some(netsettings::InterfaceType::Virtual),
-                    "vpn" => Some(netsettings::InterfaceType::Vpn),
-                    _ => {
-                        shell_println!("Unknown type: {}", parts[2]);
-                        None
-                    }
-                };
-                if let Some(it) = it {
-                    let mac = if parts.len() > 3 {
-                        parts[3]
-                    } else {
-                        "00:00:00:00:00:00"
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 4 {
+                    shell_println!("Usage: netsettings add <name> <type> <mac>");
+                    shell_println!("Types: ethernet, wifi, loopback, virtual, vpn");
+                } else {
+                    let it = match parts[2] {
+                        "ethernet" | "eth" => Some(netsettings::InterfaceType::Ethernet),
+                        "wifi" | "wlan" => Some(netsettings::InterfaceType::Wifi),
+                        "loopback" | "lo" => Some(netsettings::InterfaceType::Loopback),
+                        "virtual" | "virt" => Some(netsettings::InterfaceType::Virtual),
+                        "vpn" => Some(netsettings::InterfaceType::Vpn),
+                        _ => {
+                            shell_println!("Unknown type: {}", parts[2]);
+                            None
+                        }
                     };
-                    match netsettings::add_interface(parts[1], parts[1], it, mac) {
-                        Ok(()) => shell_println!("Added: {}", parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                    if let Some(it) = it {
+                        let mac = if parts.len() > 3 {
+                            parts[3]
+                        } else {
+                            "00:00:00:00:00:00"
+                        };
+                        match netsettings::add_interface(parts[1], parts[1], it, mac) {
+                            Ok(()) => shell_println!("Added: {}", parts[1]),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
                     }
                 }
             }
+            case(&parts);
         }
         "remove" | "rm" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: netsettings remove <interface>");
-            } else {
-                match netsettings::remove_interface(parts[1]) {
-                    Ok(()) => shell_println!("Removed: {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: netsettings remove <interface>");
+                } else {
+                    match netsettings::remove_interface(parts[1]) {
+                        Ok(()) => shell_println!("Removed: {}", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "up" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: netsettings up <interface>");
-            } else {
-                match netsettings::set_link_state(parts[1], netsettings::LinkState::Up) {
-                    Ok(()) => shell_println!("{} up", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: netsettings up <interface>");
+                } else {
+                    match netsettings::set_link_state(parts[1], netsettings::LinkState::Up) {
+                        Ok(()) => shell_println!("{} up", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "down" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: netsettings down <interface>");
-            } else {
-                match netsettings::set_link_state(parts[1], netsettings::LinkState::Down) {
-                    Ok(()) => shell_println!("{} down", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: netsettings down <interface>");
+                } else {
+                    match netsettings::set_link_state(parts[1], netsettings::LinkState::Down) {
+                        Ok(()) => shell_println!("{} down", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "ipv4" => {
-            if parts.len() < 5 {
-                shell_println!("Usage: netsettings ipv4 <iface> <auto|manual> <addr> [mask] [gw]");
-            } else {
-                let method = match parts[2] {
-                    "auto" | "dhcp" => netsettings::IpMethod::Auto,
-                    "manual" | "static" => netsettings::IpMethod::Manual,
-                    "off" | "disabled" => netsettings::IpMethod::Disabled,
-                    _ => {
-                        shell_println!("Method: auto, manual, off");
-                        return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 5 {
+                    shell_println!(
+                        "Usage: netsettings ipv4 <iface> <auto|manual> <addr> [mask] [gw]"
+                    );
+                } else {
+                    let method = match parts[2] {
+                        "auto" | "dhcp" => netsettings::IpMethod::Auto,
+                        "manual" | "static" => netsettings::IpMethod::Manual,
+                        "off" | "disabled" => netsettings::IpMethod::Disabled,
+                        _ => {
+                            shell_println!("Method: auto, manual, off");
+                            return;
+                        }
+                    };
+                    let addr = parts.get(3).copied().unwrap_or("");
+                    let mask = parts.get(4).copied().unwrap_or("255.255.255.0");
+                    let gw = parts.get(5).copied().unwrap_or("");
+                    match netsettings::set_ipv4(parts[1], method, addr, mask, gw) {
+                        Ok(()) => shell_println!("IPv4 set for {}", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
-                };
-                let addr = parts.get(3).copied().unwrap_or("");
-                let mask = parts.get(4).copied().unwrap_or("255.255.255.0");
-                let gw = parts.get(5).copied().unwrap_or("");
-                match netsettings::set_ipv4(parts[1], method, addr, mask, gw) {
-                    Ok(()) => shell_println!("IPv4 set for {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
+            case(&parts);
         }
         "ipv6" => {
-            if parts.len() < 4 {
-                shell_println!(
-                    "Usage: netsettings ipv6 <iface> <auto|manual|off> [addr] [prefix] [gw]"
-                );
-            } else {
-                let method = match parts[2] {
-                    "auto" | "slaac" => netsettings::IpMethod::Auto,
-                    "manual" | "static" => netsettings::IpMethod::Manual,
-                    "off" | "disabled" => netsettings::IpMethod::Disabled,
-                    _ => {
-                        shell_println!("Method: auto, manual, off");
-                        return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 4 {
+                    shell_println!(
+                        "Usage: netsettings ipv6 <iface> <auto|manual|off> [addr] [prefix] [gw]"
+                    );
+                } else {
+                    let method = match parts[2] {
+                        "auto" | "slaac" => netsettings::IpMethod::Auto,
+                        "manual" | "static" => netsettings::IpMethod::Manual,
+                        "off" | "disabled" => netsettings::IpMethod::Disabled,
+                        _ => {
+                            shell_println!("Method: auto, manual, off");
+                            return;
+                        }
+                    };
+                    let addr = parts.get(3).copied().unwrap_or("");
+                    let prefix: u8 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(64);
+                    let gw = parts.get(5).copied().unwrap_or("");
+                    match netsettings::set_ipv6(parts[1], method, addr, prefix, gw) {
+                        Ok(()) => shell_println!("IPv6 set for {}", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
                     }
-                };
-                let addr = parts.get(3).copied().unwrap_or("");
-                let prefix: u8 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(64);
-                let gw = parts.get(5).copied().unwrap_or("");
-                match netsettings::set_ipv6(parts[1], method, addr, prefix, gw) {
-                    Ok(()) => shell_println!("IPv6 set for {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
                 }
             }
+            case(&parts);
         }
         "dns" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: netsettings dns <iface> <auto|server1,server2,...>");
-            } else if parts[2] == "auto" {
-                match netsettings::set_dns(parts[1], true, &[]) {
-                    Ok(()) => shell_println!("DNS set to auto for {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
-                }
-            } else {
-                let servers: Vec<&str> = parts[2].split(',').collect();
-                match netsettings::set_dns(parts[1], false, &servers) {
-                    Ok(()) => shell_println!("DNS servers set for {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: netsettings dns <iface> <auto|server1,server2,...>");
+                } else if parts[2] == "auto" {
+                    match netsettings::set_dns(parts[1], true, &[]) {
+                        Ok(()) => shell_println!("DNS set to auto for {}", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    let servers: Vec<&str> = parts[2].split(',').collect();
+                    match netsettings::set_dns(parts[1], false, &servers) {
+                        Ok(()) => shell_println!("DNS servers set for {}", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "doh" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: netsettings doh <iface> <url|off>");
-            } else {
-                let url = if parts[2] == "off" { "" } else { parts[2] };
-                match netsettings::set_doh(parts[1], url) {
-                    Ok(()) => shell_println!("DoH set for {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: netsettings doh <iface> <url|off>");
+                } else {
+                    let url = if parts[2] == "off" { "" } else { parts[2] };
+                    match netsettings::set_doh(parts[1], url) {
+                        Ok(()) => shell_println!("DoH set for {}", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "mtu" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: netsettings mtu <iface> <value>");
-            } else {
-                match parts[2].parse::<u32>() {
-                    Ok(v) => match netsettings::set_mtu(parts[1], v) {
-                        Ok(()) => shell_println!("MTU set to {} for {}", v, parts[1]),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    },
-                    Err(_) => shell_println!("Invalid MTU"),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 3 {
+                    shell_println!("Usage: netsettings mtu <iface> <value>");
+                } else {
+                    match parts[2].parse::<u32>() {
+                        Ok(v) => match netsettings::set_mtu(parts[1], v) {
+                            Ok(()) => shell_println!("MTU set to {} for {}", v, parts[1]),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        },
+                        Err(_) => shell_println!("Invalid MTU"),
+                    }
                 }
             }
+            case(&parts);
         }
         "scan" | "wifi" => {
-            let nets = netsettings::wifi_scan();
-            if nets.is_empty() {
-                shell_println!("No Wi-Fi networks found");
-            } else {
-                shell_println!(
-                    "{:<24} {:<6} {:<14} {:<6} {:<4} {}",
-                    "SSID",
-                    "Signal",
-                    "Security",
-                    "Band",
-                    "Ch",
-                    "Saved"
-                );
-                for n in &nets {
-                    let band = match n.band {
-                        netsettings::WifiBand::Band2g => "2.4G",
-                        netsettings::WifiBand::Band5g => "5G",
-                        netsettings::WifiBand::Band6g => "6G",
-                    };
+            #[inline(never)]
+            fn case() {
+                let nets = netsettings::wifi_scan();
+                if nets.is_empty() {
+                    shell_println!("No Wi-Fi networks found");
+                } else {
                     shell_println!(
                         "{:<24} {:<6} {:<14} {:<6} {:<4} {}",
-                        n.ssid,
-                        n.signal,
-                        alloc::format!("{:?}", n.security),
-                        band,
-                        n.channel,
-                        if n.saved { "yes" } else { "" }
+                        "SSID",
+                        "Signal",
+                        "Security",
+                        "Band",
+                        "Ch",
+                        "Saved"
                     );
+                    for n in &nets {
+                        let band = match n.band {
+                            netsettings::WifiBand::Band2g => "2.4G",
+                            netsettings::WifiBand::Band5g => "5G",
+                            netsettings::WifiBand::Band6g => "6G",
+                        };
+                        shell_println!(
+                            "{:<24} {:<6} {:<14} {:<6} {:<4} {}",
+                            n.ssid,
+                            n.signal,
+                            alloc::format!("{:?}", n.security),
+                            band,
+                            n.channel,
+                            if n.saved { "yes" } else { "" }
+                        );
+                    }
                 }
             }
+            case();
         }
         "connect" => {
-            if parts.len() < 4 {
-                shell_println!("Usage: netsettings connect <iface> <ssid> [password]");
-            } else {
-                let pass = parts.get(3).copied().unwrap_or("");
-                match netsettings::connect_wifi(parts[1], parts[2], pass) {
-                    Ok(()) => shell_println!("Connected to {}", parts[2]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 4 {
+                    shell_println!("Usage: netsettings connect <iface> <ssid> [password]");
+                } else {
+                    let pass = parts.get(3).copied().unwrap_or("");
+                    match netsettings::connect_wifi(parts[1], parts[2], pass) {
+                        Ok(()) => shell_println!("Connected to {}", parts[2]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "disconnect" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: netsettings disconnect <iface>");
-            } else {
-                match netsettings::disconnect_wifi(parts[1]) {
-                    Ok(()) => shell_println!("Disconnected"),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: netsettings disconnect <iface>");
+                } else {
+                    match netsettings::disconnect_wifi(parts[1]) {
+                        Ok(()) => shell_println!("Disconnected"),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "saved" => {
-            let nets = netsettings::saved_networks();
-            if nets.is_empty() {
-                shell_println!("No saved networks");
-            } else {
-                shell_println!(
-                    "{:<24} {:<14} {:<10} {}",
-                    "SSID",
-                    "Security",
-                    "Auto",
-                    "Priority"
-                );
-                for n in &nets {
+            #[inline(never)]
+            fn case() {
+                let nets = netsettings::saved_networks();
+                if nets.is_empty() {
+                    shell_println!("No saved networks");
+                } else {
                     shell_println!(
                         "{:<24} {:<14} {:<10} {}",
-                        n.ssid,
-                        alloc::format!("{:?}", n.security),
-                        if n.auto_connect { "yes" } else { "no" },
-                        n.priority
+                        "SSID",
+                        "Security",
+                        "Auto",
+                        "Priority"
                     );
+                    for n in &nets {
+                        shell_println!(
+                            "{:<24} {:<14} {:<10} {}",
+                            n.ssid,
+                            alloc::format!("{:?}", n.security),
+                            if n.auto_connect { "yes" } else { "no" },
+                            n.priority
+                        );
+                    }
                 }
             }
+            case();
         }
         "forget" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: netsettings forget <ssid>");
-            } else {
-                match netsettings::forget_network(parts[1]) {
-                    Ok(()) => shell_println!("Forgot: {}", parts[1]),
-                    Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Usage: netsettings forget <ssid>");
+                } else {
+                    match netsettings::forget_network(parts[1]) {
+                        Ok(()) => shell_println!("Forgot: {}", parts[1]),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
                 }
             }
+            case(&parts);
         }
         "router" | "gateway" => {
-            let ri = netsettings::router_info();
-            shell_println!(
-                "Gateway:     {} {}",
-                ri.gateway_ip,
-                if ri.reachable {
-                    "(reachable)"
-                } else {
-                    "(unreachable)"
+            #[inline(never)]
+            fn case() {
+                let ri = netsettings::router_info();
+                shell_println!(
+                    "Gateway:     {} {}",
+                    ri.gateway_ip,
+                    if ri.reachable {
+                        "(reachable)"
+                    } else {
+                        "(unreachable)"
+                    }
+                );
+                if !ri.model.is_empty() {
+                    shell_println!("Model:       {}", ri.model);
                 }
-            );
-            if !ri.model.is_empty() {
-                shell_println!("Model:       {}", ri.model);
+                if !ri.external_ipv4.is_empty() {
+                    shell_println!("External v4: {}", ri.external_ipv4);
+                }
+                if !ri.external_ipv6.is_empty() {
+                    shell_println!("External v6: {}", ri.external_ipv6);
+                }
             }
-            if !ri.external_ipv4.is_empty() {
-                shell_println!("External v4: {}", ri.external_ipv4);
-            }
-            if !ri.external_ipv6.is_empty() {
-                shell_println!("External v6: {}", ri.external_ipv6);
-            }
+            case();
         }
         "hostname" => {
-            if parts.len() < 2 {
-                shell_println!("Hostname: {}", netsettings::hostname());
-            } else {
-                netsettings::set_hostname(parts[1]);
-                shell_println!("Hostname set to {}", parts[1]);
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if parts.len() < 2 {
+                    shell_println!("Hostname: {}", netsettings::hostname());
+                } else {
+                    netsettings::set_hostname(parts[1]);
+                    shell_println!("Hostname set to {}", parts[1]);
+                }
             }
+            case(&parts);
         }
         "init" => {
-            netsettings::init_defaults();
-            shell_println!("Initialised network settings defaults");
+            #[inline(never)]
+            fn case() {
+                netsettings::init_defaults();
+                shell_println!("Initialised network settings defaults");
+            }
+            case();
         }
         "stats" => {
-            let (ifaces, connected, saved, ops) = netsettings::stats();
-            shell_println!("Interfaces:  {} ({} connected)", ifaces, connected);
-            shell_println!("Saved WiFi:  {}", saved);
-            shell_println!("Operations:  {}", ops);
+            #[inline(never)]
+            fn case() {
+                let (ifaces, connected, saved, ops) = netsettings::stats();
+                shell_println!("Interfaces:  {} ({} connected)", ifaces, connected);
+                shell_println!("Saved WiFi:  {}", saved);
+                shell_println!("Operations:  {}", ops);
+            }
+            case();
         }
         "test" => match netsettings::self_test() {
             Ok(()) => shell_println!("netsettings: all tests passed"),
             Err(e) => shell_println!("netsettings: test FAILED: {:?}", e),
         },
         _ => {
-            shell_println!("netsettings — comprehensive network configuration");
-            shell_println!("Usage: netsettings <subcommand>");
-            shell_println!("  list              List interfaces");
-            shell_println!("  show <iface>      Show interface details");
-            shell_println!("  add <name> <type> <mac>  Add interface");
-            shell_println!("  remove <name>     Remove interface");
-            shell_println!("  up/down <iface>   Set link state");
-            shell_println!("  ipv4 <iface> <method> <addr> [mask] [gw]");
-            shell_println!("  ipv6 <iface> <method> [addr] [prefix] [gw]");
-            shell_println!("  dns <iface> <auto|servers>  Set DNS");
-            shell_println!("  doh <iface> <url|off>  Set DNS-over-HTTPS");
-            shell_println!("  mtu <iface> <val> Set MTU");
-            shell_println!("  scan              Scan Wi-Fi networks");
-            shell_println!("  connect <iface> <ssid> [pass]  Connect WiFi");
-            shell_println!("  disconnect <iface>  Disconnect WiFi");
-            shell_println!("  saved             List saved networks");
-            shell_println!("  forget <ssid>     Forget saved network");
-            shell_println!("  router            Show gateway/router info");
-            shell_println!("  hostname [name]   Get/set hostname");
-            shell_println!("  init              Load defaults");
-            shell_println!("  stats             Show statistics");
-            shell_println!("  test              Run self-tests");
+            #[inline(never)]
+            fn case() {
+                shell_println!("netsettings — comprehensive network configuration");
+                shell_println!("Usage: netsettings <subcommand>");
+                shell_println!("  list              List interfaces");
+                shell_println!("  show <iface>      Show interface details");
+                shell_println!("  add <name> <type> <mac>  Add interface");
+                shell_println!("  remove <name>     Remove interface");
+                shell_println!("  up/down <iface>   Set link state");
+                shell_println!("  ipv4 <iface> <method> <addr> [mask] [gw]");
+                shell_println!("  ipv6 <iface> <method> [addr] [prefix] [gw]");
+                shell_println!("  dns <iface> <auto|servers>  Set DNS");
+                shell_println!("  doh <iface> <url|off>  Set DNS-over-HTTPS");
+                shell_println!("  mtu <iface> <val> Set MTU");
+                shell_println!("  scan              Scan Wi-Fi networks");
+                shell_println!("  connect <iface> <ssid> [pass]  Connect WiFi");
+                shell_println!("  disconnect <iface>  Disconnect WiFi");
+                shell_println!("  saved             List saved networks");
+                shell_println!("  forget <ssid>     Forget saved network");
+                shell_println!("  router            Show gateway/router info");
+                shell_println!("  hostname [name]   Get/set hostname");
+                shell_println!("  init              Load defaults");
+                shell_println!("  stats             Show statistics");
+                shell_println!("  test              Run self-tests");
+            }
+            case();
         }
     }
 }
@@ -36432,357 +36905,440 @@ fn cmd_tasksched(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "show" | "" | "list" => {
-            let tasks = tasksched::list_tasks();
-            if tasks.is_empty() {
-                shell_println!("No scheduled tasks.");
-            } else {
-                shell_println!("{} scheduled task(s):", tasks.len());
-                for t in &tasks {
-                    let sys = if t.system { " [system]" } else { "" };
-                    shell_println!(
-                        "  #{} {} [{}] {:02}:{:02} — {} {}{}",
-                        t.id,
-                        t.name,
-                        t.schedule_type.label(),
-                        t.hour,
-                        t.minute,
-                        t.status.label(),
-                        t.command,
-                        sys
-                    );
-                    if !t.arguments.is_empty() {
-                        shell_println!("       args: {}", t.arguments);
-                    }
-                    if t.run_count > 0 {
+            #[inline(never)]
+            fn case() {
+                let tasks = tasksched::list_tasks();
+                if tasks.is_empty() {
+                    shell_println!("No scheduled tasks.");
+                } else {
+                    shell_println!("{} scheduled task(s):", tasks.len());
+                    for t in &tasks {
+                        let sys = if t.system { " [system]" } else { "" };
                         shell_println!(
-                            "       runs: {}, last: {}",
-                            t.run_count,
-                            if t.last_success { "OK" } else { "FAILED" }
+                            "  #{} {} [{}] {:02}:{:02} — {} {}{}",
+                            t.id,
+                            t.name,
+                            t.schedule_type.label(),
+                            t.hour,
+                            t.minute,
+                            t.status.label(),
+                            t.command,
+                            sys
+                        );
+                        if !t.arguments.is_empty() {
+                            shell_println!("       args: {}", t.arguments);
+                        }
+                        if t.run_count > 0 {
+                            shell_println!(
+                                "       runs: {}, last: {}",
+                                t.run_count,
+                                if t.last_success { "OK" } else { "FAILED" }
+                            );
+                        }
+                    }
+                }
+            }
+            case();
+        }
+        "info" | "get" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let Some(id_str) = parts.get(1) {
+                    if let Ok(id) = id_str.parse::<u64>() {
+                        match tasksched::get_task(id) {
+                            Ok(t) => {
+                                shell_println!("Task #{}: {}", t.id, t.name);
+                                shell_println!("  Command:     {} {}", t.command, t.arguments);
+                                shell_println!("  Schedule:    {}", t.schedule_type.label());
+                                shell_println!("  Time:        {:02}:{:02}", t.hour, t.minute);
+                                if t.schedule_type == tasksched::ScheduleType::Weekly {
+                                    let days: Vec<&str> =
+                                        ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(i, _)| t.weekdays[*i])
+                                            .map(|(_, d)| *d)
+                                            .collect();
+                                    shell_println!("  Days:        {}", days.join(", "));
+                                }
+                                if t.schedule_type == tasksched::ScheduleType::Interval {
+                                    shell_println!("  Interval:    {} min", t.interval_minutes);
+                                }
+                                shell_println!("  Priority:    {}", t.priority.label());
+                                shell_println!("  Status:      {}", t.status.label());
+                                shell_println!("  System:      {}", t.system);
+                                shell_println!("  Runs:        {}", t.run_count);
+                                if t.run_count > 0 {
+                                    shell_println!(
+                                        "  Last run:    {} ({})",
+                                        if t.last_success { "OK" } else { "FAILED" },
+                                        t.last_duration_us
+                                    );
+                                }
+                                if !t.description.is_empty() {
+                                    shell_println!("  Description: {}", t.description);
+                                }
+                            }
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Invalid task ID: {}", id_str);
+                    }
+                } else {
+                    shell_println!("Usage: schtask info <id>");
+                }
+            }
+            case(&parts);
+        }
+        "create" | "add" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                // schtask create <name> <command> [daily|weekly|once|interval|boot|login]
+                if let (Some(name), Some(cmd)) = (parts.get(1), parts.get(2)) {
+                    let sched_type = match parts.get(3).copied().unwrap_or("daily") {
+                        "daily" => tasksched::ScheduleType::Daily,
+                        "weekly" => tasksched::ScheduleType::Weekly,
+                        "once" => tasksched::ScheduleType::Once,
+                        "interval" => tasksched::ScheduleType::Interval,
+                        "boot" => tasksched::ScheduleType::Boot,
+                        "login" => tasksched::ScheduleType::Login,
+                        other => {
+                            shell_println!("Unknown schedule type: {}", other);
+                            return;
+                        }
+                    };
+                    match tasksched::create_task(name, cmd, sched_type) {
+                        Ok(id) => shell_println!("Created task #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!(
+                        "Usage: schtask create <name> <command> [daily|weekly|once|interval|boot|login]"
+                    );
+                }
+            }
+            case(&parts);
+        }
+        "remove" | "rm" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let Some(id_str) = parts.get(1) {
+                    if let Ok(id) = id_str.parse::<u64>() {
+                        match tasksched::remove_task(id) {
+                            Ok(()) => shell_println!("Task #{} removed.", id),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Invalid task ID.");
+                    }
+                } else {
+                    shell_println!("Usage: schtask remove <id>");
+                }
+            }
+            case(&parts);
+        }
+        "time" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let (Some(id_str), Some(time_str)) = (parts.get(1), parts.get(2)) {
+                    if let Ok(id) = id_str.parse::<u64>() {
+                        if let Some((h, m)) = parse_time_hhmm(time_str) {
+                            match tasksched::set_time(id, h, m) {
+                                Ok(()) => {
+                                    shell_println!("Task #{} time set to {:02}:{:02}", id, h, m)
+                                }
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
+                        } else {
+                            shell_println!("Invalid time format. Use HH:MM");
+                        }
+                    } else {
+                        shell_println!("Invalid task ID.");
+                    }
+                } else {
+                    shell_println!("Usage: schtask time <id> <HH:MM>");
+                }
+            }
+            case(&parts);
+        }
+        "day" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let (Some(id_str), Some(day_str), Some(val)) =
+                    (parts.get(1), parts.get(2), parts.get(3))
+                {
+                    if let Ok(id) = id_str.parse::<u64>() {
+                        let day_num = match *day_str {
+                            "sun" | "0" => Some(0usize),
+                            "mon" | "1" => Some(1),
+                            "tue" | "2" => Some(2),
+                            "wed" | "3" => Some(3),
+                            "thu" | "4" => Some(4),
+                            "fri" | "5" => Some(5),
+                            "sat" | "6" => Some(6),
+                            _ => None,
+                        };
+                        if let Some(d) = day_num {
+                            let enabled = matches!(*val, "on" | "true" | "yes" | "1");
+                            match tasksched::set_weekday(id, d, enabled) {
+                                Ok(()) => {
+                                    shell_println!("Task #{} weekday {} = {}", id, day_str, enabled)
+                                }
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
+                        } else {
+                            shell_println!(
+                                "Unknown day: {}. Use sun/mon/tue/wed/thu/fri/sat",
+                                day_str
+                            );
+                        }
+                    } else {
+                        shell_println!("Invalid task ID.");
+                    }
+                } else {
+                    shell_println!(
+                        "Usage: schtask day <id> <sun|mon|tue|wed|thu|fri|sat> <on|off>"
+                    );
+                }
+            }
+            case(&parts);
+        }
+        "interval" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let (Some(id_str), Some(min_str)) = (parts.get(1), parts.get(2)) {
+                    if let (Ok(id), Ok(mins)) = (id_str.parse::<u64>(), min_str.parse::<u32>()) {
+                        match tasksched::set_interval(id, mins) {
+                            Ok(()) => shell_println!("Task #{} interval set to {} min", id, mins),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Invalid arguments.");
+                    }
+                } else {
+                    shell_println!("Usage: schtask interval <id> <minutes>");
+                }
+            }
+            case(&parts);
+        }
+        "args" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let Some(id_str) = parts.get(1) {
+                    if let Ok(id) = id_str.parse::<u64>() {
+                        let task_args = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
+                        match tasksched::set_arguments(id, &task_args) {
+                            Ok(()) => shell_println!("Task #{} arguments set.", id),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Invalid task ID.");
+                    }
+                } else {
+                    shell_println!("Usage: schtask args <id> <arguments...>");
+                }
+            }
+            case(&parts);
+        }
+        "desc" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let Some(id_str) = parts.get(1) {
+                    if let Ok(id) = id_str.parse::<u64>() {
+                        let desc = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
+                        match tasksched::set_description(id, &desc) {
+                            Ok(()) => shell_println!("Task #{} description set.", id),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Invalid task ID.");
+                    }
+                } else {
+                    shell_println!("Usage: schtask desc <id> <description...>");
+                }
+            }
+            case(&parts);
+        }
+        "enable" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let Some(id_str) = parts.get(1) {
+                    if let Ok(id) = id_str.parse::<u64>() {
+                        match tasksched::enable_task(id) {
+                            Ok(()) => shell_println!("Task #{} enabled.", id),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Invalid task ID.");
+                    }
+                } else {
+                    shell_println!("Usage: schtask enable <id>");
+                }
+            }
+            case(&parts);
+        }
+        "disable" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let Some(id_str) = parts.get(1) {
+                    if let Ok(id) = id_str.parse::<u64>() {
+                        match tasksched::disable_task(id) {
+                            Ok(()) => shell_println!("Task #{} disabled.", id),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Invalid task ID.");
+                    }
+                } else {
+                    shell_println!("Usage: schtask disable <id>");
+                }
+            }
+            case(&parts);
+        }
+        "due" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let (Some(h_str), Some(m_str)) = (parts.get(1), parts.get(2)) {
+                    if let (Ok(h), Ok(m)) = (h_str.parse::<u8>(), m_str.parse::<u8>()) {
+                        let wd = parts.get(3).and_then(|d| d.parse::<u8>().ok()).unwrap_or(0);
+                        let due = tasksched::check_due(h, m, wd);
+                        if due.is_empty() {
+                            shell_println!("No tasks due at {:02}:{:02}", h, m);
+                        } else {
+                            shell_println!("{} task(s) due:", due.len());
+                            for id in &due {
+                                if let Ok(t) = tasksched::get_task(*id) {
+                                    shell_println!("  #{} {}", id, t.name);
+                                }
+                            }
+                        }
+                    } else {
+                        shell_println!("Invalid time.");
+                    }
+                } else {
+                    shell_println!("Usage: schtask due <hour> <minute> [weekday 0-6]");
+                }
+            }
+            case(&parts);
+        }
+        "run" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                if let Some(id_str) = parts.get(1) {
+                    if let Ok(id) = id_str.parse::<u64>() {
+                        match tasksched::record_start(id) {
+                            Ok(()) => {
+                                shell_println!("Task #{} started.", id);
+                                // Simulate immediate completion.
+                                let _ = tasksched::record_complete(id, true, 0);
+                                shell_println!("Task #{} completed.", id);
+                            }
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Invalid task ID.");
+                    }
+                } else {
+                    shell_println!("Usage: schtask run <id>");
+                }
+            }
+            case(&parts);
+        }
+        "history" | "hist" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id_filter = parts.get(1).and_then(|s| s.parse::<u64>().ok());
+                let history = if let Some(id) = id_filter {
+                    tasksched::task_history(id)
+                } else {
+                    tasksched::all_history()
+                };
+                if history.is_empty() {
+                    shell_println!("No execution history.");
+                } else {
+                    shell_println!("{} execution(s):", history.len());
+                    for h in history.iter().rev().take(20) {
+                        let status = if h.success { "OK" } else { "FAIL" };
+                        shell_println!(
+                            "  #{} {} [{}] exit={} duration={}us",
+                            h.task_id,
+                            h.task_name,
+                            status,
+                            h.exit_code,
+                            h.duration_us
                         );
                     }
                 }
             }
-        }
-        "info" | "get" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u64>() {
-                    match tasksched::get_task(id) {
-                        Ok(t) => {
-                            shell_println!("Task #{}: {}", t.id, t.name);
-                            shell_println!("  Command:     {} {}", t.command, t.arguments);
-                            shell_println!("  Schedule:    {}", t.schedule_type.label());
-                            shell_println!("  Time:        {:02}:{:02}", t.hour, t.minute);
-                            if t.schedule_type == tasksched::ScheduleType::Weekly {
-                                let days: Vec<&str> =
-                                    ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(i, _)| t.weekdays[*i])
-                                        .map(|(_, d)| *d)
-                                        .collect();
-                                shell_println!("  Days:        {}", days.join(", "));
-                            }
-                            if t.schedule_type == tasksched::ScheduleType::Interval {
-                                shell_println!("  Interval:    {} min", t.interval_minutes);
-                            }
-                            shell_println!("  Priority:    {}", t.priority.label());
-                            shell_println!("  Status:      {}", t.status.label());
-                            shell_println!("  System:      {}", t.system);
-                            shell_println!("  Runs:        {}", t.run_count);
-                            if t.run_count > 0 {
-                                shell_println!(
-                                    "  Last run:    {} ({})",
-                                    if t.last_success { "OK" } else { "FAILED" },
-                                    t.last_duration_us
-                                );
-                            }
-                            if !t.description.is_empty() {
-                                shell_println!("  Description: {}", t.description);
-                            }
-                        }
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
-                } else {
-                    shell_println!("Invalid task ID: {}", id_str);
-                }
-            } else {
-                shell_println!("Usage: schtask info <id>");
-            }
-        }
-        "create" | "add" => {
-            // schtask create <name> <command> [daily|weekly|once|interval|boot|login]
-            if let (Some(name), Some(cmd)) = (parts.get(1), parts.get(2)) {
-                let sched_type = match parts.get(3).copied().unwrap_or("daily") {
-                    "daily" => tasksched::ScheduleType::Daily,
-                    "weekly" => tasksched::ScheduleType::Weekly,
-                    "once" => tasksched::ScheduleType::Once,
-                    "interval" => tasksched::ScheduleType::Interval,
-                    "boot" => tasksched::ScheduleType::Boot,
-                    "login" => tasksched::ScheduleType::Login,
-                    other => {
-                        shell_println!("Unknown schedule type: {}", other);
-                        return;
-                    }
-                };
-                match tasksched::create_task(name, cmd, sched_type) {
-                    Ok(id) => shell_println!("Created task #{}", id),
-                    Err(e) => shell_println!("Error: {:?}", e),
-                }
-            } else {
-                shell_println!(
-                    "Usage: schtask create <name> <command> [daily|weekly|once|interval|boot|login]"
-                );
-            }
-        }
-        "remove" | "rm" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u64>() {
-                    match tasksched::remove_task(id) {
-                        Ok(()) => shell_println!("Task #{} removed.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
-                } else {
-                    shell_println!("Invalid task ID.");
-                }
-            } else {
-                shell_println!("Usage: schtask remove <id>");
-            }
-        }
-        "time" => {
-            if let (Some(id_str), Some(time_str)) = (parts.get(1), parts.get(2)) {
-                if let Ok(id) = id_str.parse::<u64>() {
-                    if let Some((h, m)) = parse_time_hhmm(time_str) {
-                        match tasksched::set_time(id, h, m) {
-                            Ok(()) => shell_println!("Task #{} time set to {:02}:{:02}", id, h, m),
-                            Err(e) => shell_println!("Error: {:?}", e),
-                        }
-                    } else {
-                        shell_println!("Invalid time format. Use HH:MM");
-                    }
-                } else {
-                    shell_println!("Invalid task ID.");
-                }
-            } else {
-                shell_println!("Usage: schtask time <id> <HH:MM>");
-            }
-        }
-        "day" => {
-            if let (Some(id_str), Some(day_str), Some(val)) =
-                (parts.get(1), parts.get(2), parts.get(3))
-            {
-                if let Ok(id) = id_str.parse::<u64>() {
-                    let day_num = match *day_str {
-                        "sun" | "0" => Some(0usize),
-                        "mon" | "1" => Some(1),
-                        "tue" | "2" => Some(2),
-                        "wed" | "3" => Some(3),
-                        "thu" | "4" => Some(4),
-                        "fri" | "5" => Some(5),
-                        "sat" | "6" => Some(6),
-                        _ => None,
-                    };
-                    if let Some(d) = day_num {
-                        let enabled = matches!(*val, "on" | "true" | "yes" | "1");
-                        match tasksched::set_weekday(id, d, enabled) {
-                            Ok(()) => {
-                                shell_println!("Task #{} weekday {} = {}", id, day_str, enabled)
-                            }
-                            Err(e) => shell_println!("Error: {:?}", e),
-                        }
-                    } else {
-                        shell_println!("Unknown day: {}. Use sun/mon/tue/wed/thu/fri/sat", day_str);
-                    }
-                } else {
-                    shell_println!("Invalid task ID.");
-                }
-            } else {
-                shell_println!("Usage: schtask day <id> <sun|mon|tue|wed|thu|fri|sat> <on|off>");
-            }
-        }
-        "interval" => {
-            if let (Some(id_str), Some(min_str)) = (parts.get(1), parts.get(2)) {
-                if let (Ok(id), Ok(mins)) = (id_str.parse::<u64>(), min_str.parse::<u32>()) {
-                    match tasksched::set_interval(id, mins) {
-                        Ok(()) => shell_println!("Task #{} interval set to {} min", id, mins),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
-                } else {
-                    shell_println!("Invalid arguments.");
-                }
-            } else {
-                shell_println!("Usage: schtask interval <id> <minutes>");
-            }
-        }
-        "args" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u64>() {
-                    let task_args = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
-                    match tasksched::set_arguments(id, &task_args) {
-                        Ok(()) => shell_println!("Task #{} arguments set.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
-                } else {
-                    shell_println!("Invalid task ID.");
-                }
-            } else {
-                shell_println!("Usage: schtask args <id> <arguments...>");
-            }
-        }
-        "desc" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u64>() {
-                    let desc = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
-                    match tasksched::set_description(id, &desc) {
-                        Ok(()) => shell_println!("Task #{} description set.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
-                } else {
-                    shell_println!("Invalid task ID.");
-                }
-            } else {
-                shell_println!("Usage: schtask desc <id> <description...>");
-            }
-        }
-        "enable" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u64>() {
-                    match tasksched::enable_task(id) {
-                        Ok(()) => shell_println!("Task #{} enabled.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
-                } else {
-                    shell_println!("Invalid task ID.");
-                }
-            } else {
-                shell_println!("Usage: schtask enable <id>");
-            }
-        }
-        "disable" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u64>() {
-                    match tasksched::disable_task(id) {
-                        Ok(()) => shell_println!("Task #{} disabled.", id),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
-                } else {
-                    shell_println!("Invalid task ID.");
-                }
-            } else {
-                shell_println!("Usage: schtask disable <id>");
-            }
-        }
-        "due" => {
-            if let (Some(h_str), Some(m_str)) = (parts.get(1), parts.get(2)) {
-                if let (Ok(h), Ok(m)) = (h_str.parse::<u8>(), m_str.parse::<u8>()) {
-                    let wd = parts.get(3).and_then(|d| d.parse::<u8>().ok()).unwrap_or(0);
-                    let due = tasksched::check_due(h, m, wd);
-                    if due.is_empty() {
-                        shell_println!("No tasks due at {:02}:{:02}", h, m);
-                    } else {
-                        shell_println!("{} task(s) due:", due.len());
-                        for id in &due {
-                            if let Ok(t) = tasksched::get_task(*id) {
-                                shell_println!("  #{} {}", id, t.name);
-                            }
-                        }
-                    }
-                } else {
-                    shell_println!("Invalid time.");
-                }
-            } else {
-                shell_println!("Usage: schtask due <hour> <minute> [weekday 0-6]");
-            }
-        }
-        "run" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u64>() {
-                    match tasksched::record_start(id) {
-                        Ok(()) => {
-                            shell_println!("Task #{} started.", id);
-                            // Simulate immediate completion.
-                            let _ = tasksched::record_complete(id, true, 0);
-                            shell_println!("Task #{} completed.", id);
-                        }
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
-                } else {
-                    shell_println!("Invalid task ID.");
-                }
-            } else {
-                shell_println!("Usage: schtask run <id>");
-            }
-        }
-        "history" | "hist" => {
-            let id_filter = parts.get(1).and_then(|s| s.parse::<u64>().ok());
-            let history = if let Some(id) = id_filter {
-                tasksched::task_history(id)
-            } else {
-                tasksched::all_history()
-            };
-            if history.is_empty() {
-                shell_println!("No execution history.");
-            } else {
-                shell_println!("{} execution(s):", history.len());
-                for h in history.iter().rev().take(20) {
-                    let status = if h.success { "OK" } else { "FAIL" };
-                    shell_println!(
-                        "  #{} {} [{}] exit={} duration={}us",
-                        h.task_id,
-                        h.task_name,
-                        status,
-                        h.exit_code,
-                        h.duration_us
-                    );
-                }
-            }
+            case(&parts);
         }
         "next" => {
-            if let Some((id, name, h, m)) = tasksched::next_due() {
-                shell_println!("Next due: #{} {} at {:02}:{:02}", id, name, h, m);
-            } else {
-                shell_println!("No tasks scheduled.");
+            #[inline(never)]
+            fn case() {
+                if let Some((id, name, h, m)) = tasksched::next_due() {
+                    shell_println!("Next due: #{} {} at {:02}:{:02}", id, name, h, m);
+                } else {
+                    shell_println!("No tasks scheduled.");
+                }
             }
+            case();
         }
         "stats" => {
-            let (count, runs, failures, hist, ops) = tasksched::stats();
-            shell_println!("Tasks:       {}", count);
-            shell_println!("Total runs:  {}", runs);
-            shell_println!("Failures:    {}", failures);
-            shell_println!("History:     {}", hist);
-            shell_println!("Operations:  {}", ops);
+            #[inline(never)]
+            fn case() {
+                let (count, runs, failures, hist, ops) = tasksched::stats();
+                shell_println!("Tasks:       {}", count);
+                shell_println!("Total runs:  {}", runs);
+                shell_println!("Failures:    {}", failures);
+                shell_println!("History:     {}", hist);
+                shell_println!("Operations:  {}", ops);
+            }
+            case();
         }
         "test" => {
-            tasksched::self_test();
-            shell_println!("[tasksched] All self-tests passed.");
+            #[inline(never)]
+            fn case() {
+                tasksched::self_test();
+                shell_println!("[tasksched] All self-tests passed.");
+            }
+            case();
         }
         "init" => {
-            tasksched::init_defaults();
-            shell_println!("Task scheduler initialized.");
+            #[inline(never)]
+            fn case() {
+                tasksched::init_defaults();
+                shell_println!("Task scheduler initialized.");
+            }
+            case();
         }
         _ => {
-            shell_println!("tasksched — scheduled task management");
-            shell_println!("Usage: tasksched|schtask <subcommand>");
-            shell_println!("");
-            shell_println!("Subcommands:");
-            shell_println!("  list               List all tasks (default)");
-            shell_println!("  info <id>          Show task details");
-            shell_println!(
-                "  create <n> <cmd> [type]  Create task (daily/weekly/once/interval/boot/login)"
-            );
-            shell_println!("  remove <id>        Remove a task");
-            shell_println!("  time <id> <HH:MM>  Set task run time");
-            shell_println!("  day <id> <d> <on|off>  Set weekday (sun-sat)");
-            shell_println!("  interval <id> <min>  Set interval minutes");
-            shell_println!("  args <id> <args>   Set task arguments");
-            shell_println!("  desc <id> <text>   Set description");
-            shell_println!("  enable/disable <id>  Enable/disable task");
-            shell_println!("  due <H> <M> [wd]   Check due tasks at time");
-            shell_println!("  run <id>           Run a task now");
-            shell_println!("  history [id]       Show execution history");
-            shell_println!("  next               Show next due task");
-            shell_println!("  stats              Show statistics");
-            shell_println!("  init               Initialize scheduler");
-            shell_println!("  test               Run self-tests");
+            #[inline(never)]
+            fn case() {
+                shell_println!("tasksched — scheduled task management");
+                shell_println!("Usage: tasksched|schtask <subcommand>");
+                shell_println!("");
+                shell_println!("Subcommands:");
+                shell_println!("  list               List all tasks (default)");
+                shell_println!("  info <id>          Show task details");
+                shell_println!(
+                    "  create <n> <cmd> [type]  Create task (daily/weekly/once/interval/boot/login)"
+                );
+                shell_println!("  remove <id>        Remove a task");
+                shell_println!("  time <id> <HH:MM>  Set task run time");
+                shell_println!("  day <id> <d> <on|off>  Set weekday (sun-sat)");
+                shell_println!("  interval <id> <min>  Set interval minutes");
+                shell_println!("  args <id> <args>   Set task arguments");
+                shell_println!("  desc <id> <text>   Set description");
+                shell_println!("  enable/disable <id>  Enable/disable task");
+                shell_println!("  due <H> <M> [wd]   Check due tasks at time");
+                shell_println!("  run <id>           Run a task now");
+                shell_println!("  history [id]       Show execution history");
+                shell_println!("  next               Show next due task");
+                shell_println!("  stats              Show statistics");
+                shell_println!("  init               Initialize scheduler");
+                shell_println!("  test               Run self-tests");
+            }
+            case();
         }
     }
 }
@@ -80207,323 +80763,408 @@ fn cmd_filepicker(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "open" => {
-            let dir = parts.get(1).copied().unwrap_or("/");
-            match filepicker::create_dialog(filepicker::DialogMode::OpenFile, dir, Vec::new()) {
-                Ok(id) => {
-                    shell_println!("Dialog #{}: OpenFile at {}", id, dir);
-                    // Auto-navigate to build listing.
-                    let _ = filepicker::navigate(id, dir);
-                    if let Some(d) = filepicker::get_dialog(id) {
-                        shell_println!("{} items in listing", d.listing.len());
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let dir = parts.get(1).copied().unwrap_or("/");
+                match filepicker::create_dialog(filepicker::DialogMode::OpenFile, dir, Vec::new()) {
+                    Ok(id) => {
+                        shell_println!("Dialog #{}: OpenFile at {}", id, dir);
+                        // Auto-navigate to build listing.
+                        let _ = filepicker::navigate(id, dir);
+                        if let Some(d) = filepicker::get_dialog(id) {
+                            shell_println!("{} items in listing", d.listing.len());
+                        }
                     }
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
             }
+            case(&parts);
         }
         "openm" => {
-            let dir = parts.get(1).copied().unwrap_or("/");
-            match filepicker::create_dialog(filepicker::DialogMode::OpenFiles, dir, Vec::new()) {
-                Ok(id) => shell_println!("Dialog #{}: OpenFiles at {}", id, dir),
-                Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let dir = parts.get(1).copied().unwrap_or("/");
+                match filepicker::create_dialog(filepicker::DialogMode::OpenFiles, dir, Vec::new())
+                {
+                    Ok(id) => shell_println!("Dialog #{}: OpenFiles at {}", id, dir),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
+            case(&parts);
         }
         "save" => {
-            let dir = parts.get(1).copied().unwrap_or("/");
-            match filepicker::create_dialog(filepicker::DialogMode::SaveFile, dir, Vec::new()) {
-                Ok(id) => shell_println!("Dialog #{}: SaveFile at {}", id, dir),
-                Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let dir = parts.get(1).copied().unwrap_or("/");
+                match filepicker::create_dialog(filepicker::DialogMode::SaveFile, dir, Vec::new()) {
+                    Ok(id) => shell_println!("Dialog #{}: SaveFile at {}", id, dir),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
+            case(&parts);
         }
         "folder" => {
-            let dir = parts.get(1).copied().unwrap_or("/");
-            match filepicker::create_dialog(filepicker::DialogMode::SelectFolder, dir, Vec::new()) {
-                Ok(id) => shell_println!("Dialog #{}: SelectFolder at {}", id, dir),
-                Err(e) => shell_println!("Error: {:?}", e),
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let dir = parts.get(1).copied().unwrap_or("/");
+                match filepicker::create_dialog(
+                    filepicker::DialogMode::SelectFolder,
+                    dir,
+                    Vec::new(),
+                ) {
+                    Ok(id) => shell_println!("Dialog #{}: SelectFolder at {}", id, dir),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
             }
+            case(&parts);
         }
         "nav" | "cd" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let path = parts.get(2).copied().unwrap_or("");
-            if id == 0 || path.is_empty() {
-                shell_println!("Usage: fpick nav <dialog-id> <path>");
-                return;
-            }
-            match filepicker::navigate(id, path) {
-                Ok(()) => {
-                    if let Some(d) = filepicker::get_dialog(id) {
-                        shell_println!(
-                            "Navigated to: {} ({} items)",
-                            d.current_dir.display(),
-                            d.listing.len()
-                        );
-                    }
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id = parts
+                    .get(1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let path = parts.get(2).copied().unwrap_or("");
+                if id == 0 || path.is_empty() {
+                    shell_println!("Usage: fpick nav <dialog-id> <path>");
+                    return;
                 }
-                Err(e) => shell_println!("Error: {:?}", e),
-            }
-        }
-        "up" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: fpick up <dialog-id>");
-                return;
-            }
-            match filepicker::go_up(id) {
-                Ok(()) => {
-                    if let Some(d) = filepicker::get_dialog(id) {
-                        shell_println!("Now at: {}", d.current_dir.display());
-                    }
-                }
-                Err(e) => shell_println!("Error: {:?}", e),
-            }
-        }
-        "back" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: fpick back <dialog-id>");
-                return;
-            }
-            match filepicker::go_back(id) {
-                Ok(()) => {
-                    if let Some(d) = filepicker::get_dialog(id) {
-                        shell_println!("Back to: {}", d.current_dir.display());
-                    }
-                }
-                Err(e) => shell_println!("Error: {:?}", e),
-            }
-        }
-        "select" | "sel" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let path = parts.get(2).copied().unwrap_or("");
-            if id == 0 || path.is_empty() {
-                shell_println!("Usage: fpick select <dialog-id> <path>");
-                return;
-            }
-            match filepicker::select(id, path) {
-                Ok(()) => shell_println!("Selected: {}", path),
-                Err(e) => shell_println!("Error: {:?}", e),
-            }
-        }
-        "filename" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let name = parts.get(2).copied().unwrap_or("");
-            if id == 0 || name.is_empty() {
-                shell_println!("Usage: fpick filename <dialog-id> <name>");
-                return;
-            }
-            match filepicker::set_filename(id, name) {
-                Ok(()) => shell_println!("Filename: {}", name),
-                Err(e) => shell_println!("Error: {:?}", e),
-            }
-        }
-        "confirm" | "ok" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: fpick confirm <dialog-id>");
-                return;
-            }
-            match filepicker::confirm(id) {
-                Ok(filepicker::DialogResult::Confirmed(paths)) => {
-                    shell_println!("Confirmed ({} paths):", paths.len());
-                    for p in &paths {
-                        shell_println!("  {}", p.display());
-                    }
-                }
-                Ok(filepicker::DialogResult::Cancelled) => shell_println!("Cancelled"),
-                Err(e) => shell_println!("Error: {:?}", e),
-            }
-        }
-        "cancel" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: fpick cancel <dialog-id>");
-                return;
-            }
-            match filepicker::cancel(id) {
-                Ok(()) => shell_println!("Dialog #{} cancelled", id),
-                Err(e) => shell_println!("Error: {:?}", e),
-            }
-        }
-        "close" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: fpick close <dialog-id>");
-                return;
-            }
-            match filepicker::close(id) {
-                Ok(()) => shell_println!("Dialog #{} closed", id),
-                Err(e) => shell_println!("Error: {:?}", e),
-            }
-        }
-        "info" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: fpick info <dialog-id>");
-                return;
-            }
-            match filepicker::get_dialog(id) {
-                Some(d) => {
-                    shell_println!("Dialog #{}", d.id);
-                    shell_println!("  Mode:      {}", d.mode.title());
-                    shell_println!("  Directory: {}", d.current_dir.display());
-                    shell_println!("  Items:     {}", d.listing.len());
-                    shell_println!("  Selected:  {}", d.selection.len());
-                    shell_println!("  Filters:   {}", d.filters.len());
-                    shell_println!("  Open:      {}", if d.open { "yes" } else { "no" });
-                    if !d.filename.is_empty() {
-                        shell_println!("  Filename:  {}", d.filename.display());
-                    }
-                }
-                None => shell_println!("Dialog not found: {}", id),
-            }
-        }
-        "ls" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: fpick ls <dialog-id>");
-                return;
-            }
-            match filepicker::get_dialog(id) {
-                Some(d) => {
-                    if d.listing.is_empty() {
-                        shell_println!("Empty listing");
-                    } else {
-                        shell_println!("{} items in {}:", d.listing.len(), d.current_dir.display());
-                        for item in d.listing.iter().take(30) {
-                            let kind = if item.is_dir { "DIR " } else { "FILE" };
-                            let sel = if d.selection.iter().any(|s| s == &item.path) {
-                                " *"
-                            } else {
-                                ""
-                            };
+                match filepicker::navigate(id, path) {
+                    Ok(()) => {
+                        if let Some(d) = filepicker::get_dialog(id) {
                             shell_println!(
-                                "  {} {:8} {}{}",
-                                kind,
-                                item.size,
-                                item.name.display(),
-                                sel
+                                "Navigated to: {} ({} items)",
+                                d.current_dir.display(),
+                                d.listing.len()
                             );
                         }
-                        if d.listing.len() > 30 {
-                            shell_println!("  ... and {} more", d.listing.len() - 30);
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+            case(&parts);
+        }
+        "up" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id = parts
+                    .get(1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if id == 0 {
+                    shell_println!("Usage: fpick up <dialog-id>");
+                    return;
+                }
+                match filepicker::go_up(id) {
+                    Ok(()) => {
+                        if let Some(d) = filepicker::get_dialog(id) {
+                            shell_println!("Now at: {}", d.current_dir.display());
                         }
                     }
+                    Err(e) => shell_println!("Error: {:?}", e),
                 }
-                None => shell_println!("Dialog not found: {}", id),
             }
+            case(&parts);
+        }
+        "back" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id = parts
+                    .get(1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if id == 0 {
+                    shell_println!("Usage: fpick back <dialog-id>");
+                    return;
+                }
+                match filepicker::go_back(id) {
+                    Ok(()) => {
+                        if let Some(d) = filepicker::get_dialog(id) {
+                            shell_println!("Back to: {}", d.current_dir.display());
+                        }
+                    }
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+            case(&parts);
+        }
+        "select" | "sel" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id = parts
+                    .get(1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let path = parts.get(2).copied().unwrap_or("");
+                if id == 0 || path.is_empty() {
+                    shell_println!("Usage: fpick select <dialog-id> <path>");
+                    return;
+                }
+                match filepicker::select(id, path) {
+                    Ok(()) => shell_println!("Selected: {}", path),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+            case(&parts);
+        }
+        "filename" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id = parts
+                    .get(1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let name = parts.get(2).copied().unwrap_or("");
+                if id == 0 || name.is_empty() {
+                    shell_println!("Usage: fpick filename <dialog-id> <name>");
+                    return;
+                }
+                match filepicker::set_filename(id, name) {
+                    Ok(()) => shell_println!("Filename: {}", name),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+            case(&parts);
+        }
+        "confirm" | "ok" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id = parts
+                    .get(1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if id == 0 {
+                    shell_println!("Usage: fpick confirm <dialog-id>");
+                    return;
+                }
+                match filepicker::confirm(id) {
+                    Ok(filepicker::DialogResult::Confirmed(paths)) => {
+                        shell_println!("Confirmed ({} paths):", paths.len());
+                        for p in &paths {
+                            shell_println!("  {}", p.display());
+                        }
+                    }
+                    Ok(filepicker::DialogResult::Cancelled) => shell_println!("Cancelled"),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+            case(&parts);
+        }
+        "cancel" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id = parts
+                    .get(1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if id == 0 {
+                    shell_println!("Usage: fpick cancel <dialog-id>");
+                    return;
+                }
+                match filepicker::cancel(id) {
+                    Ok(()) => shell_println!("Dialog #{} cancelled", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+            case(&parts);
+        }
+        "close" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id = parts
+                    .get(1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if id == 0 {
+                    shell_println!("Usage: fpick close <dialog-id>");
+                    return;
+                }
+                match filepicker::close(id) {
+                    Ok(()) => shell_println!("Dialog #{} closed", id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            }
+            case(&parts);
+        }
+        "info" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id = parts
+                    .get(1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if id == 0 {
+                    shell_println!("Usage: fpick info <dialog-id>");
+                    return;
+                }
+                match filepicker::get_dialog(id) {
+                    Some(d) => {
+                        shell_println!("Dialog #{}", d.id);
+                        shell_println!("  Mode:      {}", d.mode.title());
+                        shell_println!("  Directory: {}", d.current_dir.display());
+                        shell_println!("  Items:     {}", d.listing.len());
+                        shell_println!("  Selected:  {}", d.selection.len());
+                        shell_println!("  Filters:   {}", d.filters.len());
+                        shell_println!("  Open:      {}", if d.open { "yes" } else { "no" });
+                        if !d.filename.is_empty() {
+                            shell_println!("  Filename:  {}", d.filename.display());
+                        }
+                    }
+                    None => shell_println!("Dialog not found: {}", id),
+                }
+            }
+            case(&parts);
+        }
+        "ls" => {
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let id = parts
+                    .get(1)
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if id == 0 {
+                    shell_println!("Usage: fpick ls <dialog-id>");
+                    return;
+                }
+                match filepicker::get_dialog(id) {
+                    Some(d) => {
+                        if d.listing.is_empty() {
+                            shell_println!("Empty listing");
+                        } else {
+                            shell_println!(
+                                "{} items in {}:",
+                                d.listing.len(),
+                                d.current_dir.display()
+                            );
+                            for item in d.listing.iter().take(30) {
+                                let kind = if item.is_dir { "DIR " } else { "FILE" };
+                                let sel = if d.selection.iter().any(|s| s == &item.path) {
+                                    " *"
+                                } else {
+                                    ""
+                                };
+                                shell_println!(
+                                    "  {} {:8} {}{}",
+                                    kind,
+                                    item.size,
+                                    item.name.display(),
+                                    sel
+                                );
+                            }
+                            if d.listing.len() > 30 {
+                                shell_println!("  ... and {} more", d.listing.len() - 30);
+                            }
+                        }
+                    }
+                    None => shell_println!("Dialog not found: {}", id),
+                }
+            }
+            case(&parts);
         }
         "bookmark" | "bm" => {
-            let action = parts.get(1).copied().unwrap_or("");
-            match action {
-                "add" => {
-                    let label = parts.get(2).copied().unwrap_or("");
-                    let path = parts.get(3).copied().unwrap_or("");
-                    if label.is_empty() || path.is_empty() {
-                        shell_println!("Usage: fpick bm add <label> <path> [icon]");
-                        return;
+            #[inline(never)]
+            fn case(parts: &[&str]) {
+                let action = parts.get(1).copied().unwrap_or("");
+                match action {
+                    "add" => {
+                        let label = parts.get(2).copied().unwrap_or("");
+                        let path = parts.get(3).copied().unwrap_or("");
+                        if label.is_empty() || path.is_empty() {
+                            shell_println!("Usage: fpick bm add <label> <path> [icon]");
+                            return;
+                        }
+                        let icon = parts.get(4).copied().unwrap_or("icon-folder");
+                        match filepicker::add_bookmark(label, path, icon) {
+                            Ok(()) => shell_println!("Bookmark added: {} → {}", label, path),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
                     }
-                    let icon = parts.get(4).copied().unwrap_or("icon-folder");
-                    match filepicker::add_bookmark(label, path, icon) {
-                        Ok(()) => shell_println!("Bookmark added: {} → {}", label, path),
-                        Err(e) => shell_println!("Error: {:?}", e),
+                    "rm" | "remove" => {
+                        let path = parts.get(2).copied().unwrap_or("");
+                        if path.is_empty() {
+                            shell_println!("Usage: fpick bm rm <path>");
+                            return;
+                        }
+                        match filepicker::remove_bookmark(path) {
+                            Ok(()) => shell_println!("Bookmark removed: {}", path),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
                     }
-                }
-                "rm" | "remove" => {
-                    let path = parts.get(2).copied().unwrap_or("");
-                    if path.is_empty() {
-                        shell_println!("Usage: fpick bm rm <path>");
-                        return;
-                    }
-                    match filepicker::remove_bookmark(path) {
-                        Ok(()) => shell_println!("Bookmark removed: {}", path),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
-                }
-                _ => {
-                    let bms = filepicker::bookmarks();
-                    if bms.is_empty() {
-                        shell_println!("No bookmarks");
-                    } else {
-                        shell_println!("{} bookmarks:", bms.len());
-                        for bm in &bms {
-                            shell_println!("  {} → {}", bm.label, bm.path.display());
+                    _ => {
+                        let bms = filepicker::bookmarks();
+                        if bms.is_empty() {
+                            shell_println!("No bookmarks");
+                        } else {
+                            shell_println!("{} bookmarks:", bms.len());
+                            for bm in &bms {
+                                shell_println!("  {} → {}", bm.label, bm.path.display());
+                            }
                         }
                     }
                 }
             }
+            case(&parts);
         }
         "init" => {
-            filepicker::init_defaults();
-            shell_println!("Default bookmarks set");
+            #[inline(never)]
+            fn case() {
+                filepicker::init_defaults();
+                shell_println!("Default bookmarks set");
+            }
+            case();
         }
         "test" => match filepicker::self_test() {
             Ok(()) => shell_println!("All file picker self-tests passed"),
             Err(e) => shell_println!("File picker self-test failed: {:?}", e),
         },
         "stats" => {
-            let (active, total, bms, recent, opens, navs) = filepicker::stats();
-            shell_println!("Active dialogs: {}", active);
-            shell_println!("Total dialogs:  {}", total);
-            shell_println!("Bookmarks:      {}", bms);
-            shell_println!("Recent dirs:    {}", recent);
-            shell_println!("Open ops:       {}", opens);
-            shell_println!("Navigate ops:   {}", navs);
+            #[inline(never)]
+            fn case() {
+                let (active, total, bms, recent, opens, navs) = filepicker::stats();
+                shell_println!("Active dialogs: {}", active);
+                shell_println!("Total dialogs:  {}", total);
+                shell_println!("Bookmarks:      {}", bms);
+                shell_println!("Recent dirs:    {}", recent);
+                shell_println!("Open ops:       {}", opens);
+                shell_println!("Navigate ops:   {}", navs);
+            }
+            case();
         }
         "reset" => {
-            filepicker::clear_all();
-            filepicker::reset_stats();
-            shell_println!("File picker cleared and stats reset");
+            #[inline(never)]
+            fn case() {
+                filepicker::clear_all();
+                filepicker::reset_stats();
+                shell_println!("File picker cleared and stats reset");
+            }
+            case();
         }
         _ => {
-            shell_println!("Usage: fpick <subcommand>");
-            shell_println!("  open [dir]              Open file dialog");
-            shell_println!("  openm [dir]             Open multiple files dialog");
-            shell_println!("  save [dir]              Save file dialog");
-            shell_println!("  folder [dir]            Select folder dialog");
-            shell_println!("  nav <id> <path>         Navigate to directory");
-            shell_println!("  up <id>                 Navigate up");
-            shell_println!("  back <id>               Navigate back");
-            shell_println!("  select <id> <path>      Select a file");
-            shell_println!("  filename <id> <name>    Set save filename");
-            shell_println!("  confirm <id>            Confirm dialog");
-            shell_println!("  cancel <id>             Cancel dialog");
-            shell_println!("  close <id>              Close completed dialog");
-            shell_println!("  info <id>               Show dialog state");
-            shell_println!("  ls <id>                 List dialog directory");
-            shell_println!("  bm [add|rm] [args]      Manage bookmarks");
-            shell_println!("  init                    Set default bookmarks");
-            shell_println!("  test                    Run self-tests");
-            shell_println!("  stats                   Show statistics");
-            shell_println!("  reset                   Clear all");
+            #[inline(never)]
+            fn case() {
+                shell_println!("Usage: fpick <subcommand>");
+                shell_println!("  open [dir]              Open file dialog");
+                shell_println!("  openm [dir]             Open multiple files dialog");
+                shell_println!("  save [dir]              Save file dialog");
+                shell_println!("  folder [dir]            Select folder dialog");
+                shell_println!("  nav <id> <path>         Navigate to directory");
+                shell_println!("  up <id>                 Navigate up");
+                shell_println!("  back <id>               Navigate back");
+                shell_println!("  select <id> <path>      Select a file");
+                shell_println!("  filename <id> <name>    Set save filename");
+                shell_println!("  confirm <id>            Confirm dialog");
+                shell_println!("  cancel <id>             Cancel dialog");
+                shell_println!("  close <id>              Close completed dialog");
+                shell_println!("  info <id>               Show dialog state");
+                shell_println!("  ls <id>                 List dialog directory");
+                shell_println!("  bm [add|rm] [args]      Manage bookmarks");
+                shell_println!("  init                    Set default bookmarks");
+                shell_println!("  test                    Run self-tests");
+                shell_println!("  stats                   Show statistics");
+                shell_println!("  reset                   Clear all");
+            }
+            case();
         }
     }
 }

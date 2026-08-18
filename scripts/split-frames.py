@@ -128,6 +128,9 @@ RET_TYPE = "crate::error::KernelResult<()>"
 
 RETURN_RE = re.compile(r"\breturn\b")
 RETURN_NOT_ERR = re.compile(r"\breturn\b(?!\s+Err\b)")
+# `-> !` on a signature, i.e. a diverging function: it never returns, so it is
+# unit-like for splitting purposes and cannot contain `return` or `?` at all.
+DIVERGING = re.compile(r"->\s*!\s*(?:\{|$)")
 
 
 # --------------------------------------------------------------------------
@@ -276,12 +279,11 @@ def find_fn(lines: list[str], name: str, at: int = 0) -> int:
     than an ordinal keeps the reference stable against edits above it failing
     loudly instead of silently selecting a different function.
     """
-    hits = [
-        i
-        for i, ln in enumerate(lines)
-        if ln.lstrip().startswith(("fn ", "pub fn ", "pub(crate) fn "))
-        and ln.split("fn ", 1)[1].split("(")[0].split("<")[0].strip() == name
-    ]
+    pat = re.compile(
+        r"^(?:pub\s*(?:\([^)]*\)\s*)?)?(?:const\s+)?(?:unsafe\s+)?"
+        r'(?:extern\s+"[^"]*"\s+)?fn\s+' + re.escape(name) + r"\s*[(<]"
+    )
+    hits = [i for i, ln in enumerate(lines) if pat.match(ln.lstrip())]
     assert hits, f"no `fn {name}` found"
     if at:
         assert at - 1 in hits, (
@@ -705,6 +707,108 @@ def _let_patterns(masked: str) -> list[tuple[int, int]]:
     return spans
 
 
+ITEM_DECL = re.compile(
+    r"\b(?:const|static)\s+(?:mut\s+)?([A-Za-z_]\w*)"
+    r"|\b(?:fn|struct|enum|union|trait|type|mod)\s+([A-Za-z_]\w*)"
+)
+USE_DECL = re.compile(r"\buse\s+([^;]*);")
+
+
+def _use_names(spec: str) -> set[str]:
+    """The names a `use` brings into scope: the last segment, or the alias."""
+    out: set[str] = set()
+    if "{" in spec:
+        inner = spec[spec.index("{") + 1 : spec.rindex("}")] if "}" in spec else ""
+        parts, d, cur = [], 0, []
+        for ch in inner:
+            if ch in "{(":
+                d += 1
+            elif ch in "})":
+                d -= 1
+            if ch == "," and d == 0:
+                parts.append("".join(cur))
+                cur = []
+            else:
+                cur.append(ch)
+        parts.append("".join(cur))
+    else:
+        parts = [spec]
+    for p in parts:
+        p = p.strip()
+        if not p or "*" in p:
+            continue
+        if " as " in p:
+            p = p.rsplit(" as ", 1)[1]
+        name = p.split("::")[-1].strip()
+        if IDENT.fullmatch(name):
+            out.add(name)
+    return out
+
+
+def _item_binds(masked: str) -> set[str]:
+    """Names an *item* declaration in a body introduces.
+
+    A `const`, `static`, `fn`, `struct` or `use` written inside a function body
+    is scoped to the block that holds it, and moving that block under a
+    generated `fn case` takes the name out of every other case's scope.  Unlike
+    a local this is not a capture problem -- a nested `fn` may freely name an
+    item from an enclosing block -- so it never shows up as `E0434`; it shows
+    up as `E0425` in some *later* case, which is how `kernel_main` failed:
+    `const HELLO_ELF: &[u8] = include_bytes!(..)` sat in one paragraph and was
+    written to the filesystem three paragraphs further down.
+
+    These names are deliberately not filtered by capitalisation the way `let`
+    patterns are: `SCREAMING_CASE` is the convention for exactly the `const`s
+    that matter here.
+    """
+    out = {m.group(1) or m.group(2) for m in ITEM_DECL.finditer(masked)}
+    for m in USE_DECL.finditer(masked):
+        out |= _use_names(m.group(1))
+    return {n for n in out if n}
+
+
+def _value_idents(masked: str):
+    """Identifier occurrences that could be a *local* being read.
+
+    Three shapes are spelled exactly like a local and can never be one.  Each
+    was found the same way -- by a cluster that would not cut where it plainly
+    should have -- and each is a question about the characters *around* the
+    name, not about the name:
+
+    * `x.name` is a field or a method.  `cmd_oci`'s inspect arm never touches
+      the outer `cmd` but prints `image.config.cmd` five times, so a bare
+      `\\bcmd\\b` threaded an argument nothing used, one clippy warning per
+      arm.  The `.` must be a lone one: `&buf[start..cmd]` is a read.
+    * `name::init` is a path qualifier -- a module, a type, an enum.  A local
+      can never be followed by `::`, and this is the one that mattered most:
+      `kernel_main` opens with `if let Some(ref fb) = boot_info.framebuffer`,
+      binding an `fb` that dies two lines later, and then calls `fb::init()`
+      and `fb::self_test()` 5 000 lines apart.  Reading those as uses of the
+      local made the binding live across 395 of the body's 477 paragraphs and
+      fused them into a single 17 KiB case -- a split that saved 5%.
+    * `core::name` is the same thing seen from the other side.
+
+    Excluding them is not a heuristic that trades safety for yield, which
+    matters because under-approximating reads is the one direction that can
+    produce a wrong boundary rather than a missed one: none of the three *can*
+    be a local, so nothing real is being dropped.
+    """
+    for m in IDENT.finditer(masked):
+        k = m.start() - 1
+        while k >= 0 and masked[k].isspace():
+            k -= 1
+        if k >= 0 and masked[k] == "." and not (k and masked[k - 1] == "."):
+            continue  # `x.name` -- a field or method
+        if k >= 1 and masked[k] == ":" and masked[k - 1] == ":":
+            continue  # `core::name` -- a path segment
+        j = m.end()
+        while j < len(masked) and masked[j].isspace():
+            j += 1
+        if masked[j : j + 2] == "::":
+            continue  # `name::init` -- a path qualifier
+        yield m
+
+
 def _binds(masked: str) -> set[str]:
     """Names a statement's `let`s introduce -- over-approximated on purpose.
 
@@ -721,7 +825,8 @@ def _binds(masked: str) -> set[str]:
     """
     out: set[str] = set()
     for lo, hi in _let_patterns(masked):
-        for name in IDENT.findall(masked[lo:hi]):
+        for m in _value_idents(masked[lo:hi]):
+            name = m.group(0)
             if name not in NOT_A_BINDING and not name[:1].isupper():
                 out.add(name)
     return out
@@ -776,13 +881,14 @@ def _reads(masked: str) -> set[str]:
     blanked = masked
     for lo, hi in spans:
         at = _binding_takes_effect(masked, hi)
-        for name in IDENT.findall(masked[lo:hi]):
+        for m in _value_idents(masked[lo:hi]):
+            name = m.group(0)
             if name not in NOT_A_BINDING and not name[:1].isupper():
                 in_scope[name] = min(in_scope.get(name, at), at)
         blanked = blanked[:lo] + " " * (hi - lo) + blanked[hi:]
     return {
         m.group(0)
-        for m in IDENT.finditer(blanked)
+        for m in _value_idents(blanked)
         if m.start() < in_scope.get(m.group(0), len(masked) + 1)
     }
 
@@ -840,6 +946,7 @@ def find_flat_cases(
     min_lines: int,
     outer: set[str],
     declared: set[str],
+    reserve_tail: bool = False,
 ) -> tuple[list[tuple[int, int]], int]:
     """Turn each blank-line-separated paragraph of a flat body into a case.
 
@@ -867,6 +974,13 @@ def find_flat_cases(
     that point (see `_reads`), and a binding stops being live at the paragraph
     that rebinds it without reading it first.
 
+    **Items are not locals.**  A `const`, `static`, `fn` or `use` written inside
+    the body is scoped to its *block*, and a nested `fn` may freely name an item
+    from an enclosing block -- so an item crossing a boundary is not the
+    `E0434` that guards locals, and nothing about the paragraph it sits in looks
+    wrong.  It surfaces as `E0425` somewhere else entirely.  `reserve_tail` and
+    the weld below exist for the two shapes of that, both found in `kernel_main`.
+
     Note what is *not* checked: whether the split is worth doing.  A single
     case is always a no-op -- the peak becomes `outer + case`, which is what it
     already was -- so that judgement lives in `apply`, which refuses to write
@@ -882,6 +996,20 @@ def find_flat_cases(
     uses = {s: _reads(masked[s]) for s in stmts}
     tail = _masked(text, code, starts[stmts[-1][1] + 1], starts[close_idx + 1] - 1)
     tail_uses = _reads(tail)
+    tail_names = set(IDENT.findall(tail))
+
+    if reserve_tail and len(groups) > 1:
+        # A `-> !` body's last statement stands in tail position and has to
+        # diverge there; `{ fn case() { .. } case(); }` evaluates to `()`, which
+        # is `error[E0308]: expected !, found ()` -- exactly what `kernel_main`
+        # produced at main.rs:5961 on the first attempt.  The paragraph could be
+        # made a case by giving the generated `fn` a `-> !` of its own, but that
+        # is a second signature shape for one paragraph of one function; folding
+        # it into the tail instead costs the last case and nothing else.  Its
+        # reads join `tail_uses` so the locals it needs still count as live.
+        for s in groups.pop():
+            tail_uses |= uses[s]
+            tail_names |= set(IDENT.findall(masked[s]))
 
     # A group's reads are what it mentions before its own `let`s introduce it,
     # walking its statements in order so `foo(x); let x = ..;` still counts as
@@ -895,6 +1023,62 @@ def find_flat_cases(
             seen |= binds[s]
         g_binds.append(seen)
         g_reads.append(reads)
+
+    # Weld together every paragraph that mentions a block-scoped item.
+    #
+    # The local walk further down grows a cluster *forward*, which is sound for
+    # locals because a local cannot be read above the `let` that binds it.  An
+    # item can: `fn helper()` declared at the bottom of a body is callable from
+    # the top of it, and `const HELLO_ELF: &[u8] = include_bytes!(..)` in
+    # `kernel_main` is read three paragraphs below its declaration.  So the
+    # item constraint is a two-sided one and is resolved first, by fusing every
+    # paragraph from the first mention of the name to the last into a single
+    # super-paragraph.  After this the forward walk cannot cut one, because any
+    # cluster it starts inside a fused run started at the run's own first group.
+    #
+    # Mentions, not reads: a name is looked for anywhere in the paragraph's
+    # text, since an item's whole point is that it is in scope for the block
+    # regardless of where it stands.
+    g_items: list[set[str]] = []
+    g_names: list[set[str]] = []
+    for g in groups:
+        it: set[str] = set()
+        nm: set[str] = set()
+        for s in g:
+            it |= _item_binds(masked[s])
+            nm |= set(IDENT.findall(masked[s]))
+        g_items.append(it)
+        g_names.append(nm)
+
+    reach = list(range(len(groups)))
+    for j, decl in enumerate(g_items):
+        for name in decl:
+            hits = [q for q in range(len(groups)) if name in g_names[q]] or [j]
+            for q in range(min(hits), max(hits) + 1):
+                reach[q] = max(reach[q], max(hits))
+
+    fused: list[list[tuple[int, int]]] = []
+    f_binds: list[set[str]] = []
+    f_reads: list[set[str]] = []
+    f_items: list[set[str]] = []
+    k = 0
+    while k < len(groups):
+        end, j = k, k
+        while j <= end:
+            end = max(end, reach[j])
+            j += 1
+        b, r, i, stmt_list = set(), set(), set(), []
+        for q in range(k, end + 1):
+            r |= g_reads[q] - b
+            b |= g_binds[q]
+            i |= g_items[q]
+            stmt_list += groups[q]
+        fused.append(stmt_list)
+        f_binds.append(b)
+        f_reads.append(r)
+        f_items.append(i)
+        k = end + 1
+    groups, g_binds, g_reads, g_items = fused, f_binds, f_reads, f_items
 
     def last_reader(k: int, name: str) -> int:
         """Index of the last group that can still see group `k`'s `name`.
@@ -959,16 +1143,23 @@ def find_flat_cases(
     for cl in clusters:
         c_binds: set[str] = set()
         c_reads: set[str] = set()
+        c_items: set[str] = set()
         for k in cl:
             c_reads |= g_reads[k] - c_binds
             c_binds |= g_binds[k]
+            c_items |= g_items[k]
         top = _first_code_line(lines, groups[cl[0]][0])
         end = groups[cl[-1]][-1][1]
         long_enough = end - top + 1 >= min_lines
         # Nothing bound in the cluster can be read after it: the walk above
         # only stops where that is true, except at the tail, which it cannot
-        # extend past.
-        escapes = any(n in tail_uses for n in c_binds) and cl[-1] == len(groups) - 1
+        # extend past.  An *item* has no such walk -- the weld covers only the
+        # paragraphs -- so its escape into the tail is checked directly, and at
+        # any position, since `reserve_tail` may have put a whole paragraph
+        # there.
+        escapes = (
+            any(n in tail_uses for n in c_binds) and cl[-1] == len(groups) - 1
+        ) or any(n in tail_names for n in c_items)
         if long_enough and not (c_reads & before) and not escapes:
             cases.append((top, end))
         elif long_enough:
@@ -1088,14 +1279,8 @@ def _used_params(
 
 
 def _mentions(masked: str, name: str) -> bool:
-    for m in re.finditer(rf"\b{re.escape(name)}\b", masked):
-        k = m.start() - 1
-        while k >= 0 and masked[k].isspace():
-            k -= 1
-        if k >= 0 and masked[k] == "." and not (k and masked[k - 1] == "."):
-            continue  # `x.name` -- a field or method, not the local
-        return True
-    return False
+    """Does this case actually *read* the local `name`, so `--param` is used?"""
+    return any(m.group(0) == name for m in _value_idents(masked))
 
 
 def rewrite(
@@ -1144,7 +1329,15 @@ def rewrite(
         # `run` arm is the reason -- 1 178 lines and the largest frame left in
         # `kshell.rs`, in a function the earlier assertion turned away purely
         # for its signature.
-        unit = "->" not in sig
+        #
+        # A diverging `-> !` body counts as unit: a case extracted from it is
+        # an ordinary function that returns normally, and the two rules
+        # `_check_unit_returns` enforces are free there -- a `return` cannot
+        # appear in a `-> !` function and neither can `?`.  `kernel_main` is
+        # the one that matters, being both the largest frame in the kernel and
+        # the one frame that is certainly live under every init and every
+        # self-test it calls.
+        unit = "->" not in sig or DIVERGING.search(sig) is not None
         assert unit or "KernelResult<()>" in sig, (
             f"`fn {fn_name}` returns neither `()` nor KernelResult<()>; this "
             f"transformer only handles those signatures (see the module "
@@ -1158,6 +1351,7 @@ def rewrite(
             cases, skipped = find_flat_cases(
                 lines, depth, code, starts, text, open_idx, close_idx, inner,
                 flat, _sig_params(sig), declared,
+                reserve_tail=DIVERGING.search(sig) is not None,
             )
             noun = "paragraph that reads an outer local, or binds one read later"
         else:
@@ -1948,6 +2142,115 @@ _case(
 }
 """,
     AssertionError,
+    flat=3,
+)
+
+_case(
+    # An item is not a local, and gets no `E0434` to protect it: a nested `fn`
+    # may name a `const` from an enclosing block, so cutting between the
+    # declaration and the use compiles the *declaring* case fine and fails in
+    # the reading one, three paragraphs away.  The three paragraphs are
+    # therefore welded into one case -- note the second, which mentions nothing
+    # at all, is dragged in because it stands between them.
+    "a const used three paragraphs later welds them into one case",
+    """fn self_test() {
+    const BLOB: &[u8] = b"x";
+    step_one();
+    step_two();
+
+    step_three();
+    step_four();
+    step_five();
+
+    write(BLOB);
+    step_six();
+    step_seven();
+
+    step_eight();
+    step_nine();
+    step_ten();
+}
+""",
+    """fn self_test() {
+    {
+        #[inline(never)]
+        fn case() {
+            const BLOB: &[u8] = b"x";
+            step_one();
+            step_two();
+
+            step_three();
+            step_four();
+            step_five();
+
+            write(BLOB);
+            step_six();
+            step_seven();
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            step_eight();
+            step_nine();
+            step_ten();
+        }
+        case();
+    }
+}
+""",
+    flat=3,
+)
+
+_case(
+    # A `-> !` body's last paragraph stands in tail position, where the type is
+    # `!` and a `{ fn case() {..} case(); }` block is `()`.  It is reserved into
+    # the tail rather than made a case; every paragraph above it splits as
+    # usual.  This is `kernel_main`, whose final `loop { hlt(); }` produced
+    # `error[E0308]: expected !, found ()` on the first attempt.
+    "the last paragraph of a diverging body is left in tail position",
+    """fn self_test() -> ! {
+    step_one();
+    step_two();
+    step_three();
+
+    step_four();
+    step_five();
+    step_six();
+
+    loop {
+        halt();
+    }
+}
+""",
+    """fn self_test() -> ! {
+    {
+        #[inline(never)]
+        fn case() {
+            step_one();
+            step_two();
+            step_three();
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            step_four();
+            step_five();
+            step_six();
+        }
+        case();
+    }
+
+    loop {
+        halt();
+    }
+}
+""",
     flat=3,
 )
 

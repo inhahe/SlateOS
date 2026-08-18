@@ -132,6 +132,32 @@ def frames(disasm: str) -> dict[str, int]:
 MANGLE_TAIL = re.compile(r"17h[0-9a-f]{16}E$")
 
 
+def last_component(path: str) -> str | None:
+    """`kernel_main` from `_ZN6kernel11kernel_main` -- the length-prefixed tail.
+
+    Needed because a `#[unsafe(no_mangle)]` function appears in the symbol
+    table under its plain name while its nested `fn case`s are still mangled
+    under the *mangled* path, so the prefix match below finds no parent for
+    them.  That silently dropped `kernel_main` -- the largest frame in the
+    kernel, and the whole reason `--peak` exists -- from the report, which is
+    the failure mode where a measurement tool answers a question it did not
+    actually ask.
+    """
+    if not path.startswith("_ZN"):
+        return None
+    body, last, i = path[3:], None, 0
+    while i < len(body):
+        j = i
+        while j < len(body) and body[j].isdigit():
+            j += 1
+        if j == i:
+            break
+        n = int(body[i:j])
+        last = body[j : j + n]
+        i = j + n
+    return last
+
+
 def peaks(table: dict[str, int]) -> list[tuple[int, int, int, int, str]]:
     """`(peak, outer, deepest case, how many cases, name)` per split function.
 
@@ -140,6 +166,15 @@ def peaks(table: dict[str, int]) -> list[tuple[int, int, int, int, str]]:
     prefix.  All of a parent's cases collapse to one entry here, keeping the
     deepest -- which is the one that sets the peak, since only one case is live
     at a time.
+
+    **The nesting can be more than one deep, and must be followed.**  A case
+    large enough to be worth splitting again gets `fn case` inside `fn case`,
+    and `net::httpd::self_test` is exactly that: one level of pairing reported
+    its peak as 3 248 (outer 128 + case 3 120) when the case in question calls a
+    nested case claiming a further 5 104, for a true peak of 8 352.  Reporting
+    the shallow number is worse than reporting nothing, because it is the
+    number a split is judged by -- so the walk below is recursive and only
+    top-level parents are listed.
     """
     by_path: dict[str, int] = {}
     counts: dict[str, int] = {}
@@ -147,14 +182,36 @@ def peaks(table: dict[str, int]) -> list[tuple[int, int, int, int, str]]:
         p = MANGLE_TAIL.sub("", sym)
         by_path[p] = max(by_path.get(p, 0), n)
         counts[p] = counts.get(p, 0) + 1
+
+    parent_of: dict[str, str] = {}
+    children: dict[str, list[str]] = {}
+    for p in by_path:
+        if not p.endswith("4case"):
+            continue
+        par = p[: -len("4case")]
+        if par not in by_path:
+            bare = last_component(par)
+            par = bare if bare and bare in by_path else ""
+        if not par:
+            continue
+        parent_of[p] = par
+        children.setdefault(par, []).append(p)
+
+    def chain(p: str) -> tuple[int, int]:
+        """`(deepest stack below p, how many case bodies below it)`."""
+        deep, n = 0, 0
+        for c in children.get(p, ()):
+            d, k = chain(c)
+            deep = max(deep, by_path[c] + d)
+            n += counts[c] + k
+        return deep, n
+
     rows = []
-    for p, outer in by_path.items():
-        if p.endswith("4case"):
+    for p in by_path:
+        if p in parent_of or p not in children:
             continue
-        deepest = by_path.get(p + "4case")
-        if deepest is None:
-            continue
-        rows.append((outer + deepest, outer, deepest, counts[p + "4case"], p))
+        deep, n = chain(p)
+        rows.append((by_path[p] + deep, by_path[p], deep, n, p))
     rows.sort(reverse=True)
     return rows
 

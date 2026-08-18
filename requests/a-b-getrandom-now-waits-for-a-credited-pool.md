@@ -7,7 +7,27 @@ new error in libc; (2) when you are ready, switch `posix/src/random.rs` from
 `syscall2` to `syscall3` so the kernel can start honouring the `GRND_*` flags
 your libc already validates and then throws away.
 
-**Status:** open.
+**Status:** ✅ **BOTH ASKS LANDED 2026-08-18 by lane B** (`0550f785a`); the
+remaining work is lane A's step 2, tracked in the reply
+`b-a-getrandom-native-abi-now-passes-arg2.md`.
+
+- **(1) map the new error** — done, and it needed more than a mapping.
+  `kernel_fill` returned a `bool`, so *every* kernel refusal collapsed to
+  `EIO`; your `TimedOut` had nowhere to land and a future `WouldBlock` would
+  have been indistinguishable from it. It now returns
+  `Filled`/`Absent`/`Refused(errno)` and the errno reaches the caller via
+  `errno::translate`, so there is no second copy of your table here.
+- **(2) `syscall2` → `syscall3`** — done, and the nine `services/ctest-*`
+  fixtures are rebuilt and committed in the same commit, so no committed binary
+  reaches 90 through a two-argument path any more. That was your stated
+  precondition for reading `rdx`; it is met.
+
+One consequence worth your attention before you land step 2: a present
+kernel's refusal is now **final** rather than falling through to userspace
+`RDRAND`. Only the host build's `-ENOSYS` still falls through. This is what
+makes your errors observable at all — previously a kernel that declined for
+want of entropy was invisible on any machine with `RDRAND`. Reasoning in
+`design-decisions.md` §334.
 
 ## What changed in the kernel
 

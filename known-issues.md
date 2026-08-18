@@ -33438,10 +33438,13 @@ buys nothing, because the peak is set by whatever the outer frame still holds.
 **What is out of the transformer's scope, and why** - these need hand work, not
 a better tool:
 
-- `kshell::cmd_oci` (31 760) and `kshell::cmd_container` (27 432) are
+- ~~`kshell::cmd_oci` (31 760) and `kshell::cmd_container` (27 432) are
   `match cmd { "inspect" => { .. }, .. }`.  The arms read outer locals
   (`parts`), so each needs its fixtures threaded through as parameters -
-  a judgement call about what that interface should be.
+  a judgement call about what that interface should be.~~  **Done the next
+  day by `--arms`; see the 2026-08-18 progress note below.**  The threading
+  turned out not to be a judgement call at all: the compiler names the
+  fixtures for you, one `E0434` at a time.
 - `eventlog::self_test` (26 720), `self_test_sysv_ipc_mqueue` (15 808) and
   `self_test_bpf_perf_keyring` (15 568) have **flat** bodies: a long run of
   `let a = SyscallArgs { .. }; if dispatch(..) { fail }` with no block
@@ -33471,6 +33474,241 @@ the wrapped-`if` brace rustfmt puts on its own line, a block closed by
 `} else {`, a `}` inside a comment (`sched::{set,copy}_task_name`), braces in
 strings and nested block comments, a multi-line raw string (refused, because
 re-indenting would change its value), and the `return Ok(())` case above.
+
+### Progress - 2026-08-18: the four kshell dispatchers, via `--arms`
+
+The note above called the `match`-arm shape a judgement call and left it for
+hand work.  That was wrong, and cheaply so: the arms *are* the cases, and the
+only thing that made them different was syntax.  `split-frames.py --arms`
+handles them, and the four biggest dispatchers came out as follows.
+
+| Function | before | after (peak) | outer | cases |
+|---|---:|---:|---:|---:|
+| `kshell::cmd_oci` | 31 760 | **18 512** | 208 | 12 |
+| `kshell::cmd_container` | 27 432 | **5 000** | 160 | 33 |
+| `kshell::cmd_firewall` | 14 032 | **5 760** | 192 | 13 |
+| `kshell::cmd_mmtune` | 12 512 | **4 496** | 2 352 | 19 |
+
+51 968 bytes off the peaks, on top of the 52 512 from the self-tests.  Note the
+`outer` column: 160-208 bytes.  That is the difference from the three splits
+that had to be reverted - a dispatcher's arms cover *all* of it, so nothing is
+left behind in the outer frame to set the peak.  Coverage was the whole story
+there and it is the whole story here.
+
+**The safety argument is not the same one**, and this is the part worth
+carrying forward.  A dispatcher arm rejects bad arguments with a bare
+`return;`, meaning *leave the command*.  Inside a nested `fn` that becomes
+*leave this case*, and the two coincide only when there is nothing after the
+match for control to fall back into.  So `--arms` asserts two things rather
+than assuming them: the function returns unit, and the match is its **last**
+statement.  Both hold for every kshell dispatcher; neither is checked by the
+compiler, which is exactly why they are asserted.
+
+Everything else stayed the compiler's job, and it did it:
+
+- **`E0434` named the fixtures.** The first build failed with eight of them,
+  identifying `cmd` (shared by `cmd_firewall`'s `allow`/`allow6` arms) and
+  `args` (`cmd_container`). Adding `--param cmd:&str --param args:&str` and
+  rebuilding was the entire "judgement call" the earlier note anticipated.
+- **`unused_variables` caught the use-test's one false positive.**
+  `--param cmd:&str` matched `image.config.cmd`, a *field*, and passed a `cmd`
+  no arm used.  `_used_params` now ignores a name after a `.` - except after
+  `..`, where `a..cmd` is a real use - and `--check` has a case for it.
+- **`clippy::needless_borrow` caught the one hand-fix.**  `cmd_container`'s
+  network arm already called `cmd_container_network(&parts)`, which was right
+  when `parts` was a `Vec` and a double borrow once it arrives as a slice.
+
+Clippy against a pristine `kshell.rs` (stash the one file, run, unstash):
+18 235 -> 18 235 diagnostics, changed kinds 0.
+
+**What is left, and why the tool cannot take it.**  `cmd_oci`'s peak is still
+18 304, and it is now one single case: the `"run" | "create"` arm, 1 178 of the
+function's 1 691 lines.  Its body is *flat* - a long sequential build-up of one
+container configuration, where the locals genuinely do all stay live - so it is
+in the same class as `eventlog::self_test`, and shrinking it means restructuring
+what it computes, not moving braces.
+
+### Progress - 2026-08-18: the flat bodies, via `--flat`, and one comment that lied
+
+The note above called the flat shape "*inventing* the case boundaries, which is
+a decision about what the test's units are".  That was wrong for the same
+reason the `--arms` note was wrong: the boundaries are already there.  The
+author of `eventlog::self_test` separated the cases with a blank line and a
+`// Test 7: ...` header - they simply are not separated with *braces*, which is
+all the brace-walker could see.  `--flat` reads the blank lines, so it recovers
+the author's own units rather than imposing any.
+
+| Function | before | after (peak) | outer | cases |
+|---|---:|---:|---:|---:|
+| `proc::linux_fd::self_test` | 28 224 | **18 928** | 8 256 | 2 |
+| `eventlog::self_test` | 26 720 | **17 872** | 4 848 | 11 |
+| `net::httpd::self_test` | 11 152 | **8 352** | 128 | 16 |
+| `self_test_sysv_ipc_mqueue` | (top-40) | **7 232** | 64 | 6 |
+| `self_test_bpf_perf_keyring` | (top-40) | **6 000** | 224 | 24 |
+
+(The httpd row read **3 248** when this section was first written, and that was
+wrong - see the `--peak` defect in the next section. Its cases were themselves
+split, and `--peak` was pairing only one level of nesting. Corrected here to
+the figure the fixed tool reports; the "before" column was never affected,
+because none of these functions had nested cases before being split.)
+
+`linux_fd::self_test` is the one the earlier note recorded as a *regression*
+(28 224 -> 28 240 by `--peak`, from a one-case split).  It is now 18 928, and
+the tool refuses a one-case split outright rather than reporting the flattering
+per-symbol number: with a single case the peak stays `outer + case`, which is
+what it already was, so two cases is the arithmetic minimum at which `max` can
+beat `sum`.
+
+Three analysis defects had to be fixed before any of this worked, each hiding
+the next, and all three are the same mistake - **judging a name without judging
+its position**:
+
+- `container()` refused to descend into a lone bare block unless it held two
+  brace-*cases*.  `self_test_sysv_ipc_mqueue` wraps its whole 1 874-line body
+  in one such block containing no block at all, so `--flat` saw one statement
+  where there are nine paragraphs.
+- Every paragraph after the first appeared to read the previous one's `a`,
+  because `let a = SyscallArgs { .. };` *mentions* `a` and the use-test could
+  not tell a declaration from a use.  That line opens all 96 cases of that
+  function.
+- `if let Some(ev) = q.first() { ev.namespace_str() }` mentions `ev` twice, and
+  the second is the binding the first made.  This welded nine independent
+  paragraphs of `eventlog::self_test` into two clusters.
+
+The rule that resolves all three: a mention is a read of an outer name when it
+stands *before* the point a `let` in that statement brings the name into scope
+- which is the end of the **initialiser**, not the end of the pattern.  That is
+the same rule that makes the right-hand `a` of `let a = a + 1;` the outer one,
+and it falls out for free.
+
+Paragraphs whose locals genuinely cross into each other are **coalesced**
+rather than skipped: a crossing local does not mean unsplittable, it means the
+blank line is in the wrong place (`let sops_ptr = ..` declared in one
+paragraph, dereferenced in the next).  The merge is bounded so it cannot
+swallow the whole body - a local declared at the top and used at the bottom
+links the first group to the last, and merging there would produce one case
+whose peak is `outer + case`, i.e. the no-op again.  Such a paragraph is left
+in the outer frame, which is where a body-scope local belongs.
+
+**And one that was not a self-test at all.**  `scfilter::init` - 21 872 bytes,
+the largest frame in the kernel once the tests were split - was twenty lines
+long and carried a comment explaining that it used no stack:
+
+> `EMPTY` is a `const`, so the all-empty table lives in read-only static
+> memory; `Box::new` copies it straight to the heap without first constructing
+> a ~19 KiB temporary on the kernel stack.
+
+Being a `const` is what *guarantees* that temporary.  A `const` has no address
+and is inlined at each use site; `Box::new` takes its argument by value; so at
+`opt-level = 0` the ~19 KiB `FilterTable` is built in `init`'s frame and then
+memcpy'd to the heap.  `EMPTY` is now a `static` - one fixed address - and the
+table is copied from it straight into an uninitialised box.  `init` is now
+under 480 bytes, and no longer ranks in the top five frames of its own module.
+
+This is worth generalising: **a comment asserting a performance property is not
+evidence of it.**  This one was specific, plausible, and exactly backwards, and
+it survived because nobody measured the function it described.  The same shape
+was found in `scfilter::check`'s doc comment earlier (see the "History" section
+there, where a `~5 ns` estimate was typeset as a measurement).
+
+**Where this leaves the census.**  The kernel's largest single frame is now
+`kernel_main` at 19 776, where before today's work it was
+`proc::linux_fd::self_test` at 28 224 - and before this whole thread,
+`self_test_prctl_dispatch` at 32 160.  The remaining top entries are
+`test_per_cpu_work_stealing` (19 504), `PerCpuScheduler::new_const` (18 752)
+and `cmd_oci`'s run arm (18 304), none of which the tool can take:
+
+- `cmd_oci`'s run arm was re-examined with `--flat` after the tool was taught
+  to handle unit-returning functions (`--at LINE` picks it out of the 78
+  functions now named `case` in `kshell.rs`).  It has **two** paragraphs and
+  both cross: it is 126 locals of option parsing in one `while` loop, and the
+  locals really are all live.  This is a restructuring job, not a splitting
+  one, exactly as the previous note concluded.
+- `test_per_cpu_work_stealing` has one paragraph; a one-case split is a no-op.
+- `PerCpuScheduler::new_const` is a `const fn` building a large fixed array,
+  with no case structure of any kind.
+
+Verified end to end: `cargo build` clean, `cargo clippy --message-format short`
+exit 0, `split-frames.py --check` 21/21, and two full boot tests - one for the
+five self-test splits, one for `scfilter::init` - both PASSED with every gate
+green.
+
+### Progress - 2026-08-18: `kernel_main`, 19 776 -> 10 976
+
+`kernel_main` was the largest frame left, and it is the one frame that is
+certainly live under every init routine and every self-test it calls - so
+whatever it claims is subtracted from the headroom of everything below it, for
+the whole of boot. It is 5 600 lines and 477 paragraphs, none of them nested,
+which is precisely the shape `--flat` exists for.
+
+Pointing the tool at it turned up **four more defects**, three of them the same
+mistake as the three before: judging a name without judging where it stands.
+
+- **A path qualifier is not a local read.** The body opens with
+  `if let Some(ref fb) = boot_info.framebuffer`, binding an `fb` that dies two
+  lines later - and then calls `fb::init()` and, 5 000 lines further down,
+  `fb::self_test()`. Counting those as reads of the local kept its binding
+  live across 395 of the 477 paragraphs and coalesced them into a single
+  17 KiB case: 6 cases, peak 19 776 -> 18 720, a 5% "split". Three shapes are
+  spelled exactly like a local and can never be one - `x.name` (a field),
+  `name::init` (a qualifier), `core::name` (a segment) - and excluding them is
+  not a heuristic trading safety for yield, which matters because
+  *under*-approximating reads is the one direction that can produce a wrong
+  boundary rather than a missed one. With the rule in place: 36 cases, peak
+  **10 976** (outer 7 264 + deepest case 3 712). The field half of this rule
+  already existed, in a different function, used for a different purpose.
+- **An item is not a local.** A `const`, `static`, `fn` or `use` written in a
+  body is scoped to its *block*, and a nested `fn` may freely name one from an
+  enclosing block. So moving an item into a case is not the `E0434` that
+  guards locals - nothing about the paragraph looks wrong at all - it is an
+  `E0425` in some *other* case entirely. `kernel_main` declares
+  `static INIT_ELF: &[u8] = include_bytes!(..)` in one paragraph and writes it
+  to the filesystem five paragraphs later; the first attempt produced six such
+  errors across three cases. Items are also two-sided, unlike locals: a `fn`
+  is callable above its own declaration, so the forward-growing walk cannot
+  express the constraint and items are welded first.
+- **A diverging body's last paragraph is in tail position.** In a `-> !`
+  function the final statement must itself diverge, and
+  `{ fn case() {..} case(); }` evaluates to `()`. That is
+  `error[E0308]: expected !, found ()`, and it costs exactly one case to avoid:
+  the paragraph is folded into the tail, whose reads keep alive the locals it
+  needs.
+
+The fourth was in the *measuring* tool, and is the worst of them:
+
+- **`--peak` paired one level of `fn case` and stopped.** A case big enough to
+  be worth splitting again nests, and `net::httpd::self_test` is exactly that.
+  The report said its peak was 3 248 - outer 128 plus a 3 120 case - when that
+  case calls a nested case claiming a further 5 104. Its true peak is 8 352,
+  and the table above has been corrected. A shallow peak is worse than no peak,
+  because it is the number a split is *judged* by: it flatters every split that
+  needed a second pass, which is every split that mattered. `--peak` also never
+  listed `kernel_main` at all, because an `#[unsafe(no_mangle)]` parent sits in
+  the symbol table under its plain name while its cases stay under the mangled
+  path, so the prefix match found no parent. The one function the report was
+  built to watch was the one function it silently omitted.
+
+That last one belongs beside the `scfilter` comment above, as the same failure
+in a different register: **a tool that answers a question you did not ask is
+indistinguishable from one that answers the one you did.** The `scfilter`
+comment claimed a property nobody measured; `--peak` measured a property nobody
+checked the definition of. Both read as evidence.
+
+**Where this leaves the census.** The kernel's largest frame is now
+`test_per_cpu_work_stealing` at 19 504, with `PerCpuScheduler::new_const`
+(18 752), `cmd_oci`'s run arm (18 512 by peak) and `proc::linux_fd::self_test`
+(18 928 by peak) behind it. Before this whole thread it was
+`self_test_prctl_dispatch` at 32 160. The three the tool cannot take are
+unchanged and are all restructuring jobs rather than splitting ones:
+
+- `cmd_oci`'s run arm: two paragraphs, both crossing - 126 locals of option
+  parsing in one `while` loop, all genuinely live.
+- `test_per_cpu_work_stealing`: one paragraph; a one-case split is a no-op.
+- `PerCpuScheduler::new_const`: a `const fn` building a large fixed array.
+
+Verified: `cargo build` clean with zero warnings, `split-frames.py --check`
+23/23 (two new cases - a `const` read three paragraphs later, and a diverging
+tail), and a full boot test.
 
 ---
 
@@ -34614,6 +34852,195 @@ rather than a missing feature.
 
 ---
 
+## A-HDA-DMA-BUFFERS-WERE-NOT-CONTIGUOUS-AND-IGNORED-GCAP-64OK (lane A)
+
+**Status:** FIXED 2026-08-18 (`2fe6f3c69`) — boot test `bjz6yilqr` PASSED on
+`lane-a`. Move to `known-issues-resolved.md` once it has booted on `main`.
+
+**In short:** the HD-audio driver asked the memory allocator for four separate
+16 KiB pages and then told the sound hardware it had one continuous 64 KiB
+buffer. Sometimes those pages happen to sit next to each other and nothing goes
+wrong; when they do not, the audio hardware writes sound data over 48 KiB of
+memory belonging to something else, with nothing to report it. On boot 91 the
+driver's own zeroing of that "64 KiB" ran off the end of a usable memory region
+and took the kernel down with a page fault — which is the *lucky* outcome,
+because it is the only one that is visible.
+
+### What was wrong
+
+`kernel/src/hda.rs` allocated CORB, RIRB, BDL and the PCM output ring with four
+independent `mm::frame::alloc_frame()` calls (one 16 KiB frame each), then:
+
+* `write_bytes(pcm_virt, 0, 65536)` — zeroing 64 KiB from the *first* frame's
+  HHDM address, i.e. across three frames it did not own;
+* programmed a single BDL entry with `length: dev.pcm_size` (64 KiB),
+  `SD_CBL = dev.pcm_size`, `SD_LVI = 0` — telling the DMA engine, in hardware,
+  that one contiguous 64 KiB buffer lives at `pcm_phys`.
+
+The buddy allocator makes no contiguity promise across separate `alloc_frame`
+calls, so the claim was true only by luck.
+
+Second, independent defect: GCAP bit 0 (`64OK`) was never read, yet
+`setup_corb`/`setup_rirb` write the `*UBASE` (upper 32 bits) registers
+unconditionally. On a controller with 64OK clear those registers are reserved
+and the address is truncated to 32 bits — and this machine has usable RAM up to
+`0x1_4000_0000`, so a buffer above 4 GiB would have been silently aimed at the
+wrong physical address.
+
+### How it showed up
+
+Boot 91, `--bench`, release:
+
+```
+EXCEPTION: Page Fault (#PF) at 0xffffffff811a4089, address=0xffff80007fef4000, error=0x2
+FATAL: Unrecoverable kernel page fault. Halting.
+```
+
+`0xffff80007fef4000` is HHDM + `0x7fef4000`, exactly the end of the usable
+region `[0x7feb6000, 0x7fef4000)`. The run's PCM frame landed near the top of
+that region and the 64 KiB zeroing walked past it. The faulting RIP resolved to
+`kernel_main+0x2330c` — release LTO inlines the whole boot path — which is what
+`scripts/symbolize.py` was written for; before it existed this was triaged only
+from the surrounding serial lines.
+
+Note the trigger: **where the allocator happens to land**, which is a function
+of every allocation made before HDA init. So an unrelated change anywhere above
+it in the boot order flips this between "works" and "kernel panic", and it had
+been latent for a long time.
+
+### The fix
+
+All four buffers now go through `mm::dma::alloc(size, constraint)`, which
+returns one contiguous, naturally-aligned, **zeroed** buddy block and charges it
+to `MemType::DmaBuf`. The sizes are named constants (`CORB_BYTES`, `RIRB_BYTES`,
+`BDL_BYTES`, `PCM_BYTES`) because each is written twice — once to size the
+allocation and once to program a controller register — and the two silently
+disagreeing is precisely how a DMA engine ends up ringing past the end of its
+own buffer. The constraint is now `DmaConstraint::None` when GCAP `64OK` is set
+and `DmaConstraint::Below4G` when it is not. The `DmaBuffer`s are held in the
+device struct for the lifetime of the kernel with no free path, documented:
+dropping one while `CORBCTL.RUN` is set would hand the allocator memory the
+device is still writing to.
+
+### Checked, and found correct
+
+The sibling audio drivers were audited for the same shape:
+`kernel/src/ac97.rs` and `kernel/src/virtio/sound.rs` each memset exactly
+`FRAME_SIZE` from a single frame, so neither has the bug.
+
+---
+
+## A-ORPHANED-HOST-TEST-BINARIES-PIN-`target/`-AND-EVENTUALLY-STOP-THE-BOOT-TEST (lane A, 2026-08-18)
+
+**Symptom.** `scripts/boot-test.sh` refused to start:
+
+```
+ERROR: only 9 GiB free on the build volume; the floor is 20 GiB (before building).
+```
+
+The floor is there for a reason the script states itself - on 2026-08-15 this
+volume reached zero bytes free and a half-written edit truncated a kernel source
+file to zero - so the answer is to free space, not to lower the floor with
+`--min-free-gb`. The documented way to free space is to `cargo clean` a worktree
+nobody is building in, and that is the step that failed:
+
+```
+$ cargo clean --manifest-path 'D:/visual studio projects/os/Cargo.toml'
+error: failed to remove ... conmon_cli-fdb8a9c84ef02fa5.exe
+Caused by: Access is denied. (os error 5)
+```
+
+**Cause.** Two `copper_cli-69676980426dfd7c.exe` processes (PIDs 41816 and
+88924) were still running out of `os\target`, and Windows will not delete a file
+that is mapped as a running image. One stuck host-side test binary therefore
+blocks `cargo clean` for the *entire* worktree - cargo aborts on the first
+`os error 5` rather than cleaning what it can - and with it the only sanctioned
+route back to enough disk to boot.
+
+These are **host** binaries built by `cargo test`/`cargo run` in the integration
+checkout, not guest processes. The escape route is the one
+`A-ADHOC-QEMU-PROBES-LEAK-THE-EMULATOR-ABOUT-TWO-THIRDS-OF-THE-TIME` describes
+for QEMU, for the same underlying reason: coreutils `timeout` signals only its
+direct child, so a `cargo test` it kills leaves the spawned test binaries - and
+anything *they* spawned - orphaned. `CLAUDE.md` already requires
+`scripts/run-timeout.py` (Windows Job Object with `KILL_ON_JOB_CLOSE`, which
+tears down the whole tree) for precisely this; these were started some other way.
+
+**What was done, and what was deliberately not done.** The orphans belong to
+another lane's work and this session did not start them, so per the standing
+rule they were **not** killed - not by PID and certainly not by image name.
+Instead, after confirming that no lane held the cross-worktree boot lock
+(`<common-git-dir>/slateos-boot-lock` absent, so nobody was mid-boot-test),
+`os/target` was removed wholesale: `rm -rf` deletes *around* an open image
+handle on Windows, where `cargo clean` gives up at the first one. Free space
+went 6.8 GiB -> ~26 GiB. `target/` is entirely regenerable, so the cost is one
+cold rebuild of the integration tree and nothing else. Both orphans had exited
+on their own by 02:46.
+
+**Consequence.** `D:\visual studio projects\os` now has no `target/`, and its
+`rootfs.ext4` needs rebuilding, so the next boot test run *from the integration
+tree* is a cold one. Nothing in a lane worktree was touched.
+
+**Proper fix.** Nothing in the tree is wrong here; the fix is procedural and is
+already written down - every potentially-hanging run goes through
+`scripts/run-timeout.py`, never bare `timeout`, never a trailing `&`, never
+`nohup`. If this recurs, the thing worth building is a small `scripts/` helper
+that reports which processes hold an image open under a given `target/`, so the
+next person meets a named process instead of a bare `os error 5`.
+
+---
+
+## A-EVERY-HISTORY-ROW-WRITTEN-BEFORE-2026-08-18-MAY-NAME-A-COMMIT-IT-DID-NOT-MEASURE (lane A, 2026-08-18) - **fixed forward in `7eec5d294`; the old rows are still wrong**
+
+**In short:** `bench/history.jsonl` and `bench/boot-history.jsonl` each stamp a
+row with a git commit. Until `7eec5d294` that commit was read when the run
+*finished*, not when the kernel was *built* - and a boot test runs for ten to
+twenty minutes, during which committing is normal and encouraged here. So any
+row whose run overlapped a commit names the wrong code. The fix stops it
+happening again; it cannot repair the rows already written.
+
+**How it was found.** A boot test validating the `kernel_main` split was started
+at 02:35 against `3cb8ebcf3`. A known-issues commit was made at 02:47 while QEMU
+was still running. The row the run appended reads `"commit": "88e93fecf"` - the
+markdown commit. The kernel that passed contained none of it.
+
+**Why it is worse than a mislabel.** `report_bench_absence()` in
+`scripts/boot-test.sh` diffs `HEAD` against the last recorded commit to decide
+whether performance-critical code has changed since anything was last
+benchmarked. A row stamped *newer* than the tree it measured makes that diff
+come back empty, so the harness reports "no perf-critical changes since the last
+benchmarked commit" about changes that were never benchmarked. It fails in the
+reassuring direction and prints a specific-looking hash while doing it.
+
+There is a second, quieter version: nothing recorded whether the tree was dirty,
+so a row for commit X measured "X plus uncommitted work" and was indistinguishable
+from a row that measured X.
+
+**What is fixed.** `boot-test.sh` captures branch/HEAD/dirty once, before the
+build - it already did, for the banner, and then discarded them - and passes
+them to both recorders as `--commit` / `--branch` / `--dirty`. Rows gain a
+`dirty` boolean. `report_bench_absence()` qualifies its verdict when the
+baseline row was dirty rather than implying a precision it does not have. Both
+recorders still fall back to asking git when invoked standalone.
+
+**What is NOT fixed, and cannot be.** Every row written before `7eec5d294`:
+
+* carries no `dirty` field, so it is unknown whether it measured its commit or
+  its commit plus uncommitted work. Readers should treat the absence as
+  "unknown", not as "clean" - the same rule `bench-history.py` already applies
+  to the absent `profile` field on pre-2026-08-14 records.
+* may name a commit made during its own run. There is no way to detect which:
+  the row does not record when the *build* happened, only the run's end
+  timestamp. Rows whose `commit` is an unusually small, documentation-only
+  change are the suspicious shape.
+
+Practical consequence: **do not bisect on a pre-2026-08-18 row's commit without
+checking that the commit plausibly touched kernel code.** For longitudinal
+questions ("is this benchmark drifting?") the rows are still fine; it is only
+the attribution of a number to a *specific commit* that is unreliable.
+
+---
+
 ## [B] FIXED — `sudo` never checked the password, and admitted everyone when the user database was absent (2026-08-17, `65dca4eba`)
 
 **In short:** `sudo` is the program that decides who is allowed to become the
@@ -34757,3 +35184,71 @@ Five more hand-rolled generators remain in lane C and should move onto
 security: `gui/desktop/src/power.rs` (three copies of the same xorshift in one
 file), `gui/desktop/src/wallpaper.rs` (an LCG), `apps/paint` (xorshift 13/17/5),
 `apps/netscan`, `apps/spades`.
+
+---
+
+## The build volume runs out of space, and nothing reclaims it (lane A)
+
+**Status:** OPEN — 2026-08-18
+
+**In short:** all three lanes build on `D:`, which is a 1.9 TB volume that sits
+at 100% used. On 2026-08-18 it fell to 16 GiB free with three `cargo test
+--workspace` runs live, which is below the floor `scripts/boot-test.sh`
+requires, so lane A could not boot-test at all. Nothing in the tree reclaims
+space; every lane's `target/` grows monotonically and the integration checkout's
+is the largest single consumer.
+
+### What actually happens
+
+`scripts/boot-test.sh` refuses to run below 20 GiB free (`--min-free-gb` to
+override). That guard exists because on 2026-08-15 the volume hit zero bytes
+free and a half-written edit truncated a kernel source file to zero bytes — so
+the guard is right and must not be routinely overridden. But it is a *detector*,
+not a *remedy*: when it fires the agent is simply stuck, and the only advice it
+can offer is to run `cargo clean` by hand in a worktree "nobody is building in".
+
+Which worktree that is cannot be determined from the tree. Measured this
+morning:
+
+| Worktree | `target/` |
+|---|---|
+| `os` (integration) | 19.1 GB |
+| `os-lane-a` | ~0.2 GB (host) + kernel target |
+
+`os/target` is by far the biggest and is entirely regenerable, so it is the
+right thing to prune — but at the time it had been written 157 s earlier by one
+of three live `cargo test --workspace --target x86_64-pc-windows-gnu` processes,
+and a `target/` that is idle for two minutes is *not* the same as one nobody is
+using: a QEMU boot phase writes nothing to `target/` for ~8 minutes. Deleting it
+under another lane costs that lane a ~14-minute rebuild and produces confusing
+mid-build errors. So the one safe reclaim is also the one an agent cannot safely
+perform without coordination it does not have.
+
+Scratch also accumulates unattended: `os-lane-a/build/` held 1.16 GB of
+`objdump` disassembly dumps (`dis-debug.txt`, 450 MB each) and ~80 MB of clippy
+logs left by earlier sessions. That directory is gitignored, so nothing ever
+prompts anyone to look at it. Pruned by hand on 2026-08-18; it will refill.
+
+### Proper fix
+
+Two pieces, neither written yet:
+
+1. **A reclaim helper** — `scripts/reclaim-space.py <n_gib>` that frees space
+   without guessing. It must establish *idleness* rather than infer it: check
+   for a live `cargo`/`rustc`/`qemu` process, and take the same lock
+   `scripts/boot-test.sh` uses to serialise QEMU, so it cannot race a boot test.
+   Prune in a defined order — this lane's `build/` scratch older than N days
+   first, then `target/` directories belonging to worktrees with no live build,
+   integration checkout first. Never touch a source tree.
+2. **A retention rule for `build/`** — the scratch directory has no policy at
+   all. Either the helper ages files out of it, or the boot test prints its size
+   when it exceeds a threshold, so it stops being invisible.
+
+Until then the workaround is manual: measure with
+`Get-ChildItem -Recurse -File | Measure-Object -Property Length -Sum`, confirm
+no live build with `Get-CimInstance Win32_Process -Filter "Name='cargo.exe'"`,
+and prune `os/target` only when the integration checkout is genuinely idle.
+
+**Severity:** high — it does not corrupt anything by itself (the guard sees to
+that), but it stops the one test that gates merging to `main`, and the failure
+mode it guards against has already destroyed a source file once.

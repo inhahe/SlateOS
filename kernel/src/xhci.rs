@@ -25,6 +25,7 @@
 //! Based on the Intel xHCI specification revision 1.2 and the Linux
 //! kernel's `drivers/usb/host/xhci*.c` implementation.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{Ordering, fence};
 
@@ -543,7 +544,17 @@ unsafe impl Sync for XhciController {}
 use spin::Mutex;
 
 /// Global xHCI controller instance.
-static XHCI: Mutex<Option<XhciController>> = Mutex::new(None);
+///
+/// Boxed rather than stored inline.  An [`XhciController`] is ~6.6 KiB -- four
+/// `[Option<_>; MAX_SLOTS]` arrays dominate it -- and at `opt-level = 0` no
+/// by-value move is elided, so every hop between [`XhciController::init`] and
+/// this static cost a full copy of it in a live frame.  Measured before:
+/// `xhci::init` 15 504 bytes with `XhciController::init` 13 232 live beneath
+/// it, a 28.7 KiB chain on a real driver-bringup path.  Behind a `Box` the
+/// controller is built once, in the allocation, and only the 8-byte pointer
+/// moves; `Option<Box<_>>` is also niche-packed, so `None` still costs 8 bytes
+/// here instead of a whole zeroed controller sitting in `.bss`.
+static XHCI: Mutex<Option<Box<XhciController>>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
 // MMIO register access helpers
@@ -609,8 +620,13 @@ impl XhciController {
     /// Detect and initialize the xHCI controller.
     ///
     /// Returns None if no xHCI controller is found on the PCI bus.
+    ///
+    /// Returns a `Box` rather than `Self` because a returned-by-value
+    /// controller is copied into every frame it passes through at
+    /// `opt-level = 0` -- this function's own return slot, then the caller's.
+    /// See the note on the [`XHCI`] static.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn init(hhdm_offset: u64) -> KernelResult<Self> {
+    fn init(hhdm_offset: u64) -> KernelResult<Box<Self>> {
         // Find xHCI controllers via PCI class/subclass.
         let controllers = pci::find_devices_by_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB);
         let pci_dev = controllers
@@ -897,7 +913,7 @@ impl XhciController {
         const NONE_FRAME: Option<PhysFrame> = None;
         const NONE_RING: Option<TrbRing> = None;
 
-        let mut ctrl = Self {
+        let mut ctrl = Box::new(Self {
             mmio_base,
             op_base,
             rt_base,
@@ -921,7 +937,7 @@ impl XhciController {
             devices: Vec::new(),
             ports: Vec::new(),
             hid_interfaces: Vec::new(),
-        };
+        });
 
         // Scan ports for connected devices.
         ctrl.scan_ports();

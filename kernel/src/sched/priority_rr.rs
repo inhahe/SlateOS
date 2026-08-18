@@ -642,6 +642,69 @@ impl PerCpuScheduler {
         }
     }
 
+    /// Allocate a `PerCpuScheduler` on the heap without building one on the
+    /// stack on the way there.
+    ///
+    /// `Box::new(PerCpuScheduler::new_const())` does not do what its shape
+    /// suggests at `opt-level = 0`.  `Box::new`'s argument is an ordinary value
+    /// expression, so the whole structure -- `MAX_CPUS` backends, ~18 KiB -- is
+    /// materialised in the caller's frame first and then memcpied into the
+    /// allocation, while `new_const`'s own frame holds a second copy at the
+    /// same time.  `test_per_cpu_work_stealing` carried a comment reading "must
+    /// be heap-allocated -- kernel task stacks are only 32 KB" directly above
+    /// the line that put roughly 38 KiB of it on the stack.
+    ///
+    /// Writing the queues into the allocation one at a time instead bounds the
+    /// frame by a single queue rather than by `MAX_CPUS` of them.
+    ///
+    /// The queue being written is a `const` item rather than a call to
+    /// `Mutex::new(SchedulerBackend::new_const())`, for the same
+    /// by-value-hop reason one level down.  Spelled as a call, `opt-level = 0`
+    /// gives each hop its own copy of the ~1.2 KiB backend -- `new_const`'s
+    /// return slot, `Mutex::new`'s argument, `Mutex::new`'s return slot, then
+    /// `write`'s argument -- and keeps `new_const`'s and
+    /// `PriorityRoundRobin::new_const`'s frames live underneath while it does.
+    /// Measured: 7 184 bytes here plus 1 184 + 1 200 nested. As a `const` the
+    /// whole value is computed at compile time (`new_const` already builds
+    /// `queues` with an inline `const` block, so it is const-evaluable), and
+    /// the runtime cost is one memcpy out of rodata per CPU with no call
+    /// underneath it at all. The image pays ~1.2 KiB for the constant.
+    #[must_use]
+    pub fn new_boxed() -> alloc::boxed::Box<Self> {
+        /// One unlocked, empty queue, materialised at compile time.
+        //
+        // `declare_interior_mutable_const` warns because a `const` holding a
+        // `Mutex` is re-materialised at each use rather than shared, which
+        // surprises anyone who writes `const LOCK: Mutex<_>` expecting one
+        // global lock.  Here a fresh independent queue per use is precisely
+        // what is wanted -- each CPU must get its own -- and the freshness is
+        // the entire point of the construct.
+        #[allow(clippy::declare_interior_mutable_const)]
+        const EMPTY_QUEUE: Mutex<super::backend::SchedulerBackend> =
+            Mutex::new(super::backend::SchedulerBackend::new_const());
+
+        let mut uninit = alloc::boxed::Box::<Self>::new_uninit();
+        let p = uninit.as_mut_ptr();
+        // SAFETY: `p` addresses one freshly allocated, correctly sized and
+        // aligned `Self` that nothing else holds a pointer to.  Every field is
+        // written exactly once through a raw pointer derived from `p` -- never
+        // through a reference to the still-uninitialised whole -- so no
+        // uninitialised value is ever produced or read.  `queues` has exactly
+        // `MAX_CPUS` elements and the loop writes indices `0..MAX_CPUS`, so
+        // every element is initialised and no write leaves the array.  Each
+        // write is to uninitialised memory, so `write` (which does not drop the
+        // old value) is the correct primitive rather than an assignment.  Both
+        // fields are therefore valid when `assume_init` is called.
+        unsafe {
+            (&raw mut (*p).num_cpus).write(AtomicUsize::new(0));
+            let q = (&raw mut (*p).queues).cast::<Mutex<super::backend::SchedulerBackend>>();
+            for i in 0..MAX_CPUS {
+                q.add(i).write(EMPTY_QUEUE);
+            }
+            uninit.assume_init()
+        }
+    }
+
     /// Initialize with a given number of CPUs.
     ///
     /// Each CPU's queue gets the scheduler backend selected by the

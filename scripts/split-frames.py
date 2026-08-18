@@ -74,10 +74,23 @@ coincide exactly when there is nothing after the match to fall back into, so
 `--arms` requires a unit return type and a match in tail position, and asserts
 both rather than trusting them.
 
-Functions with **flat** bodies stay out of scope: `eventlog::self_test` and
-`self_test_sysv_ipc_mqueue` are long runs of `let a = ..; if dispatch(..) {..}`
-with no block structure, and splitting those means inventing the case
-boundaries, which is a decision about what the test's units are.
+`--flat [MIN_LINES]` handles the third shape: a **flat** body, a long run of
+`let a = ..; if dispatch(..) {..}` with no block structure at all
+(`eventlog::self_test`, `self_test_sysv_ipc_mqueue`).  An earlier note put
+these out of scope, on the grounds that splitting one means inventing the case
+boundaries -- a decision about what the test's units are, which is not a
+transformer's to make.  That was right about the principle and wrong about the
+facts: the boundaries are already there.  The author of such a body separates
+each case with a blank line and heads it with `// Test 7: ...`; the structure
+is simply not written in *braces*, which is all the default mode can see.  So
+`--flat` cuts at the blank lines and nowhere else, and each paragraph becomes a
+case if it is at least MIN_LINES long, reads no local bound before it, and
+binds nothing read after it.  The last two are `E0434` and `E0425` -- the
+compiler is the actual safety net, and these checks only save it the trouble.
+
+It refuses to write a **one-case** split, because that cannot help: the peak
+becomes `outer + case`, which is what it already was.  Two is the minimum at
+which `max` beats `sum`.
 
 Then measure with `stack-frames.py --peak`, not the ranking
 -------------------------------------------------------------
@@ -115,6 +128,9 @@ RET_TYPE = "crate::error::KernelResult<()>"
 
 RETURN_RE = re.compile(r"\breturn\b")
 RETURN_NOT_ERR = re.compile(r"\breturn\b(?!\s+Err\b)")
+# `-> !` on a signature, i.e. a diverging function: it never returns, so it is
+# unit-like for splitting purposes and cannot contain `return` or `?` at all.
+DIVERGING = re.compile(r"->\s*!\s*(?:\{|$)")
 
 
 # --------------------------------------------------------------------------
@@ -253,16 +269,32 @@ def line_starts(lines: list[str]) -> list[int]:
     return starts
 
 
-def find_fn(lines: list[str], name: str) -> int:
-    """Return the 0-based index of the `fn <name>(` definition line."""
-    hits = [
-        i
-        for i, ln in enumerate(lines)
-        if ln.lstrip().startswith(("fn ", "pub fn ", "pub(crate) fn "))
-        and ln.split("fn ", 1)[1].split("(")[0].split("<")[0].strip() == name
-    ]
+def find_fn(lines: list[str], name: str, at: int = 0) -> int:
+    """Return the 0-based index of the `fn <name>(` definition line.
+
+    `at` (a 1-based line number) picks one when the name is not unique, which
+    a second pass over an already-split file needs: this tool names every case
+    it generates `case`, so `kshell.rs` holds 78 of them and the biggest frame
+    left in it is one particular `fn case`.  Requiring the exact line rather
+    than an ordinal keeps the reference stable against edits above it failing
+    loudly instead of silently selecting a different function.
+    """
+    pat = re.compile(
+        r"^(?:pub\s*(?:\([^)]*\)\s*)?)?(?:const\s+)?(?:unsafe\s+)?"
+        r'(?:extern\s+"[^"]*"\s+)?fn\s+' + re.escape(name) + r"\s*[(<]"
+    )
+    hits = [i for i, ln in enumerate(lines) if pat.match(ln.lstrip())]
     assert hits, f"no `fn {name}` found"
-    assert len(hits) == 1, f"`fn {name}` is ambiguous: lines {[h + 1 for h in hits]}"
+    if at:
+        assert at - 1 in hits, (
+            f"line {at} is not a `fn {name}` definition; found at "
+            f"{[h + 1 for h in hits]}"
+        )
+        return at - 1
+    assert len(hits) == 1, (
+        f"`fn {name}` is ambiguous: lines {[h + 1 for h in hits]}; "
+        f"pass --at LINE to choose one"
+    )
     return hits[0]
 
 
@@ -281,6 +313,7 @@ def container(
     starts: list[int],
     open_idx: int,
     text: str,
+    flat: bool = False,
 ) -> int:
     """Where the cases actually live.
 
@@ -292,9 +325,17 @@ def container(
     A lone bare block is genuinely ambiguous -- it is either such a wrapper or a
     single real case -- and the tell is not its size but its contents: a wrapper
     holds sibling cases, a case does not.  So descend only when the block holds
-    at least two bare statement blocks of its own.  (Size was the first rule
-    here; it is an arbitrary constant that misjudges any function short enough
-    for its one case to be most of it.)
+    at least two cases of its own.  (Size was the first rule here; it is an
+    arbitrary constant that misjudges any function short enough for its one case
+    to be most of it.)
+
+    What counts as "cases of its own" depends on which shape is being looked
+    for, which is why `flat` is a parameter rather than a detail of the caller.
+    `self_test_sysv_ipc_mqueue` wraps 1 874 flat lines in one bare block that
+    contains no bare block at all, so the brace test says "a single real case"
+    and refuses to descend -- and `--flat` then sees one statement where there
+    are 96 paragraphs.  Only one level is descended, in either mode: no function
+    here nests two wrappers, and each extra level is another chance to guess.
     """
     body_depth = _depth_inside(lines, depth, code, starts, open_idx)
     close = _matching_close(lines, depth, starts, open_idx, body_depth, text, code)
@@ -308,9 +349,17 @@ def container(
             lines, depth, starts, bare[0], body_depth + 1, text, code
         )
         if _is_statement_block(lines, starts, text, code, bare[0], inner_close):
-            nested, _ = find_cases(
-                lines, depth, code, starts, text, bare[0], inner_close, body_depth + 1
-            )
+            if flat:
+                inner_stmts = statements(
+                    lines, depth, code, starts, text, bare[0], inner_close,
+                    body_depth + 1,
+                )
+                nested = paragraphs(lines, inner_stmts)
+            else:
+                nested, _ = find_cases(
+                    lines, depth, code, starts, text, bare[0], inner_close,
+                    body_depth + 1,
+                )
             if len(nested) >= 2:
                 return bare[0]
     return open_idx
@@ -587,6 +636,551 @@ def _arm_block_ok(
     return not _masked(text, code, open_off + 1, starts[o_line + 1] - 1).strip()
 
 
+IDENT = re.compile(r"[A-Za-z_]\w*")
+LET = re.compile(r"\blet\b")
+NOT_A_BINDING = {"mut", "ref", "box"}
+
+
+def statements(
+    lines: list[str],
+    depth: list[int],
+    code: bytearray,
+    starts: list[int],
+    text: str,
+    open_idx: int,
+    close_idx: int,
+    body: int,
+) -> list[tuple[int, int]]:
+    """Top-level statements of a block, as inclusive line ranges.
+
+    A statement ends at a `;` that leaves the depth at `body`, or at the `}`
+    that closes a block form (`if`, `match`, `for`, `unsafe`) used as a
+    statement.  Each range starts at the line after the previous statement's
+    end, so a statement absorbs the blank lines and the `// Test 4:` comment
+    above it -- which is what keeps a split readable.
+
+    Anything after the last statement (typically the trailing `Ok(())`) is not
+    returned, and is left where it is.
+    """
+    ends: list[int] = []
+    lo, hi = starts[open_idx + 1], starts[close_idx]
+    for p in range(lo, hi):
+        if not code[p]:
+            continue
+        c = text[p]
+        if not ((c == ";" and depth[p] == body) or (c == "}" and depth[p] == body + 1)):
+            continue
+        e = _line_of(starts, p)
+        # The statement must end its line; one that shares a line with the next
+        # is not something this can cut between.
+        if _masked(text, code, p + 1, starts[e + 1] - 1).strip():
+            continue
+        ends.append(e)
+    out = []
+    prev = open_idx
+    for e in ends:
+        out.append((prev + 1, e))
+        prev = e
+    return out
+
+
+def _let_patterns(masked: str) -> list[tuple[int, int]]:
+    """Offsets of each `let` **pattern** -- what is between `let` and `=`/`:`/`;`.
+
+    Both `_binds` and `_reads` need this same span, and for opposite reasons:
+    the names in it are introduced, and are therefore *not* mentions of an
+    outer name.  Sharing one scan is what keeps the two answers consistent.
+    """
+    spans: list[tuple[int, int]] = []
+    for m in LET.finditer(masked):
+        d, i = 0, m.end()
+        while i < len(masked):
+            ch = masked[i]
+            if ch in "([{":
+                d += 1
+            elif ch in ")]}":
+                d -= 1
+            elif d == 0 and ch in "=;:":
+                break
+            i += 1
+        spans.append((m.end(), i))
+    return spans
+
+
+ITEM_DECL = re.compile(
+    r"\b(?:const|static)\s+(?:mut\s+)?([A-Za-z_]\w*)"
+    r"|\b(?:fn|struct|enum|union|trait|type|mod)\s+([A-Za-z_]\w*)"
+)
+USE_DECL = re.compile(r"\buse\s+([^;]*);")
+
+
+def _use_names(spec: str) -> set[str]:
+    """The names a `use` brings into scope: the last segment, or the alias."""
+    out: set[str] = set()
+    if "{" in spec:
+        inner = spec[spec.index("{") + 1 : spec.rindex("}")] if "}" in spec else ""
+        parts, d, cur = [], 0, []
+        for ch in inner:
+            if ch in "{(":
+                d += 1
+            elif ch in "})":
+                d -= 1
+            if ch == "," and d == 0:
+                parts.append("".join(cur))
+                cur = []
+            else:
+                cur.append(ch)
+        parts.append("".join(cur))
+    else:
+        parts = [spec]
+    for p in parts:
+        p = p.strip()
+        if not p or "*" in p:
+            continue
+        if " as " in p:
+            p = p.rsplit(" as ", 1)[1]
+        name = p.split("::")[-1].strip()
+        if IDENT.fullmatch(name):
+            out.add(name)
+    return out
+
+
+def _item_binds(masked: str) -> set[str]:
+    """Names an *item* declaration in a body introduces.
+
+    A `const`, `static`, `fn`, `struct` or `use` written inside a function body
+    is scoped to the block that holds it, and moving that block under a
+    generated `fn case` takes the name out of every other case's scope.  Unlike
+    a local this is not a capture problem -- a nested `fn` may freely name an
+    item from an enclosing block -- so it never shows up as `E0434`; it shows
+    up as `E0425` in some *later* case, which is how `kernel_main` failed:
+    `const HELLO_ELF: &[u8] = include_bytes!(..)` sat in one paragraph and was
+    written to the filesystem three paragraphs further down.
+
+    These names are deliberately not filtered by capitalisation the way `let`
+    patterns are: `SCREAMING_CASE` is the convention for exactly the `const`s
+    that matter here.
+    """
+    out = {m.group(1) or m.group(2) for m in ITEM_DECL.finditer(masked)}
+    for m in USE_DECL.finditer(masked):
+        out |= _use_names(m.group(1))
+    return {n for n in out if n}
+
+
+def _value_idents(masked: str):
+    """Identifier occurrences that could be a *local* being read.
+
+    Three shapes are spelled exactly like a local and can never be one.  Each
+    was found the same way -- by a cluster that would not cut where it plainly
+    should have -- and each is a question about the characters *around* the
+    name, not about the name:
+
+    * `x.name` is a field or a method.  `cmd_oci`'s inspect arm never touches
+      the outer `cmd` but prints `image.config.cmd` five times, so a bare
+      `\\bcmd\\b` threaded an argument nothing used, one clippy warning per
+      arm.  The `.` must be a lone one: `&buf[start..cmd]` is a read.
+    * `name::init` is a path qualifier -- a module, a type, an enum.  A local
+      can never be followed by `::`, and this is the one that mattered most:
+      `kernel_main` opens with `if let Some(ref fb) = boot_info.framebuffer`,
+      binding an `fb` that dies two lines later, and then calls `fb::init()`
+      and `fb::self_test()` 5 000 lines apart.  Reading those as uses of the
+      local made the binding live across 395 of the body's 477 paragraphs and
+      fused them into a single 17 KiB case -- a split that saved 5%.
+    * `core::name` is the same thing seen from the other side.
+
+    Excluding them is not a heuristic that trades safety for yield, which
+    matters because under-approximating reads is the one direction that can
+    produce a wrong boundary rather than a missed one: none of the three *can*
+    be a local, so nothing real is being dropped.
+    """
+    for m in IDENT.finditer(masked):
+        k = m.start() - 1
+        while k >= 0 and masked[k].isspace():
+            k -= 1
+        if k >= 0 and masked[k] == "." and not (k and masked[k - 1] == "."):
+            continue  # `x.name` -- a field or method
+        if k >= 1 and masked[k] == ":" and masked[k - 1] == ":":
+            continue  # `core::name` -- a path segment
+        j = m.end()
+        while j < len(masked) and masked[j].isspace():
+            j += 1
+        if masked[j : j + 2] == "::":
+            continue  # `name::init` -- a path qualifier
+        yield m
+
+
+def _binds(masked: str) -> set[str]:
+    """Names a statement's `let`s introduce -- over-approximated on purpose.
+
+    Over-approximating *bindings* only ever makes the chunker more cautious:
+    a spurious name is one more thing that must not cross a boundary.  Under-
+    approximating would let a real one cross, so the two directions are not
+    symmetric and this leans the safe way.
+
+    Uppercase-initial identifiers are dropped because `let Some(ev) = ..` and
+    `let Foo { a } = ..` would otherwise put `Some` and `Foo` in the set, and
+    every later statement mentioning them would become unchunkable.  Rust's
+    naming convention makes that reliable, and where it is not, the compiler
+    still is.
+    """
+    out: set[str] = set()
+    for lo, hi in _let_patterns(masked):
+        for m in _value_idents(masked[lo:hi]):
+            name = m.group(0)
+            if name not in NOT_A_BINDING and not name[:1].isupper():
+                out.add(name)
+    return out
+
+
+def _binding_takes_effect(masked: str, hi: int) -> int:
+    """Offset at which the binding of a `let` pattern ending at `hi` is in scope.
+
+    Which is the end of its initialiser, not the end of its pattern -- the
+    distinction Rust makes to give `let a = a + 1;` the *outer* `a` on the
+    right.  So: the statement's `;`, or the `{` of an `if let`/`while let`
+    body, whichever comes first at depth zero.
+    """
+    d = 0
+    for i in range(hi, len(masked)):
+        ch = masked[i]
+        if ch in "([":
+            d += 1
+        elif ch in ")]":
+            d -= 1
+        elif d <= 0 and ch in ";{":
+            return i
+    return len(masked)
+
+
+def _reads(masked: str) -> set[str]:
+    """Names a statement mentions that must already be in scope around it.
+
+    The distinction is the whole ballgame for `--flat`, and it is a question
+    about *position*, not just about names:
+
+    * `let a = SyscallArgs { .. };` mentions `a`, but declares it.  Counting
+      that as a use makes every paragraph after the first look like it reads
+      the previous paragraph's `a`, which rejected 8 of the 9 paragraphs of
+      `self_test_sysv_ipc_mqueue` -- every one of its cases opens with exactly
+      that line.
+    * `if let Some(ev) = result.events.first() { ev.namespace_str() }` mentions
+      `ev` twice, and the second is the binding the first made.  Judging by
+      name alone made `eventlog::self_test` look as though Test 8 read Test 2's
+      `ev`, which welded nine paragraphs into two clusters.
+    * `let a = a + 1;` mentions `a` twice as well -- and there the second *is*
+      an outer read, because a binding is not in scope until its initialiser
+      has been evaluated.
+
+    All three fall out of one rule: a mention is an outer read when it stands
+    before the point where a `let` in this statement brings that name into
+    scope.  The pattern text itself is blanked, so a name appearing only there
+    is not a read at all.
+    """
+    spans = _let_patterns(masked)
+    in_scope: dict[str, int] = {}
+    blanked = masked
+    for lo, hi in spans:
+        at = _binding_takes_effect(masked, hi)
+        for m in _value_idents(masked[lo:hi]):
+            name = m.group(0)
+            if name not in NOT_A_BINDING and not name[:1].isupper():
+                in_scope[name] = min(in_scope.get(name, at), at)
+        blanked = blanked[:lo] + " " * (hi - lo) + blanked[hi:]
+    return {
+        m.group(0)
+        for m in _value_idents(blanked)
+        if m.start() < in_scope.get(m.group(0), len(masked) + 1)
+    }
+
+
+def _first_code_line(lines: list[str], span: tuple[int, int]) -> int:
+    """The first non-blank line of a statement range.
+
+    A range begins where the previous one ended, so it opens with whatever
+    blank lines separated them.  Those stay outside the case; the comment that
+    heads a statement does not, because it describes the statement.
+    """
+    top = span[0]
+    while top < span[1] and not lines[top].strip():
+        top += 1
+    return top
+
+
+def paragraphs(
+    lines: list[str], stmts: list[tuple[int, int]]
+) -> list[list[tuple[int, int]]]:
+    """Group top-level statements the way the author already grouped them.
+
+    A blank line between two statements starts a new group.  This is the whole
+    idea behind `--flat`, and the reason it is not the "inventing case
+    boundaries" that the earlier note refused to do: in a body like
+    `eventlog::self_test` the cases are already marked out -- a blank line and
+    a `// Test 7: ...` header before each -- they simply are not marked out
+    with *braces*, which is all `find_cases` can see.  Reading the blank lines
+    recovers the author's own structure rather than imposing one.
+
+    A blank line *inside* a statement (in the middle of a long `if` body) is
+    not a boundary, because only lines above a statement's first line of code
+    are considered.
+    """
+    groups: list[list[tuple[int, int]]] = []
+    for k, s in enumerate(stmts):
+        blank_above = any(
+            not lines[t].strip() for t in range(s[0], _first_code_line(lines, s))
+        )
+        if k == 0 or blank_above:
+            groups.append([])
+        groups[-1].append(s)
+    return groups
+
+
+def find_flat_cases(
+    lines: list[str],
+    depth: list[int],
+    code: bytearray,
+    starts: list[int],
+    text: str,
+    open_idx: int,
+    close_idx: int,
+    body: int,
+    min_lines: int,
+    outer: set[str],
+    declared: set[str],
+    reserve_tail: bool = False,
+) -> tuple[list[tuple[int, int]], int]:
+    """Turn each blank-line-separated paragraph of a flat body into a case.
+
+    `eventlog::self_test` and its kind have no block structure for
+    `find_cases` to exploit -- a few hundred statements in a row -- but they do
+    have paragraphs, so `paragraphs` supplies the boundaries and this decides
+    which of them are legal and worth taking.  A paragraph is taken when:
+
+    * it is at least `min_lines` long (a two-line case moves nothing);
+    * it reads no local bound before it -- that would be `E0434`, since a
+      nested `fn` cannot capture.  `--param` exempts a name by threading it
+      through as an argument, which is what `declared` holds;
+    * nothing it binds is read after it -- that would be `E0425`.
+
+    Both compiler errors are the safety net rather than the mechanism: getting
+    a boundary wrong fails the build, it does not miscompile.  The checks here
+    exist so the common cases do not have to fail the build first.
+
+    **Shadowing has to be modelled or nothing splits.**  These tests rebind one
+    scratch name per case -- `let a = SyscallArgs { .. };` appears 96 times in
+    `self_test_sysv_ipc_mqueue` -- so a rule that asks only "is the name
+    mentioned later" answers yes every time and skips every paragraph, which is
+    what the first version did (9 skipped, 0 taken).  A paragraph's *reads* are
+    therefore its identifiers minus the ones its own `let`s introduce before
+    that point (see `_reads`), and a binding stops being live at the paragraph
+    that rebinds it without reading it first.
+
+    **Items are not locals.**  A `const`, `static`, `fn` or `use` written inside
+    the body is scoped to its *block*, and a nested `fn` may freely name an item
+    from an enclosing block -- so an item crossing a boundary is not the
+    `E0434` that guards locals, and nothing about the paragraph it sits in looks
+    wrong.  It surfaces as `E0425` somewhere else entirely.  `reserve_tail` and
+    the weld below exist for the two shapes of that, both found in `kernel_main`.
+
+    Note what is *not* checked: whether the split is worth doing.  A single
+    case is always a no-op -- the peak becomes `outer + case`, which is what it
+    already was -- so that judgement lives in `apply`, which refuses to write
+    one, and ultimately in `stack-frames.py --peak`.
+    """
+    stmts = statements(lines, depth, code, starts, text, open_idx, close_idx, body)
+    if not stmts:
+        return [], 0
+    groups = paragraphs(lines, stmts)
+
+    masked = {s: _masked(text, code, starts[s[0]], starts[s[1] + 1] - 1) for s in stmts}
+    binds = {s: _binds(masked[s]) for s in stmts}
+    uses = {s: _reads(masked[s]) for s in stmts}
+    tail = _masked(text, code, starts[stmts[-1][1] + 1], starts[close_idx + 1] - 1)
+    tail_uses = _reads(tail)
+    tail_names = set(IDENT.findall(tail))
+
+    if reserve_tail and len(groups) > 1:
+        # A `-> !` body's last statement stands in tail position and has to
+        # diverge there; `{ fn case() { .. } case(); }` evaluates to `()`, which
+        # is `error[E0308]: expected !, found ()` -- exactly what `kernel_main`
+        # produced at main.rs:5961 on the first attempt.  The paragraph could be
+        # made a case by giving the generated `fn` a `-> !` of its own, but that
+        # is a second signature shape for one paragraph of one function; folding
+        # it into the tail instead costs the last case and nothing else.  Its
+        # reads join `tail_uses` so the locals it needs still count as live.
+        for s in groups.pop():
+            tail_uses |= uses[s]
+            tail_names |= set(IDENT.findall(masked[s]))
+
+    # A group's reads are what it mentions before its own `let`s introduce it,
+    # walking its statements in order so `foo(x); let x = ..;` still counts as
+    # reading the outer `x`.
+    g_binds: list[set[str]] = []
+    g_reads: list[set[str]] = []
+    for g in groups:
+        reads, seen = set(), set()
+        for s in g:
+            reads |= uses[s] - seen
+            seen |= binds[s]
+        g_binds.append(seen)
+        g_reads.append(reads)
+
+    # Weld together every paragraph that mentions a block-scoped item.
+    #
+    # The local walk further down grows a cluster *forward*, which is sound for
+    # locals because a local cannot be read above the `let` that binds it.  An
+    # item can: `fn helper()` declared at the bottom of a body is callable from
+    # the top of it, and `const HELLO_ELF: &[u8] = include_bytes!(..)` in
+    # `kernel_main` is read three paragraphs below its declaration.  So the
+    # item constraint is a two-sided one and is resolved first, by fusing every
+    # paragraph from the first mention of the name to the last into a single
+    # super-paragraph.  After this the forward walk cannot cut one, because any
+    # cluster it starts inside a fused run started at the run's own first group.
+    #
+    # Mentions, not reads: a name is looked for anywhere in the paragraph's
+    # text, since an item's whole point is that it is in scope for the block
+    # regardless of where it stands.
+    g_items: list[set[str]] = []
+    g_names: list[set[str]] = []
+    for g in groups:
+        it: set[str] = set()
+        nm: set[str] = set()
+        for s in g:
+            it |= _item_binds(masked[s])
+            nm |= set(IDENT.findall(masked[s]))
+        g_items.append(it)
+        g_names.append(nm)
+
+    reach = list(range(len(groups)))
+    for j, decl in enumerate(g_items):
+        for name in decl:
+            hits = [q for q in range(len(groups)) if name in g_names[q]] or [j]
+            for q in range(min(hits), max(hits) + 1):
+                reach[q] = max(reach[q], max(hits))
+
+    fused: list[list[tuple[int, int]]] = []
+    f_binds: list[set[str]] = []
+    f_reads: list[set[str]] = []
+    f_items: list[set[str]] = []
+    k = 0
+    while k < len(groups):
+        end, j = k, k
+        while j <= end:
+            end = max(end, reach[j])
+            j += 1
+        b, r, i, stmt_list = set(), set(), set(), []
+        for q in range(k, end + 1):
+            r |= g_reads[q] - b
+            b |= g_binds[q]
+            i |= g_items[q]
+            stmt_list += groups[q]
+        fused.append(stmt_list)
+        f_binds.append(b)
+        f_reads.append(r)
+        f_items.append(i)
+        k = end + 1
+    groups, g_binds, g_reads, g_items = fused, f_binds, f_reads, f_items
+
+    def last_reader(k: int, name: str) -> int:
+        """Index of the last group that can still see group `k`'s `name`.
+
+        `k` itself if the binding dies inside `k`; `len(groups) - 1` if it
+        survives to the trailing `Ok(())`, which is a boundary no merge can
+        absorb and is therefore left for the escape test to reject.
+        """
+        out = k
+        for j in range(k + 1, len(groups)):
+            if name in g_reads[j]:
+                out = j
+            if name in g_binds[j]:
+                return out  # rebound, so group k's binding dies here
+        return len(groups) - 1 if name in tail_uses else out
+
+    # Coalesce paragraphs whose locals reach into each other.
+    #
+    # A crossing local does not mean "unsplittable", it means the blank line
+    # was in the wrong place: `self_test_sysv_ipc_mqueue` declares
+    # `let sops_ptr = ..` in one paragraph and dereferences it in the next, so
+    # the two are one case that happens to be written with a gap in it.  Taking
+    # the paragraph as final gave 3 cases of 9; merging along the crossings
+    # gives 6, and the ones that merge are exactly the ones that had to.
+    #
+    # This is the partition-labels walk: extend the cluster to the furthest
+    # group any of its bindings reaches, re-extending as new groups join, and
+    # cut where nothing outstanding is still live.
+    #
+    # The one thing the walk must not do is swallow the whole body.  A local
+    # the author declared at the top and used at the bottom -- `let saved =
+    # total(); .. restore(saved);` -- links the first group to the last, and
+    # the merge would then produce a single case containing everything, whose
+    # peak is `outer + case` and so is not a saving at all.  When that happens
+    # the answer is not to merge but to leave that first paragraph where it is:
+    # it holds a genuine body-scope local, which belongs in the outer frame.
+    def grow(k: int) -> int:
+        end, j = k, k
+        while j <= end:
+            for name in g_binds[j]:
+                end = max(end, last_reader(j, name))
+            j += 1
+        return end
+
+    clusters: list[list[int]] = []
+    leading_skipped = 0
+    k = 0
+    while k < len(groups):
+        end = grow(k)
+        if k == 0 and end == len(groups) - 1 and end > 0:
+            g = groups[0]
+            if g[-1][1] - _first_code_line(lines, g[0]) + 1 >= min_lines:
+                leading_skipped += 1
+            k = 1
+            continue
+        clusters.append(list(range(k, end + 1)))
+        k = end + 1
+
+    cases: list[tuple[int, int]] = []
+    skipped = leading_skipped
+    before = set(outer) - declared
+    for cl in clusters:
+        c_binds: set[str] = set()
+        c_reads: set[str] = set()
+        c_items: set[str] = set()
+        for k in cl:
+            c_reads |= g_reads[k] - c_binds
+            c_binds |= g_binds[k]
+            c_items |= g_items[k]
+        top = _first_code_line(lines, groups[cl[0]][0])
+        end = groups[cl[-1]][-1][1]
+        long_enough = end - top + 1 >= min_lines
+        # Nothing bound in the cluster can be read after it: the walk above
+        # only stops where that is true, except at the tail, which it cannot
+        # extend past.  An *item* has no such walk -- the weld covers only the
+        # paragraphs -- so its escape into the tail is checked directly, and at
+        # any position, since `reserve_tail` may have put a whole paragraph
+        # there.
+        escapes = (
+            any(n in tail_uses for n in c_binds) and cl[-1] == len(groups) - 1
+        ) or any(n in tail_names for n in c_items)
+        if long_enough and not (c_reads & before) and not escapes:
+            cases.append((top, end))
+        elif long_enough:
+            skipped += 1
+        before |= c_binds - declared
+    return cases, skipped
+
+
+def _sig_params(sig: str) -> set[str]:
+    """Parameter names of a signature, so a chunk reading one is not attempted."""
+    a, b = sig.find("("), sig.rfind(")")
+    if a < 0 or b < a:
+        return set()
+    out: set[str] = set()
+    for part in sig[a + 1 : b].split(","):
+        name = part.split(":")[0].strip().lstrip("&").strip()
+        if IDENT.fullmatch(name) and not name[:1].isupper():
+            out.add(name)
+    return out
+
+
 def _needs_result(text: str, code: bytearray, lo: int, hi: int) -> bool:
     """Does this case body actually use `?` or `return`?
 
@@ -603,6 +1197,35 @@ def _needs_result(text: str, code: bytearray, lo: int, hi: int) -> bool:
     """
     masked = _masked(text, code, lo, hi)
     return "?" in masked or RETURN_RE.search(masked) is not None
+
+
+def _check_unit_returns(
+    text: str, code: bytearray, starts: list[int], lo: int, hi: int
+) -> None:
+    """Refuse a case of a unit-returning function that contains any `return`.
+
+    The `KernelResult` shape has an escape hatch -- `case()?` propagates a
+    `return Err(..)` unchanged -- and a unit function has none: a `return;`
+    that used to abandon the whole function would come to abandon only the
+    case, and every statement it was skipping would run.  There is no call
+    spelling that fixes that, so the paragraph cannot be split.
+
+    `--arms` is the exception that proves it: an arm's `return;` is faithful
+    only because `find_match` has already established the match is in tail
+    position, where returning from the case and falling out of it are the same
+    thing.  A paragraph in the middle of a body has no such guarantee.
+    """
+    masked = _masked(text, code, lo, hi)
+    m = RETURN_RE.search(masked)
+    assert m is None, (
+        f"line {_line_of(starts, lo + m.start()) + 1}: a case of a "
+        f"unit-returning function contains a `return`, which would abandon "
+        f"only the case once it becomes a call; split this one by hand"
+    )
+    assert "?" not in masked, (
+        f"a case of a unit-returning function contains `?`, which needs a "
+        f"`Try` return type it cannot be given here"
+    )
 
 
 def _check_returns(
@@ -644,9 +1267,20 @@ def _used_params(
     textual use-test, not name resolution -- but it does not need to be sound,
     because the compiler is: a fixture this misses is still `E0434`, and one it
     adds spuriously is still an unused-variable warning.
+
+    It is worth excluding *field* accesses even so, because they are not rare:
+    `--param cmd:&str` matched `image.config.cmd` throughout `cmd_oci`'s
+    inspect arm and passed a `cmd` nothing used.  A name after a `.` is a field
+    or a method, never the local -- unless the dot is half of a `..` range,
+    where `a..cmd` really is a use.
     """
     masked = _masked(text, code, lo, hi)
-    return [p for p in params if re.search(rf"\b{re.escape(p[0])}\b", masked)]
+    return [p for p in params if _mentions(masked, p[0])]
+
+
+def _mentions(masked: str, name: str) -> bool:
+    """Does this case actually *read* the local `name`, so `--param` is used?"""
+    return any(m.group(0) == name for m in _value_idents(masked))
 
 
 def rewrite(
@@ -654,6 +1288,8 @@ def rewrite(
     fn_name: str,
     params: list[tuple[str, ...]] | None = None,
     arms: bool = False,
+    flat: int = 0,
+    at: int = 0,
 ) -> tuple[str, list[tuple[int, int]]]:
     # A fixture's call expression defaults to its own name; `--param` lets it
     # differ, so a `Vec` local can be handed to a `&[T]` parameter.
@@ -663,9 +1299,10 @@ def rewrite(
     starts = line_starts(lines)
     depth, code, lits = scan(text)
 
-    fn_idx = find_fn(lines, fn_name)
+    fn_idx = find_fn(lines, fn_name, at)
     b_open = body_open(lines, fn_idx)
     sig = " ".join(lines[fn_idx : b_open + 1])
+    unit = False
 
     if arms:
         # Every arm keeps its own `return;`, so the cases must be infallible and
@@ -686,17 +1323,42 @@ def rewrite(
         )
         noun = "arm whose body is not a block on its own lines"
     else:
-        assert "KernelResult<()>" in sig, (
-            f"`fn {fn_name}` does not return KernelResult<()>; this transformer "
-            f"only handles that signature (see the module docstring)"
+        # A unit-returning body is splittable too, on the stricter terms
+        # `_check_unit_returns` states: its cases must contain no `return` and
+        # no `?`, because neither has a faithful call spelling.  `cmd_oci`'s
+        # `run` arm is the reason -- 1 178 lines and the largest frame left in
+        # `kshell.rs`, in a function the earlier assertion turned away purely
+        # for its signature.
+        #
+        # A diverging `-> !` body counts as unit: a case extracted from it is
+        # an ordinary function that returns normally, and the two rules
+        # `_check_unit_returns` enforces are free there -- a `return` cannot
+        # appear in a `-> !` function and neither can `?`.  `kernel_main` is
+        # the one that matters, being both the largest frame in the kernel and
+        # the one frame that is certainly live under every init and every
+        # self-test it calls.
+        unit = "->" not in sig or DIVERGING.search(sig) is not None
+        assert unit or "KernelResult<()>" in sig, (
+            f"`fn {fn_name}` returns neither `()` nor KernelResult<()>; this "
+            f"transformer only handles those signatures (see the module "
+            f"docstring)"
         )
-        open_idx = container(lines, depth, code, starts, b_open, text)
+        open_idx = container(lines, depth, code, starts, b_open, text, bool(flat))
         inner = _depth_inside(lines, depth, code, starts, open_idx)
         close_idx = _matching_close(lines, depth, starts, open_idx, inner, text, code)
-        cases, skipped = find_cases(
-            lines, depth, code, starts, text, open_idx, close_idx, inner
-        )
-        noun = "`{` that is not a bare statement block"
+        if flat:
+            declared = {p[0] for p in params}
+            cases, skipped = find_flat_cases(
+                lines, depth, code, starts, text, open_idx, close_idx, inner,
+                flat, _sig_params(sig), declared,
+                reserve_tail=DIVERGING.search(sig) is not None,
+            )
+            noun = "paragraph that reads an outer local, or binds one read later"
+        else:
+            cases, skipped = find_cases(
+                lines, depth, code, starts, text, open_idx, close_idx, inner
+            )
+            noun = "`{` that is not a bare statement block"
 
     if skipped:
         print(f"  note: skipped {skipped} {noun}")
@@ -731,14 +1393,21 @@ def rewrite(
             head = lines[i]
             pad = head[: len(head) - len(head.lstrip())]  # the `{`'s own indent
             inner_pad = pad + "    "
+            # A flat chunk has no braces of its own: the case body is the
+            # statements themselves, and the wrapping block is new.
+            lo_off = starts[i] if flat else starts[i + 1]
+            hi_off = starts[c + 1] - 1 if flat else starts[c]
             if arms:
                 # `return;` stays a `return;`, and the tail-position check in
                 # `find_match` is what makes that faithful.
                 fallible = False
+            elif unit:
+                _check_unit_returns(text, code, starts, lo_off, hi_off)
+                fallible = False
             else:
-                _check_returns(text, code, starts, starts[i + 1], starts[c])
-                fallible = _needs_result(text, code, starts[i + 1], starts[c])
-            take = _used_params(text, code, starts[i + 1], starts[c], params)
+                _check_returns(text, code, starts, lo_off, hi_off)
+                fallible = _needs_result(text, code, lo_off, hi_off)
+            take = _used_params(text, code, lo_off, hi_off, params)
             decl = ", ".join(f"{n}: {t}" for n, t, _ in take)
             pass_ = ", ".join(e for _, _, e in take)
             ret = f" -> {RET_TYPE}" if fallible else ""
@@ -747,16 +1416,21 @@ def rewrite(
             out.append(head if arms else f"{pad}{{")
             out.append(f"{inner_pad}#[inline(never)]")
             out.append(f"{inner_pad}fn case({decl}){ret} {{")
-            for b in lines[i + 1 : c]:
-                out.append(("    " + b) if b.strip() else b)
+            # A block's contents were already one level in; a flat paragraph
+            # was not, and gains two levels (the generated `{` and the `fn`).
+            step = "        " if flat else "    "
+            for b in lines[i : c + 1] if flat else lines[i + 1 : c]:
+                out.append((step + b) if b.strip() else b)
             if fallible:
                 out.append(f"{inner_pad}    Ok(())")
             out.append(f"{inner_pad}}}")
             out.append(f"{inner_pad}case({pass_}){'?' if fallible else ''};")
             out.append(lines[c] if arms else f"{pad}}}")
             # Fallible: 2 fn-header lines + `Ok(())` + the fn close + the call
-            # = 5.  Infallible: the same without the `Ok(())` = 4.
-            expect += 5 if fallible else 4
+            # = 5.  Infallible: the same without the `Ok(())` = 4.  A flat
+            # chunk consumes no lines of its own, so its `{` and `}` are two
+            # more.
+            expect += (5 if fallible else 4) + (2 if flat else 0)
             i = c + 1
             continue
         out.append(lines[i])
@@ -776,11 +1450,11 @@ def rewrite(
 # `git show HEAD:...` and diffing against the working tree -- only holds until
 # the rewrite is committed, and stops being a test the moment it is.
 # --------------------------------------------------------------------------
-CASES: list[tuple[str, str, str, list[tuple[str, ...]], bool]] = []
+CASES: list[tuple[str, str, str, list[tuple[str, ...]], bool, int]] = []
 
 
-def _case(name: str, src: str, want, params=(), arms: bool = False) -> None:
-    CASES.append((name, src, want, list(params), arms))
+def _case(name: str, src: str, want, params=(), arms: bool = False, flat: int = 0) -> None:
+    CASES.append((name, src, want, list(params), arms, flat))
 
 
 _case(
@@ -1090,6 +1764,44 @@ _case(
 )
 
 _case(
+    # `cmd_oci`'s inspect arm never uses the outer `cmd`, but prints
+    # `image.config.cmd` five times.  A bare `\bcmd\b` test took the field for
+    # the local and passed an argument nothing used -- one warning per arm.
+    "a field of the same name is not a use of the fixture",
+    """fn self_test() -> KernelResult<()> {
+    {
+        check(image.config.cmd)?;
+    }
+    {
+        check(&buf[start..cmd])?;
+    }
+    Ok(())
+}
+""",
+    """fn self_test() -> KernelResult<()> {
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            check(image.config.cmd)?;
+            Ok(())
+        }
+        case()?;
+    }
+    {
+        #[inline(never)]
+        fn case(cmd: &str) -> crate::error::KernelResult<()> {
+            check(&buf[start..cmd])?;
+            Ok(())
+        }
+        case(cmd)?;
+    }
+    Ok(())
+}
+""",
+    [("cmd", "&str")],
+)
+
+_case(
     # `eventlog::self_test` and friends: nothing to split, and saying so is
     # the correct answer -- not an exception, and not a no-op rewrite.
     "a function with no sibling blocks is left alone",
@@ -1204,12 +1916,351 @@ _case(
 )
 
 
+_case(
+    # `eventlog::self_test`'s shape: `// Test N:` groups whose locals die with
+    # them.  The boundaries are derived, not invented -- `t` is read only
+    # inside the first group, `r` only inside the second.
+    "a flat body is cut where no local crosses",
+    """fn self_test() -> KernelResult<()> {
+    serial_println!("[t] start");
+
+    // Test 1.
+    emit_one();
+    let t = total();
+    if t != 1 {
+        return Err(KernelError::InternalError);
+    }
+
+    // Test 2.
+    emit_two();
+    let r = query();
+    if r.matched != 2 {
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+""",
+    """fn self_test() -> KernelResult<()> {
+    serial_println!("[t] start");
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 1.
+            emit_one();
+            let t = total();
+            if t != 1 {
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 2.
+            emit_two();
+            let r = query();
+            if r.matched != 2 {
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+    Ok(())
+}
+""",
+    flat=5,
+)
+
+_case(
+    # The property the whole mode rests on: a local read after the cut keeps
+    # the cut from happening there.  `saved` is restored at the very end, so
+    # no chunk may hold it and no chunk may read it.
+    "a local read later is not cut across",
+    """fn self_test() -> KernelResult<()> {
+    let saved = total();
+
+    emit_one();
+    let t = total();
+    if t != 1 {
+        return Err(KernelError::InternalError);
+    }
+
+    restore(saved);
+    Ok(())
+}
+""",
+    """fn self_test() -> KernelResult<()> {
+    let saved = total();
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            emit_one();
+            let t = total();
+            if t != 1 {
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+
+    restore(saved);
+    Ok(())
+}
+""",
+    flat=4,
+)
+
+_case(
+    # Only blank lines *above* a statement's first line of code are boundaries.
+    # A blank line inside an `if` body is one the author put there to space out
+    # a case's own guts, and cutting there would split a case in half -- and,
+    # since the second half would open with `report(); }`, produce a paragraph
+    # whose braces do not balance.  This also covers the two kinds of case
+    # side by side: the first cannot fail, so it gets a plain `fn case()`.
+    "a blank line inside a statement is not a boundary",
+    """fn self_test() -> KernelResult<()> {
+    serial_println!("[t] start");
+
+    emit_one();
+    if check() {
+
+        report();
+    }
+
+    emit_two();
+    let r = query();
+    if r != 2 {
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+""",
+    """fn self_test() -> KernelResult<()> {
+    serial_println!("[t] start");
+
+    {
+        #[inline(never)]
+        fn case() {
+            emit_one();
+            if check() {
+
+                report();
+            }
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            emit_two();
+            let r = query();
+            if r != 2 {
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+    Ok(())
+}
+""",
+    flat=5,
+)
+
+
+_case(
+    # A unit-returning body splits too.  Every case is infallible by
+    # construction -- `-> KernelResult<()>` would be a lie and a
+    # `clippy::unnecessary_wraps` besides -- so this is the plain `fn case()`
+    # shape throughout, and the paragraph too short to be worth a case stays
+    # in the outer frame where it was.
+    "a unit-returning body splits into plain cases",
+    """fn self_test() {
+    println("a");
+
+    step_one();
+    step_two();
+    step_three();
+
+    step_four();
+    step_five();
+    step_six();
+}
+""",
+    """fn self_test() {
+    println("a");
+
+    {
+        #[inline(never)]
+        fn case() {
+            step_one();
+            step_two();
+            step_three();
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            step_four();
+            step_five();
+            step_six();
+        }
+        case();
+    }
+}
+""",
+    flat=3,
+)
+
+_case(
+    # The counterpart to "a case's `return Ok(())` is refused".  There the
+    # objection is that `case()?` reproduces only `return Err(..)`; here there
+    # is no `?` to reach for at all, so a `return;` that abandoned the whole
+    # function would come to abandon one case and let the rest run.  Refused,
+    # not skipped: the rewrite would compile and be wrong.
+    "a `return` in a unit-returning body's case is refused",
+    """fn self_test() {
+    step_one();
+    step_two();
+    if broken() {
+        return;
+    }
+
+    step_four();
+    step_five();
+    step_six();
+}
+""",
+    AssertionError,
+    flat=3,
+)
+
+_case(
+    # An item is not a local, and gets no `E0434` to protect it: a nested `fn`
+    # may name a `const` from an enclosing block, so cutting between the
+    # declaration and the use compiles the *declaring* case fine and fails in
+    # the reading one, three paragraphs away.  The three paragraphs are
+    # therefore welded into one case -- note the second, which mentions nothing
+    # at all, is dragged in because it stands between them.
+    "a const used three paragraphs later welds them into one case",
+    """fn self_test() {
+    const BLOB: &[u8] = b"x";
+    step_one();
+    step_two();
+
+    step_three();
+    step_four();
+    step_five();
+
+    write(BLOB);
+    step_six();
+    step_seven();
+
+    step_eight();
+    step_nine();
+    step_ten();
+}
+""",
+    """fn self_test() {
+    {
+        #[inline(never)]
+        fn case() {
+            const BLOB: &[u8] = b"x";
+            step_one();
+            step_two();
+
+            step_three();
+            step_four();
+            step_five();
+
+            write(BLOB);
+            step_six();
+            step_seven();
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            step_eight();
+            step_nine();
+            step_ten();
+        }
+        case();
+    }
+}
+""",
+    flat=3,
+)
+
+_case(
+    # A `-> !` body's last paragraph stands in tail position, where the type is
+    # `!` and a `{ fn case() {..} case(); }` block is `()`.  It is reserved into
+    # the tail rather than made a case; every paragraph above it splits as
+    # usual.  This is `kernel_main`, whose final `loop { hlt(); }` produced
+    # `error[E0308]: expected !, found ()` on the first attempt.
+    "the last paragraph of a diverging body is left in tail position",
+    """fn self_test() -> ! {
+    step_one();
+    step_two();
+    step_three();
+
+    step_four();
+    step_five();
+    step_six();
+
+    loop {
+        halt();
+    }
+}
+""",
+    """fn self_test() -> ! {
+    {
+        #[inline(never)]
+        fn case() {
+            step_one();
+            step_two();
+            step_three();
+        }
+        case();
+    }
+
+    {
+        #[inline(never)]
+        fn case() {
+            step_four();
+            step_five();
+            step_six();
+        }
+        case();
+    }
+
+    loop {
+        halt();
+    }
+}
+""",
+    flat=3,
+)
+
+
 def self_check() -> int:
     """Run the regression suite.  Returns 0 iff every case behaves."""
     failed = 0
-    for name, src, want, params, arms in CASES:
+    for name, src, want, params, arms, flat in CASES:
         try:
-            got, cases = rewrite(src, "self_test", params, arms)
+            got, cases = rewrite(src, "self_test", params, arms, flat)
         except AssertionError as exc:
             if want is AssertionError:
                 print(f"ok   {name} (refused: {exc})")
@@ -1276,9 +2327,37 @@ def main() -> int:
         "still mean `return;` once the arm is a call.",
     )
     ap.add_argument(
+        "--flat",
+        type=int,
+        nargs="?",
+        const=8,
+        default=0,
+        metavar="MIN_LINES",
+        help="split a body that has no block structure at all -- a long run "
+        "of statements, like eventlog::self_test -- into its blank-line-"
+        "separated paragraphs. A paragraph becomes a case when it is at least "
+        "MIN_LINES lines (default 8), reads no local bound before it, and "
+        "binds nothing read after it.",
+    )
+    ap.add_argument(
+        "--at",
+        type=int,
+        default=0,
+        metavar="LINE",
+        help="the line --fn's definition is on, when the name is not unique. "
+        "Every case this tool generates is named `case`, so a second pass over "
+        "an already-split file needs this to say which one",
+    )
+    ap.add_argument(
         "--dry-run",
         action="store_true",
         help="report what would change without writing",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="write even a one-case split, which normally cannot help: the "
+        "peak is `outer + case` either way",
     )
     ap.add_argument(
         "--check",
@@ -1305,14 +2384,39 @@ def main() -> int:
 
     with io.open(args.file, encoding="utf-8", newline="") as f:
         text = f.read()
-    out, cases = rewrite(text, args.fn_name, params, args.arms)
+    if args.arms and args.flat:
+        ap.error("--arms and --flat are different shapes; pick one")
+    out, cases = rewrite(
+        text, args.fn_name, params, args.arms, args.flat, args.at
+    )
     if not cases:
-        what = "match arms with block bodies" if args.arms else "bare sibling blocks"
+        what = (
+            "match arms with block bodies"
+            if args.arms
+            else "paragraphs no local crosses"
+            if args.flat
+            else "bare sibling blocks"
+        )
         print(f"{args.fn_name}: no {what} found; nothing to do")
         return 0
     span = sum(c - o + 1 for o, c in cases)
     grew = len(out.split("\n")) - len(text.split("\n"))
     print(f"{args.fn_name}: {len(cases)} case(s), {span} lines, +{grew} lines")
+    if len(cases) < 2 and not args.force:
+        # Only one case is arithmetically a no-op.  Splitting moves a case's
+        # locals out of the outer frame, but what is on the stack while the
+        # case runs is `outer + case` -- so with a single case the peak is what
+        # it always was, and the per-symbol ranking merely *reports* a smaller
+        # outer.  That flattering-but-wrong reading is exactly why the
+        # `linux_fd::self_test` split was made and then reverted (28 224 ->
+        # 18 896 by the ranking, 28 224 -> 28 240 by `--peak`).  Two cases are
+        # the minimum that can help, because only then does `max` beat `sum`.
+        print(
+            "  refusing to write a one-case split: the peak would stay "
+            "`outer + case`, which is what it already is. Lower --flat's "
+            "minimum, or pass --force if you have a reason."
+        )
+        return 1
     if args.dry_run:
         print("  (dry run; nothing written)")
         return 0

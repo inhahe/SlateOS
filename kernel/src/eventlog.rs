@@ -196,6 +196,21 @@ impl PayloadPair {
         }
     }
 
+    /// Copy `src` over `self` in place.  See [`EventEntry::copy_from`] for why
+    /// this exists rather than a `clone_from`.
+    fn copy_from(&mut self, src: &Self) {
+        let Self {
+            key,
+            key_len,
+            value,
+            value_len,
+        } = src;
+        self.key = *key;
+        self.key_len = *key_len;
+        self.value = *value;
+        self.value_len = *value_len;
+    }
+
     fn set(&mut self, key: &str, value: &str) {
         let kb = key.as_bytes();
         let kl = kb.len().min(MAX_PAYLOAD_KEY_LEN);
@@ -272,6 +287,59 @@ impl EventEntry {
             payload: [const { PayloadPair::zeroed() }; MAX_PAYLOAD_PAIRS],
             payload_count: 0,
         }
+    }
+
+    /// Copy `src` over `self` in place, field by field.
+    ///
+    /// Not `*self = src.clone()`, and not `Clone::clone_from`: a derived `Clone`
+    /// supplies only `clone`, and the default `clone_from` *is* `*self =
+    /// source.clone()`, so both spellings build a whole ~1.2 KiB `EventEntry` in
+    /// the caller's frame and then memcpy it into place.  At `opt-level = 0`
+    /// that temporary is real stack, on the one path every logged event takes.
+    /// Assigning field by field lowers to a memcpy from `src` straight into
+    /// `self` with nothing in between.
+    ///
+    /// Deriving `Copy` would also avoid the temporary, but it would make every
+    /// *accidental* copy of a 1.2 KiB struct silent and free to write — which is
+    /// the class of bug this is fixing, so the type deliberately stays non-`Copy`
+    /// and the one place that genuinely must copy says so explicitly.
+    ///
+    /// The source is destructured rather than read through `src.field` so that
+    /// adding a field to `EventEntry` is a compile error here, instead of a
+    /// field that silently stops being copied into the ring.
+    fn copy_from(&mut self, src: &Self) {
+        let Self {
+            seq,
+            timestamp_ns,
+            severity,
+            namespace,
+            namespace_len,
+            source_pid,
+            source_service,
+            source_service_len,
+            message,
+            message_len,
+            payload,
+            payload_count,
+        } = src;
+        self.seq = *seq;
+        self.timestamp_ns = *timestamp_ns;
+        self.severity = *severity;
+        self.namespace = *namespace;
+        self.namespace_len = *namespace_len;
+        self.source_pid = *source_pid;
+        self.source_service = *source_service;
+        self.source_service_len = *source_service_len;
+        self.message = *message;
+        self.message_len = *message_len;
+        // All `MAX_PAYLOAD_PAIRS` pairs are copied, not just the
+        // `payload_count` live ones: leaving the tail holding a previous
+        // event's key/value bytes would put one subsystem's data in another's
+        // ring slot, reachable by anything that reads past `payload_count`.
+        for (dst, pair) in self.payload.iter_mut().zip(payload.iter()) {
+            dst.copy_from(pair);
+        }
+        self.payload_count = *payload_count;
     }
 
     /// Get the namespace as a string slice.
@@ -403,6 +471,22 @@ impl EventEntry {
 ///     .kv("restart_count", "3")
 ///     .emit();
 /// ```
+///
+/// # Why the chain takes `&mut self`
+///
+/// The obvious builder spelling -- `fn pid(mut self, ..) -> Self` -- moves the
+/// whole builder once per link, and this builder *is* an [`EventEntry`]: about
+/// 1.2 KiB of fixed-size byte arrays.  At `opt-level = 0` there is no move
+/// elision, so a four-link chain materialises four separate ~1.2 KiB
+/// temporaries in the **caller's** frame and memcpies between them, and every
+/// site that logs an event pays it.  That was ~5 KiB per chain, and it is what
+/// made `eventlog::self_test`'s largest case claim 13 024 bytes of stack for
+/// twenty lines of test.
+///
+/// Taking `&mut self` and returning `&mut Self` leaves the call sites in the
+/// doc example above untouched -- a method taking `&mut self` may be called on
+/// the temporary that `new` returns, which lives to the end of the statement --
+/// while the builder is constructed once and mutated in place.
 pub struct EventBuilder {
     entry: EventEntry,
 }
@@ -422,13 +506,13 @@ impl EventBuilder {
     }
 
     /// Set the source process ID.
-    pub fn pid(mut self, pid: u32) -> Self {
+    pub fn pid(&mut self, pid: u32) -> &mut Self {
         self.entry.source_pid = pid;
         self
     }
 
     /// Set the source service name.
-    pub fn service(mut self, name: &str) -> Self {
+    pub fn service(&mut self, name: &str) -> &mut Self {
         let bytes = name.as_bytes();
         let len = bytes.len().min(MAX_SERVICE_LEN);
         self.entry.source_service[..len].copy_from_slice(bytes.get(..len).unwrap_or(&[]));
@@ -437,7 +521,7 @@ impl EventBuilder {
     }
 
     /// Set the human-readable message.
-    pub fn message(mut self, msg: &str) -> Self {
+    pub fn message(&mut self, msg: &str) -> &mut Self {
         let bytes = msg.as_bytes();
         let len = bytes.len().min(MAX_MESSAGE_LEN);
         self.entry.message[..len].copy_from_slice(bytes.get(..len).unwrap_or(&[]));
@@ -446,7 +530,7 @@ impl EventBuilder {
     }
 
     /// Set the message from format arguments (avoids heap allocation).
-    pub fn message_fmt(mut self, args: core::fmt::Arguments<'_>) -> Self {
+    pub fn message_fmt(&mut self, args: core::fmt::Arguments<'_>) -> &mut Self {
         let mut writer = MsgWriter {
             buf: &mut self.entry.message,
             pos: 0,
@@ -457,7 +541,7 @@ impl EventBuilder {
     }
 
     /// Add a key-value pair to the structured payload.
-    pub fn kv(mut self, key: &str, value: &str) -> Self {
+    pub fn kv(&mut self, key: &str, value: &str) -> &mut Self {
         let idx = self.entry.payload_count as usize;
         if idx < MAX_PAYLOAD_PAIRS {
             self.entry.payload[idx].set(key, value);
@@ -467,8 +551,8 @@ impl EventBuilder {
     }
 
     /// Submit the event to the global event log.
-    pub fn emit(self) {
-        emit_event(self.entry);
+    pub fn emit(&self) {
+        emit_event(&self.entry);
     }
 }
 
@@ -552,12 +636,16 @@ impl EventRing {
     }
 
     /// Write an event entry.  Returns the assigned sequence number.
-    fn write(&mut self, mut entry: EventEntry) -> u64 {
+    ///
+    /// Takes the entry by reference because an `EventEntry` is ~1.2 KiB and at
+    /// `opt-level = 0` every by-value hop along the emit path costs a full copy
+    /// of it in the caller's frame.  The one copy that genuinely has to happen —
+    /// into the ring slot — is [`EventEntry::copy_from`], below.
+    fn write(&mut self, entry: &EventEntry) -> u64 {
         self.ensure_init();
 
         let seq = self.total_written;
-        entry.seq = seq;
-        entry.timestamp_ns = current_timestamp_ns();
+        let timestamp_ns = current_timestamp_ns();
 
         // Update severity counter.
         let sev_idx = entry.severity.numeric() as usize;
@@ -586,12 +674,15 @@ impl EventRing {
 
         // Echo to serial if severity is high enough.
         if entry.severity >= self.serial_echo_level {
-            echo_serial(&entry);
+            echo_serial(entry);
         }
 
-        // Store in ring buffer.
+        // Store in ring buffer.  `seq` and `timestamp_ns` are stamped into the
+        // slot rather than onto the caller's entry, which is now shared.
         if let Some(slot) = self.entries.get_mut(self.write_idx) {
-            *slot = entry;
+            slot.copy_from(entry);
+            slot.seq = seq;
+            slot.timestamp_ns = timestamp_ns;
         }
 
         #[allow(clippy::arithmetic_side_effects)]
@@ -651,7 +742,7 @@ static GLOBAL_SEQ: AtomicU64 = AtomicU64::new(0);
 // ---------------------------------------------------------------------------
 
 /// Submit a pre-built event entry to the global event log.
-pub fn emit_event(entry: EventEntry) {
+pub fn emit_event(entry: &EventEntry) {
     let mut ring = EVENT_RING.lock();
     let seq = ring.write(entry);
     drop(ring);
@@ -1072,68 +1163,95 @@ pub fn self_test() -> KernelResult<()> {
     // Save state and clear for testing.
     let _saved_total = total_events();
 
-    // Test 1: Basic event emission.
-    clear();
-    EventBuilder::new("system.boot", Severity::Info)
-        .message("Test boot event")
-        .pid(0)
-        .emit();
-    let t = total_events();
-    if t != 1 {
-        crate::serial_println!("[eventlog]   FAIL: expected 1 event, got {}", t);
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   1. Basic emission: OK");
-
-    // Test 2: Query with no filter.
-    let result = query(&EventFilter::all(), 100);
-    if result.matched != 1 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: expected 1 match, got {}",
-            result.matched
-        );
-        return Err(KernelError::InternalError);
-    }
-    if let Some(ev) = result.events.first() {
-        if ev.namespace_str() != "system.boot" {
-            crate::serial_println!("[eventlog]   FAIL: wrong namespace: {}", ev.namespace_str());
-            return Err(KernelError::InternalError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 1: Basic event emission.
+            clear();
+            EventBuilder::new("system.boot", Severity::Info)
+                .message("Test boot event")
+                .pid(0)
+                .emit();
+            let t = total_events();
+            if t != 1 {
+                crate::serial_println!("[eventlog]   FAIL: expected 1 event, got {}", t);
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   1. Basic emission: OK");
+            Ok(())
         }
-        if ev.message_str() != "Test boot event" {
-            crate::serial_println!("[eventlog]   FAIL: wrong message: {}", ev.message_str());
-            return Err(KernelError::InternalError);
+        case()?;
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 2: Query with no filter.
+            let result = query(&EventFilter::all(), 100);
+            if result.matched != 1 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: expected 1 match, got {}",
+                    result.matched
+                );
+                return Err(KernelError::InternalError);
+            }
+            if let Some(ev) = result.events.first() {
+                if ev.namespace_str() != "system.boot" {
+                    crate::serial_println!("[eventlog]   FAIL: wrong namespace: {}", ev.namespace_str());
+                    return Err(KernelError::InternalError);
+                }
+                if ev.message_str() != "Test boot event" {
+                    crate::serial_println!("[eventlog]   FAIL: wrong message: {}", ev.message_str());
+                    return Err(KernelError::InternalError);
+                }
+            } else {
+                crate::serial_println!("[eventlog]   FAIL: no events returned");
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   2. Query all: OK");
+            Ok(())
         }
-    } else {
-        crate::serial_println!("[eventlog]   FAIL: no events returned");
-        return Err(KernelError::InternalError);
+        case()?;
     }
-    crate::serial_println!("[eventlog]   2. Query all: OK");
 
-    // Test 3: Namespace prefix filtering.
-    EventBuilder::new("security.login", Severity::Info)
-        .message("User logged in")
-        .pid(100)
-        .service("auth")
-        .emit();
-    EventBuilder::new("security.logout", Severity::Info)
-        .message("User logged out")
-        .pid(100)
-        .emit();
-    EventBuilder::new("network.dhcp", Severity::Notice)
-        .message("DHCP lease acquired")
-        .kv("ip", "10.0.2.15")
-        .kv("lease_time", "3600")
-        .emit();
-
-    let sec_result = query(&EventFilter::all().namespace("security"), 100);
-    if sec_result.matched != 2 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: expected 2 security events, got {}",
-            sec_result.matched
-        );
-        return Err(KernelError::InternalError);
+    {
+        #[inline(never)]
+        fn case() {
+            // Test 3: Namespace prefix filtering.
+            EventBuilder::new("security.login", Severity::Info)
+                .message("User logged in")
+                .pid(100)
+                .service("auth")
+                .emit();
+            EventBuilder::new("security.logout", Severity::Info)
+                .message("User logged out")
+                .pid(100)
+                .emit();
+            EventBuilder::new("network.dhcp", Severity::Notice)
+                .message("DHCP lease acquired")
+                .kv("ip", "10.0.2.15")
+                .kv("lease_time", "3600")
+                .emit();
+        }
+        case();
     }
-    crate::serial_println!("[eventlog]   3. Namespace filtering: OK");
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            let sec_result = query(&EventFilter::all().namespace("security"), 100);
+            if sec_result.matched != 2 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: expected 2 security events, got {}",
+                    sec_result.matched
+                );
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   3. Namespace filtering: OK");
+            Ok(())
+        }
+        case()?;
+    }
 
     // Test 4: Severity filtering.
     EventBuilder::new("system.error", Severity::Error)
@@ -1143,119 +1261,168 @@ pub fn self_test() -> KernelResult<()> {
         .message("Out of memory")
         .emit();
 
-    let warn_plus = query(&EventFilter::all().min_severity(Severity::Warning), 100);
-    // Should get: 1 Notice (network.dhcp) + 1 Error + 1 Critical = 3
-    // Wait — Notice is below Warning in our enum.  Let me check:
-    // Debug=0, Info=1, Notice=2, Warning=3, Error=4, Critical=5
-    // min_severity(Warning) → severity >= 3 → Error + Critical = 2
-    if warn_plus.matched != 2 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: expected 2 warning+ events, got {}",
-            warn_plus.matched,
-        );
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   4. Severity filtering: OK");
-
-    // Test 5: PID filtering.
-    let pid_result = query(&EventFilter::all().pid(100), 100);
-    if pid_result.matched != 2 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: expected 2 pid=100 events, got {}",
-            pid_result.matched
-        );
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   5. PID filtering: OK");
-
-    // Test 6: Text search.
-    let text_result = query(&EventFilter::all().search("logged"), 100);
-    if text_result.matched != 2 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: expected 2 'logged' matches, got {}",
-            text_result.matched
-        );
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   6. Text search: OK");
-
-    // Test 7: Sequence-based streaming (after_seq).
-    let seq_before = current_seq();
-    EventBuilder::new("application.test", Severity::Debug)
-        .message("Streaming test event")
-        .emit();
-    let stream_result = query(&EventFilter::all().after(seq_before.saturating_sub(1)), 100);
-    // Should get at least the new event.
-    let found_streaming = stream_result
-        .events
-        .iter()
-        .any(|e| e.message_str() == "Streaming test event");
-    if !found_streaming {
-        crate::serial_println!("[eventlog]   FAIL: streaming event not found");
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   7. Sequence-based streaming: OK");
-
-    // Test 8: Payload key-value pairs.
-    let dhcp_events = query(&EventFilter::all().namespace("network.dhcp"), 100);
-    if let Some(ev) = dhcp_events.events.first() {
-        let pairs: Vec<_> = ev.payload_iter().collect();
-        if pairs.len() != 2 {
-            crate::serial_println!(
-                "[eventlog]   FAIL: expected 2 payload pairs, got {}",
-                pairs.len()
-            );
-            return Err(KernelError::InternalError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            let warn_plus = query(&EventFilter::all().min_severity(Severity::Warning), 100);
+            // Should get: 1 Notice (network.dhcp) + 1 Error + 1 Critical = 3
+            // Wait — Notice is below Warning in our enum.  Let me check:
+            // Debug=0, Info=1, Notice=2, Warning=3, Error=4, Critical=5
+            // min_severity(Warning) → severity >= 3 → Error + Critical = 2
+            if warn_plus.matched != 2 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: expected 2 warning+ events, got {}",
+                    warn_plus.matched,
+                );
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   4. Severity filtering: OK");
+            Ok(())
         }
-        if pairs[0] != ("ip", "10.0.2.15") {
-            crate::serial_println!("[eventlog]   FAIL: wrong payload[0]: {:?}", pairs[0]);
-            return Err(KernelError::InternalError);
+        case()?;
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 5: PID filtering.
+            let pid_result = query(&EventFilter::all().pid(100), 100);
+            if pid_result.matched != 2 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: expected 2 pid=100 events, got {}",
+                    pid_result.matched
+                );
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   5. PID filtering: OK");
+            Ok(())
         }
-    } else {
-        crate::serial_println!("[eventlog]   FAIL: DHCP event not found");
-        return Err(KernelError::InternalError);
+        case()?;
     }
-    crate::serial_println!("[eventlog]   8. Payload key-value pairs: OK");
 
-    // Test 9: Statistics.
-    let st = stats();
-    if st.total_written < 7 {
-        crate::serial_println!(
-            "[eventlog]   FAIL: stats total_written < 7: {}",
-            st.total_written
-        );
-        return Err(KernelError::InternalError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 6: Text search.
+            let text_result = query(&EventFilter::all().search("logged"), 100);
+            if text_result.matched != 2 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: expected 2 'logged' matches, got {}",
+                    text_result.matched
+                );
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   6. Text search: OK");
+            Ok(())
+        }
+        case()?;
     }
-    // Check that severity counts make sense.
-    let total_by_sev: u64 = st.by_severity.iter().map(|(_, c)| c).sum();
-    if total_by_sev != st.total_written {
-        crate::serial_println!(
-            "[eventlog]   FAIL: severity sum {} != total_written {}",
-            total_by_sev,
-            st.total_written,
-        );
-        return Err(KernelError::InternalError);
-    }
-    crate::serial_println!("[eventlog]   9. Statistics consistency: OK");
 
-    // Test 10: Namespace validation.
-    if !is_valid_namespace("system") {
-        crate::serial_println!("[eventlog]   FAIL: 'system' should be valid");
-        return Err(KernelError::InternalError);
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 7: Sequence-based streaming (after_seq).
+            let seq_before = current_seq();
+            EventBuilder::new("application.test", Severity::Debug)
+                .message("Streaming test event")
+                .emit();
+            let stream_result = query(&EventFilter::all().after(seq_before.saturating_sub(1)), 100);
+            // Should get at least the new event.
+            let found_streaming = stream_result
+                .events
+                .iter()
+                .any(|e| e.message_str() == "Streaming test event");
+            if !found_streaming {
+                crate::serial_println!("[eventlog]   FAIL: streaming event not found");
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   7. Sequence-based streaming: OK");
+            Ok(())
+        }
+        case()?;
     }
-    if !is_valid_namespace("security.login") {
-        crate::serial_println!("[eventlog]   FAIL: 'security.login' should be valid");
-        return Err(KernelError::InternalError);
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 8: Payload key-value pairs.
+            let dhcp_events = query(&EventFilter::all().namespace("network.dhcp"), 100);
+            if let Some(ev) = dhcp_events.events.first() {
+                let pairs: Vec<_> = ev.payload_iter().collect();
+                if pairs.len() != 2 {
+                    crate::serial_println!(
+                        "[eventlog]   FAIL: expected 2 payload pairs, got {}",
+                        pairs.len()
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                if pairs[0] != ("ip", "10.0.2.15") {
+                    crate::serial_println!("[eventlog]   FAIL: wrong payload[0]: {:?}", pairs[0]);
+                    return Err(KernelError::InternalError);
+                }
+            } else {
+                crate::serial_println!("[eventlog]   FAIL: DHCP event not found");
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   8. Payload key-value pairs: OK");
+            Ok(())
+        }
+        case()?;
     }
-    if is_valid_namespace("foobar") {
-        crate::serial_println!("[eventlog]   FAIL: 'foobar' should be invalid");
-        return Err(KernelError::InternalError);
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 9: Statistics.
+            let st = stats();
+            if st.total_written < 7 {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: stats total_written < 7: {}",
+                    st.total_written
+                );
+                return Err(KernelError::InternalError);
+            }
+            // Check that severity counts make sense.
+            let total_by_sev: u64 = st.by_severity.iter().map(|(_, c)| c).sum();
+            if total_by_sev != st.total_written {
+                crate::serial_println!(
+                    "[eventlog]   FAIL: severity sum {} != total_written {}",
+                    total_by_sev,
+                    st.total_written,
+                );
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]   9. Statistics consistency: OK");
+            Ok(())
+        }
+        case()?;
     }
-    if is_valid_namespace("systemfoo") {
-        crate::serial_println!("[eventlog]   FAIL: 'systemfoo' should be invalid");
-        return Err(KernelError::InternalError);
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // Test 10: Namespace validation.
+            if !is_valid_namespace("system") {
+                crate::serial_println!("[eventlog]   FAIL: 'system' should be valid");
+                return Err(KernelError::InternalError);
+            }
+            if !is_valid_namespace("security.login") {
+                crate::serial_println!("[eventlog]   FAIL: 'security.login' should be valid");
+                return Err(KernelError::InternalError);
+            }
+            if is_valid_namespace("foobar") {
+                crate::serial_println!("[eventlog]   FAIL: 'foobar' should be invalid");
+                return Err(KernelError::InternalError);
+            }
+            if is_valid_namespace("systemfoo") {
+                crate::serial_println!("[eventlog]   FAIL: 'systemfoo' should be invalid");
+                return Err(KernelError::InternalError);
+            }
+            crate::serial_println!("[eventlog]  10. Namespace validation: OK");
+            Ok(())
+        }
+        case()?;
     }
-    crate::serial_println!("[eventlog]  10. Namespace validation: OK");
 
     // Clean up.
     clear();

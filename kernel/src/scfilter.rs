@@ -279,8 +279,10 @@ struct FilterTable {
 }
 
 impl FilterTable {
-    // `const fn` so the all-empty table is materialized in read-only
-    // static memory at compile time (see `init`), not built on the stack.
+    // `const fn` so the all-empty table can be a `static` initialiser, and so
+    // be materialized in read-only memory at compile time rather than built on
+    // the stack.  Being `const`-callable is necessary for that but not
+    // sufficient — see `init` for the half of it that is about the *use* site.
     const fn new() -> Self {
         // FilterEntry::empty() is a const fn producing a valid default
         // state.  This avoids a loop over MAX_FILTERS.
@@ -363,15 +365,33 @@ static TABLE: Mutex<Option<Box<FilterTable>>> = Mutex::new(None);
 /// too large for the boot stack under debug builds.
 pub fn init() {
     let mut table = TABLE.lock();
-    // Allocate on the heap to avoid stack overflow (FilterTable is ~19 KiB).
+    // Allocate on the heap to avoid stack overflow (FilterTable is ~19 KiB),
+    // and copy it out of static memory *without* passing through this frame.
     //
-    // `EMPTY` is a `const`, so the all-empty table lives in read-only
-    // static memory; `Box::new` copies it straight to the heap without
-    // first constructing a ~19 KiB temporary on the kernel stack
-    // (a plain `Box::new(FilterTable::new())` would build that temporary
-    // on the stack, which is what we must avoid here).
-    const EMPTY: FilterTable = FilterTable::new();
-    let fresh = table.insert(Box::new(EMPTY));
+    // The obvious spelling, `const EMPTY: FilterTable = FilterTable::new();
+    // Box::new(EMPTY)`, does not achieve that, though the comment here used
+    // to claim it did.  `Box::new` takes its argument **by value**, so at
+    // `opt-level = 0` the ~19 KiB table is materialised in `init`'s own frame
+    // and then memcpy'd to the heap; a `const` is inlined at each use site, so
+    // being a `const` is exactly what guarantees the temporary rather than
+    // preventing it.  Measured before this change: `init` claimed 21 872 bytes
+    // of stack in a debug build — the single largest frame in the kernel, in a
+    // twenty-line function whose comment asserted it used none.
+    //
+    // A `static` has one fixed address, so the copy below runs straight from
+    // rodata into the fresh allocation, at every optimisation level.
+    static EMPTY: FilterTable = FilterTable::new();
+    let mut uninit = Box::<FilterTable>::new_uninit();
+    // SAFETY: `EMPTY` is a fully initialised `FilterTable` in static memory
+    // and `uninit` is a fresh allocation of exactly one correctly-aligned
+    // `FilterTable`, so the two regions are non-overlapping and the count of
+    // 1 is in bounds for both.  The copy initialises every byte of the
+    // allocation, which is the precondition `assume_init` requires.
+    let fresh = unsafe {
+        core::ptr::copy_nonoverlapping(&raw const EMPTY, uninit.as_mut_ptr(), 1);
+        uninit.assume_init()
+    };
+    let fresh = table.insert(fresh);
     // Republish the (zero) active count and the (empty) index from the table
     // that is actually installed, rather than assuming the statics already
     // agree with it.  `init` can in principle run over a populated table, and

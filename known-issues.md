@@ -35834,3 +35834,54 @@ one that frees less than it hoped.
 
 **Discovered:** 2026-08-18, while testing `boot-test.sh --reclaim-space`
 end-to-end.
+
+## A-A-FRESH-CHECKOUT-CANNOT-BOOT-TEST-AND-NEITHER-FAILURE-NAMES-THE-MISSING-STEP (lane A, 2026-08-18)
+
+**Where:** `kernel/src/main.rs:6108-6112`, `kernel/src/proc/spawn.rs` (netstack,
+httpget, udpget), `kernel/src/container.rs` (hello), and
+`scripts/boot-test.sh:1418`.
+
+**Symptom.** `git worktree add` a detached checkout of this repository and run
+`./scripts/boot-test.sh`, and it cannot succeed, in two stages:
+
+1. `cargo build` fails with **15 `include_bytes!` errors**, all of the form
+   `couldn't read services/<name>/target/x86_64-unknown-none/release/<name>: No
+   such file or directory`. Six distinct binaries are embedded — `init`,
+   `hello`, `ticker`, `netstack`, `httpget`, `udpget` — from paths that are
+   `target/` directories and therefore gitignored.
+2. Supply those, and staging then fails with
+   `cp: cannot stat 'limine/BOOTX64.EFI': No such file or directory` —
+   `limine/` is a downloaded bootloader tree, also gitignored.
+
+**Why it is worth an entry.** Neither failure is wrong on its own terms; the
+defect is that **`boot-test.sh` builds neither prerequisite and reports both as
+raw file-not-found**, so the message names the missing *file* and never the
+missing *step*. A reader who did not build this tree by hand has no way to get
+from "couldn't read .../release/netstack" to "run `cargo build --release
+--target x86_64-unknown-none` in each of `services/*`", nor from the `cp`
+failure to "fetch limine". The knowledge lives only in the shell history of
+whoever set the tree up first.
+
+**How it was found.** Setting up a throwaway worktree (`os-bisect-a`) to bisect
+the SHA-256 slowdown against commits from May. Both failures cost a bisect step
+each before the cause was clear.
+
+**What the proper fix looks like.** `boot-test.sh` already has a preflight
+section (the free-space floor is in it). Add two checks there, in the same
+style — refuse *before* building, and name the remedy:
+
+- for each of the six embedded services, if the release binary is absent, print
+  the exact `cargo build` invocation that produces it, and offer to run them
+  (`--build-services`, matching the existing opt-in `--reclaim-space` shape:
+  the run that noticed should not silently do minutes of extra work);
+- for `limine/BOOTX64.EFI`, print the fetch command rather than letting `cp`
+  fail 1400 lines later, after a full workspace build has already been spent.
+
+The list of six should be derived, not hardcoded twice — `grep -o` over the
+`include_bytes!` paths in `kernel/src` is enough and cannot drift out of date
+the way a literal list would.
+
+**Workaround until then:** copy `services/*/target/x86_64-unknown-none/release/`
+and `limine/` from an already-working worktree. That is also the *better* thing
+to do when bisecting, for an unrelated reason: holding the service binaries
+fixed makes `kernel/` the only variable across the bisect.

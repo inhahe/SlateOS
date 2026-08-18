@@ -17,8 +17,9 @@
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -766,20 +767,48 @@ impl TypingTutorApp {
             corner_radii: CornerRadii::all(8.0),
         });
 
-        // Render the text with color-coded characters
+        // Render the text with colour-coded characters.
+        //
+        // Each character is a separate `Text` command because each one carries
+        // its own colour, which means this loop, and not the renderer, owns the
+        // pen. It used to advance the pen by a hardcoded 13.2 px — "approximate
+        // monospace character width" — while drawing in the *proportional* UI
+        // face, so nothing lined up: an `i` left a gap two thirds of a cell
+        // wide and an `M` ran into its neighbour, and the cursor's highlight
+        // box, also 13.2 px, sat over the wrong part of the glyph it marked.
+        // Wrapping was computed from the same guess, so a lesson of wide
+        // characters ran past the right edge of the panel it is drawn in.
+        //
+        // Both are fixed by asking the same question the renderer will:
+        // `PushFont` puts the monospace family in force (which is what a typing
+        // tutor wants — a character-per-cell grid is what makes per-character
+        // colouring legible), and each advance is measured in that family. A
+        // wide character then takes the two cells it is drawn in rather than
+        // the one a cell count would have given it.
         let font_size = 22.0;
-        let char_width = 13.2; // approximate monospace character width
-        let max_chars_per_line = ((width - 80.0) / char_width) as usize;
-        let mut x = 35.0;
+        let weight = FontWeightHint::Regular;
+        let text_left = 35.0;
+        // The typing panel spans x=20 to x=width-20; the text is inset 15 px on
+        // the left, so it wraps 15 px short of the right edge.
+        let wrap_at = (width - 35.0).max(text_left);
+        let mut x = text_left;
         let mut y = 120.0;
         let line_height = 32.0;
-        let mut chars_on_line = 0;
 
+        cmds.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
         for (i, &ch) in session.text.iter().enumerate() {
-            if chars_on_line >= max_chars_per_line {
-                x = 35.0;
+            let mut buf = [0u8; 4];
+            let glyph: &str = ch.encode_utf8(&mut buf);
+            let advance = text::measure_in(glyph, font_size, weight, FontFamily::Mono);
+
+            // Break before a character that would cross the right edge, not
+            // after a count of them. The `x > text_left` guard keeps a single
+            // character wider than the whole panel from looping forever.
+            if x > text_left && x + advance > wrap_at {
+                x = text_left;
                 y += line_height;
-                chars_on_line = 0;
             }
 
             let color = if i == session.cursor {
@@ -787,7 +816,7 @@ impl TypingTutorApp {
                 cmds.push(RenderCommand::FillRect {
                     x: x - 1.0,
                     y: y - 2.0,
-                    width: char_width + 2.0,
+                    width: advance + 2.0,
                     height: font_size + 4.0,
                     color: Color::from_hex(COL_SURFACE1),
                     corner_radii: CornerRadii::all(2.0),
@@ -807,14 +836,14 @@ impl TypingTutorApp {
                 text: String::from(ch),
                 color,
                 font_size,
-                font_weight: FontWeightHint::Regular,
+                font_weight: weight,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
 
-            x += char_width;
-            chars_on_line += 1;
+            x += advance;
         }
+        cmds.push(RenderCommand::PopFont);
 
         // Keyboard hint for current character
         if session.cursor < session.text.len() {
@@ -1700,6 +1729,69 @@ mod tests {
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == title));
         assert!(has_lesson);
+    }
+
+    /// The lesson text is laid out on the advances the font actually reports,
+    /// so consecutive characters sit exactly one advance apart and nothing runs
+    /// past the right edge of the panel. The hardcoded 13.2 px it used to
+    /// advance by satisfied neither: it was not the advance of the face being
+    /// drawn in, so glyphs collided or left gaps, and the wrap it implied let a
+    /// line of wide characters overrun the panel.
+    #[test]
+    fn typed_characters_are_placed_on_measured_advances() {
+        let panel_width = 600.0;
+        let mut app = TypingTutorApp::new();
+        app.start_lesson(0);
+        let cmds = app.render(panel_width, 800.0);
+
+        // The lesson body is drawn one character per command, inside the
+        // monospace scope; the surrounding chrome is not.
+        let mut in_mono = false;
+        let mut glyphs: Vec<(f32, f32, String)> = Vec::new();
+        for cmd in &cmds {
+            match cmd {
+                RenderCommand::PushFont { .. } => in_mono = true,
+                RenderCommand::PopFont => in_mono = false,
+                RenderCommand::Text { x, y, text, .. } if in_mono => {
+                    glyphs.push((*x, *y, text.clone()));
+                }
+                _ => {}
+            }
+        }
+        assert!(glyphs.len() > 5, "the lesson body is drawn: {glyphs:?}");
+
+        let cell = text::measure_in(
+            "0",
+            22.0,
+            FontWeightHint::Regular,
+            guitk::render::FontFamily::Mono,
+        );
+        assert!(cell > 0.0);
+
+        for pair in glyphs.windows(2) {
+            let Some(((x0, y0, glyph), (x1, y1, _))) = pair.first().zip(pair.get(1)) else {
+                continue;
+            };
+            // A line break resets the pen; only compare within a line.
+            if (y0 - y1).abs() > f32::EPSILON {
+                continue;
+            }
+            let advance = text::measure_in(
+                glyph,
+                22.0,
+                FontWeightHint::Regular,
+                guitk::render::FontFamily::Mono,
+            );
+            assert!(
+                (x1 - x0 - advance).abs() < 0.01,
+                "{glyph:?} at {x0} is followed by {x1}, which is not one \
+                 measured advance ({advance}) along"
+            );
+            assert!(
+                *x1 <= panel_width - 35.0 + 0.01,
+                "a glyph at {x1} is past the right edge of the panel"
+            );
+        }
     }
 
     #[test]

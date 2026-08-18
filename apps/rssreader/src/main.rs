@@ -4357,95 +4357,38 @@ impl RssReaderApp {
 // Text wrapping utility
 // ============================================================================
 
-/// Split `s` after at most `max_chars` characters, never inside one.
+/// An article body broken into lines that fit `max_width` pixels.
 ///
-/// `str::split_at` takes a *byte* offset and panics if that offset lands in the
-/// middle of a multi-byte character, so it cannot be handed a character count
-/// directly. `char_indices().nth(n)` converts the one into the other, and
-/// returning `None` when the string is shorter than `n` is exactly the
-/// "nothing left to split off" case.
-fn split_at_chars(s: &str, max_chars: usize) -> (&str, &str) {
-    match s.char_indices().nth(max_chars) {
-        Some((byte, _)) => s.split_at(byte),
-        None => (s, ""),
-    }
-}
-
-/// Simple word-wrap that breaks text into lines fitting within `max_width`.
+/// # Why this is four lines and used not to be
 ///
-/// Assumes an approximate character width based on font size.
+/// This was a hand-written greedy wrapper working in **characters**, over a
+/// budget of `max_width / (font_size * 0.55)` — a guess at the average
+/// character's width. Two generations of fixes went into it and neither
+/// reached the real fault:
 ///
-/// Every length here is measured in **characters**, not bytes. It used to be
-/// bytes, compared against a character budget derived from the pixel width,
-/// which was wrong in two ways at once. The visible one: a line of Japanese or
-/// Greek or accented Latin wrapped at a third to a half of its intended width,
-/// because `str::len` counts the UTF-8 encoding rather than what is drawn. The
-/// fatal one: the over-long-word branch called `split_at(max_chars)` with that
-/// byte offset, and `split_at` panics when the offset is inside a character —
-/// so a single long non-ASCII word in an article body aborted the content view
-/// on every frame that tried to draw it. Article bodies come from whatever feed
-/// the user subscribed to, so that panic was reachable from remote data.
+/// 1. The lengths were originally **bytes**. A line of Japanese or Greek or
+///    accented Latin wrapped at a third to a half of its intended width, and
+///    the over-long-word branch called `split_at` with that byte offset, which
+///    *panics* when the offset lands inside a character. Article bodies come
+///    from whatever feed the user subscribed to, so a feed could decide whether
+///    the content view rendered at all.
+/// 2. Counting characters instead fixed the panic and the worst of the
+///    mis-wrapping, but a character is still not a width: "MMMM" and "iiii" are
+///    four characters and not remotely the same number of pixels, so a line of
+///    capitals overflowed the pane and a line of narrow letters left a quarter
+///    of it empty. The 0.55 was never right for any particular string.
+///
+/// The wrapping itself is not this app's problem to solve. [`text::wrap_hard`]
+/// breaks by measured fit, using the same font cache the compositor draws with,
+/// and breaks inside a run that has no spaces in it — which is what a Japanese
+/// or Thai article body is. Its `hard_breaks` walk shapes each over-long run
+/// once, so a pathological "word" from a hostile feed is a long list of lines
+/// rather than a hang.
 pub fn wrap_text(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
-    let char_width = font_size * 0.55; // Approximate average character width
-    let max_chars = (max_width / char_width) as usize;
-
-    if max_chars == 0 {
-        return vec![text.to_string()];
-    }
-
-    let mut lines = Vec::new();
-    let mut current_line = String::new();
-    // Kept alongside `current_line` rather than recomputed, so that the fit
-    // test below is a comparison of two counts and not a scan of the line.
-    let mut current_chars: usize = 0;
-
-    for word in text.split_whitespace() {
-        let word_chars = word.chars().count();
-        if current_line.is_empty() {
-            if word_chars > max_chars {
-                // Word is longer than the line — break it. The loop condition
-                // is the emptiness of the tail rather than a fresh count of
-                // it: re-measuring the remainder on every pass would walk the
-                // whole word once per line, which is quadratic in a word the
-                // feed chose the length of.
-                let mut remaining = word;
-                loop {
-                    let (chunk, rest) = split_at_chars(remaining, max_chars);
-                    if rest.is_empty() {
-                        break;
-                    }
-                    lines.push(chunk.to_string());
-                    remaining = rest;
-                }
-                current_line = remaining.to_string();
-                current_chars = remaining.chars().count();
-            } else {
-                current_line = word.to_string();
-                current_chars = word_chars;
-            }
-        // The `+ 1` is the space that joining would insert. Saturating
-        // addition rather than a bare `+` because these are two lengths of
-        // caller-supplied text: neither can realistically overflow, but the
-        // check that says so belongs in the code and not in a reader's head.
-        } else if current_chars.saturating_add(1).saturating_add(word_chars) <= max_chars {
-            current_line.push(' ');
-            current_line.push_str(word);
-            current_chars = current_chars.saturating_add(1).saturating_add(word_chars);
-        } else {
-            lines.push(current_line);
-            current_line = word.to_string();
-            current_chars = word_chars;
-        }
-    }
-
-    if !current_line.is_empty() {
-        lines.push(current_line);
-    }
-
+    let mut lines = text::wrap_hard(text, max_width, font_size, FontWeightHint::Regular);
     if lines.is_empty() {
         lines.push(String::new());
     }
-
     lines
 }
 
@@ -6121,51 +6064,69 @@ mod tests {
         let lines = wrap_text(&word, 600.0, 14.0);
         assert!(lines.len() > 1, "120 characters must not fit one line here");
         assert_eq!(lines.concat(), word, "wrapping must not lose or add text");
-        // The first line is a full one, so it is the budget; nothing may exceed it.
-        let budget = lines.first().map_or(0, |line| line.chars().count());
-        assert!(budget > 0);
-        for line in &lines {
+        assert_lines_fit(&lines, 600.0, 14.0);
+    }
+
+    /// Every line fits the pixel width it was wrapped to. This is the whole
+    /// claim now — it used to be that every line fits a *character* budget,
+    /// which is a different and weaker statement: "MMMM" and "iiii" are both
+    /// four characters and are not the same number of pixels, so a paragraph of
+    /// capitals satisfied the old assertion while overflowing the pane.
+    fn assert_lines_fit(lines: &[String], max_width: f32, font_size: f32) {
+        for line in lines {
+            let w = text::measure(line, font_size, FontWeightHint::Regular);
             assert!(
-                line.chars().count() <= budget,
-                "line of {} characters exceeds the {budget}-character budget",
-                line.chars().count()
+                w <= max_width + 0.5,
+                "line {line:?} measures {w}, wider than the {max_width} it is drawn into"
             );
         }
     }
 
     #[test]
-    fn wrapping_counts_characters_not_bytes() {
+    fn wrapping_is_not_decided_by_byte_length() {
         // The same shape of text in two alphabets, one of which encodes to two
-        // bytes per character. Wrapping answers a question about what is
-        // drawn, so the two must wrap identically. Measured against
-        // `str::len` the Greek wrapped at half the width of the Latin -- a
-        // silent display bug, separate from the panic above, that affected
-        // every feed not written in ASCII.
+        // bytes per character. Measured against `str::len` the Greek wrapped at
+        // half the width of the Latin -- roughly twice the lines for the same
+        // content -- a silent display bug, separate from the panic above, that
+        // affected every feed not written in ASCII.
+        //
+        // The two are not asserted to wrap *identically*: Greek letterforms are
+        // not the same widths as Latin ones, so identical line counts would be
+        // a coincidence rather than a property. What must hold is that each
+        // fits, and that the Greek is not paying a factor of two for its
+        // encoding.
         let latin = "abc def ghi jkl mno pqr stu vwx";
         let greek = "\u{3b1}\u{3b2}\u{3b3} \u{3b4}\u{3b5}\u{3b6} \u{3b7}\u{3b8}\u{3b9} \
                      \u{3ba}\u{3bb}\u{3bc} \u{3bd}\u{3be}\u{3bf} \u{3c0}\u{3c1}\u{3c3} \
                      \u{3c4}\u{3c5}\u{3c6} \u{3c7}\u{3c8}\u{3c9}";
-        let latin_lines = wrap_text(latin, 200.0, 14.0);
-        let greek_lines = wrap_text(greek, 200.0, 14.0);
+        let latin_lines = wrap_text(latin, 100.0, 14.0);
+        let greek_lines = wrap_text(greek, 100.0, 14.0);
         assert!(
             latin_lines.len() > 1,
             "the sample must actually wrap or this test asserts nothing"
         );
-        let widths = |lines: &[String]| -> Vec<usize> {
-            lines.iter().map(|line| line.chars().count()).collect()
-        };
-        assert_eq!(widths(&latin_lines), widths(&greek_lines));
+        assert_lines_fit(&latin_lines, 100.0, 14.0);
+        assert_lines_fit(&greek_lines, 100.0, 14.0);
+        assert!(
+            greek_lines.len() < latin_lines.len().saturating_mul(2),
+            "the Greek wrapped into {} lines against the Latin's {} -- the \
+             signature of a byte count standing in for a width",
+            greek_lines.len(),
+            latin_lines.len()
+        );
     }
 
     #[test]
     fn a_very_long_word_wraps_without_dropping_text() {
-        // A word the feed chose the length of. The break loop must be linear
-        // in that length -- re-measuring the untaken remainder on every pass
-        // would walk the whole word once per line produced.
+        // A word the feed chose the length of. The break must come from one
+        // shaping pass over the whole run -- shaping the untaken remainder
+        // again per line produced is quadratic in a length we do not control,
+        // which is a hang rather than a slow frame.
         let word = "\u{3bb}".repeat(50_000);
         let lines = wrap_text(&word, 200.0, 14.0);
         assert!(lines.len() > 100);
         assert_eq!(lines.concat(), word);
+        assert_lines_fit(&lines, 200.0, 14.0);
     }
 
     // -----------------------------------------------------------------------

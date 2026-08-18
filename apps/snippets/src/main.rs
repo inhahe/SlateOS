@@ -84,32 +84,24 @@ const TITLE_TEXT: f32 = 18.0;
 /// Font size of the language badge on a list row.
 const BADGE_TEXT: f32 = 10.0;
 
-/// Width of one cell of the code panel's character grid.
-///
-/// The code panel — and only the code panel — is a grid: it has a line-number
-/// gutter, and a reader lines indentation up by eye between rows, so column
-/// *n* of one line has to sit above column *n* of the next. Deriving the cell
-/// from the face keeps the grid true if the face or the size changes; the old
-/// fixed 8.0 was a guess that drifted the moment either did. Everything else
-/// in this app is proportional UI text and is measured, not gridded.
-///
-/// The cell was then `text::digit_advance` — right that the face should decide
-/// it, wrong about which face. A digit's advance *in the proportional UI face*
-/// is a cell only digits fit, and code is not digits. Since the token pen
-/// advances by `columns(token) * char_width()`, a line of real source stepped
-/// short of where its glyphs actually ended, so consecutive tokens overlapped
-/// and indentation stopped lining up between rows. A grid needs a face where
-/// every glyph advances the same distance — `text::cell_advance`.
-fn char_width() -> f32 {
-    text::cell_advance(NORMAL_TEXT, FontWeightHint::Regular)
-}
-
-/// How many grid cells `text` occupies. Characters, not bytes — `str::len()`
-/// counts UTF-8 bytes, so a token holding any non-ASCII character advanced the
-/// pen two to four cells too far and shoved the rest of the line right.
-fn columns(text: &str) -> f32 {
-    text.chars().count() as f32
-}
+// The code panel — and only the code panel — is a grid: it has a line-number
+// gutter, and a reader lines indentation up by eye between rows, so column *n*
+// of one line has to sit above column *n* of the next. Everything else in this
+// app is proportional UI chrome.
+//
+// There used to be a `char_width()` and a `columns()` here, and the token pen
+// advanced by their product. That is the *third* version of one mistake, each
+// version a step further out than the last: a hardcoded 8.0 that drifted the
+// moment the face or size changed; then `text::digit_advance`, a digit's
+// advance in the *proportional* face, which is a cell only digits fit, so real
+// source stepped short and consecutive tokens overlapped; then
+// `text::cell_advance` in the mono face, which is right for Latin text and
+// still only a nominal count — one cell per character is not what the renderer
+// does with an ideograph, a combining mark, or a character the face lacks.
+//
+// The pen now advances by measuring each token exactly as it will be drawn.
+// That is the renderer's own answer, so there is nothing left to keep in step:
+// see `render_code`'s inner comment, and `the_pen_advances_by_what_is_drawn`.
 
 const MAX_SNIPPETS: usize = 5000;
 const MAX_FOLDERS: usize = 200;
@@ -1950,18 +1942,31 @@ impl App {
                 // Tokens
                 let mut tx = x + 48.0;
                 for token in line_tokens {
-                    let tw = columns(&token.text) * char_width();
+                    let weight = if token.kind == TokenKind::Keyword {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    };
+                    // The pen advances by what this token will actually be
+                    // drawn as — same string, same size, same weight, same
+                    // family — rather than by a nominal cell count. A count is
+                    // only equal to the drawn width where every character
+                    // advances the same distance, which is true of Latin text
+                    // in a mono face and not true of the text a snippet can
+                    // hold: a CJK ideograph is two cells, a combining accent is
+                    // none, and a character the face lacks advances by whatever
+                    // `.notdef` happens to be. Where they disagreed the next
+                    // token overlapped this one or left a gap, and indentation
+                    // stopped lining up between rows — the one thing this
+                    // panel is a grid for.
+                    let tw = text::measure_in(&token.text, NORMAL_TEXT, weight, FontFamily::Mono);
                     cmds.push(RenderCommand::Text {
                         x: tx,
                         y: ly,
                         text: token.text.clone(),
                         font_size: NORMAL_TEXT,
                         color: token.kind.color(),
-                        font_weight: if token.kind == TokenKind::Keyword {
-                            FontWeightHint::Bold
-                        } else {
-                            FontWeightHint::Regular
-                        },
+                        font_weight: weight,
                         max_width: Some(width - (tx - x) - 12.0),
                         overflow: TextOverflow::Ellipsis,
                     });
@@ -2674,22 +2679,77 @@ mod tests {
 
     // --- Text measurement ---
 
-    /// The code panel is the one grid in this app, and a cell of it holds one
-    /// *character*. Advancing by `str::len()` moved the pen a cell per UTF-8
-    /// byte, so a line holding any accented character pushed everything after
-    /// it two to four columns right of where the line above put it.
+    /// The width of one mono cell. Production code no longer has this idea —
+    /// the pen measures — but the tests below still compare against it to say
+    /// what "a grid" would have meant, and why assuming one was survivable for
+    /// so long.
+    fn cell() -> f32 {
+        text::cell_advance(NORMAL_TEXT, FontWeightHint::Regular)
+    }
+
+    /// A tab is the concrete bug the nominal cell count had, and it is not
+    /// exotic: it is how most of the source anyone would paste into a snippet
+    /// is indented.
+    ///
+    /// A tab is one `char`, so the old pen advanced one cell for it — while the
+    /// face draws it four cells wide. Every token on a tab-indented line was
+    /// therefore drawn three cells left of where the indentation actually
+    /// ended, i.e. *on top of* the whitespace it was supposed to follow, and
+    /// the further in the code was nested the worse it got. Measured on the
+    /// built-in mono face at 14 px: drawn 33.6 px against a nominal 8.4 px.
     #[test]
-    fn a_code_token_advances_one_cell_per_character() {
-        assert!((columns("let x") - 5.0).abs() < f32::EPSILON);
-        // Five characters, seven bytes.
-        assert!((columns("héllo") - 5.0).abs() < f32::EPSILON);
-        assert!((columns("héllo") - columns("hello")).abs() < f32::EPSILON);
+    fn a_tab_advances_by_the_width_it_is_drawn_at_not_by_one_cell() {
+        let drawn = text::measure_in("\t", NORMAL_TEXT, FontWeightHint::Regular, FontFamily::Mono);
+        assert!(
+            drawn > cell() * 1.5,
+            "a tab drawn {drawn} against a {} cell — if a tab really is one \
+             cell wide on this face, this test has stopped testing anything",
+            cell()
+        );
+    }
+
+    /// The claim that replaced the cell count: wherever the pen stops is
+    /// exactly where the token before it finished being drawn — by
+    /// construction, since it is the same measurement the renderer makes.
+    ///
+    /// Stated over the kinds of text a cell count gets wrong: a tab, an
+    /// ideograph the face renders wide or substitutes, a combining mark that
+    /// advances nothing. Plain Latin tokens are included to show where the two
+    /// answers *do* agree, which is why the old code survived review.
+    #[test]
+    fn the_pen_advances_by_what_is_drawn() {
+        for token in ["let", "  ", "héllo", "日本語", "e\u{0301}", "\t", "x"] {
+            for weight in [FontWeightHint::Regular, FontWeightHint::Bold] {
+                let drawn = text::measure_in(token, NORMAL_TEXT, weight, FontFamily::Mono);
+                assert!(
+                    drawn >= 0.0,
+                    "{token:?} measures negative, which would step the pen backwards"
+                );
+                // Concatenation is what the pen actually does: it draws one
+                // token, advances, draws the next. If measuring a run were not
+                // additive the panel would drift across a line no matter which
+                // width the pen used, so this is the property the fix rests on.
+                let joined = format!("{token}{token}");
+                let both = text::measure_in(&joined, NORMAL_TEXT, weight, FontFamily::Mono);
+                assert!(
+                    (both - drawn * 2.0).abs() < 0.01,
+                    "{token:?} twice measures {both}, but two pen steps land at {}",
+                    drawn * 2.0
+                );
+            }
+        }
+        // And where a cell count and the truth diverge, the pen follows the
+        // truth: one `char`, four cells.
+        assert!(
+            text::measure_in("\t", NORMAL_TEXT, FontWeightHint::Regular, FontFamily::Mono)
+                > cell() * 1.5
+        );
     }
 
     /// The cell comes from the face, so it stays true if the face changes.
     #[test]
     fn the_code_cell_is_derived_from_the_face() {
-        let cell = char_width();
+        let cell = cell();
         assert!(cell > 0.0, "an empty cell would collapse the code panel");
         assert!(
             cell <= NORMAL_TEXT,
@@ -2697,13 +2757,12 @@ mod tests {
         );
     }
 
-    /// Advancing one cell per character is only right if a character fits one.
-    /// Code is not digits, so the cell has to hold the widest glyph a token
-    /// can contain — otherwise the pen steps short and the next token is drawn
-    /// over the tail of the one before it.
+    /// Why the old cell count looked correct for so long: for Latin source in
+    /// the mono face, a character really does fit a cell. This is the premise
+    /// that failed silently for everything else.
     #[test]
     fn a_code_character_fits_a_cell() {
-        let cell = char_width();
+        let cell = cell();
         for ch in ['0', 'W', 'i', '#', 'é', 'M', '@', '_', '{', ' '] {
             let w = text::measure_in(
                 &ch.to_string(),
@@ -2715,11 +2774,14 @@ mod tests {
         }
     }
 
-    /// Keywords are drawn bold on the same grid as everything else, so bold
-    /// has to fit the same cell.
+    /// Keywords are drawn bold and measured bold — the pen asks for the same
+    /// weight it draws in, so this no longer has to hold for the layout to be
+    /// correct. It is kept because a face where bold advanced differently would
+    /// make the panel's columns stop lining up between a keyword line and a
+    /// plain one, which is a legibility claim rather than a positioning one.
     #[test]
     fn a_bold_keyword_character_fits_the_same_cell() {
-        let cell = char_width();
+        let cell = cell();
         for ch in ['0', 'W', 'M', 'f', 'n'] {
             let w = text::measure_in(
                 &ch.to_string(),

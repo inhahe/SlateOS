@@ -235,6 +235,35 @@ impl SystemFont {
         }
     }
 
+    /// [`wrap`](Self::wrap), except that a word wider than `max_width` is
+    /// broken by measured fit rather than left on an over-long line. See
+    /// [`ScaledFont::wrap_hard`] for when that is the rule to want.
+    ///
+    /// Unlike [`wrap`](Self::wrap) this needs no per-backend arm: the break
+    /// points come from [`ShapedRun::hard_breaks`], and both backends shape.
+    #[must_use]
+    pub fn wrap_hard(&self, text: &str, max_width: f32) -> Vec<String> {
+        let mut lines = Vec::new();
+        for line in self.wrap(text, max_width) {
+            if self.measure(&line) <= max_width {
+                lines.push(line);
+                continue;
+            }
+            let cuts = self.shape(&line).hard_breaks(max_width);
+            let mut start = 0;
+            for cut in cuts {
+                if let Some(piece) = line.get(start..cut) {
+                    lines.push(piece.to_string());
+                    start = cut;
+                }
+            }
+            if let Some(rest) = line.get(start..) {
+                lines.push(rest.to_string());
+            }
+        }
+        lines
+    }
+
     /// Draws `text` with its baseline at `y`, starting at pen position `x`.
     ///
     /// Returns the pen position after the last glyph, so runs can be chained

@@ -107,27 +107,6 @@ const TOC_SIDEBAR_WIDTH: f32 = 200.0;
 const EDITOR_PADDING: f32 = 8.0;
 /// Padding inside the preview area.
 const PREVIEW_PADDING: f32 = 16.0;
-/// Width of one cell of the source pane's character grid.
-///
-/// The source pane is a code view: it is laid out on columns, so it keeps the
-/// grid. But the cell has to come from the face — this was a hardcoded 8.4,
-/// which matched the built-in face at 14 px and nothing else, so with any
-/// other face the cursor, the selection band and the find highlights all
-/// drifted away from the text they mark.
-///
-/// The *preview* pane is prose, not a grid, and measures each run instead.
-///
-/// The cell was then `text::digit_advance` — right that the face should decide
-/// it, wrong about which face. A digit's advance in the proportional UI face is
-/// a cell only digits fit, and the source pane holds prose and Markdown syntax:
-/// at 14 px a digit is 8.1 px while `'W'` is 14.1 px, so the caret placed by
-/// `col_x` drifted further left of its character with every wide glyph on the
-/// line, and the selection band drifted with it. A grid needs a face where
-/// every glyph advances the same distance — `text::cell_advance`.
-fn char_width() -> f32 {
-    text::cell_advance(EDITOR_FONT_SIZE, FontWeightHint::Regular)
-}
-
 /// x of byte offset `col` within `line`, given the pane's left edge `text_x`.
 ///
 /// The document stores cursor and selection positions as byte offsets on
@@ -136,9 +115,43 @@ fn char_width() -> f32 {
 /// or three. Multiplying the byte offset by the cell width put the caret
 /// several columns right of the character it precedes on any line holding
 /// non-ASCII text, and stretched the selection band with it.
+///
+/// Counting characters and multiplying by a cell was the next version of that
+/// same mistake, one step further out. It assumes every character advances the
+/// cell width, which is what "monospace" means for Latin text and is *not* true
+/// of the text this pane can hold: a CJK ideograph is conventionally two cells
+/// wide, a combining accent is zero, and a face missing a glyph substitutes one
+/// of whatever width `.notdef` happens to be. The nominal count and the drawn
+/// advance then disagree, and every mark this function places — the caret, the
+/// selection band, the find highlights, and the left edge of every syntax span
+/// after the first — lands beside the character it belongs to, drifting further
+/// with each such character on the line.
+///
+/// So it measures instead, in the family the pane pushes and the caller draws
+/// in. The answer is then the renderer's own answer by construction, which is
+/// the only definition of "where is column `col`" that cannot be wrong. Weight
+/// is not passed in even though spans are drawn bold: on a monospace face bold
+/// advances the same distance as regular (asserted by
+/// `a_bold_source_character_fits_the_same_cell`), and threading a per-span
+/// weight through here would make the caret's position depend on which syntax
+/// span it happens to fall in.
 fn col_x(line: &str, col: usize, text_x: f32) -> f32 {
-    let prefix = line.get(..col.min(line.len())).unwrap_or(line);
-    text_x + prefix.chars().count() as f32 * char_width()
+    // A byte offset off a character boundary is a bug elsewhere, but slicing a
+    // `str` there aborts the process, so it is floored to the boundary below.
+    // Falling back to the *whole line* — what this used to do — turned a caret
+    // one byte out of place into a caret at the end of the line.
+    let mut end = col.min(line.len());
+    while end > 0 && !line.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    let prefix = line.get(..end).unwrap_or("");
+    text_x
+        + text::measure_in(
+            prefix,
+            EDITOR_FONT_SIZE,
+            FontWeightHint::Regular,
+            FontFamily::Mono,
+        )
 }
 /// Minimum width for the find/replace panel.
 const FIND_PANEL_HEIGHT: f32 = 64.0;
@@ -1982,7 +1995,10 @@ fn replace_in_line(lines: &mut [String], n: usize, start: usize, end: usize, tex
     let Some(line) = lines.get_mut(n) else {
         return false;
     };
-    if start > end || end > line.len() || !line.is_char_boundary(start) || !line.is_char_boundary(end)
+    if start > end
+        || end > line.len()
+        || !line.is_char_boundary(start)
+        || !line.is_char_boundary(end)
     {
         return false;
     }
@@ -2505,11 +2521,7 @@ fn highlight_inline_spans(line: &str, start_offset: usize, spans: &mut Vec<Highl
         // Links: [text](url), and images, which are a link with a `!` in front.
         if b == b'[' || (b == b'!' && next == Some(b'[')) {
             let is_image = b == b'!';
-            let bracket_start = if is_image {
-                pos.saturating_add(1)
-            } else {
-                pos
-            };
+            let bracket_start = if is_image { pos.saturating_add(1) } else { pos };
             if let Some(bracket_end) = scan_to(bytes, bracket_start.saturating_add(1), b']')
                 && bytes.get(bracket_end.saturating_add(1)) == Some(&b'(')
                 && let Some(paren_end) = scan_to(bytes, bracket_end.saturating_add(2), b')')
@@ -2706,10 +2718,12 @@ pub fn render_editor(
     find_state: &FindReplaceState,
 ) -> Vec<RenderCommand> {
     let mut cmds = vec![
-        // The source pane is a grid: `col_x` places the caret, the selection
-        // band and the find highlights at `chars * char_width()`, which came
-        // from the mono face. Everything this function draws has to be drawn
-        // in that face, or the marks land beside the characters they mark.
+        // `col_x` places the caret, the selection band, the find highlights
+        // and every syntax span by *measuring* the line's prefix in the mono
+        // face. Everything this function draws has to therefore be drawn in
+        // that face, or the marks land beside the characters they mark — and
+        // nothing that asserts on positions can see the mismatch, because both
+        // sides of such an assertion would be measured the same wrong way.
         // The preview pane — rendered separately, as prose — is deliberately
         // outside this scope.
         RenderCommand::PushFont {
@@ -3950,7 +3964,12 @@ pub fn render_status_bar(
     if let Some(err) = save_error {
         let text = err.to_string();
         cmds.push(RenderCommand::Text {
-            x: text::center_x(&text, x + width / 2.0, STATUS_FONT_SIZE, FontWeightHint::Bold),
+            x: text::center_x(
+                &text,
+                x + width / 2.0,
+                STATUS_FONT_SIZE,
+                FontWeightHint::Bold,
+            ),
             y: y + 5.0,
             text,
             font_size: STATUS_FONT_SIZE,
@@ -7429,28 +7448,70 @@ mod tests {
     }
     // --- Text measurement ---
 
-    /// The document counts columns in bytes; the grid counts them in cells.
-    /// A multi-byte character is one cell, not two or three — get this wrong
-    /// and the caret sits several columns right of the character it precedes
-    /// on any line holding an accent, and the selection band stretches with it.
+    /// The width of one mono cell, which several of these tests compare against
+    /// to state what "a grid" means. Production code no longer has this idea:
+    /// `col_x` measures, so it is right whether or not the face is a grid.
+    fn cell() -> f32 {
+        text::cell_advance(EDITOR_FONT_SIZE, FontWeightHint::Regular)
+    }
+
+    /// The document counts columns in bytes; the pane advances by glyphs. A
+    /// multi-byte character advances once, not two or three times — get this
+    /// wrong and the caret sits several columns right of the character it
+    /// precedes on any line holding an accent, and the selection band
+    /// stretches with it.
     #[test]
-    fn column_x_counts_cells_not_bytes() {
-        let cell = char_width();
+    fn column_x_advances_by_glyph_not_by_byte() {
+        let cell = cell();
         // "é" is two bytes, so the byte offset after it is 2 — but it is one
-        // cell, so the caret belongs one cell in.
+        // glyph, so the caret belongs one advance in.
         assert!((col_x("éx", 2, 0.0) - cell).abs() < 0.01);
         assert!((col_x("ax", 1, 0.0) - cell).abs() < 0.01);
-        // Same text, same cell count, whatever the encoding costs.
+        // Same text, same glyphs, whatever the encoding costs.
         assert!((col_x("ééé", 6, 0.0) - col_x("aaa", 3, 0.0)).abs() < 0.01);
     }
 
-    /// Counting cells is only right if a character actually fits one. The
-    /// source pane holds prose and Markdown syntax, not digits, so the cell
-    /// has to hold the widest glyph a line can contain — otherwise `col_x`
-    /// under-counts and the caret drifts left of its character.
+    /// The real claim, and the one a cell count could not make: `col_x` is the
+    /// renderer's own answer. Whatever the face does with a character — a wide
+    /// ideograph, a zero-width combining mark, a `.notdef` box for a glyph it
+    /// does not have — the caret goes exactly where the drawn text ends,
+    /// because it is the same measurement.
+    #[test]
+    fn column_x_is_where_the_drawn_prefix_actually_ends() {
+        for line in [
+            "abc",
+            "a#*_W",
+            "héllo",
+            "日本語です",
+            "e\u{0301}tude",
+            "\t x",
+        ] {
+            for (byte, _) in line
+                .char_indices()
+                .chain(std::iter::once((line.len(), ' ')))
+            {
+                let drawn = text::measure_in(
+                    &line[..byte],
+                    EDITOR_FONT_SIZE,
+                    FontWeightHint::Regular,
+                    FontFamily::Mono,
+                );
+                let placed = col_x(line, byte, 0.0);
+                assert!(
+                    (placed - drawn).abs() < 0.01,
+                    "{line:?}[..{byte}] draws to {drawn} but the caret goes to {placed}"
+                );
+            }
+        }
+    }
+
+    /// A cell count would have been right only if every character advanced the
+    /// same distance, and this is the test that says so out loud: it passes for
+    /// Latin text in the mono face, which is why the old code looked correct,
+    /// and there is no reason it should hold for the whole of Unicode.
     #[test]
     fn a_source_character_fits_a_cell() {
-        let cell = char_width();
+        let cell = cell();
         for ch in ['0', 'W', 'i', '#', 'é', 'M', '@', '*', '_', ' '] {
             let w = text::measure_in(
                 &ch.to_string(),
@@ -7462,11 +7523,13 @@ mod tests {
         }
     }
 
-    /// Syntax highlighting draws headings and emphasis bold on the same grid,
-    /// so bold has to fit the same cell as regular.
+    /// Syntax highlighting draws headings and emphasis bold, positioned by a
+    /// `col_x` that measures at *regular* weight. That is only sound because
+    /// bold advances the same distance on a monospace face — so this test is
+    /// the premise `col_x`'s doc comment cites, not a style check.
     #[test]
     fn a_bold_source_character_fits_the_same_cell() {
-        let cell = char_width();
+        let cell = cell();
         for ch in ['0', 'W', 'M', '#', '*'] {
             let w = text::measure_in(
                 &ch.to_string(),
@@ -7481,7 +7544,7 @@ mod tests {
         }
     }
 
-    /// The source pane is placed on a mono cell, so it must be drawn in the
+    /// The source pane is measured in the mono face, so it must be drawn in the
     /// mono face — a mismatch is invisible in any assertion about positions.
     #[test]
     fn the_source_pane_is_drawn_in_the_family_it_was_measured_in() {
@@ -7518,10 +7581,17 @@ mod tests {
     /// A byte offset past the end (or off a character boundary, which the
     /// document should never produce but rendering must survive) must not
     /// panic — slicing a `str` at a non-boundary is an outright abort.
+    ///
+    /// It must also not be *silently wrong*, which the previous version was:
+    /// its fallback for a non-boundary offset was the whole line, so a caret
+    /// one byte out of place jumped to the end of the line rather than landing
+    /// one character to its left. An offset inside `é` now floors to the
+    /// boundary below it, i.e. to the start of that character.
     #[test]
-    fn column_x_survives_a_bad_offset() {
-        assert!(col_x("é", 1, 0.0) >= 0.0, "mid-character offset");
-        assert!(col_x("abc", 99, 0.0) >= 0.0, "past the end");
+    fn column_x_survives_a_bad_offset_without_lying_about_it() {
+        assert!((col_x("é", 1, 0.0) - col_x("é", 0, 0.0)).abs() < f32::EPSILON);
+        assert!((col_x("xéy", 2, 0.0) - col_x("xéy", 1, 0.0)).abs() < f32::EPSILON);
+        assert!((col_x("abc", 99, 0.0) - col_x("abc", 3, 0.0)).abs() < f32::EPSILON);
         assert!((col_x("", 0, 5.0) - 5.0).abs() < f32::EPSILON);
     }
 

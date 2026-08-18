@@ -1802,6 +1802,59 @@ impl ScaledFont {
         lines
     }
 
+    /// [`wrap`](Self::wrap), except that a word wider than `max_width` is
+    /// broken rather than left on an over-long line.
+    ///
+    /// # When to prefer this to `wrap`
+    ///
+    /// `wrap` declines to break inside a word because where to break one is a
+    /// per-script decision that belongs to a real line breaker. That is the
+    /// right default for a paragraph of Latin prose, where the alternative is
+    /// splitting "unquestionably" across two lines for no reason.
+    ///
+    /// It is the wrong answer in two situations, and both are common here:
+    ///
+    /// - **The box cannot grow.** A desktop icon's label sits in a cell 72 px
+    ///   wide with another icon beside it, so an over-long line is not a
+    ///   typographic blemish — it is text drawn on top of the neighbour.
+    /// - **The script has no spaces.** A Japanese file name is one "word" by
+    ///   the `split(' ')` rule, so `wrap` returns the whole of it as a single
+    ///   line however narrow the box is. Han and Kana break almost anywhere, so
+    ///   breaking by measured fit is not merely a fallback for them — it is
+    ///   close to what a real line breaker would do.
+    ///
+    /// Breaking a long Latin word mid-word is inelegant, but it is what the
+    /// renderer would have done to the over-long line anyway, and this way the
+    /// caller's line count matches what is drawn.
+    ///
+    /// Existing newlines always break, as in `wrap`.
+    #[must_use]
+    pub fn wrap_hard(&self, text: &str, max_width: f32) -> Vec<String> {
+        let mut lines = Vec::new();
+        for line in self.wrap(text, max_width) {
+            if self.measure(&line) <= max_width {
+                lines.push(line);
+                continue;
+            }
+            // One shaping pass for the whole over-long line, rather than a
+            // `fit` per piece, which would re-shape the untaken remainder once
+            // per piece produced — quadratic in a length the caller's input,
+            // not the caller, chose.
+            let cuts = self.shape(&line).hard_breaks(max_width);
+            let mut start = 0;
+            for cut in cuts {
+                if let Some(piece) = line.get(start..cut) {
+                    lines.push(piece.to_string());
+                    start = cut;
+                }
+            }
+            if let Some(rest) = line.get(start..) {
+                lines.push(rest.to_string());
+            }
+        }
+        lines
+    }
+
     /// Draw `text` with its baseline at `y`, starting at pen position `x`.
     ///
     /// Returns the pen position after the last glyph, so callers can chain

@@ -685,9 +685,18 @@ fn generate_text_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Thu
         if y.saturating_add(line_height) >= right_edge {
             break;
         }
-        // Line width proportional to character count, capped at thumbnail width.
+        // Line width proportional to character count, capped at thumbnail
+        // width. Characters, not `line.len()`, which is the UTF-8 *byte*
+        // count: a minimap says "this line is about this long", and a line of
+        // Japanese encodes to three bytes a character, so measured in bytes it
+        // drew a bar three times too long — every line in a CJK file pinned to
+        // the cap, making a ragged file look like a solid block. There is no
+        // font in this path to measure in (the thumbnail is a synthetic
+        // minimap, not rendered text), so a character count is the honest
+        // proxy for "how much text"; the byte count is not a proxy for
+        // anything a reader can see.
         let max_chars = (content / 2) as usize;
-        let bar_len = (line.len().min(max_chars) as u32).saturating_mul(2);
+        let bar_len = (line.chars().count().min(max_chars) as u32).saturating_mul(2);
         if bar_len == 0 {
             continue;
         }
@@ -1519,6 +1528,45 @@ mod tests {
         assert!(!lines.is_empty());
 
         let _ = fs::remove_file(&file_path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    /// The minimap's bars say how long each line is, so two files whose lines
+    /// are the same length must draw the same bars whatever alphabet they are
+    /// written in. Measured in bytes — as this did — the Japanese file's lines
+    /// counted three times over and every bar hit the cap, turning a ragged
+    /// file into a solid block.
+    #[test]
+    fn a_minimap_bar_is_as_long_as_the_line_not_as_its_encoding() {
+        let dir = std::env::temp_dir().join("thumbs_test_minimap");
+        let _ = fs::create_dir_all(&dir);
+        let latin_path = dir.join("latin.txt");
+        let cjk_path = dir.join("cjk.txt");
+
+        // Ten characters per line in both files, and short enough that neither
+        // is capped — the cap is what hid this, by making every long-enough
+        // line look the same.
+        {
+            let mut f = fs::File::create(&latin_path).unwrap();
+            for _ in 0..3 {
+                writeln!(f, "abcdefghij").unwrap();
+            }
+            let mut f = fs::File::create(&cjk_path).unwrap();
+            for _ in 0..3 {
+                writeln!(f, "あいうえおかきくけこ").unwrap();
+            }
+        }
+
+        let config = ThumbConfig::default();
+        let latin = generate_text_thumbnail(&latin_path, &config, 1);
+        let cjk = generate_text_thumbnail(&cjk_path, &config, 1);
+        assert_eq!(
+            latin.pixels, cjk.pixels,
+            "ten characters is ten characters in both files"
+        );
+
+        let _ = fs::remove_file(&latin_path);
+        let _ = fs::remove_file(&cjk_path);
         let _ = fs::remove_dir(&dir);
     }
 

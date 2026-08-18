@@ -2397,21 +2397,36 @@ impl SlidesApp {
 // Helper functions
 // ============================================================================
 
-/// Get a short preview text for a slide thumbnail.
+/// The line of text a slide thumbnail shows: the slide's title, or failing
+/// that the first line of its first text element.
+///
+/// This used to cut the result to 30 characters and append "...". It no longer
+/// does, because both call sites draw the result with `max_width` and
+/// `TextOverflow::Ellipsis` already set — the renderer measures the string in
+/// the real font and cuts it to the thumbnail's actual width, which is a
+/// different number in the slide sorter (`thumb_w - 16.0`) than in the sidebar
+/// (`thumb_w - 8.0`) and neither of them is 30 characters. Cutting here as
+/// well meant the shorter of two answers won, and the shorter one was the
+/// guess. The 30 was also compared against `len()` — bytes — so a title in
+/// Greek or Japanese was cut at ten characters or fewer.
+///
+/// What is still done here is take a single *line*: a `Text` command draws one
+/// line, so a multi-line text box must not be handed over with its newlines in
+/// place.
 fn slide_preview_text(slide: &Slide) -> String {
     // Try title first.
     if !slide.title.is_empty() {
-        return truncate_str(&slide.title, 30);
+        return first_line(&slide.title);
     }
     // Otherwise, grab first text element content.
     for elem in &slide.elements {
         match elem {
             SlideElement::TextBox { text, .. } if !text.is_empty() => {
-                return truncate_str(text, 30);
+                return first_line(text);
             }
             SlideElement::BulletList { items, .. } => {
                 if let Some(first) = items.first() {
-                    return truncate_str(first, 30);
+                    return first_line(first);
                 }
             }
             _ => {}
@@ -2420,19 +2435,9 @@ fn slide_preview_text(slide: &Slide) -> String {
     String::new()
 }
 
-/// Truncate a string to at most `max` characters, appending "..." if truncated.
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let end = s
-            .char_indices()
-            .nth(max.saturating_sub(3))
-            .map_or(s.len(), |(i, _)| i);
-        let mut result = s[..end].to_string();
-        result.push_str("...");
-        result
-    }
+/// The first line of `s`, without its line ending.
+fn first_line(s: &str) -> String {
+    s.split('\n').next().unwrap_or(s).trim_end().to_string()
 }
 
 /// Convert a `Color` to a CSS `rgb()` string.
@@ -3157,23 +3162,51 @@ mod tests {
 
     // ---- Helper function tests ---------------------------------------------
 
+    /// A long title reaches the renderer whole. The removed 30-character cut
+    /// was applied before the thumbnail width was known, and the two thumbnail
+    /// sizes this app draws are not the same width as each other, let alone as
+    /// 30 characters.
     #[test]
-    fn test_truncate_str_short() {
-        let s = truncate_str("hello", 10);
-        assert_eq!(s, "hello");
+    fn a_long_title_is_not_pre_truncated() {
+        let theme = SlideTheme::mocha();
+        let mut id_gen = IdGen::new(8100);
+        let mut s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
+        s.title = "Q3 Revenue by Region and Segment, with Year-on-Year Comparison".to_string();
+        assert_eq!(slide_preview_text(&s), s.title);
     }
 
+    /// A title measured in bytes rather than characters was cut at a third of
+    /// its length. Nothing is cut here now, so a non-Latin title survives whole.
     #[test]
-    fn test_truncate_str_exact() {
-        let s = truncate_str("hello", 5);
-        assert_eq!(s, "hello");
+    fn a_non_latin_title_is_not_shortened() {
+        let theme = SlideTheme::mocha();
+        let mut id_gen = IdGen::new(8200);
+        let mut s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
+        s.title = "四半期ごとの売上と地域別の内訳について".to_string();
+        assert_eq!(slide_preview_text(&s), s.title);
     }
 
+    /// A `Text` command draws one line, so a multi-line text box contributes
+    /// only its first line — otherwise the newline lands in the middle of a
+    /// thumbnail label.
     #[test]
-    fn test_truncate_str_long() {
-        let s = truncate_str("hello world, this is a long string", 10);
-        assert!(s.ends_with("..."));
-        assert!(s.len() <= 13); // 10-3 chars + "..."
+    fn a_multi_line_body_previews_only_its_first_line() {
+        let theme = SlideTheme::mocha();
+        let mut id_gen = IdGen::new(8300);
+        let mut s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
+        s.elements.push(SlideElement::TextBox {
+            id: id_gen.next_id(),
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+            text: String::from("Opening remarks\nand then the rest"),
+            font_size: 14.0,
+            color: TEXT,
+            bold: false,
+            centered: false,
+        });
+        assert_eq!(slide_preview_text(&s), "Opening remarks");
     }
 
     #[test]

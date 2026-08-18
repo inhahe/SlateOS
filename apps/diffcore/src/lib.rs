@@ -176,10 +176,10 @@ pub fn myers_diff(left: &[&str], right: &[&str]) -> Vec<DiffEdit> {
         trace.push(v.clone());
         let d_i = d as isize;
 
-        let mut k = -d_i;
+        let mut k = d_i.saturating_neg();
         while k <= d_i {
             let idx = (k as usize).wrapping_add(offset);
-            let go_down = if k == -d_i {
+            let go_down = if k == d_i.saturating_neg() {
                 true
             } else if k == d_i {
                 false
@@ -218,7 +218,7 @@ pub fn myers_diff(left: &[&str], right: &[&str]) -> Vec<DiffEdit> {
                 break 'outer;
             }
 
-            k += 2;
+            k = k.saturating_add(2);
         }
     }
 
@@ -247,7 +247,7 @@ fn backtrack_edits(
         let k = x.saturating_sub(y);
         let d_i = d as isize;
 
-        let go_down = if k == -d_i {
+        let go_down = if k == d_i.saturating_neg() {
             true
         } else if k == d_i {
             false
@@ -884,11 +884,7 @@ impl ThreeWayMerge {
                 | MergeChunk::OursOnly(lines)
                 | MergeChunk::TheirsOnly(lines)
                 | MergeChunk::BothSame(lines) => out.extend(lines.iter().cloned()),
-                MergeChunk::Conflict {
-                    base,
-                    ours,
-                    theirs,
-                } => {
+                MergeChunk::Conflict { base, ours, theirs } => {
                     let choice = choices
                         .get(conflict_idx)
                         .copied()
@@ -1094,12 +1090,15 @@ fn classify_segment(
 /// Extract `lines[(from+1)..to]` (the open interval strictly between two
 /// anchor indices), clamped to the slice bounds. `from` may be `-1` (head).
 fn slice_lines(lines: &[String], from: isize, to: isize) -> Vec<String> {
-    let start = (from + 1).max(0) as usize;
+    let start = from.saturating_add(1).max(0) as usize;
     let end = to.max(0) as usize;
     if start >= end {
         return Vec::new();
     }
-    lines.get(start..end.min(lines.len())).unwrap_or(&[]).to_vec()
+    lines
+        .get(start..end.min(lines.len()))
+        .unwrap_or(&[])
+        .to_vec()
 }
 
 /// Build a map from base line index → other-side line index for every Equal
@@ -1357,11 +1356,9 @@ impl MergeReview {
             .chunks
             .iter()
             .filter_map(|c| match c {
-                MergeChunk::Conflict {
-                    base,
-                    ours,
-                    theirs,
-                } => Some((base.as_slice(), ours.as_slice(), theirs.as_slice())),
+                MergeChunk::Conflict { base, ours, theirs } => {
+                    Some((base.as_slice(), ours.as_slice(), theirs.as_slice()))
+                }
                 _ => None,
             })
             .collect()
@@ -1382,6 +1379,17 @@ impl MergeReview {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it — that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // --- Myers diff tests ---
@@ -1724,7 +1732,9 @@ mod tests {
 
         // Backdate the recorded timestamp past the settle window, exactly as
         // the passage of time would.
-        sync.mtime = sync.mtime.map(|m| m - MTIME_SETTLE - Duration::from_secs(1));
+        sync.mtime = sync
+            .mtime
+            .map(|m| m - MTIME_SETTLE - Duration::from_secs(1));
         sync.mtime_racy = false;
         // The on-disk mtime no longer matches the (backdated) recorded one, so
         // the pre-filter cannot short-circuit — it falls through to content,

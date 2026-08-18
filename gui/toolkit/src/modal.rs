@@ -3006,8 +3006,7 @@ mod tests {
         let mut visual = vec![];
         let mut at = crate::text::TextCursor::from(text.len());
         for _ in 0..6 {
-            let Some(next) =
-                crate::text::caret_left(text, at, FONT_SIZE, FontWeightHint::Regular)
+            let Some(next) = crate::text::caret_left(text, at, FONT_SIZE, FontWeightHint::Regular)
             else {
                 break;
             };

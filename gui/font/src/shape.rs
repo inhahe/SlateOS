@@ -494,6 +494,57 @@ impl ShapedRun {
         end
     }
 
+    /// Every byte offset at which to cut the source string so that no piece is
+    /// wider than `max_width` — [`fit`](Self::fit) applied repeatedly, but from
+    /// a single shaping pass.
+    ///
+    /// # Why not just call `fit` in a loop
+    ///
+    /// `fit` shapes the string it is given, so cutting a long word by calling
+    /// it on each successive remainder re-shapes the whole tail once per line
+    /// produced: quadratic in the length of the word. That matters because the
+    /// lengths in question are not ours to choose — an article body arrives
+    /// from whatever feed the user subscribed to, and a 50 000-character "word"
+    /// in one is a hang rather than a slow frame. This walks the run once.
+    ///
+    /// # Where the cuts land
+    ///
+    /// Between clusters, never inside one, so every piece is a valid string and
+    /// a decomposed character keeps its marks. A cluster wider than `max_width`
+    /// on its own gets a line to itself and overflows it: there is nowhere else
+    /// to put it, and returning no offset at all would mean an unbounded loop
+    /// in the caller.
+    ///
+    /// The offsets are in the source string's own byte order, ascending, and
+    /// exclude 0 and the string's length — they are exactly the interior cuts.
+    #[must_use]
+    pub fn hard_breaks(&self, max_width: f32) -> Vec<usize> {
+        let mut cuts = Vec::new();
+        let mut used = 0.0;
+        // Counted rather than inferred from `used > 0.0`: a line whose first
+        // cluster is a zero-width combining mark has consumed no width but is
+        // not empty, and cutting before its second cluster would strip the
+        // mark onto a line of its own.
+        let mut clusters_on_line: usize = 0;
+        let mut i = 0;
+        while i < self.glyphs.len() {
+            let j = self.group_end(i);
+            let width = self.span_width(i, j);
+            if clusters_on_line > 0 && used + width > max_width {
+                if let Some(glyph) = self.glyphs.get(i) {
+                    cuts.push(glyph.cluster);
+                }
+                used = width;
+                clusters_on_line = 1;
+            } else {
+                used += width;
+                clusters_on_line = clusters_on_line.saturating_add(1);
+            }
+            i = j;
+        }
+        cuts
+    }
+
     /// The byte offset at which the longest *suffix* fitting `max_width`
     /// begins.
     ///

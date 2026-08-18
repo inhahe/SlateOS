@@ -766,7 +766,9 @@ mod tests {
     const BLUE: Color = Color::rgb(0, 0, 255);
 
     fn spans(ends: &[(u32, Color)]) -> Vec<TextSpan> {
-        ends.iter().map(|&(end, color)| TextSpan { end, color }).collect()
+        ends.iter()
+            .map(|&(end, color)| TextSpan { end, color })
+            .collect()
     }
 
     /// The basic contract: a byte inside a span takes that span's colour, and

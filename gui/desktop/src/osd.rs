@@ -8,6 +8,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme constants — Catppuccin Mocha
@@ -58,6 +59,25 @@ pub enum OsdKind {
     BatteryLow { percent: u8 },
     /// Custom text OSD for arbitrary notifications.
     Custom { icon: OsdIcon, message: String },
+}
+
+/// Size the icon+text OSD draws its label at.
+///
+/// Named, with the two below, because a caller that has to fit something into
+/// that label — the screenshot path, which is elided from its *start* so the
+/// file name survives — has to measure it in the face it will be drawn in. A
+/// caller measuring at a guessed size is the same bug as counting characters,
+/// one level up.
+const OSD_LABEL_SIZE: f32 = 14.0;
+/// Weight it is drawn at. Bold glyphs are wider than regular ones at the same
+/// size, so measuring bold text as regular under-measures it.
+const OSD_LABEL_WEIGHT: FontWeightHint = FontWeightHint::Bold;
+/// Padding from the overlay's edge to its content.
+const OSD_PADDING: f32 = 16.0;
+
+/// Room the icon+text OSD's label has, given the overlay's width.
+fn osd_label_width(osd_w: f32) -> f32 {
+    (osd_w - OSD_PADDING * 2.0 - 36.0).max(0.0)
 }
 
 /// Keyboard lock types.
@@ -571,13 +591,23 @@ impl OsdManager {
                 );
             }
             OsdKind::ScreenshotTaken { path } => {
-                // Truncate path for display.
-                let display_path = if path.len() > 30 {
-                    format!("...{}", &path[path.len() - 27..])
-                } else {
-                    path.clone()
-                };
-                let label = format!("Screenshot: {display_path}");
+                // The path is shortened from its *start*: the file name is
+                // what identifies the shot, and a path elided the usual way
+                // reads "/home/user/pictures/scree…", which names nothing.
+                //
+                // It used to be `&path[path.len() - 27..]` — a *byte* offset
+                // into a `str`, which aborts the process when it lands inside a
+                // character. A screenshot path contains the user's home
+                // directory, so any account named in a non-Latin script took
+                // the desktop shell down on every screenshot. The 27 was also a
+                // count with no relation to the width beside it.
+                let prefix = "Screenshot: ";
+                let room = (osd_label_width(osd_w)
+                    - text::measure(prefix, OSD_LABEL_SIZE, OSD_LABEL_WEIGHT))
+                .max(0.0);
+                let display_path =
+                    text::elide_start(path, room, "\u{2026}", OSD_LABEL_SIZE, OSD_LABEL_WEIGHT);
+                let label = format!("{prefix}{display_path}");
                 self.render_icon_text_osd(
                     ox,
                     oy,
@@ -758,7 +788,7 @@ impl OsdManager {
         commands.push(RenderCommand::Text {
             x: text_x,
             y: oy + 14.0,
-            text: truncate_str(title, 35),
+            text: title.to_string(),
             font_size: 14.0,
             color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, text_alpha),
             font_weight: FontWeightHint::Bold,
@@ -770,7 +800,7 @@ impl OsdManager {
         commands.push(RenderCommand::Text {
             x: text_x,
             y: oy + 38.0,
-            text: truncate_str(artist, 40),
+            text: artist.to_string(),
             font_size: 12.0,
             color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, text_alpha),
             font_weight: FontWeightHint::Regular,
@@ -783,7 +813,7 @@ impl OsdManager {
             commands.push(RenderCommand::Text {
                 x: text_x,
                 y: oy + 58.0,
-                text: truncate_str(album, 40),
+                text: album.to_string(),
                 font_size: 11.0,
                 color: Color::rgba(SUBTEXT0.r, SUBTEXT0.g, SUBTEXT0.b, text_alpha / 2),
                 font_weight: FontWeightHint::Light,
@@ -815,7 +845,7 @@ impl OsdManager {
         accent: Color,
         commands: &mut Vec<RenderCommand>,
     ) {
-        let padding = 16.0;
+        let padding = OSD_PADDING;
         let osd_h = self.height_for_kind(&OsdKind::Custom {
             icon: OsdIcon::Info,
             message: String::new(),
@@ -838,11 +868,11 @@ impl OsdManager {
         commands.push(RenderCommand::Text {
             x: ox + padding + 32.0,
             y: center_y + 2.0,
-            text: truncate_str(label, 35),
-            font_size: 14.0,
+            text: label.to_string(),
+            font_size: OSD_LABEL_SIZE,
             color: Color::rgba(TEXT.r, TEXT.g, TEXT.b, text_alpha),
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(osd_w - padding * 2.0 - 36.0),
+            font_weight: OSD_LABEL_WEIGHT,
+            max_width: Some(osd_label_width(osd_w)),
             overflow: TextOverflow::Ellipsis,
         });
     }
@@ -913,15 +943,20 @@ fn icon_info(icon: OsdIcon) -> (&'static str, Color) {
     }
 }
 
-/// Truncate a string to max chars, appending "..." if needed.
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
-        format!("{truncated}...")
-    }
-}
+// A `truncate_str(s, max_chars)` used to cut the title, artist, album and
+// label to a fixed character budget — 35 or 40 — before handing them over.
+// It is gone, and the strings go to the renderer whole.
+//
+// Every one of its four call sites already passed `max_width` and
+// `TextOverflow::Ellipsis`, which is the instruction to fit the text and mark
+// the cut, carried out by measuring the face the text is drawn in. A character
+// budget cannot express that: 35 characters is a different width in every
+// string, and none of the four budgets bore any relation to the `max_text_w`
+// sitting three lines below it. The two answers disagreed in both directions —
+// the budget cut "Symphony No. 9 in D minor, Op. 125" that fitted, and let a
+// run of capitals past that did not — and when they disagreed the budget won,
+// because it cut first. It also appended a three-dot ASCII "..." where the
+// renderer marks with a single "…", so the same OSD showed both.
 
 // ============================================================================
 // OSD settings UI
@@ -1796,28 +1831,41 @@ mod tests {
         }
     }
 
-    // ---- truncate_str ----
+    // ---- text is bounded by width, not by a character budget ----
 
+    /// Every string the OSD draws reaches the renderer whole, with a width to
+    /// fit inside and a mark to use if it does not. The OSD used to cut them to
+    /// 35 or 40 characters first, a budget unrelated to the width beside it.
     #[test]
-    fn truncate_short_string() {
-        assert_eq!(truncate_str("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_exact_length() {
-        assert_eq!(truncate_str("hello", 5), "hello");
-    }
-
-    #[test]
-    fn truncate_long_string() {
-        let result = truncate_str("this is a really long string", 15);
-        assert!(result.ends_with("..."));
-        assert!(result.chars().count() <= 15);
-    }
-
-    #[test]
-    fn truncate_empty() {
-        assert_eq!(truncate_str("", 10), "");
+    fn osd_text_is_bounded_by_width_not_pre_truncated() {
+        let long = "Symphony No. 9 in D minor, Op. 125 — Ode an die Freude (remastered)";
+        let mut osd = OsdManager::new(1920.0, 1080.0);
+        osd.show(
+            OsdKind::MediaTrack {
+                title: long.to_string(),
+                artist: long.to_string(),
+                album: long.to_string(),
+            },
+            0,
+        );
+        let cmds = osd.render();
+        let bounded: Vec<_> = cmds
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    text,
+                    max_width,
+                    overflow,
+                    ..
+                } if text == long => Some((max_width, overflow)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bounded.len(), 3, "title, artist and album, each uncut");
+        for (max_width, overflow) in bounded {
+            assert!(max_width.is_some());
+            assert_eq!(overflow, TextOverflow::Ellipsis);
+        }
     }
 
     // ---- height_for_kind ----
@@ -1943,13 +1991,71 @@ mod tests {
         assert!(!cmds.is_empty());
     }
 
+    /// A screenshot path is shortened from its start, so what survives is the
+    /// *end* of the path — the part that says which shot — and the result fits
+    /// the label it is drawn into.
+    ///
+    /// The test asserts a suffix, not the whole file name: the label box has
+    /// room for about twenty characters, and this file name alone is thirty.
+    /// Demanding the whole name would be demanding that the box be wider,
+    /// which is a different claim from the one this code makes.
     #[test]
-    fn screenshot_long_path_truncated() {
-        let long_path =
+    fn screenshot_path_keeps_the_file_name_and_fits() {
+        let path =
             "/home/user/very/long/path/to/some/nested/directory/screenshot_2026_05_17_12345.png";
-        let result = truncate_str(long_path, 30);
-        assert!(result.chars().count() <= 30);
-        assert!(result.ends_with("..."));
+        let mut mgr = make_manager();
+        mgr.config.fade_in_ms = 0;
+        mgr.show(
+            OsdKind::ScreenshotTaken {
+                path: path.to_string(),
+            },
+            0,
+        );
+        mgr.tick(0);
+        let label = mgr
+            .render()
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } if text.starts_with("Screenshot: ") => Some(text),
+                _ => None,
+            })
+            .expect("the OSD names the screenshot");
+        let shown = label
+            .strip_prefix("Screenshot: ")
+            .expect("the prefix is what we matched on");
+        let tail = shown
+            .strip_prefix('\u{2026}')
+            .expect("a path too long for the box is marked as cut: {label}");
+        assert!(
+            path.ends_with(tail),
+            "what is shown is the end of the path, not the start: {label}"
+        );
+        assert!(
+            tail.ends_with(".png"),
+            "and it reaches at least the extension: {label}"
+        );
+        assert!(
+            text::measure(&label, OSD_LABEL_SIZE, OSD_LABEL_WEIGHT)
+                <= osd_label_width(mgr.config.width) + 0.5,
+            "and it fits the label box: {label}"
+        );
+    }
+
+    /// A path under a home directory named in a non-Latin script must not take
+    /// the shell down. The removed truncation sliced a `str` at
+    /// `len() - 27` — a byte offset — which panics inside a character.
+    #[test]
+    fn a_non_ascii_screenshot_path_renders() {
+        let mut mgr = make_manager();
+        mgr.config.fade_in_ms = 0;
+        mgr.show(
+            OsdKind::ScreenshotTaken {
+                path: "/home/ユーザー/画像/スクリーンショット_2026_05_17.png".to_string(),
+            },
+            0,
+        );
+        mgr.tick(0);
+        assert!(!mgr.render().is_empty());
     }
 
     #[test]

@@ -2,6 +2,14 @@
 
 **Filed:** 2026-08-17 by lane C.
 
+**Status: DELIVERED 2026-08-18 by lane A.** `SYS_GETRANDOM` = **90**, no
+capability required. Both acceptance criteria are met; criterion 2 ("different
+across two boots of an identically-configured VM") is enforced by *refusal* —
+the syscall fails rather than returning output from a pool that was never
+credited real entropy. Full reply, including a caveat that the `GRND_*` flags
+do not yet reach the kernel, is in
+`requests/a-c-getrandom-is-available.md`.
+
 **Blocks:** `gui/credentials` (password generation, per-vault salts, cipher
 nonces), `apps/lockscreen`, and later anything that needs a session token, a
 TLS nonce, or a random offset of ASLR quality in userspace.

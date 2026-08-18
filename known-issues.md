@@ -35646,3 +35646,49 @@ failed. The precondition this entry set for making the behaviour change —
 "a look at whether the installer ships a `/etc/sudoers` that would newly fail"
 — was checked: `git grep -ln "etc/sudoers"` finds no shipped file, so no
 existing configuration can newly be rejected.
+
+---
+
+## A-GETRANDOM-VALIDATES-THE-GRND-FLAGS-THEN-THROWS-THEM-AWAY (lane A, 2026-08-18) — **open; needs an ABI change in lane B's tree first**
+
+**What a user would see:** a program that explicitly asks `getrandom` *not* to
+block can be made to wait anyway — up to 15 seconds — and a program that says
+"give me bytes now, I accept they may be weak" has no way to say that at all.
+
+**Where it lives:** `posix/src/unistd.rs:2053` accepts `GRND_NONBLOCK`,
+`GRND_RANDOM` and `GRND_INSECURE`, validates them, and then never passes them
+on. `posix/src/random.rs` calls `syscall2(SYS_GETRANDOM, buf, len)`, and
+`posix/src/syscall.rs:548`'s `syscall2` declares only `in("rdi")`/`in("rsi")`,
+so the flags never reach the kernel. `kernel/src/syscall/handlers.rs`'s
+`sys_getrandom` correspondingly ignores `arg2`.
+
+**Why it is newly a problem.** This has been true for as long as the syscall
+has existed, but it was harmless until 2026-08-18: `getrandom` never blocked,
+so `GRND_NONBLOCK` was accidentally honoured by doing nothing. `4381365de` made
+the call wait until the CSPRNG holds credited entropy, so the flag is now
+genuinely wrong rather than vacuously right. `GRND_INSECURE` is the flag that
+would make the wait harmless — it is precisely the "I'll take weak bytes"
+escape hatch — and it is the one that cannot be honoured.
+
+**Why the kernel cannot just start reading `arg2`.** `rdx` holds whatever the
+compiler last left there when the caller went through `syscall2`. A kernel that
+interpreted it as a flags word would make every already-built binary pass
+garbage flags, including all nine committed `services/ctest-*` ELFs. It is a
+syscall ABI change and both halves must land together.
+
+**The proper fix**, in order:
+
+1. Lane B switches `posix/src/random.rs` to
+   `syscall3(SYS_GETRANDOM, buf, len, u64::from(flags))` and rebuilds the
+   fixtures. Filed as
+   `requests/a-b-getrandom-now-waits-for-a-credited-pool.md`.
+2. Lane A then makes `sys_getrandom` read `arg2`: `GRND_NONBLOCK` returns
+   `WouldBlock` instead of waiting, `GRND_INSECURE` skips the readiness check
+   entirely, `GRND_RANDOM` is a no-op (we have one pool, as Linux now does
+   since 5.6).
+
+**How much it bites today:** very little. Credit accrues from the 100 Hz timer,
+so the pool is ready roughly 0.32 s after the APIC timer starts — long before
+any userspace process runs. The wait is only reachable from the kernel's own
+boot self-tests, which take the early-out and never sleep. The entry exists
+because the *contract* is wrong, not because anything currently hangs on it.

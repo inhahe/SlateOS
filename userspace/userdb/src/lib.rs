@@ -209,6 +209,46 @@ impl Record {
         });
     }
 
+    /// Set *every* spelling of a field that this record already uses, or the
+    /// canonical one — `keys[0]` — if it uses none.
+    ///
+    /// Updating only the first spelling found would leave the other one saying
+    /// something else, and a reader that consulted the other would act on the
+    /// stale value. That is precisely the failure this crate exists to remove,
+    /// so it is not reintroduced one level down.
+    pub fn set_any(&mut self, keys: &[&str], value: &str) {
+        self.set_any_raw(keys, &quote(value));
+    }
+
+    /// [`Record::set_any`] for a value that must not be quoted.
+    fn set_bare_any(&mut self, keys: &[&str], value: &str) {
+        self.set_any_raw(keys, value);
+    }
+
+    fn set_any_raw(&mut self, keys: &[&str], raw_value: &str) {
+        let mut found = false;
+        for line in &mut self.lines {
+            if let Line::Field {
+                key: k,
+                raw_value: v,
+                ..
+            } = line
+                && keys.contains(&k.as_str())
+            {
+                raw_value.clone_into(v);
+                found = true;
+            }
+        }
+        if !found && let Some(first) = keys.first() {
+            let indent = self.field_indent.clone();
+            self.lines.push(Line::Field {
+                indent,
+                key: (*first).to_string(),
+                raw_value: raw_value.to_string(),
+            });
+        }
+    }
+
     /// Remove `key`, reporting whether it was there.
     pub fn remove(&mut self, key: &str) -> bool {
         let before = self.lines.len();
@@ -254,6 +294,12 @@ impl Record {
         self.get_any(&[field::HOME, field::HOME_ALIAS])
     }
 
+    /// Set the home directory, under whichever spelling the record already
+    /// uses.
+    pub fn set_home(&mut self, home: &str) {
+        self.set_any(&[field::HOME, field::HOME_ALIAS], home);
+    }
+
     /// The avatar path, under either spelling. A literal `null` reads as
     /// absent, which is what the login manager writes for "no avatar".
     #[must_use]
@@ -271,6 +317,27 @@ impl Record {
     pub fn is_admin(&self) -> bool {
         self.get_any(&[field::IS_ADMIN, field::IS_ADMIN_ALIAS])
             .is_some_and(|v| v.trim() == "true")
+    }
+
+    /// Set the administrator flag, under whichever spelling the record already
+    /// uses.
+    pub fn set_admin(&mut self, admin: bool) {
+        self.set_bare_any(
+            &[field::IS_ADMIN, field::IS_ADMIN_ALIAS],
+            if admin { "true" } else { "false" },
+        );
+    }
+
+    /// Set the avatar path, under whichever spelling the record already uses.
+    /// An empty path is stored as `null`, the login manager's spelling of "no
+    /// avatar", rather than as an empty string that reads back as a path to
+    /// the root of the filesystem.
+    pub fn set_avatar(&mut self, path: &str) {
+        if path.is_empty() {
+            self.set_bare_any(&[field::AVATAR, field::AVATAR_ALIAS], "null");
+        } else {
+            self.set_any(&[field::AVATAR, field::AVATAR_ALIAS], path);
+        }
     }
 
     /// Whether the account is barred from logging in.
@@ -582,6 +649,58 @@ impl UserDb {
             record.write_to(&mut out);
         }
         out
+    }
+
+    /// Read the database from `path`.
+    ///
+    /// A file that does not exist is an empty database; every *other* failure
+    /// is an error. The distinction is the whole point of returning a
+    /// `Result`: both writers previously read with `Err(_) => Vec::new()`, so
+    /// running one as a user who may not read `/etc/users.yaml` produced an
+    /// empty database, and the next write then saved that empty database over
+    /// the real one — one permission error away from deleting every account on
+    /// the machine.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error other than "not found", and a file that is not UTF-8.
+    /// YAML is defined to be UTF-8, so refusing is better than transcoding: a
+    /// lossy read would rewrite the file with U+FFFD where a display name used
+    /// to be.
+    pub fn load(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Ok(Self::parse(&text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Write the database to `path`, atomically.
+    ///
+    /// The text goes to a sibling temporary file which is then renamed over
+    /// the target, so a crash or a full disk leaves the previous database
+    /// intact. Writing in place would give a window in which `/etc/users.yaml`
+    /// is truncated, and a machine that loses power in that window has no
+    /// accounts and no way to log in and fix it.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error from creating, writing or renaming the temporary file.
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        let path = path.as_ref();
+        let mut temp = path.as_os_str().to_os_string();
+        temp.push(".tmp");
+        let temp = std::path::PathBuf::from(temp);
+        std::fs::write(&temp, self.to_text())?;
+        match std::fs::rename(&temp, path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Leaving the temporary file behind would make the next save
+                // look like it had already half-succeeded.
+                let _ = std::fs::remove_file(&temp);
+                Err(e)
+            }
+        }
     }
 
     /// The records, in file order.
@@ -981,6 +1100,96 @@ users:
         assert_eq!(out.lines().count(), 1, "{out}");
         let reparsed = UserDb::parse(&format!("users:\n{out}"));
         assert!(!reparsed.records()[0].is_admin(), "{out}");
+    }
+
+    /// A file that spells a field both ways must not come out of a write
+    /// spelling it two *different* ways — that is the original bug, one level
+    /// down.
+    #[test]
+    fn setting_a_dual_spelled_field_updates_every_spelling_present() {
+        let mut record =
+            UserDb::parse("users:\n  - uid: 5\n    home_dir: \"/home/a\"\n    home: \"/home/a\"\n")
+                .records_mut()
+                .remove(0);
+        record.set_home("/home/b");
+        let mut out = String::new();
+        record.write_to(&mut out);
+        assert!(out.contains("home_dir: \"/home/b\""), "{out}");
+        assert!(out.contains("\n    home: \"/home/b\""), "{out}");
+        assert_eq!(record.home().as_deref(), Some("/home/b"));
+    }
+
+    /// The alias is used when the record already uses it, so useradm's own
+    /// files keep their shape rather than growing a second field.
+    #[test]
+    fn setting_a_dual_spelled_field_keeps_the_records_own_spelling() {
+        let mut record =
+            UserDb::parse("users:\n  - uid: 5\n    home: \"/home/a\"\n    admin: false\n")
+                .records_mut()
+                .remove(0);
+        record.set_home("/home/b");
+        record.set_admin(true);
+        let mut out = String::new();
+        record.write_to(&mut out);
+        assert!(!out.contains("home_dir"), "{out}");
+        assert!(!out.contains("is_admin"), "{out}");
+        assert!(out.contains("home: \"/home/b\""), "{out}");
+        assert!(out.contains("admin: true"), "{out}");
+        assert!(record.is_admin());
+    }
+
+    /// An empty avatar is `null`, not `""` — an empty string reads back as a
+    /// path, and a path to nowhere is not the same as no avatar.
+    #[test]
+    fn clearing_the_avatar_writes_null_rather_than_an_empty_path() {
+        let mut record = Record::new();
+        record.set_avatar("/usr/share/faces/a.png");
+        assert_eq!(record.avatar().as_deref(), Some("/usr/share/faces/a.png"));
+        record.set_avatar("");
+        assert_eq!(record.avatar(), None);
+        let mut out = String::new();
+        record.write_to(&mut out);
+        assert!(out.contains("avatar_path: null"), "{out}");
+    }
+
+    /// A database that cannot be read must not be reported as a database with
+    /// no accounts in it, because the caller's next act is to write it back.
+    #[test]
+    fn an_unreadable_file_is_an_error_and_a_missing_one_is_empty() {
+        let dir = std::env::temp_dir().join("userdb-load-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let missing = dir.join("does-not-exist.yaml");
+        let _ = std::fs::remove_file(&missing);
+        assert!(
+            UserDb::load(&missing)
+                .expect("missing is empty")
+                .records()
+                .is_empty()
+        );
+
+        // A directory stands in for "present but unreadable": every platform
+        // refuses to read one as a file, and it is not a `NotFound`.
+        assert!(UserDb::load(&dir).is_err());
+    }
+
+    #[test]
+    fn a_save_replaces_the_file_and_leaves_no_temporary_behind() {
+        let dir = std::env::temp_dir().join("userdb-save-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("users.yaml");
+        let mut db = UserDb::new();
+        let mut record = Record::new();
+        record.set_uid(1000);
+        record.set(field::USERNAME, "dave");
+        db.push(record);
+        db.save(&path).expect("save");
+
+        let reloaded = UserDb::load(&path).expect("load");
+        assert_eq!(reloaded.find("dave").and_then(Record::uid), Some(1000));
+        let mut temp = path.as_os_str().to_os_string();
+        temp.push(".tmp");
+        assert!(!std::path::Path::new(&temp).exists());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

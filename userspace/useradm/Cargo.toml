@@ -3,4 +3,13 @@ name = "useradm"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS user account management — useradd, userdel, passwd, usermod"
+
+# The shared user database. `useradm` used to carry its own parser, its own
+# serialiser and its own password construction, none of which agreed with the
+# login manager's — so an account created here could not log in. See
+# `design-decisions.md` §330.
 [dependencies]
+userdb = { path = "../userdb" }
+
+[lints]
+workspace = true

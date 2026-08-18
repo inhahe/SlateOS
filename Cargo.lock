@@ -11177,6 +11177,9 @@ version = "0.1.0"
 [[package]]
 name = "useradm"
 version = "0.1.0"
+dependencies = [
+ "userdb",
+]
 
 [[package]]
 name = "userdb"

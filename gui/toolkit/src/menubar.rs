@@ -9,6 +9,7 @@
 //! Uses the Catppuccin Mocha dark theme, consistent with `menu.rs`.
 
 use crate::color::Color;
+use crate::cycle;
 use crate::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
@@ -492,7 +493,7 @@ impl MenuBar {
                 if self.open_submenu.is_some() {
                     self.open_submenu = None;
                 } else {
-                    self.open_menu(index_before(self.items.len(), top_idx));
+                    self.open_menu(cycle::before(self.items.len(), top_idx));
                 }
                 EventResult::Consumed
             }
@@ -508,7 +509,7 @@ impl MenuBar {
                 }
 
                 // Otherwise move to the next top-level menu.
-                self.open_menu(index_after(self.items.len(), top_idx));
+                self.open_menu(cycle::after(self.items.len(), top_idx));
                 EventResult::Consumed
             }
 
@@ -1101,46 +1102,6 @@ fn is_selectable(entry: &MenuBarEntry) -> bool {
     }
 }
 
-/// The index one place before `from` in a list of `len`, wrapping round to the
-/// last. `from` is assumed to be in range.
-fn index_before(len: usize, from: usize) -> usize {
-    from.checked_sub(1).unwrap_or_else(|| len.saturating_sub(1))
-}
-
-/// The index one place after `from` in a list of `len`, wrapping round to the
-/// first. `from` is assumed to be in range.
-fn index_after(len: usize, from: usize) -> usize {
-    match from.checked_add(1) {
-        Some(next) if next < len => next,
-        _ => 0,
-    }
-}
-
-/// The `len` indices of a list, visited once each in cyclic order from `start`,
-/// going forwards or backwards.
-///
-/// The wrap is modular arithmetic on `usize`, so an index cannot leave the
-/// range in the first place. What this replaced stepped a signed cursor off the
-/// end and pushed it back with an `if` at the top of the *next* iteration —
-/// meaning the cursor was out of range by design, and the proof that it was
-/// back in range by the time it was used lived in a different statement from
-/// the use.
-///
-/// `step` is always below `len`, so the `saturating_sub` is exact; `checked_rem`
-/// is what carries the "`len` is not zero" condition into the expression that
-/// depends on it, rather than leaving it behind in a guard further up.
-fn cyclic_from(len: usize, start: usize, forward: bool) -> impl Iterator<Item = usize> {
-    let start = start.checked_rem(len).unwrap_or(0);
-    (0..len).filter_map(move |step| {
-        let delta = if forward {
-            step
-        } else {
-            len.saturating_sub(step)
-        };
-        start.saturating_add(delta).checked_rem(len)
-    })
-}
-
 /// Move hover in `direction` (+1 or -1), skipping separators and disabled items.
 fn next_selectable(
     entries: &[MenuBarEntry],
@@ -1156,13 +1117,13 @@ fn next_selectable(
     // Where the walk begins: one place beyond the current hover in the
     // direction of travel, or the near end of the list when nothing is hovered.
     let start = match current {
-        Some(idx) if forward => index_after(len, idx),
-        Some(idx) => index_before(len, idx),
+        Some(idx) if forward => cycle::after(len, idx),
+        Some(idx) => cycle::before(len, idx),
         None if forward => 0,
         None => len.saturating_sub(1),
     };
 
-    cyclic_from(len, start, forward).find(|idx| entries.get(*idx).is_some_and(is_selectable))
+    cycle::indices(len, start, forward).find(|idx| entries.get(*idx).is_some_and(is_selectable))
 }
 
 /// Jump to the first entry whose label starts with `ch`.
@@ -1920,30 +1881,6 @@ mod tests {
         assert!(bar.open_submenu.is_none(), "no submenu can be opened");
     }
 
-    /// The walk behind Up/Down must reach every row once and stop, whichever
-    /// row it starts from and whichever way it goes.
-    #[test]
-    fn the_cyclic_walk_covers_every_index_exactly_once() {
-        for len in 1..8_usize {
-            for start in 0..len {
-                for forward in [true, false] {
-                    let visited: Vec<usize> = cyclic_from(len, start, forward).collect();
-                    let mut distinct = visited.clone();
-                    distinct.sort_unstable();
-                    distinct.dedup();
-                    assert_eq!(visited.len(), len, "len={len} start={start}");
-                    assert_eq!(visited[0], start, "the walk begins where it was told");
-                    assert_eq!(distinct.len(), len, "len={len} start={start} fwd={forward}");
-                }
-            }
-        }
-        assert_eq!(
-            cyclic_from(0, 0, true).count(),
-            0,
-            "no indices in an empty list"
-        );
-    }
-
     /// A dropdown with no row the keyboard can land on must say so, not circle.
     #[test]
     fn a_dropdown_with_no_selectable_row_yields_no_hover() {
@@ -1952,17 +1889,6 @@ mod tests {
         assert_eq!(next_selectable(&separators, None, -1), None);
         assert_eq!(next_selectable(&separators, Some(1), 1), None);
         assert_eq!(next_selectable(&[], None, 1), None);
-    }
-
-    #[test]
-    fn stepping_off_either_end_of_the_bar_wraps_round() {
-        assert_eq!(index_before(3, 0), 2);
-        assert_eq!(index_after(3, 2), 0);
-        assert_eq!(index_before(3, 1), 0);
-        assert_eq!(index_after(3, 1), 2);
-        // An empty bar has nowhere to step to, and must not underflow.
-        assert_eq!(index_before(0, 0), 0);
-        assert_eq!(index_after(0, 0), 0);
     }
 
     #[test]

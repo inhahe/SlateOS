@@ -8,6 +8,7 @@
 //! Both support vertical scrolling, text selection, copy-to-clipboard, and search.
 
 use crate::color::Color;
+use crate::cycle;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
@@ -238,7 +239,10 @@ fn color_from_256(index: u8) -> Color {
         }
         // Grayscale ramp (indices 232-255): 24 shades from 8 to 238.
         232..=255 => {
-            let gray = index.saturating_sub(232).saturating_mul(10).saturating_add(8);
+            let gray = index
+                .saturating_sub(232)
+                .saturating_mul(10)
+                .saturating_add(8);
             Color::rgb(gray, gray, gray)
         }
     }
@@ -572,11 +576,13 @@ impl SearchState {
     /// check both views used to write as a separate early return above their
     /// own copy of this arithmetic.
     fn next_index(&self) -> Option<usize> {
-        let last = self.matches.len().checked_sub(1)?;
+        if self.matches.is_empty() {
+            return None;
+        }
         Some(match self.current_match {
-            Some(idx) if idx < last => idx.saturating_add(1),
-            // Past the end, or no current match: wrap to the first.
-            Some(_) | None => 0,
+            Some(idx) => cycle::after(self.matches.len(), idx),
+            // No current match: start at the first.
+            None => 0,
         })
     }
 
@@ -584,7 +590,7 @@ impl SearchState {
     fn prev_index(&self) -> Option<usize> {
         let last = self.matches.len().checked_sub(1)?;
         Some(match self.current_match {
-            Some(idx) => idx.checked_sub(1).unwrap_or(last),
+            Some(idx) => cycle::before(self.matches.len(), idx),
             None => last,
         })
     }

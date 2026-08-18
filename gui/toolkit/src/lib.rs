@@ -27,6 +27,7 @@ pub mod canvas;
 pub mod color;
 pub mod colorpicker;
 pub mod context_ext;
+pub mod cycle;
 pub mod dialog;
 pub mod disabled;
 pub mod dnd;

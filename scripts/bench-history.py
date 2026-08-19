@@ -130,6 +130,36 @@ SCORE_RE = re.compile(
 TEXTPAD_RE = re.compile(r"^\[boot\] build profile:.*\btextpad=(\d+)",
                         re.MULTILINE)
 
+# Which accelerator the kernel actually ran on, e.g. `QEMU TCG` or
+# `Hyper-V/WHPX`, taken from the guest's own CPUID read in
+# `kernel/src/hypervisor.rs`.
+#
+# This is not a detail. Measured 2026-08-19 on *one byte-identical binary*
+# (kernel_sha 7a17cf6be2a1) run under both: the median benchmark is 3.5x faster
+# under WHPX, the fastest 10.4x, and four get dramatically *slower* -- HPET
+# reads cost a VM exit (~13.5 us) where TCG emulates them inline (~450 ns).
+# A comparison that crosses accelerators is therefore not noisy, it is
+# meaningless, and it is meaningless by a factor far larger than any regression
+# this harness exists to catch.
+#
+# Read from the log rather than from the flag that was passed, for exactly the
+# reason given above `TEXTPAD_RE`: the value that matters is what the kernel
+# *ran on*, and a harness reporting what it *intended* cannot notice a mistyped
+# `QEMU_EXTRA`, a changed default nobody remembered, or an accelerator that
+# silently failed back to TCG. CPUID cannot be wrong about this; an environment
+# variable can.
+#
+# Matched on the vendor label rather than the raw signature so the field stays
+# readable, and loosely enough that a hypervisor we have not seen yet records
+# its own name instead of breaking the parse. Absent -> `None`, which must be
+# kept distinct from any known value: absent means "this kernel predates the
+# field and cannot say", *not* "TCG". Folding absent into TCG would be the same
+# error the `text_pad` note above describes, and provably wrong here -- the
+# first WHPX run was recorded before this field existed, so an absent value is
+# demonstrably not evidence of TCG.
+ACCEL_RE = re.compile(r"^\[hypervisor\] Detected: (.+?) \(signature:",
+                      re.MULTILINE)
+
 #: `split` token values with no percentage attached.
 SPLIT_ABSENT = None      # the log predates the column entirely
 SPLIT_UNCHECKED = "-"    # the kernel ran no cross-check for this entry
@@ -569,6 +599,29 @@ def parse_text_pad(path):
         return None
     match = TEXTPAD_RE.search(text)
     return int(match.group(1)) if match else None
+
+
+def parse_accel(path):
+    """Which accelerator this kernel ran on, as the guest itself reported it.
+
+    Returns e.g. `"QEMU TCG"` or `"Hyper-V/WHPX"`, or `None` when the log
+    carries no `[hypervisor] Detected:` line at all -- which means the kernel
+    predates the banner, **not** that it ran on TCG. See `ACCEL_RE`; conflating
+    the two is provably wrong, because the first WHPX run was recorded before
+    this field existed.
+
+    Reads the file directly rather than taking already-parsed text, for the same
+    reason `parse_text_pad` does: the line is printed during early boot,
+    thousands of lines before the first SCORE, so a caller holding only the
+    scorecard section would silently get `None` for every run.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    match = ACCEL_RE.search(text)
+    return match.group(1).strip() if match else None
 
 
 TRACE_EDGES = ("start", "end")
@@ -3036,20 +3089,39 @@ def layout_arms(records, host, profile):
     for record in records:
         if layout_arm_rejection(record, host, profile) is not None:
             continue
-        groups.setdefault(record["commit"], {}) \
+        # The accelerator is part of the group *key*, not a validation step, so
+        # that arms which ran on different accelerators cannot land in one band
+        # at all. Checking for agreement afterwards would work equally well
+        # when someone remembers to check; making it structural means there is
+        # no code path that produces a mixed band to check in the first place.
+        #
+        # This matters more than the host or profile filters above it: measured
+        # on one byte-identical binary, the median benchmark is 3.5x faster
+        # under WHPX than TCG. A band accidentally spanning both would be a
+        # "placement sensitivity" of several hundred percent, and a band that
+        # wide dismisses *every* regression -- silently, and in the direction
+        # that hides faults.
+        #
+        # `None` (the kernel predates the banner) is its own key rather than
+        # being folded into TCG, so pre-field records still form the bands they
+        # always did while never mixing with a record that actually said.
+        groups.setdefault((record["commit"], record.get("accel")), {}) \
               .setdefault(record["text_pad"], []).append(record)
-    return {commit: arms for commit, arms in groups.items()
+    return {key: arms for key, arms in groups.items()
             if len(arms) >= MIN_PADS_FOR_LAYOUT_BAND}
 
 
 def layout_bands(records, host, profile):
     """Per-benchmark spread attributable to code *placement* alone.
 
-    Returns `{name: (spread_pct, pads, commit)}`, where `spread_pct` is the
-    peak-to-peak spread across the sampled layouts as a percentage of the
+    Returns `{name: (spread_pct, pads, commit, accel)}`, where `spread_pct` is
+    the peak-to-peak spread across the sampled layouts as a percentage of the
     smallest, and `pads` is how many distinct layouts it was measured over.
-    Empty when no commit has been swept -- which every consumer must treat as
-    "nobody measured this", never as "the sensitivity is zero".
+    `accel` is which emulator the arms ran on (`None` if they predate the
+    field) -- reported rather than assumed, because a band measured under one
+    accelerator says nothing about a run under the other. Empty when no commit
+    has been swept -- which every consumer must treat as "nobody measured
+    this", never as "the sensitivity is zero".
 
     # What the number means, and what it does not
 
@@ -3116,12 +3188,12 @@ def layout_bands(records, host, profile):
     # `describe_layout_band` names the commit the band came from, so a reader
     # who recognises it as ancient can discount it themselves.
     def group_key(item):
-        commit, arms = item
+        _key, arms = item
         newest = max((r.get("timestamp", "") for pad in arms.values()
                       for r in pad), default="")
         return (newest, len(arms))
 
-    commit, arms = max(groups.items(), key=group_key)
+    (commit, accel), arms = max(groups.items(), key=group_key)
 
     # One entry map per pad: the median over repeats at that pad, so a layout
     # measured twice does not get double weight and its own run-to-run noise is
@@ -3153,15 +3225,24 @@ def layout_bands(records, host, profile):
         lo, hi = min(values), max(values)
         if lo <= 0:
             continue
-        bands[name] = ((hi - lo) * 100.0 / lo, len(corrected), commit)
+        bands[name] = ((hi - lo) * 100.0 / lo, len(corrected), commit, accel)
     return bands
 
 
 def describe_layout_band(band):
-    """Human-readable form of one `layout_bands` entry."""
-    spread, pads, commit = band
+    """Human-readable form of one `layout_bands` entry.
+
+    The accelerator is named whenever it is known, because a band is only
+    evidence about the environment it was measured in -- a TCG-measured band
+    says nothing about a WHPX run, where the same binary is a median 3.5x
+    faster. When it is *not* known the description says so rather than staying
+    silent, so that an unlabelled band cannot be mistaken for one that was
+    checked.
+    """
+    spread, pads, commit, accel = band
+    where = accel if accel else "accelerator not recorded"
     return (f"placement alone moves it {spread:.0f}% "
-            f"({pads} layouts of {commit})")
+            f"({pads} layouts of {commit}, {where})")
 
 
 #: The single file the in-kernel benchmark suite is defined in, and the tree it
@@ -4305,9 +4386,14 @@ def cmd_layout_bands(history_path, profile):
               "has measured otherwise,\n  not because anybody has shown it.")
         return 0
 
-    _, pads, commit = next(iter(bands.values()))
-    print(f"Code-placement sensitivity on {host} / {profile}, measured over "
-          f"{pads} layouts of {commit}:")
+    _, pads, commit, accel = next(iter(bands.values()))
+    # The accelerator belongs in the header, not a footnote: this band is only
+    # evidence about runs on the same one. Measured on a byte-identical binary,
+    # the median benchmark is 3.5x faster under WHPX than under TCG, so a band
+    # read across accelerators is wrong by far more than it is wide.
+    where = accel if accel else "accelerator NOT recorded"
+    print(f"Code-placement sensitivity on {host} / {profile} / {where}, "
+          f"measured over {pads} layouts of {commit}:")
     print("  (how far the SAME SOURCE moves when only its .text offset "
           "changes -- a LOWER bound)")
     print()
@@ -4315,11 +4401,14 @@ def cmd_layout_bands(history_path, profile):
     # Name breaks the tie, so that two runs of this view diff cleanly. Ties are
     # the common case, not the corner one: most benchmarks sit at 0.0% and
     # would otherwise come out in dict order, making every re-run look changed.
-    for name, (spread, _pads, _commit) in sorted(
+    for name, (spread, _pads, _commit, _accel) in sorted(
             bands.items(), key=lambda item: (-item[1][0], item[0])):
         print(f"  {name:<{width}}  {spread:6.1f}%")
     print()
-    worst = max(bands.values())[0]
+    # Compare the spreads themselves rather than whole tuples: tuple ordering
+    # would fall through to `accel` on a tie, where `None` and a string are not
+    # comparable at all.
+    worst = max(band[0] for band in bands.values())
     print(f"  A movement smaller than a benchmark's own figure is not a "
           f"finding. The largest\n  here is {worst:.1f}%, which is the size of "
           f"'regression' this emulator can manufacture\n  from a relink alone.")
@@ -4485,6 +4574,12 @@ def main(argv=None):
     # from what the kernel that just ran was compiled with. They diverge exactly
     # when it matters most -- a stale build.
     text_pad = parse_text_pad(args.serial)
+    # Same argument, one layer out: the accelerator the kernel *ran on* is a
+    # fact about the run, and `QEMU_EXTRA` in this process is a fact about what
+    # was asked for. They diverge on a typo, on a changed default, and on a
+    # silent fallback -- and a cross-accelerator comparison is wrong by ~3.5x,
+    # far more than any regression this tool is looking for.
+    accel = parse_accel(args.serial)
     # Read once and used twice -- passed to the report so the replication gate
     # can find this binary's other runs, and stored in the record below so the
     # *next* run can find this one. Two `git_commit()` calls could disagree if
@@ -4637,6 +4732,14 @@ def main(argv=None):
         # tolerance -- and it would be used to *dismiss* regressions.
         if text_pad is not None:
             record["text_pad"] = text_pad
+        # Which accelerator the guest reported running on. Absent means the
+        # kernel predates the banner and cannot say -- never "TCG". This is the
+        # join key that keeps a layout band from being computed across two
+        # accelerators, where the spread would be measuring the emulator rather
+        # than the placement and would be ~3.5x too wide, i.e. wide enough to
+        # dismiss every regression the harness exists to catch.
+        if accel is not None:
+            record["accel"] = accel
         # Absent rather than null when the caller did not measure it: an
         # explicit `wall_seconds: null` invites a reader to treat it as zero,
         # and `dispersion_count`-style "absent means unknown" handling is

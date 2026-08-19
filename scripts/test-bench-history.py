@@ -3533,8 +3533,12 @@ def test_sweep_arms_are_read_even_though_they_are_experiments(bh):
 
     check("the shared filter does refuse them (that part is correct)",
           bh.comparable_records(arms, "H", "release"), [])
+    # The key is `(commit, accel)`, not a bare commit: the accelerator is part
+    # of the grouping key so that arms which ran on different accelerators
+    # cannot land in one band at all. `None` here is "these records predate the
+    # field", which is its own key and is never folded into TCG.
     check("...but the layout calibration reads them anyway",
-          list(bh.layout_arms(arms, "H", "release")), ["xxx"])
+          list(bh.layout_arms(arms, "H", "release")), [("xxx", None)])
 
 
 def test_two_layouts_are_not_a_band(bh):
@@ -3571,6 +3575,57 @@ def test_a_record_with_no_pad_is_not_counted_as_an_unpadded_arm(bh):
 
     check("a pre-banner record does not make up the third arm",
           bh.layout_bands(arms + [legacy], "H", "release"), {})
+
+
+def test_arms_from_two_accelerators_cannot_form_one_band(bh):
+    """A band spanning two emulators measures the emulators, not the placement.
+
+    Measured 2026-08-19 on one byte-identical kernel (`kernel_sha 7a17cf6be2a1`)
+    run under both accelerators: the median benchmark is 3.5x faster under WHPX
+    and the fastest 10.4x. Grouping by commit alone, a sweep that happened to
+    straddle a change of accelerator would report that ratio as "how much code
+    placement can move this benchmark" -- a band of several hundred percent,
+    which then dismisses *every* regression it is consulted about. Silently,
+    and in the direction that hides faults.
+
+    So the accelerator is part of the grouping *key*, not something checked for
+    agreement afterwards: no arrangement of records can produce a mixed band,
+    rather than none being produced as long as someone remembers to look.
+
+    The counterfactual below is the point of the test. The same seven records,
+    with the accelerator stripped, are exactly what the old code saw -- and they
+    do form the 500% band. The numbers are not incidental to the assertion; they
+    are the failure this key exists to make unreachable.
+
+    The two halves use *disjoint* pads because that is what the real failure
+    looks like: a sweep interrupted and resumed after the accelerator changed
+    continues the pad sequence rather than repeating it. Overlapping pads would
+    also produce a ruinous band (243% for these numbers) but a smaller one, the
+    per-pad median having averaged a TCG arm together with a WHPX one -- which
+    would understate what is being guarded against.
+    """
+    tcg = _sweep_arms({0: 500, 1024: 600, 2048: 550},
+                      accel="QEMU TCG", timestamp="2026-08-19T01:00:00")
+    whpx = _sweep_arms({3072: 100, 4096: 120, 5120: 110, 6144: 105},
+                       accel="Hyper-V/WHPX", timestamp="2026-08-19T02:00:00")
+
+    check("each accelerator is its own group, at the same commit",
+          sorted(bh.layout_arms(tcg + whpx, "H", "release")),
+          [("xxx", "Hyper-V/WHPX"), ("xxx", "QEMU TCG")])
+
+    bands = bh.layout_bands(tcg + whpx, "H", "release")
+    check("the band is the spread *within* one accelerator",
+          round(bands["b0"][0], 6), 20.0)
+    check("...over only that accelerator's arms", bands["b0"][1], 4)
+    check("...and it names which one, so a reader can discount it",
+          bands["b0"][3], "Hyper-V/WHPX")
+
+    # Same records, same values, accelerator removed: the mixed band appears.
+    # If this stops being 500% the test above has stopped proving anything.
+    blind = [{k: v for k, v in r.items() if k != "accel"}
+             for r in tcg + whpx]
+    check("...whereas blind to the accelerator they are one 500% band",
+          round(bh.layout_bands(blind, "H", "release")["b0"][0], 6), 500.0)
 
 
 def test_a_dirty_arm_is_not_a_layout_sample(bh):
@@ -3749,7 +3804,8 @@ def test_a_movement_inside_a_measured_band_stops_being_a_regression(bh):
           "EXPLAINED BY CODE PLACEMENT" in out, True)
     check("...and is not called a regression", "  REGRESSED (" in out, False)
     check("...and the band that excused it is quoted, with its size",
-          "placement alone moves it 900% (3 layouts of xxx)" in out, True)
+          "placement alone moves it 900% (3 layouts of xxx, "
+          "accelerator not recorded)" in out, True)
     # The band is three samples out of every possible offset, so it cannot
     # contain the worst pair among all of them. A reader who takes it as
     # exhaustive would clear a near-miss that nothing has cleared.

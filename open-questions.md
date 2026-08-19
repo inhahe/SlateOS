@@ -1593,6 +1593,56 @@ discovered later.
 | **D. Run both, for everything** | Maximum coverage: a regression that only appears under one accelerator is caught. Roughly doubles the wall-clock cost of the gate, which is already ~6 min for a debug boot. |
 | **E. Sweep intermediate `-cpu` models first, then decide** | Possibly finds a model that boots under WHPX *and* carries SMEP/SMAP — which would collapse this whole question. Cheap to test (the answer is in the first 80 lines of serial output, one boot per model), but the augmentation-dropping above suggests WHPX ignores `+feature` for any base model, so the likely outcome is "no such model exists". |
 
+#### Update 2026-08-19, from the first sweep arm: switching also disables the contamination check
+
+Found while running the probe promised below, and it is the strongest argument
+against switching that has turned up so far — strong enough that it belongs in
+the question rather than in a footnote.
+
+Every benchmark run takes a small reference measurement a dozen times during the
+suite, so that a run polluted by other work on this PC is labelled rather than
+believed. **Under WHPX it fails on all 13 samples and the suite reports
+`canary_verdict: "broken"`** — reproduced on both WHPX runs. So a WHPX run today
+has *no* contamination detection.
+
+Two things make this worse than a missing feature.
+
+- **The loss is largest exactly where the risk is.** Contamination matters more
+  the faster the guest runs: under TCG the emulator's own overhead dominates, so
+  a fixed interruption from Windows is a small slice of a long run; under WHPX
+  the same interruption lands on a run 3.5× shorter and is 3.5× the slice. WHPX
+  needs the canary more and currently supplies it less.
+- **It would trade a noise source we can measure for one we cannot.** The layout
+  artefact this switch is meant to cure is *deterministic* — that is what makes
+  a band measurable, and the harness already withdraws a movement inside one.
+  Host contamination is random and unbounded. Swapping the first for the second
+  is not obviously a gain even though the numbers would look tidier.
+
+**This does not by itself settle the question, because it looks fixable.** The
+cause is not WHPX: the canary refuses any measurement finer than 4 cycles per
+access, and a store costs 0.85 cycles on the real CPU against 5.16 under
+emulation. Worse, that threshold is wrong on its own terms — its stated
+derivation gives 4 *hundredths* of a cycle at the precision the code has used
+since 2026-08-14, so it is 100× too strict, and TCG itself was clearing it by
+only 29%. Full arithmetic in `known-issues.md`
+(`B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`). I will fix that
+regardless of how this question is answered, since it is a defect under TCG too.
+
+What that leaves genuinely open, and what the operator should weigh: fixing the
+floor restores the *measurement*, not automatically the *verdict*. The 25%
+tolerance would then apply to a 0.85-cycle quantity whose real variation has
+never been observed on this accelerator, and a second check in the same family
+(the scattered-access scale test) asserts something that is simply **false on
+real hardware** — that a per-access cost cannot depend on how many pages the
+loop walks, which ignores caches. So option C's true cost is not "one more QEMU
+run"; it is *re-establishing the benchmark suite's self-validation on a platform
+where its assumptions do not hold*. That is real work, it is not hard to
+justify, but it should be chosen knowingly rather than discovered afterwards.
+
+The same bill arrives with **Q53 option D** (real hardware), and larger — every
+assumption that breaks under WHPX breaks on bare metal too, plus the accelerator
+would be recorded as absent there (`TD-A-A-BARE-METAL-RUN-RECORDS-ITS-ACCELERATOR-AS-ABSENT`).
+
 **My recommendation: E first — it is one boot per candidate and it might make the
 question disappear — then C.** C is right if E finds nothing, because the two
 accelerators' weaknesses are disjoint *by purpose*: losing SMAP coverage matters

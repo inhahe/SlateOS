@@ -141,6 +141,24 @@ SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
 # what the stimulus did, it is what explains an ungradeable run, and it must
 # still be there tomorrow when someone asks why the window did not land.
 LOAD_RECORD="$PROJECT_ROOT/build/canary-load-record.json"
+# The live benchmark names the last run actually saw.  Rewritten by every run,
+# so it maintains itself; consulted below to reject a window bound that could
+# never fire.  See canary-load.py's header: the live result line and the SCORE
+# line disagree for 27 of the suite's 86 benchmarks, which is how P22's second
+# attempt was lost.
+LOAD_NAMES="$PROJECT_ROOT/build/canary-load-names.txt"
+
+# Checked here, before the build and the boot, rather than inside the
+# controller -- which does not start until QEMU is already up, by which point
+# the mistake has cost the very thing this check exists to save.
+if [ -n "$LOAD_AT" ] && [ -f "$LOAD_NAMES" ]; then
+    if ! python "$SCRIPT_DIR/canary-load.py" \
+            --serial "$SERIAL_FILE" --check-names-only \
+            --known-names "$LOAD_NAMES" \
+            ${LOAD_AT:+--at "$LOAD_AT"} ${LOAD_UNTIL:+--until "$LOAD_UNTIL"}; then
+        exit 2
+    fi
+fi
 
 SPIN_PIDS=()
 LOAD_PID=""
@@ -153,7 +171,17 @@ stop_load() {
     # MSYS -- no handler, no record, and the spinners left to fall back on
     # their own dead-parent detection, which works but takes a second and
     # tells us nothing about what happened.
-    [ -n "${LOAD_STOP:-}" ] && : > "$LOAD_STOP" 2>/dev/null
+    # The braces matter.  `: > "$F" 2>/dev/null` does NOT silence a failing
+    # redirect: bash applies redirections left to right, so `>` is attempted
+    # and reports to the stderr that is still the terminal before the `2>` is
+    # reached.  This function runs twice -- once explicitly at the end of a
+    # successful run, once again from the EXIT trap -- and on the second pass
+    # the directory is already gone, so the run's last line was a bare
+    # "No such file or directory" that read like a failure in an otherwise
+    # clean run.
+    if [ -n "${LOAD_STOP:-}" ]; then
+        { : > "$LOAD_STOP"; } 2>/dev/null || true
+    fi
     if [ -n "${LOAD_PID:-}" ]; then
         for _ in $(seq 1 30); do
             kill -0 "$LOAD_PID" 2>/dev/null || break
@@ -172,7 +200,13 @@ stop_load() {
 
 cleanup() {
     stop_load
-    rm -rf "${LOAD_DIR:-}" 2>/dev/null
+    # Clearing the variables after removing the directory makes a second
+    # cleanup (the EXIT trap, after an explicit call) a no-op rather than a
+    # sequence of failed operations on paths that no longer exist.
+    [ -n "${LOAD_DIR:-}" ] && rm -rf "$LOAD_DIR" 2>/dev/null
+    LOAD_DIR=""
+    LOAD_STOP=""
+    LOAD_READY=""
 
     # Restore the benchmark history.
     #
@@ -278,7 +312,7 @@ python "$SCRIPT_DIR/canary-load.py" \
     ${LOAD_AT:+--at "$LOAD_AT"} ${LOAD_UNTIL:+--until "$LOAD_UNTIL"} \
     --spinners "$SPINNERS" --timeout 1800 \
     --ready-file "$LOAD_READY" --stop-file "$LOAD_STOP" \
-    --record "$LOAD_RECORD" --hold &
+    --record "$LOAD_RECORD" --known-names "$LOAD_NAMES" --hold &
 LOAD_PID=$!
 
 # Wait for every spinner interpreter to be up before going any further, so the
@@ -312,9 +346,16 @@ LOAD_RC=$?
 LOAD_PID=""
 
 case "$LOAD_RC" in
-    0) echo "=== load fired; boot exited $BOOT_RC ===" ;;
-    1) echo "=== WARNING: the load NEVER FIRED${LOAD_AT:+ -- '$LOAD_AT' was never seen}."
-       echo "=== Nothing about the model can be concluded from this run. ===" ;;
+    0) echo "=== load fired and was released; boot exited $BOOT_RC ===" ;;
+    # Exit 1 now covers both missing edges: a trigger that never fired and a
+    # release that never fired.  The controller has already said which on
+    # stderr, with the closest live names.  Either way the labelled window is
+    # not the window that was applied, so the run is void for P22(a) -- and
+    # saying so here, rather than leaving it to be inferred from a JSON field,
+    # is the whole lesson of the second attempt.
+    1) echo "=== WARNING: the load's window is not the one that was asked for."
+       echo "=== See the PROBLEM line above. Nothing about the model can be"
+       echo "=== concluded from this run's labelled window. ===" ;;
     *) echo "=== WARNING: load controller exited $LOAD_RC ===" ;;
 esac
 

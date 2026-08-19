@@ -302,6 +302,187 @@ with tempfile.TemporaryDirectory() as tmpdir:
                f"still alive: {[p for p in pids if pid_alive(p)]}")
 
 
+# --------------------------------------------------------------------------
+# 5. A window with no right-hand edge is a failure, not a footnote
+# --------------------------------------------------------------------------
+# This is the exact shape of P22's *second* void run.  `--until` named a
+# benchmark that appears on the end-of-run scorecard but never as a live
+# result line, so it could not match; the load was applied and never released,
+# ran to the end of the boot, and the controller exited 0.  The run looked
+# successful and was unusable.
+print("unmatched --until")
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    serial = os.path.join(tmpdir, "serial.txt")
+
+    def start_replay4():
+        replay(serial, SUITE, per_line=0.01).join()
+
+    record, rc, out = run_controller(
+        serial, ["--at", "bench_05", "--until", "not_a_live_line"],
+        wait_for=start_replay4, delay=0.3)
+
+    check("the load still fired", record["fired"], True)
+    check("but it was never released", record["released"], False)
+    check("and the record names the problem",
+          record.get("problem"), "until-never-matched")
+    check("exit code 1 when the window never closed", rc, 1)
+    check_true("the operator is told which name never matched",
+               "not_a_live_line" in out, out[-400:])
+
+
+# --------------------------------------------------------------------------
+# 6. Names are validated before anything is spawned
+# --------------------------------------------------------------------------
+print("name validation")
+
+
+def run_validation(extra, known):
+    """Run only far enough to accept or reject the names. Returns (rc, out)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        names_path = os.path.join(tmp, "names.txt")
+        if known is not None:
+            with open(names_path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(known) + "\n")
+        proc = subprocess.run(
+            [sys.executable, CANARY_LOAD, "--serial",
+             os.path.join(tmp, "nonexistent-serial.txt"),
+             "--spinners", "0", "--timeout", "5",
+             "--known-names", names_path] + extra,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            timeout=90)
+        return proc.returncode, proc.stdout
+
+
+rc, out = run_validation(["--at", "bench_05", "--until", "bench_99"], SUITE)
+check("a name absent from the known list is rejected", rc, 2)
+check_true("the rejection names the offending flag and value",
+           "--until 'bench_99'" in out, out[-400:])
+check_true("and suggests the closest live names",
+           "bench_09" in out or "bench_98" in out or "closest" in out,
+           out[-400:])
+check_true("nothing was spawned before the rejection",
+           "load controller ready" not in out, out[-400:])
+
+# A typo one character off is the case the suggestion exists for.
+rc, out = run_validation(["--at", "bench_O5"], SUITE)
+check("a typo'd --at is rejected too", rc, 2)
+check_true("and bench_05 is offered as the correction",
+           "bench_05" in out, out[-400:])
+
+# Absence of the file must not block a first run on a fresh checkout.
+rc, out = run_validation(["--at", "bench_05"], None)
+check_true("an absent known-names file does not reject anything",
+           rc != 2, f"rc={rc}: {out[-300:]}")
+
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    serial = os.path.join(tmpdir, "serial.txt")
+    names_path = os.path.join(tmpdir, "names.txt")
+
+    def start_replay5():
+        replay(serial, SUITE, per_line=0.01).join()
+
+    record, rc, out = run_controller(
+        serial, ["--at", "bench_05", "--known-names", names_path],
+        wait_for=start_replay5, delay=0.3)
+    check_true("a run writes the live names it saw", os.path.exists(names_path),
+               names_path)
+    with open(names_path, encoding="utf-8") as handle:
+        written = {line.strip() for line in handle if line.strip()}
+    # Self-maintaining: the list the next run validates against is exactly the
+    # set of names that could have triggered this one.
+    check("the written list is the suite it saw", written, set(SUITE))
+    check_true("and excludes the pre-marker self-test",
+               "self_test_nop" not in written, sorted(written)[:5])
+
+
+# --------------------------------------------------------------------------
+# 7. The host-side witness
+# --------------------------------------------------------------------------
+# The probe answers "when was the host actually busy", which is the question
+# both void runs turned on and neither could answer.  Its *arithmetic* is
+# tested here on synthetic samples, deterministically; that it inflates under
+# a real load is a property of the host, checked by the run itself.
+print("host canary")
+
+check("no samples means no summary", cl.summarise_probe([], 1.0, 2.0), None)
+
+# t < 1.0 is idle, 1.0 <= t < 2.0 is loaded, t >= 2.0 is after the release.
+synthetic = ([(0.1, 0.001), (0.5, 0.001), (0.9, 0.003)]
+             + [(1.1, 0.004), (1.5, 0.002), (1.9, 0.004)]
+             + [(2.1, 0.001), (2.5, 0.001)])
+summary = cl.summarise_probe(synthetic, 1.0, 2.0)
+check("idle median comes only from before the load",
+      summary["idle_median_s"], 0.001)
+check("loaded median comes only from the window",
+      summary["loaded_median_s"], 0.004)
+check("inflation is the ratio of the two", summary["inflation"], 4.0)
+check("every sample is counted", summary["samples"], 8)
+
+# A load that never fired has no loaded side, and must not be reported as
+# "made no difference" -- that would be an exoneration nobody measured.
+never = cl.summarise_probe([(0.1, 0.001), (0.5, 0.001)], None, None)
+check("a load that never fired has no inflation", never["inflation"], None)
+check("but its idle median is still reported", never["idle_median_s"], 0.001)
+# Same for a window so short that no sample landed inside it: the honest
+# answer is "not measured", never 1.0.
+empty_window = cl.summarise_probe([(0.1, 0.001), (2.5, 0.001)], 1.0, 2.0)
+check("a window no sample fell into yields no inflation",
+      empty_window["inflation"], None)
+
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    serial = os.path.join(tmpdir, "serial.txt")
+
+    def start_replay6():
+        replay(serial, SUITE, per_line=0.02).join()
+
+    record, rc, out = run_controller(
+        serial, ["--at", "bench_10", "--until", "bench_20"],
+        wait_for=start_replay6, delay=0.3)
+
+    check_true("the run records host-canary samples",
+               len(record["host_probe_samples"]) > 5,
+               f"{len(record['host_probe_samples'])} samples")
+    stamps = [t for t, _ in record["host_probe_samples"]]
+    check_true("samples are in time order", stamps == sorted(stamps),
+               "out of order")
+    # The join that makes the ground truth measurable: every benchmark
+    # completion carries a timestamp on the same clock as the probe.
+    times = [t for _, t in record["completions"]]
+    check("every completion is timestamped",
+          len(times), record["completions_seen"])
+    check_true("completion times are in order", times == sorted(times),
+               "out of order")
+    check_true("the load's own on/off instants are on that clock too",
+               record["fired_at"] is not None
+               and record["released_at"] is not None
+               and record["fired_at"] < record["released_at"],
+               f"{record['fired_at']} -> {record['released_at']}")
+    # The window's benchmarks must fall between the two instants, to within
+    # the instrument's own resolution.
+    #
+    # The tolerance is one poll interval and is not slack: a completion is
+    # stamped when the poll *saw* it, and the trigger line is seen in the same
+    # batch as any line that arrived just after it, so those share a stamp
+    # fractionally *below* `fired_at`.  Asserting strict containment would be
+    # asserting a precision the controller does not have -- exactly the kind
+    # of claim this experiment keeps being burned by.  Propagating the
+    # uncertainty explicitly is the honest version.
+    poll = record["poll_seconds"]
+    during = dict(record["completions"])
+    inside = [during[n] for n in record["during_names"] if n in during]
+    check_true("the window's completions lie inside the load's interval",
+               all(record["fired_at"] - poll <= t
+                   <= record["released_at"] + poll for t in inside),
+               f"fired {record['fired_at']}, released "
+               f"{record['released_at']}, poll {poll}, times {inside}")
+    check_true("and none of them precedes the trigger by more than one poll",
+               all(t >= record["fired_at"] - poll for t in inside),
+               f"fired {record['fired_at']}, times {inside}")
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILURE(S)")

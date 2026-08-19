@@ -49,6 +49,53 @@ fired.  The **ground truth is established independently**, by
 loaded benchmarks measurably slowed down relative to the untouched ones.  A
 stimulus is not a stimulus because the script that applied it says so.
 
+The trigger names live in a different namespace from the scorecard
+------------------------------------------------------------------
+The second attempt was void too, and for a reason worth stating loudly: the
+kernel prints a benchmark's *live* result line under one name and its
+end-of-run SCORE line under another.  They agree for 59 of the suite's 86
+benchmarks and disagree for the other 27 -- the live line says
+`vfs_write_16k`, the scorecard says `vfs_throughput_16k_write`; the live line
+says `isr_hard_irq`, the scorecard says `isr_latency`.  There are also 11 live
+lines with no scorecard entry at all (97 live lines, 86 scored benchmarks).
+
+`--at` and `--until` match **live** lines, but a human reads the window's
+bounds off the **scorecard**.  Naming a scorecard-only benchmark therefore
+produced a trigger that could never fire, and the run went to completion
+reporting success: `--until vfs_throughput_16k_write` matched nothing, the
+load was never released, and it ran to the end of the boot while the record
+said `released: false` in a field nobody had been asked to check.
+
+Two guards, because one of them is not enough:
+
+* **Up front.**  `--known-names` points at the list of live names the previous
+  run actually saw.  A name absent from it is rejected before a single
+  spinner is spawned, with the closest matches printed -- so the cost of the
+  mistake is a second, not a 2.5-minute boot and a void experiment.  The file
+  is rewritten from every run, so it maintains itself.
+* **At the end.**  A `--until` that never matched is now a **failure exit**,
+  not a footnote in the JSON.  A window with no right-hand edge is not a
+  narrower experiment than the one requested; it is a different one.
+
+What the host-side witness is for
+---------------------------------
+Both void runs turned on the same question -- *when did the load actually
+become effective?* -- and neither could answer it, because nothing recorded
+the host's own state over time.  The serial log carries no timestamps, so
+"the load was on while benchmarks 60-72 ran" was an inference from two
+numbers the controller happened to print.
+
+So the controller now keeps a **host canary**, deliberately the same idea as
+the guest's: a fixed, tiny amount of CPU work, re-timed on a fixed interval,
+recorded with a timestamp.  When the host is saturated the same work takes
+longer, so the samples say *when* the host was contended, measured on the
+host, independently of both the guest's canary (the instrument under test)
+and this script's own beliefs.  Every benchmark completion is timestamped on
+the same clock, so the two can be joined afterwards: for each benchmark, was
+the host busy while it ran.  That is the ground truth the first two attempts
+were missing, and it is what makes an unexpected result diagnosable rather
+than merely disappointing.
+
 Process hygiene
 ---------------
 The spinners are `multiprocessing` children of this process.  They are killed
@@ -62,11 +109,14 @@ handlers here) cannot leave six CPU burners running forever.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import multiprocessing
 import os
 import re
+import statistics
 import sys
+import threading
 import time
 
 #: A benchmark's live result line, printed by the kernel as it finishes:
@@ -93,6 +143,77 @@ POLL_SECONDS = 0.1
 #: enough that the checks are not themselves the workload, small enough that
 #: a stop request is honoured in well under a benchmark's runtime.
 SPIN_CHUNK = 200_000
+
+#: How often the host canary re-times its fixed unit of work, in seconds.
+#: The benchmarks this experiment cares about occupy a few seconds, so 0.05 s
+#: puts tens of samples inside the window -- enough to say when the load
+#: became effective to within a benchmark or two, which is the resolution the
+#: whole positional question is asked at.
+HOST_PROBE_INTERVAL = 0.05
+
+#: Iterations of the host canary's unit of work.  Chosen to take well under a
+#: millisecond on an idle host: large enough to be timed reliably against a
+#: ~15 ms Windows clock granularity when it inflates, small enough that the
+#: probe itself is a negligible fraction of one core.  It measures *CPU
+#: availability* rather than wakeup latency deliberately -- that is what
+#: QEMU's vCPU thread is actually competing for.
+HOST_PROBE_WORK = 20_000
+
+
+def _host_probe(samples, stop_probe, origin):
+    """Re-time a fixed unit of CPU work, and record when it got slower.
+
+    The host-side twin of the guest's canary, and it exists for the same
+    reason: a number that should never change, so that when it does change
+    the change is the finding.  Runs in a thread rather than a process
+    because it must share this process's clock origin, and because a thread
+    that spends almost all its time asleep cannot meaningfully perturb the
+    measurement -- unlike spawning something, which RESULT P19 shows plainly
+    that it would.
+
+    Appends `(seconds_since_origin, seconds_the_work_took)`.  `samples` is a
+    plain list: CPython list append is atomic under the GIL, and the reader
+    only looks at it once this thread has been joined.
+    """
+    while not stop_probe.is_set():
+        start = time.monotonic()
+        for _ in range(HOST_PROBE_WORK):
+            pass
+        end = time.monotonic()
+        samples.append((round(start - origin, 4), round(end - start, 6)))
+        # Sleep the remainder of the interval, so the probe's duty cycle stays
+        # constant as the work inflates: a probe that ran back-to-back under
+        # load would itself become part of the load it is measuring.
+        slack = HOST_PROBE_INTERVAL - (end - start)
+        if slack > 0:
+            stop_probe.wait(slack)
+
+
+def summarise_probe(samples, fired_at, released_at):
+    """Reduce the host canary to what a reader needs to judge the stimulus.
+
+    The ratio is what matters, not the absolute cost: the unit of work's
+    idle duration is a property of this host and this Python build, and
+    comparing it against anything but itself would be meaningless.
+    """
+    if not samples:
+        return None
+    before = [d for t, d in samples if fired_at is None or t < fired_at]
+    during = [d for t, d in samples
+              if fired_at is not None and t >= fired_at
+              and (released_at is None or t < released_at)]
+    idle = statistics.median(before) if before else None
+    busy = statistics.median(during) if during else None
+    return {
+        "samples": len(samples),
+        "idle_median_s": round(idle, 6) if idle is not None else None,
+        "loaded_median_s": round(busy, 6) if busy is not None else None,
+        # None rather than 1.0 when either side is missing: "the load made no
+        # difference" and "there was nothing to compare" are different
+        # statements, and only one of them is evidence.
+        "inflation": round(busy / idle, 3)
+                     if (idle and busy) else None,
+    }
 
 
 def _spin(go, stop, deadline):
@@ -230,6 +351,15 @@ def run(args):
         "outcome": "pending",
     }
 
+    # The host canary starts before the load and stops after it, so it always
+    # has an undisturbed stretch to serve as its own reference.
+    probe_samples = []
+    probe_stop = threading.Event()
+    probe = threading.Thread(
+        target=_host_probe, args=(probe_samples, probe_stop, started),
+        daemon=True)
+    probe.start()
+
     # Announce readiness only once every interpreter is up, because the
     # caller uses this line to decide it is safe to start QEMU.  Announcing
     # earlier would move the interpreter startup cost back inside the
@@ -312,7 +442,11 @@ def run(args):
             if worker.is_alive():
                 # Last resort, and still by object rather than by name.
                 worker.terminate()
+        probe_stop.set()
+        probe.join(timeout=5)
         last_seen = watcher.completions[-1][1] if watcher.completions else None
+        fired_rel = (on_at - started) if on_at is not None else None
+        released_rel = (off_at - started) if off_at is not None else None
         record.update({
             "load_seconds": (off_at - on_at)
                             if (on_at is not None and off_at is not None)
@@ -324,10 +458,66 @@ def run(args):
             "completions_before_on": lines_before_on,
             "completions_during": len(during),
             "during_names": during,
+            # Everything below is on one clock, seconds since this process
+            # started, so a benchmark completion and a host-canary sample can
+            # be compared directly.  This is what makes "when did the load
+            # actually become effective" a measurement rather than a guess --
+            # the question both void runs turned on and neither could answer.
+            # A completion is stamped with the time the poll *observed* it, so
+            # the benchmark actually finished somewhere in
+            # [stamp - poll_seconds, stamp].  Recorded rather than assumed,
+            # because it is the instrument's real resolution: lines arriving
+            # in one batch share a stamp, and the controller cannot tell which
+            # of them preceded the trigger it fired on in that same batch.
+            "poll_seconds": POLL_SECONDS,
+            "fired_at": round(fired_rel, 4) if fired_rel is not None else None,
+            "released_at": (round(released_rel, 4)
+                            if released_rel is not None else None),
+            "completions": [(name, round(when - started, 4))
+                            for name, when in watcher.completions],
+            "host_probe": summarise_probe(probe_samples, fired_rel,
+                                          released_rel),
+            "host_probe_samples": probe_samples,
         })
+        # A `--until` that never matched is not a detail.  The window has no
+        # right-hand edge, so the run answers a different question from the
+        # one asked, and the caller must be able to tell without reading the
+        # JSON.  See the module docstring: this is exactly how the second
+        # attempt was lost.
+        if args.until is not None and not record["released"]:
+            record["problem"] = "until-never-matched"
+        elif args.at is not None and not record["fired"]:
+            record["problem"] = "at-never-matched"
         tail.close()
 
     return record
+
+
+def read_known_names(path):
+    """The live benchmark names a previous run saw, or None if unrecorded.
+
+    Absence is not an error: the first run on a fresh checkout has no list
+    yet, and refusing to run without one would make the guard impossible to
+    bootstrap.  It returns None (unknown) rather than an empty set (nothing
+    matches), because those must not behave the same way.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        names = {line.strip() for line in handle if line.strip()}
+    return names or None
+
+
+def write_known_names(path, names):
+    """Record this run's live names, so the next run can validate against it."""
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            for name in sorted(set(names)):
+                handle.write(name + "\n")
+    except OSError as exc:
+        # A guard that cannot be written is worth a warning, never a failed
+        # run: the experiment itself succeeded or failed on its own terms.
+        print(f"warning: could not write {path}: {exc}", file=sys.stderr)
 
 
 def main(argv=None):
@@ -361,13 +551,56 @@ def main(argv=None):
     parser.add_argument("--hold", action="store_true",
                         help="keep following the log after the load is "
                              "removed, until --stop-file or --timeout")
+    parser.add_argument("--known-names", default=None,
+                        help="file of live benchmark names seen by a previous "
+                             "run; --at/--until are checked against it before "
+                             "anything is spawned, and it is rewritten from "
+                             "this run's own names")
+    parser.add_argument("--check-names-only", action="store_true",
+                        help="validate --at/--until against --known-names and "
+                             "exit; used before the boot starts, so a bad "
+                             "name costs a second rather than a whole run")
     args = parser.parse_args(argv)
 
     if args.until is not None and args.at is None:
         parser.error("--until requires --at (a prefix window cannot "
                      "discriminate; see P22)")
 
+    known = read_known_names(args.known_names)
+    if known:
+        # Checked here rather than after the boot because the whole point is
+        # to make a mistyped or scorecard-only name cost a second instead of
+        # a 2.5-minute boot that produces an unusable run.
+        unknown = [(flag, name)
+                   for flag, name in (("--at", args.at), ("--until", args.until))
+                   if name is not None and name not in known]
+        if unknown:
+            for flag, name in unknown:
+                near = difflib.get_close_matches(name, sorted(known), n=5,
+                                                 cutoff=0.4)
+                print(f"{flag} '{name}' is not a live benchmark name.",
+                      file=sys.stderr)
+                if near:
+                    print(f"    closest live names: {', '.join(near)}",
+                          file=sys.stderr)
+            print(f"    ({len(known)} live names known, from "
+                  f"{args.known_names})", file=sys.stderr)
+            print("    Note the live result line and the end-of-run SCORE "
+                  "line do not always agree;\n"
+                  "    --at/--until match the live line.", file=sys.stderr)
+            return 2
+
+    if args.check_names_only:
+        # Silent on success: this runs before every boot, and a line of
+        # reassurance per run trains the reader to skip the block that also
+        # carries the refusal.
+        return 0
+
     record = run(args)
+
+    if args.known_names and record.get("completions"):
+        write_known_names(args.known_names,
+                          [name for name, _ in record["completions"]])
 
     if args.record:
         with open(args.record, "w", encoding="utf-8") as handle:
@@ -390,7 +623,37 @@ def main(argv=None):
     if record.get("load_seconds") and record.get("suite_seconds_seen"):
         share = 100 * record["load_seconds"] / record["suite_seconds_seen"]
         print(f"  window share      : {share:.1f}% of the suite's wall time")
-    return 0 if record["fired"] else 1
+
+    # The host's own account of whether it was actually busy.  Printed next to
+    # the controller's intentions on purpose: "I set the flag" and "the machine
+    # got slower" are different claims, and only the second one is a stimulus.
+    host = record.get("host_probe")
+    if host and host.get("inflation") is not None:
+        print(f"  host canary       : x{host['inflation']:.2f} "
+              f"({host['idle_median_s'] * 1e3:.2f}ms idle -> "
+              f"{host['loaded_median_s'] * 1e3:.2f}ms under load, "
+              f"{host['samples']} samples)")
+    elif host:
+        print(f"  host canary       : not comparable "
+              f"({host['samples']} samples, no idle/loaded contrast)")
+
+    problem = record.get("problem")
+    if problem == "at-never-matched":
+        print(f"  PROBLEM           : never saw '{args.at}' -- the load was "
+              f"never applied.", file=sys.stderr)
+    elif problem == "until-never-matched":
+        print(f"  PROBLEM           : never saw '{args.until}' -- the load was "
+              f"applied but never released, so it ran to the end of the boot "
+              f"and the window has no right-hand edge.", file=sys.stderr)
+    if problem:
+        print("    The live result line and the end-of-run SCORE line do not "
+              "always agree; --at/--until match the live line. Pass "
+              "--known-names to have this checked before the boot.",
+              file=sys.stderr)
+    # Exit non-zero for *either* missing edge.  Returning 0 for a window that
+    # was opened and never closed is what let the second attempt run to
+    # completion looking like a success.
+    return 1 if problem else 0
 
 
 if __name__ == "__main__":

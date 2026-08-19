@@ -729,6 +729,43 @@ def write_known_names(path, names, aliases=None, scored=None):
         print(f"warning: could not write {path}: {exc}", file=sys.stderr)
 
 
+def report_unreachable_scored(live, aliases, scored):
+    """Warn about scored names that name no live result line.
+
+    Such a name cannot be a window bound: `--at`/`--until` trigger on the live
+    line, so asking for one of these waits for output that is never printed and
+    the run is lost to a stimulus that never fired.  That is how P22's second
+    attempt died, and the three names responsible sat undiagnosed for a day
+    because nothing said them out loud -- the only thing that noticed was a
+    test which happened to probe for orphans and reported the count.
+
+    Printed after every run rather than checked once, on the same reasoning as
+    the kernel's `SCORED_WITHOUT_MEASUREMENT`: a gap that is recomputed from
+    each run's own output cannot go stale, and a silent miscount becomes a
+    printed anomaly.  Silent when there is nothing to say, so the line means
+    something when it appears.
+
+    Returns the sorted list of offenders, for a caller that wants to act on it.
+    """
+    if not live or not scored:
+        return []
+    orphans = sorted(name for name in scored
+                     if aliases.get(name, name) not in live)
+    if orphans:
+        print(f"warning: {len(orphans)} scored benchmark(s) name no live "
+              f"result line, so they cannot be used as a window bound:",
+              file=sys.stderr)
+        for name in orphans:
+            print(f"    {name}", file=sys.stderr)
+        print("    The kernel emits '[bench] MEASURED-AS <scored> <live>' for "
+              "every benchmark whose\n"
+              "    two names differ; a missing pairing means the live line's "
+              "name was not the one\n"
+              "    passed to note_measurement(). See Measurement::name in "
+              "kernel/src/bench.rs.", file=sys.stderr)
+    return orphans
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Load the host CPU across a named window of a --bench "
@@ -856,10 +893,12 @@ def main(argv=None):
     record = run(args)
 
     if args.known_names and record.get("completions"):
-        write_known_names(args.known_names,
-                          [name for name, _ in record["completions"]],
-                          read_measured_as(args.serial),
-                          read_scored_names(args.serial))
+        live_seen = [name for name, _ in record["completions"]]
+        measured_as = read_measured_as(args.serial)
+        scored_seen = read_scored_names(args.serial)
+        write_known_names(args.known_names, live_seen, measured_as,
+                          scored_seen)
+        report_unreachable_scored(set(live_seen), measured_as, scored_seen)
 
     if args.record:
         with open(args.record, "w", encoding="utf-8") as handle:

@@ -452,6 +452,18 @@ static SPLIT_TALLY_UNCHECKED: AtomicU64 = AtomicU64::new(0);
 struct Measurement {
     /// The name the window was *measured* under — which is not always the name
     /// it is *recorded* under. See [`MEASUREMENTS`].
+    ///
+    /// **Invariant: this is the name printed on the window's live
+    /// `[bench] <name>: min=…` result line.** [`run`] satisfies it for free by
+    /// passing one `name` to both, but a hand-built [`BenchResult`] prints its
+    /// line separately and must be written to keep the two in step — bind the
+    /// literal once and use the binding twice. Three of them did not, and the
+    /// consequence was not a cosmetic mislabel: `MEASURED-AS` (see
+    /// [`print_scorecard`]) is emitted only when this differs from the scored
+    /// name, so noting the *scored* name here suppresses the very line that
+    /// tells a consumer which live line to watch for. `scripts/canary-load.py`
+    /// then took the scorecard name for a live one and waited, through the
+    /// whole suite, for a result line that is never printed.
     name: &'static str,
     /// Set by [`record`] when this window reaches the scorecard, and therefore
     /// `bench/history.jsonl` and run-over-run regression detection.
@@ -527,6 +539,10 @@ fn reset_suite_state() {
 /// the window's index, which the caller **must** store in
 /// [`BenchResult::seq`] — it is the only link between a measurement and the
 /// scorecard entry that covers it.
+///
+/// `name` is the name on the window's **live result line**, not the name it is
+/// scored under; the two differ for six benchmarks and the difference is the
+/// whole content of `MEASURED-AS`. See [`Measurement::name`].
 fn note_measurement(name: &'static str, split: SplitCheck) -> usize {
     let seq = {
         let mut m = MEASUREMENTS.lock();
@@ -3557,8 +3573,18 @@ fn bench_context_switch() {
     // Each yield is a round-trip (2 context switches).
     let per_switch_ns = min_ns / 2;
 
+    // One binding for the live line's name and `note_measurement`'s, because
+    // they must not drift: `MEASURED-AS` publishes the noted name as the live
+    // one, and a consumer that trusts it (`scripts/canary-load.py`) then waits
+    // for a result line that never appears. They *had* drifted here — the print
+    // said `context_switch_rt` while the note said `context_switch`, so the two
+    // names compared equal, no `MEASURED-AS` was emitted, and the scorecard name
+    // looked like a live name that simply never fires.
+    const LIVE_NAME: &str = "context_switch_rt";
+
     serial_println!(
-        "[bench] context_switch_rt: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        LIVE_NAME,
         min,
         min_ns,
         mean,
@@ -3587,7 +3613,7 @@ fn bench_context_switch() {
         // Registered by hand because this result did not come from `run`.
         // Without it the window is absent from the coverage tally and the
         // scorecard entry below is an orphan — see `SCORED_WITHOUT_MEASUREMENT`.
-        seq: note_measurement("context_switch", SplitCheck::NotChecked),
+        seq: note_measurement(LIVE_NAME, SplitCheck::NotChecked),
     };
     score("context_switch", &ctx_result, target_ns);
     if per_switch_ns <= target_ns {
@@ -4293,8 +4319,14 @@ fn bench_ipc_channel_sync() {
     let min_ns = cycles_to_ns(min);
     let mean_ns = cycles_to_ns(mean);
 
+    // One binding for both the live line and `note_measurement` — see the
+    // identical constant in the context-switch benchmark for why they must not
+    // be written out twice.
+    const LIVE_NAME: &str = "ipc_channel_sync_rt";
+
     serial_println!(
-        "[bench] ipc_channel_sync_rt: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        LIVE_NAME,
         min,
         min_ns,
         mean,
@@ -4318,7 +4350,7 @@ fn bench_ipc_channel_sync() {
         mean_ns,
         // Hand-rolled measurement loop, not `run`; no split sets exist.
         split: SplitCheck::NotChecked,
-        seq: note_measurement("ipc_channel_sync", SplitCheck::NotChecked),
+        seq: note_measurement(LIVE_NAME, SplitCheck::NotChecked),
     };
     score("ipc_channel_sync", &sync_result, target_ns);
     if min_ns <= target_ns {
@@ -5156,8 +5188,14 @@ fn bench_isr_latency() {
             let mean_ns = cycles_to_ns(m.mean_cycles);
             let max_ns = cycles_to_ns(m.max_cycles);
 
+            // One binding for both the live line and `note_measurement` — see
+            // the identical constant in the context-switch benchmark for why
+            // they must not be written out twice.
+            const LIVE_NAME: &str = "isr_hard_irq";
+
             serial_println!(
-                "[bench] isr_hard_irq: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles ({}ns)  [{} samples in {} ticks]",
+                "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles ({}ns)  [{} samples in {} ticks]",
+                LIVE_NAME,
                 m.min_cycles,
                 min_ns,
                 m.mean_cycles,
@@ -5181,7 +5219,7 @@ fn bench_isr_latency() {
                 // Aggregated by the ISR itself across real interrupts; the
                 // samples are not ours to partition.
                 split: SplitCheck::NotChecked,
-                seq: note_measurement("isr_latency", SplitCheck::NotChecked),
+                seq: note_measurement(LIVE_NAME, SplitCheck::NotChecked),
             };
             score("isr_latency", &isr_result, 10000);
             if m.min_cycles <= target_cycles {

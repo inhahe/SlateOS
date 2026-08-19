@@ -28,8 +28,10 @@ strictly worse than the real thing.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -52,6 +54,39 @@ def load_module(path, name):
 
 
 cl = load_module(CANARY_LOAD, "canary_load")
+
+
+def read_name_file():
+    """`build/canary-load-names.txt` -> `(live, aliases, scored)`, or None.
+
+    Parsed with `canary-load.py:read_known_names`'s exact rules, because the
+    point is to predict *its* verdict. A bare line is a live name, `alias
+    <scored> <live>` is a pairing, `scored <name>` is a scorecard name.
+
+    Read up here, rather than beside the wrapper tests that first needed it,
+    because the unreachable-scored sweep further up the file reads it too, and
+    a fixture defined twice is a fixture that will one day disagree with
+    itself.
+    """
+    path = os.path.join(REPO_ROOT, "build", "canary-load-names.txt")
+    if not os.path.exists(path):
+        return None
+    live, aliases, scored = set(), {}, set()
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.split()
+            if not parts:
+                continue
+            if parts[0] == "alias" and len(parts) == 3:
+                aliases[parts[1]] = parts[2]
+            elif parts[0] == "scored" and len(parts) == 2:
+                scored.add(parts[1])
+            elif len(parts) == 1:
+                live.add(parts[0])
+    return live, aliases, scored
+
+
+NAMES = read_name_file()
 
 
 def check(label, got, want):
@@ -504,6 +539,69 @@ with tempfile.TemporaryDirectory() as tmpdir:
           {"page_alloc_free", "page_alloc_zeroed_free"})
 
 
+# The sweep that turns the two-namespace gap from something a test happens to
+# notice into something every run says out loud. A scored name that resolves to
+# no live line cannot be a window bound, and the only cost of not knowing that
+# up front is a whole boot spent waiting for a line the kernel never prints.
+def _unreachable(live, aliases, scored):
+    """`report_unreachable_scored`'s return value and its stderr, together."""
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        found = cl.report_unreachable_scored(set(live), aliases, set(scored))
+    return found, buf.getvalue()
+
+_found, _said = _unreachable(["b_one", "b_two"], {"s_two": "b_two"},
+                             ["s_two", "s_orphan"])
+check("a scored name that resolves to no live line is reported", _found,
+      ["s_orphan"])
+check_true("...and is named, not merely counted", "s_orphan" in _said, _said)
+check_true("...while the one that does resolve is left out",
+           "s_two" not in _said, _said)
+check_true("...and the reader is pointed at the kernel-side cause",
+           "MEASURED-AS" in _said and "note_measurement" in _said, _said)
+
+_found, _said = _unreachable(["b_one", "b_two"], {"s_two": "b_two"},
+                             ["s_two", "b_one"])
+check("a fully-paired suite reports nothing", _found, [])
+check("...and says nothing, so the warning means something when it appears",
+      _said, "")
+
+# Absent knowledge is not the same as a clean sweep: a first run on a fresh
+# checkout has neither set, and inventing a verdict from that would either
+# accuse every scored name or clear every one of them.
+check("no live names known yields no accusation",
+      _unreachable([], {"s_two": "b_two"}, ["s_two"])[0], [])
+check("no scored names known yields no accusation",
+      _unreachable(["b_one"], {}, [])[0], [])
+
+# The three real ones. Read from the last `--bench` serial log rather than from
+# `build/canary-load-names.txt`, because the name file is a *cache*: it is only
+# rewritten by a canary-load run, so a stale one would keep failing this check
+# long after the kernel was fixed, and -- worse -- keep passing it after a
+# regression that no canary-load run has yet observed. The serial log is the
+# kernel's own output from the most recent bench boot, which is the thing the
+# claim is actually about.
+#
+# The kernel fix binds each hand-built benchmark's live-line name once and
+# passes that same binding to `note_measurement`, so `MEASURED-AS` now states
+# the pairing for `context_switch`, `ipc_channel_sync` and `isr_latency` as it
+# already did for the other three. If it ever stops, the name that stopped it
+# is printed here instead of being rediscovered from a lost boot.
+_bench_serial = os.path.join(REPO_ROOT, "build", "serial-test.txt")
+_scored_seen = cl.read_scored_names(_bench_serial)
+if _scored_seen:
+    _live_seen = set()
+    with open(_bench_serial, encoding="utf-8", errors="replace") as _handle:
+        for _line in _handle:
+            _m = cl.BENCH_LINE_RE.match(_line.rstrip("\r\n"))
+            if _m:
+                _live_seen.add(_m.group(1))
+    _found, _said = _unreachable(_live_seen, cl.read_measured_as(_bench_serial),
+                                 _scored_seen)
+    check("the last bench boot left no scored name without a live result line",
+          _found, [])
+
+
 # --------------------------------------------------------------------------
 # 7. The host-side witness
 # --------------------------------------------------------------------------
@@ -828,34 +926,6 @@ def run_wrapper(args):
         env=wrapper_env(),
     )
     return proc.returncode, proc.stdout + proc.stderr
-
-
-def read_name_file():
-    """`build/canary-load-names.txt` -> `(live, aliases, scored)`, or None.
-
-    Parsed with `canary-load.py:read_known_names`'s exact rules, because the
-    point is to predict *its* verdict. A bare line is a live name, `alias
-    <scored> <live>` is a pairing, `scored <name>` is a scorecard name.
-    """
-    path = os.path.join(REPO_ROOT, "build", "canary-load-names.txt")
-    if not os.path.exists(path):
-        return None
-    live, aliases, scored = set(), {}, set()
-    with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            parts = line.split()
-            if not parts:
-                continue
-            if parts[0] == "alias" and len(parts) == 3:
-                aliases[parts[1]] = parts[2]
-            elif parts[0] == "scored" and len(parts) == 2:
-                scored.add(parts[1])
-            elif len(parts) == 1:
-                live.add(parts[0])
-    return live, aliases, scored
-
-
-NAMES = read_name_file()
 
 
 def usable_bound(name):

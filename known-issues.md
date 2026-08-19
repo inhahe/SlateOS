@@ -40267,7 +40267,7 @@ samples, so it carries a quantum from *each* end -- `200/m` percent, not
 the plan simply failed to carry the doubling down with the unit, which is the
 same species of oversight as the original bug.
 
-### B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS, AND ITS PER-ARM GUARD CANNOT SEE THIS (lane A, 2026-08-19) -- OPEN, fix designed
+### B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS, AND ITS PER-ARM GUARD CANNOT SEE THIS (lane A, 2026-08-19) -- FIXED 2026-08-19 in `020e014d0` + `ff74de728` + `fc40b5f15` + `f376cb8ff`; see "Resolution" at the end of this entry
 
 **In short:** a layout sweep builds and boots the same kernel six times at six
 different code placements, and the six results are only comparable to each
@@ -40482,6 +40482,68 @@ stating as a single sentence: *a kernel edit changes the key and a
 documentation edit does not*, which is exactly what `commit` failed to do and
 the entire reason for the change. Neither control is implied by the first
 two — a digest could group the arms by being insensitive to everything.
+
+#### Resolution (2026-08-19)
+
+All three parts landed, in four commits, and the six recorded arms were
+rescued as the design predicted.
+
+| part | commit | what it does |
+|---|---|---|
+| 1a | `020e014d0` | `scripts/src_digest.py` — one definition of source identity, with the audited exclusion list and the `include_bytes!` derivation for the untracked artifacts |
+| 1b | `fc40b5f15` | `boot-test.sh` computes it over the **working tree** and stamps every row, so uncommitted state counts and a docs commit does not |
+| 1c | `ff74de728` | `arm_group_key()` groups by `(src_digest, accel)`, deriving the digest from `commit` for rows written before the field existed |
+| 2 | `f376cb8ff` | `check_arm_counts()` now takes the previous arm's `(pad, key)` and aborts the sweep the moment two arms disagree |
+
+**Part 3 was answered by part 1, not skipped.** The planned warning was
+"committing anything during this sweep will void it *under the current
+fallback path*", and the plan already said it should "stop needing to say so
+once part 1 lands." It has. A sweep that commits through itself now records
+one digest across all six arms, so there is nothing left to warn about — and
+printing a warning about a hazard that no longer exists is worse than
+printing nothing, because the next reader will design around it. What replaced
+it is part 2's message, which is not a warning about a possibility but a
+report of an actual disagreement, naming both keys.
+
+**The rescue was verified, not assumed.** `arm_group_key` on the six recorded
+WHPX arms — six different commits, every one a documentation commit — returns
+a single key, because `git rev-parse <c>:kernel` is `6876f9eb…` for all six.
+The arms band. The ~70 minutes are not lost.
+
+**Two things this fix quietly repaired that were not in the original report.**
+
+1. *`dirty` stopped being a reason to drop a well-identified arm.* The entry's
+   own postscript established that `dirty` cannot see untracked files, so it
+   never meant what `layout_arms` used it for. Now `dirty` and `commit` are
+   consulted **only** when a row carries no `src_digest`. For a row that does,
+   the digest answers the identity question directly — including the embedded
+   service binaries `dirty` was blind to — so the commit hash is provenance
+   rather than identity. That removes the *second* silent way to void a
+   three-hour sweep (the harness's own `bench/history.jsonl` write is what
+   made later arms dirty), which was a separate voided sweep, not this one.
+2. *The class of failure, not just this instance.* `arm_group_key` fixes the
+   specific cause — a docs commit is no longer a new identity. It does not
+   make silent fragmentation impossible: a real edit landing mid-sweep, a
+   rebuilt service binary, a regenerated `rootfs.ext4`, or an accelerator that
+   fell back to TCG on one run all still split a sweep in exactly the same
+   way. Part 2 catches every one of those without enumerating any of them,
+   because comparing consecutive keys asks the question directly instead of
+   listing its causes. That is why part 2 was worth doing after part 1 rather
+   than being made redundant by it.
+
+**Still outstanding, deliberately: the end-to-end re-run.** The entry's last
+paragraph asked for a sweep that *deliberately* commits through itself, on
+the grounds that "a fix for a silent-fragmentation bug that has never been
+observed to survive a commit mid-sweep is a fix on paper." That is still true
+and the re-run has not happened. It is not being held open as a bug, because
+the mechanism is covered from both ends by tests that do not need three hours:
+`scripts/test-src-digest.py` exercises the digest's grouping and
+discrimination against the real recorded rows, and the four controls tabulated
+above were run against `bench/history.jsonl` as it actually exists. What the
+re-run would add is confidence that the *live* recorder path writes the field
+the parser reads, which the next benchmark boot demonstrates for free — so it
+is tracked as a validation step on the next sweep rather than as an open
+defect.
 
 ### B-A-AN-ORDINARY-RUN-NEARLY-JOINED-A-LAYOUT-BAND-AS-A-SEVENTH-ARM, AND ONLY ONE FIELD STOPPED IT (lane A, 2026-08-19) -- CLOSED as already-prevented; recorded because the margin was one field
 

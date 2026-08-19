@@ -30316,6 +30316,60 @@ Until then this entry stays open, and the guard against silently regressing to
 uncached is the WC-vs-UC line itself: on any platform that models memory types it
 warns, and on TCG it says plainly that it cannot tell.
 
+**2026-08-19 -- the manual QEMU run happened, and write-combining works.** The
+run was made the sanctioned way, via `QEMU_EXTRA` on a one-off `--experiment`
+boot; `scripts/boot-test.sh`'s accelerator is untouched and all three lanes still
+run TCG. Both logs are on disk (`build/serial-test.txt` = WHPX,
+`build/serial-canary-fail1.txt` = TCG), and each states its own accelerator from
+the guest's CPUID, so the pairing is not an assumption:
+
+| Accelerator | WC cycles | UC cycles | Ratio |
+|---|---|---|---|
+| QEMU TCG | 360,219,423 | 369,748,072 | **1.02x** |
+| Hyper-V/WHPX | 636,766 | 32,948,353 | **51.74x** |
+
+**The doubt above is resolved in the favourable direction: QEMU's `ati-vga` BAR0
+is a RAM-backed memory region, not a trapping device model.** Had it been the
+latter, every store would have trapped to the hypervisor and the ratio would have
+stayed ~1x under WHPX too. It did not -- WC is 51.74x faster than UC, which is
+only possible if the CPU is genuinely combining stores in a write-combining
+buffer, which in turn is only possible if the guest PAT is being honoured by
+hardware.
+
+The per-store costs settle it beyond the ratio. The fill is 4-byte (`u32`)
+stores over 1 MiB, so 256 Ki stores per pass:
+
+| | cycles/store | reading |
+|---|---|---|
+| WHPX, WC | **2.4** | stores absorbed by the write-combining buffer, retiring at near register speed |
+| WHPX, UC | **125.7** | each store going to the bus on its own, as `UC` requires |
+| TCG, WC | 1374 | emulation overhead |
+| TCG, UC | 1410 | the same emulation overhead |
+
+Both WHPX figures are what the hardware ought to produce, and they are what a
+trapping device model could not: a VM exit costs ~13.5 us (see
+`design-decisions.md` §237, measured on this host), which is thousands of cycles,
+so 2.4 cycles/store rules out a trap per store outright. The earlier worry that
+"~3090 cycles/store is weak evidence of a trapping model" was reading TCG's
+per-store *emulation* overhead -- which swamps the memory type entirely, and is
+exactly why TCG's two halves come out 1374 and 1410, i.e. 1.02x.
+
+**What this does and does not establish.** It establishes that our PAT
+programming is correct end to end -- the MSR we write, the `PageFlags` bit
+pattern we choose, and the mapping we install really do produce write-combining
+on hardware that implements it. That was the actual open question, and it is
+answered. It does not establish anything about a *real* RV100's aperture, whose
+behaviour also depends on the card's own memory controller; but that was always
+a hardware question (Q49), and it is no longer blocking confidence in the kernel
+side.
+
+**Status: the kernel-side question is closed.** The entry stays open only for
+the real-hardware confirmation, and the standing guard is unchanged: on a
+platform that models memory types the WC-vs-UC line warns, and on TCG it says
+plainly that it cannot tell. Note the corollary for anyone reading a TCG boot
+log: a 1.02x reading there is *not* a regression report, it is the absence of a
+measurement.
+
 ### BUG-BOOT-SPINLOCK-STALL-UNNAMED -- an intermittent boot hang reports `lock '?'` and `cpu 0 holds 0 lock(s)`, because lockdep is not yet enabled when the self-test battery runs -- 2026-08-17 -- OPEN (flaky; the diagnostic gap is the actionable part)
 
 **Observed.** Boot #10 of the lane-A tree (2026-08-17, tree at `8fd6813e1`)

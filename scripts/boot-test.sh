@@ -374,11 +374,21 @@ report_pathz_skips() {
 # pass, and what they exercised was last week's binary.  Filed by lane B as
 # requests/b-a-boot-test-boots-a-rootfs-image-that-may-predate-the-fixtures-in-it.md.
 #
-# WHY CONTENT HASHES AND NOT MTIME: QEMU opens the image read-write, so a boot
-# updates its mtime.  The image's timestamp records when it was last *run*, not
-# when it was last *packed* -- it is newer than the tree after every boot,
-# which makes the obvious `-ot` test (the idiom the staged-kernel guard below
-# uses) not merely weak here but inverted.  `ctest-fixtures.py image-check`
+# WHY CONTENT HASHES AND NOT MTIME: mtime cannot answer the question this guard
+# asks.  "Is the ELF inside the image the one we just built" is about the bytes
+# in the image, and a timestamp describes neither the bytes nor which of them
+# came from where.  That reason is independent of everything else and is why
+# hashes are correct here permanently.
+#
+# There used to be a second reason -- QEMU opened the image read-write, so a
+# boot updated its mtime and the image was newer than the tree after every run,
+# making the obvious `-ot` idiom (used by the staged-kernel guard below) not
+# merely weak but inverted.  That is no longer true: the drive is attached with
+# `snapshot=on` (see the attach site), so a boot no longer touches the file at
+# all and its timestamp once again records when it was *packed*.  The stale
+# half of this rationale is recorded rather than deleted because a future reader
+# who finds `-ot` working here might otherwise conclude the guard is redundant;
+# it is not, for the first reason.  `ctest-fixtures.py image-check`
 # compares a sha256 per staged ELF against rootfs.ext4.manifest instead, and
 # fails closed when the manifest is absent -- an image that predates the check
 # cannot have its contents established, which is not the same as matching.
@@ -1804,9 +1814,39 @@ if [ -f "$ROOTFS_IMG" ]; then
     # tested nothing current.  See check_rootfs_freshness.
     check_rootfs_freshness
     ROOTFS_IMG_WIN="$(to_win_path "$ROOTFS_IMG")"
+    # `snapshot=on`: the guest gets a fully writable vdb, but QEMU buffers the
+    # writes into a throwaway overlay and the host file is never modified.
+    #
+    # WHY THIS IS NOT OPTIONAL.  Without it a boot rewrites rootfs.ext4's
+    # *contents* -- measured 2026-08-19, sha256 f62e019d -> b2ecc74d across one
+    # boot with nothing else touching the tree -- and that file is an input to
+    # `scripts/src_digest.py`'s artifact half.  So the identity of the source
+    # changed as a side effect of testing it, and every layout sweep fragmented:
+    # arm N and arm N+1 disagreed about what they had built, landed in groups of
+    # one, and no band could form.  The sweep of this date aborted after two arms
+    # on exactly that (`full:ace827eb...` vs `full:f75959ab...`, same
+    # accelerator).  A boot test that mutates its own fixture cannot be used to
+    # establish what it booted.
+    #
+    # WHY NOT `readonly=on`: the Path-Z rungs mount /mnt read-write and writing
+    # is part of what they exercise.  `snapshot=on` keeps that behaviour exactly
+    # and discards it afterwards, which is what a fixture wants; read-only would
+    # change what the test tests.
+    #
+    # WHY NOT "just exclude rootfs.ext4 from the digest": it genuinely is an
+    # input -- 73 staged ELFs the Path-Z rungs execute.  Dropping it makes two
+    # different images share one identity, which merges runs that should never
+    # be compared.  Over-inclusion splits a band (safe: the answer is
+    # "unmeasured"); under-inclusion merges one (unsafe: an inflated band
+    # dismisses real regressions silently).  Fix the mutation, not the ledger.
+    #
+    # Note this also un-inverts the mtime idiom described above
+    # check_rootfs_freshness: the image's timestamp now records when it was
+    # last *packed*, which is what every other staleness check in this script
+    # assumes about the files it compares.
     ROOTFS_ARGS=(
         -device virtio-blk-pci,drive=rootfs-disk
-        -drive "id=rootfs-disk,if=none,format=raw,file=$ROOTFS_IMG_WIN"
+        -drive "id=rootfs-disk,if=none,format=raw,snapshot=on,file=$ROOTFS_IMG_WIN"
     )
     echo "=== Attaching Path-Z glibc rootfs: $ROOTFS_IMG (vdb) ==="
 fi

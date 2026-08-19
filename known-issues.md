@@ -40094,3 +40094,99 @@ TCG the emulator's own overhead dominates, so a fixed host interruption is a
 small fraction of a long run; under WHPX the same interruption lands on a run
 3.5x shorter and is 3.5x the fraction. WHPX both needs the canary more and,
 today, provides it less. Q54 is amended accordingly.
+
+#### The fleet data: TCG clears its own floor by 16%, and five runs already lost samples to it
+
+Everything above was argued from two WHPX runs. Replaying all 100 records in
+`bench/history.jsonl` through the same arithmetic says the floor is not a
+WHPX-only problem waiting to happen -- it is already grazing the platform it
+was designed for.
+
+**78 records carry a resolvable `min_centi`** (centicycle precision; the
+remaining 22 are pre-`CENTI` logs or the three zero-sample runs). Against a
+floor of **400 centicycles** (`CANARY_MIN_RESOLVABLE = 4` cycles x `CENTI`),
+the five lowest surviving per-access costs ever recorded are:
+
+| record | `min_centi` | margin over the floor |
+|---|---|---|
+| 2026-08-16T08:35 | 465 | **+16%** |
+| 2026-08-19T03:43 | 477 | +19% |
+| 2026-08-17T23:49 | 489 | +22% |
+| 2026-08-18T16:17 | 501 | +25% |
+| 2026-08-19T15:29 | 501 | +25% |
+
+72 of the 78 sit in a tight 500-520 band -- about +26%. So the honest summary
+is not "TCG is comfortably above the floor and WHPX is below it"; it is that
+**TCG's whole distribution lives within a quarter of the floor, and its worst
+observed sample cleared it by 16%.** An instrument whose usable range starts
+16% below the only quantity it has ever measured is not calibrated for that
+quantity; it happens to fit. That is a second, independent argument for the
+re-derivation -- one that does not depend on caring about WHPX at all.
+
+**Five TCG runs have already lost a sample** (`invalid = 1` out of 13):
+
+```
+2026-08-17T15:10:08   invalid=1  samples=12  start=0   min_centi=515  spread=0
+2026-08-17T19:36:08   invalid=1  samples=12  start=0   min_centi=505
+2026-08-17T23:49:39   invalid=1  samples=12  start=6   min_centi=489
+2026-08-18T01:13:33   invalid=1  samples=12  start=0   min_centi=625
+2026-08-18T05:08:49   invalid=1  samples=12  start=0   min_centi=515
+```
+
+**Why those losses cannot be explained from the record -- and why that is the
+misattribution defect showing up in the data rather than in the message.**
+`measure_access_at()` returns `None` for two different events: `checked_sub`
+failing because host load inverted the arms, and the delta being rejected for
+falling under the floor. Both increment the same `invalid` counter and write
+nothing else. So for each of those five runs we can say a sample was
+discarded and we cannot say why, and no amount of re-reading the file will
+recover it. Do **not** claim these as floor rejections; the point is precisely
+that the claim is unavailable.
+
+The cost of that ambiguity is visible in the first row. 2026-08-17T15:10:08
+lost its *first* sample (`start = 0`); the other twelve read 515-516
+centicycles with a spread of literally zero -- as quiet a host as this suite
+has ever recorded. It is graded **`broken`**. That grade follows correctly
+from `canary_verdict()`'s stated precedence (`bench-history.py:985` -- a
+within-tolerance spread alongside a failure is BROKEN, because the failed
+sample could have hidden an excursion), and that precedence is right in the
+absence of better information. But the information is only absent because the
+kernel throws it away: had the record said *why* the sample failed, a
+floor rejection on a machine whose other twelve samples are flat is not an
+excursion that got hidden, and the run is clean.
+
+**This adds a fourth part to the fix.** Beside the kernel bound, the Python
+bound and the report wording, `report_canary`'s record needs to count the two
+rejection causes **separately** -- e.g. a `below_floor` counter beside
+`invalid` -- and `canary_verdict()` should treat a below-floor rejection as
+non-evidence rather than as a possibly-hidden excursion. Otherwise the fix
+makes future runs measurable while leaving the verdict logic unable to tell a
+quiet run from a suppressed one, which is the same conflation one level up.
+
+**And a fifth, without which the kernel fix is invisible.** `bench-history.py`
+line 956 tests `canary["min"]` -- **whole cycles** -- against
+`CANARY_MIN_RESOLVABLE = 4`, and returns BROKEN below it. After the kernel
+starts accepting sub-cycle measurements, a legitimate WHPX record reading 0.87
+cycles/store carries `min = 0` and `min_centi = 87`: the kernel accepts the
+measurement and this line throws it away, so every consumer -- `--report`,
+the gate, the wall populations -- still sees `broken`. The fix follows the
+exemption pattern already present twelve lines below at 974-976: when the
+record carries `min_centi`, judge `min_centi` against the centicycle bound;
+only fall back to the whole-cycle bound on records that predate it. The
+"two bounds keyed on whether the record carries `min_centi`" requirement in
+the fix list above is this line, and it is load-bearing, not tidying.
+
+**One incidental corroboration of §237.** The 2026-08-19T16:15:09 record is a
+confirmed WHPX run (backfilled in `boot-history.jsonl`) whose `accel` field is
+*absent*, because `accel` recording landed after it. It is also one of the
+three zero-sample records. Had `accel` absence been folded into a "TCG"
+default, this run would have been filed as a TCG record with a broken canary
+-- a self-inflicted mystery. Absent got its own key, so it reads as what it
+is: unknown.
+
+**A number for Q52, in passing.** Across 94 release records the canary grades
+**51 clean, 29 contaminated, 5 broken, 9 absent** -- so roughly **31% of
+release runs that had a working canary were flagged contaminated**. Q52 asks
+whether a grading gate should keep failing on noise it cannot distinguish
+from a real fault; the answer has to be sized against that 31%, not against
+an assumption that contamination is rare.

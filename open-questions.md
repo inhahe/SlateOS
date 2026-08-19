@@ -1979,6 +1979,129 @@ because a table that was checked and found sound is worth as much as one that
 was checked and found wrong — and because the check was cheap and the last one
 like it changed an answer.
 
+#### Update 2026-08-19 (later still) — the check is now a command, and its output is pasted below
+
+**In short:** the two updates above re-checked this table by hand, twice. The
+rule adopted after the Q53 mistake (`design-decisions.md` §240) says a number
+quoted to you has to be regenerable by a command *you* can run — and no such
+command existed for an accelerator comparison, which is what made both checks
+throwaway work that left nothing behind. It exists now. Everything below the
+horizontal rule is its output, pasted rather than transcribed, because
+transcription is where a digit changes.
+
+**One thing you need to know before reading it.** 19 of the runs it uses,
+including the entire six-arm TCG sweep this table is built from, were recorded
+*before* the harness started writing down which accelerator it ran on. The tool
+refuses to guess — the first WHPX run in this history also predates that field,
+so "no label" provably does not mean "TCG" — so those runs only enter the
+comparison because `--assume-missing-accel` asserts it, which is my assertion
+and not a measurement. The report says so in its own third line. It also
+*refuses* the assertion for one run: the 16:15 probe's banner names both
+accelerators, so it is thrown out rather than guessed at.
+
+If you would rather see the part that rests on no assertion at all, this is it:
+
+    python scripts/bench-history.py --accel-compare tcg:whpx --profile release
+
+One binary (`1a278561f858d447`) was run on both accelerators *after* the field
+existed, and it gives **x3.53 typical, 83 of 86 faster, `hpet_read` x0.03**.
+That is a different binary from the one this table was built on, so it is an
+independent replication of the published headline rather than a restatement of
+it. The tool warns, loudly, that one binary is one code layout — which is the
+whole lesson of the update above.
+
+**What the assumed, seven-pair version says**, and how it compares to the
+hand-derived six-arm figures in the previous update:
+
+| | hand-derived (six TCG arms) | the command (seven pairs) |
+|---|---|---|
+| Typical speedup | ×3.53 – ×3.97 | **x3.44 – x3.99** |
+| Benchmarks faster | 82–83 of 86 | **82–83 of 86** |
+| Best case | ×10.34 – ×16.71, different benchmark each time | **x9.57 – x16.71, a different benchmark in 4 of 7** |
+| `hpet_read` | worst case in every arm | **worst case in every pair, x0.03** |
+
+The seventh pair is a newer binary the hand check did not have, which is why the
+span is slightly wider at both ends. No conclusion in this question moves.
+
+**The caveat the tool prints and the hand check did not.** 6 of the 15 runs
+behind these figures could not measure host load, and 2 measured it — so part of
+the difference may be host noise rather than the accelerator. Those six are the
+WHPX arms whose canary was broken (see the Q53 update above and
+`known-issues.md` `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`).
+That is exactly the sort of thing a hand-built table omits and a command does
+not.
+
+---
+
+Accelerator comparison on `Logoplex3` / `release`: **QEMU TCG** -> **Hyper-V/WHPX**. A ratio above x1 means Hyper-V/WHPX is faster.
+
+Reproduce with:
+
+    python scripts/bench-history.py --accel-compare "QEMU TCG:Hyper-V/WHPX" --profile release --assume-missing-accel "QEMU TCG" --markdown
+
+**Assumed:** runs that recorded no accelerator are treated as `QEMU TCG`. That is an assertion by whoever ran this command, not a measurement.
+
+Paired on `kernel_sha` -- one identical kernel image per pair -- **7 pair(s)**: 1a278561f858d447 (pad 0), b563a3b2831891ed (pad 3072), 00989e331039d619 (pad 2560), 114385d50cd39c4c (pad 2048), faae6997a2689db5 (pad 1536), 7c254f51182677f1 (pad 1024), 7a17cf6be2a10a26 (pad 0).
+
+| | QEMU TCG | Hyper-V/WHPX |
+|---|---|---|
+| Typical benchmark | -- | **x3.44 - x3.99 faster** (82-83 of 86 faster) |
+| Best case | -- | x9.57 - x16.71, and a **different benchmark** in 4 of 7 pairs |
+| Worst case | -- | `hpet_read` x0.03 |
+| Host-load check | 2/15 runs measured host load; 6/15 runs could not measure host load; 7/15 runs clean | |
+
+<details><summary>Runs that went in, and what was left out</summary>
+
+`QEMU TCG` -- 19 run(s):
+
+    2026-08-19T03:40:53+00:00  40515da89   ff371839180550c5   pad ?     canary clean          assumed
+    2026-08-19T03:43:51+00:00  40515da89   ff371839180550c5   pad ?     canary contaminated   assumed
+    2026-08-19T03:45:54+00:00  40515da89   ff371839180550c5   pad ?     canary clean          assumed
+    2026-08-19T03:48:02+00:00  40515da89   ff371839180550c5   pad ?     canary clean          assumed
+    2026-08-19T03:50:06+00:00  40515da89   ff371839180550c5   pad ?     canary contaminated   assumed
+    2026-08-19T03:52:11+00:00  40515da89   ff371839180550c5   pad ?     canary clean          assumed
+    2026-08-19T04:10:24+00:00  d7c311deb   ff371839180550c5   pad ?     canary clean          assumed
+    2026-08-19T07:01:22+00:00  5e9a30a22   d3b853cf19a67483   pad ?     canary clean          assumed
+    2026-08-19T07:04:10+00:00  5e9a30a22   d3b853cf19a67483   pad ?     canary clean          assumed
+    2026-08-19T09:27:44+00:00  27bb7a96d   c1418d4a1661e4bc   pad ?     canary contaminated   assumed
+    2026-08-19T09:30:25+00:00  27bb7a96d   c1418d4a1661e4bc   pad ?     canary clean          assumed
+    2026-08-19T12:54:11+00:00  338bada34   63ce0b2997023c22   pad 0     canary clean          assumed
+    2026-08-19T14:44:10+00:00  b36a244bb   7a17cf6be2a10a26   pad 0     canary clean          assumed
+    2026-08-19T14:55:48+00:00  b36a244bb   7c254f51182677f1   pad 1024  canary clean          assumed
+    2026-08-19T15:07:15+00:00  b36a244bb   faae6997a2689db5   pad 1536  canary contaminated   assumed
+    2026-08-19T15:18:29+00:00  b36a244bb   114385d50cd39c4c   pad 2048  canary clean          assumed
+    2026-08-19T15:29:53+00:00  b36a244bb   00989e331039d619   pad 2560  canary contaminated   assumed
+    2026-08-19T15:41:03+00:00  b36a244bb   b563a3b2831891ed   pad 3072  canary clean          assumed
+    2026-08-19T19:25:48+00:00  26c139a81   1a278561f858d447   pad 0     canary clean          recorded
+
+`Hyper-V/WHPX` -- 14 run(s):
+
+    2026-08-19T17:05:40+00:00  943b3f21b   7a17cf6be2a10a26   pad 0     canary broken         recorded
+    2026-08-19T17:17:45+00:00  fb6605fc0   7c254f51182677f1   pad 1024  canary broken         recorded
+    2026-08-19T17:30:07+00:00  493b6aac5   faae6997a2689db5   pad 1536  canary broken         recorded
+    2026-08-19T17:42:41+00:00  1d325ba08   114385d50cd39c4c   pad 2048  canary broken         recorded
+    2026-08-19T17:54:59+00:00  3fff02a30   00989e331039d619   pad 2560  canary broken         recorded
+    2026-08-19T18:07:13+00:00  78a921b4f   b563a3b2831891ed   pad 3072  canary broken         recorded
+    2026-08-19T19:49:04+00:00  41581ca30   1a278561f858d447   pad 0     canary clean          recorded
+    2026-08-19T20:01:13+00:00  a8a62afba   b78cb4dc0e3432bc   pad 1024  canary clean          recorded
+    2026-08-19T20:24:17+00:00  218028ced   1a278561f858d447   pad 0     canary clean          recorded
+    2026-08-19T20:36:26+00:00  334124dbf   b78cb4dc0e3432bc   pad 1024  canary clean          recorded
+    2026-08-19T20:48:36+00:00  334124dbf   4ee6ee95d024ab20   pad 1536  canary clean          recorded
+    2026-08-19T21:00:38+00:00  334124dbf   5159c1535b6a6b0e   pad 2048  canary clean          recorded
+    2026-08-19T21:12:32+00:00  334124dbf   18444cdf9e9ec634   pad 2560  canary clean          recorded
+    2026-08-19T21:24:31+00:00  334124dbf   2a0bc63792dab5d6   pad 3072  canary clean          recorded
+
+- 1 run(s) would have qualified but do not record which accelerator they ran on (2026-08-19T16:15). The `accel` field postdates them. That is NOT the same as 'they ran on TCG': the first WHPX run in this history also predates the field.
+- assumption refused for 2026-08-19T16:15:09+00:00 (9011d525b): its `experiment` banner names Hyper-V/WHPX, so assuming QEMU TCG for it would contradict the only surviving evidence about what it ran on
+- 72 run(s) rejected: no `kernel_sha` was recorded, so there is no way to show this run measured the same binary as anything on the other side, and a cross-accelerator ratio over two different binaries measures the code and the emulator at once
+- 7 run(s) rejected: profile is 'debug', not 'release'; a debug run and a release run differ by far more than the accelerator does
+- 5 kernel image(s) ran only on Hyper-V/WHPX (18444cdf9e9ec634, 2a0bc63792dab5d6, 4ee6ee95d024ab20, and 2 more), so they cannot be pairs; a ratio needs both sides of one binary.
+- 4 kernel image(s) ran only on QEMU TCG (63ce0b2997023c22, c1418d4a1661e4bc, d3b853cf19a67483, and 1 more), so they cannot be pairs; a ratio needs both sides of one binary.
+
+</details>
+
+---
+
 #### Why I did not just decide this
 
 Switching the accelerator would stop exercising a security feature on every

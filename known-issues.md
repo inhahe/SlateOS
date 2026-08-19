@@ -38643,32 +38643,81 @@ every page-straddle relationship. That control earned its keep immediately: it
 caught a const-fold in the first draft that made the unpadded arm ~256 bytes
 shorter in *code*, reintroducing the very confound the sweep exists to remove.
 
-Two things this does **not** yet do, so read reports accordingly:
+**The first sweep completed 2026-08-19**, on the fourth attempt: six arms at
+pads 0/1024/1536/2048/2560/3072, all at commit `b36a244bb`, release profile,
+Logoplex3, 4128 s. `python scripts/bench-history.py --layout-bands --profile
+release` now prints a band for **86** benchmarks. Note the `--profile release`
+— the default is `debug`, which still has no sweep and so still reports every
+movement as `unmeasured`.
 
-- **No sweep has completed yet**, so no band exists for anything. Until one does
-  (`python scripts/layout-sweep.py --pads 0,1024,2048,3072`), every movement is
-  `unmeasured` and keeps its regression — deliberately; see §234 for why absence
-  of evidence must not excuse. The report now says so, per run, naming the
-  command that would settle it.
+**What it measured, and why it is worse news than expected:**
 
-  Three attempts on 2026-08-19 were voided, and each one bought a guard, so the
-  history is worth keeping rather than summarising as "it kept failing":
+| | band |
+|---|---|
+| max | **182.0%** (`heap_raw_alloc_free_4096`) |
+| p90 | 107.3% |
+| median | **26.0%** |
+| p25 | 7.7% |
+| min | 1.4% (`net_ns_arp_lookup`) |
+
+| benchmarks with a band ≥ | count | share |
+|---|---|---|
+| 100% | 10 | 12% |
+| 50% | 26 | 30% |
+| 20% | 51 | 59% |
+| **10%** | **61** | **71%** |
+| 5% | 74 | 86% |
+
+Performance-critical paths are not the well-behaved end of that distribution;
+several are the worst of it: `pick_next` 132.0%, `page_alloc_free` 91.9%,
+`page_fault` 84.9%, `ipc_channel` 82.8%, `io_ring_nop` 74.5%,
+`syscall_dispatch` 41.9%, `isr_latency` 25.4%, `sched_pick_next` 20.1%,
+`vfs_stat_root` 14.8%. Only `context_switch` (5.5%) and
+`ipc_channel_roundtrip_64k` (4.2%) are quiet.
+
+**The consequence, stated plainly: `CLAUDE.md`'s benchmarking protocol says
+"if a change regresses a benchmark by more than 10%, investigate before
+merging", and for 71% of the suite 10% is below the noise this emulator
+manufactures from a relink alone.** Every number under that threshold on those
+61 benchmarks was, in the strict sense, unfalsifiable — a "regression" and an
+"improvement" of the same size are equally likely to be the linker. This is
+now filed for the operator as `open-questions.md` A-Q6, because the threshold
+lives in `CLAUDE.md`, which lane A may not edit on its own initiative.
+
+Two caveats on reading the bands:
+
+- **This is not run-to-run variance wearing a costume.** It is damped twice
+  before it can be read as placement sensitivity: `layout_bands()` takes the
+  median over repeats *within* each pad first, then divides each arm by its own
+  `speed_factor` against the group's per-benchmark medians to remove host
+  drift. An arm whose factor cannot be computed voids the entire group rather
+  than falling back to an uncorrected 1.0 — because uncorrected drift *widens*
+  the band, and a wider band dismisses more real movements.
+- **A band is a lower bound.** Six sampled layouts cannot contain the worst
+  pair among all of them, so a movement just outside its band is
+  *unexplained*, not cleared.
+
+  Four attempts on 2026-08-19 were needed, and each failure bought a guard, so
+  the history is worth keeping rather than summarising as "it kept failing":
 
   | Attempt | Died | Cause | Guard added |
   |---|---|---|---|
   | 1 | arm 1, 1 s | `bash` resolved to WSL's, which cannot open the Windows path | — (misdiagnosed as MSYS; the "fix" only moved the error) |
   | 2 | arm 1, 1 s | same root cause, now showing as `qemu-system-x86_64 not found` — WSL's bash has no QEMU | `find_bash()`: each candidate must *parse the boot test* **and** *find QEMU and OVMF using the boot test's own search* |
   | 3 | arm 2, 43 min | the kernel's layout-pad self-test had been folded to a constant FAIL, so every padded release kernel halted at boot | `--self-test` claim 4: every branch of the on-target check must be present in the optimised image |
+  | 4 | — completed, 4128 s | — | — |
 
   Attempts 1 and 2 are one root cause seen twice — the first "fix" addressed the
   message rather than the cause, which is why the second attempt failed two
   lines further down. The separate guard against a sweep that *runs* but
   produces no band (`check_arm_counts()`, which applies `bench-history.py`'s own
   `layout_arm_rejection()` to each arm's record as it lands) was added between
-  attempts 2 and 3 and has not yet had to fire.
-- **A band is a lower bound.** Three or four sampled layouts cannot contain the
-  worst pair among all of them, so a movement just outside its band is
-  *unexplained*, not cleared.
+  attempts 2 and 3 and has never had to fire.
+
+  Attempt 4's arm 2 is the pad that wedged attempt 3, and its passing is
+  stronger evidence than the binary grep that fixed it: `main.rs` halts the CPU
+  when the layout-pad self-test fails, so reaching `BENCH_OK` proves the
+  success branch both exists *and* was taken.
 
 **Both paths to a build failure now consult the band (2026-08-19).** The first
 version taught only the run-over-run comparison about layout, leaving

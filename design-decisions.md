@@ -22643,6 +22643,48 @@ both the finding and its veto. A veto computed over a different window than the
 finding it vetoes is a check that appears to fire on the evidence and does not —
 this project's signature failure, and it would be invisible.
 
+### What the first sweep measured (added 2026-08-19, after the fact)
+
+Everything above was written before a sweep had ever completed, so the
+confound's *size* was an argument from mechanism — a ~1.7× per-iteration
+penalty on a straddling loop — not a measurement. It has now been measured, and
+the honest note to record is that **the mechanism argument understated it
+badly.**
+
+Six arms at pads 0/1024/1536/2048/2560/3072, one commit (`b36a244bb`), release,
+Logoplex3, 4128 s. Bands for 86 benchmarks: median **26.0%**, max **182.0%**,
+and **61 of 86 (71%) at or above 10%**. Full distribution in
+`known-issues.md`.
+
+Three things follow that the design as written did not anticipate:
+
+- **The suite is not split into a sensitive minority and a stable majority.**
+  The tacit expectation behind "a movement smaller than the band is not a
+  finding" was that most benchmarks would have a small band and the exception
+  would be loud. The real shape is the opposite: 86% of the suite moves ≥5% on
+  placement alone, and the *median* benchmark can be made to move a quarter of
+  its own value by relinking. There is no quiet majority to fall back on.
+- **Performance-critical paths are among the worst, not the best.**
+  `pick_next` 132.0%, `page_alloc_free` 91.9%, `page_fault` 84.9%,
+  `ipc_channel` 82.8%, `io_ring_nop` 74.5%, `syscall_dispatch` 41.9% — the
+  exact benchmarks `CLAUDE.md` names as the ones that must not regress. That
+  is not a coincidence: these are tight hot loops, which is precisely what a
+  page-straddle penalty acts on. The benchmarks worth guarding are the
+  benchmarks least able to be judged without a band.
+- **The "unmeasured stays a regression" rule is now the expensive one, and it
+  is still right.** With bands this wide, refusing to excuse an unswept
+  benchmark means a lot of movements keep a regression they may not deserve.
+  That remains the correct direction — an excuse granted by absence is
+  indistinguishable from no check — but it converts the sweep from a nicety
+  into a prerequisite for reading release numbers at all. The `debug` profile
+  still has no sweep.
+
+The one thing this does **not** license is treating a wide band as licence to
+ignore the benchmark. A 182% band means placement can manufacture 182%; it does
+not mean a 182% code regression is acceptable. It means this emulator cannot
+distinguish the two, and something other than a single relink-to-relink
+comparison has to.
+
 ---
 
 ## §235 — A reachability map may escalate a finding, never dismiss one, because "I found no call path" is not "there is no call path"

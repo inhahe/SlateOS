@@ -3783,6 +3783,52 @@ def test_the_most_recent_sweep_wins_over_the_best_sampled_one(bh):
           tied["b0"][2], "ancient")
 
 
+def test_an_aa_pair_is_never_explained_by_placement(bh):
+    """The one comparison where placement provably cannot be the cause.
+
+    An A/A pair is the same kernel image twice, so the code sits at *identical*
+    addresses in both runs and placement is the single thing that cannot differ
+    between them. Filing an A/A movement under "explained by code placement" is
+    a false statement about the only case that is certain.
+
+    It also did a worse, quieter harm, and that is what this test really pins.
+    Rows the layout split claims are removed from the regressed/improved lists,
+    so they never reached the A/A MOVEMENT section either -- and that section
+    exists to print exactly this: the spread of an A/A pair, which is this
+    host's measurement noise, measured, and the single most useful number such
+    a run produces. The band was silently deleting it.
+
+    The general shape is worth recognising elsewhere: a filter that is correct
+    for the ordinary case, applied to the one case whose premise it violates.
+    """
+    import io
+    import contextlib
+
+    history = (_sweep_arms({0: 500, 1024: 5000, 2048: 1000})
+               + _repl_history(bh, 2900, "xxx"))
+    previous = dict(history[-1], kernel_sha="deadbeef", commit="xxx")
+    history[-1] = previous
+    current = {name: (value, 10000, "OK", None, None)
+               for name, value in previous["entries"].items()}
+    current["b0"] = (3000, 10000, "OK", None, None)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        failed = bh.report(
+            previous, current, 25.0, records=history, host="H",
+            profile="release", commit="xxx",
+            this_run={"kernel_sha": "deadbeef", "commit": "xxx"})
+    out = buf.getvalue()
+
+    check("an A/A movement is not attributed to placement",
+          "EXPLAINED BY CODE PLACEMENT" in out, False)
+    check("...and still reaches the A/A section it belongs in",
+          "A/A MOVEMENT" in out, True)
+    check("...where the noise-floor spread is actually printed",
+          "b0: 503ns -> 3000ns" in out, True)
+    check("...and an A/A pair still cannot fail the build", failed, False)
+
+
 def _bands_view(bh, tmpdir, records, profile="release"):
     """Run `--layout-bands` over a written history. -> stdout."""
     import io
@@ -3898,9 +3944,9 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 95:
+    if len(tests) < 96:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 95. Discovery is broken, not the code.")
+              f"suite has at least 96. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

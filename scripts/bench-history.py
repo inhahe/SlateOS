@@ -3451,8 +3451,23 @@ def report(previous, current_entries, threshold_pct,
     #
     # Only a *measured* band excuses anything. A benchmark that has never been
     # swept keeps its regression -- see `split_by_layout`.
+    #
+    # `not same_binary` is essential and was missing at first. In an A/A pair the
+    # two runs are the same image, so the code sits at *identical* addresses in
+    # both and placement is the one thing that provably cannot differ between
+    # them. Filing an A/A movement under "explained by code placement" is
+    # therefore a false statement, and it did a second, worse harm: these rows
+    # are removed from `reg_out`/`imp_out`, so they never reached the A/A
+    # MOVEMENT section either. That section exists to print the spread of an A/A
+    # pair -- this host's measurement noise, measured, which the comment below
+    # calls the single most useful number such a run produces -- and the layout
+    # split was silently deleting it.
+    #
+    # The general shape of the mistake is worth naming: a filter that is correct
+    # for the ordinary case, applied to the one case whose premise it violates.
     lbands = (layout_bands(records, host, profile)
-              if records is not None and host is not None else {})
+              if records is not None and host is not None and not same_binary
+              else {})
     reg_unexplained, reg_layout, reg_unswept = split_by_layout(reg_out, lbands)
     imp_unexplained, imp_layout, imp_unswept = split_by_layout(imp_out, lbands)
     reg_out = reg_unexplained + reg_unswept

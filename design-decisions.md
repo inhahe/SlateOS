@@ -997,9 +997,37 @@ capability list, or does it map to an existing capability?):**
 - **Add CAP_SYS_ADMIN as a native capability** — rejected: ambient-authority
   junk drawer; contradicts the fine-grained capability model.
 
+**2026-08-18 — build status, recorded by the S305 standing audit. The decision
+is unchanged; only this entry's description of the tree was stale.** The prose
+below (and the Decision above) says "until the `/proc/sys/vm/overcommit_memory`
+surface lands, the `vm/` subtree stays omitted (the original option C)" and
+"requires no new code (the `vm/` subtree is already omitted)". Both sentences
+stopped being true some time ago — the audit exists because a stale premise
+reads as a live blocker to the next person. What is actually built:
+
+| Option-5 element | State |
+|---|---|
+| Both commit strategies in the kernel | **Built** — `mmap` genuinely backs on touch under lazy |
+| System-wide native knob (`mm.lazy_default`, strict) | **Built** (`kernel/src/sysctl.rs`) |
+| System-wide Linux knob (`mm.linux_lazy_default`, lazy) | **Built**, independent of the native one |
+| Per-program override | **Built** — `pcb::MmapCommitPolicy` (`Inherit`/`ForceCommitted`/`ForceLazy`), inherited across `fork` |
+| `/proc/sys/vm/overcommit_memory` **read** | **Built** and honest: `1 → "0"`, `0 → "2"`; `vm` is in `SYS_DIRS`, with a procfs self-test asserting it |
+| `/proc/sys/vm/overcommit_memory` **write** | **Not built** — `procfs::write_file` answers `NotSupported` for everything but `oom_score_adj` |
+| `admin.memory_policy` capability | **Not built** — no definition exists under `kernel/src/cap/`; it appears only in doc comments |
+| Settings → Advanced UI | **Not built** (lane C) |
+
+The last three are consistent with each other rather than a gap: the capability
+is absent *because* the write path is absent, so there is **no ungated route to
+the system-wide knob** — the read-only surface cannot be used to change policy.
+`overcommit_ratio`/`overcommit_kbytes` remain deliberately unexposed (§1: never
+advertise an unhonored knob). Whoever implements the write path must land
+`admin.memory_policy` in the same change, not after it.
+
 **Where it lives:**
-- `kernel/src/fs/procfs.rs`: `SYS_FILES`/`SYS_DIRS` (currently no `vm/`; Option 5
-  adds `vm/overcommit_memory` reporting the active mode), `gen_sys`.
+- `kernel/src/fs/procfs.rs`: `SYS_FILES`/`SYS_DIRS` (**`vm/overcommit_memory`
+  has since landed and reports the active mode** — the parenthetical below
+  describing it as absent is superseded by the build-status table above),
+  `gen_sys`.
 - `kernel/src/fs/mmtune.rs`: `OvercommitMode` (exists, advisory-only — Option 5
   wires it into the commit path).
 - `kernel/src/mm/` commit/allocation path + `mm/oom.rs` (must learn to honor the
@@ -4130,6 +4158,80 @@ foundation — operator chose to land the ioctl ABI now.
 **Where it lives.** `kernel/src/syscall/linux.rs` `drm_card_ioctl` (new
 `DRM_COMMAND_BASE`-range arm routing to `drm::virtgpu_uapi`), plus a ring-3
 `renderD128` ioctl self-test.
+
+**2026-08-18 — the deferral's prerequisite has fired, and the flip is not free.
+Measured, not inferred; the decision is NOT being revisited here.** This entry
+defers the Mesa port "until a virgl test environment exists", which makes that
+clause exactly the kind of premise the S305 standing audit exists to re-check.
+It no longer holds.
+
+Two configurations of the *same* kernel image, changing only the GPU device and
+the display backend, with `kernel/src/virtio/modern.rs::negotiate` reporting the
+mask the **device offered** (it logs that independently of what we accept):
+
+| QEMU flags | Features offered (page 1 : page 0) | Page-0 bits |
+|---|---|---|
+| `-device virtio-gpu-pci -display none` | `0x00000101 : 0x30000002` | 1 (EDID) |
+| `-device virtio-gpu-gl-pci -display egl-headless` | `0x00000101 : 0x30000013` | **0 (VIRGL)**, 1 (EDID), 4 (CONTEXT_INIT) |
+
+The first row is the number this entry already quotes (`0x30000002` — EDID
+only), which is what makes the pair a controlled comparison rather than two
+unrelated readings. The second has **bit 0 set: `VIRTIO_GPU_F_VIRGL`, offered to
+our own driver, in a headless run on this machine.** QEMU 11.0.93; the enabling
+detail is that `-display none` has no GL at all ("The display backend does not
+have OpenGL support enabled", exit 1) while **`egl-headless` provides GL without
+a window** — so the environment was never missing, only unreachable through the
+display backend the harness happens to pass.
+
+**But the same run shows that adopting it today would regress the 2D path.**
+With the GL device our virtio-gpu init fails partway:
+
+```
+[virtio-gpu] Attached backing memory
+[virtio-gpu] SET_SCANOUT: resp=0x1203        # ERR_INVALID_RESOURCE_ID
+[virtio-gpu] Init: IoError (non-fatal)
+```
+
+and QEMU prints `virtio_gpu_virgl_process_cmd: ctrl 0x103, error 0x1203`. The
+consequence is visible one subsystem up — **the DRM device count drops from 2 to
+1 and virtio-gpu stops being the primary display**:
+
+| | `[drm]` outcome |
+|---|---|
+| plain | `Registered device 1 (virtio-gpu, …)` → `virtio-gpu set as primary display` → `2 devices` |
+| GL | *(no virtio-gpu registration)* → `1 device` |
+
+Cause: QEMU's `virtio-gpu-gl` routes commands through virglrenderer, which does
+not honour a plain `RESOURCE_CREATE_2D` resource as a scanout target — and it
+does so **even though we accepted no page-0 features** (`accepting
+0x00000001:0x00000000` in both rows). So this is not a flag flip; the 2D scanout
+path needs work before the harness could adopt the GL device.
+
+**What this does and does not establish.** It establishes that a virgl-capable
+*headless* environment exists and that our driver is offered the bit — the exact
+premise the deferral rests on. It does **not** establish that a 3D stack works:
+nothing here negotiates VIRGL, creates a 3D context, or renders. `param_value()`
+in `kernel/src/drm/virtgpu_uapi.rs:503` therefore stays honest (`3D_FEATURES =
+0`, `NUM_CAPSETS = 0`) — its own doc comment already names this measurement as
+the trigger for flipping, and flipping it before a backend exists is precisely
+the dishonest reporting option B was chosen to avoid.
+
+**Not resolved here, deliberately.** This is an **Operator** decision, so the
+premise change is recorded and routed rather than acted on: see
+`open-questions.md` **Q51**. The Mesa port itself is lane C's zone (`gui/**`),
+notified in `requests/a-c-the-virgl-test-environment-that-blocked-mesa-now-exists.md`;
+the kernel-side virtio-gpu/DRM half above is lane A's.
+
+Reproduce (~90 s, needs the boot lock; the harness is unmodified):
+
+```bash
+qemu-system-x86_64 \
+  -drive if=pflash,format=raw,readonly=on,file=<ovmf>/edk2-x86_64-code.fd \
+  -drive format=raw,file=fat:rw:<repo>/build/esp \
+  -device virtio-gpu-gl-pci -vga std -display egl-headless \
+  -serial file:<out>.txt -m 3072M -machine q35
+grep -a 'Features offered' <out>.txt
+```
 
 ---
 
@@ -12023,6 +12125,122 @@ replaced the old entropy-estimator with this accounting.
 
 ---
 
+## §228 — A benchmark that moved because its code moved is answered by recording addresses, not by pinning layout
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** One of our benchmarks suddenly reported that SHA-256 had got four
+times slower. It had not: the SHA-256 machine code was byte-for-byte the same.
+The function had merely ended up at a different *address* in the kernel image,
+and the emulator we measure under (QEMU) happens to run code at that particular
+address several times slower. Any other address was fine. The question was what
+the project should do about a benchmark that can swing 4x for a reason that has
+nothing to do with the code being measured. The answer taken: make the swing
+*recognisable* by writing down where the hot functions live in each run, and
+stop trying to make it not happen.
+
+### The problem
+
+QEMU's TCG (its just-in-time translator — it turns guest x86 into host code and
+caches the result) indexes some of its internal caches by guest address. A
+function whose address collides badly in one of those structures is emulated
+several-fold slower with identical machine code. Which structure was not pinned
+down; it needs QEMU source we do not have checked out, and knowing would not
+change anything below.
+
+This is not hypothetical or marginal. Measured on this tree: `crypto::compress`
+at `…80afce00` gave 30048 cycles for `crypto_sha256_64B`; the same source built
+so the function landed at `…80364980` gave 7188. `crypto_sha512_64B` —
+near-identical code, same file, different function — was *faster* across the
+same boundary. `net_tcp_checksum_v6_1460b` hit 12.5x at one commit and healed by
+itself two commits later as later edits shifted `.text` again.
+
+It bites the project's own rule. CLAUDE.md says a benchmark that regresses more
+than 10% must be investigated before merging. That rule is right, and this is a
+class of trigger for it where the correct outcome of the investigation is "no
+change was made to this code". The first occurrence cost a multi-hour bisect
+that terminated on a commit editing only `audio_mixer.rs`.
+
+### Options
+
+**A. Record the addresses of known placement-sensitive functions in every
+benchmark record.** *What changes:* each run in `bench/history.jsonl` gains a
+`hot_symbols` map; a future 4x swing is diagnosed by reading one line instead of
+running a bisect.
+
+**B. Normalise each benchmark against an in-run reference.** *What changes:* the
+reported number for a benchmark becomes a ratio to some reference benchmark
+measured in the same boot, so a whole-suite emulator effect divides out.
+
+**C. Mark the affected benchmarks comparable only within a single build.**
+*What changes:* `crypto_sha256_64B` and its siblings stop being tracked across
+commits at all, and only ever compare against themselves in the same binary.
+
+**D. Pin the layout so the address cannot move** — align `compress`, pad
+`.text`, or fix the link order.
+
+### Why A
+
+**B fails on the shape of the effect.** The suite already removes whole-suite
+drift by dividing by the median ratio, and it did not help here: the median
+ratio across 98 benchmarks was 0.995. This is not a uniform slowdown to divide
+out — it is one function moving 4x while its neighbours do not move at all.
+Normalising against a reference that was unaffected leaves the 4x exactly where
+it was; normalising against one that *was* affected would hide a real
+regression in the same code.
+
+**C throws away the measurement to avoid the noise.** These are the benchmarks
+for the kernel's hash primitives; cross-commit tracking is the entire reason
+they exist. Silencing the four benchmarks that route through `compress` would
+also silence a genuine 4x regression in SHA-256, which is a far more expensive
+error than a false positive that costs one lookup.
+
+**D is luck dressed as engineering.** It was tried: `#[rustc_align(4096)]` on
+`compress` restored every affected benchmark to baseline and looked like a
+clean causal fix. A control — pristine source, built the same way — matched it
+to within 0.1%, proving the alignment attribute did nothing and the *build
+flag* had reshuffled the layout. Any layout pin holds only until the next
+commit shifts `.text`, moves the problem to whichever hot function lands on the
+bad address next, and is meaningless on real hardware where the effect almost
+certainly does not exist. Shipping it would have been shipping a remedy for
+something alignment has no part in.
+
+**A is the only option that adds information rather than removing it.** It
+changes no kernel code, hides no regression, and converts a multi-hour bisect
+into a one-line correlation: the crypto benchmarks jumped *and* `compress`
+moved, in the same record.
+
+A second, smaller decision falls out of the same investigation and is recorded
+here rather than separately: **runs of deliberately-modified binaries are kept
+but excluded from baselines** (`--experiment` / `BENCH_EXPERIMENT`). Deleting
+them was rejected for the same reason C was — they are the evidence for the
+finding — but five probe runs spanning 4x in one 8-run window would have widened
+that benchmark's outlier fence past the effect it is meant to catch.
+
+### Cost
+
+`hot_symbols` is three addresses per record and a hand-rolled ELF symbol-table
+reader (~50 lines) that must degrade quietly, since it is bookkeeping attached
+to a measurement that took nine minutes to produce. The list of tracked symbols
+is manual and will go stale: it names the functions we have *seen* be
+placement-sensitive, not the ones that are. That is accepted — a stale entry
+costs a useless address in a record, while the alternative (dump every symbol)
+would put a megabyte of addresses in the history per run.
+
+### How to reverse
+
+Drop `--kernel-elf` from `scripts/boot-test.sh` and the `hot_symbols` block from
+`scripts/bench-history.py`. Existing records keep the field; nothing reads it
+programmatically, so nothing breaks. The `--experiment` exclusion is separable
+and lives in `comparable_records`.
+
+**Reference:** `known-issues.md` →
+`A-A-4x-CRYPTO-"REGRESSION"-BISECTS-TO-A-COMMIT-THAT-ONLY-EDITS-audio_mixer.rs`,
+which carries the bisect log, the three-build table and the near-miss.
+
+---
+
 ## §300 — A NULL pointer is `EFAULT` only where the kernel would see it; glibc's own pre-checks keep their `EINVAL`
 
 **Date:** 2026-08-13
@@ -19760,6 +19978,250 @@ that buffer-less form and is compatible with either outcome.
 
 ---
 
+## §229 — The positional drift model *attributes* contamination and refuses to *correct* it
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** The benchmark suite has a "canary" — a tiny, fixed memory
+operation re-timed every 8 benchmarks, whose cost should never change. When it
+does change, something outside the OS (usually this agent's own tooling) was
+competing for the machine's CPU, and the benchmark numbers from that run cannot
+be trusted. Until now the tool could only say *how much* the canary moved, which
+condemned the whole run — all sixty-odd benchmarks — on the strength of a
+disturbance that may have touched two of them. The canary also records *where in
+the run* each reading was taken, and that record has now been made usable. The
+decision is what to do with it: this tool will **name the benchmarks that ran
+during the disturbed stretch**, and will **not** quietly adjust their numbers to
+compensate.
+
+### What was built
+
+Three pieces, in `scripts/bench-history.py`:
+
+- Each benchmark now carries its **suite position** — its ordinal among the
+  scorecard lines — stored explicitly on the history record. This is the join
+  key between a benchmark and a canary reading, and it cannot be recovered
+  later: records are written with `sort_keys=True`, which alphabetises the
+  benchmark map on the way to disk, so all 71 existing records have lost their
+  suite order permanently.
+- A **baseline**: the median of the run's own mid-suite canary readings.
+- A **factor per benchmark**: the canary reading interpolated to that
+  benchmark's position, divided by the baseline. 1.0 means the machine was
+  behaving normally where that benchmark ran; 3.2 means the canary was reading
+  3.2x dear there.
+
+### The decision, and the case against it
+
+The factor is *printed*, next to the benchmark's name. It is **not** applied to
+the measured value, and it is **not** stored on the record.
+
+Against — and this is a real cost, not a strawman: a contaminated run currently
+fails the regression gate wholesale, and a correction would rescue most of it.
+The information to do so now exists. Declining to use it means continuing to
+throw away runs that are mostly good.
+
+For, and why it wins:
+
+1. **The model's resolution is eight benchmarks, and a corrected number would
+   not say so.** The canary samples once per 8 benchmarks, so a one-benchmark
+   spike and an eight-benchmark plateau are indistinguishable to it; the model
+   renders both as a triangle spanning the interval. Against the real
+   contaminated trace in `build/ab-old-2.log` — whose only dear reading is
+   position 32, at 3.2x — the model flags positions 25–41, sixteen benchmarks,
+   of which perhaps one was genuinely disturbed. Printed as an attribution that
+   is honest. Baked into fifteen benchmarks' recorded values it is fifteen
+   fabrications that look like measurements and would enter the history
+   permanently.
+2. **The coupling between canary and benchmark is benchmark-dependent.** The
+   canary times a memory access. A memory-bound benchmark tracks it closely; a
+   branch-bound one barely tracks it at all. One factor applied to both
+   under-corrects the first and over-corrects the second, and nothing in the
+   record would afterwards distinguish a corrected value from a measured one.
+3. **This project's most expensive bench failures have all been instruments
+   asserting more than they measured** — nine runs certified clean by a canary
+   that measured zero (`known-issues.md`
+   B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST), a contamination
+   verdict that named the optimiser as the sole cause of a symptom host load
+   also produces. A silent correction is the same shape of error: it converts a
+   modelled quantity into a measured-looking one at the point where a reader
+   stops being able to check it.
+
+### The smaller calls inside it
+
+- **Median, not mean, for the baseline.** This is what makes the positional
+  model complementary to the existing whole-suite `global_drift` rather than a
+  rival estimate of the same thing. If the host was uniformly twice as busy,
+  every reading is 2x, the median is 2x, every factor is 1.0 — so this model
+  contributes nothing and leaves the uniform case to `global_drift`, which is
+  built for it. A mean would let a burst drag its own baseline toward itself and
+  shrink the correction exactly in proportion to how badly it was needed.
+- **Three readings minimum.** Two define a line through both of themselves, with
+  no residual and no way to be wrong; three is the smallest number at which the
+  trace can disagree with a line, and therefore the smallest at which an
+  excursion is distinguishable from a trend.
+- **Hold flat outside the sampled span, never extrapolate.** Extrapolation
+  produces its largest values exactly where the evidence is thinnest — the tail
+  of the suite. The one exception is the post-suite canary reading, which is a
+  genuine right-hand bracket for the trailing benchmarks; using it required
+  giving the two endpoint readings distinct labels in the kernel, since both
+  previously printed as `end:` and a failed calibration leaves the *end* sitting
+  in the slot a reader would take for the start.
+- **The factors are not stored on the record.** Both inputs are (the trace and
+  the position map), so the factors are derivable, and storing a derived value
+  alongside its inputs creates two things that can disagree the moment the model
+  changes. The file's existing convention — store the measurement, not the
+  verdict — points the same way.
+- **Silence, not an empty list, when the model cannot be built.** The
+  attribution line sits directly under the contamination verdict, where a reader
+  has just been told the run is untrustworthy and is looking for something to
+  narrow it down. Printing "affected benchmarks: none" when there was no trace
+  to consult answers that question with an exoneration nobody measured.
+
+### What would reverse this
+
+Evidence that the factor predicts the disturbance well enough to correct with.
+That is measurable and not yet measured: `scripts/canary-load-test.sh` can apply
+load at a known moment, so a run with load confined to a known stretch of the
+suite would show whether the flagged benchmarks' inflation actually matches
+their factors. If it does — and if the match holds across memory-bound and
+branch-bound benchmarks alike — points 1 and 2 above weaken and a correction
+becomes defensible. Until that experiment is run, correcting would be asserting
+its result rather than establishing it.
+
+---
+
+## §230 — The experiment that grades the drift model must first prove its own disturbance happened, and the proof's thresholds come from the measured noise floor
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** §229 built a tool that guesses *which* benchmarks were spoiled by
+something else hogging the machine, and left it ungraded. To grade it we
+deliberately hog the machine ourselves during a known stretch of the benchmark
+run and see whether the tool points at that stretch. The first attempt failed in
+a way worth a permanent rule: the hogging arrived late and outstayed its welcome,
+so the stretch we *told* the grader was slowed was actually untouched — and the
+grader, trusting that label, reported the tool had guessed wrong when in fact it
+had guessed right. The decision is that **the grader now measures whether the
+disturbance really landed where the label says, and refuses to grade at all if it
+did not** — and that the numbers it uses to decide "really landed" are taken from
+how much this suite wobbles on its own, not from any round figure.
+
+### The decision, in two parts
+
+**1. A verdict of `UNGRADED` outranks every verdict about the model.** Before
+`scripts/grade-positional.py` looks at a single one of the model's flags, it
+compares three regions of the run against the previous clean run: the *prefix*
+(everything before the labelled window — clean by construction, since the trigger
+is a line the kernel has already printed), the *window* itself, and the region
+*beyond the disturbance's reach*. It returns `UNGRADED` unless the window ran
+measurably slower than the prefix (*the load arrived*) **and** the far region did
+not (*the load stayed put*). Whatever the model did is not reported, because on
+such a run nothing the model did means anything.
+
+**2. The thresholds are the measured null distribution, not a principle.** The
+first draft reused the model's own 10% reporting threshold. That is *below the
+instrument's noise floor*: across 4567 benchmark-pairs from 59 consecutive clean
+release runs on this host, **38% of benchmarks move ≥10% on the mean** with
+nothing disturbing them at all (19% on the best case). The gate does not compare
+single benchmarks, though — it compares region medians, which averages most of
+that away. Partitioning each clean run into five contiguous blocks by sorted
+benchmark name and testing blocks 1–4 against block 0 gives 236 region-pairs of
+pure noise:
+
+| statistic | median | p95 | max |
+|---|---|---|---|
+| best-case ratio | 0.998 | 1.124 | 1.609 |
+| mean ratio | 1.001 | 1.678 | 2.585 |
+
+The two statistics are **not** equally good, and the table says which is which.
+The best-case p95 (1.124) sits just below its 1.15 threshold, so best-case alone
+already fires on under 5% of clean pairs. The mean's p95 (1.678) is far *above*
+its 1.30 threshold — on the tightest single-host subset the mean alone fires on
+**13% of clean region-pairs**, three times the ceiling. So the mean is not a
+second opinion of equal weight: **the best-case ratio is the discriminating
+statistic, and the mean is a weaker corroborating condition** that mostly rules
+out a best-case fluke. Requiring both — best-case median ≥ 1.15 *and* mean median
+≥ 1.30 — fires on **1 of those 236 clean region-pairs (0.4%)**.
+
+That asymmetry is not a defect to be tuned away; it is a property of what the two
+numbers measure. The best case is the fastest iteration a benchmark achieved, so
+it moves only when *every* iteration was slowed — a frequency or cache effect
+that lasts. The mean is dragged by single outlier iterations, and one preemption
+inside one iteration of a 2000-iteration benchmark can move it by an order of
+magnitude. Measured on an *undisturbed* prefix, per-benchmark mean ratios ranged
+from ×0.06 to ×34 while best-case ratios stayed within ×0.9–×1.1. A region median
+tames that, but it does not make the mean into a precise instrument, and no
+threshold on it could.
+
+`scripts/test-grade-positional.py` re-derives that rate from the real
+`bench/history.jsonl` on every run and fails if it climbs above 5%. A suite that
+grows noisier therefore breaks the test rather than quietly turning the gate back
+into a rubber stamp.
+
+### The alternatives, and why each loses
+
+**Trust the label.** This is what the first attempt did, and it is the reason
+this entry exists: the run was reported `FAILED (misplaced)` with 22 of 44
+"provably-clean" benchmarks flagged, and all 22 were the model **correctly
+reporting a real disturbance that the run's own label denied**. A grader that can
+convict a model for being right is worse than no grader, because its output is
+not merely absent but actively misleading, and it is misleading in the direction
+that looks like a finding. Cheapest to build, and it cost a whole run.
+
+**One statistic instead of two.** Simpler to explain and strictly more
+sensitive. But the table above shows why it fails: the mean ratio alone at 1.30
+would fire on roughly a twentieth of clean region-pairs, and every such firing
+licenses a verdict about the model that rests on nothing. The cost of requiring
+both is that a *faint* real disturbance grades `UNGRADED` and the run must be
+repeated — which is the correct way to spend a re-run.
+
+**The model's own 10% threshold.** Tempting for consistency: grade the stimulus
+by the same bar the model reports at. It is the worst option available, because
+it is the one whose failures are invisible — 38% of undisturbed benchmarks clear
+it, so a gate built on it would pass almost any run and be indistinguishable from
+no gate at all while appearing rigorous.
+
+**A median of the last 8 runs as the baseline, instead of the single previous
+clean run.** More samples, less noise — the usual reason to widen a window. It
+is wrong here for a reason specific to what is being measured: eight runs span
+eight commits of kernel changes, and those changes are not spread evenly over the
+suite, so different *regions* acquire different apparent drifts. Measured on the
+void run, the 8-run baseline put the untouched prefix at ×0.70 where the previous
+run put it at ×0.88 — **an error larger than the disturbance being measured.**
+The tightest baseline wins whenever the thing being measured is smaller than the
+drift between the runs being averaged.
+
+### The general rule this bought, which outlives the experiment
+
+> You cannot grade "did the model find the disturbance" until you have
+> established "there was a disturbance to find."
+
+It is now the first paragraph of `scripts/grade-positional.py`. The same shape
+applies to any experiment with an actuator: **a controller whose latency is
+comparable to the window it controls does not control that window.** The
+benchmark suite is a ~6 s tail of a ~131 s boot, so a 26-benchmark window is
+about two seconds — against a `sleep 1` poll and six MSYS `python -c` process
+spawns. Nothing in the old script did anything other than what it said; the costs
+it paid were simply larger than the thing it was measuring. The replacement,
+`scripts/canary-load.py`, pays every cost up front: workers are spawned before
+QEMU boots and park on a semaphore, so firing the load is a kernel wakeup, and
+the log is followed in-process at 0.1 s.
+
+### What this does not decide
+
+It does not decide P22. The re-run has not happened; §229's correction ban stands
+untouched. The one thing the void run did establish — because it needs no label —
+is that benchmarks the model flagged were inflated (×1.31 best-case / ×1.84 mean,
+n=34) where unflagged ones were not (×0.97 / ×0.92, n=52). That is a single
+observation rather than 34, since the flagged set is one contiguous stretch; and
+the *magnitude* does not track at all (Pearson r = +0.30 best-case, +0.03 mean).
+A correction multiplies by the factor, and the factor is the part carrying no
+information — which strengthens §229 rather than weakening it.
+
+---
+
 ## §217 — The AMD GPU driver targets the 25-year-old R100/Rage 128, because it is the only AMD display engine this project can actually execute
 
 **Date:** 2026-08-17
@@ -21534,6 +21996,105 @@ refusal as an absent kernel.
 
 ---
 
+## §335 — `csplit` is rewritten around two cursors and an execution-time repeat, and reads its input whole
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** `csplit` cuts a file into pieces at places you name. Ours was
+wrong in four independent ways at once — the worst of them produced **10,003
+files** where GNU produces 8 — so it was rewritten rather than patched. Three
+design choices in the rewrite had a real alternative: how a repeated pattern is
+expanded, how the two positions in the input are tracked, and whether the input
+is streamed or read whole. This records those three.
+
+### 1. `{*}` and `{N}` are expanded when the pattern runs, not when it is parsed
+
+The old code cloned the pattern *10000 times* at parse time. That is wrong for
+two separate reasons and only one of them is the file count: a cloned line
+number is re-applied **absolutely** on each copy, so `csplit f 3 '{*}'` split at
+line 3, then at line 3 again, forever — the cursor never advanced, and every
+one of the 10,003 files after the first two was empty.
+
+The alternative was to keep the clone-at-parse shape and make the clones carry
+an incrementing multiplier. It works, but it stores 10000 `Control`s to
+represent "repeat until the input runs out", and it makes the repeat count a
+property of the pattern list rather than of the loop that walks it — which is
+exactly the confusion that produced the bug. The rewrite carries
+`Repeat::{Times(n), Forever}` on one `Control` and expands it in the executor,
+where the repetition index is in hand and `lines_required * (repetition + 1)`
+is one line of arithmetic.
+
+*Cost:* the executor is now a nested loop rather than a flat walk, and the
+`{*}` termination condition differs by pattern kind — a regex that stops
+matching ends the run with status 0, a line number that runs past the end is a
+fatal `line number out of range on repetition N`. Those two really are
+different in GNU (`process_regexp` has a `repeat_forever` branch,
+`process_line_count` has none), so the asymmetry is not ours to remove.
+
+### 2. Two cursors, `emit` and `search`, rather than one position
+
+The obvious model is a single "where are we" index. GNU does not have one, and
+the difference is observable:
+
+```
+$ csplit f 2 '/2/'          # 20 lines
+2
+csplit: '/2/': match not found
+```
+
+The `2` split consumed nothing past line 1, and yet `/2/` does not find line 2.
+The reason is that a regex match leaves the search position at **`m + 1`**
+(GNU's `find_line (++current_line)`), while a line number leaves it at the new
+section's start. `csplit f '%MARK%' '/MARK/'` shows the same thing from the
+other side: it finds the *second* `MARK`, because the first is behind the search
+cursor even though it is the first line of the current section.
+
+A single cursor can be made to reproduce this only by special-casing the
+lookahead at each use site. Two named cursors state the rule once, at the two
+places that assign them, and every case in the harness that distinguishes them
+passes without further conditionals.
+
+*Cost:* one more piece of state to keep consistent, and a reader has to learn
+which cursor a given operation moves. The names carry it: `emit` is the first
+line not yet written, `search` is the first line the next regex examines.
+
+### 3. The input is read whole, not streamed
+
+GNU streams through a line buffer. We read the file into memory and take
+`&[u8]` slices of it, each keeping its own terminator.
+
+*For:* the two cursors are then plain indices into one slice, backwards offsets
+(`/RE/-1`) are free, and the byte count of a piece is a subtraction rather than
+a running total. Streaming would need a rewindable window sized to the largest
+negative offset seen anywhere in the pattern list, and the old implementation's
+"re-terminate every line with `
+`" corruption is a direct consequence of
+having consumed the terminator on the way past.
+
+*Against:* an input larger than memory cannot be split, and one behaviour
+diverges — reading a **directory** as input. GNU creates `xx00` and prints its
+count of `0` before the read fails, because the failure happens mid-stream; we
+report the same `read error: Is a directory` with no count and no file. That is
+the *only* case out of 76 in `scripts/csplit-diff.sh` where the two differ
+behaviourally, and it is a case with no legitimate use.
+
+*Revisit if:* `csplit` is ever asked to split something too large to hold. The
+change that fixes the size limit fixes the directory case in the same motion,
+and the harness case for it is already written.
+
+### Why a rewrite rather than four fixes
+
+Three of the four faults were **silent**: the byte counts on stdout were
+self-consistently wrong, so only a comparison of the *files* revealed them.
+`scripts/csplit-diff.sh` is the first harness in this tree to compare a manifest
+of what was left on disk rather than stdout alone, and it was written before the
+fixes. Patching four faults individually would have left the shape that produced
+them — a parse-time repeat, a single cursor, and `str::contains` standing in for
+a regular expression — intact.
+
+---
+
 ## §462 — A generator that cannot reach the kernel CSPRNG refuses to generate
 
 **Date:** 2026-08-18
@@ -21605,6 +22166,1360 @@ before. That obligation is documented on the type, discharged by
 `AppRandom::secret` for the one caller that exists, and pinned by six tests in
 `apps/passwordgen`. Any future caller that wants real entropy should route
 through a `secret`-shaped wrapper rather than calling `next_u64` directly.
+
+## §231 — The load controller measures the load instead of inferring it, because on a host with spare cores the inference is not merely weak but invertible
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** to test a feature that guesses which benchmarks were disturbed, we
+deliberately slow the machine down during part of the benchmark run. We then need
+to confirm the slowdown actually happened. We were confirming it by timing a small
+fixed job on the host and checking it got slower — but on a machine with more
+cores than we use, that job just runs on a spare core and barely notices. Worse,
+the number we computed from it was unstable enough to say the host got *faster*
+while under load, which it did, three times in twelve trials. The fix is to stop
+guessing: each load process now reports how much CPU it actually consumed.
+
+**The problem.** The controller applies load by starting 6 spinner processes, and
+verified the load "landed" by timing a fixed unit of work on the host and
+comparing the median before and during. On this 12-core machine that comparison
+does not work, for two independent reasons:
+
+- **Physical.** 6 spinners on 12 cores leaves the probe a free core. The best-case
+  cost of the probe moves by ~0.4% (×1.004). The probe is *correctly* reporting
+  almost no effect; there is almost no effect to report, on the probe.
+- **Statistical.** The median of a probe sample is wildly unstable. Over 12
+  back-to-back trials with the spinners verifiably alive throughout, the median
+  ratio ranged ×0.784–×1.526 (a 1.95× spread) and came out **below 1.0 — "the
+  host sped up" — in 3 of 12 trials.**
+
+The second is what made it dangerous rather than merely useless. Run 3 of the P22
+experiment reported ×0.78 and cost a day of investigation into a physical effect
+that does not exist. (A zero-spinner control reproduced ×0.77 with no load at all.)
+
+**Options considered.**
+
+1. **Report a stable statistic (min or trimmed best-case) and keep inferring.**
+   *What changes:* the alarming number goes away — run 3 recomputes to ×1.018.
+   Cheap, and strictly better than the median. But it converts a misleading
+   reading into an uninformative one: ×1.004 is what you get whether the load ran
+   or not, so the question "was the load applied" remains unanswered.
+2. **Make the probe compete — pin probe and spinners to one core set.**
+   *What changes:* the probe would feel the load. But it would then be measuring
+   contention on an artificial core subset rather than the host's spare capacity,
+   which is not the quantity QEMU's vCPU thread competes for. It would also make
+   the probe part of the load it is measuring.
+3. **Raise the spinner count above the core count.** *What changes:* the probe
+   would feel the load, at the cost of changing the stimulus the experiment
+   applies to the guest — i.e. changing the experiment to suit the instrument.
+4. **Chosen: measure the spinners' own CPU consumption directly.** Each spinner
+   publishes its `process_time` into a shared cell on every chunk boundary; the
+   controller snapshots at fire and at release. Occupancy = CPU burned ÷ (spinners
+   × window). *What changes:* the output states "102% occupancy, 12.25s of CPU
+   burned of 12.06s available" instead of a ratio that needs interpreting.
+
+**Why 4.** It is a direct measurement of the thing in question rather than a proxy
+for it. It needs no baseline, so there is no unequal-windows problem; it cannot be
+confounded by QEMU's own phase-dependent host demand, which is roughly 4× larger
+than the spinner signal and was the leading rival explanation for the ×0.78; and
+it is independent of the host's core count, so it does not silently degrade on a
+different machine the way the probe did. It also has an *absolute* expectation
+(1.0), which means it can be asserted in a test rather than merely observed — the
+regression suite now checks a live 2-spinner run clears the floor and does not
+exceed what wall time allows.
+
+**Costs, accepted.** It adds a `process_time()` call per spin chunk (negligible
+against 200 000 empty loop iterations) and a shared-memory cell per spinner. It
+measures only the spinners, so it cannot detect load from *other* sources — but
+that was never what it was for, and the benchmarks' own measured disturbance
+(reported separately, and independently of both the model and the controller)
+remains the evidence that the guest actually felt something.
+
+**The probe is kept, demoted.** `inflation` now carries the best-case ratio
+(option 1, adopted as well as rather than instead of option 4), the median is
+retained as `median_inflation` and labelled unreliable in both the JSON and the
+printed output, and old records are detected and marked `(median, unreliable)` on
+display rather than silently compared against new ones. The probe still answers a
+real question — *when*, across the run, was the host contended — which is what its
+timestamped samples were added for and which occupancy does not address.
+
+**Threshold.** Occupancy below 0.5 marks the run `load-not-applied`. Set low
+deliberately: its job is to catch spinners that never ran at all (a failure mode
+that silently voided an earlier standalone probe, which reported a confident ratio
+with zero live spinners), not to police scheduling jitter on a busy desktop. Run 3
+sat far above it.
+
+---
+
+## §232 — Image identity is a relation, not a label, and a hash may not be overruled by a commit
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** The benchmark tool needs to answer "did these two measurements come from
+the same kernel?" It used to answer by comparing the git commit each run was labelled
+with, which was wrong in both directions and produced four false regression reports in
+one afternoon (known-issues.md, 2026-08-19). It now hashes the kernel file that was
+actually booted. The decision recorded here is what to do about the ~79 older runs that
+have no hash: they are compared by commit as before, but a hash always wins over a
+commit when one is available, and two hashes settle the question between themselves.
+
+### The problem the obvious fix leaves behind
+
+Hashing the booted ELF is not the interesting part; it is obviously right. The
+interesting part is that the history already contains 79 records with no hash, and the
+gate that consumes them — "has this same binary produced this movement more than once?"
+— is worthless if it can only compare records written from today onward. A gate that
+cannot fire is the same failure as a gate that fires wrongly.
+
+So identity cannot be a string that each record carries and that is compared for
+equality. A run hashed today and a clean, unhashed run of the same commit from last
+week *are* the same image, but one is labelled `sha:eec7c6f373f19b6f` and the other
+`commit:6e780afbc`, and those do not compare equal. The question has to be asked of a
+*pair* of records, not derived from each separately.
+
+### The decision
+
+`same_image(a, b)`:
+
+1. **Both hashed** → the hashes decide, and nothing else is consulted.
+2. **At most one hashed** → fall back to: both clean (not `dirty`), both with a known
+   commit, and the commits equal.
+3. **Otherwise** → not the same image. In particular, unidentifiable never matches
+   unidentifiable: two runs that both failed to read HEAD, or that were both measured
+   with uncommitted changes, are not evidence about each other.
+
+Rule 1 taking precedence over rule 2 is the part with a real tradeoff, and it is
+deliberate. If two records carry differing hashes, a matching commit label does **not**
+rescue them. On this project that is not pedantry: §228 records a benchmark moving
+several-fold purely because its *code moved in the address space*, with identical
+source. "Same commit" is a statement about text; the gate is about behaviour.
+
+### The alternative, and why it lost
+
+**Require a hash on both sides, full stop.** Cleaner, and it never asserts anything the
+record cannot support.
+
+*Against:* it retires the replication gate for every existing record, and the gate is
+precisely the thing that stops a noisy run being written up as a regression — the
+failure that motivated it happened *twice* before the gate existed. Reintroducing a
+window of months during which the check silently declines to fire, in exchange for
+removing an assumption ("a clean commit determines the bytes") that is true of every
+build this project has ever made, is a bad trade. The assumption is also *checkable*:
+once both sides are hashed, rule 1 supersedes it and any counterexample surfaces as a
+`SAME COMMIT, DIFFERENT IMAGE` banner rather than as a silent mismatch.
+
+*Also against:* the fallback is self-retiring. Every future run carries a hash, so rule
+2 applies to a strictly shrinking set of comparisons and needs no deprecation plan.
+
+### Consequence for the reader
+
+The banner now names three states rather than asserting one of two. A comparison whose
+commits match but whose images differ says so explicitly and says *how* it knows
+(`DIFFERENT IMAGE`, both hashes printed, versus `UNKNOWN IMAGE`, neither pinnable).
+The rule behind that: where the record cannot support a claim, print the ignorance —
+never let a matching commit in the header line stand as unrebutted evidence that the
+code was the same, because that is exactly the inference that produced the false
+reports.
+
+---
+
+## §233 — The instrumented build enables KASAN itself, because a sanitizer whose shadow nothing populates is not a weaker check but a guaranteed-silent one
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** KASAN has two halves that have to agree. One half is the compiler:
+built with `scripts/kasan-build.sh`, it inserts a check in front of every read
+and write the kernel performs. The other half is our code: it maintains the
+"shadow", a side table saying which bytes are currently usable, updated when
+memory is allocated and freed. Those updates were switched off by default. So
+the instrumented kernel dutifully checked every access against a table that was
+blank — and a blank table means "everything is fine", always. The build took
+about 3.5x as long to boot and could not, even in principle, report anything.
+The decision is that the instrumented build now switches the shadow updates on
+by itself, for the whole boot, instead of waiting for a command-line flag that
+nobody passing `--boot` had any reason to think was required.
+
+### What was actually there
+
+`mm::kasan::on_alloc` and `on_free` — the only writers of the shadow — both open
+with `if !is_enabled() { return; }`. The only thing that ever called `enable()`
+outside a self-test was the `mm.corruption_hunt` block in `main.rs`, which arms
+KASAN around one narrow region (the Path-Z spawn/teardown) and disarms it after.
+Nothing tied `enable()` to the instrumented build.
+
+The consequence is not "less coverage". It is *zero* coverage, delivered
+silently:
+
+| | ordinary build | instrumented build (before) | instrumented build (now) |
+|---|---|---|---|
+| Checks emitted per access | none | **every access** | every access |
+| Shadow populated | only in the hunt window | **never** (unless the flag) | whole boot |
+| Reports possible | in the hunt window | **none** | whole boot |
+| Boot cost | 1x | **~3.5x** | ~3.5x + shadow upkeep |
+
+The middle column is the one that matters: it is the only cell in the table
+where the cost is paid in full and the benefit is exactly nil. And nothing in
+the output said so — a boot with no findings looks identical to a boot that
+cannot have findings. `scripts/kasan-build.sh`'s own header says the profile
+"exists to root-cause heap corruption (B-KNULLJUMP) by having the compiler check
+every load and store against the KASAN shadow", and it had never once done that.
+
+### The alternatives
+
+**A. Enable in the instrumented build, at init, for the whole boot.** *What
+changes:* `kasan-build.sh --boot` now actually reports use-after-free and
+redzone overruns anywhere in the boot, and takes longer than the 946 s it takes
+today. Chosen.
+
+**B. Leave the code alone; make `kasan-build.sh --boot` pass
+`mm.corruption_hunt` on the cmdline.** *What changes:* the script's own runs
+work; anyone who builds instrumented and boots by another route (`boot-test.sh
+--no-build`, the soak harness, a manual QEMU line) still gets the silent no-op.
+Rejected: it fixes one caller rather than the property, and the property is
+exactly "you can hold this build wrong without being told". It would also leave
+detection scoped to the Path-Z window, which is a *guess* about where the
+corruption is — a guess the profile exists to stop having to make.
+
+**C. Keep the flag, but have the instrumented build print a warning at boot when
+KASAN is off.** *What changes:* the silence becomes audible, but the default is
+still useless. Rejected as a strictly worse A: if the only correct way to run
+the profile is with the flag, the profile should set the flag.
+
+### The argument for A over "the cost is opt-in for a reason"
+
+The counter-argument is that shadow upkeep on every allocation and free is
+expensive and should be asked for. It does not survive contact with where the
+cost actually is. In the instrumented build the *check* is already emitted at
+every load and store — an outlined call, per `-asan-instrumentation-with-call-
+threshold=0` — and that is the dominant cost by a wide margin. Shadow upkeep is
+a handful of byte stores per alloc/free on top of it. Declining to pay the small
+remainder buys nothing and forfeits the whole reason the large part was paid.
+
+The flag keeps its meaning where the reasoning is different: in the *ordinary*
+build there are no emitted checks at all, only the explicit `check()` calls on
+the quarantine path, so there the cost genuinely is opt-in. Linux draws the line
+in the same place — `CONFIG_KASAN` means KASAN is on, not that it is available.
+
+### What this depends on, and what had to be fixed first
+
+A only became safe once `disable()` wiped the shadow
+(`B-KASAN-STALE-POISON-ON-LIVE-SLOT`, fixed the same day). Under A the boot
+self-tests now find KASAN already enabled, so their `if !was_enabled { disable() }`
+restore is a no-op, and the slot that `with_self_test_freed_address` frees stays
+poisoned. That is *correct* under A and only under A: KASAN remains on, so
+`on_alloc` clears the poison when the allocator hands the slot out again. Before
+the wipe fix, the same sequence with KASAN ending up off is precisely what
+produced 62 spurious use-after-free reports and exhausted the report budget two
+thirds of the way through a boot. The two changes are not independent, and the
+order matters.
+
+It also depends on every path that hands out a heap slot running `on_alloc`.
+Audited: `heap.rs` has exactly two alloc hook sites (the per-CPU fast path and
+the global path, covering slab and large allocations alike) and one free hook,
+and `quarantine_return_slot` moves in the free direction only — it returns a
+parked slot to the slab still poisoned, which the next `on_alloc` clears. An
+alloc path that skipped the hook would reintroduce the same false-UAF failure,
+so this is the invariant to re-check if the allocator grows another entry point.
+
+**That audit was right about the heap and wrong about its scope, which the first
+whole-boot run demonstrated within 2092 lines.** Poison does not only outlive an
+*object*; it outlives a *frame*. `large_dealloc` returns physical frames to the
+buddy allocator carrying the `0xFA` that `on_free` just wrote, and the buddy
+allocator reissues them to page tables, slab pages and DMA buffers — none of
+which go anywhere near `on_alloc`. So the invariant is one level lower than
+stated above: **every path that hands out memory must unpoison it, and the frame
+allocator is such a path.** `frame::on_frames_allocated` is now the single hook
+all five allocation return sites go through, and it unpoisons before the owner
+tag so nothing can touch the frame first. See `known-issues.md` →
+`B-KASAN-POISON-SURVIVES-FRAME-REUSE`.
+
+**The first implementation of that hook was itself wrong, in a way worth
+recording because the wrongness was invisible in review and obvious in the
+stats.** Unpoisoning writes shadow bytes; writing a shadow byte normally *backs*
+the shadow frame first; and backing it allocates a frame — so the hook re-entered
+itself through the allocator that called it. The natural guard (a per-CPU flag
+held across an interrupts-off window) does cut the recursion, but it forces every
+call to reach `with_map_lock` with interrupts already off, and that is exactly
+the case that gives up rather than spinning. A given-up *unpoison* fails
+**closed**: the stale `0xFA` stays on live memory and every later access to it is
+reported forever. The very first boot said so — `map_lock_giveups=3`, plus the
+module's own warning that "shadow coverage has holes this boot" — in a build
+where KASAN is live only for the self-test window. Whole-boot, firing on every
+frame allocation, it would have manufactured the very false positives the hook
+exists to remove.
+
+The fix was to notice that the hook writes exactly one value, `KASAN_ADDRESSABLE`
+(`0x00`), and that an *unbacked* shadow frame already reads `0x00` — the whole
+shadow window resolves through a shared read-only zero page until something backs
+it. So "back the frame, then write zero into it" and "do nothing" are the same
+result, and the hook can simply skip unbacked frames (`IfUnmapped::Skip`). That
+removes the allocation, and with it the recursion, the guard, the interrupts-off
+window, the lock, and the hole — at zero cost, because the skipped write was a
+no-op by construction. The general lesson: **an unpoison-only path never needs to
+allocate shadow, and any design in which it does is buying a re-entrancy problem
+for nothing.**
+
+The same run also exposed `B-KASAN-SHADOW-BOOTSTRAP-SELF-REPORT`: `mm::kasan`'s
+own `ensure_shadow_mapped` zeroed its freshly-allocated shadow frame with
+`core::ptr::write_bytes`, an *instrumented* `core` generic (§118/§119), against
+a frame that could itself be carrying stale poison. Turning KASAN on for the
+whole boot is what made KASAN's own bookkeeping visible to KASAN.
+
+That is the general shape of this entry's cost, and it is worth stating plainly
+because it will recur: **A does not add bugs, it removes the condition — a
+shadow nothing populates — under which existing ones were unobservable.** The
+first whole-boot run should therefore be budgeted as a bug-finding exercise, not
+a regression check, and a noisy first run is evidence the decision was right
+rather than evidence against it.
+
+### Cost accepted
+
+Boot time rises above the measured 946 s by the shadow-upkeep margin, and the
+shadow's lazily-mapped frames (one 16 KiB frame per 128 KiB of heap ever
+touched) now cover the whole boot rather than one window. `KASAN_BOOT_TIMEOUT`
+is 3600 s, ~3.8x the previously measured need, and was set generously for
+exactly this kind of growth. If a future measurement puts a whole-boot
+instrumented run near that ceiling, raise the constant rather than narrowing the
+window — a narrowed window is the state this entry exists to leave behind.
+
+---
+
+## §234 — Layout sensitivity is measured by deliberately perturbing layout, and an unmeasured benchmark stays a regression
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** The benchmark harness kept reporting confident, repeatable
+"regressions" that were not code changes at all — they were the *addresses* the
+code happened to land at. QEMU runs a loop noticeably slower when the loop
+straddles a 4 KiB boundary in memory, and every commit relinks the kernel and so
+re-rolls that dice for every function. The fix is to build the *same source*
+several times at deliberately different offsets and measure how far each
+benchmark moves with no source change at all; a later movement smaller than that
+is not reported as a finding. The decision recorded here is what to do when a
+benchmark has *not* been swept: it keeps its regression, rather than being
+excused.
+
+### The confound
+
+Under QEMU's TCG a translation block is bounded by the guest 4 KiB page, so a
+hot loop whose backward branch crosses a page boundary is retranslated far more
+often — measured at ~1.7x per iteration. Whether it crosses is a property of the
+loop's *address*, not of its code. Relinking, which any commit does, shifts
+every function after the edited file.
+
+What made this worse than ordinary noise is that it is *deterministic*. The
+harness's strongest label, `REGRESSED (...every recorded run of this same kernel
+image shows it)`, is awarded on replication — and a layout artifact replicates
+perfectly, every time, forever. Replication asks "did the same binary produce
+this twice?", and a fixed-address artifact answers yes. It is blind to layout by
+construction, so the artifact arrives wearing the best label the harness has.
+
+### The mechanism
+
+`kernel/src/layout_pad.rs` emits a `#[used]` byte array into
+`.text.slateos_layout_pad`, sized by `SLATEOS_TEXT_PAD` at build time and empty
+by default. `kernel/linker.ld` places that section *first* in `.text`, so its
+size shifts every other function. `scripts/layout-sweep.py` builds and benches
+several pads; `bench-history.py` records the pad in each history record and
+computes a per-benchmark band from the spread across arms.
+
+Three implementation choices are worth recording because the obvious
+alternatives are wrong in ways that do not show up as failures:
+
+- **The kernel reads the pad from the linker symbols bracketing the section,
+  never from the Rust constant.** Reading the constant let the compiler fold
+  `if PAD_BYTES == 0` away in the unpadded build, which made that build's code
+  ~256 bytes shorter — so the baseline arm differed from the padded arms *in
+  code as well as in placement*, reintroducing the exact confound the sweep
+  exists to isolate. This was caught by the sweep's own negative control, which
+  saw shifts of 4096, 4336 *and* 4352 where a pure placement change must produce
+  a single uniform number. After the fix: `+3072 .. +3072` and `+4096 .. +4096`
+  across all 115,542 shared `.text` symbols, 0 unmoved.
+- **A pad that is a multiple of 4096 is rejected as a sweep sample**, by a
+  negative control in `--self-test`. It shifts everything by a whole page and
+  therefore *preserves every straddle relationship* — a sample that looks like a
+  sample, moves the whole image, and measures nothing.
+- **The boot-time placement check is fatal.** It is unreachable in a normal
+  build (pad 0 returns immediately), and in a sweep build a misplaced pad makes
+  every arm a subset of every other, yielding a sensitivity underestimate of
+  unknown size — numbers worse than none, because they would be used to dismiss
+  real regressions.
+
+### The decision: what "unmeasured" means
+
+The band's job is to *dismiss* movements, so every uncertainty must be resolved
+in the direction that dismisses fewer. Three consequences, all deliberate:
+
+| Situation | Chosen behaviour | The tempting alternative, and why it is wrong |
+|---|---|---|
+| Benchmark never swept | Stays a regression, with a printed note that placement was **not** ruled out | Excusing it would silence the check in the ordinary case — nothing has been swept — which is the same failure as a check that cannot fire |
+| Only two layouts sampled | No band at all | Two points define an interval containing both by construction: no residual, no way to be wrong, and it would be reported as if it were a measurement |
+| One arm's host-drift factor uncomputable | The whole group is voided | Falling back to an uncorrected 1.0 lets host drift inflate the spread, widening the band — failing in the one direction that hides regressions |
+| Record predates the `textpad=` banner | Excluded (absent ≠ 0) | Folding absent into 0 would enrol ~70 historical records into the unpadded arm of a sweep they were never part of, manufacturing a wide band out of months of unrelated code change |
+
+The general principle, shared with `replication_verdict` and `MODE_UNDECIDED`:
+**only a positively-evidenced verdict may excuse a finding.** An excuse granted
+by absence is indistinguishable from having no check.
+
+### Which sweep applies, when more than one exists
+
+The most **recent** sweep wins; arm count only breaks ties. "Most arms wins" is
+the tempting rule, because more sampled layouts genuinely is a better lower
+bound of the true sensitivity. It is still wrong, for a categorical rather than
+a statistical reason: a band is evidence about the hot loops that *exist*, and a
+sweep of a commit whose code has since been rewritten is evidence about code
+that no longer runs. Preferring it lets a wide, well-sampled, obsolete band
+dismiss a real regression in today's code. The converse error — a
+barely-above-floor recent sweep giving a band too narrow to excuse a genuine
+artifact — fails the safe way: the movement stays a regression and a human looks
+at it. No staleness cutoff is imposed on top, because any threshold would be
+arbitrary and would silently flip the answer to "unmeasured" at some commit
+count nobody chose; the report names the commit the band came from instead, so a
+reader who recognises it as ancient can discount it.
+
+### What this does not do
+
+The band is a **lower bound**, and the report says so in as many words. Three or
+four sampled layouts cannot contain the worst pair among all layouts, so a
+movement just *outside* its band is not thereby cleared — it is merely not
+*explained*. The alternative, presenting the band as exhaustive, would let a
+near-miss be waved through by a number that was never entitled to clear it.
+
+### Both paths to a build failure, not just the loud one
+
+There are two independent ways a movement can fail `--fail-on-regression`: the
+run-over-run comparison, and `level_shifts()` — a *sustained* shift off a
+baseline older than the last three runs, which exists because a regression that
+appears and then persists is invisible run-over-run by construction. The first
+version of this work taught only the first path about layout.
+
+That was a real hole, and the reasoning that hid it is written in
+`level_shifts()`' own comment: *"host disturbance is random per run, while a
+code regression is in every run after the commit."* True, and incomplete — **a
+layout artifact is also in every run after the commit**, because the addresses
+are a property of the image and every re-run of that image reproduces them
+exactly. Persistence therefore separates {code *or* layout} from host noise and
+cannot say which of the two it is holding.
+
+`mode_structure()` does not cover it either. That check needs the benchmark to
+have been *seen* at both of its modes across different binaries in the recorded
+history, so the very first commit whose relink lands a hot loop across a page
+boundary is `MODE_UNDECIDED` — which fails the build, correctly, on the evidence
+it has. A sweep knows the same thing before the artifact has ever repeated,
+which is the whole reason to run one.
+
+So the band now applies to sustained shifts on the same terms as everywhere
+else — a band measured for that exact benchmark, at least as large as the shift
+— **plus** one extra precondition that is specific to this path:
+
+> Placement can only explain a shift if placement could have *changed* across
+> the runs the shift is drawn from.
+
+`placement_is_constant()` answers that, and answers `True` **only on proof**: if
+every run in the shift's reference and corroboration windows, and the run being
+judged, are provably one kernel image, then the addresses are identical
+throughout and layout is ruled out by arithmetic rather than weighed against the
+numbers. Such a series is a host-level change (thermal, background load) that
+persisted; reporting it is right, calling it code placement would be a false
+statement. This is the same mistake as filing an A/A movement under "explained
+by code placement", in a different costume — *a filter that is correct for the
+ordinary case, applied to the one case whose premise it violates*.
+
+Ignorance is deliberately **not** proof. A run with no `kernel_sha`, or a dirty
+tree with no clean commit, makes the predicate `False`, because "we do not know"
+is not "they are the same". That direction is the safe one here precisely
+because this predicate only ever *blocks* an excuse: answering `False` on
+ignorance leaves the band to be judged on its own positive evidence, exactly as
+it is everywhere else, whereas answering `True` would let a missing hash veto a
+correct excuse.
+
+One structural note, because it is the kind of thing that decays: the window a
+shift is drawn from is now computed once, by `level_shift_window()`, and read by
+both the finding and its veto. A veto computed over a different window than the
+finding it vetoes is a check that appears to fire on the evidence and does not —
+this project's signature failure, and it would be invisible.
+
+### What the first sweep measured (added 2026-08-19, after the fact)
+
+Everything above was written before a sweep had ever completed, so the
+confound's *size* was an argument from mechanism — a ~1.7× per-iteration
+penalty on a straddling loop — not a measurement. It has now been measured, and
+the honest note to record is that **the mechanism argument understated it
+badly.**
+
+Six arms at pads 0/1024/1536/2048/2560/3072, one commit (`b36a244bb`), release,
+Logoplex3, 4128 s. Bands for 86 benchmarks: median **26.0%**, max **182.0%**,
+and **61 of 86 (71%) at or above 10%**. Full distribution in
+`known-issues.md`.
+
+Three things follow that the design as written did not anticipate:
+
+- **The suite is not split into a sensitive minority and a stable majority.**
+  The tacit expectation behind "a movement smaller than the band is not a
+  finding" was that most benchmarks would have a small band and the exception
+  would be loud. The real shape is the opposite: 86% of the suite moves ≥5% on
+  placement alone, and the *median* benchmark can be made to move a quarter of
+  its own value by relinking. There is no quiet majority to fall back on.
+- **Performance-critical paths are among the worst, not the best.**
+  `pick_next` 132.0%, `page_alloc_free` 91.9%, `page_fault` 84.9%,
+  `ipc_channel` 82.8%, `io_ring_nop` 74.5%, `syscall_dispatch` 41.9% — the
+  exact benchmarks `CLAUDE.md` names as the ones that must not regress. That
+  is not a coincidence: these are tight hot loops, which is precisely what a
+  page-straddle penalty acts on. The benchmarks worth guarding are the
+  benchmarks least able to be judged without a band.
+- **The "unmeasured stays a regression" rule is now the expensive one, and it
+  is still right.** With bands this wide, refusing to excuse an unswept
+  benchmark means a lot of movements keep a regression they may not deserve.
+  That remains the correct direction — an excuse granted by absence is
+  indistinguishable from no check — but it converts the sweep from a nicety
+  into a prerequisite for reading release numbers at all. The `debug` profile
+  still has no sweep.
+
+The one thing this does **not** license is treating a wide band as licence to
+ignore the benchmark. A 182% band means placement can manufacture 182%; it does
+not mean a 182% code regression is acceptable. It means this emulator cannot
+distinguish the two, and something other than a single relink-to-relink
+comparison has to.
+
+---
+
+## §235 — A reachability map may escalate a finding, never dismiss one, because "I found no call path" is not "there is no call path"
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** When the benchmark harness flags a slowdown, it is useful to know
+whether the code change under test even *runs* inside the benchmark that got
+slower. The obvious use of that knowledge — "the change doesn't touch this
+benchmark's code, so the slowdown must be a build artifact, drop it" — is the
+one use that is unsafe, because a search of the source can miss a call path that
+really exists, and dropping a real slowdown is the expensive mistake. So the map
+is wired the other way round: nothing is ever excused *because* of it, and it
+only ever adds a warning on top of an excuse that was already granted on other
+evidence. Every gap in the map therefore produces silence, which changes no
+verdict.
+
+### The problem, and why it stayed open
+
+`known-issues.md`'s standing fix list for the layout-artifact problem had three
+parts. Parts (1) and (3) landed; part (2) — *"label cross-image movements
+`MOVED (image changed)`, not `REGRESSED`, unless the changed files plausibly
+reach the benchmark"* — sat blocked for weeks behind what looked like a tooling
+gap ("we need a benchmark-to-source reachability map"). It was not a tooling
+gap. It was the direction of the clause.
+
+Read it precisely: a movement is *demoted* out of `REGRESSED` when the changed
+files do **not** plausibly reach the benchmark. The predicate that fires is
+non-reachability. To demote correctly, the tool must establish that no path
+exists from the diff to the benchmark — and no static analysis available here
+can establish that. `bench.rs` calls into the kernel through helper functions,
+trait objects and generic instantiations; `-C lto` and inlining dissolve the
+call graph the source suggests. A grep-grade map that finds nothing has two
+indistinguishable explanations: there is no path, or the map cannot see it.
+
+The two errors are not symmetric:
+
+| The map says | Truth | Consequence |
+|---|---|---|
+| unreachable | unreachable | correct demotion |
+| **unreachable** | **reachable** | **a real regression is relabelled a build artifact and disappears** |
+
+The bottom row is the whole reason the harness exists. A tool whose failure mode
+is *silently deleting the finding it was built to protect* is worse than no
+tool, because it also removes the reader's suspicion. So part (2), as written,
+was not blocked on effort — it was unimplementable at any effort, and the
+correct response was to reverse it rather than keep waiting for a map good
+enough to satisfy it.
+
+### The decision
+
+Reachability is used in exactly one direction: **to escalate.**
+
+- A movement is excused only by the *measured* layout band (§234), on positive
+  evidence, exactly as before. The map is not consulted to excuse anything.
+- *After* an excuse is granted, the map runs. If the diff provably edits a file
+  belonging to a subsystem the benchmark demonstrably enters, the report adds a
+  warning: placement and the diff are now **both** live explanations, and this
+  measurement cannot tell them apart. Read the diff.
+- Every uncertainty resolves to silence: no map entry for the benchmark, a
+  `git diff` that failed, an unreadable `bench.rs`, no base commit. `None`
+  escalates nothing, and silence leaves the verdict exactly as §234 set it.
+
+Now invert the table. A *found* call path is positive evidence — the map only
+claims a path when it can point at one. A *missing* one produces no output. The
+expensive row is gone: the map can no longer delete a finding, only annotate
+one.
+
+### What the map actually is, and why its sloppiness is acceptable
+
+`benchmark_subsystems()` in `scripts/bench-history.py` scans `kernel/src/bench.rs`
+for `score("name", …)` call sites, collects the `mod::` path prefixes appearing
+in the enclosing function, and resolves each to a file or directory under
+`kernel/src/`. `changed_paths()` asks git what the comparison's base commit
+changed. `diff_touches()` intersects them.
+
+This is a crude map, and it is crude in two directions — both of which are safe
+under escalate-only semantics:
+
+- **It under-covers**: 67 of 86 benchmarks get an entry. The other 19 name no
+  module the scanner recognises. Under the old direction, an uncovered benchmark
+  would have been auto-demoted (unreachable by default) — catastrophic. Under
+  this one, it simply never escalates.
+- **It over-attributes**: `vfs_stat_root` picks up `sync` and `lockdep` because
+  those module paths appear in its enclosing function. Under the old direction,
+  over-attribution would *suppress* demotions, which is at least safe; here it
+  causes an occasional warning that sends a reader to a diff that turns out to
+  be irrelevant. That costs a minute of reading. The opposite error costs a
+  shipped regression.
+
+Neither flaw can change a verdict. That is the property being bought, and it is
+the reason a map this rough is worth having at all — its accuracy determines
+only how often a *true* warning is printed, never whether a *false* excuse is
+granted.
+
+### Alternative considered: build a real call graph
+
+`cargo`'s MIR, or `llvm-cfg` over the built object, could yield a genuine call
+graph and would answer non-reachability far better than grep does. Rejected —
+not on cost, but because it does not change the argument. LTO and inlining mean
+even a real call graph is a graph of *one particular build*, and the claim
+needed for demotion is about the semantics of the source. A better map would
+narrow the bottom row of the table without eliminating it, and a rare silent
+deletion of a real regression is worse than a frequent one, because nobody is
+looking for it. The escalate-only framing removes the row outright, at which
+point map quality stops being a correctness question and becomes a
+signal-to-noise one — where grep is adequate.
+
+### Consequences
+
+- `known-issues.md`'s part (2) is closed, in reversed form; the wording there
+  now records the reversal rather than the original clause, because the original
+  clause is the trap.
+- Anything else that wants to consult reachability inherits the rule: it may add
+  suspicion to a finding, never subtract it. If a future check wants to demote
+  on non-reachability, it needs positive proof of non-reachability — which means
+  it needs a different mechanism entirely, not a better version of this one.
+- `SCORE_CALL_RE` is named that, and not `SCORE_RE`, for a reason worth
+  remembering: the first draft bound the new pattern to `SCORE_RE`, which
+  already existed 3000 lines above matching the `SCORE …` line the kernel prints
+  on serial. Python rebound it at module scope with no error and no warning, and
+  the tool then parsed zero benchmarks out of every log it was handed — an empty
+  parse being indistinguishable from a boot that scored nothing. The existing
+  test suite caught it; nothing else would have.
+
+---
+
+## §236 — A self-test is verified to *exist in the binary*, not merely to be written, because the optimiser is entitled to answer the question for you
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel has a check that runs at boot and confirms the layout
+padding landed where the linker script says it should. On 2026-08-19 that check
+failed on every padded build — printing two addresses that were *identical* and
+declaring them different. The compiler had decided the answer at build time
+(wrongly) and deleted the half of the check that says "OK", so the check could
+only ever fail. We fixed the check, and then added a rule: from now on the
+build-time test suite confirms that each branch of that check is still *present
+in the compiled kernel*, not just present in the source.
+
+### The problem
+
+LLVM guarantees that two distinct global objects have distinct addresses, and
+uses that to constant-fold address comparisons. `layout_pad.rs` declared
+`__text_start` and `__layout_pad_start` as two `extern static u8`s that
+`linker.ld` deliberately makes *the same address*. So `pad_start != text_start`
+folded to `true`, the success branch became unreachable, and LLVM removed it.
+`main.rs` halts on failure by design, so every optimised nonzero-pad kernel
+wedged at boot. Full write-up in `known-issues.md`.
+
+The check was correct as written, correct in intent, and had a correct ELF
+underneath it. It still could not pass. That is the part worth turning into a
+rule: **source-level correctness of a self-test says nothing about whether the
+self-test survived compilation.**
+
+### Decision 1 — launder linker-symbol addresses through an `asm!` barrier, not `black_box`
+
+`opaque_addr()` passes the address through an empty `asm!` with the value as an
+`inout(reg)` operand. The compiler must assume the block wrote an arbitrary
+integer, so everything it knew about the symbol — including that it *was* a
+symbol — is gone, and the comparison has to happen at run time.
+
+*Alternative considered: `core::hint::black_box`.* Shorter, no `unsafe`, and it
+would almost certainly work on today's rustc, which lowers it to the same
+barrier. Rejected because its documentation states plainly that it guarantees
+nothing and may be a no-op. The cost of that being wrong is not a slow kernel;
+it is this exact bug returning silently on a toolchain upgrade, as an
+unbootable kernel whose source looks fine. An `unsafe` block with a SAFETY
+comment is a real price, but it buys a guarantee rather than a likelihood, and
+the failure it prevents is one we have already paid for once.
+
+*Alternative considered: make it one symbol.* `linker.ld` could define only
+`__text_start` and have the pad module use it for both roles. That removes the
+aliasing — and with it the entire check, since "is the pad at the start of
+.text" becomes a tautology. The check exists precisely because `linker.ld` is
+editable and a future toolchain could reorder sections. Deleting the question
+to avoid a wrong answer is the worst available option.
+
+### Decision 2 — verify branch survival by string presence, and extract the strings
+
+`--self-test` now requires every message `self_test_pad_is_first_in_text()` can
+print to appear in each padded release image. A branch that has been folded
+away takes its message with it, because nothing else references the string.
+
+*Why this proxy rather than something stronger.* The rigorous version is to
+disassemble the function and confirm a `cmp` of two run-time values survives.
+That is a real check on the real artifact, and it is also a fragile one: it
+depends on instruction selection, on which registers the barrier chose, and on
+the function still being a discrete function rather than inlined into
+`kernel_main`. It would need maintenance every toolchain bump, and a check that
+cries wolf gets suppressed. String presence has none of those failure modes: it
+is one `in` against the image bytes, and it is *exactly* correlated with the
+thing we care about, because a message string is referenced by precisely one
+branch and nothing else.
+
+*Why the strings are extracted from the Rust source rather than written down in
+the Python.* Same reasoning as `extract_dependency_probe()` (see §235's
+neighbours): a second copy of a fact drifts, and a drifted copy checks
+something that is no longer true. Extraction makes rewording a message a
+one-edit change, and makes *deleting* a branch — the thing being guarded
+against — show up as a count mismatch that the extractor refuses to paper over.
+
+### The general rule this establishes
+
+Where a self-test's outcome could be decided at compile time, the test suite
+must confirm the test still exists in the artifact. Concretely, in this repo
+that means: any check comparing two linker symbols, any check whose operands
+are all compile-time constants, and any check inside `#[cfg]`-gated code that
+could be gated out. The existing project rule is "a check that cannot fire
+presents as a check that found nothing"; this is its twin — *a check the
+compiler has already answered presents as a check that ran.*
+
+### Consequence
+
+An audit of every other linker-symbol use in the kernel (`alternatives.rs`,
+`idt.rs`, `mm/protect.rs`) found no other site with this exposure: every one of
+them compares a symbol against a **run-time** value (a page-table walk's
+address, a stored callback pointer), which LLVM cannot fold, or subtracts the
+bounds of a section that is never empty. `layout_pad.rs` was the only place
+where both sides of a comparison were linker symbols, and it is also the only
+place where the linker script *intends* two symbols to coincide — which is what
+made it the one that broke. Those two facts travel together, and the second is
+the cheap thing to grep for next time.
+
+---
+
+## §237 — The benchmark record stores which emulator it ran on, taken from the guest's own boot banner, and that value is part of the key that groups records for comparison
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** Our benchmarks run inside an emulated PC, and there are two very
+different ways to emulate one: QEMU can interpret every instruction in software
+(TCG), or it can hand the instructions to the CPU's own virtualization hardware
+(WHPX). We measured the *same kernel binary* both ways: the typical benchmark
+runs 3.5× faster under the hardware one, the best 10×. Until now the saved
+result did not say which had been used, so a comparison could unknowingly put a
+software-emulated run next to a hardware-accelerated one and report a tenfold
+speed difference as though it were a change in our code. Two decisions: record
+which emulator was used, reading it from what the kernel itself printed at boot
+rather than from the flag we passed; and make that value part of the identity of
+a comparison group, so a mixed comparison cannot be constructed at all.
+
+### The measurement that forced it
+
+Run 2026-08-19, one byte-identical kernel (`kernel_sha 7a17cf6be2a10a26` —
+literally the same bytes on disk, so no code difference and no code *placement*
+difference), release profile, 86 benchmarks, on this host:
+
+| | |
+|---|---|
+| Median | **×3.53** faster under WHPX |
+| Faster under WHPX | 82 of 86 |
+| Slower under WHPX | 4 of 86 |
+| Best | `ipc_channel_roundtrip_64k` ×10.36 (23352 ns → 2253 ns) |
+| Worst | `hpet_read` ×0.033 (453 ns → 13534 ns) |
+
+The four that get *slower* are not noise and they are not a puzzle — they are a
+signature. `hpet_read`, `net_arp_lookup` and `net_ns_arp_lookup` all collapse to
+almost exactly the same number, ~13.5 µs, regardless of what they were before.
+That is the cost of one VM exit: reading an emulated timer device under WHPX
+traps out to the hypervisor, where TCG, already in software, simply computes the
+answer inline (~450 ns). The two ARP benchmarks are slow for the same reason —
+they read the clock. So the accelerator does not scale performance, it *reshapes*
+it: everything CPU-bound gets much faster, everything device-bound gets ~30×
+slower.
+
+`isr_latency` at ×0.862 is the control that proves the rest are real. If WHPX
+had merely rescaled our timing calibration, every benchmark would have moved by
+one common factor. Instead one barely moves while another drops 87%. The
+differences are differences in what the machine actually does.
+
+### Correction: the accelerator was not the *only* difference
+
+Noticed while writing the follow-up question, and recorded here rather than
+quietly fixed, because the original phrasing of this section ("the same bytes, so
+there is no code difference") was an overclaim about what *executed*.
+
+The two boots differ in three CPU features as well as the accelerator:
+
+| | TCG | WHPX |
+|---|---|---|
+| SMEP / SMAP / UMIP | true | **false** |
+| `[alt]` patch sites applied | 47 of 47 | **0 of 47** |
+| everything else (SSE4, POPCNT, AVX, XSAVE, AES-NI, RDRAND, RDTSCP, 1 GiB pages) | absent | absent |
+
+The cause is not WHPX's nature but our command line: `boot-test.sh` passes
+`-cpu qemu64,+smep,+smap,+umip`, and under WHPX the three `+` augmentations are
+silently dropped — the base model is otherwise identical, which is why every
+other feature matches exactly.
+
+**The runtime consequence is bounded and it is knowable, not a vague caveat.**
+`alternatives.rs` has exactly one `Feature` variant, `Smap`, so all 47 sites are
+`stac`/`clac` insertions on kernel paths that touch user memory. SMEP and UMIP
+add no instructions at all — they are CR4 bits that turn certain accesses into
+faults. So the entire executed-code difference is: under TCG, user-memory
+accesses carry a `stac`/`clac` pair that under WHPX is absent.
+
+That confounds the user-copy and syscall-boundary benchmarks by an unknown but
+small amount, and leaves the headline numbers standing, because the largest
+effects are on paths that never touch user memory: `ipc_channel_roundtrip_64k`
+(×10.36), `sched_pick_next_d1`/`d256` (×8.20/×8.40), `io_ring_nop` (×9.57),
+`crypto_x25519` (×8.27). Two emulated instructions cannot produce ×8 on a
+benchmark that does not execute them.
+
+**It does not weaken the decision below; it strengthens it.** The grouping key
+was adopted because a cross-accelerator comparison is meaningless. This shows the
+accelerator drags *other* machine properties along with it, so the records being
+separated differ by even more than the argument assumed.
+
+### Why the value is read from the guest, not from the flag we passed
+
+The harness knows perfectly well which accelerator it asked for — it is on its
+own command line. Recording *that* would have been one line and would have been
+wrong. A flag records an intention; the boot banner records an outcome, and they
+come apart in exactly the cases that matter: a stale build that never got the
+flag, a mistyped `QEMU_EXTRA`, a changed default, and above all a **silent
+fallback** — QEMU asked for an accelerator it cannot provide will happily fall
+back to TCG. In every one of those the harness would confidently write "WHPX"
+onto a TCG run, which is worse than the gap it was meant to close: an absent
+field is at least honest about not knowing.
+
+The kernel had been printing the answer on every boot since the hypervisor
+detection work (`[hypervisor] Detected: … (signature: …)`, from the guest's own
+CPUID), so this is not new instrumentation. It is the harness ceasing to discard
+something it was already being told.
+
+### Why it is part of the grouping key rather than a check
+
+The alternative was to keep grouping by commit and add a validation step — "if
+the records in this group disagree about the accelerator, refuse". That works
+until someone adds a second path that builds a group, or refactors the one that
+exists, and forgets the check; then the check is absent and nothing says so.
+Putting the accelerator in the key makes a mixed group *unconstructible*: there
+is no arrangement of records, and no future code path, that can produce one,
+because such records are no longer the same key.
+
+The stakes justify the stronger form. A layout band spanning both accelerators
+would report ×10 as "how far code placement alone can move this benchmark" — a
+band near 1000%, which then silently excuses every regression it is ever
+consulted about. That is the single worst failure this subsystem has: not a
+false alarm, but a permanent, invisible all-clear.
+
+### Absent is its own value and is never folded into TCG
+
+The same rule §234 set for `text_pad`, and here it is not an analogy but a
+proof. The first WHPX run in our history was recorded *before* this field
+existed, so it carries no accelerator — an absent value is demonstrably not
+evidence of TCG, because at least one absent value is WHPX. Defaulting absent to
+TCG would have enrolled every one of the ~97 pre-field records into an arm they
+were never part of. Absent therefore gets its own key: historical records keep
+forming exactly the bands they always did, and never mix with a record that
+actually said.
+
+### The cost, and what is not decided here
+
+Bands and baselines now fragment by accelerator, so switching accelerators
+invalidates every band we have measured and requires a fresh 69-minute sweep
+before placement can excuse anything again. That is the correct cost — the
+alternative is bands that quietly mean nothing — but it does mean the
+accelerator choice is now a heavier decision than it looks.
+
+**This entry does not decide which accelerator we should use.** That is a
+cross-lane environment change (`known-issues.md` explicitly fences
+`scripts/boot-test.sh`'s accelerator as shared by all three lanes) and it trades
+a measurement artifact against real lost coverage — WHPX cannot expose UMIP on
+this host, so our SMEP/SMAP/UMIP hardening would go untested. It is filed for
+the operator, not settled here.
+
+---
+
+## §238 — An append-only measurement log may be corrected in place, but only for facts about the *harness*, never about the tree
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** We keep a log of every kernel boot — did it work, how long did it
+take — and other parts of the project read it to answer questions like "has this
+bug stopped happening?" Normally we only ever add lines to that log; we never go
+back and change one, because a log you can edit is a log you can quietly make
+say whatever you want. But three of its lines were wrong in a specific way: they
+recorded deliberate experiments (runs where the emulator was deliberately
+misconfigured to see what would happen) as if they were ordinary boots of our
+code, and one of those "boots" never even loaded our kernel. Left alone, they
+made a bug look like it had stopped recurring when nothing had been tested. The
+decision is that this narrow kind of correction is allowed, and the three
+conditions that make it allowed are written down so the exception cannot widen.
+
+### What happened
+
+`bench/history.jsonl` had carried an `experiment` field since the layout sweeps;
+`bench/boot-history.jsonl` had none. Three WHPX probe runs on 2026-08-19 were
+therefore recorded as ordinary boots. The `-cpu host` probe, which died inside
+OVMF's `PlatformPei` before our kernel was loaded (see
+`ENV-WHPX-CPU-HOST-FIRMWARE-GP`), landed as a plain `TIMEOUT`. Two consequences:
+
+- `current consecutive clean streak` read **0**. Four open kernel issues state
+  their closure condition as a count of consecutive clean boots, so all four had
+  silently had their bar reset by a fact about which CPU models WHPX accepts.
+- Worse, `streaks()` counted it toward every failure fingerprint's `since_last`.
+  That function's entire claim to being usable for closing an issue is the
+  argument *"a boot that failed differently is still a boot in which this did not
+  appear"* — which assumes the kernel **ran**. Here it had not. That is a
+  manufactured clean streak, the exact failure the module's docstring exists to
+  prevent, arriving through the one door nobody had put a guard on.
+
+Adding the field fixes the future. It does not fix those three rows, and the
+damage is entirely in those three rows.
+
+### The decision
+
+**In-place correction of an append-only log is permitted when all three of these
+hold.** If any one fails, the row stands and the discrepancy is documented
+instead.
+
+1. **The row misstates a fact about the harness, not about the tree.** Whether a
+   run was a deliberate probe is a property of how it was launched. It is not a
+   measurement, it was never observed-and-recorded, and re-deciding it cannot
+   change any number the run produced. Contrast: a wall time that looks wrong, a
+   verdict that seems mistaken, a serial log that disagrees with memory — those
+   are the tree talking, and they are never editable, however implausible.
+2. **The correction is verifiable from records outside the file.** Otherwise the
+   file is being edited to agree with somebody's recollection, which is what the
+   append-only rule exists to forbid. Each row here was matched on its exact
+   timestamp and checked against its `(profile, verdict, marker)` before being
+   touched, and each was corroborated externally — a byte-identical experiment
+   string on the same timestamp in `bench/history.jsonl`, the row's own recorded
+   OVMF `tail`, and the session transcript's record of the invocation.
+3. **Leaving it wrong actively corrupts an inference something else depends on.**
+   A cosmetic inaccuracy is not worth the precedent. A poisoned streak that four
+   issues read as a closure condition is.
+
+And two procedural requirements, which cost nothing and are what make the edit
+auditable afterwards:
+
+- **Reconstruct what the harness would have written, do not paraphrase.** The
+  reason strings were assembled the way `record_boot_outcome()` assembles them
+  today — `BENCH_EXPERIMENT`, then `QEMU_EXTRA`, then an overridden `QEMU_CPU`,
+  joined `"; "`. A hand-written summary would read as an annotation by a later
+  hand, and would not survive being diffed against a real row.
+- **The edit asserts its way in.** The backfill script refuses to write if a
+  timestamp is missing, if the fingerprint disagrees, or if the row already
+  carries the field. A backfill that silently no-ops is worse than none, because
+  it reports success.
+
+### Why not the alternatives
+
+**Leave the rows and note the discrepancy in `known-issues.md`.** This was the
+conservative option and is what the append-only rule says by default. Rejected
+because the note does not reach the consumer. `streaks()` is read by a future
+session asking "can I close this?", and it would answer "not seen in 166 boots"
+in a machine-checkable-looking format; the human reading that number has no
+prompt to go find a paragraph in a 40,000-line file explaining that three of
+them do not count. A correction that only works if someone remembers to apply it
+is not a correction — the same reasoning that made `accel` part of the grouping
+*key* in §237 rather than a check performed afterwards.
+
+**Delete the three rows.** Strictly worse than labelling them. The `-cpu host`
+row is the sole machine-readable record that the probe happened and how it
+failed, and `--list` should keep showing it: probes are excluded from
+*inference*, not hidden. Deletion also destroys the audit trail that makes this
+edit reviewable.
+
+**Append three compensating "correction" rows.** Preserves the literal
+append-only property while abandoning what it is for. It leaves the file with
+rows that are not boots, which every consumer must now learn to skip — the same
+problem, moved, plus a new record type.
+
+### The cost, stated plainly
+
+This weakens a property that was previously absolute, and "we may edit it when
+the edit is clearly justified" is exactly the shape of rule that erodes. The
+mitigation is that condition 1 is a bright line and not a judgement call:
+*was this fact ever measured?* An experiment label was not — it was known before
+the run started and simply not written down. Anything the boot itself produced is
+off limits, permanently, no matter how wrong it looks. If a future session finds
+itself arguing that a *measurement* meets these conditions, the answer is no, and
+the argument itself is the evidence that the exception is doing what exceptions
+do.
+
+## §239 — A layout band whose arms could not check the host is reported with that caveat, not discarded
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** Every benchmark run includes a tiny self-check — a "canary" — whose
+only job is to answer "was this machine busy doing something else while the
+measurement ran?". On all six runs of the 2026-08-19 layout sweep that self-check
+failed outright: it could not produce a usable answer either way. The results of
+those six runs are used to set a tolerance band, and anything that moves less
+than that band is dismissed as noise rather than reported as a slowdown. The
+question was whether to throw the six runs away because their self-check failed,
+or keep them and print a warning. The decision is: keep them, and make every
+place that prints the band also print who could and could not verify the host.
+
+### The situation
+
+`layout_bands()` takes several boots of byte-identical source, built at different
+`.text` offsets, and reports how far each benchmark moves when *only* the code's
+address changes. That figure is then used to withdraw movements: a benchmark that
+moved less than its band is filed under "explained by code placement" instead of
+"regressed".
+
+The six WHPX arms recorded on 2026-08-19 (`943b3f21b..78a921b4f`) each carry
+`canary: {samples: 0, invalid: 13, ...}` — the kernel-side canary rejected all
+thirteen of its own measurements, so `canary_verdict()` returns `broken`. The
+band they produce printed with no indication of this whatsoever; it read exactly
+like a band measured on a machine verified to be idle.
+
+That is a genuine defect. The band is a *licence to dismiss findings*, and a
+licence issued by an instrument that could not check its own preconditions is not
+the same object as one that could. Nothing in the output distinguished them.
+
+### The decision
+
+Report, do not discard.
+
+`layout_bands()` now returns a fifth element per band — `{verdict: arm count}` —
+and `describe_layout_band()` / `--layout-bands` state it in words. Silence is
+reserved for the all-clean case, so the caveat's *presence* is what carries the
+information. `absent` (an arm with no canary at all) is caveated alongside
+`broken`, because an unchecked run is not a passing run and the two are only
+distinguishable if the output refuses to read silence as a pass.
+
+### Why not void the group, which is the usual direction here
+
+`layout_bands()` already voids a group outright when any arm's host-drift factor
+cannot be computed, and the reasoning there is the standing direction-of-error
+rule: an uncorrected band is *too wide*, a too-wide band dismisses real
+regressions, so failing to "unmeasured" is the safe failure. Applying the same
+rule to a broken canary is the obvious move, and it was rejected for one reason.
+
+An uncorrectable drift factor is evidence that *this band is wrong* — the
+correction it needed is missing, and its absence has a known sign. A broken
+canary is evidence that *nobody knows*: the host may have been perfectly idle.
+The two are not the same epistemic object, and voiding treats them as if they
+were.
+
+Concretely, voiding would have discarded the only WHPX measurement that exists —
+and would go on discarding every future WHPX sweep, silently, until the canary's
+resolution floor is fixed (`CANARY_MIN_RESOLVABLE` is applied to raw cycles but
+was derived before `CENTI` made the measurement centicycles, so the bound is 100x
+too strict and WHPX's ~87 centi is rejected out of hand). That is a *separate*,
+already-diagnosed instrument bug. Letting it silently delete an unrelated
+measurement — with the deletion presenting as "no sweep has been run" — is the
+same class of invisible failure that the whole layout-band mechanism exists to
+end.
+
+### The cost, stated plainly
+
+A reader who ignores the warning gets today's behaviour, which is the unsafe one:
+a band possibly inflated by host noise, dismissing movements it should not. This
+decision does not fix that; it makes it visible. The actual fix is the canary
+resolution floor, and until that lands the warning is the only thing standing
+between a broken instrument and a silently-widened tolerance.
+
+This is therefore a decision to revisit once the floor is fixed. If broken
+canaries persist *after* it, the argument above weakens considerably — a canary
+that stays broken with no diagnosed cause is not "nobody knows", it is an
+instrument that does not work, and voiding becomes correct.
+
+## §240 — A check that decides whether evidence counts must be on the only path to that evidence; an analysis that re-selects its own inputs is not covered by it
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** The benchmark tooling has a function whose job is to decide which
+recorded runs are allowed to be compared against each other. It works. But on
+2026-08-19 a set of numbers reached `open-questions.md` — where the operator is
+being asked to make a decision — that had been produced by a hand-written script
+which picked its own runs and never called that function. It picked a run that
+the function would have rejected, and the published figures were wrong by up to
+400x, in the direction that supported the conclusion the analysis was hoping for.
+The decision is that a guard only guards the paths that call it, so evidence
+quoted to the operator must come from a command that the reader can re-run —
+and any ad-hoc analysis that groups records must call the real predicate rather
+than restate it.
+
+### The situation
+
+`layout_arm_rejection()` in `scripts/bench-history.py` decides whether a given
+benchmark record may be used as an arm of a layout band. A layout band is a
+range of timings measured across several builds of *identical* source at
+different code offsets; its purpose is to say how much a benchmark moves for
+reasons that are not a code change, so movements inside it can be dismissed. A
+band that is too wide therefore dismisses real regressions, silently.
+
+One of the predicate's checks is `LAYOUT_SWEEP_TAG`: the record's `experiment`
+field must say it was submitted as a sweep arm. That check looks redundant
+beside six fields of real measurement, and its comment already explains why it
+is not — the 16:15 run of 2026-08-19 matches a genuine arm on *every* other
+field (same host, same profile, unloaded, `text_pad: 0` truthfully, `accel`
+absent truthfully, byte-identical kernel tree) and is separated only by the tag.
+See `known-issues.md`
+`B-A-AN-ORDINARY-RUN-NEARLY-JOINED-A-LAYOUT-BAND-AS-A-SEVENTH-ARM`.
+
+That run is a WHPX (hardware-virtualised) run. Admitting it to a TCG
+(software-emulated) band is not a small error: `hpet_read` costs a VM exit under
+WHPX (13,680 ns) and is emulated inline under TCG (446 ns), so one such row
+inflates that benchmark's band about thirtyfold.
+
+It was admitted. Not by `bench-history.py`, which rejected it and always would
+have, but by a hand-written analysis that enumerated records itself to build the
+WHPX-vs-TCG comparison table for Q53. The table was published in
+`open-questions.md` as the evidence for that question's option D.
+
+| | as published | actual |
+|---|---|---|
+| median TCG band | 36.5% | 26.0% |
+| mean | 104.9% | 40.6% |
+| worst benchmark | 2466% (`hpet_read`) | 182.0% |
+| `hpet_read` | 2466% | 6.2% |
+
+### The decision
+
+Two rules, adopted together:
+
+1. **Numbers quoted in `open-questions.md` must be reproducible by a command
+   the reader can run.** The corrected Q53 table is entirely printed by
+   `python scripts/bench-history.py --layout-bands --profile release`, which
+   routes through `layout_arm_rejection` and therefore cannot pick up an
+   untagged run.
+2. **An ad-hoc analysis that groups records must call the real predicate, not
+   restate its conditions.** `build/whpx-band-preview.py` does exactly this —
+   it monkeypatches the *grouping key* and reuses `layout_arm_rejection`
+   unmodified — and its WHPX column survived re-derivation intact. That is the
+   pattern; the TCG column was produced by something that did not, and did not.
+
+### Why, and what the alternatives were
+
+**Alternative A: strengthen the record so the tag is unnecessary.** Make the
+data itself distinguish a sweep arm from an ordinary run, so that no
+declaration is needed and no analysis can get it wrong. Rejected because it is
+impossible, and the impossibility is instructive: `text_pad: 0` is *correct*
+for an unpadded kernel and there is no value meaning "not a sweep arm";
+`accel: None` is correct-for-its-time on a kernel predating the banner; the
+source digest is correct *and equal*, because the source genuinely was equal.
+The intent — "this run was submitted as an arm" — is not derivable from any
+measurement. It has to be declared, which means there will always be a check
+that an analysis can skip.
+
+**Alternative B: treat it as a one-off mistake and fix the numbers.** Rejected
+because the shape of the failure is the argument against it. It was silent
+(nothing flagged it), plausible (the resulting group looked entirely normal),
+and *directionally favourable* to the hypothesis being tested — inflating TCG's
+noise makes the case for abandoning TCG look stronger. It was found only
+because the table was being re-derived for an unrelated reason (adding a sixth
+arm), and could as easily have gone unexamined indefinitely. A failure with
+those three properties is not one that "being more careful" addresses.
+
+**Alternative C: forbid ad-hoc analysis; require every number to come from
+committed tooling.** Rejected as too strong, and it would have prevented
+something valuable: the preview script existed precisely to answer "what will
+the band be once the digest fix lands?" *before* implementing the fix, which
+de-risked the implementation. The distinction that matters is not ad-hoc versus
+committed, it is whether the analysis re-implements a decision the tooling
+already owns. Rule 2 targets exactly that and leaves exploratory work alone.
+
+**The cost of rule 1** is that some evidence is harder to quote — a figure that
+no command prints must either get a command or be described rather than
+tabulated. That is accepted: `open-questions.md`'s entire purpose is to support
+an operator decision, and a number the operator cannot re-check is worth less
+than one they can, however carefully it was derived.
+
+### Relationship to the existing rules
+
+This is the same defect as `layout_arm_rejection()`'s own docstring warns
+about, one level out. That docstring explains that `layout-sweep.py` must call
+the predicate rather than restate its conditions, because a restatement drifts
+and then passes arms the real predicate drops. Here the restatement was written
+in an analysis script instead of in the sweep, and drifted in the other
+direction — admitting an arm the real predicate rejects. Same cause, opposite
+sign, worse consequence: the sweep failure is loud (no band appears), this one
+is silent (a plausible band appears).
+
+It is also another instance of the pattern §238 and §239 circle: an inference
+resting on a justification that quietly stopped holding, with no test able to
+notice because the justification was never expressed as code. Here the
+unexpressed justification was "the arms in this table were selected the way the
+tool selects them."
+
+---
+
+## §241 — A record with no recorded accelerator is its own population, not an assumed TCG one; the resulting blindness is announced rather than papered over
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** The benchmark history judges a boot by comparing it against
+earlier boots on the same machine. It has just been taught that boots produced
+by QEMU's two different virtual-machine accelerators are not comparable — they
+differ by multiples, in both directions. But sixty of the sixty-one stored
+boots predate the field that says which accelerator was used. The choice was
+whether to assume those sixty were the common one (TCG), which would keep the
+statistics working immediately, or to treat "not recorded" as its own third
+value, which is honest but leaves the tool unable to judge anything for the
+next handful of runs. The second was chosen, with the tool now printing exactly
+why it cannot judge.
+
+### The decision
+
+`ACCEL_UNRECORDED = None` is a value in its own right and groups only with
+itself. `comparable_records()` compares `record_accel(record) == accel`
+directly, so an unlabelled record never joins a labelled window and vice versa.
+
+### Why not fold it into TCG
+
+Because it is falsifiable and it is false. The first Hyper-V/WHPX boot on this
+host is `2026-08-19T16:15:09`, and it predates the `accel` field. An absent
+value is therefore demonstrably not evidence of TCG — at least one unlabelled
+record is known to be WHPX. Folding would import that record into the TCG band.
+
+The stronger version of the argument does not depend on that one record. The
+assumption "unlabelled means TCG" is unfalsifiable *by the tool*: nothing in a
+record without the field can ever contradict it, so if it is wrong the band is
+wrong forever and silently. The alternative's cost is visible and expires.
+
+Note that the assumption is not even unreasonable — a structural discriminator
+built from labelled data (any benchmark where `min(WHPX) > 4·max(TCG)`, which
+selects `hpet_read` and the two ARP lookups on VM-exit cost rather than on a
+tuned threshold) flags exactly one of the sixty unlabelled records, and it is
+the known 16:15 probe. So "the unlabelled window is TCG-like" is *true*. It was
+still rejected as a *rule*, because a rule that happens to be true of today's
+data and cannot be checked against tomorrow's is the shape of every
+band-poisoning bug this project has had.
+
+### What it costs
+
+The first labelled TCG run finds no history. Both banded axes (wall clock,
+dispersion) return `unknown` until `MIN_WINDOW_FOR_BAND` (6) labelled runs
+accumulate — roughly five runs of reduced sensitivity. During that window the
+tool cannot condemn a genuinely contaminated run on those two axes; the canary
+axis is unaffected.
+
+*What changes:* for about five boots, the verdict line reads `unknown` where it
+would otherwise read `clean` or `contaminated`.
+
+### Why that cost is acceptable
+
+Because it is *stated*. `accel_thinning_note()` puts a sentence in the verdict's
+own notes giving the comparable-run count, how many records were excluded for
+predating the field, how many for naming a different accelerator, and the
+reason ("an accelerator changes the numbers by a multiple, not a percentage, so
+those runs would widen the bands rather than fill them"). A reader who sees
+`unknown` is told why, and the note disappears by itself once the window fills.
+
+The rejected option has the opposite profile: it works immediately and fails
+invisibly. This file has had to undo that trade three times already
+(`CANARY_TOLERANCE_PCT`, `DISPERSION_SUSPECT_RATIO`, the absolute A/B cycle
+budget), and the general principle it keeps arriving at is that **loud
+abstention beats silent confidence.** A tool that says "I cannot tell" is
+usable; a tool that says "clean" because it compared against the wrong
+population is worse than no tool.
+
+### A corollary that was implemented at the same time
+
+Neither window selector may have a default. `profile` used to default to
+`"debug"`, on the reasoning that a caller passing no `--profile` should keep
+finding the legacy records. There is no such caller, and a selector that
+silently picks a population when the caller forgets to name one is the same
+failure in miniature: on this host the unnamed-accelerator bucket holds sixty
+runs, so the wrong answer looks like a full and healthy history rather than an
+error. Both `profile` and `accel` are now required positionals, and a test
+asserts that omitting either raises `TypeError`.
+
+### Revisit when
+
+The unlabelled bucket stops being useful — i.e. once ≥6 labelled TCG release
+records exist and the unlabelled sixty are only of historical interest. At that
+point the question becomes whether to retire them from the window entirely
+rather than keep a third population alive. That is a cheaper decision than this
+one and does not need to be made now.
+
+---
+
+## §242 — One script loads another by path to reuse a parser, rather than either duplicating the pattern or extracting a shared module
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short.** Two scripts in `scripts/` need to read the same line out of a
+boot log — the `[hypervisor]` banner that says which emulator ran the kernel.
+`bench-history.py` already knew how. `boot-history.py` now needs to as well.
+Rather than copy the two regular expressions into the second file, it loads the
+first file at run time (via `importlib`, by path, because the filenames have
+hyphens and are not importable as modules) and calls its function. The cost is
+an unusual-looking dependency between two command-line scripts; the benefit is
+that there is exactly one parser, so the two files cannot come to disagree.
+
+**The alternatives, and why not.**
+
+*Copy the patterns.* Cheapest to write and the worst to own, for a reason
+specific to this parser: the failure mode of a stale copy is **silent**. A
+pattern that no longer matches returns `None`, and `None` already has a
+meaning here — "this kernel predates the banner and cannot say". So a broken
+copy in `boot-history.py` would not raise, would not print anything odd, and
+would produce records that look exactly like the several hundred legitimately
+unlabelled ones already in the file. `design-decisions.md` §240 forbids
+restating a selector for the general version of this reason; this instance is
+the aggravated one, because the restatement's failure is indistinguishable from
+correct output.
+
+*Extract a shared `scripts/serial_parse.py`.* The clean answer, and the one to
+take when a third consumer appears. It is not taken now because the shared
+surface is currently one function, and the extraction is not free: `parse_accel`
+sits next to `parse_text_pad`, `ACCEL_RE`, `BARE_METAL_RE` and a long comment
+explaining why there must be two patterns, none of which have an obvious home
+that is not just "the new module", and moving them would touch a file whose
+suite was mutation-checked yesterday. Splitting a module to serve two callers,
+when one of them is satisfied by an import, buys nothing today and costs the
+review of a file that is currently known-good.
+
+*Have `boot-test.sh` pass the accelerator on the command line.* Rejected on the
+same grounds `grade-positional.py` rejected it: a run that has to be **told**
+which accelerator produced it can be told wrong, and the shell already has two
+ways of selecting one (`QEMU_EXTRA`, and the default). The kernel itself
+observed the answer and printed it; reading what the guest reported is the only
+version that cannot disagree with what actually ran.
+
+**The load is failure-tolerant on purpose, and that is not a hedge.**
+`boot-history.py` catches any exception from the load and records `accel: null`
+with a warning on stderr. This is the single place in that file where
+swallowing an error is right: `boot-test.sh` calls the recorder from its EXIT
+trap with `|| true`, so an exception does not surface — it silently drops the
+record of the boot. Losing an accelerator label costs one row's grouping;
+losing the row costs the evidence of a failed boot, which is the whole reason
+the file exists. The asymmetry is what makes the catch correct rather than
+lazy, and it is under test in both directions (the record survives; the warning
+is printed).
+
+**What would change this decision.** A third consumer of the banner, or any
+second function that both scripts need. At that point the shared module pays
+for itself and the `importlib` load should be replaced by a real import.
 
 ## §463 — Two shared RNG crates merge into the dependency-free one
 

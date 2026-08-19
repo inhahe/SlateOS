@@ -132,6 +132,7 @@ mod ksyms;
 mod ktimer;
 mod ktrace;
 mod kwarn;
+mod layout_pad;
 mod limine;
 mod loadavg;
 mod lockdep;
@@ -461,6 +462,51 @@ extern "C" fn kernel_main() -> ! {
     }
 
     serial_println!("=== Kernel booting ===");
+    // Announce the build profile, unconditionally and with a *varying* value.
+    //
+    // `bench/boot-history.jsonl` records `profile: "debug"` for an instrumented
+    // boot and `profile: "debug"` for an ordinary one, which is the same string
+    // for two populations whose wall times differ by 3.4x (≈330 s vs ≈1100 s on
+    // this host). Anything that reads durations out of that file — a streak, a
+    // timeout calibration, a "is this boot unusually slow" judgement — is
+    // averaging across a mixture it cannot see. This line is what lets a
+    // consumer separate them.
+    //
+    // Unconditional, and printed even when there is nothing interesting to say,
+    // for the reason this project has now been bitten by three times: a line
+    // that appears *only* in the instrumented build is indistinguishable from a
+    // kernel too old to print it, so its absence would silently mean "assume
+    // uninstrumented" and quietly mislabel every historic boot. Because the
+    // value varies rather than the line's existence, absence is a third and
+    // distinguishable state — "this kernel predates the banner" — which is what
+    // a parser needs in order to decline to guess.
+    //
+    // `textpad=` is the same idea applied to code *placement*: under QEMU's TCG
+    // a loop that straddles a 4 KiB guest page costs ~1.7x per iteration, and
+    // relinking re-rolls that, so two builds of identical source can differ by
+    // that much on a benchmark. `SLATEOS_TEXT_PAD` deliberately perturbs the
+    // layout so the effect can be measured rather than guessed at; the value is
+    // reported here so a bench record can say which placement produced it,
+    // instead of the harness having to remember what it built.
+    serial_println!(
+        "[boot] build profile: sanitizer={} textpad={}",
+        if cfg!(kasan_instrumented) {
+            "kasan-instrumented"
+        } else {
+            "none"
+        },
+        layout_pad::pad_bytes()
+    );
+    // Fatal on purpose, and harmless in a normal build. With no padding this
+    // returns immediately, so an ordinary boot cannot reach the halt. In a
+    // sweep build a misplaced pad means every sample is a subset of every
+    // other one and the resulting "layout sensitivity" is an underestimate of
+    // unknown size — numbers that are worse than none, because they would be
+    // used to dismiss real regressions. Refusing to boot is the only outcome
+    // that cannot be mistaken for a clean run.
+    if layout_pad::self_test_pad_is_first_in_text().is_err() {
+        cpu::halt_loop();
+    }
     boot_timing::mark(boot_timing::Milestone::KernelEntry);
 
     // Lay down the boot-stack overflow canary now, while RSP is near the top
@@ -2983,6 +3029,13 @@ extern "C" fn kernel_main() -> ! {
             // run under the soak harness (many reboots) with the flag set. See
             // known-issues.md B-KNULLJUMP and open-questions.md Q34.
             let corruption_hunt = fs::kernparam::is_set("mm.corruption_hunt");
+            // Sampled before arming so the disarm below can *restore* rather
+            // than force-off. In the `kasan_instrumented` build KASAN is on for
+            // the whole boot (see `mm::kasan::init`), and an unconditional
+            // `disable()` at the end of this block would switch off — and wipe
+            // the shadow of — the very profile that was built to check
+            // everything after it.
+            let kasan_was_enabled = mm::kasan::is_enabled();
             if corruption_hunt {
                 mm::kasan::enable();
                 mm::quarantine::enable();
@@ -3680,7 +3733,9 @@ extern "C" fn kernel_main() -> ! {
                     ks.map_lock_giveups
                 );
                 mm::quarantine::disable();
-                mm::kasan::disable();
+                if !kasan_was_enabled {
+                    mm::kasan::disable();
+                }
                 // Reclaim parked slots (verifying each on the way out).
                 mm::quarantine::drain(|ptr, _class_idx| {
                     // SAFETY: `ptr` is a slab slot that was live when parked; returning

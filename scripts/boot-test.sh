@@ -111,6 +111,19 @@
 #                                       # TCG/no-PMU QEMU this is the only NMI
 #                                       # source that can catch a single-CPU
 #                                       # IF=0 spin.
+#   ./scripts/boot-test.sh --bootstrap  # if a git-ignored prerequisite is
+#                                       # missing (one of the six ring-3 service
+#                                       # binaries the kernel embeds, or the
+#                                       # limine/ tree staged into the ESP), run
+#                                       # scripts/bootstrap-worktree.sh and
+#                                       # continue instead of refusing.  Without
+#                                       # it the run stops before Step 1 and
+#                                       # prints the command — provisioning
+#                                       # builds six crates and may clone a
+#                                       # bootloader, which a run should not do
+#                                       # unasked.  This is what a fresh
+#                                       # worktree needs; see known-issues.md
+#                                       # A-A-FRESH-CHECKOUT-CANNOT-BOOT-TEST-…
 
 set -euo pipefail
 
@@ -361,11 +374,21 @@ report_pathz_skips() {
 # pass, and what they exercised was last week's binary.  Filed by lane B as
 # requests/b-a-boot-test-boots-a-rootfs-image-that-may-predate-the-fixtures-in-it.md.
 #
-# WHY CONTENT HASHES AND NOT MTIME: QEMU opens the image read-write, so a boot
-# updates its mtime.  The image's timestamp records when it was last *run*, not
-# when it was last *packed* -- it is newer than the tree after every boot,
-# which makes the obvious `-ot` test (the idiom the staged-kernel guard below
-# uses) not merely weak here but inverted.  `ctest-fixtures.py image-check`
+# WHY CONTENT HASHES AND NOT MTIME: mtime cannot answer the question this guard
+# asks.  "Is the ELF inside the image the one we just built" is about the bytes
+# in the image, and a timestamp describes neither the bytes nor which of them
+# came from where.  That reason is independent of everything else and is why
+# hashes are correct here permanently.
+#
+# There used to be a second reason -- QEMU opened the image read-write, so a
+# boot updated its mtime and the image was newer than the tree after every run,
+# making the obvious `-ot` idiom (used by the staged-kernel guard below) not
+# merely weak but inverted.  That is no longer true: the drive is attached with
+# `snapshot=on` (see the attach site), so a boot no longer touches the file at
+# all and its timestamp once again records when it was *packed*.  The stale
+# half of this rationale is recorded rather than deleted because a future reader
+# who finds `-ot` working here might otherwise conclude the guard is redundant;
+# it is not, for the first reason.  `ctest-fixtures.py image-check`
 # compares a sha256 per staged ELF against rootfs.ext4.manifest instead, and
 # fails closed when the manifest is absent -- an image that predates the check
 # cannot have its contents established, which is not the same as matching.
@@ -576,14 +599,79 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # re-benchmarking, so a row stamped *newer* than the tree it measured hides
 # precisely the changes the check exists to catch -- and it fails silently, by
 # printing the reassuring branch.
+#
+# The two files this harness itself writes are excluded from the dirty check,
+# and that exclusion is the whole point of the pathspec below.  Both are
+# tracked; both are appended to by the recorders at the *end* of a run.  So a
+# clean tree stops being clean the moment the first run finishes, and every
+# subsequent run at the same commit stamps itself `"dirty": true` — not because
+# anything under test changed, but because the previous run recorded itself.
+# The signature is visible in bench/history.jsonl: 40515da89 has one clean row
+# followed by five dirty ones, 5e9a30a22 one clean then one dirty, with no
+# source commit in between.
+#
+# It is not a cosmetic mislabel either.  `dirty` means "the commit hash does not
+# identify the source that was built", and consumers act on it: layout_arms()
+# in bench-history.py drops dirty records outright, because a layout band is
+# only meaningful across arms that share identical source.  A six-arm sweep
+# would therefore have contributed exactly one usable arm — one below the
+# three-arm minimum — and reported no band at all, silently, after three hours
+# of QEMU.  A check that cannot fire, presenting as a check that found nothing.
+#
+# Excluding them is safe in the direction that matters.  Widening `dirty` hides
+# nothing; narrowing it admits records into comparisons.  These two files are
+# never compiled and never read by the kernel, so no edit to them can change
+# what was built — which is precisely and only what `dirty` is claiming about.
 BT_BRANCH="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
 BT_HEAD="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
 BT_DIRTY=0
-git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null || BT_DIRTY=1
+git -C "$PROJECT_ROOT" diff --quiet HEAD -- . \
+    ':(exclude)bench/history.jsonl' \
+    ':(exclude)bench/boot-history.jsonl' 2>/dev/null || BT_DIRTY=1
 _bt_dirty=""
 [ "$BT_DIRTY" = 1 ] && _bt_dirty=" +uncommitted"
 echo "=== Tree under test: $PROJECT_ROOT [$BT_BRANCH @ $BT_HEAD$_bt_dirty] ==="
 unset _bt_dirty
+
+# A digest of the source this run is about to build, recorded alongside the
+# commit because the commit is not an identity and never was.
+#
+# Two things it fixes, both of which have already cost a sweep:
+#
+#   - `commit` SPLITS identical builds.  A layout sweep spends ~75 min per arm,
+#     so any commit landing while it runs -- a documentation commit will do --
+#     gives later arms a different hash.  bench-history.py's layout_arms() then
+#     groups six identical arms into six one-pad groups and reports no band at
+#     all, silently.  That is exactly what happened to the WHPX sweep of
+#     2026-08-19, whose six arms carry six different commits.
+#
+#   - `dirty` MERGES different builds.  `git diff --quiet HEAD` cannot see
+#     untracked files, and the kernel include_bytes!s six gitignored service
+#     binaries while every boot attaches rootfs.ext4.  Rebuild a service
+#     between two arms and both rows still say `dirty: false` at one commit.
+#
+# Captured HERE, before the build, for the same reason BT_HEAD is: the record
+# must describe the source that went *into* the kernel under test.  Re-deriving
+# it at exit would describe whatever the tree became afterwards, and would do
+# so in the direction that hides changes.
+#
+# Never fatal.  A missing digest is recorded as absent, which downstream treats
+# as "unknown" and therefore refuses to group -- the safe direction.  A boot
+# test that failed because a digest could not be computed would be strictly
+# worse than one that simply did not record it.
+BT_SRC_DIGEST=""
+if command -v python &>/dev/null; then
+    BT_SRC_DIGEST="$(python "$PROJECT_ROOT/scripts/src_digest.py" \
+                     --root "$PROJECT_ROOT" 2>/dev/null || true)"
+elif command -v python3 &>/dev/null; then
+    BT_SRC_DIGEST="$(python3 "$PROJECT_ROOT/scripts/src_digest.py" \
+                     --root "$PROJECT_ROOT" 2>/dev/null || true)"
+fi
+if [ -n "$BT_SRC_DIGEST" ]; then
+    echo "=== Source digest: $BT_SRC_DIGEST ==="
+else
+    echo "=== Source digest: unavailable (rows will not be groupable) ==="
+fi
 
 # Convert to Windows paths if running under MSYS/Git Bash (QEMU needs them).
 to_win_path() {
@@ -743,6 +831,14 @@ MIN_FREE_GB="${BOOT_TEST_MIN_FREE_GB:-20}"
 # happened to be the one that noticed.  See check_free_space.
 RECLAIM_SPACE="${BOOT_TEST_RECLAIM_SPACE:-0}"
 
+# Opt-in: when a git-ignored prerequisite is missing, run
+# scripts/bootstrap-worktree.sh and continue instead of refusing.  Off by
+# default for the same reason --reclaim-space is: provisioning builds six
+# crates and may clone a bootloader over the network, and a run should not
+# spend minutes on that merely because it happened to be the one that noticed.
+# See check_prerequisites.
+BOOTSTRAP="${BOOT_TEST_BOOTSTRAP:-0}"
+
 # Parse args
 for arg in "$@"; do
     case "$arg" in
@@ -778,6 +874,7 @@ for arg in "$@"; do
         --host-load=*) HOST_LOAD="${arg#*=}" ;;
         --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
         --reclaim-space) RECLAIM_SPACE=1 ;;
+        --bootstrap) BOOTSTRAP=1 ;;
     esac
 done
 
@@ -1026,14 +1123,20 @@ if [ "$HARD_LOCKUP_WATCHDOG" -eq 1 ]; then
     echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT, $MONITOR_PORT_SRC) ==="
 fi
 
-# Capture the frozen guest CPU state over the HMP monitor socket, then resolve
-# RIP to a kernel symbol.  Called on timeout (guest still running) so the RIP is
-# the wedged instruction pointer.  Best-effort: prints a warning and returns
-# non-zero if the monitor is unreachable or the shell lacks /dev/tcp support.
+# Capture the guest CPU state over the HMP monitor socket, then resolve RIP to a
+# kernel symbol.  Best-effort: prints a warning and returns non-zero if the
+# monitor is unreachable or the shell lacks /dev/tcp support.
 #
-# Args: $1 = monitor TCP port, $2 = output file for the raw register dump.
+# $3 is the label to print the RIP under, and it is a required argument rather
+# than a default because the meaning of the sample depends entirely on which
+# caller took it.  From the stall detector the guest has demonstrably stopped
+# and "Wedged RIP" is a finding; from the plain timeout path the guest may well
+# have been running, and the same words would be an unfounded diagnosis.
+#
+# Args: $1 = monitor TCP port, $2 = output file for the raw register dump,
+#       $3 = label to print the RIP under (see above; required).
 capture_guest_state() {
-    local port="$1" out="$2"
+    local port="$1" out="$2" rip_label="$3"
     # HMP over a bash /dev/tcp socket.  Fire the read-only queries and let the
     # `timeout` bound the read — we deliberately do NOT send `quit`: quitting
     # provokes a QEMU shutdown that can hang mid-teardown (holding the monitor
@@ -1056,7 +1159,7 @@ capture_guest_state() {
     local rip
     rip="$(grep -oiE 'RIP=[0-9a-f]+' "$out" | head -n1 | cut -d= -f2 || true)"
     if [ -n "$rip" ]; then
-        echo "  Wedged RIP = 0x$rip"
+        echo "  $rip_label = 0x$rip"
         resolve_kernel_symbol "$rip"
     else
         echo "  (no RIP= line in monitor output; see $out)"
@@ -1198,8 +1301,29 @@ print_bench_results() {
     # why re-deriving it at exit is wrong, and wrong in the hiding direction.
     local bench_args=(--serial "$file" --profile "$BENCH_PROFILE"
                       --host-load "$HOST_LOAD" --commit "${BT_HEAD:-unknown}")
+    # Omitted entirely rather than passed empty when it could not be computed:
+    # an absent field is unknown, and unknown must not group.
+    if [ -n "${BT_SRC_DIGEST:-}" ]; then
+        bench_args+=(--src-digest "$BT_SRC_DIGEST")
+    fi
+    # The ELF that was actually measured, so the record carries the addresses of
+    # the placement-sensitive functions alongside their timings.
+    if [ -f "${KERNEL_BIN:-}" ]; then
+        bench_args+=(--kernel-elf "$KERNEL_BIN")
+    fi
     if [ "${BT_DIRTY:-0}" = 1 ]; then
         bench_args+=(--dirty)
+    fi
+    # A probe run is recorded but never becomes a baseline. BENCH_EXPERIMENT
+    # states the reason; QEMU_EXTRA implies one even when the caller forgot,
+    # because a run under non-default emulator flags is no more reproducible
+    # from a checkout than one under a hand-patched kernel -- and it was exactly
+    # such a run (a tb-size probe) that landed unlabelled in the history and
+    # motivated all of this.
+    if [ -n "${BENCH_EXPERIMENT:-}" ]; then
+        bench_args+=(--experiment "$BENCH_EXPERIMENT")
+    elif [ -n "${QEMU_EXTRA:-}" ]; then
+        bench_args+=(--experiment "QEMU_EXTRA=$QEMU_EXTRA (non-default emulator flags)")
     fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
@@ -1268,11 +1392,39 @@ record_boot_outcome() {
     local args=(--serial "$SERIAL_FILE" --exit-code "$rc"
                 --marker "$WAIT_MARKER" --profile "${BENCH_PROFILE:-debug}"
                 --commit "${BT_HEAD:-unknown}" --branch "${BT_BRANCH:-unknown}")
+    if [ -n "${BT_SRC_DIGEST:-}" ]; then
+        args+=(--src-digest "$BT_SRC_DIGEST")
+    fi
     if [ "${BT_DIRTY:-0}" = 1 ]; then
         args+=(--dirty)
     fi
     if [ -n "${BOOT_LABEL:-}" ]; then
         args+=(--label "$BOOT_LABEL")
+    fi
+    # Mirrors the benchmark recorder's experiment rule, and must keep mirroring
+    # it. A run that no checkout reproduces is not evidence about the tree, and
+    # that is as true of its boot outcome as of its timings -- but only the
+    # benchmark half used to say so. The gap let a deliberate `-cpu host` probe,
+    # which died in OVMF before our kernel was even loaded, land as a plain
+    # TIMEOUT and reset the consecutive-clean streak that four open kernel
+    # issues use as their closure bar.
+    #
+    # Every reason is collected into one string rather than the first one
+    # winning, because a probe is often several at once (foreign accelerator
+    # *and* foreign CPU model), and the reader of a row a month from now needs
+    # all of them to know what was actually run.
+    local why=""
+    if [ -n "${BENCH_EXPERIMENT:-}" ]; then
+        why="$BENCH_EXPERIMENT"
+    fi
+    if [ -n "${QEMU_EXTRA:-}" ]; then
+        why="${why:+$why; }QEMU_EXTRA=$QEMU_EXTRA (non-default emulator flags)"
+    fi
+    if [ "${QEMU_CPU_OVERRIDDEN:-0}" = 1 ]; then
+        why="${why:+$why; }QEMU_CPU=$QEMU_CPU (non-default guest CPU)"
+    fi
+    if [ -n "$why" ]; then
+        args+=(--experiment "$why")
     fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
@@ -1385,6 +1537,118 @@ if [ -z "$OVMF" ]; then
     echo "ERROR: OVMF/EDK2 firmware not found" >&2
     exit 1
 fi
+
+# Git-ignored prerequisites (known-issues.md
+# A-A-FRESH-CHECKOUT-CANNOT-BOOT-TEST-AND-NEITHER-FAILURE-NAMES-THE-MISSING-STEP).
+#
+# Two classes of artifact are required and absent from any fresh checkout: the
+# six ring-3 service binaries the kernel pulls in with `include_bytes!`, and the
+# `limine/` bootloader tree staged into the ESP.  Both used to be discovered the
+# hard way — the first as fifteen `couldn't read .../release/netstack` errors
+# from a compiler that is not what is missing, and the second as a bare
+# `cp: cannot stat 'limine/BOOTX64.EFI'` raised *after* a full workspace build
+# had already been spent.  Neither message named the step to run, so the
+# knowledge lived only in the shell history of whoever set the tree up first.
+#
+# Checked here, before Step 1, because that is the last point at which the
+# limine failure is free.  The list is not restated: bootstrap-worktree.sh
+# derives it from the kernel's own `include_bytes!` paths, so a service added
+# to the kernel is covered here without anyone remembering to add it.
+check_prerequisites() {
+    local boot="$SCRIPT_DIR/bootstrap-worktree.sh"
+    if [ ! -x "$boot" ] && [ ! -f "$boot" ]; then
+        echo "WARNING: $boot not found; build/boot prerequisites are NOT being" \
+             "checked for this run." >&2
+        return 0
+    fi
+
+    # Ask only about what this particular run needs.  A --no-build --no-stage
+    # soak boots the image already in the ESP: it compiles nothing and copies
+    # nothing, so neither the embedded service binaries nor limine/ can affect
+    # it, and refusing such a run for their absence would be refusing a run that
+    # would have worked.  rootfs.ext4 is always in scope — every boot attaches
+    # it, and its absence silently shrinks the suite rather than blocking it.
+    local need="rootfs"
+    [ "$NO_BUILD" -eq 0 ] && need="services,$need"
+    [ "$NO_STAGE" -eq 0 ] && need="limine,$need"
+
+    local report status
+    report="$(bash "$boot" --check --need="$need" 2>&1)" && status=0 || status=$?
+
+    case "$status" in
+        0) echo "Prerequisites OK ($need)." ;;
+        3)
+            # Degrading, not blocking: the boot test runs and passes, having
+            # quietly skipped every REAL-glibc rung.  Refusing would be wrong —
+            # the run is still useful — but saying nothing would let a green
+            # result stand for more than it measured.
+            echo "" >&2
+            echo "$report" >&2
+            echo "" >&2
+            echo "WARNING: continuing, but this run tests LESS than a normal one." >&2
+            echo "" >&2
+            ;;
+        1)
+            if [ "$BOOTSTRAP" = "1" ]; then
+                echo "Prerequisites missing; --bootstrap given, provisioning:" >&2
+                echo "$report" >&2
+                # Not silenced and not backgrounded: this builds several crates
+                # and may clone a bootloader, and a caller who asked for it
+                # should see it happen.
+                #
+                # Its exit status is deliberately not tested, for the same
+                # reason check_free_space ignores reclaim-space.py's: a run that
+                # could not provision *everything* may well have provisioned
+                # everything that blocks a build.  bootstrap-worktree.sh exits
+                # non-zero when only `rootfs.ext4` is missing, and that alone
+                # must not turn a now-buildable tree back into a refusal.  The
+                # re-check below is the authority.
+                bash "$boot" || true
+                report="$(bash "$boot" --check --need="$need" 2>&1)" && status=0 || status=$?
+                case "$status" in
+                    0)
+                        echo "Prerequisites provisioned."
+                        return 0
+                        ;;
+                    3)
+                        echo "Prerequisites provisioned, except rootfs.ext4:" >&2
+                        echo "$report" >&2
+                        echo "" >&2
+                        echo "WARNING: continuing, but this run tests LESS than a normal one." >&2
+                        echo "" >&2
+                        return 0
+                        ;;
+                esac
+                echo "ERROR: --bootstrap ran but prerequisites are still missing." >&2
+            fi
+            echo "" >&2
+            echo "$report" >&2
+            echo "" >&2
+            echo "ERROR: this checkout cannot build or stage a boot image yet." >&2
+            echo "" >&2
+            echo "Refusing here rather than at the point of failure.  A missing service" >&2
+            echo "binary surfaces as fifteen include_bytes! errors blaming the kernel, and" >&2
+            echo "a missing limine/ surfaces as a 'cp: cannot stat' AFTER a full workspace" >&2
+            echo "build has been spent — neither of which names the step above." >&2
+            echo "" >&2
+            echo "Run the command above, or re-run this script with --bootstrap to do" >&2
+            echo "that and continue in one go." >&2
+            exit 1
+            ;;
+        *)
+            # Includes 2 (the embed list could not be derived).  Do not continue
+            # on an unclassified answer: the one thing this check must never do
+            # is let "I could not tell" pass for "nothing is missing".
+            echo "" >&2
+            echo "$report" >&2
+            echo "" >&2
+            echo "ERROR: prerequisite check exited $status (unexpected); refusing." >&2
+            exit 1
+            ;;
+    esac
+}
+
+check_prerequisites
 
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
@@ -1550,9 +1814,39 @@ if [ -f "$ROOTFS_IMG" ]; then
     # tested nothing current.  See check_rootfs_freshness.
     check_rootfs_freshness
     ROOTFS_IMG_WIN="$(to_win_path "$ROOTFS_IMG")"
+    # `snapshot=on`: the guest gets a fully writable vdb, but QEMU buffers the
+    # writes into a throwaway overlay and the host file is never modified.
+    #
+    # WHY THIS IS NOT OPTIONAL.  Without it a boot rewrites rootfs.ext4's
+    # *contents* -- measured 2026-08-19, sha256 f62e019d -> b2ecc74d across one
+    # boot with nothing else touching the tree -- and that file is an input to
+    # `scripts/src_digest.py`'s artifact half.  So the identity of the source
+    # changed as a side effect of testing it, and every layout sweep fragmented:
+    # arm N and arm N+1 disagreed about what they had built, landed in groups of
+    # one, and no band could form.  The sweep of this date aborted after two arms
+    # on exactly that (`full:ace827eb...` vs `full:f75959ab...`, same
+    # accelerator).  A boot test that mutates its own fixture cannot be used to
+    # establish what it booted.
+    #
+    # WHY NOT `readonly=on`: the Path-Z rungs mount /mnt read-write and writing
+    # is part of what they exercise.  `snapshot=on` keeps that behaviour exactly
+    # and discards it afterwards, which is what a fixture wants; read-only would
+    # change what the test tests.
+    #
+    # WHY NOT "just exclude rootfs.ext4 from the digest": it genuinely is an
+    # input -- 73 staged ELFs the Path-Z rungs execute.  Dropping it makes two
+    # different images share one identity, which merges runs that should never
+    # be compared.  Over-inclusion splits a band (safe: the answer is
+    # "unmeasured"); under-inclusion merges one (unsafe: an inflated band
+    # dismisses real regressions silently).  Fix the mutation, not the ledger.
+    #
+    # Note this also un-inverts the mtime idiom described above
+    # check_rootfs_freshness: the image's timestamp now records when it was
+    # last *packed*, which is what every other staleness check in this script
+    # assumes about the files it compares.
     ROOTFS_ARGS=(
         -device virtio-blk-pci,drive=rootfs-disk
-        -drive "id=rootfs-disk,if=none,format=raw,file=$ROOTFS_IMG_WIN"
+        -drive "id=rootfs-disk,if=none,format=raw,snapshot=on,file=$ROOTFS_IMG_WIN"
     )
     echo "=== Attaching Path-Z glibc rootfs: $ROOTFS_IMG (vdb) ==="
 fi
@@ -1565,7 +1859,50 @@ fi
 # known-issues.md).  Requesting them explicitly makes the boot test actually
 # exercise those paths — and makes a future `clac` in the ISR stubs testable
 # rather than dead code.  Override with QEMU_CPU=... to test other models.
+#
+# The override is remembered here rather than inferred later by comparing
+# against the default string: a default edited in this line would silently stop
+# matching such a comparison, and the consequence of a missed match is a probe
+# recorded as an ordinary boot of the tree.
+if [ -n "${QEMU_CPU:-}" ]; then
+    QEMU_CPU_OVERRIDDEN=1
+else
+    QEMU_CPU_OVERRIDDEN=0
+fi
 QEMU_CPU="${QEMU_CPU:-qemu64,+smep,+smap,+umip}"
+
+# Extra QEMU arguments, for diagnosing emulator-side effects without touching
+# the guest.  Word-split on purpose so a caller can pass several:
+#
+#     QEMU_EXTRA="-accel tcg,tb-size=512" ./scripts/boot-test.sh --bench
+#
+# This exists because a benchmark result can move by 4x for reasons that are
+# entirely QEMU's — commit 665fbb27b, which edits only `audio_mixer.rs`, moved
+# `crypto_sha256_64B` from 7364 to 28184 cycles while the SHA-256 machine code
+# stayed byte-identical (same symbol size, same mangled hash; only the address
+# changed).  Separating "our code got slower" from "TCG got slower at running
+# the same code" needs the binary held fixed and the emulator varied, which is
+# exactly what this knob is for.  Default empty: no effect on ordinary runs.
+#
+# Setting it also marks the benchmark record an experiment (see BENCH_EXPERIMENT
+# below), so a probe run cannot become the baseline a later honest run is judged
+# against.
+read -r -a QEMU_EXTRA_ARGS <<< "${QEMU_EXTRA:-}"
+
+# Why this run is a deliberate probe rather than a tracking run, e.g.
+#
+#     BENCH_EXPERIMENT="alignment probe on crypto::compress" ./scripts/boot-test.sh --bench
+#
+# Such a run measures a kernel (or an emulator) that no checkout reproduces, so
+# it is recorded in full but excluded from every future baseline.  Set it for
+# any hand-modified build: a bisect step, a toggled compiler feature, a source
+# patch applied only to answer a question.  QEMU_EXTRA implies it; a modified
+# *guest* cannot be detected from here, so it must be declared.
+#
+# The cost of not having had it: five probe runs of the placement investigation
+# went in unlabelled, three reading ~8085 ns for `crypto_sha256_64B` and two
+# ~1936 for identical source, which between them would have stretched that
+# benchmark's outlier fence past 4x and blinded the detector for it.
 
 # --- Cross-worktree boot lock -------------------------------------------------
 #
@@ -2094,6 +2431,7 @@ QEMU_START_EPOCH=$(date +%s)
     -no-reboot \
     -m 3072M \
     -cpu "$QEMU_CPU" \
+    "${QEMU_EXTRA_ARGS[@]}" \
     -machine q35 &
 QEMU_PID=$!
 # Ensure QEMU is reaped even if the harness is interrupted (Ctrl-C, SIGTERM)
@@ -2117,9 +2455,16 @@ trap 'on_boot_exit "$?" exit' EXIT
 
 # Wait for BOOT_OK or timeout
 ELAPSED=0
-# Serial-stall tracking (only acted on when STALL_SECS > 0).  We remember the
-# serial log's last observed size and the elapsed time at which it last grew;
-# if (ELAPSED - last-growth) reaches STALL_SECS the kernel has gone silent.
+# Serial-stall tracking.  We remember the serial log's last observed size and
+# the elapsed time at which it last grew; if (ELAPSED - last-growth) reaches
+# STALL_SECS the kernel has gone silent.
+#
+# The *tracking* is unconditional even though the stall verdict is opt-in
+# (STALL_SECS > 0), because "was the guest still producing output when the
+# clock ran out?" is what decides whether a timeout means a hung kernel or
+# merely a budget too small for it.  Answering that only when the opt-in
+# detector happens to be armed is how a slow boot gets reported as a wedge --
+# see the timeout path below.
 STALL_LAST_SIZE=-1
 STALL_LAST_GROWTH=0
 while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
@@ -2167,16 +2512,16 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     # If the log has not grown for STALL_SECS seconds and the marker still isn't
     # present, treat it as a genuine hang (distinct from a slow host that would
     # eventually reach the marker) — capture the frozen RIP and exit 2.
-    if [ "$STALL_SECS" -gt 0 ] && [ -f "$SERIAL_FILE" ]; then
+    if [ -f "$SERIAL_FILE" ]; then
         cur_size=$(wc -c < "$SERIAL_FILE" 2>/dev/null || echo 0)
         if [ "$cur_size" -ne "$STALL_LAST_SIZE" ]; then
             STALL_LAST_SIZE=$cur_size
             STALL_LAST_GROWTH=$ELAPSED
-        elif [ $((ELAPSED - STALL_LAST_GROWTH)) -ge "$STALL_SECS" ]; then
+        elif [ "$STALL_SECS" -gt 0 ] && [ $((ELAPSED - STALL_LAST_GROWTH)) -ge "$STALL_SECS" ]; then
             echo "=== WEDGE: serial output stalled for ${STALL_SECS}s at ${ELAPSED}s (kernel not progressing; $WAIT_MARKER never reached) ==="
             if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then
                 RIPDUMP="${SERIAL_FILE%.txt}-regs.txt"
-                capture_guest_state "$MONITOR_PORT" "$RIPDUMP" || true
+                capture_guest_state "$MONITOR_PORT" "$RIPDUMP" "Wedged RIP" || true
             fi
             kill_qemu "$QEMU_PID"
             echo "=== Boot test FAILED (WEDGE: serial stalled) ==="
@@ -2185,15 +2530,32 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     fi
 done
 
-# Timed out (or QEMU died): the guest may be wedged.  If the diagnostic monitor
-# is attached and QEMU is still alive, capture the frozen RIP from the emulator
-# BEFORE we kill it.  This is the primary observability tool for the silent
-# BSP-dead hang, which never takes the injected NMI in-guest.
+# Timed out (or QEMU died).  If the diagnostic monitor is attached and QEMU is
+# still alive, capture the RIP from the emulator BEFORE we kill it.  This is the
+# primary observability tool for the silent BSP-dead hang, which never takes the
+# injected NMI in-guest.
+#
+# Say which kind of timeout this was.  The loop above has been watching the
+# serial log grow, so we know the answer rather than having to hedge: a log that
+# was still growing when the clock ran out is a kernel that was working, and
+# calling its RIP "wedged" sends the reader hunting a hang that never happened.
+# That is not hypothetical -- an instrumented (KASAN) boot on 2026-08-19 was
+# reported as "Wedged RIP = kasan::byte_bad" while it was in fact 27 000 lines
+# deep and still printing; the RIP was simply wherever the sample happened to
+# land, and under KASAN that is the shadow checker on nearly every sample.
 if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then
     if ! grep -q "^$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
-        echo "=== Timeout with guest still running: capturing wedged RIP via HMP monitor ==="
+        SINCE_GROWTH=$((ELAPSED - STALL_LAST_GROWTH))
+        if [ "$STALL_LAST_SIZE" -gt 0 ] && [ "$SINCE_GROWTH" -lt 10 ]; then
+            echo "=== Timeout at ${TIMEOUT}s with the guest STILL PRODUCING OUTPUT (serial grew ${SINCE_GROWTH}s ago) ==="
+            echo "=== This is a budget that was too small, not a hang. Re-run with a larger --timeout. ==="
+            RIP_LABEL="RIP when the clock ran out (guest was live; not a hang)"
+        else
+            echo "=== Timeout at ${TIMEOUT}s; serial last grew ${SINCE_GROWTH}s ago ($WAIT_MARKER never reached) ==="
+            RIP_LABEL="RIP at timeout"
+        fi
         RIPDUMP="${SERIAL_FILE%.txt}-regs.txt"
-        capture_guest_state "$MONITOR_PORT" "$RIPDUMP" || true
+        capture_guest_state "$MONITOR_PORT" "$RIPDUMP" "$RIP_LABEL" || true
     fi
 fi
 

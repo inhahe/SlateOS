@@ -109,6 +109,18 @@ ENTRY_ALLOWED_CALLS = [
 ENTRY_SYM = "kernel_main"
 WINDOW_END_SUBSTRING = "6serial4init"
 
+# How a function nested *inside* `kernel_main` appears in a v0-mangled symbol:
+# the path component is length-prefixed, so `kernel_main`'s own `case` helpers
+# read as `...11kernel_main4case`, `...11kernel_mains_4case`,
+# `...11kernel_mains0_4case`, and so on (the `s_`/`sN_` are Rust's
+# disambiguators for repeated names in one scope).
+#
+# These are not separate subsystems that `kernel_main` calls; they are
+# `kernel_main`'s own body, carved up so each step gets its own stack frame.
+# `check_entry_order` therefore scans *through* them rather than treating a
+# call to one as a call out of the entry function.
+NESTED_ENTRY_SUBSTRING = f"{len(ENTRY_SYM)}{ENTRY_SYM}"
+
 # Functions that are checked for instrumentation but whose callees are NOT
 # followed.
 #
@@ -177,6 +189,36 @@ POISON_ROOT_SUBSTRINGS = [
     "2mm6poison12verify_freed",
     "2mm10quarantine11fill_poison",
     "2mm10quarantine15find_corruption",
+    # `mm::kasan`'s own shadow-mutation path.
+    #
+    # These were missing until 2026-08-19, and the omission was not a detail:
+    # `ensure_shadow_mapped` zeroed a freshly-allocated frame through
+    # `core::ptr::write_bytes` (lowered to `memset`), and that frame is the HHDM
+    # alias of memory the buddy allocator just handed back — which can still be
+    # marked `0xFA` from whatever heap object last lived in it. So KASAN's own
+    # bookkeeping write reported a use-after-free against KASAN's own
+    # bookkeeping. `set_shadow` had the same shape with `write_volatile`. See
+    # `known-issues.md` → `B-KASAN-SHADOW-BOOTSTRAP-SELF-REPORT`.
+    #
+    # The reason it was missed is instructive and is why it is listed here now
+    # rather than fixed and forgotten: the three modules above were added as
+    # roots because they *deliberately read poisoned memory*, and `mm::kasan`
+    # does not obviously belong to that category — it is the thing doing the
+    # poisoning. But it writes the shadow, and it touches frames of unknown
+    # poison state, so it is subject to the identical §118/§119 hazard. The
+    # category is "code that must not take a shadow check", not "code that reads
+    # poison", and `mm::kasan` is its charter member.
+    "2mm5kasan10set_shadow",
+    "2mm5kasan11fill_shadow",
+    # The worker behind `fill_shadow`. Listed *separately* rather than relying on
+    # the entry above, because the v0 length prefix makes these substrings exact:
+    # `11fill_shadow` cannot match `16fill_shadow_with`. That precision is the
+    # point elsewhere in this file (it is what keeps `11alloc_frame` off
+    # `18alloc_frame_zeroed`), but it means a rename or a wrapper split silently
+    # moves the body out from under the root unless the new name is added here.
+    "2mm5kasan16fill_shadow_with",
+    "2mm5kasan20ensure_shadow_mapped",
+    "2mm5kasan16clear_all_poison",
 ]
 
 # Roots that are allowed to be missing from the binary.
@@ -209,6 +251,33 @@ POISON_NO_EXPAND_SUBSTRINGS = [
     "2mm8kasan_rt6report",
     "4core3fmt",
     "9panicking",
+    # --- Cuts belonging to the `mm::kasan` roots added 2026-08-19 ---
+    #
+    # `ensure_shadow_mapped` backs a shadow page: it allocates a frame, zeroes
+    # it, installs a PTE for it, and shoots down the TLB. Exactly *one* of those
+    # accesses touches memory of unknown poison state — the zeroing of the
+    # freshly-allocated frame through its HHDM alias, which is the bug the root
+    # was added for (`B-KASAN-SHADOW-BOOTSTRAP-SELF-REPORT`). The other three are
+    # ordinary live kernel memory: the buddy allocator's own bookkeeping, the
+    # page-table pool's freelist, and an APIC MMIO register. Instrumentation
+    # there is correct and even desirable — it is how a bug in the allocator
+    # itself would be caught — so descending into them yields only noise. It
+    # yielded 35 findings on the first run, every one of them a `read_volatile`
+    # on a scheduler queue, a swap slot, or `apic_read`.
+    #
+    # Cut at the callee rather than by no-expanding `ensure_shadow_mapped`
+    # itself, which was the tempting shortcut. No-expanding the root would stop
+    # the walk from examining the root's *own* direct callees — and the bug
+    # being guarded against appears in the graph as precisely that: a `memset`
+    # called directly from `ensure_shadow_mapped`. Cutting the root would have
+    # produced a green check on the exact binary that had the bug in it.
+    #
+    # The length prefixes make these exact despite being substring tests:
+    # `11alloc_frame` cannot match `18alloc_frame_zeroed`.
+    "2mm5frame11alloc_frame",
+    "2mm5frame10free_frame",
+    "2mm10page_table13alloc_pt_page",
+    "3tlb11flush_range",
 ]
 
 # The third walk's violation rule is deliberately NOT the first two's.
@@ -273,16 +342,23 @@ POISON_ACCESSOR_SUBSTRINGS = ["4core3ptr", "4core10intrinsics"]
 # unrelated symbol that merely contains them.
 POISON_ACCESSOR_EXACT = {"memset", "memcpy", "memmove"}
 
-# What this branch is actually doing today: nothing, and that is the point.
+# What this branch is actually doing today.
 #
-# After the `rawmem` conversion, *zero* accessors of any kind are reachable from
-# the poison roots — the byte touching is all inline `asm!`, which emits no call
-# at all. So the accessor branch currently judges an empty set, and passes
-# because there is nothing to judge rather than because what it judged was
-# clean. That is the correct end state, but it is worth stating plainly, because
-# a check that is vacuous by accident and one that is vacuous by success look
-# identical from the exit code. The OK line reports the accessor count for
-# exactly this reason.
+# It used to do nothing. After the `rawmem` conversion, *zero* accessors of any
+# kind were reachable from the poison roots — the byte touching was all inline
+# `asm!`, which emits no call at all — so the branch judged an empty set and
+# passed because there was nothing to judge rather than because what it judged
+# was clean. That was worth stating plainly, because a check that is vacuous by
+# accident and one that is vacuous by success look identical from the exit code,
+# and it is why the OK line reports the accessor count at all.
+#
+# Since the `mm::kasan` roots were added (2026-08-19) the count is no longer
+# zero: the branch judges a small number of accessors and finds them
+# uninstrumented. That is a strict improvement — the branch is now *tested* on
+# every run rather than only prospectively — and it is the reason the count is
+# printed rather than merely the verdict. A drop back to zero would mean the
+# roots stopped reaching anything, i.e. a rename silently emptied the walk, and
+# is the number to watch.
 #
 # The branch earns its keep prospectively: it fires the moment someone
 # reintroduces a `core::ptr` call or a `memset` onto a poison path, which is the
@@ -370,28 +446,86 @@ def check_entry_order(functions: dict[str, list[str]]) -> list[str]:
     Returns a list of problems (empty if fine). This is what keeps the root
     list from going stale: adding a call ahead of `serial::init` without
     listing it here is reported instead of silently escaping the walk.
+
+    The scan is in *flattened* program order: `kernel_main`'s body is split
+    across nested `case` helpers (`86a56f78c`, which cut its peak frame from
+    19 776 to 10 976 bytes by giving each step its own `#[inline(never)]`
+    scope), so the statements that run before the shadow exists — including
+    the `serial::init` that ends the window — live inside the first helper
+    rather than in `kernel_main` itself. A scan that looked only at
+    `kernel_main`'s own calls would see a call to `kernel_main::case` where it
+    expected `serial::init`, fail to find the window end anywhere, and then
+    report every remaining call in the function as a pre-shadow violation.
+    That is exactly what it did between `86a56f78c` and this fix, and because
+    the instrumented build is not part of the routine boot gate, nothing
+    noticed. Descending into the nested helpers keeps the check anchored to
+    what the code *does* rather than to how it is currently carved into
+    functions.
     """
     if ENTRY_SYM not in functions:
         return [f"entry symbol {ENTRY_SYM!r} not found"]
 
-    problems = []
+    problems: list[str] = []
+    missing: list[str] = []
     seen_end = False
-    for callee in calls_in(functions[ENTRY_SYM]):
-        if WINDOW_END_SUBSTRING in callee:
-            seen_end = True
-            break
-        if not any(allowed in callee for allowed in ENTRY_ALLOWED_CALLS):
-            problems.append(
-                f"{ENTRY_SYM}\n    calls {callee}\n    before "
-                f"{WINDOW_END_SUBSTRING} — it runs in the pre-shadow window "
-                f"but is not in ENTRY_ALLOWED_CALLS"
-            )
+    visited: set[str] = set()
+
+    def scan(owner: str, lines: list[str]) -> None:
+        nonlocal seen_end
+        for callee in calls_in(lines):
+            if seen_end:
+                return
+            if WINDOW_END_SUBSTRING in callee:
+                seen_end = True
+                return
+            if NESTED_ENTRY_SUBSTRING in callee and callee != ENTRY_SYM:
+                # A `case` helper: part of `kernel_main`'s straight-line body,
+                # so its calls are `kernel_main`'s calls for this purpose.
+                if callee in visited:
+                    continue
+                visited.add(callee)
+                body = functions.get(callee)
+                if body is None:
+                    # Reported rather than skipped: an unseen helper is a hole
+                    # in the window, and skipping it could hide the very call
+                    # this check exists to catch.
+                    missing.append(
+                        f"{owner}\n    calls {callee}\n    which has no "
+                        f"disassembly, so the pre-shadow window cannot be "
+                        f"followed through it"
+                    )
+                    continue
+                scan(callee, body)
+                continue
+            if not any(allowed in callee for allowed in ENTRY_ALLOWED_CALLS):
+                problems.append(
+                    f"{owner}\n    calls {callee}\n    before "
+                    f"{WINDOW_END_SUBSTRING} — it runs in the pre-shadow window "
+                    f"but is not in ENTRY_ALLOWED_CALLS"
+                )
+
+    scan(ENTRY_SYM, functions[ENTRY_SYM])
+
     if not seen_end:
-        problems.append(
-            f"no call to {WINDOW_END_SUBSTRING!r} found in {ENTRY_SYM}; "
-            "the pre-shadow window's end can no longer be located"
-        )
-    return problems
+        # Report *only* this. Without the anchor the scan never learned where
+        # the window ends, so it treated the whole function as pre-shadow and
+        # every entry in `problems` is an artefact of that — printing them
+        # alongside buries the one finding that is true and sends the reader
+        # off to exempt calls that were never in the window. This is not
+        # hypothetical: the real failure emitted ~40 such lines above the
+        # single accurate diagnosis.
+        return [
+            f"no call to {WINDOW_END_SUBSTRING!r} found in {ENTRY_SYM} or in "
+            f"the nested helpers it calls; the pre-shadow window's end can no "
+            f"longer be located.\n    Nothing else is reported: with the "
+            f"window unbounded every call looks like a violation, so any "
+            f"further output would be noise.\n    Most likely the code that "
+            f"calls it moved into a helper this scan does not recognise as "
+            f"part of {ENTRY_SYM} (see NESTED_ENTRY_SUBSTRING), or "
+            f"{WINDOW_END_SUBSTRING!r} was inlined and no longer appears as a "
+            f"call at all."
+        ]
+    return missing + problems
 
 
 def walk(
@@ -721,14 +855,39 @@ def main() -> int:
     # after the `rawmem` conversion — whereas a non-zero accessor count means
     # the walk found accessors and cleared them. Both exit 0; conflating them in
     # the output would hide a check that had quietly stopped judging anything.
-    poison_accessors = sum(1 for name in poison_visited if is_poison_accessor(name))
+    poison_accessors = sorted(
+        name for name in poison_visited if is_poison_accessor(name)
+    )
     print(
         f"kasan-check-preshadow: OK — {len(pre_visited)} function(s) reachable "
         f"before the shadow is installed, {len(rt_visited)} on the check path, "
         f"and {len(poison_visited)} reachable from the deliberate "
-        f"poisoned-memory roots ({poison_accessors} of them raw byte "
+        f"poisoned-memory roots ({len(poison_accessors)} of them raw byte "
         f"accessors), none instrumented."
     )
+    # Name them, don't just count them.
+    #
+    # The count alone cannot distinguish "the same three accessors as last run,
+    # still uninstrumented" from "one of them dropped out and a different one
+    # appeared" — and the second is exactly the shape of a regression this
+    # check is meant to make visible, because *which* accessor a poison path
+    # reaches is the whole subject of the §118/§119 hazard. A `memset` newly
+    # appearing on a path that previously reached only `rawmem` is a real
+    # change of risk even though the verdict and the count are unchanged.
+    #
+    # Printed on success rather than only on failure: on failure the offending
+    # symbol is already named in the violation report, so the run that needs
+    # this line is the one that passes.
+    #
+    # As of 2026-08-19 the set is three: `memcpy`, and `core::ptr::drop_glue`
+    # monomorphised for `spin::MutexGuard<()>` and `spin::SpinMutexGuard<()>`.
+    # The two drop glues are worth a word, because "drop glue" does not sound
+    # like a byte accessor and the matcher only catches them because they live
+    # in `core::ptr`. That match is right rather than lucky: a guard's drop
+    # glue *is* the unlock, i.e. a store, and it runs on a poison path, so it
+    # is exactly the kind of `core`-owned access this walk exists to check.
+    for name in poison_accessors:
+        print(f"  raw byte accessor (uninstrumented): {name}")
     return 0
 
 

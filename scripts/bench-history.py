@@ -60,12 +60,14 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime
+import hashlib
 import json
 import math
 import os
 import platform
 import re
 import statistics
+import struct
 import subprocess
 import sys
 
@@ -102,6 +104,93 @@ SCORE_RE = re.compile(
     r"(?:\s+(\d+)\s+(\d+)(?:\s+(-|\?|\d+!?))?)?\s*$"
 )
 
+# `[boot] build profile: sanitizer=<none|kasan-instrumented> textpad=<bytes>`
+#
+# `textpad` is the number of padding bytes `kernel/src/layout_pad.rs` prepended
+# to `.text` in this build, selected by `SLATEOS_TEXT_PAD`. It is the join key
+# for layout calibration: several builds of *identical source* at different pads
+# differ only in where the code sits, so the spread between their numbers is a
+# direct measurement of how much of a benchmark's movement code *placement* can
+# account for. Under TCG that is not a rounding error -- a loop that straddles a
+# 4 KiB guest page costs ~1.7x per iteration, deterministically, which is why
+# "replicates exactly" has never been the proof of a code regression the harness
+# was reading it as.
+#
+# Read from the log rather than taken as a flag, for the same reason the
+# sanitizer banner exists at all: the value that matters is the one the kernel
+# was *built* with, and a harness that reports what it *intended* to build
+# cannot notice a cache hit that silently reused the previous layout.
+#
+# Matched loosely on the `textpad=` key, not on the whole line, so a later key
+# can be appended to the banner without breaking this. Absent -> `None`, which
+# every consumer must keep distinct from `0`: `0` is "this build had no
+# padding", absent is "this kernel predates the banner and cannot say", and
+# folding the second into the first would silently enrol all 70-odd historical
+# records into the unpadded arm of a comparison they were never part of.
+TEXTPAD_RE = re.compile(r"^\[boot\] build profile:.*\btextpad=(\d+)",
+                        re.MULTILINE)
+
+# Which accelerator the kernel actually ran on, e.g. `QEMU TCG` or
+# `Hyper-V/WHPX`, taken from the guest's own CPUID read in
+# `kernel/src/hypervisor.rs`.
+#
+# This is not a detail. Measured 2026-08-19 on *one byte-identical binary*
+# (kernel_sha 7a17cf6be2a1) run under both: the median benchmark is 3.5x faster
+# under WHPX, the fastest 10.4x, and four get dramatically *slower* -- HPET
+# reads cost a VM exit (~13.5 us) where TCG emulates them inline (~450 ns).
+# A comparison that crosses accelerators is therefore not noisy, it is
+# meaningless, and it is meaningless by a factor far larger than any regression
+# this harness exists to catch.
+#
+# Read from the log rather than from the flag that was passed, for exactly the
+# reason given above `TEXTPAD_RE`: the value that matters is what the kernel
+# *ran on*, and a harness reporting what it *intended* cannot notice a mistyped
+# `QEMU_EXTRA`, a changed default nobody remembered, or an accelerator that
+# silently failed back to TCG. CPUID cannot be wrong about this; an environment
+# variable can.
+#
+# Matched on the vendor label rather than the raw signature so the field stays
+# readable, and loosely enough that a hypervisor we have not seen yet records
+# its own name instead of breaking the parse. Absent -> `None`, which must be
+# kept distinct from any known value: absent means "this kernel predates the
+# field and cannot say", *not* "TCG". Folding absent into TCG would be the same
+# error the `text_pad` note above describes, and provably wrong here -- the
+# first WHPX run was recorded before this field existed, so an absent value is
+# demonstrably not evidence of TCG.
+ACCEL_RE = re.compile(r"^\[hypervisor\] Detected: (.+?) \(signature:",
+                      re.MULTILINE)
+
+# The other half of the same banner, and the reason `ACCEL_RE` alone was not
+# enough. `kernel/src/hypervisor.rs:235` prints the `Detected:` line *only*
+# inside `if hv.is_virtual()`; on real hardware it prints this sentence
+# instead. Reading only the first pattern therefore returned `None` for a
+# bare-metal boot -- and `None` is defined two paragraphs up to mean "this
+# kernel predates the banner and cannot say". Two genuinely different
+# platforms rendering as one value is the precise conflation §237 exists to
+# forbid, arriving by the back door.
+#
+# It is not a hypothetical platform: bare metal is Q53 option D and the
+# fallback in Q54, and it is the only option on the table that fully restores
+# CLAUDE.md's 10% regression threshold, because the layout noise behind it is
+# a TCG artefact. The very first thing that work produces is a set of records
+# this parser would have mislabelled -- silently, and into a group that looks
+# entirely plausible.
+#
+# Fixed here rather than in the kernel because this works on logs already
+# written; the kernel has always printed enough to tell the two apart, and
+# only the reader was blind. Anchored at the line start like its sibling, and
+# with the parenthetical included, so that the two patterns cannot cross-match
+# a line meant for the other.
+BARE_METAL_RE = re.compile(
+    r"^\[hypervisor\] Running on bare metal \(no hypervisor detected\)",
+    re.MULTILINE)
+
+#: What `parse_accel` returns for a bare-metal boot. Deliberately the same
+#: string as `Hypervisor::name()`'s `None` variant (`kernel/src/hypervisor.rs`
+#: line 77), so the field's vocabulary stays the kernel's own and no token is
+#: invented that exists only in the harness.
+ACCEL_BARE_METAL = "bare metal"
+
 #: `split` token values with no percentage attached.
 SPLIT_ABSENT = None      # the log predates the column entirely
 SPLIT_UNCHECKED = "-"    # the kernel ran no cross-check for this entry
@@ -136,11 +225,87 @@ SPLIT_UNRESOLVED = "?"   # cross-checked, but the timer could not resolve it
 # both "the extremes were 5 and 7" (a 40% spread) and "spread = 47" -- the
 # 2026-08-14T22:1x record does exactly that. Their presence is also the only
 # signal that a record's `spread` is trustworthy at all: see canary_verdict.
+#
+# An eleventh field, `<below_floor>`, counts how many of the `<invalid>`
+# failures were *not* separation failures: the arms separated, but by less than
+# the instrument can resolve. It is appended rather than folded into `invalid`
+# because `invalid` is already on disk in ~100 records with a settled meaning,
+# and because the two carry opposite evidential weight -- a sample that resolved
+# a small figure cannot have hidden an excursion, which is large, whereas one
+# whose arms inverted might have been the excursion itself.
+#
+# Its ABSENCE must stay distinguishable from zero. A record without this field
+# was written by a kernel that could not tell the two failure kinds apart, so
+# its failures are genuinely of unknown kind; storing a 0 would assert that
+# every historical failure was a separation failure, which nobody measured.
+# `canary_verdict` may still *assume* zero when judging such a record, because
+# that assumption is the conservative one (unknown-kind failures keep the
+# verdict BROKEN), but the record itself must not claim it.
 CANARY_RE = re.compile(
     r"^\[bench\]\s+CANARY\s+(\d+)\s+(\d+)\s+(\d+)"
     r"(?:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)"
-    r"(?:\s+(\d+)(?:\s+(\d+)\s+(\d+))?)?)?\s*$"
+    r"(?:\s+(\d+)(?:\s+(\d+)\s+(\d+)(?:\s+(\d+))?)?)?)?\s*$"
 )
+
+# `[bench] CANARY-TRACE start:<cycles> <pos>:<cycles> ... end:<cycles>`
+#
+# The per-sample trace behind the `min`/`max`/`spread` summary above. `<pos>`
+# is the scored-benchmark index the sample followed; `start` and `end` mark the
+# two suite endpoints, which bracket the suite rather than sitting at a
+# position. Older logs label *both* endpoints `end:` -- see `parse_canary_trace`
+# for why that is reported verbatim rather than repaired by ordinal.
+#
+# Why parse it at all, when `spread` already summarises it: extremes say *how
+# much* the reference cost moved and can never say *where*, and the two causes
+# have opposite remedies. Samples dear at the same positions across runs are
+# the suite's own cache/TLB residue -- real, repeatable, and not contamination.
+# Samples dear at differing positions each run are host load. `spread` reports
+# the identical number for both.
+#
+# It is also the only input a *positional* drift correction could have. The
+# existing `global_drift` removes a whole-suite factor, which is the right
+# model for a uniformly busier host and the wrong one for a burst that lands
+# on two benchmarks and leaves the other sixty untouched -- the exact case the
+# canary was built to catch.
+#
+# Absent from every record written before this parser existed, so every
+# consumer must treat "no trace" as normal rather than as an error.
+#
+# The value is accepted with or without a fractional part, and with any number
+# of fractional digits, because the kernel emitted tenths before it emitted
+# hundredths. `parse_canary` normalises both to integer centicycles rather
+# than carrying a float, so a 1-digit log and a 2-digit log land in the same
+# units -- see `_trace_centi`.
+CANARY_TRACE_RE = re.compile(
+    r"^\[bench\]\s+CANARY-TRACE((?:\s+\S+?:\d+(?:\.\d+)?)*)\s*$"
+)
+CANARY_TRACE_SAMPLE_RE = re.compile(r"(\S+?):(\d+)(?:\.(\d+))?")
+
+# `[bench] CANARY-ARMS <pos>:<nop>:<store> ...`
+#
+# The same samples as CANARY-TRACE, as the two raw arm totals each traced value
+# was derived from. Emitted on its own line, so this regex and the one above are
+# independent and an old log missing this line parses exactly as before.
+#
+# Why the arms are worth storing when the derived value is already here: the
+# value is `(store - nop) * 100 / n`, a *difference*, so a move in it is
+# ambiguous between the two arms -- and the two mean opposite things. A dearer
+# store arm is the host getting slower at the thing being measured. A *cheaper
+# nop arm* is the measurement's own baseline shifting, which is an instrument
+# artefact and says nothing about the host.
+#
+# That ambiguity is the open question this exists to close. Across every trace
+# recorded up to 2026-08-19 the samples cluster at ~5.04, ~5.16 and ~5.79
+# centicycles with nothing in between, and the top cluster is +12.3% over the
+# middle one -- discrete, repeatable in magnitude, and independent of position,
+# which is the profile of a mechanism rather than of drift. Which arm moved
+# decides whether that is a real host state or an artefact of the A/B, and the
+# arms were computed and discarded on every run recorded before this line
+# existed. See known-issues.md.
+CANARY_ARMS_RE = re.compile(
+    r"^\[bench\]\s+CANARY-ARMS((?:\s+\S+?:\d+:\d+)*)\s*$"
+)
+CANARY_ARMS_SAMPLE_RE = re.compile(r"(\S+?):(\d+):(\d+)")
 
 # Percent deviation at which a run is called contaminated. Must match
 # `CANARY_TOLERANCE_PCT` in `kernel/src/bench.rs`; the kernel prints its own
@@ -178,17 +343,218 @@ CANARY_TOLERANCE_PCT = 25
 #: which now computes the spread in hundredths of a cycle (`CENTI` in
 #: `kernel/src/bench.rs`) and so never rounds the verdict into existence.
 #:
-#: What this constant still does, and why it is kept: the kernel now applies the
-#: identical bound to `delta` *before* emitting a sample, so no record written by
+#: CORRECTION 2026-08-19: this comment used to end "the kernel now applies the
+#: identical bound to `delta` before emitting a sample, so no record written by
 #: the current kernel can fail this test -- on live data it is a check that
-#: cannot fire. It is retained solely to keep judging the **historical** records
-#: written before that filter existed. Deleting it as dead code would silently
-#: re-admit the 15:57 and 16:16 records as usable.
+#: cannot fire." Both halves were false, and their falseness is the bug this
+#: pair of constants now exists to keep separate.
+#:
+#: The bound was *not* identical: the kernel compared a raw cycle delta against
+#: `n * 4`, i.e. four **whole cycles** per access, while the value it went on to
+#: store was in hundredths. It was 100x too strict, and it fired on every arm of
+#: every WHPX run -- `samples: 0, invalid: 13`, thirteen times, six sweeps
+#: running. And it can certainly fire here: a WHPX guest resolves ~0.87
+#: cycles/access, so `min` (whole cycles, rounded) reads **0** on a perfectly
+#: good record. Judging that record by this constant would return CANARY_BROKEN
+#: for the whole life of the platform.
+#:
+#: Hence two bounds rather than one, applied to whichever unit the record
+#: actually carries -- see `canary_verdict`. This one keeps judging the
+#: **historical** whole-cycle records (deleting it would silently re-admit the
+#: 15:57 and 16:16 records as usable); `CANARY_MIN_RESOLVABLE_CENTI` judges
+#: every record written since the extremes went to hundredths.
 CANARY_MIN_RESOLVABLE = math.ceil(100 / CANARY_TOLERANCE_PCT)
+
+#: The same bound, one unit down: the smallest per-access cost *in hundredths*
+#: whose spread is measurable.
+#:
+#: The derivation is unchanged and that is the point -- the quantum is one unit
+#: of whatever the figure is stored in, so at a minimum of `m` units, one unit
+#: of quantisation is `100/m` percent, and the bound is where that reaches the
+#: tolerance. Only the unit moved. Writing it as the same expression rather than
+#: as `CANARY_MIN_RESOLVABLE * 100` is deliberate: the two are numerically
+#: unequal (4, not 400), and the reason is that the quantum shrank by the same
+#: factor the figure grew by. A constant defined as "the old one times a hundred"
+#: would encode exactly the confusion that produced the kernel bug.
+#:
+#: Must match `CANARY_MIN_RESOLVABLE_CENTI` in `kernel/src/bench.rs`, which
+#: filters individual samples with it. This file applies twice that bound,
+#: because a *spread* is taken across two quantised samples and so carries two
+#: quanta -- the same doubling the whole-cycle path below has always applied.
+CANARY_MIN_RESOLVABLE_CENTI = math.ceil(100 / CANARY_TOLERANCE_PCT)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
 DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "history.jsonl")
+
+# Imported by path rather than by a plain `import` because this file is itself
+# routinely loaded via importlib -- by its own test suite and by ad-hoc
+# analysis scripts -- in which case `sys.path[0]` is not `scripts/` and a bare
+# import would fail for reasons having nothing to do with the caller.
+if os.path.join(REPO_ROOT, "scripts") not in sys.path:
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+try:
+    import src_digest as _src_digest
+except ImportError:  # pragma: no cover -- a checkout missing the module
+    _src_digest = None
+
+#: Functions whose *address* has been shown to change their measured cost by
+#: several-fold under QEMU's TCG, with their machine code byte-identical.
+#:
+#: On 2026-08-18 `crypto_sha256_64B` went 7426 -> 30048 cycles across a commit
+#: that edits only `audio_mixer.rs`.  The SHA-256 code did not change (same
+#: symbol size, same mangled hash); `crypto::compress` merely moved to
+#: `…80afce00`, and moving it anywhere else -- two unrelated addresses were
+#: tried -- restored the original number exactly.  `crypto_sha512_64B`, a
+#: near-identical routine at a different address, was unaffected.  See
+#: A-A-4x-CRYPTO-"REGRESSION" in known-issues.md.
+#:
+#: Recording the addresses turns a repeat of that into a one-line observation
+#: rather than the multi-hour bisect it cost the first time: if a crypto
+#: benchmark jumps and `compress` moved in the same run, that is the answer.
+#:
+#: Matched as substrings so that one pattern covers both of Rust's mangling
+#: schemes -- legacy `_ZN4sha28compress17h…E` and v0
+#: `_RNvCs…_4sha28compress` share the length-prefixed `4sha28compress`.
+#: The `4sha2` prefix is what keeps `fs::compress` and `mm::compress` out.
+#:
+#: This pattern names a *module path*, so it goes stale whenever the function
+#: moves -- and it just did: `compress` was `kernel::crypto`'s until
+#: `kernel/src/crypto.rs` was moved onto the shared `sha2` crate, at which
+#: point `6crypto8compress` stopped matching anything and `4sha28compress`
+#: started. Updating it is not optional bookkeeping: the migration relocates
+#: the very function whose address this exists to record, so a run that fails
+#: to match here is precisely the run where the reading matters most. It is
+#: updated in the same commit as the migration for that reason. `sha2::compress`
+#: is a crate-root item, so there is no module segment between the crate name
+#: and the function -- hence `4sha2` directly abutting `8compress`.
+#:
+#: The friendly name stays `crypto::compress` even though the function now
+#: lives in `sha2`. It is the key this address is filed under in every
+#: benchmark record, and its job is to let one run's address be compared with
+#: another's. Renaming it would split the series in two at exactly the commit
+#: whose effect on the address is the thing being watched -- the reader would
+#: see a key disappear and a new one appear and have to work out that they are
+#: the same function. Accuracy of the label is worth less here than continuity
+#: of the series; the pattern beside it records where the code actually is.
+HOT_SYMBOLS = {
+    "crypto::compress": "4sha28compress",
+    "crypto::sha512_compress": "6crypto15sha512_compress",
+    "net::tcp::tcp_checksum_ip": "3tcp15tcp_checksum_ip",
+}
+
+
+def kernel_sha(path):
+    """SHA-256 of the kernel image at `path`, truncated, or None.
+
+    Truncated to 16 hex characters: this is an identity for grouping records
+    that were written minutes apart on one host, not a security claim, and a
+    64-character string in every record of an append-only file that is already
+    read by eye is a real cost against no benefit. 64 bits of a SHA-256 is far
+    beyond any accidental collision between two builds of one kernel.
+
+    None on any read failure rather than an exception or a sentinel string: a
+    hash that could not be taken must degrade to "identity unknown", which is
+    what `binary_identity` does with an absent field. A sentinel would instead
+    make every unreadable build look like the same binary -- the exact error
+    `UNKNOWN_COMMIT` exists to prevent, reintroduced one field over.
+    """
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()[:16]
+    except OSError:
+        return None
+
+
+def elf_symbol_addresses(path, wanted=HOT_SYMBOLS):
+    """Map friendly name -> load address for `wanted`, read from an ELF64 file.
+
+    Parsed by hand rather than shelled out to `nm`/`objdump` on purpose: neither
+    is on PATH in this environment by default (llvm-tools had to be installed
+    mid-investigation to get one), and a diagnostic that silently records
+    nothing on a machine missing an optional tool is worse than no diagnostic,
+    because its absence looks like "the addresses did not move".
+
+    Returns `{}` -- never raises -- if the file is missing, is not ELF64, or has
+    been stripped.  This is bookkeeping attached to a benchmark record; it must
+    never be the reason a completed measurement fails to be written.
+
+    On a file that *did* parse, every key of `wanted` is present, mapped to
+    `None` where the pattern matched no symbol.  So `{}` means "this binary told
+    us nothing" while a `null` value means "we looked for this one and it is not
+    there any more" -- most likely because it moved module and the pattern needs
+    updating.  The two must stay distinguishable; see the comment at the return.
+    """
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return {}
+    # 0x7f E L F, class 2 (64-bit), little-endian.
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        return {}
+
+    def u(fmt, off):
+        return struct.unpack_from(fmt, data, off)[0]
+
+    try:
+        e_shoff = u("<Q", 0x28)
+        e_shentsize = u("<H", 0x3A)
+        e_shnum = u("<H", 0x3C)
+        if not e_shoff or not e_shnum:
+            return {}
+        # Find .symtab (sh_type 2); its sh_link names the matching string table,
+        # which is why the string table is not searched for by name.
+        symtab = None
+        for i in range(e_shnum):
+            sh = e_shoff + i * e_shentsize
+            if u("<I", sh + 4) == 2:  # SHT_SYMTAB
+                symtab = sh
+                break
+        if symtab is None:
+            return {}
+        sym_off, sym_size = u("<Q", symtab + 0x18), u("<Q", symtab + 0x20)
+        sym_entsize = u("<Q", symtab + 0x38) or 24
+        strtab_idx = u("<I", symtab + 0x28)
+        st = e_shoff + strtab_idx * e_shentsize
+        str_off, str_size = u("<Q", st + 0x18), u("<Q", st + 0x20)
+        strs = data[str_off:str_off + str_size]
+
+        # Keep the shortest match per pattern: a monomorphised wrapper that
+        # merely mentions the function has a longer name than the function.
+        best = {}
+        for off in range(sym_off, sym_off + sym_size, sym_entsize):
+            name_off = u("<I", off)
+            value = u("<Q", off + 8)
+            if not value or name_off >= len(strs):
+                continue
+            end = strs.find(b"\0", name_off)
+            name = strs[name_off:end if end >= 0 else None].decode(
+                "utf-8", "replace")
+            for friendly, pattern in wanted.items():
+                if pattern in name:
+                    prev = best.get(friendly)
+                    if prev is None or len(name) < prev[0]:
+                        best[friendly] = (len(name), value)
+        # Every wanted name is present, `null` where the pattern matched
+        # nothing. A pattern goes stale when its function moves module, and that
+        # has now happened once: `crypto::compress` moved into the shared `sha2`
+        # crate, turning `6crypto8compress` into `4sha28compress`. The pattern
+        # was updated in the same commit, so nothing was lost -- but had it not
+        # been, dropping the key on a miss would have made the failure silent,
+        # and silent in the worst possible way: the diagnostic would
+        # disappear at the moment it is most needed, because the very change
+        # that broke the pattern is the one that relocates the function.
+        return {
+            friendly: (f"{best[friendly][1]:#018x}" if friendly in best
+                       else None)
+            for friendly in sorted(wanted)
+        }
+    except (struct.error, IndexError, ValueError):
+        return {}
 
 
 def split_is_unstable(token):
@@ -213,17 +579,41 @@ def split_pct(token):
 
 
 def parse_serial(path):
-    """Extract {name: (measured_ns, target_ns, verdict, mean_ns, iters, split)}.
+    """Extract {name: (measured_ns, target_ns, verdict, mean_ns, iters, split, pos)}.
 
     `mean_ns` and `iters` are `None` for a log predating their emission, and
     `split` is `SPLIT_ABSENT` for a log predating *its* emission. The tuple is
     extended only at the end so existing positional readers (`value[0]`,
     `value[3]`) keep meaning what they meant.
 
+    `pos` is the benchmark's **suite position**: its 0-based ordinal among the
+    SCORE lines. It is not decoration -- it is the join key between a benchmark
+    and the canary trace, which records the position each reference sample was
+    taken at and nothing else. Without it the trace can say "the host went 3x
+    dearer around position 32" and no reader can name a single benchmark that
+    sat there.
+
+    # Why the ordinal has to be captured here and stored explicitly
+
+    The kernel emits SCORE lines from `SCORECARD` in push order, which is
+    `record()` order, which is exactly the order that increments
+    `CANARY_SCORED` -- so the Nth SCORE line and canary position N are the same
+    N by construction, not by coincidence. That correspondence is only
+    available *while reading the log in order*.
+
+    It cannot be recovered afterwards from a stored record. `entries` is a
+    `{name: value}` dict, and Python would have preserved its insertion order,
+    but records are written with `json.dumps(..., sort_keys=True)` -- so every
+    one of the 71 records on disk has its entries sorted alphabetically, and
+    the suite order is gone. Deriving the index from key order would therefore
+    be wrong on every historical record and *silently* wrong: it would yield a
+    plausible integer for every benchmark, just not the right one.
+
     Returns an empty dict if the log has no scorecard, which is the normal
     case for a boot run without `--bench`.
     """
     entries = {}
+    seen = 0
     try:
         # The serial log is written by QEMU and can contain stray bytes if a
         # boot is killed mid-write, so decode leniently rather than failing.
@@ -245,7 +635,15 @@ def parse_serial(path):
                         int(mean) if mean is not None else None,
                         int(iters) if iters is not None else None,
                         split,
+                        # Counted over SCORE lines seen, not over `entries`:
+                        # a duplicate name must not renumber the suite behind
+                        # the canary's back. `len(entries)` would do exactly
+                        # that -- a repeated name overwrites rather than
+                        # appends, so every later benchmark would shift one
+                        # position left of where the kernel sampled it.
+                        seen,
                     )
+                    seen += 1
     except FileNotFoundError:
         print(f"bench-history: no serial log at {path}", file=sys.stderr)
         return {}
@@ -255,27 +653,237 @@ def parse_serial(path):
     return entries
 
 
+def _trace_centi(whole, frac):
+    """One trace value as integer centicycles.
+
+    `frac` is whatever digits followed the point, or None. The kernel printed
+    tenths before it printed hundredths, so both widths appear in the logs on
+    disk and both must land in the same units: "5.1" is 510 centicycles, not
+    51. Padding right (rather than left) is what makes that true, and is the
+    whole reason this is a function instead of a `float(...) * 100` that would
+    also drag in binary-rounding surprises on exactly the values we care about.
+
+    Longer-than-two fractions are truncated rather than rejected: a future
+    kernel printing more precision should not make an older parser refuse the
+    line outright.
+    """
+    digits = (frac or "")[:2].ljust(2, "0")
+    return int(whole) * 100 + int(digits)
+
+
+def parse_text_pad(path):
+    """Bytes of layout padding this kernel reports having been built with.
+
+    Returns an `int`, or `None` when the log carries no `textpad=` key at all --
+    which means the kernel predates the banner, *not* that it was unpadded. See
+    `TEXTPAD_RE`; the two must never be conflated.
+
+    Reads the file directly rather than taking already-parsed text, so that a
+    caller cannot accidentally hand it the scorecard section alone: the banner
+    is printed at kernel entry, thousands of lines before the first SCORE.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    match = TEXTPAD_RE.search(text)
+    return int(match.group(1)) if match else None
+
+
+def parse_accel(path):
+    """Which accelerator this kernel ran on, as the guest itself reported it.
+
+    Returns e.g. `"QEMU TCG"` or `"Hyper-V/WHPX"` under a hypervisor,
+    `ACCEL_BARE_METAL` on real hardware, or `None` when the log carries
+    *neither* banner -- which means the kernel predates them, **not** that it
+    ran on TCG. See `ACCEL_RE`; conflating the two is provably wrong, because
+    the first WHPX run was recorded before this field existed.
+
+    # Why two patterns rather than one
+
+    The kernel prints one sentence when it is running under something and a
+    different one when it is not, so a single pattern can only ever recognise
+    one of the two platforms and must return "cannot say" for the other. Which
+    of the three answers a bare-metal boot gets is the whole question: `None`
+    pools it with every pre-banner record, and pooling is what widens a band,
+    and a wider band dismisses real regressions in silence.
+
+    The patterns are tried in order and both are anchored, but the order is a
+    readability choice, not a correctness one -- they are mutually exclusive by
+    construction, since the kernel emits exactly one of them per boot and the
+    two literals share no prefix past `[hypervisor] `. `test-bench-history.py`
+    asserts the non-crossing directly rather than leaving it to be re-derived.
+
+    Reads the file directly rather than taking already-parsed text, for the same
+    reason `parse_text_pad` does: the line is printed during early boot,
+    thousands of lines before the first SCORE, so a caller holding only the
+    scorecard section would silently get `None` for every run.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    match = ACCEL_RE.search(text)
+    if match:
+        return match.group(1).strip()
+    return ACCEL_BARE_METAL if BARE_METAL_RE.search(text) else None
+
+
+TRACE_EDGES = ("start", "end")
+
+
+def parse_canary_trace(text):
+    """Parse the sample list off a CANARY-TRACE line into a list of dicts.
+
+    Each element is `{"pos": <int> or None, "centi": <int>}`, in the order the
+    samples were taken. `pos` is None for a suite endpoint, which is not at a
+    suite position -- None rather than a sentinel integer so that no arithmetic
+    can silently treat it as position zero, and so it survives a JSON round-trip
+    as `null`.
+
+    Endpoint samples additionally carry `"edge": "start"` or `"edge": "end"`,
+    naming which side of the suite they bracket. The key is **absent** on a
+    positioned sample rather than null, matching the convention every other
+    optional field here follows.
+
+    Both endpoints were labelled `end:` before the kernel distinguished them, so
+    a trace parsed out of an old raw log can contain two samples claiming to be
+    the tail. That is why `edge` is reported verbatim and not repaired by
+    position in the list: with a failed calibration only one endpoint is
+    recorded, and it is the *end* sitting where the start would have been, so
+    ordinal cannot identify it either. Consumers must detect the duplicate and
+    decline to use it -- see `trace_edge`.
+    """
+    samples = []
+    for pos, whole, frac in CANARY_TRACE_SAMPLE_RE.findall(text):
+        sample = {
+            "pos": None if pos in TRACE_EDGES else int(pos),
+            "centi": _trace_centi(whole, frac),
+        }
+        if pos in TRACE_EDGES:
+            sample["edge"] = pos
+        samples.append(sample)
+    return samples
+
+
+def parse_canary_arms(text):
+    """Parse the sample list off a CANARY-ARMS line into a list of dicts.
+
+    Each element is `{"pos": <int> or None, "nop": <int>, "store": <int>}`, in
+    the order the samples were taken, with `"edge"` present on an endpoint --
+    the same shape and the same ordering as `parse_canary_trace`, deliberately,
+    because the two lists are merged elementwise by `merge_canary_arms` and a
+    pair of lists that are merged elementwise but *shaped* differently is a pair
+    that will eventually be merged offset by one.
+
+    The arms are raw cycle totals for the two A/B arms, not a derived value: the
+    traced centicycle figure is `(store - nop) * 100 / n`. They are stored
+    unreduced on purpose -- `n` is not on this line, and reconstructing it from
+    the quotient would round-trip through the very division whose ambiguity the
+    arms exist to resolve.
+    """
+    samples = []
+    for pos, nop, store in CANARY_ARMS_SAMPLE_RE.findall(text):
+        sample = {
+            "pos": None if pos in TRACE_EDGES else int(pos),
+            "nop": int(nop),
+            "store": int(store),
+        }
+        if pos in TRACE_EDGES:
+            sample["edge"] = pos
+        samples.append(sample)
+    return samples
+
+
+def _same_trace_slot(trace_sample, arm_sample):
+    """True when two samples name the same slot of the same suite.
+
+    Compares the label only -- `pos` and `edge` -- because that is all the two
+    lines share; the trace carries a derived value and the arms carry the totals
+    it was derived from, so there is nothing else to cross-check against.
+    """
+    return (trace_sample.get("pos") == arm_sample.get("pos")
+            and trace_sample.get("edge") == arm_sample.get("edge"))
+
+
+def merge_canary_arms(trace, arms):
+    """Attach `nop`/`store` to each trace sample, or return the trace unchanged.
+
+    Merging is all-or-nothing. The two lines are emitted from one walk of one
+    array, so in a well-formed log they agree in length and label at every slot;
+    if they do not, the log is not one this function can align, and attaching
+    arms to the wrong sample would produce exactly the confident-but-wrong
+    attribution the arms were added to prevent. A missing arm is a gap -- the
+    caller sees no `nop` key and knows to say nothing. A *misplaced* arm is
+    evidence pointing at the wrong slot, and no consumer downstream can detect
+    it. So a disagreement drops every arm rather than any trace sample: the
+    trace is the older, independently-useful record and must survive intact.
+
+    Returns a new list; the inputs are not modified.
+    """
+    if len(trace) != len(arms):
+        return trace
+    if not all(_same_trace_slot(t, a) for t, a in zip(trace, arms)):
+        return trace
+    merged = []
+    for trace_sample, arm_sample in zip(trace, arms):
+        sample = dict(trace_sample)
+        sample["nop"] = arm_sample["nop"]
+        sample["store"] = arm_sample["store"]
+        merged.append(sample)
+    return merged
+
+
 def parse_canary(path):
     """Extract the contamination canary as a dict, or None.
 
     Keys: `start`, `end`, `pct` always; `min`, `max`, `spread`, `samples`
-    only when the log carries mid-suite sampling.
+    only when the log carries mid-suite sampling; `trace` only when the log
+    carries the per-sample CANARY-TRACE line. Each `trace` sample additionally
+    carries `nop`/`store` when the log also has the matching CANARY-ARMS line
+    and the two agree slot for slot -- a log predating that line, or one whose
+    two lines disagree, yields a trace with no arms rather than an error.
 
     None means the log has no canary at all, in which case contamination is
     *unknown* for that run -- materially different from "known clean", and
     callers must not conflate the two.
 
     The last CANARY line wins, matching `parse_serial`'s last-wins behaviour
-    for SCORE, so a concatenated/replayed log reports its final suite.
+    for SCORE, so a concatenated/replayed log reports its final suite. The
+    trace attaches to the CANARY line it follows rather than being tracked
+    independently: the kernel prints it immediately after, so binding it to
+    the open `result` keeps a suite's trace from ever being stapled onto a
+    later suite that emitted no trace of its own (`samples == 0` suppresses
+    the line entirely).
     """
     result = None
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                match = CANARY_RE.match(line.strip())
+                stripped = line.strip()
+                trace_match = CANARY_TRACE_RE.match(stripped)
+                if trace_match and result is not None:
+                    samples = parse_canary_trace(trace_match.group(1))
+                    if samples:
+                        result["trace"] = samples
+                    continue
+                arms_match = CANARY_ARMS_RE.match(stripped)
+                if arms_match and result is not None and "trace" in result:
+                    # Only ever merged onto an existing trace, never stored
+                    # alone. The kernel emits both lines from one walk of one
+                    # array, so arms without a trace means a truncated or
+                    # interleaved log -- and standing the arms up as a second,
+                    # parallel sample list would hand every consumer a second
+                    # shape to handle for no case that occurs in a whole log.
+                    result["trace"] = merge_canary_arms(
+                        result["trace"], parse_canary_arms(arms_match.group(1)))
+                    continue
+                match = CANARY_RE.match(stripped)
                 if match:
                     (start, end, pct, lo, hi, spread, samples,
-                     invalid, lo_centi, hi_centi) = match.groups()
+                     invalid, lo_centi, hi_centi, below_floor) = match.groups()
                     result = {
                         "start": int(start),
                         "end": int(end),
@@ -293,12 +901,114 @@ def parse_canary(path):
                     if lo_centi is not None and hi_centi is not None:
                         result["min_centi"] = int(lo_centi)
                         result["max_centi"] = int(hi_centi)
+                    # Stored only when the log actually said it. See CANARY_RE:
+                    # the absence of this key is the record's way of saying its
+                    # failures are of unknown kind, and a default would erase
+                    # that distinction permanently on write.
+                    if below_floor is not None:
+                        result["below_floor"] = int(below_floor)
     except FileNotFoundError:
         return None
     except OSError as exc:
         print(f"bench-history: cannot read {path}: {exc}", file=sys.stderr)
         return None
     return result
+
+
+#: How a single traced sample's two arms moved, relative to the run's own
+#: typical arms. The derived canary value cannot distinguish these -- it is a
+#: difference, so every one of them is just "a bigger number" -- and they mean
+#: materially different things. See known-issues.md, "the canary's arms
+#: separate three mechanisms".
+ARM_QUIET = "quiet"
+ARM_ARTEFACT = "artefact"
+ARM_SCALED = "scaled"
+ARM_DISTURBED = "disturbed"
+ARM_UNCLASSIFIED = "unclassified"
+
+#: A move at or below this (percent, either arm) is not a move.
+ARM_QUIET_PCT = 0.5
+#: Two arms whose moves agree within this many percentage points moved
+#: *together* -- i.e. the whole measurement scaled, rather than the measured
+#: work changing relative to the baseline.
+ARM_PROPORTIONAL_PP = 1.0
+
+
+def classify_arm_sample(sample, ref_nop, ref_store):
+    """Say which arm moved, and therefore what kind of event this sample is.
+
+    Returns one of the ARM_* constants, or None when the sample carries no arms
+    (every record written before arm recording existed, which is most of them).
+
+    The classification rests on an asymmetry of minima, not on a statistical
+    model. The canary value is a minimum over ~500 rounds, so:
+
+    - a minimum moves **up** only if essentially *every* round was slower;
+    - a minimum moves **down** if a *single* round happened to be faster.
+
+    Hence a lone arm moving is cheap and means nothing about the host -- one
+    lucky round in one arm -- while both arms moving up together is expensive
+    and means the host really was slower for the whole window. That is why
+    ARM_ARTEFACT is a verdict about the *instrument* and ARM_DISTURBED is a
+    verdict about the *host*, from what is otherwise the same-looking number.
+
+    ARM_SCALED is both arms moving together by the same proportion: the whole
+    measurement sped up or slowed down uniformly, which moves the reported
+    difference without anything having gone wrong with the measurement.
+
+    ARM_UNCLASSIFIED is a real outcome and not a bucket of last resort. With
+    only a few dozen arm samples on disk, forcing every shape into one of the
+    named classes would manufacture confidence the data does not support.
+    """
+    if "nop" not in sample or "store" not in sample:
+        return None
+    if not ref_nop or not ref_store:
+        return None
+    d_nop = (sample["nop"] / ref_nop - 1) * 100
+    d_store = (sample["store"] / ref_store - 1) * 100
+    moved_nop = abs(d_nop) > ARM_QUIET_PCT
+    moved_store = abs(d_store) > ARM_QUIET_PCT
+    if not moved_nop and not moved_store:
+        return ARM_QUIET
+    if moved_nop != moved_store:
+        # Exactly one arm moved. No host state slows (or speeds) the nop loop
+        # without touching the store loop interleaved with it.
+        return ARM_ARTEFACT
+    if abs(d_nop - d_store) <= ARM_PROPORTIONAL_PP:
+        return ARM_SCALED
+    if d_nop > 0 and d_store > 0:
+        return ARM_DISTURBED
+    return ARM_UNCLASSIFIED
+
+
+def classify_canary_trace(trace):
+    """Classify every armed sample in a trace against the run's own baseline.
+
+    Returns a list the same length as `trace`, holding an ARM_* string per
+    sample, or None where that sample has no arms.
+
+    The reference is the run's **median** arm, taken from the run itself rather
+    than from any stored constant. Two reasons, and both matter: the absolute
+    arm totals are a property of the host and the build, so a constant would
+    rot the first time either changed; and the median is unmoved by the very
+    excursions being classified, which a mean would not be.
+
+    The assumption the median carries is that *most* of a run's samples are
+    quiet, and that is an assumption rather than a guarantee: the run at
+    2026-08-19T03:45:54 has 6 of 13 samples in one displaced state, one sample
+    short of moving the median onto the displaced value and inverting every
+    label in that run. If a run ever does cross that line, its excursions will
+    be reported as quiet and its quiet samples as excursions. There is no
+    within-run defence against it -- a run that is mostly displaced has no
+    internal baseline left -- so the fix, should it start happening, is a
+    cross-run reference, which needs more arm-bearing history than exists.
+    """
+    armed = [s for s in trace if "nop" in s and "store" in s]
+    if not armed:
+        return [None] * len(trace)
+    ref_nop = statistics.median(s["nop"] for s in armed)
+    ref_store = statistics.median(s["store"] for s in armed)
+    return [classify_arm_sample(s, ref_nop, ref_store) for s in trace]
 
 
 #: The canary's four possible outcomes. Four rather than two, because
@@ -337,6 +1047,14 @@ def canary_verdict(canary):
     over-tolerance spread is CONTAMINATED even alongside failures; only a
     *within*-tolerance spread with failures present is BROKEN, because a failed
     sample is not a quiet one and could have hidden the excursion.
+
+    "Failures present" then had to be narrowed once more, because it was not
+    true of all of them. A sample refused for resolving a cost *below the
+    instrument's floor* did resolve something, and what it resolved was small --
+    an excursion is large and would have cleared the floor. Such a sample hides
+    nothing, so it is subtracted out (`below_floor`). Without that, correcting
+    the kernel's 100x-too-strict floor would have bought nothing: WHPX runs
+    would have gone on being ungradeable, just for a different stated reason.
     """
     if canary is None:
         return CANARY_ABSENT
@@ -350,42 +1068,91 @@ def canary_verdict(canary):
     # exact shape of the nine dead release records.
     if canary["start"] <= 0 and "spread" not in canary:
         return CANARY_BROKEN
-    # A minimum below one cycle of usable resolution means the arms barely
-    # separated: `min == 0` is the fully-eliminated case the pre-`invalid` logs
-    # express, and `min` of 1-2 is the same failure caught mid-collapse. Either
-    # way the spread computed from it is quantisation noise. See
-    # CANARY_MIN_RESOLVABLE for why the bound is derived rather than picked.
+    # Is the record's own minimum big enough for a spread taken across it to
+    # mean anything? Same question either way, asked in whichever unit the
+    # record actually stores -- and it MUST be asked in that unit. Judging a
+    # centicycle record by the whole-cycle bound is what would return
+    # CANARY_BROKEN for every WHPX run ever recorded: a real 0.87 cycles/access
+    # rounds to `min == 0`, which is indistinguishable from a dead instrument if
+    # you only look at the rounded field. See CANARY_MIN_RESOLVABLE.
     low = canary.get("min")
-    if low is not None and low < CANARY_MIN_RESOLVABLE:
-        return CANARY_BROKEN
-    # A whole-cycle record's `spread` may be two roundings wide.
-    #
-    # CANARY_MIN_RESOLVABLE bounds *one* cycle of quantisation at the tolerance,
-    # but a spread is taken across two samples. So on a record that predates the
-    # centicycle extremes, a per-access cost below twice that bound cannot
-    # support either verdict: `min=5 max=7` is consistent with a true spread
-    # anywhere from 17% to 60%, which straddles the 25% tolerance. Neither
-    # "contaminated" nor "clean" is assertable, and "the instrument could not
-    # measure" is exactly what CANARY_BROKEN means.
-    #
-    # This deliberately RECLASSIFIES two historical records -- 21:37 from
-    # `contaminated` and 21:56 from `clean`, both to `broken`. That is a
-    # correction, not a loss: those runs really were unable to resolve their own
-    # quantity, and the later centicycle run showed the true figure (47%) sits
-    # between what the two of them claimed. Records carrying `min_centi` are
-    # exempt because their spread was computed at 0.01-cycle resolution.
-    if "min_centi" not in canary and low is not None:
+    low_centi = canary.get("min_centi")
+    if low_centi is not None:
+        # Two quanta, not one: a spread is `(hi - lo) / lo`, so it carries a
+        # rounding from each endpoint. This is the same doubling the whole-cycle
+        # branch below applies, and it is applied here too now -- the previous
+        # code exempted centicycle records from it entirely, on the grounds that
+        # their spread "was computed at 0.01-cycle resolution". True, and beside
+        # the point: the resolution is finer but it is still finite, so the
+        # argument scales down with the unit rather than disappearing.
+        # Numerically it changes nothing on any record yet written (TCG resolves
+        # ~500 centi against a bound of 8); it is here so the rule does not have
+        # to be rediscovered the next time the unit moves.
+        if low_centi < 2 * CANARY_MIN_RESOLVABLE_CENTI:
+            return CANARY_BROKEN
+    elif low is not None:
+        # A minimum below one cycle of usable resolution means the arms barely
+        # separated: `min == 0` is the fully-eliminated case the pre-`invalid`
+        # logs express, and `min` of 1-2 is the same failure caught
+        # mid-collapse. Either way the spread computed from it is quantisation
+        # noise.
+        if low < CANARY_MIN_RESOLVABLE:
+            return CANARY_BROKEN
+        # A whole-cycle record's `spread` may be two roundings wide.
+        #
+        # CANARY_MIN_RESOLVABLE bounds *one* cycle of quantisation at the
+        # tolerance, but a spread is taken across two samples. So on a record
+        # that predates the centicycle extremes, a per-access cost below twice
+        # that bound cannot support either verdict: `min=5 max=7` is consistent
+        # with a true spread anywhere from 17% to 60%, which straddles the 25%
+        # tolerance. Neither "contaminated" nor "clean" is assertable, and "the
+        # instrument could not measure" is exactly what CANARY_BROKEN means.
+        #
+        # This deliberately RECLASSIFIES two historical records -- 21:37 from
+        # `contaminated` and 21:56 from `clean`, both to `broken`. That is a
+        # correction, not a loss: those runs really were unable to resolve their
+        # own quantity, and the later centicycle run showed the true figure
+        # (47%) sits between what the two of them claimed.
         if low < 2 * CANARY_MIN_RESOLVABLE and canary.get("samples"):
             return CANARY_BROKEN
     if "spread" in canary:
         over = canary["spread"] > CANARY_TOLERANCE_PCT
     else:
         over = abs(canary["pct"] - 100) > CANARY_TOLERANCE_PCT
-    # Arm-separation failures are decisive only when the samples that *did*
-    # measure came back quiet. `invalid` is authoritative when present (the
-    # kernel counted its own failures); on older logs a zero start is the same
-    # thing, one failed endpoint measurement.
-    if not over and (canary.get("invalid", 0) > 0 or canary["start"] <= 0):
+    # Failed measurements are decisive only when the samples that *did* measure
+    # came back quiet. `invalid` is authoritative when present (the kernel
+    # counted its own failures); on older logs a zero start is the same thing,
+    # one failed endpoint measurement.
+    #
+    # But only the failures that could have HIDDEN something count here, which
+    # is `invalid` minus `below_floor`. The argument for BROKEN is "a failed
+    # sample is not a quiet one -- it could have been the excursion", and that
+    # holds for a sample whose arms inverted and fails for one that resolved a
+    # small figure and was refused for being small. An excursion is large; it
+    # would have cleared the floor comfortably. Counting below-floor rejections
+    # here is what would keep every fast guest permanently ungradeable even
+    # after the kernel's floor was corrected.
+    #
+    # `below_floor` defaults to 0 when the record predates the field, and that
+    # default is an assumption rather than a reading -- deliberately the
+    # conservative one. It attributes every failure of unknown kind to the
+    # could-have-hidden-something side, so an old record keeps the verdict it
+    # already had. The field is never *stored* with that default (see
+    # CANARY_RE); an assumption made at judgement time can be revisited, one
+    # written to disk cannot.
+    #
+    # The `start <= 0` fallback applies ONLY to records with no `invalid` field.
+    # It is the pre-`invalid` logs' way of saying one endpoint measurement
+    # failed, and at whole-cycle scale that inference was sound. At sub-cycle
+    # scale it is the *same unit bug a third time*: a WHPX endpoint of 0.87
+    # cycles/access is written as `start = 0` because `start` is rounded to
+    # whole cycles, so a perfectly good record would be condemned by a heuristic
+    # meant for a dead one. Where the kernel counted its own failures there is
+    # nothing to infer, and the inference is exactly wrong.
+    unresolved = canary.get("invalid", 0) - canary.get("below_floor", 0)
+    counted_own_failures = "invalid" in canary
+    if not over and (unresolved > 0
+                     or (not counted_own_failures and canary["start"] <= 0)):
         return CANARY_BROKEN
     return CANARY_CONTAMINATED if over else CANARY_CLEAN
 
@@ -512,7 +1279,58 @@ def print_canary_summary(canary):
               "known-issues.md B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING, and "
               "read the run-level verdict below rather than this line.")
 
+    _report_arm_signatures(canary)
     return verdict
+
+
+#: What each arm signature means, in the reader's terms. Deliberately phrased
+#: as what it licenses concluding, since the whole point is that the derived
+#: canary number licenses none of these distinctions on its own.
+_ARM_MEANING = {
+    ARM_ARTEFACT: ("one arm moved and the other did not - one lucky round in "
+                   "one arm, NOT a host event; the canary figure moved for a "
+                   "reason that says nothing about this run"),
+    ARM_SCALED: ("both arms moved together by the same proportion - the whole "
+                 "measurement scaled uniformly, which moves the canary figure "
+                 "without anything having gone wrong"),
+    ARM_DISTURBED: ("both arms rose together - a real host disturbance over "
+                    "the canary's whole window; check the benchmarks in that "
+                    "sampling interval before trusting them"),
+    ARM_UNCLASSIFIED: ("both arms moved, but not in a shape seen before - "
+                       "worth looking at by hand"),
+}
+
+
+def _report_arm_signatures(canary):
+    """Print the per-sample arm classification, when the log carries arms.
+
+    Silent when it does not, which is every record written before arm recording
+    existed. Silence is correct there: absent arms are not evidence of a quiet
+    instrument, and printing "no artefacts detected" for a run that could not
+    have detected one would be the same false assurance this whole line of work
+    exists to remove.
+    """
+    trace = canary.get("trace") or []
+    labels = [c for c in classify_canary_trace(trace) if c is not None]
+    if not labels:
+        return
+    counts = collections.Counter(labels)
+    notable = [k for k in (ARM_ARTEFACT, ARM_SCALED, ARM_DISTURBED,
+                           ARM_UNCLASSIFIED) if counts.get(k)]
+    if not notable:
+        print(f"  Arm check: all {counts[ARM_QUIET]} sampled arm pair(s) "
+              f"quiet - no excursion of any kind in this run.")
+        return
+    print(f"  Arm check: {counts.get(ARM_QUIET, 0)} of {len(labels)} sampled "
+          f"arm pair(s) quiet; the rest break down as:")
+    for kind in notable:
+        print(f"    {counts[kind]}x {kind}: {_ARM_MEANING[kind]}")
+    if counts.get(ARM_ARTEFACT):
+        print("  An 'artefact' sample means the canary's own number is "
+              "untrustworthy at that sample, in EITHER direction: a lucky nop "
+              "round inflates it (false alarm), a lucky store round deflates "
+              "it (masks real load). See known-issues.md, 'the canary's arms "
+              "separate three mechanisms'.")
 
 
 def display_path(path):
@@ -854,26 +1672,181 @@ def record_host_load(record):
     return load if load in HOST_LOAD_CHOICES else HOST_LOAD_UNKNOWN
 
 
-def comparable_records(records, host, profile=LEGACY_PROFILE):
+def record_experiment(record):
+    """Why this run was a deliberate probe, or `""` for an ordinary run.
+
+    A run whose *binary* was built to answer a question -- a QEMU flag under
+    test, a compiler feature toggled by hand, a bisect step -- is a real
+    measurement of a kernel that no checkout reproduces. It belongs in the
+    history (throwing away measurements is how findings get re-discovered the
+    expensive way) but it must never become the yardstick a later honest run is
+    judged against.
+
+    This is a different assertion from the two labels that already exist, which
+    is why it is a third field rather than a reuse of either. `dirty` says the
+    source moved a little from `commit`, and is true of most runs during
+    development, so excluding on it would empty the history. `host_load:
+    loaded` says the *host* was poisoned while the guest was fine. Neither
+    covers "the guest itself was not the guest we ship".
+
+    The cost of not having had this: five probe runs of the placement
+    investigation (three at ~8085 ns for `crypto_sha256_64B`, two at ~1936 for
+    the identical source built with a different symbol-mangling scheme) would
+    have entered one 8-run window, widening that benchmark's outlier fence past
+    4x and silently blinding the detector for it for the next eight runs.
+    """
+    why = record.get("experiment", "")
+    return why if isinstance(why, str) else ""
+
+
+#: What `record_accel` returns for a record written before the field existed.
+#:
+#: `None`, and emphatically **not** `"QEMU TCG"`. The reasoning is already set
+#: out above `ACCEL_RE` and is repeated here because this is the point where it
+#: would be most tempting to fold the two together: absent means "this kernel
+#: predates the banner and cannot say", and the first WHPX run on this host was
+#: recorded before the field existed, so an absent value is demonstrably not
+#: evidence of TCG.
+#:
+#: It is therefore a value in its own right, and it groups only with itself.
+ACCEL_UNRECORDED = None
+
+
+def record_accel(record):
+    """Which accelerator a record was measured under, or `ACCEL_UNRECORDED`.
+
+    Normalising helper rather than a bare `record.get("accel")` so that an
+    empty string -- which a future writer could produce from a log whose banner
+    parsed to nothing -- reads as "not recorded" instead of becoming a distinct
+    accelerator that no other record shares and that silently empties every
+    window it appears in.
+    """
+    accel = record.get("accel")
+    return accel if isinstance(accel, str) and accel else ACCEL_UNRECORDED
+
+
+def comparable_records(records, host, profile, accel):
     """Records that may legitimately serve as history for a run here.
 
-    Same host, same build profile, and **not** a deliberately-loaded control.
+    Same host, same build profile, **same accelerator**, **not** a
+    deliberately-loaded control, and **not** a deliberate experiment
+    (`record_experiment`).
 
     Extracted because `previous_for_host` and `report_run_position` had each
     open-coded the host/profile filter, so a third rule (excluding controls)
     would otherwise have had to be added twice and could then be added to only
-    one of them. One filter, two callers.
+    one of them. One filter, many callers.
+
+    # Why the accelerator is one of the filters
+
+    For the same reason the build profile is, only more so. The profile note in
+    `previous_for_host` argues that `opt-level = 0` versus `3` is "a multiple
+    rather than a percentage", and that the drift correction cannot rescue it
+    because the ratio is not uniform across the suite. Both halves are true of
+    the accelerator and by a larger factor: measured on one byte-identical
+    binary (`kernel_sha 7a17cf6be2a1`, 2026-08-19), the median benchmark is
+    ~3.5x *faster* under Hyper-V/WHPX than under TCG, the best ~10x, and the
+    device-bound ones ~30x *slower*, because an HPET read costs a VM exit under
+    hardware virtualisation and is emulated inline under TCG. A window that
+    mixes the two does not have a wider spread; it has two populations.
+
+    Every consequence of mixing them is a silent one:
+
+    - the wall-clock axis judges a ~170 s WHPX run against a band built from
+      ~130 s TCG runs and reports host contention that never happened;
+    - conversely a handful of WHPX runs inflate that band until it no longer
+      fires on anything, which is the direction this file names repeatedly as
+      the dangerous one -- "a band inflated by a real difference dismisses
+      every regression inside its width";
+    - `previous_for_host` diffs across the boundary and reports the whole suite
+      as a 3.5x improvement and `hpet_read` as a 30x regression.
+
+    None of that is hypothetical arithmetic: it is what the fourteen WHPX
+    records in `bench/history.jsonl` would already do. They are excluded today
+    only because every one of them also happens to carry an `experiment` tag,
+    which is a property of how that sweep was run and not a property anything
+    here relies on.
+
+    `arm_group_key` has partitioned layout bands by accelerator since the field
+    existed. This is the same rule applied to the other window.
+
+    The first three clauses are `measurement_mismatch`'s, called rather than
+    restated -- see `design-decisions.md` sec 240, and note that this function
+    *was* the restatement until 2026-08-19. The last two are this window's own:
+    `layout_arm_rejection` shares the first three but must not share these,
+    since a layout arm is by definition an experiment and arms on different
+    accelerators form separate groups rather than being discarded.
     """
     return [
         record for record in records
-        if record.get("host") == host
-        and record_profile(record) == profile
-        and record_host_load(record) != HOST_LOAD_LOADED
+        if measurement_mismatch(record, host, profile) is None
+        and record_accel(record) == accel
+        and not record_experiment(record)
     ]
 
 
-def previous_for_host(records, host, profile=LEGACY_PROFILE):
-    """Most recent record from the same host *and build profile*, or None.
+def accel_window_thinning(records, host, profile, accel):
+    """How many otherwise-comparable records the accelerator filter removed.
+
+    Returns `(unrecorded, other)`: records that pass every *other* filter but
+    carry no accelerator, and those that name a different one.
+
+    Exists because the filter's cost is otherwise invisible in exactly the
+    situation where it matters most. When the schema gained `accel` this host
+    had sixty comparable runs and no labelled ones, so the first labelled run
+    sees a window of length zero and both banded axes correctly answer "too few
+    comparable runs (0 < 6)" -- a true statement that reads like a missing
+    history rather than like a deliberate partition. The reader needs to be
+    told that sixty runs are sitting just the other side of a line, and why.
+
+    The "every *other* filter" is `comparable_records`' own clauses minus the
+    accelerator one, expressed by calling the same predicates rather than by
+    listing the same conditions again. A count that drifted from the filter it
+    describes would be worse than no count: it would report neighbours that the
+    window is not in fact excluding, or miss ones it is.
+    """
+    unrecorded = other = 0
+    for record in records:
+        if (measurement_mismatch(record, host, profile) is not None
+                or record_experiment(record)):
+            continue
+        found = record_accel(record)
+        if found == accel:
+            continue
+        if found is ACCEL_UNRECORDED:
+            unrecorded += 1
+        else:
+            other += 1
+    return unrecorded, other
+
+
+def accel_thinning_note(records, host, profile, accel):
+    """One sentence for `report_run_verdict`'s extra notes, or `None`.
+
+    Only spoken when the window is actually too short to band, because that is
+    the only case where the partition changed an answer. A run with plenty of
+    same-accelerator history does not need to hear about the runs next door.
+    """
+    window = comparable_records(records, host, profile, accel)
+    if len(window) >= MIN_WINDOW_FOR_BAND:
+        return None
+    unrecorded, other = accel_window_thinning(records, host, profile, accel)
+    if not unrecorded and not other:
+        return None
+    parts = []
+    if unrecorded:
+        parts.append(f"{unrecorded} that predate the `accel` field")
+    if other:
+        parts.append(f"{other} on a different accelerator")
+    where = "" if accel is ACCEL_UNRECORDED else f" ({accel})"
+    return (f"accelerator window: {len(window)} comparable run(s)"
+            f"{where}; {' and '.join(parts)} are excluded on purpose -- an "
+            f"accelerator changes the numbers by a multiple, not a percentage, "
+            f"so those runs would widen the bands rather than fill them")
+
+
+def previous_for_host(records, host, profile, accel):
+    """Most recent record from the same host/profile/accelerator, or None.
 
     Cross-host comparison is meaningless here -- a different machine or QEMU
     build moves every number at once -- so we would rather report "no baseline"
@@ -886,11 +1859,17 @@ def previous_for_host(records, host, profile=LEGACY_PROFILE):
     by the drift correction: that removes a *uniform* factor, and the
     debug-to-release ratio is anything but uniform across the suite.
 
+    And harder again across accelerators, where the non-uniformity is not a
+    matter of degree: WHPX is ~3.5x faster than TCG on the median benchmark and
+    ~30x *slower* on the device-bound ones, so a cross-accelerator diff moves
+    the two halves of the suite in opposite directions at once. See
+    `comparable_records`.
+
     Deliberately-loaded control runs are skipped too (`comparable_records`):
     they are contaminated on purpose, and diffing the next honest run against
     one would report the *recovery* as a suite-wide improvement.
     """
-    window = comparable_records(records, host, profile)
+    window = comparable_records(records, host, profile, accel)
     return window[-1] if window else None
 
 
@@ -939,6 +1918,239 @@ def global_drift(previous_entries, current):
     return statistics.median(ratios)
 
 
+#: Fewest positioned canary samples a positional model may be built on.
+#:
+#: Three, not two. Two samples define a straight line through both, so the
+#: "correction" they yield is a ramp fitted to exactly its own two data points
+#: with no residual and no way to be wrong -- which is not a measurement of
+#: anything. Three is the smallest number at which the trace can disagree with a
+#: line, and therefore the smallest at which an excursion is distinguishable
+#: from the trend. A normal 64-benchmark suite yields eight.
+MIN_TRACE_SAMPLES = 3
+
+#: How far above its own run's baseline a stretch of the suite must sit before
+#: it is worth naming the benchmarks that ran there.
+#:
+#: Deliberately far below `CANARY_TOLERANCE_PCT`: that gate asks "is this whole
+#: run untrustworthy", which is a question about the suite. This asks "which
+#: benchmarks sat in the dear stretch", which is only ever asked about a run
+#: already under suspicion, and answering it too narrowly reproduces the
+#: original defect -- a burst confined to two benchmarks moves the *spread* a
+#: long way and moves the median hardly at all.
+POSITIONAL_NOTE_PCT = 10.0
+
+#: How many flagged benchmarks to name before summarising the rest. A whole-run
+#: disturbance can flag every benchmark in the suite, and sixty lines of
+#: near-identical factors bury the two that matter at the top.
+POSITIONAL_NOTE_LIMIT = 8
+
+#: Benchmarks between canary samples. Must match `CANARY_SAMPLE_EVERY` in
+#: `kernel/src/bench.rs` -- it is the resolution limit of every positional
+#: statement this tool makes, so it is quoted to the reader rather than left
+#: implicit.
+CANARY_SAMPLE_EVERY = 8
+
+
+def trace_edge(trace, which):
+    """Centicycles at the `which` ("start"/"end") endpoint, or None.
+
+    None when the endpoint is missing, and equally when the trace carries **two
+    or more** samples claiming that label -- because both endpoints printed
+    `end:` before the kernel gave them separate sentinels, so a duplicate means
+    the labels in this particular log cannot be trusted rather than that there
+    were two ends. Refusing is the only safe reading: picking either one would
+    anchor the suite's tail correction to a measurement possibly taken before
+    the suite began.
+    """
+    hits = [s.get("centi") for s in trace or () if s.get("edge") == which]
+    if len(hits) != 1 or not isinstance(hits[0], int) or hits[0] <= 0:
+        return None
+    return hits[0]
+
+
+def positioned_samples(trace):
+    """`[(pos, centi)]` for the mid-suite samples only, sorted by position.
+
+    Endpoints are excluded: they are not at a suite position, so they cannot
+    take part in an interpolation over positions. They are also *outside* the
+    span the model claims to describe -- the start sample measures the host
+    before a single benchmark has run.
+    """
+    return sorted(
+        (s["pos"], s["centi"])
+        for s in trace or ()
+        if isinstance(s.get("pos"), int) and isinstance(s.get("centi"), int)
+        and s["centi"] > 0
+    )
+
+
+def trace_reference(trace):
+    """The reading this run's positional model treats as "undisturbed", or None.
+
+    The **median** of the positioned samples, and the choice of estimator is
+    what makes this model complementary to `global_drift` rather than a rival to
+    it. If the host was uniformly twice as busy for the whole run, every sample
+    reads 2x, the median reads 2x, and every positional factor comes out 1.0 --
+    so this correction removes nothing and leaves the uniform factor to
+    `global_drift`, which is the estimator built for it. Only a *local*
+    excursion moves a sample away from its own run's median, and only that is
+    what gets corrected here.
+
+    A mean would defeat exactly that: the burst this instrument exists to catch
+    would drag the baseline toward itself and shrink the correction in
+    proportion to how badly it was needed.
+    """
+    samples = positioned_samples(trace)
+    if len(samples) < MIN_TRACE_SAMPLES:
+        return None
+    return statistics.median(centi for _, centi in samples)
+
+
+def interpolate_trace(trace, pos, last_pos=None):
+    """Reference cost at suite position `pos`, linearly interpolated, or None.
+
+    The canary samples once per `CANARY_SAMPLE_EVERY` benchmarks, so most
+    benchmarks have no sample of their own and must be read off the line between
+    the two that bracket them. A sample at position *p* is taken immediately
+    after benchmark *p* returns, so a benchmark that sits exactly on a sample
+    position gets that sample's own value and nothing is interpolated.
+
+    Outside the sampled span the value is **held flat** rather than
+    extrapolated, on both sides. Extrapolating a noisy reference past its last
+    support point invents data, and the invented values grow without bound
+    exactly where there is least evidence -- the tail of the suite.
+
+    `last_pos` is the highest occupied suite position, and supplying it lets the
+    tail do better than flat: the `end` endpoint sample brackets the benchmarks
+    that run after the final mid-suite sample, which on a 64-benchmark suite is
+    the last seven of them. Used only when `trace_edge` can identify it
+    unambiguously.
+
+    # The resolution limit, which is not a bug and must not be papered over
+
+    A line between two samples is the *least* this can assume, not an estimate
+    of the burst's real shape. The model cannot localise anything finer than the
+    sampling interval, so a one-benchmark spike and an eight-benchmark plateau
+    with the same peak are indistinguishable to it, and it renders both as a
+    triangle spanning the interval. Run against the real contaminated trace in
+    `build/ab-old-2.log`, whose only dear sample is position 32 at 3.2x, this
+    reports factors above 1.1 for positions 25-41 -- sixteen benchmarks, of
+    which perhaps one was actually disturbed.
+
+    That is the correct behaviour for an instrument sampling once per eight
+    benchmarks: the alternative -- attributing the excursion to position 32
+    alone -- would claim a precision the sampling rate does not support. It does
+    mean a corrected value is evidence that a benchmark *may* have been
+    disturbed, never that it was.
+    """
+    samples = positioned_samples(trace)
+    if len(samples) < MIN_TRACE_SAMPLES:
+        return None
+    end_centi = trace_edge(trace, "end")
+    if end_centi is not None and isinstance(last_pos, int) and last_pos > samples[-1][0]:
+        samples.append((last_pos, end_centi))
+    if pos <= samples[0][0]:
+        return float(samples[0][1])
+    if pos >= samples[-1][0]:
+        return float(samples[-1][1])
+    for (lo_pos, lo_centi), (hi_pos, hi_centi) in zip(samples, samples[1:]):
+        if lo_pos <= pos <= hi_pos:
+            span = hi_pos - lo_pos
+            if span <= 0:
+                return float(lo_centi)
+            return lo_centi + (hi_centi - lo_centi) * (pos - lo_pos) / span
+    # Unreachable while `samples` is sorted and `pos` lies inside its range,
+    # both of which are established above. Returning None rather than falling
+    # off the end keeps the "no answer" contract intact if that ever changes.
+    return None
+
+
+def positional_factors(canary, positions):
+    """`{name: factor}` -- how much dearer the host was where each benchmark ran.
+
+    A factor of 1.0 means the reference cost at that benchmark's position
+    matched this run's own baseline; 2.0 means the host was reading twice as
+    dear there, and dividing the benchmark's measured value by the factor is the
+    first-order correction for it.
+
+    Returns `{}` -- not a map of 1.0s -- when the model cannot be built: too few
+    samples, no baseline, or no position map. Those are all "this run cannot be
+    corrected", which a caller must be able to tell from "this run needed no
+    correction". A dict of ones would assert the second while meaning the first.
+
+    # What this assumes, and where it stops being true
+
+    That a benchmark's cost scales with the reference access cost measured
+    beside it. That is the same assumption `global_drift` already makes, applied
+    over position instead of over the whole run, and it is a *first-order*
+    correction: a benchmark that is memory-bound tracks the reference closely
+    and one that is branch-bound barely tracks it at all, so the factor is an
+    upper bound on the correction for the second kind. It is not a licence to
+    trust a corrected outlier -- it is a way to stop reporting an uncorrected
+    one as a regression.
+    """
+    trace = (canary or {}).get("trace")
+    reference = trace_reference(trace)
+    if not reference or not positions:
+        return {}
+    last_pos = max(positions.values())
+    factors = {}
+    for name, pos in positions.items():
+        at = interpolate_trace(trace, pos, last_pos)
+        if at is None:
+            continue
+        factors[name] = at / reference
+    return factors
+
+
+def report_positional_attribution(canary, positions):
+    """Name the benchmarks that ran while the reference cost was elevated.
+
+    This is the line the contamination verdict has never been able to print.
+    `CONTAMINATED: reference access cost spread 117%` states that the host moved
+    and leaves every one of the sixty-odd benchmarks equally under suspicion, so
+    the only safe response has been to discard the whole run. The trace knows
+    *where* the movement was; this says which benchmarks were there.
+
+    Prints nothing at all when the model cannot be built. That is deliberate:
+    silence here means "no positional evidence", and a reader who has just been
+    told the run is contaminated must not be handed a reassuring-looking empty
+    list of affected benchmarks as though the trace had been consulted and had
+    exonerated everyone.
+    """
+    factors = positional_factors(canary, positions)
+    if not factors:
+        return {}
+    reference = trace_reference((canary or {}).get("trace"))
+    flagged = {
+        name: factor
+        for name, factor in factors.items()
+        if (factor - 1.0) * 100 >= POSITIONAL_NOTE_PCT
+    }
+    if not flagged:
+        print(f"  Positional attribution: no stretch of the suite ran more than "
+              f"{POSITIONAL_NOTE_PCT:.0f}% above this run's own reference "
+              f"baseline ({reference / 100:.2f} cycles).")
+        return flagged
+
+    worst = sorted(flagged.items(), key=lambda kv: -kv[1])
+    print(f"  Positional attribution: {len(flagged)} benchmark(s) ran where the "
+          f"reference cost was >={POSITIONAL_NOTE_PCT:.0f}% above this run's "
+          f"baseline of {reference / 100:.2f} cycles.")
+    for name, factor in worst[:POSITIONAL_NOTE_LIMIT]:
+        print(f"    {factor:.2f}x  {name}  (suite position {positions[name]})")
+    if len(worst) > POSITIONAL_NOTE_LIMIT:
+        print(f"    ... and {len(worst) - POSITIONAL_NOTE_LIMIT} more.")
+    # Stated every time, because the number above is the most misreadable thing
+    # this tool prints: it looks like a per-benchmark measurement and is not one.
+    print("  These are the benchmarks the disturbance *could* have reached, not "
+          "ones shown to be affected: the canary samples once per "
+          f"{CANARY_SAMPLE_EVERY} benchmarks, so a spike on one of them is "
+          "attributed to its whole sampling interval. Treat a flagged "
+          "regression as unproven, not as corrected.")
+    return flagged
+
+
 #: How many recent same-host/same-profile records form the median that a single
 #: run is judged against.  Enough to outvote one or two odd boots; short enough
 #: that a real, permanent speed-up stops being treated as an anomaly after a
@@ -982,7 +2194,7 @@ def speed_factor(entries, medians):
     return statistics.median(ratios)
 
 
-def report_run_position(records, host, profile, current, previous):
+def report_run_position(records, host, profile, accel, current, previous):
     """Say where this run and its baseline sit against the recent history.
 
     Why this exists on top of `global_drift`
@@ -1013,7 +2225,7 @@ def report_run_position(records, host, profile, current, previous):
     so a verdict never changes retroactively as later runs arrive, and the
     number printed at boot is the number still printed a week later.
     """
-    window = comparable_records(records, host, profile)[-SPEED_WINDOW:]
+    window = comparable_records(records, host, profile, accel)[-SPEED_WINDOW:]
     if len(window) < 2:
         return
 
@@ -1434,7 +2646,56 @@ LEVEL_SHIFT_PCT = 25.0
 LEVEL_SHIFT_TUKEY_K = 3.0
 
 
-def level_shifts(records, host, profile, current, threshold_pct=LEVEL_SHIFT_PCT):
+def level_shift_window(records, host, profile, accel):
+    """The `(reference, recent)` run windows a sustained shift is judged over.
+
+    `reference` is the clean pre-window baseline the shift is measured against;
+    `recent` is the runs that must corroborate it. Either may be empty, in
+    which case `level_shifts` reports nothing.
+
+    Extracted rather than inlined because two callers need the same answer and
+    a second copy of the slicing would drift silently: `level_shifts` reads the
+    values, and the layout veto in `report` needs to know *which runs* a shift
+    was drawn from in order to ask whether the kernel image ever changed across
+    them. A veto computed over a different window than the finding it vetoes is
+    a check that appears to fire on the evidence and does not.
+    """
+    if records is None or host is None:
+        return [], []
+    window = comparable_records(records, host, profile, accel)
+    # Causal and clean: drop the run being judged and the ones that could
+    # already contain the shift, then take the window before them.
+    reference = window[:-LEVEL_SHIFT_SKIP][-SPEED_WINDOW:] if len(
+        window) > LEVEL_SHIFT_SKIP else []
+    return reference, window[-LEVEL_SHIFT_PERSIST:]
+
+
+def placement_is_constant(records, host, profile, accel, this_run):
+    """Is every run a sustained shift is drawn from provably the SAME image?
+
+    When it is, code placement is identical throughout and is the one
+    explanation that can be ruled out by construction -- the same reasoning
+    that keeps the run-over-run layout split away from A/A pairs.
+
+    Returns True **only on proof**, never on ignorance. A run that cannot name
+    its own image (no `kernel_sha`, or a dirty tree with no clean commit) makes
+    the answer False, because "we do not know" is not "they are the same". That
+    asymmetry is the safe one: this predicate only ever *blocks* an excuse, so
+    answering False on ignorance leaves the layout band to be judged on its own
+    positive evidence, exactly as it is everywhere else. Answering True on
+    ignorance would instead let a missing hash veto a correct excuse.
+    """
+    if not this_run:
+        return False
+    reference, recent = level_shift_window(records, host, profile, accel)
+    runs = list(reference) + list(recent) + [this_run]
+    if len(runs) < 2:
+        return False
+    return all(same_image(runs[0], other) for other in runs[1:])
+
+
+def level_shifts(records, host, profile, accel, current,
+                 threshold_pct=LEVEL_SHIFT_PCT):
     """Benchmarks sitting far off a baseline that PREDATES the recent runs.
 
     Returns `[(name, reference_median, value, adjusted_pct, band, n)]`, worst
@@ -1506,13 +2767,7 @@ def level_shifts(records, host, profile, current, threshold_pct=LEVEL_SHIFT_PCT)
     is below it and is NOT reported here. That is the same blind spot the
     run-over-run path has, not a new one.
     """
-    if records is None or host is None:
-        return []
-    window = comparable_records(records, host, profile)
-    # Causal and clean: drop the run being judged and the ones that could
-    # already contain the shift, then take the window before them.
-    reference = window[:-LEVEL_SHIFT_SKIP][-SPEED_WINDOW:] if len(
-        window) > LEVEL_SHIFT_SKIP else []
+    reference, recent = level_shift_window(records, host, profile, accel)
     if len(reference) < MIN_WINDOW_FOR_BAND:
         return []
 
@@ -1537,7 +2792,16 @@ def level_shifts(records, host, profile, current, threshold_pct=LEVEL_SHIFT_PCT)
     # that actually differs: host disturbance is random per run, while a code
     # regression is in every run after the commit. So a benchmark must sit above
     # the fence in the newest run AND in the ones just before it.
-    recent = window[-LEVEL_SHIFT_PERSIST:]
+    #
+    # WHAT PERSISTENCE DOES *NOT* SEPARATE -- read this before "simplifying" the
+    # layout veto in `report` away. The sentence above is true and incomplete: a
+    # code-*placement* artifact is also in every run after the commit, because
+    # the addresses are a property of the image and every re-run of that image
+    # reproduces them exactly. So persistence separates {code regression OR
+    # layout artifact} from host noise; it says nothing about which of the two
+    # it is holding. The discriminator for that lives in `report`, where a
+    # measured layout band (`layout_bands`) and `placement_is_constant` are
+    # consulted before a shift is counted as bisectable.
     if len(recent) < LEVEL_SHIFT_PERSIST:
         return []
 
@@ -1625,13 +2889,13 @@ ModeVerdict = collections.namedtuple(
 )
 
 
-def repeats_by_commit(records, host, profile, name):
+def repeats_by_commit(records, host, profile, accel, name):
     """`{commit: [values]}` for commits measured more than once.
 
     Ordered by first appearance so the report is stable across runs.
     """
     by_commit = collections.OrderedDict()
-    for record in comparable_records(records, host, profile):
+    for record in comparable_records(records, host, profile, accel):
         value = record.get("entries", {}).get(name)
         commit = record.get("commit")
         if value is None or not commit:
@@ -1642,7 +2906,7 @@ def repeats_by_commit(records, host, profile, name):
     )
 
 
-def mode_structure(records, host, profile, name, split):
+def mode_structure(records, host, profile, accel, name, split):
     """Does `split` separate *binaries*, or merely *runs*?
 
     This is the question a "sustained shift" report cannot answer on its own,
@@ -1690,7 +2954,7 @@ def mode_structure(records, host, profile, name, split):
     actually separates the modes is at ~7500, between 6396 and 8546, and only a
     search over observed values finds it.
     """
-    repeats = repeats_by_commit(records, host, profile, name)
+    repeats = repeats_by_commit(records, host, profile, accel, name)
     straddling = collections.OrderedDict(
         (commit, values)
         for commit, values in repeats.items()
@@ -1712,7 +2976,7 @@ def mode_structure(records, host, profile, name, split):
     return ModeVerdict(verdict, repeats, straddling, below, above)
 
 
-def mode_split_search(records, host, profile, name, low, high):
+def mode_split_search(records, host, profile, accel, name, low, high):
     """Best `(split, ModeVerdict)` separating `low` from `high`, or `None`.
 
     Searches every split that could separate the baseline from the current
@@ -1737,7 +3001,7 @@ def mode_split_search(records, host, profile, name, low, high):
     """
     values = sorted({
         record["entries"][name]
-        for record in comparable_records(records, host, profile)
+        for record in comparable_records(records, host, profile, accel)
         if name in record.get("entries", {})
     })
     candidates = []
@@ -1748,7 +3012,7 @@ def mode_split_search(records, host, profile, name, low, high):
         candidates.append((upper - lower, split))
     # Widest gap first, so a tie between splits resolves to the most separated.
     for _gap, split in sorted(candidates, reverse=True):
-        verdict = mode_structure(records, host, profile, name, split)
+        verdict = mode_structure(records, host, profile, accel, name, split)
         if verdict.verdict == MODE_STRUCTURED:
             return split, verdict
     return None
@@ -1805,19 +3069,113 @@ UNKNOWN_COMMIT = "unknown"
 ReplicationVerdict = collections.namedtuple("ReplicationVerdict", "verdict values")
 
 
-def values_for_commit(records, host, profile, name, commit):
-    """Every comparable measurement of `name` already recorded for `commit`."""
-    if not commit or commit == UNKNOWN_COMMIT:
+def binary_identity(record):
+    """Which binary this record measured, or None if that cannot be known.
+
+    The replication gate and the A/A banner both ask "is this the same binary?"
+    and both originally answered it with the **commit**. That proxy fails in
+    two ways, and both of them fire in ordinary use rather than in some corner:
+
+    1. **Same binary, different commit.** The gate's own printed advice is
+       "re-run `boot-test.sh --bench` WITHOUT rebuilding to confirm" -- i.e. it
+       asks for a run of a byte-identical image. A developer who commits their
+       work before re-running (the normal thing to do, and what the project's
+       own push-often rule encourages) files that re-run under a *new* commit.
+       The confirmation is then invisible: the flag stays UNREPLICATED forever
+       and the re-run is instead treated as a fresh commit's first measurement,
+       manufacturing a new crop of regression claims out of an unchanged image.
+       That happened on 2026-08-19 -- two boots of one `--no-build --no-stage`
+       image reported four "REGRESSED, UNREPLICATED" benchmarks between them
+       (`sched_pick_next_d1` +62%, `vfs_stat_breakdown_ns` +45%, and both gzip
+       benchmarks ~+30%) with the A/A banner silent, because the commit had
+       moved even though not one byte of the kernel had.
+
+    2. **Same commit, different binary.** A run measured with uncommitted
+       changes is labelled with a commit whose tree was never built. Two such
+       runs share a label while measuring different code, so matching them
+       manufactures the very replication the gate exists to demand.
+
+    So identity comes from a hash of the kernel ELF that was actually booted,
+    which is the thing both questions are really about. `commit` remains the
+    fallback for records written before the hash existed -- but only when that
+    record is *clean*, because a dirty commit label does not name a binary.
+    This is the same argument `UNKNOWN_COMMIT` already makes for an unreadable
+    HEAD, applied to the other way a label can fail to identify code.
+
+    None means "not knowable". This function is for *display* -- what to call
+    this run in a banner. The comparison itself is `same_image`, which cannot
+    be expressed as equality between two of these strings; see there.
+    """
+    sha = record.get("kernel_sha")
+    if sha:
+        return f"sha:{sha}"
+    commit = record.get("commit")
+    if not commit or commit == UNKNOWN_COMMIT or record.get("dirty"):
+        return None
+    return f"commit:{commit}"
+
+
+def same_image(a, b):
+    """Did these two records measure the same kernel code?
+
+    Deliberately a *relation* rather than equality between two identity
+    strings, because the two available keys are not interchangeable and which
+    one applies depends on both records at once:
+
+    - **Both hashed:** the bytes decide, and nothing else is consulted. This is
+      the case that matters and the one the hash was added for -- it answers
+      correctly across a commit boundary (the no-rebuild re-run) and correctly
+      within one commit label (two dirty builds).
+    - **At most one hashed:** fall back to the commit, which identifies code
+      only on a clean tree. This keeps a hashed run comparable with the
+      unhashed records already in the history, which an equality on identity
+      strings would silently stop matching -- turning the very first run after
+      this change into an unrecognised A/A pair.
+
+    The asymmetry is on purpose. A clean commit pins the *source*, which is
+    enough to answer "could code have caused this?", but not the *bytes* --
+    two builds of one commit can differ in function placement, which this
+    project has measured moving a benchmark several-fold on its own. So when
+    both hashes exist the weaker key is not allowed to overrule them.
+
+    Unidentifiable never matches, including against another unidentifiable:
+    two runs that both failed to name their code are not two runs of one image.
+    """
+    sha_a, sha_b = a.get("kernel_sha"), b.get("kernel_sha")
+    if sha_a and sha_b:
+        return sha_a == sha_b
+
+    def clean_commit(record):
+        commit = record.get("commit")
+        if not commit or commit == UNKNOWN_COMMIT or record.get("dirty"):
+            return None
+        return commit
+
+    commit_a, commit_b = clean_commit(a), clean_commit(b)
+    return bool(commit_a and commit_a == commit_b)
+
+
+def values_for_binary(records, host, profile, accel, name, this_run):
+    """Every comparable measurement of `name` recorded for `this_run`'s image.
+
+    `this_run` is a record-shaped mapping -- `kernel_sha` / `commit` / `dirty`
+    -- not an identity string, because the match is `same_image` and that is a
+    relation between two records. A falsy `this_run` short-circuits to nothing:
+    a run that cannot name its own code cannot be shown to have repeated
+    anything.
+    """
+    if not this_run:
         return []
     return [
         value
-        for record in comparable_records(records, host, profile)
-        if record.get("commit") == commit
+        for record in comparable_records(records, host, profile, accel)
+        if same_image(record, this_run)
         and (value := record.get("entries", {}).get(name)) is not None
     ]
 
 
-def replication_verdict(records, host, profile, name, commit, observed, band):
+def replication_verdict(records, host, profile, accel, name, this_run,
+                        observed, band):
     """Did a second run of this *same binary* also produce this movement?
 
     Why this gate exists, and why nothing cheaper works
@@ -1856,10 +3214,16 @@ def replication_verdict(records, host, profile, name, commit, observed, band):
     repeat to land inside of, so nothing can be contradicted. Those rows are
     already printed as UNCONFIRMED and are deliberately left alone rather than
     judged against an invented fence.
+
+    `this_run` is a record-shaped mapping describing the image these numbers
+    came from, not a commit. The distinction is not pedantry: keying this on
+    the commit made the gate blind to exactly the re-run it asks the reader to
+    perform. See `binary_identity` and `same_image`.
     """
     if band is None:
         return ReplicationVerdict(UNREPLICATED, [observed])
-    values = values_for_commit(records, host, profile, name, commit) + [observed]
+    values = values_for_binary(records, host, profile, accel, name,
+                               this_run) + [observed]
     if len(values) < REPLICATION_MIN_RUNS:
         return ReplicationVerdict(UNREPLICATED, values)
     _lo, hi, _median, _n = band
@@ -1876,7 +3240,12 @@ def describe_replication(name, verdict, band):
     for `name` on this host, and a floor of 85% is the fact that decides
     whether any smaller movement in it is judgeable at all.
     """
-    if verdict.verdict != CONTRADICTED or not verdict.values:
+    # `None` is a legitimate argument, not a bug to assert on: the A/A listing
+    # passes every row it prints through here, and rows that never reached the
+    # replication gate (improvements, and regressions with too little history
+    # for a band) have no verdict. "No verdict" is not "contradicted", so the
+    # answer is the same empty list either way.
+    if verdict is None or verdict.verdict != CONTRADICTED or not verdict.values:
         return []
     _lo, hi, _median, _n = band
     values = sorted(verdict.values)
@@ -1929,6 +3298,748 @@ def describe_band(band):
     lo, hi, median, n = band
     return (f"its own range is {max(lo, 0.0):.0f}-{hi:.0f}ns "
             f"(median {median:.0f}ns over {n} runs)")
+
+
+# ---------------------------------------------------------------------------
+# Layout sensitivity
+# ---------------------------------------------------------------------------
+
+#: Fewest distinct pad values before a layout band means anything.
+#:
+#: Three, not two, for the same reason `MIN_SAMPLES_FOR_POSITIONAL_MODEL` is
+#: three: two samples define an interval that contains both of them by
+#: construction. A two-point "spread" has no residual and no way to be wrong,
+#: so it cannot be shown to be unrepresentative of the layouts it did not
+#: sample -- and this number's job is to *dismiss* movements, which is the
+#: direction where an over-confident estimate hides real regressions.
+MIN_PADS_FOR_LAYOUT_BAND = 3
+
+#: How a deliberate layout-sweep arm announces itself: `scripts/layout-sweep.py`
+#: puts this in `BENCH_EXPERIMENT`, and `layout_arm_rejection` matches on it.
+#: One statement of the string, imported by the producer, because two copies
+#: could drift and the symptom would be a whole sweep silently rejected.
+#:
+#: This is not decoration. `text_pad` is parsed from the kernel's own banner, so
+#: *every* run reports one -- an ordinary unpadded run truthfully says
+#: `textpad=0`. Without this tag such a run is indistinguishable from a
+#: deliberate pad=0 arm, and gets banded as one.
+#:
+#: That is not hypothetical, and it fails in the dangerous direction. The 16:15
+#: run of 2026-08-19 was the WHPX-vs-TCG probe: unpadded, so `textpad=0`; on a
+#: kernel predating the accelerator banner, so `accel` is absent and reads as
+#: `None` exactly like a TCG arm; and built from source identical to the TCG
+#: sweep, so it shares that sweep's digest. Every field that might have
+#: separated it from a genuine TCG arm was blind, and it would have joined the
+#: TCG band as a seventh arm -- contributing hardware-virtualised timings, a
+#: median 3.5x faster, to a band whose whole purpose is to be compared against
+#: TCG runs. A band inflated that way dismisses every regression inside it.
+LAYOUT_SWEEP_TAG = "layout sweep: textpad="
+
+
+#: `measurement_mismatch` result codes. Codes rather than sentences because the
+#: two callers address different readers -- a sweep operator staring at an
+#: aborted arm, and someone regenerating an evidence table for
+#: `open-questions.md` -- and the wording that helps one is noise to the other.
+#: What must not diverge is *which records count*, and that is what is shared.
+MISMATCH_HOST = "host"
+MISMATCH_PROFILE = "profile"
+MISMATCH_LOADED = "host_load"
+
+
+def measurement_mismatch(record, host, profile):
+    """Which of the three universal filters this record fails, or `None`.
+
+    Right machine, right build profile, not a deliberately-loaded control.
+    Every view in this file that divides one run by another applies exactly
+    these three before it applies anything of its own.
+
+    # Why this is a function and not three lines copied twice
+
+    `design-decisions.md` sec 240 was written after an evidence table in
+    `open-questions.md` turned out to have been built by an analysis that
+    enumerated records itself instead of calling the predicate the real code
+    uses. The predicate was correct; the table was wrong; nothing detected the
+    gap, because a second enumeration that has drifted still produces a
+    plausible table. The rule adopted there is that analysis code must call the
+    real selector rather than restate it.
+
+    `accel_run_rejection` is the first consumer of that rule, and these three
+    clauses are all it needs from `layout_arm_rejection` -- the rest of that
+    predicate is about being a *sweep arm*, which an accelerator comparison is
+    not. So the shared part became this, and each caller words the answer for
+    its own audience.
+
+    `comparable_records` and `accel_window_thinning` became consumers on
+    2026-08-19, having previously restated these same three clauses inline --
+    which is the drift this exists to prevent, sitting in the file that
+    prevents it. They add two clauses of their own on top (same accelerator,
+    not an experiment); those stay out of here because `layout_arm_rejection`
+    must not inherit them: a layout arm *is* an experiment by construction, and
+    arms on a different accelerator are grouped separately by `arm_group_key`
+    rather than discarded, so reporting either as a rejection would be false.
+
+    `test-bench-history.py` asserts the equivalence directly rather than
+    trusting the refactor: for every mismatch code, both predicates must reject.
+    """
+    if record.get("host") != host:
+        return MISMATCH_HOST
+    if record_profile(record) != profile:
+        return MISMATCH_PROFILE
+    if record_host_load(record) == HOST_LOAD_LOADED:
+        return MISMATCH_LOADED
+    return None
+
+
+def layout_arm_rejection(record, host, profile):
+    """Why `layout_arms` would discard this record, or `None` if it keeps it.
+
+    Exists so that a sweep can ask, arm by arm, whether the row it just spent
+    twenty minutes producing will actually be *counted* -- using the very
+    predicate that decides, not a restatement of it. A restatement is the
+    failure this guard exists to prevent, one level up: it would drift from
+    `layout_arms` and then pass every arm of a sweep that `layout_arms`
+    silently drops.
+
+    That is not hypothetical. Two sweeps have already been voided this way. The
+    first died on a path bug and at least died loudly; the second would have
+    run to completion, printed six successful arms, and produced no band at
+    all, because the harness's own `bench/history.jsonl` write made every run
+    after the first at that commit `dirty` -- and a `dirty` record is dropped
+    here. A sweep is the most expensive thing this repo does; discovering at
+    the end that it measured nothing is the worst available outcome, and it is
+    entirely preventable by asking after the first arm rather than the last.
+
+    The reasons are prose, not codes, because the only consumer is a human
+    staring at an aborted sweep who needs to know what to change before
+    spending the three hours again.
+    """
+    # The three universal filters are delegated, not restated -- see
+    # `measurement_mismatch`. Only the *wording* is local, because a sweep
+    # operator reading an aborted arm needs to hear about bands and arms.
+    code = measurement_mismatch(record, host, profile)
+    if code == MISMATCH_HOST:
+        return (f"host is {record.get('host')!r}, but the band is being "
+                f"computed for {host!r}; arms from different machines are "
+                f"different measurements")
+    if code == MISMATCH_PROFILE:
+        return (f"profile is {record_profile(record)!r}, not {profile!r}; "
+                f"a debug arm cannot calibrate a release band")
+    if code == MISMATCH_LOADED:
+        return ("the host was loaded during this run, so its timings carry "
+                "contention as well as placement -- and an inflated spread "
+                "widens the band, which dismisses real regressions")
+    # `dirty` and `commit` are only consulted when the row does *not* carry a
+    # measured `src_digest`. A recorded digest identifies the built source
+    # directly -- including the untracked artifacts the kernel embeds, which
+    # `dirty` has never been able to see -- so for such a row the commit hash
+    # is provenance, not identity, and a dirty tree is no longer a reason to
+    # discard a perfectly well-identified arm. That is not a loosening for
+    # convenience: it removes a second silent way to void a three-hour sweep,
+    # since the harness's own writes are exactly what make later arms dirty.
+    if not record.get("src_digest"):
+        if record.get("dirty"):
+            return ("the tree was dirty and no `src_digest` was recorded, so "
+                    "`commit` does not identify the source that was built and "
+                    "the arms cannot be shown to share one")
+    pad = record.get("text_pad")
+    if not isinstance(pad, int) or isinstance(pad, bool):
+        return ("no `text_pad` was recorded, so where this kernel's code sits "
+                "is unknown -- which is not the same as unpadded, and cannot "
+                "be assumed to be")
+    if LAYOUT_SWEEP_TAG not in (record.get("experiment") or ""):
+        return ("this run was not an arm of a layout sweep -- every run "
+                "reports a `text_pad`, and an ordinary unpadded run truthfully "
+                "reports 0, so a pad alone does not make a record comparable "
+                "to a deliberately perturbed one; see LAYOUT_SWEEP_TAG")
+    if not record.get("src_digest") and not record.get("commit"):
+        return ("neither `src_digest` nor `commit` was recorded, so this arm "
+                "cannot be grouped with the others as the same source")
+    return None
+
+
+#: Memoises `arm_group_key`'s git lookups. A derivation costs a `git ls-tree
+#: -r` over ~13k paths, and a sweep's arms are asked about repeatedly.
+_ARM_KEY_CACHE = {}
+
+
+def arm_group_key(record):
+    """The identity a record must share with another to be banded against it.
+
+    # Why this is not `record["commit"]`
+
+    It used to be, and that is a broken proxy for "the same source was built"
+    in both directions.
+
+    It **splits arms that are identical**: an arm takes ~75 minutes, so any
+    commit landing mid-sweep -- including a documentation commit, which cannot
+    change a build -- gives later arms a different `commit` string. Six arms
+    then become six one-pad groups, `MIN_PADS_FOR_LAYOUT_BAND` rejects every
+    one, and the sweep reports no band at all, silently. The six WHPX arms of
+    2026-08-19 were recorded under six different commits, every one of them a
+    docs commit; see known-issues.md
+    `B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS`.
+
+    It also **merges arms that differ**, which is the dangerous direction:
+    `dirty` cannot see untracked files, and the kernel embeds six gitignored
+    service binaries. Two arms that embed different `init` builds hash
+    identically under `commit` + `dirty` and band together, and a band inflated
+    by a real code difference dismisses every regression inside its width.
+
+    # The three tiers, in decreasing order of what they assert
+
+    1. A recorded `src_digest` -- the row measured its own source, artifacts
+       included. Tagged `full:`.
+    2. A digest *derived* from `commit` for rows written before the field
+       existed. Tagged `tracked:`; the artifact half is unrecoverable because
+       those bytes were never stored anywhere.
+    3. The bare `commit` string, when git cannot resolve it at all -- a branch
+       deleted, a row from another machine, a shallow clone.
+
+    Tier 3 is deliberately *today's behaviour*, unchanged: keying on the commit
+    groups only exact-commit matches, which is what this function did before
+    and merges nothing new. The tiers never collide with each other, because
+    the digests carry their tags and a commit hash does not, so a row whose
+    artifacts are unknown can never band with one whose artifacts are pinned.
+    """
+    digest = record.get("src_digest")
+    if not digest:
+        commit = record.get("commit")
+        if commit and _src_digest is not None:
+            if commit not in _ARM_KEY_CACHE:
+                try:
+                    _ARM_KEY_CACHE[commit] = _src_digest.src_digest_commit(
+                        REPO_ROOT, commit)
+                except Exception:
+                    # Falling back to a *constant* here would give every
+                    # unresolvable commit one key and band unrelated sweeps
+                    # together; falling back to the commit reproduces the old
+                    # behaviour exactly, which merges nothing that was not
+                    # already merged.
+                    _ARM_KEY_CACHE[commit] = commit
+            digest = _ARM_KEY_CACHE[commit]
+        else:
+            digest = commit
+    return (digest, record.get("accel"))
+
+
+def layout_arms(records, host, profile):
+    """Records that differ from one another *only* in where the code sits.
+
+    Returns `{commit: {pad: [record, ...]}}`, keeping only commits sampled at
+    at least `MIN_PADS_FOR_LAYOUT_BAND` distinct pads.
+
+    # Why this does not use `comparable_records`
+
+    `comparable_records` excludes `experiment`-tagged runs, and every arm of a
+    layout sweep is tagged as one -- correctly, because a padded kernel is not
+    a kernel any checkout reproduces and must never become the baseline an
+    honest run is judged against. But that is exactly the *opposite* of what is
+    wanted here: the sweep arms are not contaminating the reference, they *are*
+    the reference. Reusing the shared filter would have made this function
+    return nothing, forever, silently -- a calibration that cannot fire,
+    presenting as a calibration that found no sensitivity.
+
+    `dirty` records are excluded, because the whole construction rests on the
+    arms sharing identical source: `commit` is only a source identity on a
+    clean tree. Records with no `text_pad` are excluded because their placement
+    is unknown -- *not* assumed unpadded; see `TEXTPAD_RE`.
+
+    The per-record test lives in `layout_arm_rejection` so that a sweep can run
+    the identical predicate on each arm as it is produced, rather than a copy
+    of it that is free to drift; see that function for why that matters enough
+    to be worth the indirection.
+    """
+    groups = {}
+    for record in records:
+        if layout_arm_rejection(record, host, profile) is not None:
+            continue
+        # The accelerator is part of the group *key*, not a validation step, so
+        # that arms which ran on different accelerators cannot land in one band
+        # at all. Checking for agreement afterwards would work equally well
+        # when someone remembers to check; making it structural means there is
+        # no code path that produces a mixed band to check in the first place.
+        #
+        # This matters more than the host or profile filters above it: measured
+        # on one byte-identical binary, the median benchmark is 3.5x faster
+        # under WHPX than TCG. A band accidentally spanning both would be a
+        # "placement sensitivity" of several hundred percent, and a band that
+        # wide dismisses *every* regression -- silently, and in the direction
+        # that hides faults.
+        #
+        # `None` (the kernel predates the banner) is its own key rather than
+        # being folded into TCG, so pre-field records still form the bands they
+        # always did while never mixing with a record that actually said.
+        #
+        # The source half of the key is `arm_group_key`, not `commit`: see that
+        # function for why a commit hash both splits identical arms and merges
+        # different ones.
+        groups.setdefault(arm_group_key(record), {}) \
+              .setdefault(record["text_pad"], []).append(record)
+    return {key: arms for key, arms in groups.items()
+            if len(arms) >= MIN_PADS_FOR_LAYOUT_BAND}
+
+
+def layout_bands(records, host, profile):
+    """Per-benchmark spread attributable to code *placement* alone.
+
+    Returns `{name: (spread_pct, pads, provenance, accel, canaries)}`, where
+    `spread_pct` is the peak-to-peak spread across the sampled layouts as a
+    percentage of the smallest, `pads` is how many distinct layouts it was
+    measured over, and `provenance` names the commit the arms came from -- or
+    the *range* of commits, when a sweep spanned several without changing any
+    build input. `accel` is which emulator the arms ran on (`None` if they
+    predate the field) -- reported rather than assumed, because a band measured
+    under one accelerator says nothing about a run under the other. `canaries`
+    is `{CANARY_* verdict: how many arms had it}`. Empty when no commit has
+    been swept -- which every consumer must treat as "nobody measured this",
+    never as "the sensitivity is zero".
+
+    # What the number means, and what it does not
+
+    Under QEMU's TCG a translation block is bounded by the guest 4 KiB page, so
+    a hot loop whose backward branch crosses a page boundary is retranslated
+    far more often and costs ~1.7x per iteration. Whether it crosses is a
+    property of the loop's *address*. Relinking the kernel -- which any commit
+    does -- re-rolls that for every function after the edited file. So two
+    builds of identical semantics can differ by that much on a benchmark, and
+    the difference replicates perfectly on every re-run, which is precisely the
+    signature the harness had been reading as proof of a code regression.
+
+    `scripts/layout-sweep.py` builds the same source at several deliberate
+    `.text` offsets. The spread between those arms is a *direct measurement* of
+    how much placement alone can move each benchmark.
+
+    Peak-to-peak of the smallest, not a deviation from the median, because of
+    what it is compared against: a run-over-run percentage change, where the
+    two runs are two arbitrary layouts. The largest change placement alone can
+    produce between two layouts is exactly (max - min) / min.
+
+    **It is a lower bound.** Three or four sampled layouts cannot contain the
+    worst pair among all layouts, so a benchmark whose movement sits just
+    outside its band is not thereby cleared -- it is merely not *explained*.
+    Consumers say so rather than implying the band is exhaustive.
+
+    # Drift correction, and why an uncorrectable arm voids the group
+
+    The arms are separate boots, minutes to hours apart, and TCG is CPU-bound,
+    so whatever else the host was doing scales a whole arm at once. Each arm is
+    divided by its own `speed_factor` against the group's per-benchmark
+    medians, which removes that.
+
+    If any arm's factor cannot be computed the entire group is dropped rather
+    than falling back to an uncorrected 1.0. Uncorrected host drift would
+    inflate the spread, and a wider layout band *dismisses* more movements --
+    so the convenient fallback fails in the one direction that hides real
+    regressions. Dropping the group yields "unmeasured", under which a movement
+    stays a regression. That is the direction to fail in.
+
+    # Why a broken canary is reported rather than voiding the band
+
+    The canary is the per-run instrument that answers "was the host quiet while
+    this ran?". All six arms of the 2026-08-19 WHPX sweep returned
+    `samples: 0, invalid: 13` -- every canary sample rejected, verdict `broken`
+    -- and the band they produced still printed as though nothing were wrong.
+    That is the failure this fixes: a band whose arms could not verify their
+    own conditions is not thereby *wrong*, but a reader must not be able to
+    mistake it for one that was checked.
+
+    Voiding the group instead would be the usual fail-safe direction, and it
+    was rejected here for one reason: unlike an uncorrectable drift factor, a
+    broken canary is not evidence that this band is wide -- it is evidence that
+    nobody knows. Voiding would discard the only WHPX measurement that exists
+    on the strength of a *separate*, already-diagnosed instrument bug (the
+    resolution floor, see `CANARY_MIN_RESOLVABLE`), and would go on discarding
+    every future WHPX sweep until that is fixed, silently. So the verdicts ride
+    along on the band and `describe_layout_band` says them out loud, on the
+    same principle that already governs `accel`: reported, never assumed. See
+    design-decisions.md sec 239.
+    """
+    groups = layout_arms(records, host, profile)
+    if not groups:
+        return {}
+
+    # The most *recent* sweep wins, and the number of arms only breaks ties.
+    #
+    # The other ordering -- most arms first -- is tempting, because more
+    # sampled layouts is a strictly better lower bound of the true placement
+    # sensitivity. It is still wrong here, and the reason is categorical rather
+    # than statistical: a band is evidence about the hot loops that *exist*, and
+    # a sweep of a commit whose code has since been rewritten is evidence about
+    # code that no longer runs. Preferring it means a wide, well-sampled,
+    # obsolete band could dismiss a real regression in today's code -- the one
+    # failure direction this whole mechanism is built to avoid.
+    #
+    # The converse error, preferring a barely-above-floor recent sweep and so
+    # getting a band too narrow to excuse a genuine layout artifact, fails the
+    # safe way: the movement stays a regression and a human looks at it. That
+    # asymmetry decides the ordering.
+    #
+    # No staleness cutoff is imposed on top, because any threshold would be
+    # arbitrary and would silently switch the answer to "unmeasured" at some
+    # commit count nobody chose. Provenance is reported instead:
+    # `describe_layout_band` names the commit the band came from, so a reader
+    # who recognises it as ancient can discount it themselves.
+    def group_key(item):
+        _key, arms = item
+        newest = max((r.get("timestamp", "") for pad in arms.values()
+                      for r in pad), default="")
+        return (newest, len(arms))
+
+    (_digest, accel), arms = max(groups.items(), key=group_key)
+
+    # Provenance for a human, derived from the arms rather than from the group
+    # key, because the key is now a source digest and "6 layouts of
+    # tracked:02c5a23a" tells a reader nothing they can act on. When the arms
+    # span several commits -- which is the normal case now that a docs commit
+    # mid-sweep no longer splits them -- say so explicitly and say why they
+    # were banded anyway, so that a reader who expected one commit per band is
+    # not left to guess whether two unrelated sweeps got merged.
+    by_time = sorted(
+        (r for pad in arms.values() for r in pad),
+        key=lambda r: r.get("timestamp", ""))
+    commits = []
+    for record in by_time:
+        commit = record.get("commit")
+        if commit and commit not in commits:
+            commits.append(commit)
+    if len(commits) == 1:
+        provenance = commits[0]
+    elif commits:
+        provenance = (f"{commits[0]}..{commits[-1]}, {len(commits)} commits "
+                      f"of identical build inputs")
+    else:
+        provenance = "an unrecorded commit"
+
+    # Recomputed from each arm's raw `canary` rather than read from its stored
+    # `canary_verdict` string, because `canary_verdict()` has deliberately
+    # reclassified historical records as its resolution bounds tightened (see
+    # its docstring), and the stored string is whatever the *then*-current rule
+    # said. Reading it back would make a band's trust label depend on when its
+    # arms were run rather than on what they measured.
+    canaries = {}
+    for record in by_time:
+        verdict = canary_verdict(record.get("canary"))
+        canaries[verdict] = canaries.get(verdict, 0) + 1
+
+    # One entry map per pad: the median over repeats at that pad, so a layout
+    # measured twice does not get double weight and its own run-to-run noise is
+    # damped before it is read as placement sensitivity.
+    per_pad = {}
+    for pad, arm_records in arms.items():
+        acc = {}
+        for record in arm_records:
+            for name, value in (record.get("entries") or {}).items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    acc.setdefault(name, []).append(float(value))
+        per_pad[pad] = {n: statistics.median(v) for n, v in acc.items() if v}
+
+    medians = per_benchmark_median(
+        [{"entries": entries} for entries in per_pad.values()]
+    )
+    corrected = {}
+    for pad, entries in per_pad.items():
+        factor = speed_factor(entries, medians)
+        if not factor or factor <= 0:
+            # See the docstring: no correction is worse than no band.
+            return {}
+        corrected[pad] = {n: v / factor for n, v in entries.items()}
+
+    bands = {}
+    names = set.intersection(*(set(e) for e in corrected.values()))
+    for name in names:
+        values = [corrected[pad][name] for pad in corrected]
+        lo, hi = min(values), max(values)
+        if lo <= 0:
+            continue
+        bands[name] = ((hi - lo) * 100.0 / lo, len(corrected), provenance,
+                       accel, canaries)
+    return bands
+
+
+def describe_canary_mix(canaries, subject="arms"):
+    """How the runs behind a figure answered "was the host quiet?", in words.
+
+    `subject` names them for the caller's audience -- "arms" under a layout
+    band, "runs" under an accelerator comparison, where nothing is an arm of
+    anything. A count of "6/15 arms" printed beneath a table with no arms in it
+    invites the reader to go looking for a sweep that does not exist.
+
+    Returns `""` when every arm was clean -- the only case that needs no
+    caveat, and the case where a caveat would be noise on every line.
+
+    Anything else is stated, and stated as a count out of the total rather than
+    as a bare adjective, because "2 of 6 arms" and "6 of 6 arms" call for
+    different reactions and a single word cannot tell them apart. `broken` is
+    spelled out as "could not measure host load" rather than left as jargon: a
+    reader who meets it in one line of `--list` output has no way to know it
+    means the instrument failed rather than the run failed, and the whole point
+    of printing it is that it should be understood without a detour into this
+    file.
+    """
+    total = sum(canaries.values())
+    if not total or canaries.get(CANARY_CLEAN) == total:
+        return ""
+    wording = {
+        CANARY_BROKEN: "could not measure host load",
+        CANARY_CONTAMINATED: "measured host load",
+        CANARY_ABSENT: "carried no host-load check",
+        CANARY_CLEAN: "clean",
+    }
+    # Worst first: the reason for printing this at all is the part that
+    # undermines the band, so it must not sit behind the reassuring part.
+    order = [CANARY_CONTAMINATED, CANARY_BROKEN, CANARY_ABSENT, CANARY_CLEAN]
+    parts = [f"{canaries[v]}/{total} {subject} {wording[v]}"
+             for v in order if canaries.get(v)]
+    return "; ".join(parts)
+
+
+def describe_layout_band(band):
+    """Human-readable form of one `layout_bands` entry.
+
+    The accelerator is named whenever it is known, because a band is only
+    evidence about the environment it was measured in -- a TCG-measured band
+    says nothing about a WHPX run, where the same binary is a median 3.5x
+    faster. When it is *not* known the description says so rather than staying
+    silent, so that an unlabelled band cannot be mistaken for one that was
+    checked.
+
+    The arms' canary verdicts are appended on the same grounds, and for a
+    concrete failure: every arm of the 2026-08-19 WHPX sweep had a *broken*
+    canary -- it could not tell whether the host was quiet -- and the band
+    printed exactly as confidently as one measured on a verified-idle machine.
+    A band is a licence to dismiss a movement as placement noise, so a reader
+    is entitled to know that the arms behind it could not check their own
+    conditions. Silence is reserved for the all-clean case, so that the caveat
+    appearing means something.
+    """
+    spread, pads, provenance, accel, canaries = band
+    where = accel if accel else "accelerator not recorded"
+    caveat = describe_canary_mix(canaries)
+    return (f"placement alone moves it {spread:.0f}% "
+            f"({pads} layouts of {provenance}, {where}"
+            f"{'; ' + caveat if caveat else ''})")
+
+
+#: The single file the in-kernel benchmark suite is defined in, and the tree it
+#: calls into. Both are read only to *derive* a map; neither is written.
+BENCH_SOURCE = os.path.join(REPO_ROOT, "kernel", "src", "bench.rs")
+KERNEL_SRC = os.path.join(REPO_ROOT, "kernel", "src")
+
+#: `score("name", ...)` -- how a benchmark result is named in `bench.rs`.
+#:
+#: Not `SCORE_RE`, which is taken 3000 lines up: that one matches the `SCORE …`
+#: *line the kernel prints on serial*, and this one matches the *call in the
+#: Rust source* that eventually prints it. Two files, two languages, one
+#: obvious name. Binding this to `SCORE_RE` silently rebound the other --
+#: module scope, no error, no warning -- and the tool then parsed zero
+#: benchmarks out of every log it was given. The suite caught it; nothing else
+#: would have, because an empty parse looks like a boot that scored nothing.
+SCORE_CALL_RE = re.compile(r'\bscore\(\s*"([^"]+)"')
+#: A column-0 `fn`, i.e. the start of a new benchmark body.
+BENCH_FN_RE = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?"
+                         r"(?:extern\s+\"C\"\s+)?fn\s+(\w+)")
+#: A `module::` path segment. Filtered against the real tree, so `core::` and
+#: `u64::` fall out on their own rather than needing a denylist that rots.
+MODPATH_RE = re.compile(r"\b([a-z][a-z0-9_]*)::")
+
+
+def kernel_modules(kernel_src=KERNEL_SRC):
+    """`{module name: repo-relative path}` for every top-level kernel module.
+
+    Derived from the directory listing rather than from a table, because a
+    table is a second place the truth lives and this one would rot silently --
+    a module renamed out from under it simply stops being recognised, which
+    looks exactly like a benchmark that touches nothing.
+    """
+    modules = {}
+    try:
+        entries = os.listdir(kernel_src)
+    except OSError:
+        return modules
+    for entry in sorted(entries):
+        path = os.path.join(kernel_src, entry)
+        if entry.endswith(".rs"):
+            modules[entry[:-3]] = f"kernel/src/{entry}"
+        elif os.path.isdir(path):
+            modules[entry] = f"kernel/src/{entry}/"
+    return modules
+
+
+def benchmark_subsystems(bench_source=BENCH_SOURCE, kernel_src=KERNEL_SRC):
+    """`{benchmark: {repo-relative kernel path, ...}}` a benchmark provably enters.
+
+    Read straight out of `kernel/src/bench.rs`: every `score("name", ...)` is
+    attributed to the column-0 `fn` it sits inside, and that function's body is
+    scanned for `module::` paths that name a real top-level kernel module. So
+    `pick_next` maps to `kernel/src/sched/` because its body calls
+    `sched::kill_task`.
+
+    # What this is for, and the one direction it may be used in
+
+    It answers "does this diff touch code the benchmark demonstrably runs?" --
+    and it may only ever be used to **escalate**, never to dismiss. A found
+    call is positive evidence; a *missing* one is not evidence of absence,
+    because this map cannot see through helper functions, trait objects,
+    inlining or LTO. `known-issues.md`'s standing fix (2) is phrased the other
+    way round -- "label it MOVED unless the changed files plausibly reach the
+    benchmark" -- and that phrasing is the reason it has stayed blocked: it
+    needs proof of NON-reachability, which nothing available here can supply
+    and a wrong answer to which hides a real regression.
+
+    # Deliberate imprecisions, both in the safe direction
+
+    - **It under-covers.** 67 of the 86 benchmarks in recent history are
+      mapped; the rest are scored through helpers or under generated names and
+      simply get no escalation. Silence from this map is worth nothing and is
+      never read as "the diff cannot reach it".
+    - **It over-attributes.** `vfs_stat_root` maps to `sync` and `lockdep` as
+      well as `fs`, because its body mentions them while setting the
+      measurement up. That yields escalations that a perfect call graph would
+      not, which costs a human a look -- the cheap failure, versus a dismissal
+      nobody sees.
+
+    `kernel/src/bench.rs` itself is included for every benchmark: a change to
+    the harness reaches the measurement by definition.
+    """
+    modules = kernel_modules(kernel_src)
+    try:
+        with open(bench_source, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return {}
+
+    bodies, current = {}, None
+    for line in lines:
+        match = BENCH_FN_RE.match(line)
+        if match:
+            current = match.group(1)
+            bodies.setdefault(current, [])
+        if current is not None:
+            bodies[current].append(line)
+
+    subsystems = {}
+    for body in bodies.values():
+        text = "\n".join(body)
+        names = SCORE_CALL_RE.findall(text)
+        if not names:
+            continue
+        paths = {modules[mod] for mod in MODPATH_RE.findall(text)
+                 if mod in modules}
+        paths.add("kernel/src/bench.rs")
+        for name in names:
+            subsystems.setdefault(name, set()).update(paths)
+    return subsystems
+
+
+def changed_paths(base_commit, repo_root=REPO_ROOT):
+    """Repo-relative files differing between `base_commit` and the WORKING TREE.
+
+    Returns `None` -- meaning "not established" -- rather than an empty list
+    whenever the question cannot be answered: no base commit, a commit this
+    repo does not have, or git unavailable. The distinction is the whole point;
+    an empty list would read as "this diff changed nothing", which is the one
+    answer that must never be produced by a failure.
+
+    Against the working tree, not against HEAD, because a benchmark run of a
+    dirty tree measured the uncommitted edits too. `git diff <base>` with no
+    second revision is exactly that comparison.
+    """
+    if not base_commit or base_commit == UNKNOWN_COMMIT:
+        return None
+    try:
+        probe = subprocess.run(
+            ["git", "-C", repo_root, "cat-file", "-e", f"{base_commit}^{{commit}}"],
+            capture_output=True, text=True, timeout=15, check=False)
+        if probe.returncode != 0:
+            return None
+        out = subprocess.run(
+            ["git", "-C", repo_root, "diff", "--name-only", base_commit],
+            capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+
+def diff_touches(name, subsystems, changed):
+    """Changed files lying in a subsystem `name` provably enters. `[]` if none.
+
+    `changed is None` (the question was never answered) and `changed == []`
+    (this diff changed nothing) both yield `[]` here, which is correct for the
+    single use this has: an *escalation* fires only on a positive hit, so the
+    two cases are equivalent at the point of use. They are kept distinct in
+    `changed_paths` because a future consumer that dismissed on emptiness would
+    need to tell them apart, and by then the distinction would be gone.
+    """
+    paths = subsystems.get(name) if subsystems else None
+    if not paths or not changed:
+        return []
+    hits = []
+    for path in changed:
+        normalised = path.replace("\\", "/")
+        for owned in paths:
+            if (normalised == owned or
+                    (owned.endswith("/") and normalised.startswith(owned))):
+                hits.append(normalised)
+                break
+    return sorted(set(hits))
+
+
+def describe_diff_touch(name, subsystems, changed, limit=3):
+    """The one-line escalation, or `None` when the diff provably touches nothing.
+
+    Deliberately worded as "the measurement cannot distinguish", not "this is a
+    regression after all". A movement inside a measured layout band genuinely
+    carries no information about the diff -- placement alone fully accounts for
+    it -- and that stays true when the diff also edits the code under test.
+    What changes is that a second explanation is now live and equally
+    unfalsified, so silence would be the wrong output.
+    """
+    hits = diff_touches(name, subsystems, changed)
+    if not hits:
+        return None
+    # The file list goes on its own lines rather than into the sentence. A
+    # subsystem-wide diff can hit a dozen files, and inlining even three of
+    # them produced a 143-column line -- which wraps in whatever terminal the
+    # reader has, at whatever column, and takes the sentence with it.
+    lines = [f"       !! but this diff edits code {name} provably runs, so "
+             f"placement and the",
+             f"          diff are now BOTH live explanations and this "
+             f"measurement cannot tell",
+             f"          them apart. Read the diff:"]
+    lines += [f"            {path}" for path in hits[:limit]]
+    if len(hits) > limit:
+        lines.append(f"            ... and {len(hits) - limit} more")
+    return "\n".join(lines)
+
+
+def split_by_layout(rows, bands):
+    """Partition movements by whether code placement alone could explain them.
+
+    Returns `(unexplained, explained, unmeasured)`. Rows keep their original
+    shape; the layout band is *not* appended, because these lists are handed to
+    printers that unpack a fixed tuple -- the band is looked up again by name at
+    print time instead.
+
+    A row lands in `explained` only on positive evidence: a measured band for
+    that specific benchmark, at least as large as the movement. No band at all
+    means `unmeasured`, and an unmeasured movement is still a regression. That
+    asymmetry is deliberate and is the same one the replication gate uses --
+    only a *positively evidenced* verdict is allowed to excuse a finding,
+    because an excuse granted by absence would silence the check in the
+    ordinary case, which is the case where nothing has been swept.
+    """
+    unexplained, explained, unmeasured = [], [], []
+    for row in rows:
+        band = bands.get(row[0])
+        if band is None:
+            unmeasured.append(row)
+        elif abs(row[4]) <= band[0]:
+            explained.append(row)
+        else:
+            unexplained.append(row)
+    return unexplained, explained, unmeasured
 
 
 def split_by_band(flagged, bands, worse):
@@ -2044,12 +4155,14 @@ def report_baseline_canary(previous):
 
 
 def report(previous, current_entries, threshold_pct,
-           records=None, host=None, profile=LEGACY_PROFILE, commit=None):
+           records=None, host=None, profile=LEGACY_PROFILE,
+           accel=ACCEL_UNRECORDED, commit=None,
+           this_run=None, changed_files=None, bench_subsystems=None):
     """Print the run-over-run comparison. Returns True if anything regressed.
 
-    `records`/`host`/`profile` are optional only so that callers interested
-    purely in the run-over-run diff (the tests, chiefly) need not construct a
-    history.  When they are supplied, two things change: the run is placed
+    `records`/`host`/`profile`/`accel` are optional only so that callers
+    interested purely in the run-over-run diff (the tests, chiefly) need not
+    construct a history.  When they are supplied, two things change: the run is placed
     against the recent history for this host (`report_run_position`), and each
     threshold-crossing movement is checked against that benchmark's own recent
     range (`per_benchmark_bands`) before being called a regression.  The
@@ -2061,11 +4174,39 @@ def report(previous, current_entries, threshold_pct,
     silently confirmed: a caller that supplies no records has not shown the
     benchmark to be stable, and must not be told that it has.
 
-    `commit` is this run's HEAD.  It is what makes the replication gate
-    possible -- without it no movement can be shown to have survived a second
-    run of the same binary, so every banded regression degrades to
-    UNREPLICATED.  See `replication_verdict`.
+    `this_run` identifies which kernel image these numbers came from: a mapping
+    with any of `kernel_sha`/`commit`/`dirty`, i.e. the same shape as a history
+    record, so it can be compared against one by `same_image`.  It is what makes
+    the replication gate possible: without it no movement can be shown to have
+    survived a second run of the same binary, so every banded regression
+    degrades to UNREPLICATED.  See `replication_verdict`.
+
+    It is a *mapping*, not an identity string, because image identity is a
+    relation and not an equality between labels: a hashed run and an older
+    unhashed-but-clean run of the same commit are the same image, yet no two
+    strings drawn from those records compare equal.  `same_image` decides;
+    `binary_identity` only supplies display text.
+
+    `commit` is this run's HEAD.  It is now used only for the weaker
+    same-commit-unknown-image note; the gate itself no longer keys on it,
+    because a commit both over- and under-identifies a binary.  When no
+    `this_run` is supplied, one is derived from `commit` so that callers
+    predating the split (the tests, chiefly) keep the old meaning.
+
+    `changed_files`/`bench_subsystems` exist for one purpose and are permitted
+    only one direction of effect: annotating a movement that a measured layout
+    band has just *excused*, when the diff also edits code that benchmark
+    provably runs.  Withdrawing such a movement is right -- placement alone
+    fully accounts for a movement inside the band, and that stays true whatever
+    the diff says -- but withdrawing it *silently* is not, because the reader
+    is then never told that a second, equally unfalsified explanation exists.
+    Neither argument can ever cause a movement to be excused, only to be
+    escalated with a line of prose; both default to None, and None escalates
+    nothing.  See `benchmark_subsystems` for why the map may not be read in the
+    other direction.
     """
+    if this_run is None and commit:
+        this_run = {"commit": commit}
     current = {name: vals[0] for name, vals in current_entries.items()}
 
     # Run before the early return: the target cross-check is independent of
@@ -2094,23 +4235,29 @@ def report(previous, current_entries, threshold_pct,
     # run-over-run comparison is an A/A test, and its result is known before it
     # is computed: nothing in it can have been caused by code. That is not a
     # statistical claim to be weighed against the numbers, it is arithmetic --
-    # the two runs share a commit, so the diff between them has no code term.
+    # the two runs ran the same image, so the diff between them has no code
+    # term.
     #
     # Said here, above every list, because the failure it prevents is one that
     # actually happened: a `pick_next` +92% from exactly this situation was
     # written up as a scheduler regression, corroborated by a second statistic,
-    # and believed. The band cannot notice this and neither can the canary;
-    # only the commit field can, and it was already in the record.
-    same_binary = bool(
-        commit
-        and commit != UNKNOWN_COMMIT
-        and previous.get("commit") == commit
-    )
+    # and believed. The band cannot notice this and neither can the canary.
+    #
+    # Keyed on the kernel image, not the commit. The commit was the original
+    # key and it let this fire in reverse on 2026-08-19: two boots of one
+    # `--no-build --no-stage` image, with a commit made between them, produced
+    # four "REGRESSED, UNREPLICATED" claims with this banner silent -- an A/A
+    # pair the A/A check could not see, because the label had moved and the
+    # code had not. See `binary_identity`.
+    same_binary = bool(this_run and same_image(previous, this_run))
     if same_binary:
+        # Display text only -- the decision above was `same_image`'s. Prefer
+        # this run's label; both records agree on the image by construction.
+        identity = binary_identity(this_run) or binary_identity(previous)
         print(
-            f"  !! A/A COMPARISON: the baseline run is the SAME commit "
-            f"({commit}) as this one, so no\n"
-            f"     movement below can have been caused by code -- every "
+            f"  !! A/A COMPARISON: the baseline run is the SAME kernel image "
+            f"({identity}) as this one,\n"
+            f"     so no movement below can have been caused by code -- every "
             f"difference is this host's\n"
             f"     measurement noise, by construction, and none of it is "
             f"counted as a regression.\n"
@@ -2120,6 +4267,43 @@ def report(previous, current_entries, threshold_pct,
             f"known-issues.md\n"
             f"     B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY."
         )
+    elif commit and commit != UNKNOWN_COMMIT \
+            and previous.get("commit") == commit:
+        # The commits match but the images did not. Two ways that happens, and
+        # they are opposite claims, so they get opposite wordings -- the one
+        # thing neither may do is let the matching commit in the header line
+        # stand as unrebutted evidence that the code was the same.
+        prev_sha, this_sha = previous.get("kernel_sha"), this_run.get("kernel_sha")
+        if prev_sha and this_sha:
+            # Both hashed, hashes differ: not unknown, *known different*. One of
+            # the two was built from a tree that did not match its own commit.
+            print(
+                f"  !! SAME COMMIT ({commit}), DIFFERENT IMAGE: the two runs "
+                f"hash differently\n"
+                f"     ({prev_sha} then {this_sha}), so at least one was built "
+                f"from a tree that did not\n"
+                f"     match its commit label. The movements below may well be "
+                f"real code changes; the\n"
+                f"     commit in the header just does not describe them."
+            )
+        else:
+            # At least one side cannot be pinned to an image -- a run measured
+            # with uncommitted changes and no recorded hash. Saying "A/A" here
+            # would be a claim nobody can support, and saying nothing would let
+            # the reader supply it themselves. So the state is named.
+            print(
+                f"  ?? SAME COMMIT ({commit}), UNKNOWN IMAGE: at least one of "
+                f"these two runs cannot be\n"
+                f"     pinned to a kernel image -- it was measured with "
+                f"uncommitted changes, or it predates\n"
+                f"     kernel-hash recording -- so whether the two ran the "
+                f"same code is not knowable from\n"
+                f"     the record. Movements below are judged as if the code "
+                f"differed, which is the\n"
+                f"     conservative reading -- but do not treat the matching "
+                f"commit in the header as\n"
+                f"     evidence that it did not."
+            )
     print(
         "  Comparison is run-over-run on this host, which cancels the TCG "
         "emulation constant; a movement is only called a regression if it "
@@ -2161,7 +4345,7 @@ def report(previous, current_entries, threshold_pct,
     # raises ("drifted relative to what?") and before the regressed/improved
     # lists, because it says whether those lists can be trusted at all.
     if records is not None and host is not None:
-        report_run_position(records, host, profile, current, previous)
+        report_run_position(records, host, profile, accel, current, previous)
 
     # Each threshold-crossing movement is now checked against the benchmark's
     # *own* recent spread before it is called a regression. The window is the
@@ -2170,7 +4354,7 @@ def report(previous, current_entries, threshold_pct,
     # boot still reads the same a week later.
     if records is not None and host is not None:
         bands = per_benchmark_bands(
-            comparable_records(records, host, profile)[-SPEED_WINDOW:]
+            comparable_records(records, host, profile, accel)[-SPEED_WINDOW:]
         )
     else:
         bands = {}
@@ -2211,6 +4395,50 @@ def report(previous, current_entries, threshold_pct,
     imp_unjudged, imp_unjudged_void = _withdraw_unstable(imp_unjudged)
     void_rows = reg_void + reg_unjudged_void + imp_void + imp_unjudged_void
 
+    # Code *placement*, checked before replication because it disqualifies on
+    # grounds the replication gate is blind to by construction.
+    #
+    # Replication asks "did the same binary produce this twice?" and a
+    # layout-caused movement answers yes every time -- the addresses are fixed,
+    # so the ~1.7x TCG page-straddle penalty is a property of the image, not of
+    # the run. That is why "replicated" was never the proof of a code regression
+    # the harness read it as, and why no amount of re-running settles it.
+    #
+    # The band comes from `scripts/layout-sweep.py`: the same source built at
+    # several deliberate `.text` offsets, so the spread between the arms is a
+    # measurement of what placement alone can do to each benchmark. A movement
+    # no larger than that is not evidence about the diff.
+    #
+    # Only a *measured* band excuses anything. A benchmark that has never been
+    # swept keeps its regression -- see `split_by_layout`.
+    #
+    # `not same_binary` is essential and was missing at first. In an A/A pair the
+    # two runs are the same image, so the code sits at *identical* addresses in
+    # both and placement is the one thing that provably cannot differ between
+    # them. Filing an A/A movement under "explained by code placement" is
+    # therefore a false statement, and it did a second, worse harm: these rows
+    # are removed from `reg_out`/`imp_out`, so they never reached the A/A
+    # MOVEMENT section either. That section exists to print the spread of an A/A
+    # pair -- this host's measurement noise, measured, which the comment below
+    # calls the single most useful number such a run produces -- and the layout
+    # split was silently deleting it.
+    #
+    # The general shape of the mistake is worth naming: a filter that is correct
+    # for the ordinary case, applied to the one case whose premise it violates.
+    #
+    # Computed once and filtered per consumer, rather than computed twice: the
+    # sustained-shift block below needs the same bands under a *different*
+    # precondition (its window can span several images even when the last two
+    # runs are one), so gating the computation itself on `same_binary` would
+    # have starved that consumer of a band it is entitled to.
+    all_lbands = (layout_bands(records, host, profile)
+                  if records is not None and host is not None else {})
+    lbands = {} if same_binary else all_lbands
+    reg_unexplained, reg_layout, reg_unswept = split_by_layout(reg_out, lbands)
+    imp_unexplained, imp_layout, imp_unswept = split_by_layout(imp_out, lbands)
+    reg_out = reg_unexplained + reg_unswept
+    imp_out = imp_unexplained + imp_unswept
+
     # The replication gate, applied last because it is the strongest claim and
     # the one the word "REGRESSED" is now reserved for. A movement that left
     # the band is asked one further question: did this *same binary* produce it
@@ -2231,7 +4459,7 @@ def report(previous, current_entries, threshold_pct,
     repl_verdicts = {}
     for row in reg_out:
         name, _before, after, _raw, _adj, band = row
-        rv = replication_verdict(records, host, profile, name, commit,
+        rv = replication_verdict(records, host, profile, accel, name, this_run,
                                  after, band)
         repl_verdicts[name] = rv
         if rv.verdict == REPLICATED:
@@ -2253,16 +4481,95 @@ def report(previous, current_entries, threshold_pct,
     worst_first = lambda r: -r[4]  # noqa: E731 - reads better inline
     best_first = lambda r: r[4]    # noqa: E731
 
-    if reg_repl:
+    # An A/A pair prints none of the verdict headings below.
+    #
+    # The banner at the top of this report already states that no movement in
+    # this comparison can have been caused by code, and `--fail-on-regression`
+    # already declines to count any of it. Printing a `REGRESSED` list anyway
+    # left the reader holding two statements that contradict each other, with
+    # nothing but attentiveness deciding which one won -- and on 2026-08-19 the
+    # heading won: `lock_uncontended` was written up as `REGRESSED ...
+    # replicated` from an A/A run whose own banner said it could not be. Its two
+    # samples were 280 and 486 ns, which is a noise floor, not a finding.
+    #
+    # So the movements are still shown -- an A/A pair's spread is the single
+    # most useful number it produces, and hiding it would throw that away -- but
+    # under a heading that names what they are. Nothing is suppressed except the
+    # claim.
+    verdicts_mean_something = not same_binary
+    if same_binary:
+        aa_rows = (reg_repl + reg_unrep + reg_contra + reg_unjudged
+                   + imp_out + imp_unjudged)
+        if aa_rows:
+            print(
+                "  A/A MOVEMENT (the baseline is the SAME kernel image as this "
+                "run, so every number below is this host's measurement noise, "
+                "measured -- NOT a regression and NOT an improvement, in either "
+                "direction):"
+            )
+            for name, before, after, raw, adj, band in sorted(
+                    aa_rows, key=lambda row: -abs(row[4])):
+                detail = f"; {describe_band(band)}" if band else ""
+                print(
+                    f"    {name}: {before}ns -> {after}ns "
+                    f"({adj:+.0f}% vs suite, {raw:+.0f}% raw){detail}"
+                )
+                # The per-row detail is kept, not just the heading. It quotes
+                # the actual repeat samples, and "this binary produced 367 and
+                # 680 ns" is the one number an A/A pair exists to produce -- a
+                # measured noise floor for this benchmark on this host. A
+                # collective heading cannot say that per benchmark, and the
+                # per-benchmark figure is what decides whether any *smaller*
+                # movement in a real comparison is judgeable at all.
+                for line in describe_replication(
+                        name, repl_verdicts.get(name), band):
+                    print(line)
+            print(
+                "    -> this is the per-benchmark noise floor, and it is what "
+                "an A/A pair is for.\n"
+                "       Read it as the size of movement this host can produce "
+                "with no code change at\n"
+                "       all -- i.e. the size below which nothing in a real "
+                "comparison is judgeable."
+            )
+    if verdicts_mean_something and reg_repl:
         _print_movements(
             f"  REGRESSED (>{threshold_pct:g}% slower than the suite, outside "
             f"its own recent range, AND replicated -- every recorded run of "
-            f"this commit shows it):", reg_repl, worst_first)
-    if reg_unrep:
+            f"this same kernel image shows it, so it is not single-run noise):",
+            reg_repl, worst_first)
+        # What "replicated" does *not* mean, said where the word is used.
+        #
+        # A reader reasonably takes the strongest label the harness emits to
+        # mean "confirmed as a code effect". It does not: replication is a
+        # within-image test, and the comparison it decorates is between two
+        # *different* images. Relinking alone moves benchmarks under TCG --
+        # deterministically, so a layout artifact replicates exactly as
+        # perfectly as a real regression does, and arrives wearing this label.
+        # That is not hypothetical either; see the known-issues entry named
+        # below, where ten of thirteen perfectly-replicating movers got
+        # *faster* on a commit that touched only the scheduler.
+        print(
+            "    -> 'replicated' rules out noise, not layout. The baseline is a "
+            "DIFFERENT kernel image,\n"
+            "       and shifting a function's address re-rolls whether its loop "
+            "straddles a guest page,\n"
+            "       which costs ~1.7x per iteration under TCG and reproduces "
+            "every run. Before crediting\n"
+            "       the diff: check the changed files plausibly reach this "
+            "benchmark at all, and run\n"
+            "         python scripts/straddle-check.py --compare <old-kernel-elf>"
+            " <new-kernel-elf>\n"
+            "       See known-issues.md, 'the bench harness treats \"replicates "
+            "exactly\" as proof of a\n"
+            "       code regression, but that is also the signature of a "
+            "code-layout artifact'."
+        )
+    if verdicts_mean_something and reg_unrep:
         _print_movements(
             f"  REGRESSED, UNREPLICATED (>{threshold_pct:g}% slower than the "
-            f"suite and outside its own recent range, but this commit has "
-            f"been measured only once):", reg_unrep, worst_first)
+            f"suite and outside its own recent range, but this kernel image "
+            f"has been measured only once):", reg_unrep, worst_first)
         print(
             "    -> re-run `./scripts/boot-test.sh --bench` WITHOUT "
             "rebuilding to confirm. Two runs of one\n"
@@ -2273,7 +4580,7 @@ def report(previous, current_entries, threshold_pct,
             "       either replicated or contradicted -- unmeasured is not "
             "the same as absolved."
         )
-    if reg_contra:
+    if verdicts_mean_something and reg_contra:
         print(
             "  NOT REPLICATED (crossed the threshold and left its own range, "
             "but another run of this SAME binary did not -- withdrawn, and "
@@ -2288,20 +4595,100 @@ def report(previous, current_entries, threshold_pct,
             )
             for line in describe_replication(name, repl_verdicts[name], band):
                 print(line)
-    if reg_unjudged:
+    if verdicts_mean_something and reg_unjudged:
         _print_movements(
             f"  REGRESSED, UNCONFIRMED (>{threshold_pct:g}% slower than the "
             f"suite; too few prior runs to know this benchmark's spread):",
             reg_unjudged, worst_first)
-    if imp_out:
+    if verdicts_mean_something and imp_out:
         _print_movements(
             f"  IMPROVED (>{threshold_pct:g}% faster than the suite AND "
             f"outside its own recent range):", imp_out, best_first)
-    if imp_unjudged:
+    if verdicts_mean_something and imp_unjudged:
         _print_movements(
             f"  IMPROVED, UNCONFIRMED (>{threshold_pct:g}% faster than the "
             f"suite; too few prior runs to know this benchmark's spread):",
             imp_unjudged, best_first)
+    # The direction histogram, printed only when it is diagnostic -- i.e. when
+    # movement left the band in *both* directions in one comparison.
+    #
+    # This is the cheapest discriminator the harness has between code and
+    # layout, and it works because the two have different signatures. A code
+    # change moves what it touched, in the direction it pushed. Relinking moves
+    # whatever happens to land badly, in whichever direction each one lands --
+    # so a mixed histogram is evidence about the *set*, not about any one row,
+    # and it is evidence no per-benchmark statistic can supply. On 2026-08-19 a
+    # scheduler-only commit produced thirteen deterministic movers of which ten
+    # were faster; every one of them replicated perfectly, and reading them one
+    # at a time gave no way to see that.
+    #
+    # Deliberately not a verdict and deliberately not suppressive: an
+    # optimisation commit legitimately produces a mixed histogram too. It is
+    # printed as an observation with the check that settles it attached.
+    if verdicts_mean_something and reg_out and imp_out:
+        print(
+            f"  DIRECTION HISTOGRAM: {len(reg_out)} benchmark(s) left their own "
+            f"range slower and {len(imp_out)} left it faster in this one "
+            f"comparison."
+        )
+        print(
+            "    -> unless this commit was an optimisation, that mix is the "
+            "signature of code\n"
+            "       *placement* rather than code. Relinking shifts the address "
+            "of everything after\n"
+            "       the edited file, and under TCG that alone moves benchmarks "
+            "in both directions,\n"
+            "       deterministically. Settle it before reading the diff:\n"
+            "         python scripts/straddle-check.py --compare "
+            "<old-kernel-elf> <new-kernel-elf>"
+        )
+    # Movements a measured layout band already accounts for. Withdrawn, like
+    # MEASUREMENT VOID and unlike WITHIN ITS OWN RANGE: this is not "a small
+    # movement", it is a movement of exactly the size that two builds of
+    # *identical source* have been observed to produce on this benchmark.
+    if reg_layout or imp_layout:
+        print(
+            "  EXPLAINED BY CODE PLACEMENT -- NOT a finding in either "
+            "direction:\n"
+            "  (a sweep of this same source, rebuilt at several .text offsets, "
+            "moves these\n"
+            "   benchmarks at least this far with no source change at all.)"
+        )
+        for name, before, after, raw, adj, _band in sorted(
+                reg_layout + imp_layout, key=worst_first):
+            lb = lbands.get(name)
+            detail = f"; {describe_layout_band(lb)}" if lb else ""
+            print(
+                f"    {name}: {before}ns -> {after}ns "
+                f"({adj:+.0f}% vs suite, {raw:+.0f}% raw){detail}"
+            )
+            escalation = describe_diff_touch(name, bench_subsystems,
+                                             changed_files)
+            if escalation:
+                print(escalation)
+        print(
+            "    -> the band is a LOWER bound: a handful of sampled layouts "
+            "cannot contain the worst\n"
+            "       pair among all of them, so a movement just *outside* its "
+            "band is not thereby cleared\n"
+            "       either -- only unexplained. Widen the sweep with "
+            "scripts/layout-sweep.py before\n"
+            "       treating a near-miss as code."
+        )
+    # Said out loud, because an uncalibrated benchmark and a benchmark with a
+    # zero band produce identical output otherwise -- and the whole point of
+    # this machinery is that those are different states. Printed only when
+    # there is something it would have judged, so a quiet run stays quiet.
+    if (reg_unswept or imp_unswept) and verdicts_mean_something:
+        print(
+            f"  ({len(reg_unswept) + len(imp_unswept)} of the movements above "
+            f"have no measured layout band, so placement has NOT been ruled "
+            f"out for them.\n"
+            f"   They are judged as code because nobody has measured "
+            f"otherwise, not because anybody has shown it.\n"
+            f"   Calibrate with: python scripts/layout-sweep.py "
+            f"--pads 0,1024,2048,3072)"
+        )
     if reg_within or imp_within:
         _print_movements(
             f"  WITHIN ITS OWN RANGE (crossed {threshold_pct:g}% run-over-run, "
@@ -2334,7 +4721,8 @@ def report(previous, current_entries, threshold_pct,
     # is computed from its own pre-window reference and printed unconditionally
     # -- including on runs where the run-over-run lists are empty, which is
     # exactly when it is most needed.
-    shifts = level_shifts(records, host, profile, current) if records else []
+    shifts = (level_shifts(records, host, profile, accel, current)
+              if records else [])
     # Shifts that survive the mode-structure check -- i.e. the ones actually
     # worth bisecting for. Only these fail the build; see the return below.
     bisectable_shifts = []
@@ -2346,6 +4734,15 @@ def report(previous, current_entries, threshold_pct,
             f"they persist):"
         )
         any_structured = False
+        any_layout = False
+        # Placement can only explain a shift if placement could have *changed*
+        # across the runs the shift is drawn from. When every one of them is
+        # provably the same image the addresses are identical throughout, and
+        # attributing the shift to layout would be the A/A mistake in its other
+        # costume -- a filter correct for the ordinary case, applied to the one
+        # case whose premise it violates.
+        fixed_layout = placement_is_constant(records, host, profile, accel,
+                                             this_run)
         for name, median, value, adjusted, band, n in shifts:
             lo, hi, _med, _n = band
             print(
@@ -2357,14 +4754,40 @@ def report(previous, current_entries, threshold_pct,
             # separates binaries or runs. `http_build_response_1KiB` was
             # bisected across three commits before anyone asked; the answer was
             # "binaries", and there was no guilty commit. See mode_structure().
-            found = mode_split_search(records, host, profile, name,
+            found = mode_split_search(records, host, profile, accel, name,
                                       median, value)
             verdict = found[1] if found else mode_structure(
-                records, host, profile, name, hi)
+                records, host, profile, accel, name, hi)
             for line in describe_mode_verdict(name, verdict):
                 print(line)
+            # A measured layout band is the second, independent way a shift can
+            # fail to be about the code -- and it reaches cases mode-structure
+            # cannot. `mode_structure` needs the benchmark to have been *seen*
+            # at both modes across binaries in the recorded history, so the
+            # first commit whose relink lands a hot loop across a page boundary
+            # is MODE_UNDECIDED and fails the build; the band knows the same
+            # thing from a sweep, before the artifact has ever repeated.
+            #
+            # Same evidential rule as everywhere else: only a band measured for
+            # this exact benchmark, at least as large as the shift, excuses
+            # anything. Unswept keeps its regression.
+            lband = all_lbands.get(name)
+            explained = (not fixed_layout and lband is not None
+                         and abs(adjusted) <= lband[0])
+            if explained:
+                print(f"    -> NOT a code finding: code placement alone "
+                      f"covers this shift.\n"
+                      f"       Measured by a sweep of one source at several "
+                      f".text offsets:\n"
+                      f"       {describe_layout_band(lband)}.")
+                escalation = describe_diff_touch(name, bench_subsystems,
+                                                 changed_files)
+                if escalation:
+                    print(escalation)
             if verdict.verdict == MODE_STRUCTURED:
                 any_structured = True
+            elif explained:
+                any_layout = True
             else:
                 bisectable_shifts.append(name)
         # Name the first thing to rule out. Under TCG a loop that lands across
@@ -2375,15 +4798,32 @@ def report(previous, current_entries, threshold_pct,
         # disassemblies), which is the argument for checking it *before*
         # reading diffs rather than after. See known-issues.md
         # B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x.
-        print(
-            "    -> rule out code layout before reading the diff:\n"
-            "       python scripts/straddle-check.py --compare "
-            "<old-kernel-elf> <new-kernel-elf>"
-        )
+        #
+        # Only when something is still *going* to be bisected. The advice is
+        # "rule this out before reading the diff", so printing it under a shift
+        # already attributed to placement -- by a measured sweep or by
+        # mode-structure -- tells the reader to go and establish what the line
+        # above it just established.
+        if bisectable_shifts:
+            print(
+                "    -> rule out code layout before reading the diff:\n"
+                "       python scripts/straddle-check.py --compare "
+                "<old-kernel-elf> <new-kernel-elf>"
+            )
         if any_structured:
             print(
                 "    -> at least one shift above is mode-structured and is "
                 "NOT counted as a regression by --fail-on-regression."
+            )
+        if any_layout:
+            print(
+                "    -> at least one shift above is covered by a measured "
+                "layout band and is\n"
+                "       NOT counted as a regression by --fail-on-regression. "
+                "The band is a LOWER\n"
+                "       bound on placement sensitivity, so this is 'not "
+                "evidence about the diff',\n"
+                "       not 'proven harmless'."
             )
 
     if added:
@@ -2470,6 +4910,928 @@ def report(previous, current_entries, threshold_pct,
     return bool(run_over_run or bisectable_shifts)
 
 
+# ---------------------------------------------------------------------------
+# Accelerator comparison
+# ---------------------------------------------------------------------------
+
+#: Every string `parse_accel` can produce: one per `Hypervisor::name()` in
+#: `kernel/src/hypervisor.rs`, plus `ACCEL_BARE_METAL`.
+#:
+#: Listed rather than derived from the history on purpose. The point of having
+#: a catalogue at all is to recognise a name the history does *not* yet
+#: contain, so that `--accel-compare "QEMU TCG:KVM"` on a history with no KVM
+#: run answers "KVM has 0 records here" rather than "no such accelerator" --
+#: two very different things to tell someone who is about to go and produce
+#: the missing runs.
+KNOWN_ACCELS = (
+    ACCEL_BARE_METAL,
+    "KVM",
+    "Hyper-V/WHPX",
+    "VMware",
+    "VirtualBox",
+    "Xen",
+    "QEMU TCG",
+    "bhyve",
+    "unknown hypervisor",
+)
+
+#: Lower-cased substrings that name an accelerator when they turn up in a run's
+#: free-text `experiment` banner.
+#:
+#: Used only ever to **refuse** an assumption, never to grant one. A banner is
+#: prose written by whoever ran the probe; it is evidence that a run was *about*
+#: an accelerator, not evidence that it ran on one. Reading it the other way
+#: would be exactly the inference `parse_accel` refuses to make -- see its
+#: docstring on why `None` must not be folded into TCG.
+ACCEL_EXPERIMENT_TOKENS = {
+    "QEMU TCG": ("tcg",),
+    "Hyper-V/WHPX": ("whpx", "hyper-v"),
+    "KVM": ("kvm",),
+    "VMware": ("vmware",),
+    "VirtualBox": ("virtualbox", "vbox"),
+    "Xen": ("xen",),
+    "bhyve": ("bhyve",),
+    ACCEL_BARE_METAL: ("bare metal", "bare-metal"),
+}
+
+def assumed_accel_refusal(record, assumed):
+    """Why `--assume-missing-accel` must not be applied to this record.
+
+    Returns a sentence, or `None` when the assumption may stand.
+
+    # What the assumption is, and why it is the reader's to make
+
+    `accel` was added to the record schema on 2026-08-19. Every run before that
+    predates it, including the entire TCG layout sweep that the Q54 evidence
+    table in `open-questions.md` is built from. `parse_accel` deliberately
+    reports those as `None` rather than as TCG, because the very first WHPX run
+    was also recorded before the field existed -- so "no banner" provably does
+    not mean "TCG", and a tool that inferred it would be wrong about at least
+    one real record in this repo's own history.
+
+    That leaves a comparison of the two accelerators unable to use the six-arm
+    TCG sweep at all, which is most of the evidence there is.
+    `--assume-missing-accel` lets the reader supply the fact the record failed
+    to record. It is an assertion by whoever types it, exactly like
+    `--host-load idle`, and every figure derived under it is labelled as such.
+
+    # The one thing that can be checked, and is
+
+    An assumption cannot be verified from the data -- if it could, it would not
+    be an assumption. But it can sometimes be *falsified*: a run whose own
+    `experiment` banner names a different accelerator is a run the assumption
+    is demonstrably wrong about. Those are refused individually and listed, so
+    that `--assume-missing-accel "QEMU TCG"` cannot quietly relabel the
+    2026-08-19 16:15 probe -- whose banner reads "WHPX vs TCG: benchmark suite
+    under hardware virtualisation" -- as a TCG run and then compare it against
+    itself for a speedup of exactly 1.
+
+    That banner names *both* accelerators, so it is refused under either
+    assumption. Refusing an ambiguous record is the right direction: an unusable
+    record costs a pair, a mislabelled one corrupts every figure its pair feeds.
+
+    The guard is partial by construction. It cannot catch a run that used a
+    non-default accelerator and said nothing about it in its banner. Nothing
+    can; that record simply did not record what it did.
+    """
+    text = (record.get("experiment") or "").lower()
+    if not text:
+        return None
+    named = sorted(
+        name for name, tokens in ACCEL_EXPERIMENT_TOKENS.items()
+        if name != assumed and any(token in text for token in tokens)
+    )
+    if not named:
+        return None
+    return (f"its `experiment` banner names {', '.join(named)}, so assuming "
+            f"{assumed} for it would contradict the only surviving evidence "
+            f"about what it ran on")
+
+
+def accel_run_rejection(record, host, profile, wanted, pin=""):
+    """Why an accelerator comparison would discard this record, or `None`.
+
+    `wanted` is the pair of accelerator names under comparison. The record must
+    already carry a decided accelerator in `record["accel"]` -- see
+    `accel_selection`, which applies `--assume-missing-accel` before calling
+    this so that the assumption is resolved in exactly one place.
+
+    # Why the source identity here is `kernel_sha` and not `src_digest`
+
+    A layout band groups arms built from the same *source*, because the arms
+    are deliberately different binaries -- that is the whole point of padding
+    `.text` -- and `src_digest` is the only thing that can say they came from
+    one tree.
+
+    An accelerator comparison wants the opposite: the *same binary*, run twice.
+    `kernel_sha` is the SHA-256 of the kernel ELF that was measured, which
+    settles that directly rather than by proxy. It is strictly stronger than
+    the digest -- a digest is an argument that two builds should be identical, a
+    matching `kernel_sha` is the observation that they are -- and it is
+    available on records far older than the digest field.
+
+    It also happens to be the only pin that works on the data we have: the six
+    TCG sweep arms carry no `src_digest` (the field postdates them) and the six
+    WHPX arms carry a `full:` one, so no digest match between the two sides can
+    ever exist, while their `kernel_sha` values match pad for pad exactly.
+
+    A consequence worth stating: `dirty` is not consulted here at all. It is a
+    statement about the tree, and this comparison is not asking about the tree.
+    Two runs of one ELF are two runs of one ELF however the tree looked.
+    """
+    code = measurement_mismatch(record, host, profile)
+    if code == MISMATCH_HOST:
+        return (f"host is {record.get('host')!r}, but the comparison is being "
+                f"computed for {host!r}; runs from different machines cannot "
+                f"be divided by each other")
+    if code == MISMATCH_PROFILE:
+        return (f"profile is {record_profile(record)!r}, not {profile!r}; a "
+                f"debug run and a release run differ by far more than the "
+                f"accelerator does")
+    if code == MISMATCH_LOADED:
+        return ("the host was loaded during this run, so its timings carry "
+                "contention as well as the accelerator, and a deliberately "
+                "poisoned control is never a baseline")
+    accel = record.get("accel")
+    if not accel:
+        return ("this run does not record which accelerator it ran on. That is "
+                "NOT the same as 'it ran on TCG' -- the first WHPX run in this "
+                "history also predates the field. Supply it with "
+                "--assume-missing-accel if you know it")
+    if accel not in wanted:
+        return f"ran on {accel!r}, which is neither side of this comparison"
+    if not record.get("kernel_sha"):
+        return ("no `kernel_sha` was recorded, so there is no way to show this "
+                "run measured the same binary as anything on the other side, "
+                "and a cross-accelerator ratio over two different binaries "
+                "measures the code and the emulator at once")
+    if pin and not any(
+            (record.get(field) or "").startswith(pin)
+            for field in ("kernel_sha", "src_digest")):
+        return (f"neither its `kernel_sha` nor its `src_digest` starts with "
+                f"{pin!r}, which this comparison was pinned to")
+    return None
+
+
+def positive_entries(records):
+    """Per-benchmark median over `records`, dropping non-positive values.
+
+    Median rather than mean so that a side sampled twice (a pad measured on two
+    days, say) is not swung by one bad run, and so that a side sampled once is
+    unchanged. Non-positive values are dropped rather than kept and guarded at
+    the division, because a zero here means the scorecard did not resolve that
+    benchmark at all -- a missing measurement, not a fast one.
+    """
+    acc = {}
+    for record in records:
+        for name, value in (record.get("entries") or {}).items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            if value > 0:
+                acc.setdefault(name, []).append(float(value))
+    return {name: statistics.median(values) for name, values in acc.items()}
+
+
+def accel_selection(records, host, profile, baseline, candidate,
+                    assume="", pin=""):
+    """Everything an accelerator comparison needs, with its working shown.
+
+    Returns a dict whose fields are as much about what was *not* used as what
+    was, because sec 240's rule is that the reader can re-derive the table --
+    and a selection they cannot see is one they cannot check:
+
+    - `sides`: `{accel: [(record, "recorded"|"assumed"), ...]}`, in time order.
+    - `pairs`: one per `kernel_sha` present on both sides, newest first. Each
+      carries the records behind it, the per-benchmark medians of each side,
+      and the ratios.
+    - `rejected`: `{reason: count}` over every record that did not qualify.
+    - `unassigned`: records that would have qualified but record no accelerator.
+    - `refused`: `[(record, why)]` -- records the assumption was refused for.
+    - `one_sided`: `{kernel_sha: [accel, ...]}` for images only one side ran.
+    - `recoverable`: how many `kernel_sha` values would become pairs if the
+      unassigned records' accelerators were known. This is the number that says
+      whether the comparison is thin because the runs were never made or
+      because the harness of the day did not write down what it ran on.
+
+    # Why the pairing is per-`kernel_sha` and not one pooled comparison
+
+    Pooling every baseline run against every candidate run would produce one
+    tidy ratio, and it would be wrong in a way this project has already been
+    bitten by. The Q54 evidence table was built from one TCG layout arm;
+    re-derived against the other five, its "typical speedup" moved from x3.53
+    to x3.97 and its "best case" named a different benchmark in four of the six.
+    Placement alone moves a benchmark by up to 182% under TCG, so a pool mixes
+    the accelerator difference with the layout difference and then reports the
+    sum as the former.
+
+    One pair per binary keeps the two apart: *within* a pair placement is held
+    exactly fixed, because it is the same ELF. The spread *across* pairs is then
+    a measurement of how much the layout was contributing -- precisely the thing
+    Q54's table could not see.
+    """
+    decided = []
+    rejected = {}
+    unassigned = []
+    refused = []
+    for record in records:
+        accel = record.get("accel")
+        source = "recorded"
+        if not accel and assume:
+            why = assumed_accel_refusal(record, assume)
+            if why is None:
+                accel, source = assume, "assumed"
+            else:
+                refused.append((record, why))
+        if not accel:
+            # Counted as "unassigned" only when it would otherwise have been
+            # usable. A debug run on another host is not evidence that the
+            # missing `accel` field is what holds this comparison back, and
+            # counting it as such would inflate `recoverable` into a promise
+            # that recording the field would deliver pairs it cannot.
+            probe = dict(record, accel=baseline)
+            if accel_run_rejection(probe, host, profile,
+                                   (baseline, candidate), pin) is None:
+                unassigned.append(record)
+            continue
+        why = accel_run_rejection(dict(record, accel=accel), host, profile,
+                                  (baseline, candidate), pin)
+        if why is not None:
+            rejected[why] = rejected.get(why, 0) + 1
+            continue
+        decided.append((record, accel, source))
+
+    sides = {baseline: [], candidate: []}
+    for record, accel, source in sorted(
+            decided, key=lambda item: item[0].get("timestamp", "")):
+        sides[accel].append((record, source))
+
+    by_sha = {}
+    for record, accel, _source in decided:
+        by_sha.setdefault(
+            record["kernel_sha"], {baseline: [], candidate: []}
+        )[accel].append(record)
+
+    pairs = []
+    for sha, at_sha in by_sha.items():
+        base_records, cand_records = at_sha[baseline], at_sha[candidate]
+        if not base_records or not cand_records:
+            continue
+        base_entries = positive_entries(base_records)
+        cand_entries = positive_entries(cand_records)
+        names = sorted(set(base_entries) & set(cand_entries))
+        if not names:
+            continue
+        both = base_records + cand_records
+        pads = sorted({r.get("text_pad") for r in both
+                       if isinstance(r.get("text_pad"), int)
+                       and not isinstance(r.get("text_pad"), bool)})
+        pairs.append({
+            "kernel_sha": sha,
+            "pads": pads,
+            "newest": max(r.get("timestamp", "") for r in both),
+            "base_records": sorted(base_records,
+                                   key=lambda r: r.get("timestamp", "")),
+            "cand_records": sorted(cand_records,
+                                   key=lambda r: r.get("timestamp", "")),
+            "base_entries": base_entries,
+            "cand_entries": cand_entries,
+            "ratios": {n: base_entries[n] / cand_entries[n] for n in names},
+            "dropped": len(set(base_entries) ^ set(cand_entries)),
+        })
+    pairs.sort(key=lambda pair: pair["newest"], reverse=True)
+
+    paired = {pair["kernel_sha"] for pair in pairs}
+    one_sided = {sha: [a for a, recs in at.items() if recs]
+                 for sha, at in by_sha.items() if sha not in paired}
+    recoverable = len({record["kernel_sha"] for record in unassigned
+                       if record.get("kernel_sha") in one_sided})
+
+    return {
+        "baseline": baseline,
+        "candidate": candidate,
+        "sides": sides,
+        "pairs": pairs,
+        "rejected": rejected,
+        "unassigned": unassigned,
+        "refused": refused,
+        "one_sided": one_sided,
+        "recoverable": recoverable,
+        "assume": assume,
+        "pin": pin,
+    }
+
+
+def summarise_accel_pair(pair):
+    """The headline figures for one binary: typical speedup, how many
+    benchmarks got faster, and the two extremes with the benchmarks that
+    produced them.
+
+    "Typical" is the median ratio, not the ratio of the totals. A sum is
+    dominated by whichever benchmark is slowest in absolute nanoseconds -- under
+    WHPX that is the device-bound handful that got ~30x *slower* -- so a
+    total-based figure would report the accelerator as a slowdown while 95% of
+    the suite sped up. The median answers the question a reader is actually
+    asking: what happens to a benchmark I pick.
+    """
+    ratios = pair["ratios"]
+    ordered = sorted(ratios.items(), key=lambda item: item[1])
+    return {
+        "typical": statistics.median(ratios.values()),
+        "faster": sum(1 for value in ratios.values() if value > 1.0),
+        "total": len(ratios),
+        "best": ordered[-1],
+        "worst": ordered[0],
+    }
+
+
+def _accel_span(values, fmt="{:.2f}"):
+    """`x3.53` for one value, `x3.53 - x3.97` for a spread. ASCII only.
+
+    A range wherever a range exists is the whole point of this view: the
+    single-number form of exactly this figure was published in Q54 and turned
+    out to be the lowest of six. Collapsing a spread back to its median here
+    would reintroduce that defect by hand.
+    """
+    low, high = min(values), max(values)
+    if fmt.format(low) == fmt.format(high):
+        return "x" + fmt.format(low)
+    return f"x{fmt.format(low)} - x{fmt.format(high)}"
+
+
+def _accel_record_line(record, source):
+    """One selected run, in enough detail to find it in `bench/history.jsonl`."""
+    pad = record.get("text_pad")
+    pad_text = (f"pad {pad}"
+                if isinstance(pad, int) and not isinstance(pad, bool)
+                else "pad ?")
+    return (f"{record.get('timestamp', '?'):<26} "
+            f"{record.get('commit') or '?':<11} "
+            f"{record.get('kernel_sha') or '?':<18} {pad_text:<9} "
+            f"canary {canary_verdict(record.get('canary')):<14} {source}")
+
+
+def resolve_accel_name(records, wanted):
+    """Map what the reader typed onto an accelerator string. -> (name, error).
+
+    Case-insensitive, exact first then unique substring, so that `whpx` reaches
+    `Hyper-V/WHPX` and `tcg` reaches `QEMU TCG` without anyone having to type a
+    slash or guess the capitalisation the kernel used.
+
+    Matches against `KNOWN_ACCELS` as well as the names present in the history,
+    which is what makes "KVM has no records here" reachable as an *answer*
+    rather than as a spelling complaint. The two failures need opposite
+    responses -- fix the typo, versus go and produce the runs -- and a tool that
+    returns the same message for both sends half its readers the wrong way.
+    """
+    present = []
+    for record in records:
+        accel = record.get("accel")
+        if accel and accel not in present:
+            present.append(accel)
+    catalogue = present + [n for n in KNOWN_ACCELS if n not in present]
+    lowered = wanted.strip().lower()
+    if not lowered:
+        return None, "an empty accelerator name"
+    exact = [name for name in catalogue if name.lower() == lowered]
+    if exact:
+        return exact[0], None
+    partial = [name for name in catalogue if lowered in name.lower()]
+    if len(partial) == 1:
+        return partial[0], None
+    if partial:
+        return None, (f"{wanted!r} matches {len(partial)} accelerators "
+                      f"({', '.join(partial)}); name one exactly")
+    return None, (f"no accelerator matches {wanted!r}. Recorded in this "
+                  f"history: {', '.join(present) or '(none)'}. Known to the "
+                  f"kernel: {', '.join(KNOWN_ACCELS)}")
+
+
+def cmd_accel_compare(history_path, profile, spec, assume="", pin="",
+                      markdown=False):
+    """Compare two accelerators over every kernel image both of them ran.
+
+    Exists because `design-decisions.md` sec 240 adopted a rule -- evidence
+    quoted in `open-questions.md` must be regenerable by a command the reader
+    can re-run -- and the two tables that rule was written for were both
+    accelerator comparisons, for which no such command existed. The rule was
+    therefore unsatisfiable for precisely the evidence that motivated it, which
+    leaves it an intention rather than a rule. See `known-issues.md`
+    `TD-A-THE-EVIDENCE-RULE-ADOPTED-IN-...-CANNOT-BE-SATISFIED-BY-ANY-EXISTING-COMMAND`.
+
+    Three properties are load-bearing, and each is a lesson from a table that
+    was already published and already wrong:
+
+    1. **It prints its selection, run by run.** The Q53 table was built by an
+       analysis that enumerated records itself; it looked right and was not. A
+       reader who can see which runs went in can check the claim without
+       reading this file.
+    2. **It never presents one arm as "the" number.** Where several binaries are
+       shared it reports the range across them, because Q54's x3.53 was one of
+       six values spanning x3.53-x3.97 and its "best case" named a different
+       benchmark in four of the six. Where only one binary is shared it says so,
+       loudly, rather than printing a bare figure that looks like the
+       six-binary kind.
+    3. **It refuses to guess an accelerator.** A run that did not record one is
+       reported as unusable and counted, never folded into whichever side seems
+       likely -- the mistake `parse_accel` exists to prevent.
+
+    Output is ASCII throughout, including in `--markdown` mode. It is printed to
+    a Windows console whose code page is not UTF-8, where a multiplication sign
+    is mojibake; `x3.53` pastes into a document just as well.
+
+    Returns 0 whenever it produced a complete answer, *including* the answer "no
+    two runs of one binary exist on these two accelerators" -- that is a finding
+    about the history, and the diagnosis printed with it is the useful output.
+    2 is reserved for being unable to understand the request.
+    """
+    records = load_history(history_path)
+    if not records:
+        print(f"bench-history: no records in {history_path}")
+        return 0
+
+    parts = spec.split(":", 1)
+    if len(parts) != 2:
+        print(f"bench-history: --accel-compare wants BASELINE:CANDIDATE, got "
+              f"{spec!r}. Try: --accel-compare tcg:whpx")
+        return 2
+    names = []
+    for part in parts:
+        name, error = resolve_accel_name(records, part)
+        if error:
+            print(f"bench-history: {error}")
+            return 2
+        names.append(name)
+    baseline, candidate = names
+    if baseline == candidate:
+        print(f"bench-history: both sides resolve to {baseline!r}; an "
+              f"accelerator compared with itself is an A/A pair, which --list "
+              f"already shows")
+        return 2
+    if assume:
+        assume, error = resolve_accel_name(records, assume)
+        if error:
+            print(f"bench-history: --assume-missing-accel: {error}")
+            return 2
+
+    host = platform.node() or "unknown"
+    sel = accel_selection(records, host, profile, baseline, candidate,
+                          assume, pin)
+    emit = _accel_report_markdown if markdown else _accel_report_text
+    emit(sel, host, profile)
+    return 0
+
+
+def _accel_reproduce_command(sel, profile, markdown):
+    """The command line that regenerates this exact report.
+
+    Printed *in* the report, because a table pasted into `open-questions.md`
+    outlives the shell it was produced in, and sec 240's rule is only satisfied
+    if the next reader can re-run it without reconstructing the flags from
+    prose.
+    """
+    parts = ["python scripts/bench-history.py",
+             f'--accel-compare "{sel["baseline"]}:{sel["candidate"]}"',
+             f"--profile {profile}"]
+    if sel["assume"]:
+        parts.append(f'--assume-missing-accel "{sel["assume"]}"')
+    if sel["pin"]:
+        parts.append(f"--accel-pin {sel['pin']}")
+    if markdown:
+        parts.append("--markdown")
+    return " ".join(parts)
+
+
+def _accel_stamp_span(stamps):
+    """`2026-08-14 to 2026-08-19`, or down to minutes when it is all one day.
+
+    A span that reads "2026-08-19 to 2026-08-19" tells the reader the field was
+    missing on a single day, which is the opposite of the truth in the case
+    that matters most -- runs made minutes apart, before and after the field
+    landed, where the missing half is recoverable by anyone who remembers the
+    afternoon.
+    """
+    low, high = stamps[0], stamps[-1]
+    width = 10 if low[:10] != high[:10] else 16
+    if low[:width] == high[:width]:
+        return low[:width]
+    return f"{low[:width]} to {high[:width]}"
+
+
+def _accel_unusable_lines(sel):
+    """What was left out, and whether that is why the answer is thin.
+
+    Shared by both report forms word for word: the plain form is read by whoever
+    is deciding whether to trust the numbers, and the markdown form is pasted
+    next to them in front of the operator, who is the one person who can
+    authorise the runs that would fix it.
+    """
+    lines = []
+    unassigned = sel["unassigned"]
+    if unassigned:
+        stamps = sorted(r.get("timestamp", "") for r in unassigned)
+        lines.append(
+            f"{len(unassigned)} run(s) would have qualified but do not record "
+            f"which accelerator they ran on ({_accel_stamp_span(stamps)}). "
+            f"The `accel` field postdates them. That is "
+            f"NOT the same as 'they ran on TCG': the first WHPX run in this "
+            f"history also predates the field.")
+        if sel["recoverable"]:
+            lines.append(
+                f"  {sel['recoverable']} of those kernel images ARE present on "
+                f"one side of this comparison, so knowing what those runs ran "
+                f"on would add {sel['recoverable']} more pair(s). That is the "
+                f"difference between this comparison being thin because the "
+                f"runs were never made and thin because the harness of the day "
+                f"did not write down what it ran on.")
+        if not sel["assume"]:
+            lines.append(
+                "  Re-run with --assume-missing-accel NAME to assert what they "
+                "ran on. It is an assertion by whoever types it, like "
+                "--host-load idle, and everything derived from it is labelled.")
+    for record, why in sel["refused"]:
+        lines.append(
+            f"assumption refused for {record.get('timestamp', '?')} "
+            f"({record.get('commit') or '?'}): {why}")
+    for why, count in sorted(sel["rejected"].items(),
+                             key=lambda item: (-item[1], item[0])):
+        lines.append(f"{count} run(s) rejected: {why}")
+    # Grouped by which side ran them, rather than one line per image. Eleven
+    # near-identical sentences differing only in a hash is a wall a reader
+    # skips, and the fact that matters is not *which* images went unmatched but
+    # that one accelerator has a pile of runs the other never answered -- which
+    # is a statement about what to go and measure next.
+    by_side = {}
+    for sha, present in sel["one_sided"].items():
+        by_side.setdefault(", ".join(sorted(present)), []).append(sha)
+    for side, shas in sorted(by_side.items()):
+        shown = ", ".join(sorted(shas)[:3])
+        if len(shas) > 3:
+            shown += f", and {len(shas) - 3} more"
+        lines.append(
+            f"{len(shas)} kernel image(s) ran only on {side} ({shown}), so "
+            f"they cannot be pairs; a ratio needs both sides of one binary.")
+    return lines
+
+
+def _accel_pair_label(pair):
+    pads = pair["pads"]
+    if not pads:
+        return pair["kernel_sha"]
+    if len(pads) == 1:
+        return f"{pair['kernel_sha']} (pad {pads[0]})"
+    return f"{pair['kernel_sha']} (pads {', '.join(str(p) for p in pads)})"
+
+
+def _accel_canary_mix(sel):
+    """The host-load verdicts of the runs the printed figures came from.
+
+    Over the runs behind the **pairs**, not over everything the selection kept.
+    Those differ here by a lot -- fourteen WHPX runs qualify and three of them
+    end up in a pair -- and a caveat computed over the wider set would describe
+    runs that contributed nothing to any number on the page, in either
+    direction: it could report six broken instruments beside a table drawn
+    entirely from clean ones, or hide one broken instrument among nine clean
+    runs that were never used.
+
+    Recomputed from each run's raw `canary` by `canary_verdict`, and phrased by
+    `describe_canary_mix`, for the reason `layout_bands` gives: the stored
+    verdict string is whatever the rule said on the day, and the rule has
+    tightened since.
+
+    It matters more here than anywhere else in this file. Every WHPX run in this
+    history once reported `broken` -- the canary's resolution floor is a
+    TCG-only instrument, see
+    `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT` -- so a WHPX column
+    can be a column no contamination check was watching, and a reader must not
+    have to already know that to read the table safely.
+    """
+    mix = {}
+    for pair in sel["pairs"]:
+        for record in pair["base_records"] + pair["cand_records"]:
+            verdict = canary_verdict(record.get("canary"))
+            mix[verdict] = mix.get(verdict, 0) + 1
+    return mix
+
+
+def _accel_thin_warning(sel):
+    """The sentence that stops one pair being read as a settled figure."""
+    return (
+        f"WARNING: only ONE kernel image ran on both accelerators, so every "
+        f"figure below is a single code layout.\n"
+        f"  That is the exact shape of the error this view exists to prevent: "
+        f"the x3.53 published for\n"
+        f"  {sel['candidate']} came from one layout arm, and re-derived against "
+        f"the other five it spanned\n"
+        f"  x3.53-x3.97, with a different benchmark winning 'best case' in four "
+        f"of the six. Placement\n"
+        f"  alone moves a benchmark by up to 182% under TCG. Read what follows "
+        f"as one point on that\n"
+        f"  scale. Sweeping both accelerators over the same pads would give the "
+        f"range instead:\n"
+        f"    python scripts/layout-sweep.py --pads 0,1024,2048,3072 --profile "
+        f"release")
+
+
+def _accel_faster_text(summaries):
+    """`82 of 86`, or `82-83 of 86` when the pairs disagree."""
+    faster = sorted({s["faster"] for s in summaries})
+    total = sorted({s["total"] for s in summaries})
+    left = str(faster[0]) if len(faster) == 1 else f"{faster[0]}-{faster[-1]}"
+    right = str(total[0]) if len(total) == 1 else f"{total[0]}-{total[-1]}"
+    return f"{left} of {right}"
+
+
+def _accel_report_text(sel, host, profile):
+    baseline, candidate, pairs = sel["baseline"], sel["candidate"], sel["pairs"]
+    print(f"Accelerator comparison on {host} / {profile}: "
+          f"{baseline} -> {candidate}")
+    print(f"  (a ratio above x1 means {candidate} is FASTER; entries are "
+          f"nanoseconds, so lower is better)")
+    if sel["assume"]:
+        assumed = sum(1 for rows in sel["sides"].values()
+                      for _r, source in rows if source == "assumed")
+        print(f"  ASSUMED: {assumed} run(s) that recorded no accelerator are "
+              f"being treated as {sel['assume']}.\n"
+              f"  That is your assertion, not a measurement. Every figure here "
+              f"rests on it.")
+    if sel["pin"]:
+        print(f"  Pinned to kernel_sha/src_digest prefix {sel['pin']!r}.")
+    print(f"\n  Reproduce: {_accel_reproduce_command(sel, profile, False)}")
+
+    print("\nRuns that went in:")
+    for accel in (baseline, candidate):
+        rows = sel["sides"][accel]
+        print(f"  {accel} -- {len(rows)} run(s)")
+        for record, source in rows:
+            print(f"    {_accel_record_line(record, source)}")
+        if not rows:
+            print("    (none)")
+
+    unusable = _accel_unusable_lines(sel)
+    if unusable:
+        print("\nNot used:")
+        for line in unusable:
+            print(f"  {line}")
+
+    if not pairs:
+        print(f"\nNo kernel image ran on both {baseline} and {candidate}, so "
+              f"there is nothing to divide.")
+        print("  A cross-accelerator ratio is only meaningful over one "
+              "identical binary; anything else\n  measures the code and the "
+              "emulator at the same time and reports the sum as the emulator.")
+        return
+
+    print(f"\nPaired on kernel_sha -- one identical kernel image per pair -- "
+          f"{len(pairs)} pair(s):")
+    for pair in pairs:
+        extra = (f", {pair['dropped']} not on both sides"
+                 if pair["dropped"] else "")
+        print(f"  {_accel_pair_label(pair)}: "
+              f"{len(pair['base_records'])} x {baseline}, "
+              f"{len(pair['cand_records'])} x {candidate}, "
+              f"{len(pair['ratios'])} benchmarks in common{extra}")
+    if len(pairs) == 1:
+        print(f"\n  {_accel_thin_warning(sel)}")
+
+    summaries = [summarise_accel_pair(pair) for pair in pairs]
+    print(f"\nSummary across {len(pairs)} pair(s):")
+    print(f"  Typical benchmark   "
+          f"{_accel_span([s['typical'] for s in summaries])} faster")
+    print(f"  Benchmarks faster   {_accel_faster_text(summaries)}")
+    best_names = sorted({s["best"][0] for s in summaries})
+    best = _accel_span([s["best"][1] for s in summaries])
+    print(f"  Best case           {best}"
+          + (f"  {best_names[0]}" if len(best_names) == 1 else
+             f"  -- and a DIFFERENT benchmark in {len(best_names)} of "
+             f"{len(pairs)} pairs ({', '.join(best_names)}), so this row does "
+             f"not name one"))
+    worst_names = sorted({s["worst"][0] for s in summaries})
+    worst = _accel_span([s["worst"][1] for s in summaries])
+    print(f"  Worst case          {worst}"
+          + (f"  {worst_names[0]}" if len(worst_names) == 1 else
+             f"  -- and a different benchmark in {len(worst_names)} of "
+             f"{len(pairs)} pairs"))
+    caveat = describe_canary_mix(_accel_canary_mix(sel), "runs")
+    if caveat:
+        print(f"  Host-load check     {caveat}.\n"
+              f"                      Those runs could not confirm the machine "
+              f"was idle, so part of this\n"
+              f"                      difference may be host noise rather than "
+              f"the accelerator.")
+
+    names = sorted(set.intersection(*(set(p["ratios"]) for p in pairs)))
+    print(f"\nPer benchmark ({len(names)} measured on every pair):")
+    width = max(len(name) for name in names)
+    if len(pairs) == 1:
+        pair = pairs[0]
+        print(f"  {'benchmark':<{width}}  {baseline:>14}  {candidate:>14}  "
+              f"ratio")
+        for name in sorted(names, key=lambda n: (-pair["ratios"][n], n)):
+            print(f"  {name:<{width}}  {pair['base_entries'][name]:>12.1f}ns  "
+                  f"{pair['cand_entries'][name]:>12.1f}ns  "
+                  f"x{pair['ratios'][name]:.2f}")
+    else:
+        def median_ratio(name):
+            return statistics.median(pair["ratios"][name] for pair in pairs)
+        print(f"  {'benchmark':<{width}}  {'median':>8}  range over "
+              f"{len(pairs)} pairs")
+        for name in sorted(names, key=lambda n: (-median_ratio(n), n)):
+            values = [pair["ratios"][name] for pair in pairs]
+            print(f"  {name:<{width}}  x{median_ratio(name):>7.2f}  "
+                  f"{_accel_span(values)}")
+    print("\n  A ratio is one binary under two emulators. It is not a "
+          "prediction about real hardware,\n  and it is not transitive with "
+          "any other pair of accelerators.")
+
+
+def _accel_report_markdown(sel, host, profile):
+    baseline, candidate, pairs = sel["baseline"], sel["candidate"], sel["pairs"]
+    print(f"Accelerator comparison on `{host}` / `{profile}`: "
+          f"**{baseline}** -> **{candidate}**. A ratio above x1 means "
+          f"{candidate} is faster.")
+    print("\nReproduce with:\n")
+    print(f"    {_accel_reproduce_command(sel, profile, True)}")
+    if sel["assume"]:
+        print(f"\n**Assumed:** runs that recorded no accelerator are treated "
+              f"as `{sel['assume']}`. That is an assertion by whoever ran this "
+              f"command, not a measurement.")
+    if not pairs:
+        print("\n**No kernel image ran on both accelerators**, so there is "
+              "nothing to divide. A cross-accelerator ratio is only meaningful "
+              "over one identical binary.\n")
+        for line in _accel_unusable_lines(sel):
+            print(f"- {line}")
+        return
+
+    summaries = [summarise_accel_pair(pair) for pair in pairs]
+    print(f"\nPaired on `kernel_sha` -- one identical kernel image per pair -- "
+          f"**{len(pairs)} pair(s)**: "
+          f"{', '.join(_accel_pair_label(p) for p in pairs)}.")
+    if len(pairs) == 1:
+        print(f"\n> **Only one kernel image ran on both accelerators, so every "
+              f"figure below is a single code layout.** The x3.53 published for "
+              f"{candidate} in Q54 came from one layout arm and spanned "
+              f"x3.53-x3.97 across six; placement alone moves a benchmark by up "
+              f"to 182% under TCG.")
+
+    print(f"\n| | {baseline} | {candidate} |")
+    print("|---|---|---|")
+    print(f"| Typical benchmark | -- | "
+          f"**{_accel_span([s['typical'] for s in summaries])} faster** "
+          f"({_accel_faster_text(summaries)} faster) |")
+    best_names = sorted({s["best"][0] for s in summaries})
+    best = _accel_span([s["best"][1] for s in summaries])
+    best_cell = (f"`{best_names[0]}` {best}" if len(best_names) == 1 else
+                 f"{best}, and a **different benchmark** in {len(best_names)} "
+                 f"of {len(pairs)} pairs")
+    print(f"| Best case | -- | {best_cell} |")
+    worst_names = sorted({s["worst"][0] for s in summaries})
+    worst = _accel_span([s["worst"][1] for s in summaries])
+    worst_cell = (f"`{worst_names[0]}` {worst}" if len(worst_names) == 1 else
+                  f"{worst}, and a different benchmark in {len(worst_names)} "
+                  f"of {len(pairs)} pairs")
+    print(f"| Worst case | -- | {worst_cell} |")
+    caveat = describe_canary_mix(_accel_canary_mix(sel), "runs")
+    if caveat:
+        print(f"| Host-load check | {caveat} | |")
+
+    print("\n<details><summary>Runs that went in, and what was left out"
+          "</summary>\n")
+    for accel in (baseline, candidate):
+        print(f"`{accel}` -- {len(sel['sides'][accel])} run(s):\n")
+        for record, source in sel["sides"][accel]:
+            print(f"    {_accel_record_line(record, source)}")
+        print()
+    for line in _accel_unusable_lines(sel):
+        print(f"- {line}")
+    print("\n</details>")
+
+
+def cmd_layout_bands(history_path, profile):
+    """Print the measured code-placement sensitivity of each benchmark.
+
+    Exists because a band is otherwise only ever visible as a side effect of a
+    comparison, and then only for benchmarks that happened to move far enough
+    to be listed. That makes the two states a reader most needs to tell apart --
+    "swept, and this benchmark barely cares about placement" versus "never
+    swept, so nothing is known" -- look identical: silence in both cases. This
+    view distinguishes them explicitly.
+
+    It reports the swept commit and the number of layouts alongside every band,
+    because those are what decide whether a band should be believed: a band is
+    evidence about the hot loops that existed at that commit, and a reader who
+    recognises it as ancient is the only staleness check there is (see
+    `layout_bands` on why no automatic cutoff is imposed).
+    """
+    records = load_history(history_path)
+    if not records:
+        print(f"bench-history: no records in {history_path}")
+        return 0
+
+    host = platform.node() or "unknown"
+    bands = layout_bands(records, host, profile)
+    if not bands:
+        arms = layout_arms(records, host, profile)
+        print(f"No layout band has been measured for {host} / {profile}.")
+        # Distinguish the three ways to get here, because they call for three
+        # different actions and the bare "no band" is compatible with all of
+        # them. Reporting only the conclusion is how a sweep that silently
+        # failed to qualify would look exactly like a sweep never run.
+        #
+        # Grouped by `arm_group_key`, the same key `layout_arms` uses, and not
+        # by `commit`. Listing this diagnostic per commit would show a sweep
+        # that spanned several docs commits as one row per arm -- reproducing,
+        # in the very message meant to explain the absence, the miscount that
+        # caused it.
+        swept = {}
+        non_arms = 0
+        for record in records:
+            pad = record.get("text_pad")
+            if not isinstance(pad, int) or isinstance(pad, bool):
+                continue
+            # Only genuine sweep arms are grouped. An ordinary run reports
+            # `textpad=0` truthfully, so listing every pad-bearing record
+            # under a shared group key would show a non-sweep run as though it
+            # were about to band with a sweep -- which is exactly the
+            # contamination LAYOUT_SWEEP_TAG exists to prevent, restated as a
+            # reassuring line of diagnostic output.
+            if LAYOUT_SWEEP_TAG not in (record.get("experiment") or ""):
+                non_arms += 1
+                continue
+            entry = swept.setdefault(arm_group_key(record),
+                                     {"pads": set(), "commits": []})
+            entry["pads"].add(pad)
+            commit = record.get("commit")
+            if commit and commit not in entry["commits"]:
+                entry["commits"].append(commit)
+        if not swept:
+            print("  No run on any host/profile has recorded a layout-sweep "
+                  "arm at all, so no sweep has ever been run.")
+            if non_arms:
+                print(f"  ({non_arms} run(s) do record a textpad=, but none "
+                      f"was a deliberate sweep arm -- every run reports one.)")
+        elif not arms:
+            print("  Sweep arms exist, but none qualify here "
+                  "(wrong host or profile, dirty tree, or a loaded host):")
+            for entry in sorted(swept.values(),
+                                key=lambda e: e["commits"] or [""]):
+                commits = entry["commits"] or ["(no commit recorded)"]
+                label = commits[0] if len(commits) == 1 else (
+                    f"{commits[0]}..{commits[-1]} ({len(commits)} commits, "
+                    f"identical build inputs)")
+                print(f"    {label}: pads {sorted(entry['pads'])}")
+        else:
+            print(f"  {len(arms)} commit(s) have enough layouts, but every "
+                  f"band was voided -- an arm's host-drift factor could not "
+                  f"be computed, and an uncorrected band is worse than none.")
+        print(f"\n  Measure one with:\n"
+              f"    python scripts/layout-sweep.py --pads 0,1024,2048,3072 "
+              f"--profile {profile}")
+        print("  Until then every movement is judged as code because nobody "
+              "has measured otherwise,\n  not because anybody has shown it.")
+        return 0
+
+    _, pads, provenance, accel, canaries = next(iter(bands.values()))
+    # The accelerator belongs in the header, not a footnote: this band is only
+    # evidence about runs on the same one. Measured on a byte-identical binary,
+    # the median benchmark is 3.5x faster under WHPX than under TCG, so a band
+    # read across accelerators is wrong by far more than it is wide.
+    where = accel if accel else "accelerator NOT recorded"
+    print(f"Code-placement sensitivity on {host} / {profile} / {where}, "
+          f"measured over {pads} layouts of {provenance}:")
+    print("  (how far the SAME SOURCE moves when only its .text offset "
+          "changes -- a LOWER bound)")
+    # Printed above the table rather than after it, because it qualifies every
+    # row: a reader who has already read the numbers has already formed the
+    # belief this line exists to temper. Silent when every arm was clean.
+    caveat = describe_canary_mix(canaries)
+    if caveat:
+        print(f"  WARNING: {caveat}. These arms could not confirm the machine "
+              f"was idle,\n  so part of this band may be host noise rather "
+              f"than placement -- and a band\n  that is too wide dismisses "
+              f"real regressions.")
+    print()
+    width = max(len(name) for name in bands)
+    # Name breaks the tie, so that two runs of this view diff cleanly. Ties are
+    # the common case, not the corner one: most benchmarks sit at 0.0% and
+    # would otherwise come out in dict order, making every re-run look changed.
+    for name, (spread, _pads, _provenance, _accel, _canaries) in sorted(
+            bands.items(), key=lambda item: (-item[1][0], item[0])):
+        print(f"  {name:<{width}}  {spread:6.1f}%")
+    print()
+    # Compare the spreads themselves rather than whole tuples: tuple ordering
+    # would fall through to `accel` on a tie, where `None` and a string are not
+    # comparable at all.
+    worst = max(band[0] for band in bands.values())
+    print(f"  A movement smaller than a benchmark's own figure is not a "
+          f"finding. The largest\n  here is {worst:.1f}%, which is the size of "
+          f"'regression' this emulator can manufacture\n  from a relink alone.")
+    print("  These are lower bounds: a handful of sampled layouts cannot "
+          "contain the worst pair\n  among all of them, so a movement just "
+          "outside its band is unexplained, not cleared.")
+    return 0
+
+
 def cmd_list(history_path):
     """Print a one-line summary of every stored record.
 
@@ -2504,7 +5866,7 @@ def cmd_list(history_path):
         # must still read the same a week later, rather than being rewritten by
         # runs that had not happened yet.
         prior = comparable_records(records[:index], record.get("host"),
-                                   record_profile(record))
+                                   record_profile(record), record_accel(record))
         prior_stalls = [c for c in (dispersion_count(r) for r in prior)
                         if c is not None]
         prior_walls = [w for r in prior
@@ -2516,7 +5878,12 @@ def cmd_list(history_path):
             f"{len(entries):>3} benchmarks, {over} over hardware target, "
             f"canary {verdict}, stalls {'?' if stalls is None else stalls}, "
             f"wall {'?' if wall is None else f'{wall:g}s'}, "
-            f"load {record_host_load(record)}, run {run_v}"
+            f"load {record_host_load(record)}, "
+            # Shown because it now selects the window each verdict was reached
+            # in: two adjacent rows with different accelerators are judged
+            # against disjoint histories, and without this column that reads as
+            # an inexplicable jump from `clean` to `unknown`.
+            f"accel {record_accel(record) or '?'}, run {run_v}"
         )
     if broken:
         print(
@@ -2535,6 +5902,15 @@ def main(argv=None):
                         help="serial log to parse (default: build/serial-test.txt)")
     parser.add_argument("--history", default=DEFAULT_HISTORY,
                         help="JSON-lines history file (default: bench/history.jsonl)")
+    parser.add_argument("--kernel-elf", default=None,
+                        help="kernel ELF that was measured. Read for two "
+                             "things: the hot-function addresses (recorded as "
+                             "`hot_symbols`, so a placement-caused swing can "
+                             "be recognised without a bisect) and its SHA-256 "
+                             "(recorded as `kernel_sha`, which is what the "
+                             "replication gate keys on -- without it a "
+                             "no-rebuild re-run made under a different commit "
+                             "cannot be recognised as the same binary)")
     parser.add_argument("--threshold", type=float, default=25.0,
                         help="percent change worth reporting (default: 25)")
     parser.add_argument("--no-record", action="store_true",
@@ -2543,6 +5919,39 @@ def main(argv=None):
                         help="exit 1 if any benchmark regressed past the threshold")
     parser.add_argument("--list", action="store_true",
                         help="list stored records and exit")
+    parser.add_argument("--layout-bands", action="store_true",
+                        help="show the measured code-placement sensitivity per "
+                             "benchmark (from scripts/layout-sweep.py) and "
+                             "exit. Reports which commit was swept and over "
+                             "how many layouts, so a band can be judged for "
+                             "staleness before it is trusted.")
+    parser.add_argument("--accel-compare", default="", metavar="BASE:CAND",
+                        help="compare two accelerators over every kernel image "
+                             "both of them ran, and exit. e.g. "
+                             "--accel-compare tcg:whpx. Pairs on `kernel_sha`, "
+                             "so every ratio is one identical binary under two "
+                             "emulators; prints the runs it selected, and "
+                             "reports a RANGE rather than one number whenever "
+                             "more than one image is shared.")
+    parser.add_argument("--assume-missing-accel", default="", metavar="ACCEL",
+                        help="for --accel-compare: treat runs that recorded no "
+                             "accelerator as having run on ACCEL. The field "
+                             "postdates most of the history, and 'no banner' "
+                             "provably does not mean TCG (the first WHPX run "
+                             "predates it too), so this is an assertion by "
+                             "whoever types it -- like --host-load idle. "
+                             "Refused per-run where a run's own `experiment` "
+                             "banner names a different accelerator, and every "
+                             "figure derived under it is labelled.")
+    parser.add_argument("--accel-pin", default="", metavar="PREFIX",
+                        help="for --accel-compare: restrict to runs whose "
+                             "`kernel_sha` or `src_digest` starts with PREFIX, "
+                             "to quote a figure about one named binary.")
+    parser.add_argument("--markdown", action="store_true",
+                        help="for --accel-compare: emit markdown tables, so "
+                             "evidence in open-questions.md is pasted output "
+                             "rather than transcribed output. Transcription is "
+                             "where a digit changes.")
     parser.add_argument("--profile", default=LEGACY_PROFILE,
                         help="cargo build profile these numbers were measured "
                              "on (default: debug). Records are only ever "
@@ -2559,6 +5968,14 @@ def main(argv=None):
                              "whoever ran it, not a measurement. 'loaded' "
                              "marks a deliberately-poisoned control run, which "
                              "is then excluded from every baseline.")
+    parser.add_argument("--src-digest", default="",
+                        help="identity of the source that was built, from "
+                             "scripts/src_digest.py. Unlike --commit this "
+                             "covers the untracked binaries the kernel embeds, "
+                             "and unlike --commit it is unchanged by a "
+                             "documentation commit landing mid-sweep. Omit it "
+                             "rather than passing an empty value if it could "
+                             "not be computed.")
     parser.add_argument("--commit", default="",
                         help="commit the measured kernel was built from. Pass "
                              "the value read BEFORE the build: this tool runs "
@@ -2567,10 +5984,25 @@ def main(argv=None):
     parser.add_argument("--dirty", action="store_true",
                         help="the tree had uncommitted changes at build time, "
                              "so --commit names an ancestor of what ran.")
+    parser.add_argument("--experiment", default="",
+                        help="why this run was a deliberate probe (a QEMU flag "
+                             "under test, a hand-toggled compiler feature, a "
+                             "bisect step). Recorded in full, but never used "
+                             "as a baseline for a later run: the binary is one "
+                             "no checkout reproduces.")
     args = parser.parse_args(argv)
 
     if args.list:
         return cmd_list(args.history)
+
+    if args.layout_bands:
+        return cmd_layout_bands(args.history, args.profile)
+
+    if args.accel_compare:
+        return cmd_accel_compare(args.history, args.profile,
+                                 args.accel_compare,
+                                 args.assume_missing_accel, args.accel_pin,
+                                 args.markdown)
 
     current_entries = parse_serial(args.serial)
     if not current_entries:
@@ -2580,23 +6012,55 @@ def main(argv=None):
 
     host = platform.node() or "unknown"
     records = load_history(args.history)
-    previous = previous_for_host(records, host, args.profile)
+    # Parsed here rather than beside the other log reads below because the
+    # baseline lookup on the next line needs it: an accelerator changes every
+    # number by a multiple, so it selects the history exactly as the profile
+    # does. See `comparable_records`.
+    #
+    # Read from the log, not from the environment: `QEMU_EXTRA` in this process
+    # says what was *asked for*, and the banner says what the kernel *ran on*.
+    # They diverge on a typo, on a changed default, and on a silent fallback to
+    # TCG -- and a cross-accelerator comparison is wrong by ~3.5x, far more
+    # than any regression this tool is looking for.
+    accel = parse_accel(args.serial)
+    previous = previous_for_host(records, host, args.profile, accel)
 
-    # If there is no same-profile baseline but there *are* same-host records on
-    # another profile, say so explicitly. Otherwise the reader sees the generic
-    # "no baseline" line and reasonably concludes the history is empty, when in
-    # fact it is full of numbers that were deliberately not used.
+    # If there is no baseline but there *are* same-host records that one of the
+    # deliberate partitions excluded, say which. Otherwise the reader sees the
+    # generic "no baseline" line and reasonably concludes the history is empty,
+    # when in fact it is full of numbers that were deliberately not used.
     if previous is None:
-        other = [r for r in records
-                 if r.get("host") == host and record_profile(r) != args.profile]
+        same_host = [r for r in records if r.get("host") == host]
+        other = [r for r in same_host if record_profile(r) != args.profile]
         if other:
             profiles = sorted({record_profile(r) for r in other})
             print(f"  No baseline on the '{args.profile}' profile yet "
                   f"({len(other)} record(s) exist for this host on "
                   f"{', '.join(profiles)}, deliberately not compared: "
                   f"different optimisation level, different numbers).")
+        # The accelerator split is newer than the profile one and will surprise
+        # a reader who has sixty runs of history and is suddenly told there is
+        # no baseline, so it names the accelerators it declined and why.
+        elsewhere = [r for r in same_host
+                     if record_profile(r) == args.profile
+                     and record_accel(r) != accel]
+        if elsewhere:
+            names = sorted({record_accel(r) or "not recorded"
+                            for r in elsewhere})
+            mine = accel or "not recorded"
+            print(f"  No baseline under '{mine}' yet ({len(elsewhere)} "
+                  f"record(s) exist for this host and profile under "
+                  f"{', '.join(names)}, deliberately not compared: an "
+                  f"accelerator moves the median benchmark by ~3.5x and the "
+                  f"device-bound ones ~30x the other way).")
 
     canary = parse_canary(args.serial)
+    # Read from the log, not from the environment: `SLATEOS_TEXT_PAD` in this
+    # process says what the *sweep driver asked for*, which is a different fact
+    # from what the kernel that just ran was compiled with. They diverge exactly
+    # when it matters most -- a stale build.
+    text_pad = parse_text_pad(args.serial)
+    # `accel` is parsed further up, beside the baseline lookup that needs it.
     # Read once and used twice -- passed to the report so the replication gate
     # can find this binary's other runs, and stored in the record below so the
     # *next* run can find this one. Two `git_commit()` calls could disagree if
@@ -2610,9 +6074,30 @@ def main(argv=None):
     # build and hands that value down -- and it wins whenever it is given. The
     # git fallback keeps a standalone invocation working.
     commit = args.commit or git_commit()
+    # The same read-once-use-twice discipline, for the field that actually
+    # answers "same binary?". Note this is strictly stronger than the paragraph
+    # above worries about: `--commit` fixes HEAD moving *during* the boot, and
+    # the hash additionally fixes HEAD moving *between* a flagged run and the
+    # no-rebuild re-run the flag asks for -- which is the case that cost four
+    # false regression claims on 2026-08-19. See `binary_identity`.
+    sha = kernel_sha(args.kernel_elf) if args.kernel_elf else None
+    # Shaped like a history record on purpose: `same_image` compares this run
+    # against stored ones, and a comparison whose two sides have different
+    # shapes is one that will one day be given the wrong side.
+    this_run = {"kernel_sha": sha, "commit": commit, "dirty": args.dirty}
+    # What this comparison's diff actually edits, and which kernel subsystems
+    # each benchmark provably enters. Used in exactly one direction: to annotate
+    # a movement that a measured layout band has just excused, when the diff
+    # also edits code that benchmark runs. Both are derived from the *previous*
+    # run's commit, which is the base of the comparison being printed; a failure
+    # to derive either yields None, and None escalates nothing.
+    changed_files = changed_paths(previous.get("commit") if previous else None)
+    bench_subsystems = benchmark_subsystems()
     regressed = report(previous, current_entries, args.threshold,
                        records=records, host=host, profile=args.profile,
-                       commit=commit)
+                       accel=accel, commit=commit, this_run=this_run,
+                       changed_files=changed_files,
+                       bench_subsystems=bench_subsystems)
 
     # Reported *after* the comparison, so it qualifies the verdict the reader
     # has just seen rather than being buried above it. The verdict is *taken
@@ -2620,6 +6105,13 @@ def main(argv=None):
     # second `canary_verdict(canary)` call is a place where they could silently
     # stop agreeing.
     verdict = print_canary_summary(canary)
+    # Immediately under the verdict it qualifies. When the line above says
+    # CONTAMINATED it has just told the reader the run moved and left every
+    # benchmark equally suspect; this is the only thing in the tool that can
+    # narrow that down. Run on a clean verdict too -- a quiet spread with one
+    # dear stretch is exactly the case `spread` averages away.
+    report_positional_attribution(
+        canary, {n: v[6] for n, v in current_entries.items() if len(v) > 6})
 
     report_dispersion(current_entries)
 
@@ -2628,7 +6120,7 @@ def main(argv=None):
     # from the same window every other historical judgement here uses, so a
     # deliberately-loaded control can never become part of the band that
     # decides whether an honest run was quiet.
-    window = comparable_records(records, host, args.profile)
+    window = comparable_records(records, host, args.profile, accel)
     dispersions = [c for c in (dispersion_count(r) for r in window)
                    if c is not None]
     walls = [w for r in window
@@ -2637,10 +6129,23 @@ def main(argv=None):
     run_v, run_notes = run_verdict(verdict, here_dispersion, dispersions,
                                    args.wall_seconds, walls)
     extra = []
+    # Why both banded axes just said "too few comparable runs", when the file
+    # holds dozens. Printed with the axes rather than in place of them because
+    # it explains a verdict, it does not vote on one.
+    thinning = accel_thinning_note(records, host, args.profile, accel)
+    if thinning:
+        extra.append(thinning)
     if args.host_load != HOST_LOAD_UNKNOWN:
         extra.append(f"host load: recorded as '{args.host_load}' by the "
                      f"caller -- an assertion, not a measurement, so it does "
                      f"not move the verdict either way")
+    if args.experiment:
+        # Said out loud because the exclusion is otherwise invisible: the run
+        # prints a full comparison and is then never referred to again, and a
+        # caller who passed the flag by habit would have no way to notice.
+        extra.append(f"experiment: {args.experiment} -- recorded, but excluded "
+                     f"from every future baseline, because the binary is one "
+                     f"no checkout reproduces")
     report_run_verdict(run_v, run_notes, extra)
 
     if not args.no_record:
@@ -2658,6 +6163,13 @@ def main(argv=None):
             # Stored so a later comparison can qualify itself instead of
             # treating the hash as if it identified the code.
             "dirty": bool(args.dirty),
+            # What `commit` + `dirty` only pretended to be: an identity for the
+            # source that was built, covering the untracked binaries the kernel
+            # embeds. Omitted entirely when it could not be computed, because
+            # an absent field reads as unknown downstream and unknown refuses
+            # to group -- whereas an empty string would group every such row
+            # together. See scripts/src_digest.py and `arm_group_key`.
+            **({"src_digest": args.src_digest} if args.src_digest else {}),
             # The target is static and already lives in baselines.toml, so
             # only the measured number goes here.
             "entries": {n: v[0] for n, v in current_entries.items()},
@@ -2679,6 +6191,49 @@ def main(argv=None):
             "host_load": args.host_load,
             "dispersion": here_dispersion,
         }
+        # Addresses of the functions known to change cost by several-fold when
+        # only their placement changes.
+        #
+        # Absent means "no ELF was offered"; `{}` means "an ELF was offered and
+        # yielded nothing" (stripped, or the functions were inlined away). The
+        # two are kept distinct on purpose: collapsing them would let a reader
+        # who finds no addresses beside a 4x swing conclude the addresses did
+        # not move, when in fact nobody looked -- which is the same mistake,
+        # one level up, that this field exists to prevent.
+        if args.kernel_elf:
+            record["hot_symbols"] = elf_symbol_addresses(args.kernel_elf)
+        # Which image produced these numbers. Absent means nobody could say --
+        # no ELF was offered, or it could not be read -- and `binary_identity`
+        # then falls back to the commit, which is only trustworthy on a clean
+        # tree. Recorded from the same `sha` the report was judged with, for
+        # the reason stated at that read: a record filed under a different
+        # identity than the one it was judged as corrupts every later
+        # replication verdict.
+        if sha:
+            record["kernel_sha"] = sha
+        # Only present on probe runs, so that the overwhelming majority of
+        # records -- ordinary ones -- carry no field asserting they are
+        # ordinary. An empty string here would be a claim; absence is the
+        # default.
+        if args.experiment:
+            record["experiment"] = args.experiment
+        # How much padding was in front of `.text`, as reported by the kernel
+        # itself. Absent means the kernel predates the banner; `0` means it was
+        # built unpadded. Keeping those distinct is the whole value of the
+        # field: a layout band derived from records that were assumed unpadded
+        # would be a spread between builds that may or may not have differed in
+        # placement, i.e. a number with no defined meaning presented as a
+        # tolerance -- and it would be used to *dismiss* regressions.
+        if text_pad is not None:
+            record["text_pad"] = text_pad
+        # Which accelerator the guest reported running on. Absent means the
+        # kernel predates the banner and cannot say -- never "TCG". This is the
+        # join key that keeps a layout band from being computed across two
+        # accelerators, where the spread would be measuring the emulator rather
+        # than the placement and would be ~3.5x too wide, i.e. wide enough to
+        # dismiss every regression the harness exists to catch.
+        if accel is not None:
+            record["accel"] = accel
         # Absent rather than null when the caller did not measure it: an
         # explicit `wall_seconds: null` invites a reader to treat it as zero,
         # and `dispersion_count`-style "absent means unknown" handling is
@@ -2708,6 +6263,16 @@ def main(argv=None):
         }
         if splits:
             record["split"] = splits
+        # Suite position, same sibling-map convention, and the one field here
+        # that cannot be reconstructed later: `sort_keys=True` below alphabetises
+        # `entries` on the way to disk, so a record written without this map has
+        # lost its suite order permanently. The 71 records already on disk are
+        # in exactly that state -- which is why this is stored rather than
+        # derived, and why positional analysis can only ever apply to records
+        # written from here on.
+        positions = {n: v[6] for n, v in current_entries.items() if len(v) > 6}
+        if positions:
+            record["positions"] = positions
         # Same append-only reasoning: a sibling key, absent on older records.
         # Recorded even when clean, because a stored verdict with no stored
         # measurement could never be re-judged if the tolerance is retuned --

@@ -94,6 +94,40 @@ if ($llvm_ar) {
 }
 
 Write-Host ""
+# Record what this sysroot was built from, by content.
+#
+# Without this, the only way to ask "is libc.a behind its sources?" was to
+# compare mtimes -- and that check was unsatisfiable by its own advice. This
+# script assembles with `Copy-Item`, which PRESERVES the source timestamp, so
+# libc.a's mtime is whenever cargo last *linked* libposix.a. If posix has not
+# changed, cargo does not relink, the mtime does not move, and re-running this
+# script -- the remedy the checker prints -- changes nothing. Meanwhile git
+# writes mtimes on files it has not edited (`checkout`, `merge`, `stash`), and
+# CLAUDE.md requires a merge from origin/main at the start of every task. So the
+# gate got wedged by routine work and could not be cleared by following its own
+# instructions. See known-issues.md
+# A-SYSROOT-STALENESS-GATE-IS-WEDGED-BY-GIT-TOUCHING-A-FILE-IT-WATCHES.
+#
+# The stamp is rewritten on every run whether or not cargo relinked, which is
+# what makes the gate satisfiable again. The hashing lives in the Python
+# checker rather than here on purpose: a stamp written by one implementation
+# and verified by another is a second place to get the CRLF-folding rule wrong,
+# which is the bug that took the fixture stamps to version 2.
+Write-Host "=== Stamping sysroot inputs ===" -ForegroundColor Cyan
+$py = Get-Command python -ErrorAction SilentlyContinue
+if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+if ($py) {
+    & $py.Source (Join-Path $root "scripts\ctest-fixtures.py") sysroot-stamp
+    if ($LASTEXITCODE -ne 0) { throw "sysroot stamp failed" }
+} else {
+    # Not fatal: the sysroot itself is built and usable, and the checker falls
+    # back to the mtime test when the stamp is absent. Loud, though, because
+    # that fallback is the weaker check this stamp exists to replace.
+    Write-Host "  WARNING: no python on PATH - no .sysroot.stamp written." -ForegroundColor Yellow
+    Write-Host "  Staleness checks will fall back to comparing mtimes, which git can trip." -ForegroundColor Yellow
+}
+
+Write-Host ""
 Write-Host "=== Sysroot ready ===" -ForegroundColor Green
 Get-ChildItem $sysroot | ForEach-Object {
     Write-Host ("  {0,-20} {1,12:N0} bytes" -f $_.Name, $_.Length)

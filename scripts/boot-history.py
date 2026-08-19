@@ -71,6 +71,7 @@ regardless -- a broken recorder must not turn a green boot red.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import platform
@@ -85,6 +86,27 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
 DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "boot-history.jsonl")
+BENCH_HISTORY = os.path.join(SCRIPT_DIR, "bench-history.py")
+
+_BENCH_HISTORY_MODULE = None
+
+
+def bench_history():
+    """Import `bench-history.py` by path; its name is not an identifier.
+
+    Cached because the module compiles several dozen regexes at import and the
+    tests parse many logs, while a real run parses one.
+    """
+    global _BENCH_HISTORY_MODULE
+    if _BENCH_HISTORY_MODULE is None:
+        spec = importlib.util.spec_from_file_location("bench_history",
+                                                      BENCH_HISTORY)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot load {BENCH_HISTORY}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _BENCH_HISTORY_MODULE = module
+    return _BENCH_HISTORY_MODULE
 
 #: How much of a failing boot's serial log to keep, and how wide.
 #:
@@ -123,6 +145,37 @@ class Serial:
     exceptions: tuple[str, ...]
     benign_exceptions: tuple[str, ...]
     has_panic: bool
+    #: Which sanitizer the kernel was built with, as the kernel itself reported
+    #: it: `"kasan-instrumented"`, `"none"`, or `None` when the log carries no
+    #: banner at all.
+    #:
+    #: The three-way split is the point, and `None` must never be folded into
+    #: `"none"`. Every boot recorded before 2026-08-19 predates the banner, and
+    #: a good number of those *were* instrumented; treating a missing line as
+    #: "not instrumented" would mislabel them all in the direction that makes
+    #: the two populations look like one. `None` means "this log cannot say",
+    #: which is a thing a consumer can decline to average.
+    sanitizer: str | None = None
+    #: Which accelerator the kernel ran under, as the kernel itself reported it:
+    #: `"QEMU TCG"`, `"Hyper-V/WHPX"`, `"bare metal"`, or `None` when the log
+    #: carries no `[hypervisor]` banner at all.
+    #:
+    #: Here for exactly the reason `sanitizer` is, one variable over. A boot's
+    #: wall time is a property of the *pair* (build, accelerator), and this file
+    #: already knows it: `wall_populations`' docstring records two WHPX boots at
+    #: 168 s and 186 s against a TCG median of ~120 s for the same profile. It
+    #: keeps them out today by skipping `experiment` rows -- which works only
+    #: because every WHPX boot so far happened to be a tagged probe. That is a
+    #: property of how those runs were invoked, not one this file guarantees,
+    #: and Q53 is a live proposal to make WHPX the ordinary way to boot. The
+    #: first untagged WHPX boot would move the median by ~40% with nothing to
+    #: say why.
+    #:
+    #: Three-valued for the same reason and with the same force: `None` means
+    #: "this log cannot say", never "TCG". `bench-history.py`'s `ACCEL_RE` notes
+    #: that the conflation is provably wrong -- the first WHPX run on this host
+    #: predates the banner -- and the same records are described here.
+    accel: str | None = None
 
     @property
     def last_line(self) -> str:
@@ -165,6 +218,57 @@ _PANIC_RE = re.compile(r"PANIC|FATAL")
 _BENIGN_EXCEPTION_RE = re.compile(
     r"in userspace|deliberate|intentional|expected|self-test", re.IGNORECASE)
 
+#: Vectors whose handler prints and *returns*, so the line can never be evidence
+#: that the kernel died.
+#:
+#: This is a second, independent guard, and the first one having failed is why
+#: it exists. `_BENIGN_EXCEPTION_RE` relies on the kernel annotating deliberate
+#: faults, and on 2026-08-19 three that it did not annotate --
+#:
+#:     [idt] Running direction-flag self-test...
+#:     EXCEPTION: Breakpoint (#BP) at 0xffffffff813b56b6
+#:     [idt]   DF is clear on exception entry: OK
+#:
+#: -- turned a boot that merely ran out of clock into a `PANIC` verdict. Note
+#: what made that bug survive: `classify()` consults the exception list only on
+#: a run with no marker, so the mislabelling is invisible on every green boot
+#: and fires exactly on the failed one whose verdict someone needs.
+#:
+#: Annotating those lines (kernel/src/idt.rs, `ExpectedBreakpoint`) fixes the
+#: instance. This fixes the class: `#BP`'s handler is documented "Logged but
+#: non-fatal" and structurally returns, so *whatever* raised it, the kernel was
+#: still running afterwards. A stray breakpoint is still worth knowing about --
+#: it stays in `benign_exceptions` and is still printed -- it just cannot on its
+#: own mean "kernel died".
+_NONFATAL_VECTOR_RE = re.compile(r"\(#BP\)")
+
+#: The kernel's build-profile banner (kernel/src/main.rs, printed immediately
+#: after "=== Kernel booting ===").
+#:
+#: Matched loosely on the `sanitizer=` key rather than on the whole line, so
+#: that adding a second key to the banner later (`opt=`, `lto=`, …) does not
+#: silently stop this from matching — a parser that stops matching produces the
+#: same `None` as a kernel that never printed, and those must stay
+#: distinguishable.
+_SANITIZER_RE = re.compile(r"^\[boot\] build profile:.*\bsanitizer=(\S+)",
+                           re.MULTILINE)
+
+
+def _can_be_fatal(exc: str) -> bool:
+    """Could this `EXCEPTION:` line be evidence that the kernel died?
+
+    Two independent reasons it could not: the kernel said the fault was on
+    purpose, or the vector's handler returns and so the kernel outlived it
+    either way. Only lines that clear both become `Serial.exceptions`; the rest
+    are still recorded (as `benign_exceptions`) and still printed, because "the
+    kernel survived it" is not the same claim as "nobody needs to see it".
+    """
+    if _BENIGN_EXCEPTION_RE.search(exc):
+        return False
+    if _NONFATAL_VECTOR_RE.search(exc):
+        return False
+    return True
+
 
 def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
     """Parse the serial log, or None if it does not exist / is empty.
@@ -195,8 +299,9 @@ def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
 
     marker_re = re.compile("^" + re.escape(marker), re.MULTILINE)
     all_exc = tuple(_EXCEPTION_RE.findall(text))
-    benign = tuple(e for e in all_exc if _BENIGN_EXCEPTION_RE.search(e))
-    fatal = tuple(e for e in all_exc if e not in benign)
+    benign = tuple(e for e in all_exc if not _can_be_fatal(e))
+    fatal = tuple(e for e in all_exc if _can_be_fatal(e))
+    san_match = _SANITIZER_RE.search(text)
     return Serial(
         path=path,
         text=text,
@@ -209,7 +314,43 @@ def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
         exceptions=fatal,
         benign_exceptions=benign,
         has_panic=bool(_PANIC_RE.search(text)),
+        sanitizer=san_match.group(1) if san_match else None,
+        accel=_parse_accel(path),
     )
+
+
+def _parse_accel(path: str) -> str | None:
+    """Which accelerator this boot ran under, delegated not reimplemented.
+
+    `bench-history.py` owns the two `[hypervisor]` banner patterns and the
+    reasoning about why there have to be two of them (the kernel prints a
+    different sentence on bare metal, and a single pattern would render that
+    platform as "cannot say"). A second copy here would be a restatement of a
+    selector, which is the drift `design-decisions.md` sec 240 exists to forbid
+    -- and it would drift *silently*, because a pattern that stopped matching
+    returns the same `None` a pre-banner log does.
+
+    Failure to load that module is caught rather than raised, and this is the
+    one place in this file where swallowing an error is right. `boot-test.sh`
+    calls this script from its EXIT trap with `|| true`, so an exception here
+    does not surface -- it silently loses the record of the boot, which for a
+    *failing* boot is the most expensive outcome this script has. Losing the
+    accelerator label is cheap; losing the boot is not.
+
+    The answer on failure is `None` -- "this row cannot say" -- which is the
+    truth, and is a value every consumer here already declines to average.
+    It does not distinguish "the kernel did not print a banner" from "the
+    recorder could not read one", and deliberately no sentinel is invented for
+    that: the warning above names the difference where a human will see it, and
+    a `bench-history.py` too broken to import fails loudly within seconds
+    anyway, since `boot-test.sh` runs it directly on the same run.
+    """
+    try:
+        return bench_history().parse_accel(path)
+    except Exception as exc:                       # noqa: BLE001 - see above
+        print(f"boot-history: cannot read the accelerator banner: {exc}",
+              file=sys.stderr)
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -219,6 +360,30 @@ def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
 #: Verdicts that mean the kernel got where it was going. Only these extend a
 #: clean streak; everything else is a recurrence candidate.
 CLEAN_VERDICTS = frozenset({"PASS", "PASS_TOOLING", "BENCH_INCOMPLETE"})
+
+
+def is_experiment(rec: dict) -> bool:
+    """Whether this row is a deliberate probe rather than a boot of the tree.
+
+    A probe runs the kernel under conditions no checkout reproduces -- foreign
+    emulator flags, a hand-patched binary -- so its outcome is evidence about
+    the probe, not about the tree. It is recorded (never discarded: the reason
+    a thing was tried and what happened is exactly what stops it being tried
+    again) but it is kept out of every statistic that describes the tree's
+    health.
+
+    **Absent means "not an experiment", deliberately, even though absent is also
+    what every row written before this field looked like.** That is the opposite
+    of the rule `bench-history.py` applies to `accel` and `text_pad`, where
+    absent must never be folded into a known value -- and the difference is the
+    direction each error fails in. There, folding absent into a value *widens* a
+    band, and a wider band dismisses real regressions silently. Here, treating
+    an old probe as a normal boot can only *shorten* a clean streak or *add* a
+    failure to the counts, which shows up as a boot someone goes and looks at.
+    Under-counting failures would be the dangerous direction, and this cannot
+    do it. So the ambiguity is resolved toward the side that fails loudly.
+    """
+    return bool(rec.get("experiment"))
 
 VERDICT_HELP = {
     "PASS": "marker reached, every gate green",
@@ -332,6 +497,19 @@ def _fp_kasan_midprint(s: Serial, verdict: str) -> bool:
     # report -- `EXCEPTION: Page Fault (#PF) at` truncated exactly where
     # `{:#x}` would have formatted `frame.rip`. Disjoint from W1 by
     # construction: W1 requires no exception line at all.
+    #
+    # The issue is titled "KASAN builds only", and now that the kernel says
+    # which build it is, say so here. Note the asymmetry in how the three
+    # sanitizer states are treated, which is deliberate and is the whole reason
+    # `sanitizer` is three-valued: an explicit `"none"` is a *positive* denial
+    # from the kernel and rules the fingerprint out, whereas `None` -- a log
+    # from a kernel too old to print the banner -- rules nothing out and must
+    # still be allowed to match. Every boot this fingerprint was validated
+    # against (2026-08-12) predates the banner, so folding `None` in with
+    # `"none"` would un-validate it and reset its streak to a clean one, which
+    # is precisely the failure this file exists to prevent.
+    if s.sanitizer == "none":
+        return False
     return (
         verdict in ("WEDGE", "TIMEOUT", "PANIC")
         and s.ends_mid_line
@@ -537,6 +715,11 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
     rec: dict = {
         "ts": _now_iso(),
         "commit": args.commit or git_commit(),
+        # Omitted entirely when unavailable rather than stored empty: an absent
+        # field reads as unknown, and unknown refuses to group, whereas an
+        # empty string would group every such row together. See
+        # scripts/src_digest.py.
+        **({"src_digest": args.src_digest} if args.src_digest else {}),
         "branch": args.branch or git_branch(),
         # True when the tree carried uncommitted changes at build time, so the
         # `commit` above names the nearest ancestor rather than what ran.  A
@@ -551,6 +734,23 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
         "label": args.label,
         "profile": args.profile,
     }
+    # Why this run is not a normal boot, or absent when it is one. Set for a
+    # deliberate probe -- non-default emulator flags, a hand-patched kernel --
+    # and stored for the same reason `bench/history.jsonl` stores it: such a run
+    # is not reproducible from a checkout, so it must not be counted as evidence
+    # about the tree.
+    #
+    # This exists because a probe was silently counted as a regression. On
+    # 2026-08-19 a one-off `-cpu host` boot, run only to find out whether WHPX
+    # could carry SMEP/SMAP/UMIP, died in OVMF before our kernel loaded -- a
+    # fact about QEMU, not about us -- and landed here as a TIMEOUT that reset
+    # the consecutive-clean streak to 0 after a long run of passes. Four open
+    # kernel issues have closure conditions written as counts of consecutive
+    # clean boots, so a streak that any experiment can zero is not merely untidy:
+    # it postpones closing real issues, and it trains a reader to shrug at
+    # failures in this file.
+    if args.experiment:
+        rec["experiment"] = args.experiment
     if args.wall_seconds is not None:
         rec["wall_seconds"] = args.wall_seconds
     if serial is not None:
@@ -558,6 +758,33 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
         rec["serial_lines"] = len(serial.lines)
         rec["ends_mid_line"] = serial.ends_mid_line
         rec["boot_ok"] = serial.boot_ok
+        # Written unconditionally, `null` included, and *not* folded into
+        # `profile`.
+        #
+        # `profile` is what the harness was told to build; this is what the
+        # kernel says it actually is, and until 2026-08-19 the two were not the
+        # same question with the same answer. An instrumented boot and an
+        # ordinary one both recorded `profile: "debug"`, while their wall times
+        # differed by 3.4x (~1100 s against ~330 s on this host) -- so every
+        # duration statistic drawn from this file was averaging two populations
+        # it had no way to tell apart.
+        #
+        # Emitting the key even when the value is `null` is what keeps the
+        # three states distinguishable *within* the rows that have a serial log
+        # at all: absent means "row predates this field", `null` means "the
+        # kernel did not say", and a string means it did. Had the key simply
+        # been omitted when unknown, those first two would collapse, and a
+        # consumer would have to guess -- which, on this file's history, means
+        # guess "uninstrumented" and quietly mislabel the slow boots.
+        rec["sanitizer"] = serial.sanitizer
+        # Written unconditionally, `null` included, for the same reason and by
+        # the same rule as `sanitizer` directly above: absent means "this row
+        # predates the field", `null` means "the log did not say", and a string
+        # means it did. Fold the first two together and a consumer has to guess,
+        # and on this file's history the guess would be "TCG" -- which
+        # bench-history.py's ACCEL_RE shows is provably wrong, since the first
+        # WHPX run on this host predates the banner.
+        rec["accel"] = serial.accel
         fps = fingerprints_for(serial, verdict)
         if fps:
             rec["fingerprints"] = fps
@@ -598,11 +825,23 @@ def streaks(records: list[dict]) -> list[Streak]:
     `since_last` counts *records*, not clean records: a boot that failed for a
     different reason is still a boot in which this fingerprint did not appear,
     which is what the known-issues closure bars mean by "routine boots count".
+
+    Experiment boots are the exception, and excluding them is the whole reason
+    this function may be trusted to close an issue. That argument -- "a boot
+    that failed differently is still a boot where this did not appear" --
+    silently assumes the kernel *ran*. A probe need not have: the `-cpu host`
+    boot of 2026-08-19 died in OVMF before our kernel was loaded, so it could
+    not have exhibited any kernel fingerprint whatever. Counting it would be
+    recording the absence of a symptom in a run that had no opportunity to
+    show one, and `since_last` is exactly what several `known-issues.md`
+    closure bars are written in terms of. This is the direction this module
+    exists to prevent: not a missed failure, but a manufactured clean streak.
     """
+    tree = [r for r in records if not is_experiment(r)]
     out = []
     for fp in FINGERPRINTS:
-        st = Streak(fp=fp, recorded=len(records))
-        for rec in records:
+        st = Streak(fp=fp, recorded=len(tree))
+        for rec in tree:
             hit = fp.id in (rec.get("fingerprints") or [])
             if hit:
                 st.occurrences += 1
@@ -649,6 +888,155 @@ def describe_streak(st: Streak) -> list[str]:
     return lines
 
 
+#: Label for a record that cannot say which build it was.
+#:
+#: Spelled as prose rather than as the bare word "unknown" because it is going
+#: to be read next to "none", and those two must never look like near-synonyms:
+#: one is the kernel saying it was not instrumented, the other is nobody saying
+#: anything.
+_SAN_UNKNOWN = "unknown (pre-banner)"
+
+
+def sanitizer_of(rec: dict) -> str:
+    """Which population a record belongs to, for statistics that must not mix.
+
+    Collapses the two ways of not knowing -- key absent (row written before the
+    field existed) and key present but null (kernel too old to print the
+    banner) -- because for the purpose of *grouping* they are the same: neither
+    can be put in a bucket. They stay distinct in the file itself, where the
+    difference tells you whether it is the recorder or the kernel that is old.
+    """
+    if "sanitizer" not in rec:
+        return _SAN_UNKNOWN
+    val = rec["sanitizer"]
+    return _SAN_UNKNOWN if val is None else str(val)
+
+
+#: Label for a record that cannot say which accelerator ran it. Prose, like
+#: `_SAN_UNKNOWN`, and for the same reason: it is printed beside real
+#: accelerator names and must not read like one of them.
+_ACCEL_UNKNOWN = "unknown accel (pre-banner)"
+
+
+def accel_of(rec: dict) -> str:
+    """Which accelerator population a record belongs to.
+
+    The exact twin of `sanitizer_of`, collapsing key-absent and key-null for
+    grouping while leaving them distinct in the file. Never folds either into a
+    named accelerator: see `bench-history.py`'s `ACCEL_RE`, and the record from
+    2026-08-19T16:15:09 that proves it.
+    """
+    if "accel" not in rec:
+        return _ACCEL_UNKNOWN
+    val = rec["accel"]
+    return _ACCEL_UNKNOWN if val is None else str(val)
+
+
+def population_of(rec: dict) -> str:
+    """The full label of the population a boot's duration belongs to.
+
+    A wall time is a property of the *pair* (build, accelerator) -- KASAN costs
+    ~3.4x and the accelerator ~1.4x on this host -- and neither factor makes the
+    other irrelevant, so the population is the pair and not either half. Kept as
+    one function rather than composed at each call site so that the printed
+    label and the grouping key cannot drift: a legend that names a different
+    partition from the one the numbers were computed over is worse than no
+    legend, because it is believed.
+    """
+    return f"{sanitizer_of(rec)} on {accel_of(rec)}"
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def wall_populations(records: list[dict]) -> dict[str, list[float]]:
+    """Wall times grouped by build *and accelerator*, never merged.
+
+    Experiment boots are excluded outright rather than given a population of
+    their own, because "experiment" is not a build -- the probes have nothing in
+    common with each other. Two WHPX boots recorded on 2026-08-19 took 168 s and
+    186 s against a TCG median of ~120 s for the same profile, so leaving them
+    in silently shifted a number whose entire purpose is to say what a normal
+    boot costs.
+
+    That last sentence used to be the *whole* defence, and it was resting on a
+    coincidence. Those two boots were kept out because they happened to be
+    tagged `experiment`, which is a fact about how they were invoked and not a
+    rule this file applies -- and Q53 is a live proposal to make WHPX the
+    ordinary way to boot the tree, at which point the tag stops appearing and
+    the ~40% shift arrives with nothing to attribute it to. Grouping by the
+    accelerator makes the exclusion structural: an untagged WHPX boot now forms
+    its own population instead of moving the TCG one.
+    """
+    out: dict[str, list[float]] = {}
+    for rec in records:
+        if is_experiment(rec):
+            continue
+        wall = rec.get("wall_seconds")
+        if not isinstance(wall, (int, float)) or isinstance(wall, bool):
+            continue
+        out.setdefault(population_of(rec), []).append(float(wall))
+    return out
+
+
+def tail_clean_streak(records: list[dict]) -> int:
+    """How many times running the *tree* has booted clean, most recent first.
+
+    A named function rather than a loop inside `report()` because several
+    `known-issues.md` closure bars are written in terms of this number, so it is
+    a published quantity that has to be testable on its own — and because the
+    probe-skipping rule below is the kind that a second, inlined copy would
+    quietly fail to acquire.
+
+    Experiment boots are stepped over, not counted and not treated as a break.
+    Neither alternative is right: a probe is not a clean boot of the tree, so it
+    cannot extend the streak, and it is not a boot of the tree at all, so it
+    cannot end one either. Skipping is what makes this number mean "the tree has
+    booted clean this many times running", whatever was probed in between.
+    """
+    streak = 0
+    for rec in reversed(records):
+        if is_experiment(rec):
+            continue
+        if rec.get("verdict") in CLEAN_VERDICTS:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def report_wall(records: list[dict]) -> None:
+    """Per-build, per-accelerator wall-time standing.
+
+    Deliberately prints no combined figure, not even when there is only one
+    population -- because "only one population" is a fact about the records
+    that happen to be loaded, and a single number printed today would be the
+    number someone compares against tomorrow, after an instrumented run has
+    landed in the same file. The whole defect this replaces was a statistic
+    that stayed valid right up until the day the second population appeared,
+    and then said nothing about either.
+    """
+    pops = wall_populations(records)
+    if not pops:
+        return
+    print("[boot-history] wall time by build and accelerator:")
+    for name in sorted(pops):
+        vals = pops[name]
+        print(f"[boot-history]   {name}: {len(vals)} boot(s), "
+              f"median {_median(vals):.0f}s, "
+              f"range {min(vals):.0f}-{max(vals):.0f}s")
+    if len(pops) > 1:
+        print("[boot-history]   (reported separately on purpose: a "
+              "KASAN-instrumented boot runs several times longer and a "
+              "hardware-virtualised one ~40% longer again on this host, so "
+              "one median over the mixture describes no build that exists)")
+
+
 def report(records: list[dict], current: dict | None) -> None:
     if current is not None:
         verdict = current["verdict"]
@@ -656,23 +1044,33 @@ def report(records: list[dict], current: dict | None) -> None:
         why = VERDICT_HELP.get(verdict, "")
         print(f"[boot-history] {verdict}"
               + (f" -- {why}" if why else ""))
+        # Named as the pair, matching `wall_populations`' key exactly, so the
+        # line that says which population this boot is in and the block that
+        # prints that population's median cannot disagree about the partition.
+        print(f"[boot-history] build: {population_of(current)}")
         if hits:
             print("[boot-history] matches known issue(s): " + ", ".join(hits))
             for fp in FINGERPRINTS:
                 if fp.id in hits and fp.note:
                     print(f"[boot-history]   {fp.id}: {fp.note}")
 
-    clean = sum(1 for r in records if r.get("verdict") in CLEAN_VERDICTS)
-    print(f"[boot-history] {len(records)} boot(s) recorded, {clean} clean "
-          f"({len(records) - clean} not)")
+    # Probes are set aside before anything is counted, not filtered at each
+    # call site: the streak and the totals must agree about what a boot is, and
+    # two separate filters are two chances to disagree.
+    tree = [r for r in records if not is_experiment(r)]
+    probes = len(records) - len(tree)
 
-    tail_clean = 0
-    for rec in reversed(records):
-        if rec.get("verdict") in CLEAN_VERDICTS:
-            tail_clean += 1
-        else:
-            break
-    print(f"[boot-history] current consecutive clean streak: {tail_clean}")
+    clean = sum(1 for r in tree if r.get("verdict") in CLEAN_VERDICTS)
+    print(f"[boot-history] {len(tree)} boot(s) recorded, {clean} clean "
+          f"({len(tree) - clean} not)")
+    if probes:
+        print(f"[boot-history] {probes} experiment boot(s) excluded "
+              f"(deliberate probes under non-default conditions; they say "
+              f"nothing about the tree)")
+
+    print("[boot-history] current consecutive clean streak: "
+          f"{tail_clean_streak(records)}")
+    report_wall(records)
 
 
 def cmd_streaks(history_path: str) -> int:
@@ -697,9 +1095,22 @@ def cmd_list(history_path: str, limit: int) -> int:
         fps = ",".join(rec.get("fingerprints") or []) or "-"
         wall = rec.get("wall_seconds")
         wall_s = f"{wall:.0f}s" if isinstance(wall, (int, float)) else "-"
+        # Abbreviated to keep the row one terminal line, but still three-valued:
+        # `kasan`, `-` (kernel said "none"), `?` (nothing said). A row whose
+        # duration looks wrong is almost always a row from the other build, and
+        # this column is what lets you see that without opening the JSON.
+        san = sanitizer_of(rec)
+        san_s = {"kasan-instrumented": "kasan", "none": "-"}.get(san, "?")
+        # Abbreviated on the same three-valued principle as the column beside
+        # it, and present for the same reason: a duration that looks wrong is
+        # almost always a row from the other *population*, and until this
+        # column existed only half of that population was visible. `?` is a row
+        # that cannot say, never a row assumed to be TCG.
+        accel_s = {"QEMU TCG": "tcg", "Hyper-V/WHPX": "whpx",
+                   "bare metal": "metal"}.get(accel_of(rec), "?")
         print(f"{rec.get('ts','?'):<26} {rec.get('commit','?'):<10} "
-              f"{rec.get('verdict','?'):<17} {wall_s:>6}  "
-              f"{rec.get('label','') or '-':<12} {fps}")
+              f"{rec.get('verdict','?'):<17} {wall_s:>6} {san_s:<5} "
+              f"{accel_s:<5} {rec.get('label','') or '-':<12} {fps}")
     return 0
 
 
@@ -727,11 +1138,23 @@ def main(argv=None) -> int:
     parser.add_argument("--wall-seconds", type=float, default=None)
     parser.add_argument("--label", default="",
                         help="free-form run tag, e.g. 'soak-iter3'")
+    parser.add_argument("--experiment", default="",
+                        help="why this boot is a deliberate probe rather than "
+                             "a boot of the tree (non-default emulator flags, "
+                             "a hand-patched kernel). Recorded, then excluded "
+                             "from the clean streak and the wall-time medians. "
+                             "boot-test.sh sets this automatically whenever "
+                             "QEMU_EXTRA or BENCH_EXPERIMENT is set.")
     parser.add_argument("--profile", default="debug")
     parser.add_argument("--commit", default="",
                         help="commit the tested kernel was built from; pass "
                              "the value read BEFORE the build, since HEAD can "
                              "move during a run (default: ask git now)")
+    parser.add_argument("--src-digest", default="",
+                        help="identity of the source that was built, from "
+                             "scripts/src_digest.py; covers the untracked "
+                             "binaries the kernel embeds, which `commit` and "
+                             "`dirty` between them cannot see")
     parser.add_argument("--branch", default="",
                         help="branch the tested kernel was built from "
                              "(default: ask git now)")

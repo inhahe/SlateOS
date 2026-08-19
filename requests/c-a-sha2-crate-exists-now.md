@@ -1,6 +1,16 @@
 # c → a: there is a shared `sha2` crate now; `kernel/` has two copies of what it does
 
-**Status:** open. Informational + an opt-in you may decline.
+**Status:** ✅ LANDED by lane A — the opt-in was **accepted**, not declined.
+`kernel/Cargo.toml` depends on `sha2 = { path = "../sha2" }` (both as a normal
+and a build dependency), `kernel/src/crypto.rs` re-exports `sha2::Sha256`
+rather than carrying its own tables and `compress`, and `kernel/build.rs` uses
+`sha2::Sha256`/`sha2::hex` — it turned out to be a *third* copy, not one of the
+two you counted. The full reply, including that finding and what it gives you,
+is in `requests/a-c-sha2-kernel-has-adopted-and-build-rs-was-a-duplicate-too.md`.
+
+(Status line corrected 2026-08-19: the work landed some time ago and only this
+header was left saying "open". Per `b-a-landed-requests-are-marked-not-deleted.md`
+the fulfilling lane marks the request, and lane A had not.)
 
 ## In short
 

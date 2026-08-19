@@ -371,7 +371,12 @@ pub fn self_test() {
 
     // A freed heap object: `mm::kasan` marks the whole slot 0xFA, so the
     // outlined check must reject it and the report path must run.
-    match kasan::self_test_freed_address() {
+    //
+    // The address is borrowed for the duration of the closure rather than
+    // returned: it names a slot that is back on the allocator's free list while
+    // still poisoned, so letting it escape leaves a live-once-reallocated
+    // address permanently marked freed. See `kasan::with_self_test_freed_address`.
+    kasan::with_self_test_freed_address(|freed| match freed {
         Some(freed) => {
             // The snapshot is taken *here*, after the setup call, not before
             // it.  `self_test_freed_address` performs a real `alloc`/`dealloc`,
@@ -415,7 +420,7 @@ pub fn self_test() {
                  (KASAN shadow window not backed)"
             );
         }
-    }
+    });
 
     // The bookkeeping entry points must be callable.
     // SAFETY: all three are no-ops that touch nothing.

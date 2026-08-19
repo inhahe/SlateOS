@@ -882,9 +882,36 @@ fi
 # files.  `|| true` keeps a missing directory from killing the script under
 # `set -e` — see the fixture loop below for what that failure mode costs when
 # it happens silently.
+#
+# Delegated to `ctest-fixtures.py sysroot-check` when python is available,
+# because that is where the check now lives: since the sysroot grew a content
+# stamp (toolchain/sysroot/.sysroot.stamp, written by build-sysroot.ps1), the
+# real question is a hash comparison, not the `find -newer` ordering below.
+# The ordering test remains here as the no-python fallback and is *exactly*
+# what the checker itself falls back to, so the two agree by construction
+# rather than by two people remembering to edit both.
+#
+# Why the stamp had to happen: `Copy-Item` in build-sysroot.ps1 preserves the
+# source timestamp, so libc.a's mtime is cargo's last link time.  If posix has
+# not changed cargo does not relink, the mtime cannot advance, and the remedy
+# printed below — re-run build-sysroot.ps1 — provably does not clear the gate.
+# Meanwhile git writes mtimes on files it never edited, and this project
+# mandates a merge from origin/main at the start of every task.  See
+# known-issues.md A-SYSROOT-STALENESS-GATE-IS-WEDGED-BY-GIT-TOUCHING-A-FILE-*.
 LIBC_A="$ROOT_DIR/toolchain/sysroot/lib/libc.a"
 SYSROOT_STALE=""
-if [ -e "$LIBC_A" ]; then
+SYSROOT_PY=""
+for _cand in python3 python; do
+    if command -v "$_cand" >/dev/null 2>&1; then SYSROOT_PY="$_cand"; break; fi
+done
+if [ -e "$LIBC_A" ] && [ -n "$SYSROOT_PY" ]; then
+    # sysroot-check prints its own diagnosis, including which inputs moved and
+    # whether it used the stamp or the mtime fallback, so this branch records
+    # the verdict and does not restate it.
+    if ! "$SYSROOT_PY" "$ROOT_DIR/scripts/ctest-fixtures.py" sysroot-check; then
+        SYSROOT_STALE="the inputs reported above"
+    fi
+elif [ -e "$LIBC_A" ]; then
     for sysroot_src in "$ROOT_DIR/posix/src" \
                        "$ROOT_DIR/posix/Cargo.toml" \
                        "$ROOT_DIR/toolchain/stubs" \
@@ -895,8 +922,10 @@ if [ -e "$LIBC_A" ]; then
         SYSROOT_STALE="${newer#"$ROOT_DIR/"}"
         break
     done
+    echo "[rootfs] NOTE: no python3/python — the sysroot check is the mtime fallback,"
+    echo "[rootfs]       which git can trip by merely writing a file it did not edit."
 fi
-if [ -n "$SYSROOT_STALE" ]; then
+if [ -n "$SYSROOT_STALE" ] && [ -z "$SYSROOT_PY" ]; then
     echo "[rootfs] WARNING: toolchain/sysroot/lib/libc.a is OLDER than $SYSROOT_STALE."
     echo "[rootfs]          libc.a is a gitignored build artifact, so a merge or checkout that"
     echo "[rootfs]          changes posix/src leaves it behind without saying so. Everything"
@@ -1143,20 +1172,31 @@ for elf in "$ROOT_DIR"/services/ctest-*/*.elf; do
 done
 if [ "$CTEST_COUNT" -gt 0 ]; then
     echo "[rootfs] staged $CTEST_COUNT native C self-test ELF(s) into /tests"
-    if [ "$CTEST_STALE" -gt 0 ]; then
-        if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
-            echo "[rootfs] WARNING: $CTEST_STALE of them are stale (see above);" \
-                 "continuing because ALLOW_STALE_FIXTURES=1"
-        else
-            echo "[rootfs] ERROR: $CTEST_STALE of $CTEST_COUNT native C fixtures are STALE."
-            echo "[rootfs]        Each either links an older libc.a than the sysroot's or was"
-            echo "[rootfs]        built from an older source than the one on disk (see which,"
-            echo "[rootfs]        above). Either way it would report a green result about code"
-            echo "[rootfs]        that is not what would run. Rebuild them (commands above),"
-            echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
-            exit 1
-        fi
-    fi
+    # The verdict is NOT reached here.  It is deferred to the combined exit at
+    # the end of the next section, for the reason the section header states:
+    # this gate compares mtimes, and the content-stamp gate below answers the
+    # same question by hashing the very same inputs -- build.py, main.c and the
+    # linked libc.a -- into a tracked .stamp.  Where they disagree the stamp is
+    # right, so the stamp must be allowed to *run*.
+    #
+    # Exiting here stopped that.  On 2026-08-18 a merge brought lane B's
+    # posix/src/crt.rs into lane A, so the sysroot had to be rebuilt; the
+    # rebuilt libc.a was newer than every checked-out .elf and all nine
+    # fixtures were declared stale, `exit 1`, image never written.  Every one
+    # of them was in fact current -- the rebuilt libc.a hashed to exactly the
+    # 5915b6ca... the stamps already recorded -- but the stamp check three
+    # sections down never executed to say so.
+    #
+    # The ordering is an artifact of *where each file came from*, not of what
+    # is in it.  A tracked .elf gets its mtime from the checkout that wrote it;
+    # libc.a gets its mtime from a local cargo build.  Merging a lane that
+    # touched posix/ therefore lands both -- new ELFs stamped at merge time and
+    # a libc.a rebuilt minutes later -- and puts the library after the binaries
+    # every time, whether or not either changed.  That is the routine case, not
+    # a corner: this project requires merging origin/main at the start of every
+    # task.  A gate reading file order alone cannot tell it from a real
+    # regression; the stamp, which hashes the same inputs, can and does.
+    :
 else
     echo "[rootfs] WARNING: no services/ctest-*/*.elf found — C self-tests will self-skip"
 fi
@@ -1269,12 +1309,44 @@ elif [ "$STAMP_FAIL" -ne 0 ]; then
     echo "[rootfs] WARNING: fixture content stamps do not match (see above);" \
          "continuing because ALLOW_STALE_FIXTURES=1"
 fi
-# One exit for both, so a tree that is stale at several levels learns all of it
-# in one run.  Telling someone to rebuild libc.a and then stopping, only for the
-# rebuilt fixtures to be flagged on the *next* run, costs a second cycle to
-# learn something this run already knew.
+# The deferred mtime verdict (CTEST_STALE, set by the fixture loop above).
+#
+# It is fatal only when the content-stamp gate could not run, i.e. no python on
+# this host.  Then mtime is the only evidence there is, and weak evidence of
+# staleness still beats none.  When the stamp gate DID run, it has already
+# judged these same fixtures by content and its answer supersedes this one in
+# both directions: it fails fixtures whose mtimes look fine (a rebuild nobody
+# committed), and it clears fixtures whose mtimes look stale (a sysroot rebuilt
+# after checkout).  Reporting the mtime finding as an error in that case is how
+# nine provably-current fixtures blocked an image build; reporting it as a
+# warning keeps the signal for a human without letting file order veto a hash.
+CTEST_MTIME_FATAL=0
+if [ "$CTEST_STALE" -gt 0 ]; then
+    if [ -z "$STAMP_PY" ]; then
+        CTEST_MTIME_FATAL=1
+        echo "[rootfs] ERROR: $CTEST_STALE of $CTEST_COUNT native C fixtures are older than"
+        echo "[rootfs]        libc.a or their own sources, and with no python here the"
+        echo "[rootfs]        content-stamp check could not run to confirm or clear them."
+        echo "[rootfs]        Rebuild them (commands above)."
+    elif [ "$STAMP_FAIL" -eq 0 ]; then
+        echo "[rootfs] NOTE: $CTEST_STALE of $CTEST_COUNT fixtures are older than libc.a or"
+        echo "[rootfs]       their own sources by mtime, but the content stamps above verify"
+        echo "[rootfs]       every one against those same inputs — so they are current and"
+        echo "[rootfs]       the mtime ordering is an artifact (typically a sysroot rebuilt"
+        echo "[rootfs]       after checkout). Not an error; the stamps are authoritative."
+    fi
+    # If STAMP_FAIL is set the stamp gate is already reporting the real fault
+    # above with the file that actually moved; adding an mtime line would only
+    # repeat it less precisely.
+fi
+
+# One exit for all three, so a tree that is stale at several levels learns all
+# of it in one run.  Telling someone to rebuild libc.a and then stopping, only
+# for the rebuilt fixtures to be flagged on the *next* run, costs a second cycle
+# to learn something this run already knew.
 if [ "${ALLOW_STALE_FIXTURES:-0}" != "1" ] \
-   && { [ -n "$SYSROOT_STALE" ] || [ "$STAMP_FAIL" -ne 0 ]; }; then
+   && { [ -n "$SYSROOT_STALE" ] || [ "$STAMP_FAIL" -ne 0 ] \
+        || [ "$CTEST_MTIME_FATAL" -ne 0 ]; }; then
     echo "[rootfs]        (set ALLOW_STALE_FIXTURES=1 to build the image anyway)"
     exit 1
 fi

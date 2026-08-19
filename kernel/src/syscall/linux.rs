@@ -46733,13 +46733,15 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
 /// who wanted uncredited bytes could simply ask for them through this ABI
 /// instead.  A guarantee with a second, unguarded door is not a guarantee.
 ///
-/// This entry point can implement the full semantics where the native one
-/// cannot, and the reason is purely mechanical: `flags` genuinely arrives here.
-/// The native ABI's libc stub passes two arguments, so its third register holds
-/// whatever the compiler left there and cannot be read as a flags word until
-/// lane B widens the stub (see
-/// `requests/a-b-getrandom-now-waits-for-a-credited-pool.md`).  So `GRND_*`
-/// works here and nowhere else, for now.
+/// **The native entry point (syscall 90) now implements the same semantics**,
+/// and the two must not drift: libc reaches 90, ported Linux binaries reach
+/// this, and a program should not be able to tell which door it came through.
+/// `handlers::sys_getrandom` therefore owns the `GRND_*` constants and this
+/// function borrows them, so a value can only be wrong in both places at once.
+/// (For a while `GRND_*` worked here and nowhere else, because the native libc
+/// stub passed two arguments and its third register held whatever the compiler
+/// left there.  Lane B widened it to `syscall3` and rebuilt the committed
+/// fixtures — `requests/b-a-getrandom-native-abi-now-passes-arg2.md`.)
 ///
 /// `flags` handling matches Linux:
 ///   - `GRND_NONBLOCK` (0x0001) — if the pool is not yet credited, fail
@@ -46843,10 +46845,10 @@ fn sys_clock_nanosleep(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns the number of bytes written to `buf`.
 fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
-    const GRND_NONBLOCK: u32 = 0x0001;
-    const GRND_RANDOM: u32 = 0x0002;
-    const GRND_INSECURE: u32 = 0x0004;
-    const VALID_FLAGS: u32 = GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE;
+    // Shared with the native entry point rather than redeclared here: two
+    // copies of a flag word is one copy that can be edited alone.
+    use crate::syscall::handlers::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM};
+    const VALID_FLAGS: u32 = crate::syscall::handlers::GRND_VALID;
 
     let buf_ptr = args.arg0;
     let buf_len = args.arg1 as usize;

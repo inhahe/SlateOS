@@ -51,6 +51,15 @@
 # Toolchain sysroot — populated by cargo build of `posix` and
 # `toolchain/stubs` (libc.a, libstubs.a, libunwind.a). Pure build
 # output that must be regenerated per-machine; never commit.
+#
+# This deliberately covers `.sysroot.stamp` too, and that is not an oversight
+# to be "fixed" by tracking it. Unlike the ctest fixture stamps — which sit
+# beside tracked ELFs and must survive a fresh clone — the sysroot stamp
+# describes *this machine's* libc.a. A tracked copy would arrive in a checkout
+# asserting that a libc.a you have not built yet was built from those sources,
+# which is the precise false-green the stamp exists to prevent. Absent stamp =
+# "nobody has built the sysroot here", which is the truth on a fresh clone, and
+# the checker falls back to mtime and says so.
 /toolchain/sysroot/
 
 # Orchestrator history (personal)

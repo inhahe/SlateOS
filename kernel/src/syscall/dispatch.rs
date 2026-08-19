@@ -2700,6 +2700,11 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
         arg5: 0,
     };
 
+    // The `GRND_*` battery runs on its own buffer, before either arm below:
+    // the refusal arm returns early, and it also asserts that `sink` was left
+    // untouched, which a `GRND_INSECURE` draw into it would falsify.
+    test_dispatch_getrandom_flags()?;
+
     if !crate::rng::is_ready() {
         // The refusal arm.  Two things must hold, and the second matters more
         // than the first: the call must report an error, *and* it must not
@@ -2772,6 +2777,132 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   Dispatch SYS_GETRANDOM: OK (pool credited)");
+    Ok(())
+}
+
+/// Test the `GRND_*` flags word on the **native** `SYS_GETRANDOM` (90).
+///
+/// Until 2026-08-18 `arg2` was ignored here, because libc reached this syscall
+/// through a two-argument stub and the third register held whatever the caller
+/// last left in it.  Lane B widened the stub and rebuilt the committed
+/// fixtures, so the kernel now reads it — and this is the test that says so.
+///
+/// The important arm is `GRND_NONBLOCK` against an **uncredited** pool, which
+/// is the state this self-test always runs in on a QEMU guest (`main` runs the
+/// syscall battery long before `rng::init`, and there is no RDRAND to short-cut
+/// it).  It is asserted against the *specific* error, and that precision is the
+/// whole test: a handler that ignored the flag would also return an error here
+/// — `TimedOut`, from `wait_until_ready`'s "nothing is crediting this pool"
+/// early-out — so "some error" is indistinguishable between working and broken.
+/// The two are not interchangeable at the libc boundary either: lane B maps
+/// `WouldBlock` to `EAGAIN` and pins `TimedOut` to `EIO`, and `EAGAIN` is the
+/// only one a `GRND_NONBLOCK` caller retries on.
+///
+/// (On a machine where the pool *can* eventually be credited, ignoring the flag
+/// would instead mean a 15-second stall where the caller asked for none — the
+/// same bug, in the form that only shows up off the self-test path.)
+///
+/// `GRND_INSECURE` is asserted to succeed *in the same pool state* — that
+/// pairing is the whole point of the flag, and asserting it here (rather than
+/// in a run where the pool happens to be credited) is what makes it meaningful.
+fn test_dispatch_getrandom_flags() -> KernelResult<()> {
+    use crate::syscall::handlers::{GRND_INSECURE, GRND_NONBLOCK, GRND_RANDOM};
+
+    let mut scratch = [0u8; 32];
+    let ptr = scratch.as_mut_ptr() as u64;
+    let call = |arg0: u64, len: u64, flags: u32| {
+        dispatch(
+            SYS_GETRANDOM,
+            &SyscallArgs {
+                arg0,
+                arg1: len,
+                arg2: u64::from(flags),
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+    let einval = i64::from(KernelError::InvalidArgument.code());
+
+    // An unknown bit is rejected rather than ignored.  Checked with length 0
+    // *and* a null pointer, which is the case that would succeed if the flags
+    // were screened after the zero-length early-out — and a caller probing for
+    // feature support with `getrandom(NULL, 0, FLAG)` is precisely who would be
+    // told "supported" by that bug.
+    for (label, flags, len, buf) in [
+        ("unknown bit 0x10", 0x10u32, 0u64, 0u64),
+        ("unknown bit 0x10, real buffer", 0x10, 16, ptr),
+        ("RANDOM|INSECURE", GRND_RANDOM | GRND_INSECURE, 16, ptr),
+        ("every bit set", u32::MAX, 16, ptr),
+    ] {
+        let r = call(buf, len, flags);
+        if r != einval {
+            serial_println!(
+                "[syscall]   FAIL: getrandom flags {} returned {}, expected InvalidArgument ({})",
+                label,
+                r,
+                einval
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // GRND_INSECURE waives the readiness gate, so it must return bytes whatever
+    // the pool's state.  This is also the only way this self-test can exercise
+    // the fill path at all before `rng::init`.
+    let r = call(ptr, 32, GRND_INSECURE);
+    if r != 32 {
+        serial_println!(
+            "[syscall]   FAIL: getrandom(32, GRND_INSECURE) returned {}, expected 32",
+            r
+        );
+        return Err(KernelError::InternalError);
+    }
+    if scratch == [0u8; 32] {
+        serial_println!(
+            "[syscall]   FAIL: getrandom(32, GRND_INSECURE) reported 32 bytes but wrote none"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // The gate itself, and the flag that converts the wait into an error.
+    let ready = crate::rng::is_ready();
+    let want_nonblock = if ready {
+        4
+    } else {
+        i64::from(KernelError::WouldBlock.code())
+    };
+    let r = call(ptr, 4, GRND_NONBLOCK);
+    if r != want_nonblock {
+        serial_println!(
+            "[syscall]   FAIL: getrandom(4, GRND_NONBLOCK) returned {}, expected {} (pool {})",
+            r,
+            want_nonblock,
+            if ready { "credited" } else { "uncredited" }
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // GRND_RANDOM alone is accepted and changes nothing: one pool, one gate.
+    // Asserting it behaves *identically to no flags at all* is what pins it as
+    // a no-op rather than merely as "not an error".
+    let plain = call(ptr, 4, 0);
+    let random = call(ptr, 4, GRND_RANDOM);
+    if (plain < 0) != (random < 0) || (plain < 0 && plain != random) {
+        serial_println!(
+            "[syscall]   FAIL: getrandom GRND_RANDOM ({}) differs from no flags ({})",
+            random,
+            plain
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[syscall]   Dispatch SYS_GETRANDOM flags: OK (NONBLOCK/INSECURE honoured, pool {})",
+        if ready { "credited" } else { "uncredited" }
+    );
     Ok(())
 }
 

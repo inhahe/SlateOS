@@ -10065,6 +10065,14 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      stream is gone.  Flags (GRND_NONBLOCK / GRND_RANDOM /
 ##      GRND_INSECURE) are accepted but ignored — we never block and
 ##      we don't distinguish urandom/random sources.
+##      SUPERSEDED 2026-08-18: both halves of that last sentence are
+##      now false.  sys_getrandom waits for a credited pool (4381365de)
+##      and reads arg2 as the GRND_* word, so NONBLOCK and INSECURE are
+##      honoured on the native path as well as on Linux-ABI 318.  See
+##      known-issues.md ->
+##      A-GETRANDOM-VALIDATES-THE-GRND-FLAGS-THEN-THROWS-THEM-AWAY.
+##      (GRND_RANDOM is still a no-op, deliberately: one pool, as Linux
+##      has had since 5.6.)
 ##   2. Cross-CPU TLB shootdown for mprotect — DONE.  sys_mprotect
 ##      now batches all PTE updates and ends with a single
 ##      mprotect_flush_range() call that delegates to
@@ -54000,6 +54008,55 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   C++/slateos toolchain exists" -- the C half has fired, the C++ half has
 ##   NOT; YSH is genuine Oils C++, so this one is still correctly blocked -- but
 ##   re-check it whenever C++ cross-compilation lands).
+##
+##   AUDIT PASS 2026-08-18 (lane A) -- IN PROGRESS, resumable. Findings so far:
+##   * S59 (GPU accel scope, Q18): PREMISE HAS FIRED. It defers the Mesa port
+##     "until a virgl test environment exists"; one exists and always did. The
+##     0x30000002 "no VIRGL" reading was taken under `-display none`, which has
+##     NO OpenGL at all; `-display egl-headless` gives GL without a window, and
+##     with `-device virtio-gpu-gl-pci` our own driver is offered 0x30000013 --
+##     bit 0 = VIRTIO_GPU_F_VIRGL. Measured with the same kernel image, control
+##     row reproduces S59's exact number. RECORDED in S59 (annotated, NOT
+##     flipped -- it is an Operator decision), raised as open-questions.md Q51,
+##     and routed to lane C (requests/a-c-the-virgl-test-environment-...md)
+##     since Mesa is gui/**. CAVEAT carried everywhere: this proves the bit is
+##     OFFERED, not that 3D renders -- nothing negotiates it yet. Also found:
+##     switching the harness to the GL device today REGRESSES the 2D path
+##     (SET_SCANOUT -> 0x1203 ERR_INVALID_RESOURCE_ID; [drm] drops 2 devices ->
+##     1, no primary display) because QEMU's virtio-gpu-gl routes through
+##     virglrenderer even when we accept no page-0 features. That kernel-side
+##     fix is LANE A's and is the gate on any harness flip.
+##   * S11 (/proc/sys/vm/overcommit_memory + commit policy): PREMISE FIRED, but
+##     benignly -- the work overtook the prose rather than the prose blocking
+##     the work. The entry still said "the vm/ subtree stays omitted (the
+##     original option C)" and "requires no new code (already omitted)"; in
+##     fact vm/overcommit_memory landed, is in SYS_DIRS, reports the live
+##     sysctl honestly (mm.linux_lazy_default 1->"0", 0->"2"), has a procfs
+##     self-test, and is backed by a real per-process MmapCommitPolicy. NOT a
+##     security gap: writes are still NotSupported (procfs::write_file only
+##     accepts oom_score_adj), which is exactly why admin.memory_policy does
+##     not exist yet -- there is no ungated route to the system-wide knob.
+##     ANNOTATED S11 with a build-status table (Operator decision, unchanged --
+##     only its description of the tree was stale). RESIDUAL, for whoever does
+##     the write path: land admin.memory_policy IN THE SAME CHANGE, not after.
+##   CHECKED AND STILL CORRECTLY BLOCKED (premise holds, no action):
+##   * S34 (line ~2560) -- "fullscreen game/video remoting unsupported until
+##     GPU encode exists". No encoder exists: the only hits for vaapi/NVENC are
+##     userspace/{wf-recorder,wl-screenrec,twitchstudio,mpv}-cli, which are
+##     facades that println! a codec name. No `trait Encoder` anywhere.
+##   * S92 (line ~6238) -- gated on `#[thread_local]` stabilising. Still E0658
+##     on stable: verified by compiling a probe with rustc 1.95.0 targeting
+##     x86_64-unknown-none (issue #29594). Sysroot stays on stable.
+##   * S8-ish (line ~351) -- auxv builder "awaiting the Linux compat loader".
+##     posix/src/linux_binfmt_elf.rs is still constants + tests, no stack
+##     builder. Holds. (posix/ is lane B's anyway.)
+##   * S73 (YSH) -- C++ half still has not fired; re-check when C++ cross
+##     compilation lands.
+##   PASS COMPLETE 2026-08-18: swept every "How to reverse"/"revisit if"/
+##   "until X lands|exists|stabilises" clause in design-decisions.md. Two
+##   premises had fired (S59, S11); four checked and still hold. Next pass
+##   should re-run the same sweep -- the regex that found them:
+##     grep -nEi "revisit if|How to reverse|until .{0,60}(exists|lands|stabilis)|once a .{0,40}(exists|lands)" design-decisions.md
 
 ## DONE (2026-08-14, design-decisions.md S306): the shared docs stay per-branch;
 ##   the fix is a fetch/merge CADENCE, now in roadmap.md S5.5 and CLAUDE.md.
@@ -54296,3 +54353,53 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##
 ## WHEN TO REVISIT: when commit 7 is actually written. This note exists so the
 ## author of that commit does not follow the older block's step 4 verbatim.
+
+## Bench positional drift — 2026-08-18 (lane A)
+
+DONE: the canary's positional trace is now parsed, stored, and turned into a
+per-benchmark factor.
+  - kernel/src/bench.rs: trace emits two decimals (was tenths, which could not
+    express variation the same CANARY line reported); the two endpoint samples
+    print `start:`/`end:` instead of both printing `end:`.
+  - scripts/bench-history.py: CANARY_TRACE_RE / parse_canary_trace;
+    `positions` sibling map on the record; trace_edge / positioned_samples /
+    trace_reference / interpolate_trace / positional_factors;
+    report_positional_attribution printed under the canary verdict.
+  - design-decisions.md §229 records why the factor is *printed* and not
+    *applied*.
+
+DONE 2026-08-18 (same day, the item listed below as missing): the stimulus and
+the grader for the prediction now exist.
+  - scripts/canary-load-test.sh --load-at=NAME [--load-until=NAME] places the
+    load over an interior window, triggered on the live result line the kernel
+    prints when a named benchmark finishes. Follows the serial log on one
+    held-open fd in pure bash rather than a grep-per-second, because RESULT P19
+    says host activity during the QEMU window moves the reference cost by tens
+    of percent — and here that cost *is* the measurement.
+  - scripts/grade-positional.py scores the model against the loaded window:
+    sensitivity, localisation over the window widened by the sampling interval,
+    and the false-positive rate over the provably-unreachable remainder, which
+    is the only one of the three that can tell a working model from one that
+    flags everything.
+  - scripts/test-grade-positional.py, 15 groups. All five verdicts have a test
+    that produces them, each confirmed reachable by mutating the grader.
+  - The first real record carrying `positions` + labelled trace edges landed at
+    0ece277de (86 positions 0..85; start:5.16 end:5.78).
+
+NOT DONE, and deliberately — do not treat as an oversight:
+  - No correction is applied to any recorded value. Blocked on PREDICTION P22
+    (known-issues.md), which is the experiment that would establish the factor
+    predicts a benchmark's inflation. Correcting before P22 grades would be
+    asserting its result. (Registered as P21 on 2026-08-18 and renumbered to P22
+    the next day: P21 was already taken by the graded no-op-path-translation
+    prediction. An ambiguous identifier defeats the point of registering a
+    prediction in advance — a later reader cannot check what was claimed if the
+    name resolves to two different claims.)
+  - P22 itself is NOT graded. The stimulus and grader exist and are tested; no
+    loaded boot has been run through them yet. test-grade-positional.py passing
+    is not evidence — its end-to-end case is a synthetic log whose trace was
+    written by hand to be the right answer.
+  - No positional analysis is possible on any *historical* record. All 71 carry
+    neither a trace nor a position map, and the position map cannot be
+    reconstructed: records are written with `sort_keys=True`, so `entries` was
+    alphabetised on the way to disk and the suite order is gone.

@@ -44,6 +44,36 @@ SECTIONS
     /* Executable code. */
     .text : ALIGN(4K) {
         __text_start = .;
+
+        /* Build-time layout padding (see kernel/src/layout_pad.rs).
+         *
+         * Must come FIRST, before *(.text .text.*), because its entire purpose
+         * is to shift the address of every other function — which is how we
+         * measure how much of a benchmark's movement is caused by code
+         * *placement* rather than code. Under QEMU's TCG a loop that straddles
+         * a 4 KiB guest page costs ~1.7x per iteration, and relinking re-rolls
+         * that for free, so "the diff made this 1.7x slower" and "the diff
+         * moved this function across a page" are indistinguishable without a
+         * deliberate perturbation to calibrate against.
+         *
+         * KEEP() because nothing references it symbolically; empty (0 bytes)
+         * unless SLATEOS_TEXT_PAD is set at build time, which is the default
+         * and is byte-for-byte the layout we have always built.
+         *
+         * `self_test_pad_is_first_in_text()` checks on every boot that this
+         * really is first — a pad placed mid-.text would still build and boot
+         * while silently under-reporting layout sensitivity.
+         *
+         * The bracketing symbols are how the kernel learns the pad's size. It
+         * deliberately does NOT read the Rust constant: doing so let the
+         * compiler fold `if PAD_BYTES == 0` away in the unpadded build, which
+         * made that build's code ~256 bytes shorter and so differ from the
+         * padded ones in code as well as in placement — the exact confound the
+         * whole mechanism exists to isolate. */
+        __layout_pad_start = .;
+        KEEP(*(.text.slateos_layout_pad))
+        __layout_pad_end = .;
+
         *(.text .text.*)
         __text_end = .;
     } :text

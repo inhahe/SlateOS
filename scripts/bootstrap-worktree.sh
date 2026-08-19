@@ -61,27 +61,89 @@
 #     ./scripts/bootstrap-worktree.sh              # everything
 #     ./scripts/bootstrap-worktree.sh netstack     # build just one service
 #     ./scripts/bootstrap-worktree.sh --check      # report what is missing
+#     ./scripts/bootstrap-worktree.sh --check --need=limine,rootfs
+#                                                  # ...only these classes
 #
 # Safe to re-run: cargo no-ops when a service is already up to date, so this
 # is cheap enough to run before any kernel build if you are unsure.
+#
+# `--check` exit status, which `scripts/boot-test.sh` reads:
+#
+#     0  everything present
+#     1  something *blocking* is missing — the kernel cannot build, or the
+#        boot test cannot stage (a service binary, or limine)
+#     2  usage error (unknown service name, or the kernel's embed list could
+#        not be derived — see embedded_artifact_paths)
+#     3  only rootfs.ext4 is missing — the boot test still runs and still
+#        passes, but silently tests ~58 rungs fewer
+#
+# 1 and 3 are split because conflating them forces a caller to choose between
+# refusing a run that would have been useful and accepting a green result that
+# quietly measured less than it claims. Both are wrong; neither is necessary.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
 
-# The services the kernel embeds. Keep in sync with the `include_bytes!`
-# calls in kernel/src/main.rs and kernel/src/proc/spawn.rs — the --check
-# mode below verifies the produced set, but it cannot discover a service
-# that was added to the kernel and not added here.
-SERVICES=(init hello ticker netstack httpget udpget)
+# The services the kernel embeds are DERIVED from the `include_bytes!` calls
+# in kernel/src, not listed here.
+#
+# A literal list would be a second copy of a fact the kernel already states,
+# and the two drift in one direction only: a service added to the kernel and
+# not added here goes missing from every fresh worktree, while this script —
+# whose entire job is to say what is missing — reports everything present.
+# That is the worst shape a check can have, and deriving the list makes it
+# impossible. See known-issues.md
+# A-A-FRESH-CHECKOUT-CANNOT-BOOT-TEST-AND-NEITHER-FAILURE-NAMES-THE-MISSING-STEP.
+#
+# The pattern matches the artifact path *inside* the macro, so it yields the
+# target triple and the binary name as well as the service directory. Nothing
+# about the layout is assumed beyond `services/<dir>/target/<triple>/release/
+# <bin>`, which is what the kernel literally writes — a service that one day
+# builds for a different triple needs no change here.
+embedded_artifact_paths() {
+    grep -rh --include='*.rs' 'include_bytes!' "$ROOT/kernel/src" 2>/dev/null \
+        | grep -o 'services/[A-Za-z0-9_.-]\+/target/[A-Za-z0-9_.-]\+/release/[A-Za-z0-9_.-]\+' \
+        | sort -u
+}
 
-# Every service builds for the bare-metal ring-3 triple, not the kernel's
-# custom target: these are ordinary user programs, not kernel code.
-TRIPLE="x86_64-unknown-none"
+declare -A ARTIFACT=()
+SERVICES=()
+while IFS= read -r _rel; do
+    [ -n "$_rel" ] || continue
+    _name="${_rel#services/}"
+    _name="${_name%%/*}"
+    if [ -z "${ARTIFACT[$_name]+set}" ]; then
+        SERVICES+=("$_name")
+        ARTIFACT["$_name"]="$_rel"
+    elif [ "${ARTIFACT[$_name]}" != "$_rel" ]; then
+        # One service directory, two different embedded artifacts. Keeping the
+        # first would provision one and silently leave the other missing, which
+        # is exactly the failure this derivation exists to prevent — so refuse
+        # rather than pick.
+        echo "error: service '$_name' is embedded from two different paths:" >&2
+        echo "         ${ARTIFACT[$_name]}" >&2
+        echo "         $_rel" >&2
+        echo "       One cargo invocation cannot produce both; teach this" >&2
+        echo "       script how before continuing." >&2
+        exit 2
+    fi
+done < <(embedded_artifact_paths)
+
+if [ ${#SERVICES[@]} -eq 0 ]; then
+    # An empty scan must never read as a clean bill of health. Either the
+    # kernel stopped embedding services (delete the derivation) or the pattern
+    # no longer matches how they are written (fix it) — both need a human, and
+    # neither is "nothing is missing".
+    echo "error: found no include_bytes! service artifacts under kernel/src." >&2
+    echo "       Refusing to report 'all prerequisites present' from a scan" >&2
+    echo "       that found nothing to look for. See embedded_artifact_paths." >&2
+    exit 2
+fi
 
 artifact_for() {
-    echo "$ROOT/services/$1/target/$TRIPLE/release/$1"
+    echo "$ROOT/${ARTIFACT[$1]}"
 }
 
 # The one file boot-test.sh actually stages; its presence stands in for a
@@ -182,9 +244,62 @@ provision_rootfs() {
 }
 
 check_only=0
-if [ "${1-}" = "--check" ]; then
-    check_only=1
-    shift
+
+# Which classes of prerequisite `--check` reports on.  All three by default.
+#
+# This exists because "missing" and "missing *and needed*" are different
+# questions, and only the caller knows which it is asking.  `boot-test.sh
+# --no-build --no-stage` boots an already-staged image: it touches neither the
+# embedded service binaries nor `limine/`, so refusing that run because they are
+# absent would be a false refusal — the run is valid and would have worked.  A
+# gate that blocks correct runs gets disabled, and then it is not a gate.
+#
+# Provisioning mode has no use for this (it provisions everything or the
+# named services), so `--need` outside `--check` is an error rather than a
+# silently-ignored flag.
+need_services=1
+need_limine=1
+need_rootfs=1
+_need_given=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check) check_only=1; shift ;;
+        --need=*)
+            # The first --need clears the defaults; further ones add to it.
+            if [ "$_need_given" -eq 0 ]; then
+                need_services=0; need_limine=0; need_rootfs=0; _need_given=1
+            fi
+            IFS=',' read -r -a _classes <<< "${1#--need=}"
+            for _c in ${_classes[@]+"${_classes[@]}"}; do
+                case "$_c" in
+                    services) need_services=1 ;;
+                    limine)   need_limine=1 ;;
+                    rootfs)   need_rootfs=1 ;;
+                    "")       ;;
+                    *)
+                        echo "error: unknown --need class '$_c'" >&2
+                        echo "known classes: services, limine, rootfs" >&2
+                        exit 2
+                        ;;
+                esac
+            done
+            shift
+            ;;
+        --) shift; break ;;
+        -*)
+            echo "error: unknown option '$1'" >&2
+            echo "usage: bootstrap-worktree.sh [--check [--need=<classes>]] [service...]" >&2
+            exit 2
+            ;;
+        *) break ;;
+    esac
+done
+
+if [ "$_need_given" -eq 1 ] && [ "$check_only" -eq 0 ]; then
+    echo "error: --need only applies to --check; provisioning always does" >&2
+    echo "       everything, or the services you name." >&2
+    exit 2
 fi
 
 if [ $# -gt 0 ]; then
@@ -205,33 +320,62 @@ else
 fi
 
 if [ "$check_only" -eq 1 ]; then
-    missing=0
-    if [ -f "$LIMINE_MARKER" ]; then
-        printf '  present  limine bootloader\n'
-    else
-        printf '  MISSING  limine bootloader  (%s)\n' "$LIMINE_MARKER"
-        missing=$((missing + 1))
-    fi
-    if looks_like_ext4 "$ROOTFS_IMG"; then
-        printf '  present  rootfs.ext4 (Path-Z glibc tests)\n'
-    else
-        printf '  MISSING  rootfs.ext4  (%s) — ~58 tests will silently SKIP\n' "$ROOTFS_IMG"
-        missing=$((missing + 1))
-    fi
-    for name in "${requested[@]}"; do
-        path="$(artifact_for "$name")"
-        if [ -f "$path" ]; then
-            printf '  present  %s\n' "$name"
+    # Two severities, reported and exited separately, because they are not the
+    # same kind of problem and a caller that automates this needs to tell them
+    # apart:
+    #
+    #   blocking  — the build or the boot cannot happen at all (services,
+    #               limine).  Loud, immediate, unambiguous.
+    #   degrading — the run still goes green while quietly testing less
+    #               (rootfs.ext4 → ~58 rungs SKIP).  Far more dangerous to
+    #               conflate with "fine", and far too weak a reason to refuse
+    #               a boot test that would otherwise be useful.
+    #
+    # Exit: 0 all present, 1 something blocking, 3 only degrading, 2 usage.
+    blocking=0
+    degrading=0
+    if [ "$need_limine" -eq 1 ]; then
+        if [ -f "$LIMINE_MARKER" ]; then
+            printf '  present  limine bootloader\n'
         else
-            printf '  MISSING  %s  (%s)\n' "$name" "$path"
-            missing=$((missing + 1))
+            printf '  MISSING  limine bootloader  (%s)\n' "$LIMINE_MARKER"
+            blocking=$((blocking + 1))
         fi
-    done
-    if [ "$missing" -gt 0 ]; then
+    fi
+    if [ "$need_rootfs" -eq 1 ]; then
+        if looks_like_ext4 "$ROOTFS_IMG"; then
+            printf '  present  rootfs.ext4 (Path-Z glibc tests)\n'
+        else
+            printf '  DEGRADED rootfs.ext4  (%s) — ~58 tests will silently SKIP\n' "$ROOTFS_IMG"
+            degrading=$((degrading + 1))
+        fi
+    fi
+    if [ "$need_services" -eq 1 ]; then
+        for name in "${requested[@]}"; do
+            path="$(artifact_for "$name")"
+            if [ -f "$path" ]; then
+                printf '  present  %s\n' "$name"
+            else
+                printf '  MISSING  %s  (%s)\n' "$name" "$path"
+                blocking=$((blocking + 1))
+            fi
+        done
+    fi
+    if [ "$blocking" -gt 0 ]; then
         echo ""
-        echo "$missing prerequisite$([ "$missing" -eq 1 ] || echo s) missing;"
-        echo "run ./scripts/bootstrap-worktree.sh to provision them."
+        echo "$blocking prerequisite$([ "$blocking" -eq 1 ] || echo s) missing."
+        echo "The kernel cannot build, or the boot test cannot stage, until"
+        echo "provisioned:"
+        echo "    ./scripts/bootstrap-worktree.sh"
         exit 1
+    fi
+    if [ "$degrading" -gt 0 ]; then
+        echo ""
+        echo "Everything needed to build and boot is present, but rootfs.ext4 is not,"
+        echo "so a boot test will report PASSED while skipping every REAL-glibc"
+        echo "Path-Z rung.  Provision it before trusting a green run:"
+        echo "    ./scripts/bootstrap-worktree.sh"
+        exit 3
     fi
     echo ""
     echo "All build and boot prerequisites present."

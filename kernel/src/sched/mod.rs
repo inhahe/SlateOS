@@ -2407,10 +2407,63 @@ fn liveness_report_prefix() -> &'static str {
 ///
 /// At WATCHDOG_CHECK_INTERVAL (5s) per interval, 3 intervals = 15 seconds
 /// of the whole machine making zero task-level progress during boot.  No
-/// legitimate pre-BOOT_OK operation stalls all tasks for that long, so 15s
-/// is comfortably above the noise floor while still catching the hang
-/// promptly.
+/// legitimate pre-BOOT_OK operation stalls all tasks for that long *in an
+/// ordinary build*, so 15s is comfortably above the noise floor while still
+/// catching the hang promptly.
+///
+/// # Why this is a threshold and not a smarter signal
+///
+/// The detector's blind spot is a long CPU-bound *kernel-side* computation:
+/// `USEFUL_WORK_TICKS` only advances for ticks that preempt ring-3 code or a CPU
+/// with a queued task, `kernel_progress_count()` counts page faults and block
+/// I/O, and a pure in-memory compression loop does none of those while printing
+/// nothing.  It is therefore indistinguishable — by every signal the kernel
+/// has — from an in-kernel infinite loop, which is precisely the hang this
+/// detector exists to catch.  Making kernel-mode ticks count as progress would
+/// close the false positive by blinding the detector to its primary target.
+/// Duration is the only knob that separates the two, so duration is what gets
+/// tuned.
+///
+/// # Why instrumentation changes the number
+///
+/// Under `kasan_instrumented` every load and store grows a shadow-byte lookup
+/// first, so the wall-clock cost of a fixed amount of work rises and a threshold
+/// calibrated in seconds silently becomes a threshold calibrated in *less work*.
+/// Measured 2026-08-19, same host, same QEMU, on the bzip2 boot self-test's
+/// repetitive-data round-trip:
+///
+/// | build | silent window | verdict at 15s |
+/// |---|---|---|
+/// | ordinary   | inside one 30 s breadcrumb window, alongside the whole rest of the bzip2 *and* xz self-tests | no report |
+/// | instrumented | ~93 s (armed 898 s → 991 s) | two spurious `SYSTEM HANG` reports |
+///
+/// The self-test *completed and passed*, and the boot ran on to BOOT_OK with
+/// every later self-test green, so the reports were false by direct evidence
+/// rather than by inference.
+///
+/// **Do not scale this by the aggregate boot slowdown.**  That figure was 3.7x
+/// (285 s → 1063 s), and 3.7 x 15 s = 55 s — still under the measured 93 s, so a
+/// threshold derived that way would go on false-firing.  Instrumentation cost is
+/// proportional to memory-access *density*, and a compression inner loop is far
+/// denser than boot taken as a whole; the aggregate ratio is the wrong scaling
+/// factor for a per-operation threshold.  36 intervals = 180 s is ~1.9x the
+/// measured window, chosen against the measurement itself.
+///
+/// The generosity is cheap because it costs only *promptness*, never detection:
+/// `liveness_boot_deadline_check`'s wall-clock backstop still catches any hang
+/// mode by construction, and on an instrumented boot it sits at ~3498 s — so
+/// even at 180 s the progress detectors remain the promptest signal by 19x.
+///
+/// Same bug class, and the same fix, as `KASAN_BOOT_TIMEOUT` in
+/// `scripts/kasan-build.sh` and `BENCH_TIMEOUT` in `scripts/boot-test.sh`: a
+/// constant calibrated on an uninstrumented kernel, applied to an instrumented
+/// one, reported as a kernel fault.
+#[cfg(not(kasan_instrumented))]
 const LIVENESS_ALERT_COUNT: u64 = 3;
+
+/// See the ordinary-build [`LIVENESS_ALERT_COUNT`] for the full derivation.
+#[cfg(kasan_instrumented)]
+const LIVENESS_ALERT_COUNT: u64 = 36;
 
 /// Monotonic timestamp (ns since boot) captured when the liveness watchdog was
 /// armed, or 0 if not armed. Backs the wall-clock boot-deadline backstop below.

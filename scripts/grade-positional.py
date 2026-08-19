@@ -109,6 +109,17 @@ GRADE_SUPPORTED = "SUPPORTED"
 GRADE_BLIND = "FAILED (blind)"
 GRADE_UNLOCALISED = "FAILED (not localised)"
 GRADE_MISPLACED = "FAILED (misplaced)"
+
+#: How many benchmarks one idle-host canary spike flags, measured not assumed.
+#:
+#: RESULT P24 ran five bench boots with no load at all. Two produced a single
+#: isolated +12.6% canary sample, and because the model interpolates between
+#: samples each one flagged exactly 3 adjacent benchmarks (positions 31-33 and
+#: 7-9). This is the size of the smallest disturbance the host produces on its
+#: own, and therefore the size below which an outside-reach cluster says nothing
+#: about the model. Used only to annotate the report -- never to change a
+#: verdict.
+P24_IDLE_CLUSTER = 3
 GRADE_UNGRADED = "UNGRADED"
 
 #: A model that flags most of the suite has not localised anything, however
@@ -636,6 +647,27 @@ def print_grade(result, positions, load_at, load_until):
         more = len(result["outside"]) - 8
         print(f"      outside reach: {shown}" + (f", +{more} more" if more > 0
                                                  else ""))
+        # State the measured host-noise rate next to the count, always.
+        #
+        # "Provably clean" means "no load was applied there", which is not the
+        # same as "undisturbed" -- and RESULT P24 measured the difference: five
+        # bench boots with nothing running at all produced this exact signature
+        # in **two** of them, ~3 adjacent benchmarks around one isolated +12.6%
+        # canary sample, at positions 32 and 8 with no load within reach.
+        #
+        # So a small isolated cluster here is what an idle host looks like, not
+        # evidence about the model. The verdict below is deliberately left
+        # unchanged -- relaxing the gate that had just returned FAILED would be
+        # moving the goalposts, and that call is not this script's to make (see
+        # open-questions.md). What is fixed here is only the reading: the number
+        # now arrives with the context needed to interpret it, so no future
+        # reader has to rediscover P24 to know whether it means anything.
+        if len(result["outside"]) <= P24_IDLE_CLUSTER:
+            print(f"      note: {len(result['outside'])} flag(s) outside reach "
+                  f"is within the idle-host rate measured by RESULT P24 "
+                  f"(2 of 5 unloaded runs flagged ~{P24_IDLE_CLUSTER} "
+                  f"benchmarks each). Treat as host noise unless the flags "
+                  f"form a shifted band rather than an isolated cluster.")
     print(f"  VERDICT: {result['verdict']} -- {result['reason']}")
 
 

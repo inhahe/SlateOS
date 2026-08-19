@@ -1343,6 +1343,69 @@ features), `scripts/boot-test.sh:2262,2276` (`-device virtio-gpu-pci`,
 
 ---
 
+
+## Q52 — [A] Should a benchmark-grading gate keep failing on noise it cannot tell from a real fault? — Status: OPEN
+
+**In short:** we have a tool that watches for the machine getting busy while
+benchmarks run, so a slow benchmark isn't mistaken for a real slowdown. To check
+that the tool works, we deliberately load the machine over a known stretch of
+benchmarks and see whether it points at the right ones. Part of that check fails
+the tool if it points *anywhere else at all* — zero tolerance. We have now
+measured that the machine hiccups on its own in 2 runs out of 5 with nothing
+running, and the tool correctly reports those hiccups, which the check then
+counts against it. So the check can fail a perfectly good tool on a coin flip.
+The question is whether to loosen it, and if so how.
+
+**Glossary, in case this is read cold:** *canary* — a tiny fixed piece of work
+timed repeatedly during the run, so a change in its cost reveals the machine got
+busy. *False positive* — the tool pointing at a benchmark nothing was actually
+done to. *Tolerance 0* — any single one of those fails the check outright.
+
+#### The evidence
+
+RESULT P24 (in `known-issues.md`): five benchmark runs, nothing else running on
+the machine. Two of the five contained a real one-off 12.6% jump in the canary's
+cost, and each caused about 3 benchmarks to be reported. That is the same
+signature that failed the check in RESULT P23. The two cases are not
+distinguishable from the output.
+
+Worth stating plainly: the tool is not malfunctioning in any of this. Both
+experiments found it reports exactly what its input says. The disagreement is
+about what the *grading rule* should count as a mistake.
+
+#### Options
+
+| | *What changes:* |
+|---|---|
+| **A. Leave it at zero** | Nothing. The check keeps returning `FAILED (misplaced)` roughly 2 runs in 5 no matter how good the tool is, and each result needs a human to read the note and discount it. |
+| **B. Allow a small isolated cluster** (~3 benchmarks, the measured size of one hiccup) | Runs like P23 read `PASSED` instead of `FAILED`. A tool that genuinely pointed at a *few* wrong benchmarks would now slip through. |
+| **C. Fail only on a shifted *band*, not on isolated spikes** | Distinguishes "reported a stray hiccup somewhere" from "found the window but in the wrong place" — the fault the check actually exists to catch. More code, and the band/spike rule needs its own justification. |
+| **D. Measure the noise properly first** (20+ idle runs, then set the rule from the distribution) | Nothing changes for now; the decision gets made on 20 samples instead of 5. Costs about 45 minutes of machine time, none of it mine to spend badly. |
+
+**My recommendation: D, then C.** Five runs is enough to prove the assumption is
+wrong but too few to calibrate anything — picking a number from 5 samples is how
+the original zero got there. C is the option that matches what the check is for,
+but it should be built on a real distribution rather than on two observations.
+
+#### Why I did not just decide this
+
+The rule I would be relaxing is the one that returned `FAILED` on my own
+experiment three hours ago. Changing a gate immediately after it fails you is
+indistinguishable from moving the goalposts, whatever the reasoning, so this is
+worth a second opinion even though the technical argument seems clear to me.
+
+I have already made the part that carries no such hazard: the grader now prints
+the measured idle-host rate next to the count, so the number is readable in
+context. **No verdict changed.**
+
+#### If this is never answered
+
+Safe, and it does not get worse. The check keeps running and keeps being
+slightly too harsh in a documented, annotated way; nothing is blocked and no
+recorded benchmark number is affected (`design-decisions.md` S229 means nothing
+is auto-corrected on this tool's say-so). The cost is only that future runs of
+this experiment need the note read alongside the verdict.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

@@ -123,6 +123,17 @@ class Serial:
     exceptions: tuple[str, ...]
     benign_exceptions: tuple[str, ...]
     has_panic: bool
+    #: Which sanitizer the kernel was built with, as the kernel itself reported
+    #: it: `"kasan-instrumented"`, `"none"`, or `None` when the log carries no
+    #: banner at all.
+    #:
+    #: The three-way split is the point, and `None` must never be folded into
+    #: `"none"`. Every boot recorded before 2026-08-19 predates the banner, and
+    #: a good number of those *were* instrumented; treating a missing line as
+    #: "not instrumented" would mislabel them all in the direction that makes
+    #: the two populations look like one. `None` means "this log cannot say",
+    #: which is a thing a consumer can decline to average.
+    sanitizer: str | None = None
 
     @property
     def last_line(self) -> str:
@@ -189,6 +200,17 @@ _BENIGN_EXCEPTION_RE = re.compile(
 #: own mean "kernel died".
 _NONFATAL_VECTOR_RE = re.compile(r"\(#BP\)")
 
+#: The kernel's build-profile banner (kernel/src/main.rs, printed immediately
+#: after "=== Kernel booting ===").
+#:
+#: Matched loosely on the `sanitizer=` key rather than on the whole line, so
+#: that adding a second key to the banner later (`opt=`, `lto=`, …) does not
+#: silently stop this from matching — a parser that stops matching produces the
+#: same `None` as a kernel that never printed, and those must stay
+#: distinguishable.
+_SANITIZER_RE = re.compile(r"^\[boot\] build profile:.*\bsanitizer=(\S+)",
+                           re.MULTILINE)
+
 
 def _can_be_fatal(exc: str) -> bool:
     """Could this `EXCEPTION:` line be evidence that the kernel died?
@@ -237,6 +259,7 @@ def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
     all_exc = tuple(_EXCEPTION_RE.findall(text))
     benign = tuple(e for e in all_exc if not _can_be_fatal(e))
     fatal = tuple(e for e in all_exc if _can_be_fatal(e))
+    san_match = _SANITIZER_RE.search(text)
     return Serial(
         path=path,
         text=text,
@@ -249,6 +272,7 @@ def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
         exceptions=fatal,
         benign_exceptions=benign,
         has_panic=bool(_PANIC_RE.search(text)),
+        sanitizer=san_match.group(1) if san_match else None,
     )
 
 
@@ -372,6 +396,19 @@ def _fp_kasan_midprint(s: Serial, verdict: str) -> bool:
     # report -- `EXCEPTION: Page Fault (#PF) at` truncated exactly where
     # `{:#x}` would have formatted `frame.rip`. Disjoint from W1 by
     # construction: W1 requires no exception line at all.
+    #
+    # The issue is titled "KASAN builds only", and now that the kernel says
+    # which build it is, say so here. Note the asymmetry in how the three
+    # sanitizer states are treated, which is deliberate and is the whole reason
+    # `sanitizer` is three-valued: an explicit `"none"` is a *positive* denial
+    # from the kernel and rules the fingerprint out, whereas `None` -- a log
+    # from a kernel too old to print the banner -- rules nothing out and must
+    # still be allowed to match. Every boot this fingerprint was validated
+    # against (2026-08-12) predates the banner, so folding `None` in with
+    # `"none"` would un-validate it and reset its streak to a clean one, which
+    # is precisely the failure this file exists to prevent.
+    if s.sanitizer == "none":
+        return False
     return (
         verdict in ("WEDGE", "TIMEOUT", "PANIC")
         and s.ends_mid_line
@@ -598,6 +635,25 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
         rec["serial_lines"] = len(serial.lines)
         rec["ends_mid_line"] = serial.ends_mid_line
         rec["boot_ok"] = serial.boot_ok
+        # Written unconditionally, `null` included, and *not* folded into
+        # `profile`.
+        #
+        # `profile` is what the harness was told to build; this is what the
+        # kernel says it actually is, and until 2026-08-19 the two were not the
+        # same question with the same answer. An instrumented boot and an
+        # ordinary one both recorded `profile: "debug"`, while their wall times
+        # differed by 3.4x (~1100 s against ~330 s on this host) -- so every
+        # duration statistic drawn from this file was averaging two populations
+        # it had no way to tell apart.
+        #
+        # Emitting the key even when the value is `null` is what keeps the
+        # three states distinguishable *within* the rows that have a serial log
+        # at all: absent means "row predates this field", `null` means "the
+        # kernel did not say", and a string means it did. Had the key simply
+        # been omitted when unknown, those first two would collapse, and a
+        # consumer would have to guess -- which, on this file's history, means
+        # guess "uninstrumented" and quietly mislabel the slow boots.
+        rec["sanitizer"] = serial.sanitizer
         fps = fingerprints_for(serial, verdict)
         if fps:
             rec["fingerprints"] = fps
@@ -689,6 +745,75 @@ def describe_streak(st: Streak) -> list[str]:
     return lines
 
 
+#: Label for a record that cannot say which build it was.
+#:
+#: Spelled as prose rather than as the bare word "unknown" because it is going
+#: to be read next to "none", and those two must never look like near-synonyms:
+#: one is the kernel saying it was not instrumented, the other is nobody saying
+#: anything.
+_SAN_UNKNOWN = "unknown (pre-banner)"
+
+
+def sanitizer_of(rec: dict) -> str:
+    """Which population a record belongs to, for statistics that must not mix.
+
+    Collapses the two ways of not knowing -- key absent (row written before the
+    field existed) and key present but null (kernel too old to print the
+    banner) -- because for the purpose of *grouping* they are the same: neither
+    can be put in a bucket. They stay distinct in the file itself, where the
+    difference tells you whether it is the recorder or the kernel that is old.
+    """
+    if "sanitizer" not in rec:
+        return _SAN_UNKNOWN
+    val = rec["sanitizer"]
+    return _SAN_UNKNOWN if val is None else str(val)
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def wall_populations(records: list[dict]) -> dict[str, list[float]]:
+    """Wall times grouped by build, never merged."""
+    out: dict[str, list[float]] = {}
+    for rec in records:
+        wall = rec.get("wall_seconds")
+        if not isinstance(wall, (int, float)) or isinstance(wall, bool):
+            continue
+        out.setdefault(sanitizer_of(rec), []).append(float(wall))
+    return out
+
+
+def report_wall(records: list[dict]) -> None:
+    """Per-build wall-time standing.
+
+    Deliberately prints no combined figure, not even when there is only one
+    population -- because "only one population" is a fact about the records
+    that happen to be loaded, and a single number printed today would be the
+    number someone compares against tomorrow, after an instrumented run has
+    landed in the same file. The whole defect this replaces was a statistic
+    that stayed valid right up until the day the second population appeared,
+    and then said nothing about either.
+    """
+    pops = wall_populations(records)
+    if not pops:
+        return
+    print("[boot-history] wall time by build:")
+    for name in sorted(pops):
+        vals = pops[name]
+        print(f"[boot-history]   {name}: {len(vals)} boot(s), "
+              f"median {_median(vals):.0f}s, "
+              f"range {min(vals):.0f}-{max(vals):.0f}s")
+    if len(pops) > 1:
+        print("[boot-history]   (reported separately on purpose: a "
+              "KASAN-instrumented boot runs several times longer, so one "
+              "median over the mixture describes no build that exists)")
+
+
 def report(records: list[dict], current: dict | None) -> None:
     if current is not None:
         verdict = current["verdict"]
@@ -696,6 +821,7 @@ def report(records: list[dict], current: dict | None) -> None:
         why = VERDICT_HELP.get(verdict, "")
         print(f"[boot-history] {verdict}"
               + (f" -- {why}" if why else ""))
+        print(f"[boot-history] build: {sanitizer_of(current)}")
         if hits:
             print("[boot-history] matches known issue(s): " + ", ".join(hits))
             for fp in FINGERPRINTS:
@@ -713,6 +839,7 @@ def report(records: list[dict], current: dict | None) -> None:
         else:
             break
     print(f"[boot-history] current consecutive clean streak: {tail_clean}")
+    report_wall(records)
 
 
 def cmd_streaks(history_path: str) -> int:
@@ -737,8 +864,14 @@ def cmd_list(history_path: str, limit: int) -> int:
         fps = ",".join(rec.get("fingerprints") or []) or "-"
         wall = rec.get("wall_seconds")
         wall_s = f"{wall:.0f}s" if isinstance(wall, (int, float)) else "-"
+        # Abbreviated to keep the row one terminal line, but still three-valued:
+        # `kasan`, `-` (kernel said "none"), `?` (nothing said). A row whose
+        # duration looks wrong is almost always a row from the other build, and
+        # this column is what lets you see that without opening the JSON.
+        san = sanitizer_of(rec)
+        san_s = {"kasan-instrumented": "kasan", "none": "-"}.get(san, "?")
         print(f"{rec.get('ts','?'):<26} {rec.get('commit','?'):<10} "
-              f"{rec.get('verdict','?'):<17} {wall_s:>6}  "
+              f"{rec.get('verdict','?'):<17} {wall_s:>6} {san_s:<5} "
               f"{rec.get('label','') or '-':<12} {fps}")
     return 0
 

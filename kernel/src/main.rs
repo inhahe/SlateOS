@@ -461,6 +461,32 @@ extern "C" fn kernel_main() -> ! {
     }
 
     serial_println!("=== Kernel booting ===");
+    // Announce the build profile, unconditionally and with a *varying* value.
+    //
+    // `bench/boot-history.jsonl` records `profile: "debug"` for an instrumented
+    // boot and `profile: "debug"` for an ordinary one, which is the same string
+    // for two populations whose wall times differ by 3.4x (≈330 s vs ≈1100 s on
+    // this host). Anything that reads durations out of that file — a streak, a
+    // timeout calibration, a "is this boot unusually slow" judgement — is
+    // averaging across a mixture it cannot see. This line is what lets a
+    // consumer separate them.
+    //
+    // Unconditional, and printed even when there is nothing interesting to say,
+    // for the reason this project has now been bitten by three times: a line
+    // that appears *only* in the instrumented build is indistinguishable from a
+    // kernel too old to print it, so its absence would silently mean "assume
+    // uninstrumented" and quietly mislabel every historic boot. Because the
+    // value varies rather than the line's existence, absence is a third and
+    // distinguishable state — "this kernel predates the banner" — which is what
+    // a parser needs in order to decline to guess.
+    serial_println!(
+        "[boot] build profile: sanitizer={}",
+        if cfg!(kasan_instrumented) {
+            "kasan-instrumented"
+        } else {
+            "none"
+        }
+    );
     boot_timing::mark(boot_timing::Milestone::KernelEntry);
 
     // Lay down the boot-stack overflow canary now, while RSP is near the top

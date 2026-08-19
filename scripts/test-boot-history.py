@@ -184,6 +184,18 @@ S_LIVELOCK = _PROLOGUE + (
 )
 
 
+#: The build-profile banner, both values, as kernel/src/main.rs prints it
+#: immediately after "=== Kernel booting ===".
+#:
+#: Note none of the samples above carry it. That is deliberate and load-bearing:
+#: every occurrence in every `validated_by` list predates the banner, so the
+#: pre-banner samples are the *real* evidence and must keep matching. If adding
+#: the banner to `_PROLOGUE` had been the easy way to make these tests pass,
+#: that would have been the bug -- see `test_kasan_fp_still_matches_a_pre_banner_log`.
+S_BANNER_KASAN = "[boot] build profile: sanitizer=kasan-instrumented\n"
+S_BANNER_NONE = "[boot] build profile: sanitizer=none\n"
+
+
 def _serial(bh, text, marker="BOOT_OK"):
     """Parse a sample without touching the filesystem."""
     with tempfile.NamedTemporaryFile("wb", suffix=".txt", delete=False) as fh:
@@ -790,6 +802,168 @@ def test_clean_verdicts_are_all_known(bh):
 
 
 # --------------------------------------------------------------------------
+# Build profile (which sanitizer the kernel was built with)
+# --------------------------------------------------------------------------
+
+
+def test_sanitizer_read_from_the_banner(bh):
+    kasan = _serial(bh, S_BANNER_KASAN + S_PASS)
+    plain = _serial(bh, S_BANNER_NONE + S_PASS)
+    check("instrumented banner parsed", kasan.sanitizer, "kasan-instrumented")
+    check("uninstrumented banner parsed", plain.sanitizer, "none")
+
+
+def test_absent_banner_is_none_the_object_not_none_the_string(bh):
+    """The distinction the whole three-valued field exists for.
+
+    A log with no banner cannot say which build it was; a log that says
+    `sanitizer=none` says it was not instrumented. Folding the first into the
+    second would relabel every boot recorded before 2026-08-19 -- a population
+    that certainly includes instrumented ones -- as definitely-not-instrumented,
+    in exactly the direction that makes the two populations look like one.
+    """
+    s = _serial(bh, S_PASS)
+    check("no banner -> None", s.sanitizer, None)
+    check("and specifically not the string 'none'", s.sanitizer == "none", False)
+
+
+def test_banner_survives_a_second_key_being_added(bh):
+    """A parser that quietly stops matching produces the same answer as a kernel
+    that never printed, and those must stay distinguishable -- so the regex keys
+    off `sanitizer=`, not off the whole line."""
+    text = "[boot] build profile: sanitizer=none opt=3 lto=thin\n" + S_PASS
+    check("extra keys do not break the match", _serial(bh, text).sanitizer,
+          "none")
+
+
+def test_kasan_fp_still_matches_a_pre_banner_log(bh):
+    """Scoping the fingerprint by build must not un-validate its own evidence.
+
+    S_KASAN is the 2026-08-12 occurrence, from a kernel that could not print a
+    banner. If "unknown" were treated as "not instrumented", this fingerprint's
+    single validated occurrence would stop matching and its streak would reset
+    to a perfect clean one -- the precise failure this suite exists to catch.
+    """
+    verdict, fps = _fps(bh, S_KASAN, 2)
+    check_true("pre-banner KASAN wedge still matches",
+               "B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT"
+               in fps)
+
+
+def test_kasan_fp_matches_an_instrumented_log(bh):
+    _, fps = _fps(bh, S_BANNER_KASAN + S_KASAN, 2)
+    check_true("instrumented KASAN wedge matches",
+               "B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT"
+               in fps)
+
+
+def test_kasan_fp_declines_an_explicitly_uninstrumented_log(bh):
+    """The issue is titled "KASAN builds only"; now the kernel can say so.
+
+    Only an explicit denial rules it out. This is the one direction where
+    narrowing is safe, because the kernel positively asserted the build.
+    """
+    _, fps = _fps(bh, S_BANNER_NONE + S_KASAN, 2)
+    check("uninstrumented build declines the KASAN fingerprint",
+          "B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT" in fps,
+          False)
+    check_true("and the record is not lost -- W1 is disjoint, so nothing "
+               "silently absorbs it", isinstance(fps, list))
+
+
+def test_record_carries_the_sanitizer_even_when_unknown(bh):
+    """Present-and-null, not absent.
+
+    Within rows that have a serial log at all, an absent key must mean "written
+    before the field existed" and null must mean "the kernel did not say". Omit
+    the key when unknown and those collapse into one, leaving a consumer to
+    guess -- which on this file's history means guess "uninstrumented".
+    """
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check_true("sanitizer key always written", "sanitizer" in rec)
+    check("unknown build recorded as null", rec["sanitizer"], None)
+    rec2 = bh.build_record(_serial(bh, S_BANNER_KASAN + S_PASS), "PASS",
+                           _Args())
+    check("known build recorded verbatim", rec2["sanitizer"],
+          "kasan-instrumented")
+    # It must survive the round trip that actually happens: the file is JSONL.
+    check("null survives serialisation", json.loads(json.dumps(rec))["sanitizer"],
+          None)
+
+
+def test_sanitizer_of_groups_the_two_ways_of_not_knowing(bh):
+    absent = {"verdict": "PASS"}
+    null = {"verdict": "PASS", "sanitizer": None}
+    known = {"verdict": "PASS", "sanitizer": "none"}
+    check("absent key groups as unknown", bh.sanitizer_of(absent),
+          bh.sanitizer_of(null))
+    check("and never as the kernel's own 'none'",
+          bh.sanitizer_of(absent) == bh.sanitizer_of(known), False)
+    check("an explicit 'none' groups as itself", bh.sanitizer_of(known), "none")
+
+
+def test_wall_times_are_never_averaged_across_builds(bh):
+    """The defect this change fixes, stated as a test.
+
+    Two populations whose wall times differ by ~3.4x were both recorded
+    `profile: "debug"`, so any median drawn over the file described neither.
+    """
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "wall_seconds": 320.0},
+        {"verdict": "PASS", "sanitizer": "none", "wall_seconds": 340.0},
+        {"verdict": "PASS", "sanitizer": "kasan-instrumented",
+         "wall_seconds": 1100.0},
+        {"verdict": "PASS", "wall_seconds": 900.0},
+    ]
+    pops = bh.wall_populations(records)
+    check("three populations kept apart", sorted(pops), sorted(
+        ["none", "kasan-instrumented", bh._SAN_UNKNOWN]))
+    check("uninstrumented median", bh._median(pops["none"]), 330.0)
+    check("instrumented median", bh._median(pops["kasan-instrumented"]), 1100.0)
+
+
+def test_wall_populations_ignore_rows_without_a_duration(bh):
+    """A missing `wall_seconds` must not become a zero -- a zero would drag the
+    median of whichever population it landed in toward a value no boot took."""
+    records = [{"verdict": "PASS", "sanitizer": "none"},
+               {"verdict": "PASS", "sanitizer": "none", "wall_seconds": None},
+               {"verdict": "PASS", "sanitizer": "none", "wall_seconds": 300.0}]
+    check("only the row with a duration counts",
+          bh.wall_populations(records)["none"], [300.0])
+
+
+def test_report_prints_each_build_separately_and_no_combined_figure(bh):
+    import contextlib
+    import io
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "wall_seconds": 330.0},
+        {"verdict": "PASS", "sanitizer": "kasan-instrumented",
+         "wall_seconds": 1100.0},
+    ]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(records, None)
+    out = buf.getvalue()
+    check_true("uninstrumented population reported", "330s" in out)
+    check_true("instrumented population reported", "1100s" in out)
+    check_true("and the reader is told why they are apart",
+               "separately on purpose" in out)
+    # 715 is the mean of 330 and 1100: the number the old code would have
+    # produced, and the one no boot on this host has ever taken.
+    check("no figure averaged across builds", "715" in out, False)
+
+
+def test_report_names_the_build_of_the_run_it_just_recorded(bh):
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report([], {"verdict": "PASS", "sanitizer": "kasan-instrumented"})
+    check_true("current run's build is printed",
+               "build: kasan-instrumented" in buf.getvalue())
+
+
+# --------------------------------------------------------------------------
 # End-to-end
 # --------------------------------------------------------------------------
 
@@ -855,9 +1029,9 @@ def main():
              if name.startswith("test_") and callable(fn)]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes -- the failure mode this whole script is about. Assert a floor.
-    if len(tests) < 35:
+    if len(tests) < 60:
         print(f"FATAL: test discovery found only {len(tests)} tests; the suite "
-              f"has at least 35. Discovery is broken, not the code.")
+              f"has at least 60. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

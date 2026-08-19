@@ -1859,6 +1859,57 @@ default and no committed configuration — it is a probe, and it will be recorde
 as one. If the bands stay wide under WHPX, option C loses most of its value and
 this question gets much easier to answer.
 
+#### Update 2026-08-19 (later) — this table was re-checked against the tool, and the headline holds; one row does not
+
+`design-decisions.md` §240 adopted a rule after a table on **Q53** was found to
+be wrong: evidence quoted here has to be reproducible by a command the reader
+can re-run, because the Q53 figures had been produced by a one-off analysis that
+picked its own runs. This table has the same provenance — it was built by hand
+in §237, and there is no `bench-history.py` mode that regenerates it — so it was
+re-derived from `bench/history.jsonl` before being left in front of you.
+
+**The arithmetic is exact.** Comparing the two records the table names
+(`kernel_sha 7a17cf6be2a10a26`, release, TCG at `text_pad 0` vs the WHPX probe)
+reproduces ×3.53, 82 of 86 faster, best ×10.36, and `hpet_read` 453 → 13534 ns,
+to the digit. Nothing here is fabricated.
+
+**But the TCG side is a single layout arm, and Q53 exists because a single
+layout arm is not a reliable number.** The comparison used the `text_pad 0` arm
+of a six-arm sweep. Re-running it against each of the other five:
+
+| | as published (pad 0) | across all six TCG arms |
+|---|---|---|
+| Typical speedup | ×3.53 | **×3.53 – ×3.97** |
+| Benchmarks faster | 82 of 86 | 82–83 of 86 |
+| Best case | `ipc_channel_roundtrip_64k` ×10.36 | **×10.34 – ×16.71, and a different benchmark each time** |
+| `hpet_read` | 453 → 13534 ns | 441–453 → 13534 ns |
+
+Three conclusions, and they differ by row:
+
+- **The headline is safe, and understates itself.** ×3.53 is the *lowest* of the
+  six; the true typical figure is ×3.5–4.0. Unlike the Q53 case, the arm that
+  happened to be picked was the one least favourable to the argument being made,
+  so this error — such as it is — runs against the conclusion rather than toward
+  it.
+- **The device-bound row is solid.** `hpet_read` sits in 441–453 ns across every
+  arm and collapses to one VM-exit cost regardless, so "~30× slower, and it is a
+  different *shape* rather than a speed dial" is unaffected. That was always the
+  most important claim in the table and it is the best-supported one.
+- **The "best case" row should not be read as naming a benchmark.** Which
+  benchmark wins depends on which TCG arm you compare against —
+  `ipc_channel_roundtrip_64k` at pads 0 and 1536, `io_ring_nop` at 2048 and
+  3072, `http_gzip_8KiB` at 1024, `vfs_throughput_16k_read` at 2560 — and the
+  value ranges to ×16.71. The honest statement is "the best cases are ×10–17",
+  with no name attached. Individual per-benchmark speedups swing by up to 2.9×
+  with arm choice (`heap_raw_alloc_free_4096` is ×1.72–×5.00).
+
+**What this does to the options: nothing.** Every option above turns on the
+typical speedup, the shape change, and the security-feature loss, and all three
+survive. The row that moved was the one no option depends on. This is recorded
+because a table that was checked and found sound is worth as much as one that
+was checked and found wrong — and because the check was cheap and the last one
+like it changed an answer.
+
 #### Why I did not just decide this
 
 Switching the accelerator would stop exercising a security feature on every

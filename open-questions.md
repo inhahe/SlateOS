@@ -1507,6 +1507,100 @@ mode is the quiet one, where a genuine regression in a hot path is waved
 through as "within the band" by someone who never checked whether a band was
 ever measured for it.
 
+#### Update 2026-08-19 (later) — option D has been measured, and the answer is "mostly yes, but you cannot yet trust the remainder"
+
+**In short:** the guess that most of this noise is an artifact of the emulator
+(rather than something real about our code) has now been tested rather than
+argued, by building the *same* kernel at five deliberately different code
+placements and running the suite on the faster emulator mode. The noise
+collapses — the typical benchmark's placement-only spread falls from **36.5%
+to 4.9%**, and the worst offenders fall by two orders of magnitude. But it
+does not collapse to nothing, and the instrument that would tell us whether
+the remainder is placement or merely a busy PC is broken on that emulator
+mode. So this changes the recommendation without yet settling the question.
+
+**The measurement.** Five arms so far (a sixth is building), identical source,
+`.text` padded by 0/1024/1536/2048/2560 bytes, all under `-accel whpx`,
+compared against the existing six-arm TCG sweep at `b36a244bb`:
+
+| | TCG | WHPX |
+|---|---|---|
+| median placement band | **36.5%** | **4.9%** |
+| mean | 104.9% | 11.9% |
+| worst benchmark | 2466% (`hpet_read`) | 93.8% (`firewall_check`) |
+| benchmarks whose band exceeds the 10% regression threshold | **71 of 86** | **35 of 86** |
+| benchmarks whose band exceeds 25% | 51 | 12 |
+
+WHPX is narrower on **78 of 86** benchmarks. The page-straddle explanation is
+confirmed about as directly as it can be: the benchmarks that were absurd
+under TCG are the ones that collapse.
+
+```
+benchmark                            TCG      WHPX
+hpet_read                        2466.0%      2.3%
+net_ns_arp_lookup                1389.4%      2.3%
+net_arp_lookup                   1332.9%      3.2%
+vfs_throughput_16k_read           168.7%      3.7%
+heap_raw_alloc_free_4096          179.4%     24.7%
+vfs_stat_breakdown_resolve        140.8%     18.8%
+```
+
+**Why this does not settle it.** Three reasons, in increasing order of how
+much they should bother you:
+
+1. **35 of 86 benchmarks still have a placement band wider than the 10%
+   threshold this question is about.** A 7.4x improvement in the median is not
+   the same as the problem going away. On those 35, a movement under ~10-30%
+   still cannot be read as a regression.
+
+2. **Eight benchmarks are *wider* under WHPX**, and the identity of two of
+   them is a warning rather than a curiosity. `isr_latency` goes 53.2% ->
+   69.9%, and `firewall_check` 51.2% -> 93.8%. `isr_latency` is the control
+   benchmark from the original WHPX comparison — the one that barely changed
+   (x0.862) and thereby proved the other speedups were real. A benchmark that
+   does *not* speed up under hardware virtualisation has no translation blocks
+   to lose, so removing them cannot make it *more* placement-sensitive. Its
+   band getting wider is evidence that something other than placement is in
+   these numbers.
+
+3. **We cannot tell how much of the residue is placement and how much is a
+   busy PC, because the detector for that is broken on WHPX.** Every one of
+   these arms recorded `canary_verdict: broken` — see known-issues.md
+   `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`. The canary's
+   resolution floor is 100x tighter than its own derivation, which TCG clears
+   by 26% and WHPX misses by 4.6x, so on WHPX it refuses every sample. And the
+   loss bites hardest exactly here: host interference matters *more* the
+   faster the guest runs (a fixed interruption is a larger fraction of a 3.5x
+   shorter run), so the accelerator with the narrowest true placement band is
+   also the one whose measurements are most exposed to the noise we can no
+   longer detect.
+
+   Worse, nothing says so. `layout_arm_rejection()` screens arms on
+   `host_load`, which is a **hand-supplied label** (`unknown` on every one of
+   these runs), and never consults the **measured** `canary_verdict` sitting
+   in the same record. So the band above was computed from six runs of
+   explicitly unknown contamination and reported as though it were clean.
+
+**What this does to the options.** Option D ("run the benchmarks somewhere
+faster than TCG") is now the best-supported option on the table — 7.4x on the
+median is not a marginal gain — but it is *gated on the canary fix*, not
+merely improved by it. Without a working contamination check the WHPX band
+cannot be distinguished from WHPX host noise, and adopting a threshold
+derived from it would bake that confusion into the gate. The order is
+therefore: fix the canary floor, re-run the sweep, and only then set a
+threshold from the result.
+
+**A note on how this was obtained**, because it affects how much to trust it:
+the six arms were recorded under six different commits (documentation commits
+landed while the sweep ran), so `bench-history.py` filed them as six unrelated
+one-arm experiments and would have reported no band at all. The numbers above
+come from regrouping the arms by a digest of the build-relevant tree — which
+is verified identical across all six commits — using the *unmodified* band
+machinery on top. See known-issues.md
+`B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS`. The
+regrouping is the fix that is about to land, not a fudge for this table, and
+the numbers will be reproduced by `--layout-bands` once it does.
+
 ## Q54 — [A] The emulator we test in has a second mode that is 3.5× faster and would fix our benchmark-noise problem — but it silently switches off three of the CPU security features the kernel is built around. Switch, split, or stay? — Status: OPEN
 
 **In short:** Every test we run happens inside QEMU, a program that pretends to

@@ -40744,3 +40744,78 @@ same failure with the restatement written in an analysis script rather than in
 The original verdict above is left as written rather than edited, because
 "CLOSED, the guard held" being wrong within hours of being written is itself
 the useful record.
+
+### TD-A-THE-EVIDENCE-RULE-ADOPTED-IN-§240-CANNOT-BE-SATISFIED-BY-ANY-EXISTING-COMMAND (lane A, 2026-08-19)
+
+**Status:** OPEN — blocked until the WHPX layout sweep finishes (the fix is in
+`scripts/**`, and editing `scripts/**` mid-sweep changes the source digest and
+aborts the sweep; see `B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS`).
+
+**In short:** we just adopted a rule saying that any number quoted to the
+operator in `open-questions.md` has to be regenerable by a command they can run
+themselves. Both of the tables that rule was written for compare benchmark runs
+made under *different emulators*, and no such command exists — the tool has a
+mode for comparing code layouts and a mode for listing records, but nothing that
+compares two accelerators. So the rule is currently unsatisfiable for exactly
+the evidence that motivated it, and both tables had to be re-checked by throwaway
+scripts that leave nothing behind for the next reader.
+
+#### What it is
+
+`design-decisions.md` §240 adopted, after the Q53 contamination:
+
+> evidence quoted in `open-questions.md` must be reproducible by a command the
+> reader can re-run
+
+`scripts/bench-history.py` offers `--list`, `--layout-bands`, and the record/diff
+path. None of them produces an accelerator comparison. The two tables that need
+one:
+
+| Table | Claim | How it was produced |
+|---|---|---|
+| **Q54** "The evidence" | ×3.53 typical, 82/86 faster, `hpet_read` 453 → 13534 ns | hand-built in `design-decisions.md` §237 |
+| **Q53** "Update 2026-08-19" | TCG vs WHPX layout-band widths | `build/whpx-band-preview.py`, which monkeypatches `bh`'s grouping key |
+
+Q53's is the better of the two — it reuses `bh.layout_arm_rejection` unmodified,
+which is why its WHPX column survived re-derivation intact — but it is a
+throwaway script in `build/`, i.e. gitignored, i.e. not a command the operator
+has.
+
+#### Why this is debt and not a bug
+
+Nothing is currently *wrong*. Both tables have now been checked by hand: Q53's
+was corrected (`41581ca30`), Q54's was confirmed sound with one row amended
+(`0d9da98c6`). The defect is that the check is not repeatable — the next person
+to update either table, including a future me with no memory of today, gets no
+help from the tooling and no warning if they select records the way the Q53
+analysis did.
+
+That is precisely the failure §240 describes. Writing the rule and not building
+the thing that makes it satisfiable leaves the rule as an intention.
+
+#### What the proper fix looks like
+
+An `--accel-compare` mode on `scripts/bench-history.py`:
+
+- Takes two accelerator names (or `--accel-compare A:B`), a profile, and
+  optionally a `kernel_sha` or `src_digest` to pin the source.
+- **Selects records through the same predicate the layout code uses**, not a
+  fresh enumeration — §240 rule 2. Where the layout predicate does not apply
+  (an accelerator comparison is not a band), the selection it *does* make must
+  be printed, record by record, so the reader sees which runs went in.
+- **Refuses to compare a single TCG arm against a single WHPX run without
+  saying so.** The Q54 amendment found the typical speedup is ×3.53–×3.97
+  depending on which of six layout arms is chosen, and that the "best case"
+  benchmark is a different benchmark in four of the six. If a band exists for
+  either side, the tool should report the range, not one arm's number.
+- Emits markdown, so the table in `open-questions.md` is pasted output rather
+  than transcribed output. Transcription is where a digit changes.
+
+#### How to reproduce the gap
+
+```bash
+python scripts/bench-history.py --help    # no accelerator-comparison mode
+```
+
+Then try to regenerate Q54's table from the documented inputs. It cannot be done
+without writing new code, which is the whole of this entry.

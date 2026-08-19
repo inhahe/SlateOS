@@ -2395,13 +2395,206 @@ def test_replication_evidence_must_be_the_same_binary_on_the_same_terms(bh):
     check("another host's run is not evidence here", failed, True)
 
     # And the unit-level statement of the same rule, so a refactor that moves
-    # the filtering out of `values_for_commit` is caught here too.
+    # the filtering out of `values_for_binary` is caught here too.
     history = _repl_history(bh, 500, "xxx")
-    check("values_for_commit finds the repeat",
-          bh.values_for_commit(history, "H", "release", "b0", "xxx"), [500])
+    check("values_for_binary finds the repeat",
+          bh.values_for_binary(history, "H", "release", "b0",
+                               {"commit": "xxx"}), [500])
     check("...and refuses to match the unknown sentinel",
-          bh.values_for_commit(history, "H", "release", "b0",
-                               bh.UNKNOWN_COMMIT), [])
+          bh.values_for_binary(history, "H", "release", "b0",
+                               {"commit": bh.UNKNOWN_COMMIT}), [])
+    check("...and refuses to match on no identity at all",
+          bh.values_for_binary(history, "H", "release", "b0", None), [])
+
+
+def test_binary_identity_is_the_image_not_the_commit(bh, tmpdir):
+    """The gate must key on the kernel image, because the commit both over-
+    and under-identifies it.
+
+    This is a measured failure, not a hypothetical. On 2026-08-19 a run flagged
+    `page_alloc_zeroed_free` +83% as REGRESSED, UNREPLICATED and printed its
+    standard advice: re-run WITHOUT rebuilding to confirm. That was done --
+    `--no-build --no-stage`, a byte-identical image -- but a commit had been
+    made in between, so the re-run was filed under a new commit. The gate,
+    keyed on commit, could not see the confirmation; the A/A banner, keyed on
+    commit, stayed silent; and the re-run was instead judged as a fresh
+    commit's first measurement, manufacturing four new "REGRESSED,
+    UNREPLICATED" claims (`sched_pick_next_d1` +62%, `vfs_stat_breakdown_ns`
+    +45%, both gzip benchmarks ~+30%) out of an image that had not changed by
+    one byte.
+
+    The converse holds too and is in the same record: the flagged run carried
+    `dirty: true`, so its commit label named a tree that was never built. Two
+    such runs share a label while measuring different code.
+    """
+    sha_a, sha_b = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+
+    check("the hash wins when present",
+          bh.binary_identity({"kernel_sha": sha_a, "commit": "c1"}),
+          f"sha:{sha_a}")
+    check("...even on a dirty tree, which is the case it exists for",
+          bh.binary_identity({"kernel_sha": sha_a, "commit": "c1",
+                              "dirty": True}), f"sha:{sha_a}")
+    check("a clean commit still identifies a legacy record",
+          bh.binary_identity({"commit": "c1"}), "commit:c1")
+    check("a dirty commit identifies nothing -- its tree was never built",
+          bh.binary_identity({"commit": "c1", "dirty": True}), None)
+    check("an unreadable HEAD identifies nothing",
+          bh.binary_identity({"commit": bh.UNKNOWN_COMMIT}), None)
+    check("and neither does a record with no fields at all",
+          bh.binary_identity({}), None)
+
+    # The two directions the commit gets wrong, stated through the relation the
+    # rest of the gate is built on. Note these are *not* expressible as an
+    # equality between the identity strings above in every case -- which is why
+    # `same_image` exists and is what the gate calls.
+    check("one image under two commits is one binary",
+          bh.same_image({"kernel_sha": sha_a, "commit": "c1"},
+                        {"kernel_sha": sha_a, "commit": "c2"}), True)
+    check("two images under one commit are not",
+          bh.same_image({"kernel_sha": sha_a, "commit": "c1"},
+                        {"kernel_sha": sha_b, "commit": "c1"}), False)
+
+    # The transition case, and the reason identity cannot be a string: a hashed
+    # run against a legacy record of the same clean commit. Neither `sha:` nor
+    # `commit:` label matches the other, yet they are the same image and the
+    # history is full of the unhashed side.
+    check("a hashed run matches an older unhashed run of the same clean commit",
+          bh.same_image({"commit": "c1"},
+                        {"kernel_sha": sha_a, "commit": "c1"}), True)
+    check("...in either order -- the relation is symmetric",
+          bh.same_image({"kernel_sha": sha_a, "commit": "c1"},
+                        {"commit": "c1"}), True)
+    check("...but a dirty unhashed run matches nothing, hashed or not",
+          bh.same_image({"commit": "c1", "dirty": True},
+                        {"kernel_sha": sha_a, "commit": "c1"}), False)
+    # Asymmetric in strength, not in argument order: two hashes settle the
+    # question between themselves and a commit label cannot overrule them. This
+    # project has measured function *placement* moving a benchmark several-fold
+    # with identical source, so "same commit" is not a licence to ignore a hash.
+    check("two differing hashes are not rescued by a matching clean commit",
+          bh.same_image({"kernel_sha": sha_a, "commit": "c1"},
+                        {"kernel_sha": sha_b, "commit": "c1"}), False)
+    check("two unidentifiable records are never the same image",
+          bh.same_image({"commit": "c1", "dirty": True},
+                        {"commit": "c1", "dirty": True}), False)
+    check("and neither are two unreadable HEADs",
+          bh.same_image({"commit": bh.UNKNOWN_COMMIT},
+                        {"commit": bh.UNKNOWN_COMMIT}), False)
+
+    # Unidentifiable must never match unidentifiable. `values_for_binary` is
+    # where that would leak, because None is a perfectly good dict value.
+    unknowns = [{"host": "H", "profile": "release", "commit": "c1",
+                 "dirty": True, "entries": {"b0": 500}}]
+    check("two unidentifiable runs are not evidence about each other",
+          bh.values_for_binary(unknowns, "H", "release", "b0",
+                               {"commit": "c1", "dirty": True}), [])
+    check("...and no `this_run` at all finds nothing rather than everything",
+          bh.values_for_binary(unknowns, "H", "release", "b0", None), [])
+
+    # And the hash itself: same bytes, same value; different bytes, different.
+    one = os.path.join(tmpdir, "k1")
+    two = os.path.join(tmpdir, "k2")
+    three = os.path.join(tmpdir, "k3")
+    with open(one, "wb") as handle:
+        handle.write(b"kernel-image-bytes")
+    with open(two, "wb") as handle:
+        handle.write(b"kernel-image-bytes")
+    with open(three, "wb") as handle:
+        handle.write(b"kernel-image-byteS")
+    check("identical images hash alike", bh.kernel_sha(one), bh.kernel_sha(two))
+    check("a one-bit difference does not",
+          bh.kernel_sha(one) == bh.kernel_sha(three), False)
+    check("an unreadable image is 'unknown', not a shared sentinel",
+          bh.kernel_sha(os.path.join(tmpdir, "no-such-kernel")), None)
+
+
+def test_a_no_rebuild_rerun_confirms_across_a_commit(bh):
+    """End to end: the re-run the gate asks for is counted even if HEAD moved.
+
+    The regression this locks down is the whole point of `binary_identity`. Two
+    records of one image, different commits: the second must be recognised as
+    an A/A comparison and must not fail the build. Before the fix this printed
+    a regression.
+    """
+    import io
+    import contextlib
+
+    sha = "0123456789abcdef"
+    stable = {f"b{i}": 1000 for i in range(1, 20)}
+    history = [{"host": "H", "profile": "release", "commit": f"h{i}",
+                "kernel_sha": f"old{i:012d}", "entries": dict(stable, b0=value)}
+               for i, value in enumerate(_QUIET)]
+    # The flagged run: this image's first appearance, filed under a dirty tree.
+    history.append({"host": "H", "profile": "release", "commit": "c1",
+                    "dirty": True, "kernel_sha": sha,
+                    "entries": dict(stable, b0=500)})
+
+    previous = history[-1]
+    current = {name: (value, 10000, "OK", None, None)
+               for name, value in previous["entries"].items()}
+    current["b0"] = (3000, 10000, "OK", None, None)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        failed = bh.report(previous, current, 25.0, records=history, host="H",
+                           profile="release", commit="c2",
+                           this_run={"kernel_sha": sha, "commit": "c2"})
+    out = buf.getvalue()
+    check("a no-rebuild re-run across a commit is seen as A/A",
+          "A/A COMPARISON" in out, True)
+    check("...and names the image rather than the commit",
+          f"sha:{sha}" in out, True)
+    check("...and does not fail the build", failed, False)
+
+    # The same pair without hashes -- a legacy record -- must not claim A/A,
+    # but must not let the reader infer it from the header's matching commit
+    # either.
+    legacy_prev = {"host": "H", "profile": "release", "commit": "c1",
+                   "dirty": True, "entries": dict(stable, b0=500)}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(legacy_prev, current, 25.0, records=history + [legacy_prev],
+                  host="H", profile="release", commit="c1",
+                  this_run={"commit": "c1", "dirty": True})
+    out = buf.getvalue()
+    check("an unhashed dirty pair is not called A/A",
+          "A/A COMPARISON" in out, False)
+    check("...but the reader is told the image is unknown",
+          "SAME COMMIT" in out and "UNKNOWN IMAGE" in out, True)
+
+    # The third state, which is neither A/A nor unknown: both sides hashed,
+    # hashes differ, commit label the same. That is *known different* code, and
+    # calling it "unknown" would understate what the record says.
+    hashed_prev = {"host": "H", "profile": "release", "commit": "c1",
+                   "kernel_sha": "ffffffffffffffff",
+                   "entries": dict(stable, b0=500)}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(hashed_prev, current, 25.0, records=history + [hashed_prev],
+                  host="H", profile="release", commit="c1",
+                  this_run={"kernel_sha": sha, "commit": "c1"})
+    out = buf.getvalue()
+    check("two hashed runs of one commit that differ are not called A/A",
+          "A/A COMPARISON" in out, False)
+    check("...nor merely unknown -- the record says they differ",
+          "DIFFERENT IMAGE" in out and "UNKNOWN IMAGE" not in out, True)
+    check("...and both hashes are named so the reader can check",
+          "ffffffffffffffff" in out and sha in out, True)
+
+    # A legacy pair with no hashes and a *clean* commit is still A/A: that is
+    # the entire pre-hash history, and refusing to judge it would retire the
+    # check on every record written before today.
+    clean_prev = {"host": "H", "profile": "release", "commit": "c1",
+                  "entries": dict(stable, b0=500)}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(clean_prev, current, 25.0, records=history + [clean_prev],
+                  host="H", profile="release", commit="c1",
+                  this_run={"commit": "c1"})
+    out = buf.getvalue()
+    check("two clean unhashed runs of one commit are still A/A",
+          "A/A COMPARISON" in out, True)
 
 
 def test_an_aa_comparison_is_named_and_cannot_fail_the_build(bh):
@@ -2420,7 +2613,13 @@ def test_an_aa_comparison_is_named_and_cannot_fail_the_build(bh):
 
     check("an A/A comparison cannot fail the build", failed, False)
     check("...and says so before any list", "A/A COMPARISON" in out, True)
-    check("...naming the shared commit", "SAME commit (xxx)" in out, True)
+    # Named as an *image*, and the identity printed is the one the gate keyed
+    # on -- here derived from the commit, because these legacy-shaped records
+    # carry no hash. The wording matters: "same commit" was the claim that was
+    # wrong in both directions (see `binary_identity`), so the banner must not
+    # go on making it.
+    check("...naming the shared image", "SAME kernel image (commit:xxx)" in out,
+          True)
     check("...and pointing at the measurement",
           "5 of 83 benchmarks" in out, True)
 

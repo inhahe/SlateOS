@@ -60,6 +60,7 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -269,6 +270,31 @@ HOT_SYMBOLS = {
     "crypto::sha512_compress": "6crypto15sha512_compress",
     "net::tcp::tcp_checksum_ip": "3tcp15tcp_checksum_ip",
 }
+
+
+def kernel_sha(path):
+    """SHA-256 of the kernel image at `path`, truncated, or None.
+
+    Truncated to 16 hex characters: this is an identity for grouping records
+    that were written minutes apart on one host, not a security claim, and a
+    64-character string in every record of an append-only file that is already
+    read by eye is a real cost against no benefit. 64 bits of a SHA-256 is far
+    beyond any accidental collision between two builds of one kernel.
+
+    None on any read failure rather than an exception or a sentinel string: a
+    hash that could not be taken must degrade to "identity unknown", which is
+    what `binary_identity` does with an absent field. A sentinel would instead
+    make every unreadable build look like the same binary -- the exact error
+    `UNKNOWN_COMMIT` exists to prevent, reintroduced one field over.
+    """
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()[:16]
+    except OSError:
+        return None
 
 
 def elf_symbol_addresses(path, wanted=HOT_SYMBOLS):
@@ -2335,19 +2361,112 @@ UNKNOWN_COMMIT = "unknown"
 ReplicationVerdict = collections.namedtuple("ReplicationVerdict", "verdict values")
 
 
-def values_for_commit(records, host, profile, name, commit):
-    """Every comparable measurement of `name` already recorded for `commit`."""
-    if not commit or commit == UNKNOWN_COMMIT:
+def binary_identity(record):
+    """Which binary this record measured, or None if that cannot be known.
+
+    The replication gate and the A/A banner both ask "is this the same binary?"
+    and both originally answered it with the **commit**. That proxy fails in
+    two ways, and both of them fire in ordinary use rather than in some corner:
+
+    1. **Same binary, different commit.** The gate's own printed advice is
+       "re-run `boot-test.sh --bench` WITHOUT rebuilding to confirm" -- i.e. it
+       asks for a run of a byte-identical image. A developer who commits their
+       work before re-running (the normal thing to do, and what the project's
+       own push-often rule encourages) files that re-run under a *new* commit.
+       The confirmation is then invisible: the flag stays UNREPLICATED forever
+       and the re-run is instead treated as a fresh commit's first measurement,
+       manufacturing a new crop of regression claims out of an unchanged image.
+       That happened on 2026-08-19 -- two boots of one `--no-build --no-stage`
+       image reported four "REGRESSED, UNREPLICATED" benchmarks between them
+       (`sched_pick_next_d1` +62%, `vfs_stat_breakdown_ns` +45%, and both gzip
+       benchmarks ~+30%) with the A/A banner silent, because the commit had
+       moved even though not one byte of the kernel had.
+
+    2. **Same commit, different binary.** A run measured with uncommitted
+       changes is labelled with a commit whose tree was never built. Two such
+       runs share a label while measuring different code, so matching them
+       manufactures the very replication the gate exists to demand.
+
+    So identity comes from a hash of the kernel ELF that was actually booted,
+    which is the thing both questions are really about. `commit` remains the
+    fallback for records written before the hash existed -- but only when that
+    record is *clean*, because a dirty commit label does not name a binary.
+    This is the same argument `UNKNOWN_COMMIT` already makes for an unreadable
+    HEAD, applied to the other way a label can fail to identify code.
+
+    None means "not knowable". This function is for *display* -- what to call
+    this run in a banner. The comparison itself is `same_image`, which cannot
+    be expressed as equality between two of these strings; see there.
+    """
+    sha = record.get("kernel_sha")
+    if sha:
+        return f"sha:{sha}"
+    commit = record.get("commit")
+    if not commit or commit == UNKNOWN_COMMIT or record.get("dirty"):
+        return None
+    return f"commit:{commit}"
+
+
+def same_image(a, b):
+    """Did these two records measure the same kernel code?
+
+    Deliberately a *relation* rather than equality between two identity
+    strings, because the two available keys are not interchangeable and which
+    one applies depends on both records at once:
+
+    - **Both hashed:** the bytes decide, and nothing else is consulted. This is
+      the case that matters and the one the hash was added for -- it answers
+      correctly across a commit boundary (the no-rebuild re-run) and correctly
+      within one commit label (two dirty builds).
+    - **At most one hashed:** fall back to the commit, which identifies code
+      only on a clean tree. This keeps a hashed run comparable with the
+      unhashed records already in the history, which an equality on identity
+      strings would silently stop matching -- turning the very first run after
+      this change into an unrecognised A/A pair.
+
+    The asymmetry is on purpose. A clean commit pins the *source*, which is
+    enough to answer "could code have caused this?", but not the *bytes* --
+    two builds of one commit can differ in function placement, which this
+    project has measured moving a benchmark several-fold on its own. So when
+    both hashes exist the weaker key is not allowed to overrule them.
+
+    Unidentifiable never matches, including against another unidentifiable:
+    two runs that both failed to name their code are not two runs of one image.
+    """
+    sha_a, sha_b = a.get("kernel_sha"), b.get("kernel_sha")
+    if sha_a and sha_b:
+        return sha_a == sha_b
+
+    def clean_commit(record):
+        commit = record.get("commit")
+        if not commit or commit == UNKNOWN_COMMIT or record.get("dirty"):
+            return None
+        return commit
+
+    commit_a, commit_b = clean_commit(a), clean_commit(b)
+    return bool(commit_a and commit_a == commit_b)
+
+
+def values_for_binary(records, host, profile, name, this_run):
+    """Every comparable measurement of `name` recorded for `this_run`'s image.
+
+    `this_run` is a record-shaped mapping -- `kernel_sha` / `commit` / `dirty`
+    -- not an identity string, because the match is `same_image` and that is a
+    relation between two records. A falsy `this_run` short-circuits to nothing:
+    a run that cannot name its own code cannot be shown to have repeated
+    anything.
+    """
+    if not this_run:
         return []
     return [
         value
         for record in comparable_records(records, host, profile)
-        if record.get("commit") == commit
+        if same_image(record, this_run)
         and (value := record.get("entries", {}).get(name)) is not None
     ]
 
 
-def replication_verdict(records, host, profile, name, commit, observed, band):
+def replication_verdict(records, host, profile, name, this_run, observed, band):
     """Did a second run of this *same binary* also produce this movement?
 
     Why this gate exists, and why nothing cheaper works
@@ -2386,10 +2505,15 @@ def replication_verdict(records, host, profile, name, commit, observed, band):
     repeat to land inside of, so nothing can be contradicted. Those rows are
     already printed as UNCONFIRMED and are deliberately left alone rather than
     judged against an invented fence.
+
+    `this_run` is a record-shaped mapping describing the image these numbers
+    came from, not a commit. The distinction is not pedantry: keying this on
+    the commit made the gate blind to exactly the re-run it asks the reader to
+    perform. See `binary_identity` and `same_image`.
     """
     if band is None:
         return ReplicationVerdict(UNREPLICATED, [observed])
-    values = values_for_commit(records, host, profile, name, commit) + [observed]
+    values = values_for_binary(records, host, profile, name, this_run) + [observed]
     if len(values) < REPLICATION_MIN_RUNS:
         return ReplicationVerdict(UNREPLICATED, values)
     _lo, hi, _median, _n = band
@@ -2574,7 +2698,8 @@ def report_baseline_canary(previous):
 
 
 def report(previous, current_entries, threshold_pct,
-           records=None, host=None, profile=LEGACY_PROFILE, commit=None):
+           records=None, host=None, profile=LEGACY_PROFILE, commit=None,
+           this_run=None):
     """Print the run-over-run comparison. Returns True if anything regressed.
 
     `records`/`host`/`profile` are optional only so that callers interested
@@ -2591,11 +2716,27 @@ def report(previous, current_entries, threshold_pct,
     silently confirmed: a caller that supplies no records has not shown the
     benchmark to be stable, and must not be told that it has.
 
-    `commit` is this run's HEAD.  It is what makes the replication gate
-    possible -- without it no movement can be shown to have survived a second
-    run of the same binary, so every banded regression degrades to
-    UNREPLICATED.  See `replication_verdict`.
+    `this_run` identifies which kernel image these numbers came from: a mapping
+    with any of `kernel_sha`/`commit`/`dirty`, i.e. the same shape as a history
+    record, so it can be compared against one by `same_image`.  It is what makes
+    the replication gate possible: without it no movement can be shown to have
+    survived a second run of the same binary, so every banded regression
+    degrades to UNREPLICATED.  See `replication_verdict`.
+
+    It is a *mapping*, not an identity string, because image identity is a
+    relation and not an equality between labels: a hashed run and an older
+    unhashed-but-clean run of the same commit are the same image, yet no two
+    strings drawn from those records compare equal.  `same_image` decides;
+    `binary_identity` only supplies display text.
+
+    `commit` is this run's HEAD.  It is now used only for the weaker
+    same-commit-unknown-image note; the gate itself no longer keys on it,
+    because a commit both over- and under-identifies a binary.  When no
+    `this_run` is supplied, one is derived from `commit` so that callers
+    predating the split (the tests, chiefly) keep the old meaning.
     """
+    if this_run is None and commit:
+        this_run = {"commit": commit}
     current = {name: vals[0] for name, vals in current_entries.items()}
 
     # Run before the early return: the target cross-check is independent of
@@ -2624,23 +2765,29 @@ def report(previous, current_entries, threshold_pct,
     # run-over-run comparison is an A/A test, and its result is known before it
     # is computed: nothing in it can have been caused by code. That is not a
     # statistical claim to be weighed against the numbers, it is arithmetic --
-    # the two runs share a commit, so the diff between them has no code term.
+    # the two runs ran the same image, so the diff between them has no code
+    # term.
     #
     # Said here, above every list, because the failure it prevents is one that
     # actually happened: a `pick_next` +92% from exactly this situation was
     # written up as a scheduler regression, corroborated by a second statistic,
-    # and believed. The band cannot notice this and neither can the canary;
-    # only the commit field can, and it was already in the record.
-    same_binary = bool(
-        commit
-        and commit != UNKNOWN_COMMIT
-        and previous.get("commit") == commit
-    )
+    # and believed. The band cannot notice this and neither can the canary.
+    #
+    # Keyed on the kernel image, not the commit. The commit was the original
+    # key and it let this fire in reverse on 2026-08-19: two boots of one
+    # `--no-build --no-stage` image, with a commit made between them, produced
+    # four "REGRESSED, UNREPLICATED" claims with this banner silent -- an A/A
+    # pair the A/A check could not see, because the label had moved and the
+    # code had not. See `binary_identity`.
+    same_binary = bool(this_run and same_image(previous, this_run))
     if same_binary:
+        # Display text only -- the decision above was `same_image`'s. Prefer
+        # this run's label; both records agree on the image by construction.
+        identity = binary_identity(this_run) or binary_identity(previous)
         print(
-            f"  !! A/A COMPARISON: the baseline run is the SAME commit "
-            f"({commit}) as this one, so no\n"
-            f"     movement below can have been caused by code -- every "
+            f"  !! A/A COMPARISON: the baseline run is the SAME kernel image "
+            f"({identity}) as this one,\n"
+            f"     so no movement below can have been caused by code -- every "
             f"difference is this host's\n"
             f"     measurement noise, by construction, and none of it is "
             f"counted as a regression.\n"
@@ -2650,6 +2797,43 @@ def report(previous, current_entries, threshold_pct,
             f"known-issues.md\n"
             f"     B-BENCH-CONFIRMED-REGRESSIONS-FIRE-ON-AN-UNCHANGED-BINARY."
         )
+    elif commit and commit != UNKNOWN_COMMIT \
+            and previous.get("commit") == commit:
+        # The commits match but the images did not. Two ways that happens, and
+        # they are opposite claims, so they get opposite wordings -- the one
+        # thing neither may do is let the matching commit in the header line
+        # stand as unrebutted evidence that the code was the same.
+        prev_sha, this_sha = previous.get("kernel_sha"), this_run.get("kernel_sha")
+        if prev_sha and this_sha:
+            # Both hashed, hashes differ: not unknown, *known different*. One of
+            # the two was built from a tree that did not match its own commit.
+            print(
+                f"  !! SAME COMMIT ({commit}), DIFFERENT IMAGE: the two runs "
+                f"hash differently\n"
+                f"     ({prev_sha} then {this_sha}), so at least one was built "
+                f"from a tree that did not\n"
+                f"     match its commit label. The movements below may well be "
+                f"real code changes; the\n"
+                f"     commit in the header just does not describe them."
+            )
+        else:
+            # At least one side cannot be pinned to an image -- a run measured
+            # with uncommitted changes and no recorded hash. Saying "A/A" here
+            # would be a claim nobody can support, and saying nothing would let
+            # the reader supply it themselves. So the state is named.
+            print(
+                f"  ?? SAME COMMIT ({commit}), UNKNOWN IMAGE: at least one of "
+                f"these two runs cannot be\n"
+                f"     pinned to a kernel image -- it was measured with "
+                f"uncommitted changes, or it predates\n"
+                f"     kernel-hash recording -- so whether the two ran the "
+                f"same code is not knowable from\n"
+                f"     the record. Movements below are judged as if the code "
+                f"differed, which is the\n"
+                f"     conservative reading -- but do not treat the matching "
+                f"commit in the header as\n"
+                f"     evidence that it did not."
+            )
     print(
         "  Comparison is run-over-run on this host, which cancels the TCG "
         "emulation constant; a movement is only called a regression if it "
@@ -2761,7 +2945,7 @@ def report(previous, current_entries, threshold_pct,
     repl_verdicts = {}
     for row in reg_out:
         name, _before, after, _raw, _adj, band = row
-        rv = replication_verdict(records, host, profile, name, commit,
+        rv = replication_verdict(records, host, profile, name, this_run,
                                  after, band)
         repl_verdicts[name] = rv
         if rv.verdict == REPLICATED:
@@ -3066,9 +3250,14 @@ def main(argv=None):
     parser.add_argument("--history", default=DEFAULT_HISTORY,
                         help="JSON-lines history file (default: bench/history.jsonl)")
     parser.add_argument("--kernel-elf", default=None,
-                        help="kernel ELF to read hot-function addresses from, "
-                             "recorded as `hot_symbols` so a placement-caused "
-                             "swing can be recognised without a bisect")
+                        help="kernel ELF that was measured. Read for two "
+                             "things: the hot-function addresses (recorded as "
+                             "`hot_symbols`, so a placement-caused swing can "
+                             "be recognised without a bisect) and its SHA-256 "
+                             "(recorded as `kernel_sha`, which is what the "
+                             "replication gate keys on -- without it a "
+                             "no-rebuild re-run made under a different commit "
+                             "cannot be recognised as the same binary)")
     parser.add_argument("--threshold", type=float, default=25.0,
                         help="percent change worth reporting (default: 25)")
     parser.add_argument("--no-record", action="store_true",
@@ -3150,9 +3339,20 @@ def main(argv=None):
     # build and hands that value down -- and it wins whenever it is given. The
     # git fallback keeps a standalone invocation working.
     commit = args.commit or git_commit()
+    # The same read-once-use-twice discipline, for the field that actually
+    # answers "same binary?". Note this is strictly stronger than the paragraph
+    # above worries about: `--commit` fixes HEAD moving *during* the boot, and
+    # the hash additionally fixes HEAD moving *between* a flagged run and the
+    # no-rebuild re-run the flag asks for -- which is the case that cost four
+    # false regression claims on 2026-08-19. See `binary_identity`.
+    sha = kernel_sha(args.kernel_elf) if args.kernel_elf else None
+    # Shaped like a history record on purpose: `same_image` compares this run
+    # against stored ones, and a comparison whose two sides have different
+    # shapes is one that will one day be given the wrong side.
+    this_run = {"kernel_sha": sha, "commit": commit, "dirty": args.dirty}
     regressed = report(previous, current_entries, args.threshold,
                        records=records, host=host, profile=args.profile,
-                       commit=commit)
+                       commit=commit, this_run=this_run)
 
     # Reported *after* the comparison, so it qualifies the verdict the reader
     # has just seen rather than being buried above it. The verdict is *taken
@@ -3244,6 +3444,15 @@ def main(argv=None):
         # one level up, that this field exists to prevent.
         if args.kernel_elf:
             record["hot_symbols"] = elf_symbol_addresses(args.kernel_elf)
+        # Which image produced these numbers. Absent means nobody could say --
+        # no ELF was offered, or it could not be read -- and `binary_identity`
+        # then falls back to the commit, which is only trustworthy on a clean
+        # tree. Recorded from the same `sha` the report was judged with, for
+        # the reason stated at that read: a record filed under a different
+        # identity than the one it was judged as corrupts every later
+        # replication verdict.
+        if sha:
+            record["kernel_sha"] = sha
         # Only present on probe runs, so that the overwhelming majority of
         # records -- ordinary ones -- carry no field asserting they are
         # ordinary. An empty string here would be a claim; absence is the

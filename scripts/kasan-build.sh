@@ -26,6 +26,27 @@
 #
 # Requires a nightly toolchain: `-Zsanitizer` and the `sanitize` attribute are
 # both unstable.
+#
+# ---------------------------------------------------------------------------
+# The instrumented build turns KASAN on for the whole boot, by itself
+# ---------------------------------------------------------------------------
+#
+# You do not need `mm.corruption_hunt` on the kernel cmdline, and you should not
+# add it expecting more coverage: `mm::kasan::init` sees `--cfg
+# kasan_instrumented` and enables checking at init, for the entire boot.
+#
+# This was not always so, and the failure mode was silent. `on_alloc`/`on_free`
+# are gated on `kasan::is_enabled()`, and until 2026-08-19 the only thing that
+# ever enabled it was the narrow `mm.corruption_hunt` window in `main.rs`. So an
+# ordinary `kasan-build.sh --boot` paid the full ~3.5x instrumented boot cost to
+# check every load and store against a shadow that nothing had ever written —
+# all-zero, "addressable" everywhere, no report possible. The script did exactly
+# what it said and found nothing, because there was nothing it *could* find.
+#
+# The `mm.corruption_hunt` flag still means what it always did in the *ordinary*
+# build, where checking is opt-in because the cost is not otherwise being paid.
+# What it additionally arms here is `mm::quarantine` (delayed slot reuse), which
+# is orthogonal to the shadow and still worth passing for a corruption hunt.
 
 set -euo pipefail
 
@@ -45,7 +66,12 @@ while [ "$#" -gt 0 ]; do
         --)        shift; BOOT_ARGS=("$@"); break ;;
         --boot)    BOOT=1 ;;
         --release) PROFILE_ARGS+=("--release") ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        # 2..49 is the whole header comment block, ending at the blank line
+        # before `set -euo pipefail`. Keep this in step when the header grows —
+        # a stale upper bound silently truncates the help halfway through a
+        # sentence, which is how the "turns KASAN on by itself" paragraph would
+        # be the first thing lost.
+        -h|--help) sed -n '2,49p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
     shift

@@ -2983,6 +2983,13 @@ extern "C" fn kernel_main() -> ! {
             // run under the soak harness (many reboots) with the flag set. See
             // known-issues.md B-KNULLJUMP and open-questions.md Q34.
             let corruption_hunt = fs::kernparam::is_set("mm.corruption_hunt");
+            // Sampled before arming so the disarm below can *restore* rather
+            // than force-off. In the `kasan_instrumented` build KASAN is on for
+            // the whole boot (see `mm::kasan::init`), and an unconditional
+            // `disable()` at the end of this block would switch off — and wipe
+            // the shadow of — the very profile that was built to check
+            // everything after it.
+            let kasan_was_enabled = mm::kasan::is_enabled();
             if corruption_hunt {
                 mm::kasan::enable();
                 mm::quarantine::enable();
@@ -3680,7 +3687,9 @@ extern "C" fn kernel_main() -> ! {
                     ks.map_lock_giveups
                 );
                 mm::quarantine::disable();
-                mm::kasan::disable();
+                if !kasan_was_enabled {
+                    mm::kasan::disable();
+                }
                 // Reclaim parked slots (verifying each on the way out).
                 mm::quarantine::drain(|ptr, _class_idx| {
                     // SAFETY: `ptr` is a slab slot that was live when parked; returning

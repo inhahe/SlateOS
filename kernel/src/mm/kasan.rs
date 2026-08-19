@@ -897,8 +897,10 @@ unsafe fn install_shadow_frame(shadow_va: u64, phys: u64, hhdm: u64) -> bool {
 /// Initialize KASAN. Records the HHDM offset — needed only to reach a freshly
 /// allocated shadow frame through its direct-map alias in order to zero it, not
 /// for shadow addressing, which is HHDM-independent. Does **not** map any shadow
-/// pages (they are lazily backed) and does **not** enable checking (call
-/// [`enable`]).
+/// pages (they are lazily backed).
+///
+/// Enables checking immediately **in the instrumented build only** — see the
+/// `kasan_instrumented` block below for why that is not a convenience.
 pub fn init(hhdm_offset: u64) {
     HHDM_OFFSET.store(hhdm_offset, Ordering::Relaxed);
     INITED.store(true, Ordering::Release);
@@ -911,6 +913,32 @@ pub fn init(hhdm_offset: u64) {
         COVER_LOW.wrapping_add(KASAN_COVER_BYTES),
         KASAN_SHADOW_OFFSET
     );
+
+    // The instrumented build checks every load and store against the shadow —
+    // but *this module* is what puts anything in the shadow, and [`on_alloc`] /
+    // [`on_free`] are gated on [`is_enabled`]. Left disabled, the shadow stays
+    // all-zero, every compiler-emitted check reads "addressable", and the whole
+    // profile is a ~3.5x-slower boot that cannot report anything. That was the
+    // state until 2026-08-19: KASAN was enabled only inside the narrow
+    // `mm.corruption_hunt` window in `main.rs`, so `kasan-build.sh --boot`
+    // — whose stated purpose is hunting heap corruption — hunted nothing.
+    //
+    // The flag stays for the *uninstrumented* build, where checking is opt-in
+    // (`mm.corruption_hunt`) because there the only checks are the explicit
+    // `check()` calls on the quarantine path and the cost is not otherwise
+    // being paid. In the instrumented build the cost is already sunk in every
+    // emitted check, so anything less than "on for the whole boot" is strictly
+    // worse. Linux draws the line the same way: `CONFIG_KASAN` means KASAN is
+    // on, not that it is available.
+    #[cfg(kasan_instrumented)]
+    {
+        ENABLED.store(true, Ordering::Release);
+        serial_println!(
+            "[kasan] enabled for the whole boot (kasan_instrumented build): \
+             alloc/free maintain the shadow and every compiler-emitted check \
+             consults it"
+        );
+    }
 }
 
 /// Enable KASAN checking + shadow maintenance.

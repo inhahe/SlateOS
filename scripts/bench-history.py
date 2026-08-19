@@ -3201,6 +3201,51 @@ MIN_PADS_FOR_LAYOUT_BAND = 3
 LAYOUT_SWEEP_TAG = "layout sweep: textpad="
 
 
+#: `measurement_mismatch` result codes. Codes rather than sentences because the
+#: two callers address different readers -- a sweep operator staring at an
+#: aborted arm, and someone regenerating an evidence table for
+#: `open-questions.md` -- and the wording that helps one is noise to the other.
+#: What must not diverge is *which records count*, and that is what is shared.
+MISMATCH_HOST = "host"
+MISMATCH_PROFILE = "profile"
+MISMATCH_LOADED = "host_load"
+
+
+def measurement_mismatch(record, host, profile):
+    """Which of the three universal filters this record fails, or `None`.
+
+    Right machine, right build profile, not a deliberately-loaded control.
+    Every view in this file that divides one run by another applies exactly
+    these three before it applies anything of its own.
+
+    # Why this is a function and not three lines copied twice
+
+    `design-decisions.md` sec 240 was written after an evidence table in
+    `open-questions.md` turned out to have been built by an analysis that
+    enumerated records itself instead of calling the predicate the real code
+    uses. The predicate was correct; the table was wrong; nothing detected the
+    gap, because a second enumeration that has drifted still produces a
+    plausible table. The rule adopted there is that analysis code must call the
+    real selector rather than restate it.
+
+    `accel_run_rejection` is the first consumer of that rule, and these three
+    clauses are all it needs from `layout_arm_rejection` -- the rest of that
+    predicate is about being a *sweep arm*, which an accelerator comparison is
+    not. So the shared part became this, and each caller words the answer for
+    its own audience.
+
+    `test-bench-history.py` asserts the equivalence directly rather than
+    trusting the refactor: for every mismatch code, both predicates must reject.
+    """
+    if record.get("host") != host:
+        return MISMATCH_HOST
+    if record_profile(record) != profile:
+        return MISMATCH_PROFILE
+    if record_host_load(record) == HOST_LOAD_LOADED:
+        return MISMATCH_LOADED
+    return None
+
+
 def layout_arm_rejection(record, host, profile):
     """Why `layout_arms` would discard this record, or `None` if it keeps it.
 
@@ -3224,14 +3269,18 @@ def layout_arm_rejection(record, host, profile):
     staring at an aborted sweep who needs to know what to change before
     spending the three hours again.
     """
-    if record.get("host") != host:
+    # The three universal filters are delegated, not restated -- see
+    # `measurement_mismatch`. Only the *wording* is local, because a sweep
+    # operator reading an aborted arm needs to hear about bands and arms.
+    code = measurement_mismatch(record, host, profile)
+    if code == MISMATCH_HOST:
         return (f"host is {record.get('host')!r}, but the band is being "
                 f"computed for {host!r}; arms from different machines are "
                 f"different measurements")
-    if record_profile(record) != profile:
+    if code == MISMATCH_PROFILE:
         return (f"profile is {record_profile(record)!r}, not {profile!r}; "
                 f"a debug arm cannot calibrate a release band")
-    if record_host_load(record) == HOST_LOAD_LOADED:
+    if code == MISMATCH_LOADED:
         return ("the host was loaded during this run, so its timings carry "
                 "contention as well as placement -- and an inflated spread "
                 "widens the band, which dismisses real regressions")
@@ -3563,8 +3612,13 @@ def layout_bands(records, host, profile):
     return bands
 
 
-def describe_canary_mix(canaries):
-    """How the arms behind a band answered "was the host quiet?", in words.
+def describe_canary_mix(canaries, subject="arms"):
+    """How the runs behind a figure answered "was the host quiet?", in words.
+
+    `subject` names them for the caller's audience -- "arms" under a layout
+    band, "runs" under an accelerator comparison, where nothing is an arm of
+    anything. A count of "6/15 arms" printed beneath a table with no arms in it
+    invites the reader to go looking for a sweep that does not exist.
 
     Returns `""` when every arm was clean -- the only case that needs no
     caveat, and the case where a caveat would be noise on every line.
@@ -3590,7 +3644,7 @@ def describe_canary_mix(canaries):
     # Worst first: the reason for printing this at all is the part that
     # undermines the band, so it must not sit behind the reassuring part.
     order = [CANARY_CONTAMINATED, CANARY_BROKEN, CANARY_ABSENT, CANARY_CLEAN]
-    parts = [f"{canaries[v]}/{total} arms {wording[v]}"
+    parts = [f"{canaries[v]}/{total} {subject} {wording[v]}"
              for v in order if canaries.get(v)]
     return "; ".join(parts)
 
@@ -4709,6 +4763,803 @@ def report(previous, current_entries, threshold_pct,
     return bool(run_over_run or bisectable_shifts)
 
 
+# ---------------------------------------------------------------------------
+# Accelerator comparison
+# ---------------------------------------------------------------------------
+
+#: Every string `parse_accel` can produce: one per `Hypervisor::name()` in
+#: `kernel/src/hypervisor.rs`, plus `ACCEL_BARE_METAL`.
+#:
+#: Listed rather than derived from the history on purpose. The point of having
+#: a catalogue at all is to recognise a name the history does *not* yet
+#: contain, so that `--accel-compare "QEMU TCG:KVM"` on a history with no KVM
+#: run answers "KVM has 0 records here" rather than "no such accelerator" --
+#: two very different things to tell someone who is about to go and produce
+#: the missing runs.
+KNOWN_ACCELS = (
+    ACCEL_BARE_METAL,
+    "KVM",
+    "Hyper-V/WHPX",
+    "VMware",
+    "VirtualBox",
+    "Xen",
+    "QEMU TCG",
+    "bhyve",
+    "unknown hypervisor",
+)
+
+#: Lower-cased substrings that name an accelerator when they turn up in a run's
+#: free-text `experiment` banner.
+#:
+#: Used only ever to **refuse** an assumption, never to grant one. A banner is
+#: prose written by whoever ran the probe; it is evidence that a run was *about*
+#: an accelerator, not evidence that it ran on one. Reading it the other way
+#: would be exactly the inference `parse_accel` refuses to make -- see its
+#: docstring on why `None` must not be folded into TCG.
+ACCEL_EXPERIMENT_TOKENS = {
+    "QEMU TCG": ("tcg",),
+    "Hyper-V/WHPX": ("whpx", "hyper-v"),
+    "KVM": ("kvm",),
+    "VMware": ("vmware",),
+    "VirtualBox": ("virtualbox", "vbox"),
+    "Xen": ("xen",),
+    "bhyve": ("bhyve",),
+    ACCEL_BARE_METAL: ("bare metal", "bare-metal"),
+}
+
+def assumed_accel_refusal(record, assumed):
+    """Why `--assume-missing-accel` must not be applied to this record.
+
+    Returns a sentence, or `None` when the assumption may stand.
+
+    # What the assumption is, and why it is the reader's to make
+
+    `accel` was added to the record schema on 2026-08-19. Every run before that
+    predates it, including the entire TCG layout sweep that the Q54 evidence
+    table in `open-questions.md` is built from. `parse_accel` deliberately
+    reports those as `None` rather than as TCG, because the very first WHPX run
+    was also recorded before the field existed -- so "no banner" provably does
+    not mean "TCG", and a tool that inferred it would be wrong about at least
+    one real record in this repo's own history.
+
+    That leaves a comparison of the two accelerators unable to use the six-arm
+    TCG sweep at all, which is most of the evidence there is.
+    `--assume-missing-accel` lets the reader supply the fact the record failed
+    to record. It is an assertion by whoever types it, exactly like
+    `--host-load idle`, and every figure derived under it is labelled as such.
+
+    # The one thing that can be checked, and is
+
+    An assumption cannot be verified from the data -- if it could, it would not
+    be an assumption. But it can sometimes be *falsified*: a run whose own
+    `experiment` banner names a different accelerator is a run the assumption
+    is demonstrably wrong about. Those are refused individually and listed, so
+    that `--assume-missing-accel "QEMU TCG"` cannot quietly relabel the
+    2026-08-19 16:15 probe -- whose banner reads "WHPX vs TCG: benchmark suite
+    under hardware virtualisation" -- as a TCG run and then compare it against
+    itself for a speedup of exactly 1.
+
+    That banner names *both* accelerators, so it is refused under either
+    assumption. Refusing an ambiguous record is the right direction: an unusable
+    record costs a pair, a mislabelled one corrupts every figure its pair feeds.
+
+    The guard is partial by construction. It cannot catch a run that used a
+    non-default accelerator and said nothing about it in its banner. Nothing
+    can; that record simply did not record what it did.
+    """
+    text = (record.get("experiment") or "").lower()
+    if not text:
+        return None
+    named = sorted(
+        name for name, tokens in ACCEL_EXPERIMENT_TOKENS.items()
+        if name != assumed and any(token in text for token in tokens)
+    )
+    if not named:
+        return None
+    return (f"its `experiment` banner names {', '.join(named)}, so assuming "
+            f"{assumed} for it would contradict the only surviving evidence "
+            f"about what it ran on")
+
+
+def accel_run_rejection(record, host, profile, wanted, pin=""):
+    """Why an accelerator comparison would discard this record, or `None`.
+
+    `wanted` is the pair of accelerator names under comparison. The record must
+    already carry a decided accelerator in `record["accel"]` -- see
+    `accel_selection`, which applies `--assume-missing-accel` before calling
+    this so that the assumption is resolved in exactly one place.
+
+    # Why the source identity here is `kernel_sha` and not `src_digest`
+
+    A layout band groups arms built from the same *source*, because the arms
+    are deliberately different binaries -- that is the whole point of padding
+    `.text` -- and `src_digest` is the only thing that can say they came from
+    one tree.
+
+    An accelerator comparison wants the opposite: the *same binary*, run twice.
+    `kernel_sha` is the SHA-256 of the kernel ELF that was measured, which
+    settles that directly rather than by proxy. It is strictly stronger than
+    the digest -- a digest is an argument that two builds should be identical, a
+    matching `kernel_sha` is the observation that they are -- and it is
+    available on records far older than the digest field.
+
+    It also happens to be the only pin that works on the data we have: the six
+    TCG sweep arms carry no `src_digest` (the field postdates them) and the six
+    WHPX arms carry a `full:` one, so no digest match between the two sides can
+    ever exist, while their `kernel_sha` values match pad for pad exactly.
+
+    A consequence worth stating: `dirty` is not consulted here at all. It is a
+    statement about the tree, and this comparison is not asking about the tree.
+    Two runs of one ELF are two runs of one ELF however the tree looked.
+    """
+    code = measurement_mismatch(record, host, profile)
+    if code == MISMATCH_HOST:
+        return (f"host is {record.get('host')!r}, but the comparison is being "
+                f"computed for {host!r}; runs from different machines cannot "
+                f"be divided by each other")
+    if code == MISMATCH_PROFILE:
+        return (f"profile is {record_profile(record)!r}, not {profile!r}; a "
+                f"debug run and a release run differ by far more than the "
+                f"accelerator does")
+    if code == MISMATCH_LOADED:
+        return ("the host was loaded during this run, so its timings carry "
+                "contention as well as the accelerator, and a deliberately "
+                "poisoned control is never a baseline")
+    accel = record.get("accel")
+    if not accel:
+        return ("this run does not record which accelerator it ran on. That is "
+                "NOT the same as 'it ran on TCG' -- the first WHPX run in this "
+                "history also predates the field. Supply it with "
+                "--assume-missing-accel if you know it")
+    if accel not in wanted:
+        return f"ran on {accel!r}, which is neither side of this comparison"
+    if not record.get("kernel_sha"):
+        return ("no `kernel_sha` was recorded, so there is no way to show this "
+                "run measured the same binary as anything on the other side, "
+                "and a cross-accelerator ratio over two different binaries "
+                "measures the code and the emulator at once")
+    if pin and not any(
+            (record.get(field) or "").startswith(pin)
+            for field in ("kernel_sha", "src_digest")):
+        return (f"neither its `kernel_sha` nor its `src_digest` starts with "
+                f"{pin!r}, which this comparison was pinned to")
+    return None
+
+
+def positive_entries(records):
+    """Per-benchmark median over `records`, dropping non-positive values.
+
+    Median rather than mean so that a side sampled twice (a pad measured on two
+    days, say) is not swung by one bad run, and so that a side sampled once is
+    unchanged. Non-positive values are dropped rather than kept and guarded at
+    the division, because a zero here means the scorecard did not resolve that
+    benchmark at all -- a missing measurement, not a fast one.
+    """
+    acc = {}
+    for record in records:
+        for name, value in (record.get("entries") or {}).items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            if value > 0:
+                acc.setdefault(name, []).append(float(value))
+    return {name: statistics.median(values) for name, values in acc.items()}
+
+
+def accel_selection(records, host, profile, baseline, candidate,
+                    assume="", pin=""):
+    """Everything an accelerator comparison needs, with its working shown.
+
+    Returns a dict whose fields are as much about what was *not* used as what
+    was, because sec 240's rule is that the reader can re-derive the table --
+    and a selection they cannot see is one they cannot check:
+
+    - `sides`: `{accel: [(record, "recorded"|"assumed"), ...]}`, in time order.
+    - `pairs`: one per `kernel_sha` present on both sides, newest first. Each
+      carries the records behind it, the per-benchmark medians of each side,
+      and the ratios.
+    - `rejected`: `{reason: count}` over every record that did not qualify.
+    - `unassigned`: records that would have qualified but record no accelerator.
+    - `refused`: `[(record, why)]` -- records the assumption was refused for.
+    - `one_sided`: `{kernel_sha: [accel, ...]}` for images only one side ran.
+    - `recoverable`: how many `kernel_sha` values would become pairs if the
+      unassigned records' accelerators were known. This is the number that says
+      whether the comparison is thin because the runs were never made or
+      because the harness of the day did not write down what it ran on.
+
+    # Why the pairing is per-`kernel_sha` and not one pooled comparison
+
+    Pooling every baseline run against every candidate run would produce one
+    tidy ratio, and it would be wrong in a way this project has already been
+    bitten by. The Q54 evidence table was built from one TCG layout arm;
+    re-derived against the other five, its "typical speedup" moved from x3.53
+    to x3.97 and its "best case" named a different benchmark in four of the six.
+    Placement alone moves a benchmark by up to 182% under TCG, so a pool mixes
+    the accelerator difference with the layout difference and then reports the
+    sum as the former.
+
+    One pair per binary keeps the two apart: *within* a pair placement is held
+    exactly fixed, because it is the same ELF. The spread *across* pairs is then
+    a measurement of how much the layout was contributing -- precisely the thing
+    Q54's table could not see.
+    """
+    decided = []
+    rejected = {}
+    unassigned = []
+    refused = []
+    for record in records:
+        accel = record.get("accel")
+        source = "recorded"
+        if not accel and assume:
+            why = assumed_accel_refusal(record, assume)
+            if why is None:
+                accel, source = assume, "assumed"
+            else:
+                refused.append((record, why))
+        if not accel:
+            # Counted as "unassigned" only when it would otherwise have been
+            # usable. A debug run on another host is not evidence that the
+            # missing `accel` field is what holds this comparison back, and
+            # counting it as such would inflate `recoverable` into a promise
+            # that recording the field would deliver pairs it cannot.
+            probe = dict(record, accel=baseline)
+            if accel_run_rejection(probe, host, profile,
+                                   (baseline, candidate), pin) is None:
+                unassigned.append(record)
+            continue
+        why = accel_run_rejection(dict(record, accel=accel), host, profile,
+                                  (baseline, candidate), pin)
+        if why is not None:
+            rejected[why] = rejected.get(why, 0) + 1
+            continue
+        decided.append((record, accel, source))
+
+    sides = {baseline: [], candidate: []}
+    for record, accel, source in sorted(
+            decided, key=lambda item: item[0].get("timestamp", "")):
+        sides[accel].append((record, source))
+
+    by_sha = {}
+    for record, accel, _source in decided:
+        by_sha.setdefault(
+            record["kernel_sha"], {baseline: [], candidate: []}
+        )[accel].append(record)
+
+    pairs = []
+    for sha, at_sha in by_sha.items():
+        base_records, cand_records = at_sha[baseline], at_sha[candidate]
+        if not base_records or not cand_records:
+            continue
+        base_entries = positive_entries(base_records)
+        cand_entries = positive_entries(cand_records)
+        names = sorted(set(base_entries) & set(cand_entries))
+        if not names:
+            continue
+        both = base_records + cand_records
+        pads = sorted({r.get("text_pad") for r in both
+                       if isinstance(r.get("text_pad"), int)
+                       and not isinstance(r.get("text_pad"), bool)})
+        pairs.append({
+            "kernel_sha": sha,
+            "pads": pads,
+            "newest": max(r.get("timestamp", "") for r in both),
+            "base_records": sorted(base_records,
+                                   key=lambda r: r.get("timestamp", "")),
+            "cand_records": sorted(cand_records,
+                                   key=lambda r: r.get("timestamp", "")),
+            "base_entries": base_entries,
+            "cand_entries": cand_entries,
+            "ratios": {n: base_entries[n] / cand_entries[n] for n in names},
+            "dropped": len(set(base_entries) ^ set(cand_entries)),
+        })
+    pairs.sort(key=lambda pair: pair["newest"], reverse=True)
+
+    paired = {pair["kernel_sha"] for pair in pairs}
+    one_sided = {sha: [a for a, recs in at.items() if recs]
+                 for sha, at in by_sha.items() if sha not in paired}
+    recoverable = len({record["kernel_sha"] for record in unassigned
+                       if record.get("kernel_sha") in one_sided})
+
+    return {
+        "baseline": baseline,
+        "candidate": candidate,
+        "sides": sides,
+        "pairs": pairs,
+        "rejected": rejected,
+        "unassigned": unassigned,
+        "refused": refused,
+        "one_sided": one_sided,
+        "recoverable": recoverable,
+        "assume": assume,
+        "pin": pin,
+    }
+
+
+def summarise_accel_pair(pair):
+    """The headline figures for one binary: typical speedup, how many
+    benchmarks got faster, and the two extremes with the benchmarks that
+    produced them.
+
+    "Typical" is the median ratio, not the ratio of the totals. A sum is
+    dominated by whichever benchmark is slowest in absolute nanoseconds -- under
+    WHPX that is the device-bound handful that got ~30x *slower* -- so a
+    total-based figure would report the accelerator as a slowdown while 95% of
+    the suite sped up. The median answers the question a reader is actually
+    asking: what happens to a benchmark I pick.
+    """
+    ratios = pair["ratios"]
+    ordered = sorted(ratios.items(), key=lambda item: item[1])
+    return {
+        "typical": statistics.median(ratios.values()),
+        "faster": sum(1 for value in ratios.values() if value > 1.0),
+        "total": len(ratios),
+        "best": ordered[-1],
+        "worst": ordered[0],
+    }
+
+
+def _accel_span(values, fmt="{:.2f}"):
+    """`x3.53` for one value, `x3.53 - x3.97` for a spread. ASCII only.
+
+    A range wherever a range exists is the whole point of this view: the
+    single-number form of exactly this figure was published in Q54 and turned
+    out to be the lowest of six. Collapsing a spread back to its median here
+    would reintroduce that defect by hand.
+    """
+    low, high = min(values), max(values)
+    if fmt.format(low) == fmt.format(high):
+        return "x" + fmt.format(low)
+    return f"x{fmt.format(low)} - x{fmt.format(high)}"
+
+
+def _accel_record_line(record, source):
+    """One selected run, in enough detail to find it in `bench/history.jsonl`."""
+    pad = record.get("text_pad")
+    pad_text = (f"pad {pad}"
+                if isinstance(pad, int) and not isinstance(pad, bool)
+                else "pad ?")
+    return (f"{record.get('timestamp', '?'):<26} "
+            f"{record.get('commit') or '?':<11} "
+            f"{record.get('kernel_sha') or '?':<18} {pad_text:<9} "
+            f"canary {canary_verdict(record.get('canary')):<14} {source}")
+
+
+def resolve_accel_name(records, wanted):
+    """Map what the reader typed onto an accelerator string. -> (name, error).
+
+    Case-insensitive, exact first then unique substring, so that `whpx` reaches
+    `Hyper-V/WHPX` and `tcg` reaches `QEMU TCG` without anyone having to type a
+    slash or guess the capitalisation the kernel used.
+
+    Matches against `KNOWN_ACCELS` as well as the names present in the history,
+    which is what makes "KVM has no records here" reachable as an *answer*
+    rather than as a spelling complaint. The two failures need opposite
+    responses -- fix the typo, versus go and produce the runs -- and a tool that
+    returns the same message for both sends half its readers the wrong way.
+    """
+    present = []
+    for record in records:
+        accel = record.get("accel")
+        if accel and accel not in present:
+            present.append(accel)
+    catalogue = present + [n for n in KNOWN_ACCELS if n not in present]
+    lowered = wanted.strip().lower()
+    if not lowered:
+        return None, "an empty accelerator name"
+    exact = [name for name in catalogue if name.lower() == lowered]
+    if exact:
+        return exact[0], None
+    partial = [name for name in catalogue if lowered in name.lower()]
+    if len(partial) == 1:
+        return partial[0], None
+    if partial:
+        return None, (f"{wanted!r} matches {len(partial)} accelerators "
+                      f"({', '.join(partial)}); name one exactly")
+    return None, (f"no accelerator matches {wanted!r}. Recorded in this "
+                  f"history: {', '.join(present) or '(none)'}. Known to the "
+                  f"kernel: {', '.join(KNOWN_ACCELS)}")
+
+
+def cmd_accel_compare(history_path, profile, spec, assume="", pin="",
+                      markdown=False):
+    """Compare two accelerators over every kernel image both of them ran.
+
+    Exists because `design-decisions.md` sec 240 adopted a rule -- evidence
+    quoted in `open-questions.md` must be regenerable by a command the reader
+    can re-run -- and the two tables that rule was written for were both
+    accelerator comparisons, for which no such command existed. The rule was
+    therefore unsatisfiable for precisely the evidence that motivated it, which
+    leaves it an intention rather than a rule. See `known-issues.md`
+    `TD-A-THE-EVIDENCE-RULE-ADOPTED-IN-...-CANNOT-BE-SATISFIED-BY-ANY-EXISTING-COMMAND`.
+
+    Three properties are load-bearing, and each is a lesson from a table that
+    was already published and already wrong:
+
+    1. **It prints its selection, run by run.** The Q53 table was built by an
+       analysis that enumerated records itself; it looked right and was not. A
+       reader who can see which runs went in can check the claim without
+       reading this file.
+    2. **It never presents one arm as "the" number.** Where several binaries are
+       shared it reports the range across them, because Q54's x3.53 was one of
+       six values spanning x3.53-x3.97 and its "best case" named a different
+       benchmark in four of the six. Where only one binary is shared it says so,
+       loudly, rather than printing a bare figure that looks like the
+       six-binary kind.
+    3. **It refuses to guess an accelerator.** A run that did not record one is
+       reported as unusable and counted, never folded into whichever side seems
+       likely -- the mistake `parse_accel` exists to prevent.
+
+    Output is ASCII throughout, including in `--markdown` mode. It is printed to
+    a Windows console whose code page is not UTF-8, where a multiplication sign
+    is mojibake; `x3.53` pastes into a document just as well.
+
+    Returns 0 whenever it produced a complete answer, *including* the answer "no
+    two runs of one binary exist on these two accelerators" -- that is a finding
+    about the history, and the diagnosis printed with it is the useful output.
+    2 is reserved for being unable to understand the request.
+    """
+    records = load_history(history_path)
+    if not records:
+        print(f"bench-history: no records in {history_path}")
+        return 0
+
+    parts = spec.split(":", 1)
+    if len(parts) != 2:
+        print(f"bench-history: --accel-compare wants BASELINE:CANDIDATE, got "
+              f"{spec!r}. Try: --accel-compare tcg:whpx")
+        return 2
+    names = []
+    for part in parts:
+        name, error = resolve_accel_name(records, part)
+        if error:
+            print(f"bench-history: {error}")
+            return 2
+        names.append(name)
+    baseline, candidate = names
+    if baseline == candidate:
+        print(f"bench-history: both sides resolve to {baseline!r}; an "
+              f"accelerator compared with itself is an A/A pair, which --list "
+              f"already shows")
+        return 2
+    if assume:
+        assume, error = resolve_accel_name(records, assume)
+        if error:
+            print(f"bench-history: --assume-missing-accel: {error}")
+            return 2
+
+    host = platform.node() or "unknown"
+    sel = accel_selection(records, host, profile, baseline, candidate,
+                          assume, pin)
+    emit = _accel_report_markdown if markdown else _accel_report_text
+    emit(sel, host, profile)
+    return 0
+
+
+def _accel_reproduce_command(sel, profile, markdown):
+    """The command line that regenerates this exact report.
+
+    Printed *in* the report, because a table pasted into `open-questions.md`
+    outlives the shell it was produced in, and sec 240's rule is only satisfied
+    if the next reader can re-run it without reconstructing the flags from
+    prose.
+    """
+    parts = ["python scripts/bench-history.py",
+             f'--accel-compare "{sel["baseline"]}:{sel["candidate"]}"',
+             f"--profile {profile}"]
+    if sel["assume"]:
+        parts.append(f'--assume-missing-accel "{sel["assume"]}"')
+    if sel["pin"]:
+        parts.append(f"--accel-pin {sel['pin']}")
+    if markdown:
+        parts.append("--markdown")
+    return " ".join(parts)
+
+
+def _accel_stamp_span(stamps):
+    """`2026-08-14 to 2026-08-19`, or down to minutes when it is all one day.
+
+    A span that reads "2026-08-19 to 2026-08-19" tells the reader the field was
+    missing on a single day, which is the opposite of the truth in the case
+    that matters most -- runs made minutes apart, before and after the field
+    landed, where the missing half is recoverable by anyone who remembers the
+    afternoon.
+    """
+    low, high = stamps[0], stamps[-1]
+    width = 10 if low[:10] != high[:10] else 16
+    if low[:width] == high[:width]:
+        return low[:width]
+    return f"{low[:width]} to {high[:width]}"
+
+
+def _accel_unusable_lines(sel):
+    """What was left out, and whether that is why the answer is thin.
+
+    Shared by both report forms word for word: the plain form is read by whoever
+    is deciding whether to trust the numbers, and the markdown form is pasted
+    next to them in front of the operator, who is the one person who can
+    authorise the runs that would fix it.
+    """
+    lines = []
+    unassigned = sel["unassigned"]
+    if unassigned:
+        stamps = sorted(r.get("timestamp", "") for r in unassigned)
+        lines.append(
+            f"{len(unassigned)} run(s) would have qualified but do not record "
+            f"which accelerator they ran on ({_accel_stamp_span(stamps)}). "
+            f"The `accel` field postdates them. That is "
+            f"NOT the same as 'they ran on TCG': the first WHPX run in this "
+            f"history also predates the field.")
+        if sel["recoverable"]:
+            lines.append(
+                f"  {sel['recoverable']} of those kernel images ARE present on "
+                f"one side of this comparison, so knowing what those runs ran "
+                f"on would add {sel['recoverable']} more pair(s). That is the "
+                f"difference between this comparison being thin because the "
+                f"runs were never made and thin because the harness of the day "
+                f"did not write down what it ran on.")
+        if not sel["assume"]:
+            lines.append(
+                "  Re-run with --assume-missing-accel NAME to assert what they "
+                "ran on. It is an assertion by whoever types it, like "
+                "--host-load idle, and everything derived from it is labelled.")
+    for record, why in sel["refused"]:
+        lines.append(
+            f"assumption refused for {record.get('timestamp', '?')} "
+            f"({record.get('commit') or '?'}): {why}")
+    for why, count in sorted(sel["rejected"].items(),
+                             key=lambda item: (-item[1], item[0])):
+        lines.append(f"{count} run(s) rejected: {why}")
+    # Grouped by which side ran them, rather than one line per image. Eleven
+    # near-identical sentences differing only in a hash is a wall a reader
+    # skips, and the fact that matters is not *which* images went unmatched but
+    # that one accelerator has a pile of runs the other never answered -- which
+    # is a statement about what to go and measure next.
+    by_side = {}
+    for sha, present in sel["one_sided"].items():
+        by_side.setdefault(", ".join(sorted(present)), []).append(sha)
+    for side, shas in sorted(by_side.items()):
+        shown = ", ".join(sorted(shas)[:3])
+        if len(shas) > 3:
+            shown += f", and {len(shas) - 3} more"
+        lines.append(
+            f"{len(shas)} kernel image(s) ran only on {side} ({shown}), so "
+            f"they cannot be pairs; a ratio needs both sides of one binary.")
+    return lines
+
+
+def _accel_pair_label(pair):
+    pads = pair["pads"]
+    if not pads:
+        return pair["kernel_sha"]
+    if len(pads) == 1:
+        return f"{pair['kernel_sha']} (pad {pads[0]})"
+    return f"{pair['kernel_sha']} (pads {', '.join(str(p) for p in pads)})"
+
+
+def _accel_canary_mix(sel):
+    """The host-load verdicts of the runs the printed figures came from.
+
+    Over the runs behind the **pairs**, not over everything the selection kept.
+    Those differ here by a lot -- fourteen WHPX runs qualify and three of them
+    end up in a pair -- and a caveat computed over the wider set would describe
+    runs that contributed nothing to any number on the page, in either
+    direction: it could report six broken instruments beside a table drawn
+    entirely from clean ones, or hide one broken instrument among nine clean
+    runs that were never used.
+
+    Recomputed from each run's raw `canary` by `canary_verdict`, and phrased by
+    `describe_canary_mix`, for the reason `layout_bands` gives: the stored
+    verdict string is whatever the rule said on the day, and the rule has
+    tightened since.
+
+    It matters more here than anywhere else in this file. Every WHPX run in this
+    history once reported `broken` -- the canary's resolution floor is a
+    TCG-only instrument, see
+    `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT` -- so a WHPX column
+    can be a column no contamination check was watching, and a reader must not
+    have to already know that to read the table safely.
+    """
+    mix = {}
+    for pair in sel["pairs"]:
+        for record in pair["base_records"] + pair["cand_records"]:
+            verdict = canary_verdict(record.get("canary"))
+            mix[verdict] = mix.get(verdict, 0) + 1
+    return mix
+
+
+def _accel_thin_warning(sel):
+    """The sentence that stops one pair being read as a settled figure."""
+    return (
+        f"WARNING: only ONE kernel image ran on both accelerators, so every "
+        f"figure below is a single code layout.\n"
+        f"  That is the exact shape of the error this view exists to prevent: "
+        f"the x3.53 published for\n"
+        f"  {sel['candidate']} came from one layout arm, and re-derived against "
+        f"the other five it spanned\n"
+        f"  x3.53-x3.97, with a different benchmark winning 'best case' in four "
+        f"of the six. Placement\n"
+        f"  alone moves a benchmark by up to 182% under TCG. Read what follows "
+        f"as one point on that\n"
+        f"  scale. Sweeping both accelerators over the same pads would give the "
+        f"range instead:\n"
+        f"    python scripts/layout-sweep.py --pads 0,1024,2048,3072 --profile "
+        f"release")
+
+
+def _accel_faster_text(summaries):
+    """`82 of 86`, or `82-83 of 86` when the pairs disagree."""
+    faster = sorted({s["faster"] for s in summaries})
+    total = sorted({s["total"] for s in summaries})
+    left = str(faster[0]) if len(faster) == 1 else f"{faster[0]}-{faster[-1]}"
+    right = str(total[0]) if len(total) == 1 else f"{total[0]}-{total[-1]}"
+    return f"{left} of {right}"
+
+
+def _accel_report_text(sel, host, profile):
+    baseline, candidate, pairs = sel["baseline"], sel["candidate"], sel["pairs"]
+    print(f"Accelerator comparison on {host} / {profile}: "
+          f"{baseline} -> {candidate}")
+    print(f"  (a ratio above x1 means {candidate} is FASTER; entries are "
+          f"nanoseconds, so lower is better)")
+    if sel["assume"]:
+        assumed = sum(1 for rows in sel["sides"].values()
+                      for _r, source in rows if source == "assumed")
+        print(f"  ASSUMED: {assumed} run(s) that recorded no accelerator are "
+              f"being treated as {sel['assume']}.\n"
+              f"  That is your assertion, not a measurement. Every figure here "
+              f"rests on it.")
+    if sel["pin"]:
+        print(f"  Pinned to kernel_sha/src_digest prefix {sel['pin']!r}.")
+    print(f"\n  Reproduce: {_accel_reproduce_command(sel, profile, False)}")
+
+    print("\nRuns that went in:")
+    for accel in (baseline, candidate):
+        rows = sel["sides"][accel]
+        print(f"  {accel} -- {len(rows)} run(s)")
+        for record, source in rows:
+            print(f"    {_accel_record_line(record, source)}")
+        if not rows:
+            print("    (none)")
+
+    unusable = _accel_unusable_lines(sel)
+    if unusable:
+        print("\nNot used:")
+        for line in unusable:
+            print(f"  {line}")
+
+    if not pairs:
+        print(f"\nNo kernel image ran on both {baseline} and {candidate}, so "
+              f"there is nothing to divide.")
+        print("  A cross-accelerator ratio is only meaningful over one "
+              "identical binary; anything else\n  measures the code and the "
+              "emulator at the same time and reports the sum as the emulator.")
+        return
+
+    print(f"\nPaired on kernel_sha -- one identical kernel image per pair -- "
+          f"{len(pairs)} pair(s):")
+    for pair in pairs:
+        extra = (f", {pair['dropped']} not on both sides"
+                 if pair["dropped"] else "")
+        print(f"  {_accel_pair_label(pair)}: "
+              f"{len(pair['base_records'])} x {baseline}, "
+              f"{len(pair['cand_records'])} x {candidate}, "
+              f"{len(pair['ratios'])} benchmarks in common{extra}")
+    if len(pairs) == 1:
+        print(f"\n  {_accel_thin_warning(sel)}")
+
+    summaries = [summarise_accel_pair(pair) for pair in pairs]
+    print(f"\nSummary across {len(pairs)} pair(s):")
+    print(f"  Typical benchmark   "
+          f"{_accel_span([s['typical'] for s in summaries])} faster")
+    print(f"  Benchmarks faster   {_accel_faster_text(summaries)}")
+    best_names = sorted({s["best"][0] for s in summaries})
+    best = _accel_span([s["best"][1] for s in summaries])
+    print(f"  Best case           {best}"
+          + (f"  {best_names[0]}" if len(best_names) == 1 else
+             f"  -- and a DIFFERENT benchmark in {len(best_names)} of "
+             f"{len(pairs)} pairs ({', '.join(best_names)}), so this row does "
+             f"not name one"))
+    worst_names = sorted({s["worst"][0] for s in summaries})
+    worst = _accel_span([s["worst"][1] for s in summaries])
+    print(f"  Worst case          {worst}"
+          + (f"  {worst_names[0]}" if len(worst_names) == 1 else
+             f"  -- and a different benchmark in {len(worst_names)} of "
+             f"{len(pairs)} pairs"))
+    caveat = describe_canary_mix(_accel_canary_mix(sel), "runs")
+    if caveat:
+        print(f"  Host-load check     {caveat}.\n"
+              f"                      Those runs could not confirm the machine "
+              f"was idle, so part of this\n"
+              f"                      difference may be host noise rather than "
+              f"the accelerator.")
+
+    names = sorted(set.intersection(*(set(p["ratios"]) for p in pairs)))
+    print(f"\nPer benchmark ({len(names)} measured on every pair):")
+    width = max(len(name) for name in names)
+    if len(pairs) == 1:
+        pair = pairs[0]
+        print(f"  {'benchmark':<{width}}  {baseline:>14}  {candidate:>14}  "
+              f"ratio")
+        for name in sorted(names, key=lambda n: (-pair["ratios"][n], n)):
+            print(f"  {name:<{width}}  {pair['base_entries'][name]:>12.1f}ns  "
+                  f"{pair['cand_entries'][name]:>12.1f}ns  "
+                  f"x{pair['ratios'][name]:.2f}")
+    else:
+        def median_ratio(name):
+            return statistics.median(pair["ratios"][name] for pair in pairs)
+        print(f"  {'benchmark':<{width}}  {'median':>8}  range over "
+              f"{len(pairs)} pairs")
+        for name in sorted(names, key=lambda n: (-median_ratio(n), n)):
+            values = [pair["ratios"][name] for pair in pairs]
+            print(f"  {name:<{width}}  x{median_ratio(name):>7.2f}  "
+                  f"{_accel_span(values)}")
+    print("\n  A ratio is one binary under two emulators. It is not a "
+          "prediction about real hardware,\n  and it is not transitive with "
+          "any other pair of accelerators.")
+
+
+def _accel_report_markdown(sel, host, profile):
+    baseline, candidate, pairs = sel["baseline"], sel["candidate"], sel["pairs"]
+    print(f"Accelerator comparison on `{host}` / `{profile}`: "
+          f"**{baseline}** -> **{candidate}**. A ratio above x1 means "
+          f"{candidate} is faster.")
+    print("\nReproduce with:\n")
+    print(f"    {_accel_reproduce_command(sel, profile, True)}")
+    if sel["assume"]:
+        print(f"\n**Assumed:** runs that recorded no accelerator are treated "
+              f"as `{sel['assume']}`. That is an assertion by whoever ran this "
+              f"command, not a measurement.")
+    if not pairs:
+        print("\n**No kernel image ran on both accelerators**, so there is "
+              "nothing to divide. A cross-accelerator ratio is only meaningful "
+              "over one identical binary.\n")
+        for line in _accel_unusable_lines(sel):
+            print(f"- {line}")
+        return
+
+    summaries = [summarise_accel_pair(pair) for pair in pairs]
+    print(f"\nPaired on `kernel_sha` -- one identical kernel image per pair -- "
+          f"**{len(pairs)} pair(s)**: "
+          f"{', '.join(_accel_pair_label(p) for p in pairs)}.")
+    if len(pairs) == 1:
+        print(f"\n> **Only one kernel image ran on both accelerators, so every "
+              f"figure below is a single code layout.** The x3.53 published for "
+              f"{candidate} in Q54 came from one layout arm and spanned "
+              f"x3.53-x3.97 across six; placement alone moves a benchmark by up "
+              f"to 182% under TCG.")
+
+    print(f"\n| | {baseline} | {candidate} |")
+    print("|---|---|---|")
+    print(f"| Typical benchmark | -- | "
+          f"**{_accel_span([s['typical'] for s in summaries])} faster** "
+          f"({_accel_faster_text(summaries)} faster) |")
+    best_names = sorted({s["best"][0] for s in summaries})
+    best = _accel_span([s["best"][1] for s in summaries])
+    best_cell = (f"`{best_names[0]}` {best}" if len(best_names) == 1 else
+                 f"{best}, and a **different benchmark** in {len(best_names)} "
+                 f"of {len(pairs)} pairs")
+    print(f"| Best case | -- | {best_cell} |")
+    worst_names = sorted({s["worst"][0] for s in summaries})
+    worst = _accel_span([s["worst"][1] for s in summaries])
+    worst_cell = (f"`{worst_names[0]}` {worst}" if len(worst_names) == 1 else
+                  f"{worst}, and a different benchmark in {len(worst_names)} "
+                  f"of {len(pairs)} pairs")
+    print(f"| Worst case | -- | {worst_cell} |")
+    caveat = describe_canary_mix(_accel_canary_mix(sel), "runs")
+    if caveat:
+        print(f"| Host-load check | {caveat} | |")
+
+    print("\n<details><summary>Runs that went in, and what was left out"
+          "</summary>\n")
+    for accel in (baseline, candidate):
+        print(f"`{accel}` -- {len(sel['sides'][accel])} run(s):\n")
+        for record, source in sel["sides"][accel]:
+            print(f"    {_accel_record_line(record, source)}")
+        print()
+    for line in _accel_unusable_lines(sel):
+        print(f"- {line}")
+    print("\n</details>")
+
+
 def cmd_layout_bands(history_path, profile):
     """Print the measured code-placement sensitivity of each benchmark.
 
@@ -4922,6 +5773,33 @@ def main(argv=None):
                              "exit. Reports which commit was swept and over "
                              "how many layouts, so a band can be judged for "
                              "staleness before it is trusted.")
+    parser.add_argument("--accel-compare", default="", metavar="BASE:CAND",
+                        help="compare two accelerators over every kernel image "
+                             "both of them ran, and exit. e.g. "
+                             "--accel-compare tcg:whpx. Pairs on `kernel_sha`, "
+                             "so every ratio is one identical binary under two "
+                             "emulators; prints the runs it selected, and "
+                             "reports a RANGE rather than one number whenever "
+                             "more than one image is shared.")
+    parser.add_argument("--assume-missing-accel", default="", metavar="ACCEL",
+                        help="for --accel-compare: treat runs that recorded no "
+                             "accelerator as having run on ACCEL. The field "
+                             "postdates most of the history, and 'no banner' "
+                             "provably does not mean TCG (the first WHPX run "
+                             "predates it too), so this is an assertion by "
+                             "whoever types it -- like --host-load idle. "
+                             "Refused per-run where a run's own `experiment` "
+                             "banner names a different accelerator, and every "
+                             "figure derived under it is labelled.")
+    parser.add_argument("--accel-pin", default="", metavar="PREFIX",
+                        help="for --accel-compare: restrict to runs whose "
+                             "`kernel_sha` or `src_digest` starts with PREFIX, "
+                             "to quote a figure about one named binary.")
+    parser.add_argument("--markdown", action="store_true",
+                        help="for --accel-compare: emit markdown tables, so "
+                             "evidence in open-questions.md is pasted output "
+                             "rather than transcribed output. Transcription is "
+                             "where a digit changes.")
     parser.add_argument("--profile", default=LEGACY_PROFILE,
                         help="cargo build profile these numbers were measured "
                              "on (default: debug). Records are only ever "
@@ -4967,6 +5845,12 @@ def main(argv=None):
 
     if args.layout_bands:
         return cmd_layout_bands(args.history, args.profile)
+
+    if args.accel_compare:
+        return cmd_accel_compare(args.history, args.profile,
+                                 args.accel_compare,
+                                 args.assume_missing_accel, args.accel_pin,
+                                 args.markdown)
 
     current_entries = parse_serial(args.serial)
     if not current_entries:

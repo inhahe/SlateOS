@@ -4862,6 +4862,563 @@ def test_the_diff_escalation_can_only_ever_escalate(bh):
           bh.changed_paths(bh.UNKNOWN_COMMIT), None)
 
 
+# ---------------------------------------------------------------------------
+# `--accel-compare`
+#
+# Every test below is a published-and-wrong table turned into an assertion. Q53
+# was built by an analysis that enumerated records itself and looked right; Q54
+# published x3.53 as "the" speedup when it was the lowest of six values spanning
+# x3.53-x3.97, with a different benchmark winning "best case" in four of them.
+# The command exists so those tables are pasted output rather than transcribed
+# output; these tests exist so the command cannot quietly acquire either defect.
+# ---------------------------------------------------------------------------
+
+#: A canary that resolves its own quantity and finds nothing. `min` has to clear
+#: `2 * CANARY_MIN_RESOLVABLE` or `canary_verdict` returns `broken` -- correctly,
+#: but it would then put a caveat under every table in this section and hide the
+#: one test that is actually about the caveat.
+_ACCEL_CLEAN_CANARY = {"start": 200, "end": 204, "pct": 102, "samples": 10,
+                       "min": 200, "max": 204, "spread": 2}
+
+_ACCEL_WANTED = ("QEMU TCG", "Hyper-V/WHPX")
+
+
+def _accel_run(accel=None, sha="a" * 16, when="2026-08-19T01:00:00+00:00",
+               entries=None, **overrides):
+    """One bench record shaped as an accelerator comparison needs it.
+
+    `accel=None` is written as a *missing key*, not as a null, because that is
+    what the 19 pre-2026-08-19 runs in the real history look like -- the field
+    did not exist. A test that wrote `"accel": None` would be testing a record
+    shape that has never occurred.
+    """
+    record = {
+        "host": "H",
+        "profile": "release",
+        "commit": "cccccccccc1",
+        "timestamp": when,
+        "kernel_sha": sha,
+        "canary": dict(_ACCEL_CLEAN_CANARY),
+        "entries": dict(entries or {"a": 1000.0, "b": 1000.0, "c": 1000.0}),
+    }
+    if accel is not None:
+        record["accel"] = accel
+    record.update(overrides)
+    return record
+
+
+def _accel_sel(bh, records, assume="", pin=""):
+    """`accel_selection` over TCG -> WHPX on host H, release."""
+    return bh.accel_selection(records, "H", "release", *_ACCEL_WANTED,
+                              assume, pin)
+
+
+def _accel_view(bh, tmpdir, records, spec="tcg:whpx", **kwargs):
+    """Run `--accel-compare` over a written history. -> (stdout, exit code).
+
+    Rewrites every record's host to this machine's, because `cmd_accel_compare`
+    resolves the host itself -- the comparison is only ever meaningful within
+    one machine, so there is deliberately no flag to override it.
+    """
+    import json
+    import platform
+
+    path = os.path.join(tmpdir, "history.jsonl")
+    host = platform.node() or "unknown"
+    with open(path, "w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(dict(record, host=host)) + "\n")
+    return capture(bh.cmd_accel_compare, path, "release", spec, **kwargs)
+
+
+def test_the_accel_predicate_shares_the_layout_predicates_universal_filters(bh):
+    """Two selection rules, one copy of the part they agree on.
+
+    sec 240 rule 2 says an analysis that groups records must call the real
+    predicate rather than restate it, and this is the first place two callers
+    needed the same three filters -- wrong host, wrong profile, deliberately
+    loaded host. Restating them would agree today and drift on the next edit to
+    either, which is how a band certifies arms it should have thrown out.
+
+    The equivalence is asserted over a matrix rather than case by case, and the
+    final clause is the one with teeth: it reads `MISMATCH_*` off the module and
+    fails if a fourth filter is added without a case here. Without it this test
+    could not distinguish "the shared predicate grew a clause nobody exercises"
+    from "there are three clauses and all three are checked".
+
+    Mutation-checked by re-inlining the `host` comparison into
+    `accel_run_rejection` and dropping it from `measurement_mismatch`: the
+    matrix still passes (both sides still reject) but the layout predicate stops
+    rejecting a foreign host, which the second row catches.
+    """
+    host, profile = "H", "release"
+    cases = {
+        "other host": {"host": "OTHER"},
+        "other profile": {"profile": "debug"},
+        "loaded host": {"host_load": bh.HOST_LOAD_LOADED},
+    }
+    seen = []
+    for label, override in cases.items():
+        record = dict(_sweep_arms({1024: 500}, **override)[0],
+                      accel="QEMU TCG", kernel_sha="a" * 16)
+        seen.append(bh.measurement_mismatch(record, host, profile))
+        check(f"{label}: both predicates reject it",
+              (bh.layout_arm_rejection(record, host, profile) is None,
+               bh.accel_run_rejection(record, host, profile,
+                                      _ACCEL_WANTED) is None),
+              (False, False))
+        check(f"{label}: ...and each words it for its own reader",
+              bh.layout_arm_rejection(record, host, profile)
+              == bh.accel_run_rejection(record, host, profile, _ACCEL_WANTED),
+              False)
+
+    clean = dict(_sweep_arms({1024: 500})[0],
+                 accel="QEMU TCG", kernel_sha="a" * 16)
+    check("a run that fails none of the three passes both predicates",
+          (bh.measurement_mismatch(clean, host, profile),
+           bh.layout_arm_rejection(clean, host, profile),
+           bh.accel_run_rejection(clean, host, profile, _ACCEL_WANTED)),
+          (None, None, None))
+
+    codes = sorted(value for name, value in vars(bh).items()
+                   if name.startswith("MISMATCH_"))
+    check("every shared filter the module defines is exercised above",
+          codes, sorted(seen))
+
+
+def test_an_accelerator_comparison_refuses_to_guess_one(bh):
+    """A run that recorded no accelerator joins no side, ever.
+
+    This is the mistake `parse_accel` exists to prevent, one layer up. 98 of the
+    113 records in the real history predate the `accel` field, and the temptation
+    is to read "no banner" as "the default, so TCG" -- which is provably wrong
+    about at least one record here, because the *first* WHPX run predates the
+    field too. Folding those in would have relabelled a WHPX run as TCG and
+    compared it against itself for a speedup of exactly 1.
+
+    So the missing field is reported as unusable and counted, and the reader can
+    only override it by asserting the answer, which is then labelled at every
+    record it touched.
+    """
+    records = [
+        _accel_run("QEMU TCG", when="2026-08-19T01:00:00+00:00"),
+        _accel_run(None, when="2026-08-19T02:00:00+00:00",
+                   entries={"a": 500.0, "b": 500.0, "c": 500.0}),
+    ]
+    sel = _accel_sel(bh, records)
+    check("a run with no accel joins neither side",
+          [len(sel["sides"][name]) for name in _ACCEL_WANTED], [1, 0])
+    check("...and is counted as unusable rather than silently dropped",
+          len(sel["unassigned"]), 1)
+    check("...so the two runs are not a pair", len(sel["pairs"]), 0)
+
+    why = bh.accel_run_rejection(_accel_run(None), "H", "release",
+                                 _ACCEL_WANTED)
+    check("the refusal says what a missing field is NOT",
+          "NOT the same" in (why or ""), True)
+
+    sel = _accel_sel(bh, records, assume="Hyper-V/WHPX")
+    check("the reader may assert what it ran on", len(sel["pairs"]), 1)
+    check("...and the assertion is labelled at the record it was applied to",
+          sorted(source for rows in sel["sides"].values()
+                 for _record, source in rows),
+          ["assumed", "recorded"])
+
+
+def test_the_assumption_is_refused_where_the_record_contradicts_it(bh):
+    """An assumption cannot be verified. It can sometimes be falsified.
+
+    `--assume-missing-accel` is the reader's assertion, like `--host-load idle`,
+    and nothing in the data can confirm it. But a run whose own `experiment`
+    banner names a *different* accelerator is one the assertion is demonstrably
+    wrong about, and those are refused one by one rather than taken on trust.
+
+    The case that forced it is real: the 2026-08-19 16:15 probe is banner-titled
+    "WHPX vs TCG", and it names *both*, so it is refused under either
+    assumption. Refusing an ambiguous record is the safe direction -- an unusable
+    record costs a pair, a mislabelled one corrupts every figure its pair feeds.
+
+    The guard is partial by construction and the last two rows say so: a banner
+    that names nothing cannot contradict anything, and neither can a missing
+    banner. Nothing can catch a run that used a non-default accelerator and said
+    nothing about it; that record simply did not record what it did.
+    """
+    other = {"experiment": "WHPX layout sweep: textpad=1024"}
+    check("a banner naming another accelerator refuses the assumption",
+          bh.assumed_accel_refusal(other, "QEMU TCG") is None, False)
+    check("...and names which accelerator it saw",
+          "Hyper-V/WHPX" in (bh.assumed_accel_refusal(other, "QEMU TCG")
+                             or ""), True)
+    check("a banner naming the assumed accelerator does not refuse it",
+          bh.assumed_accel_refusal({"experiment": "tcg layout sweep"},
+                                   "QEMU TCG"), None)
+
+    both = {"experiment": "WHPX vs TCG: benchmark suite under hardware virt"}
+    check("a banner naming both is refused under either assumption",
+          (bh.assumed_accel_refusal(both, "QEMU TCG") is None,
+           bh.assumed_accel_refusal(both, "Hyper-V/WHPX") is None),
+          (False, False))
+
+    check("a banner naming no accelerator cannot contradict anything",
+          bh.assumed_accel_refusal({"experiment": "layout sweep: textpad=0"},
+                                   "QEMU TCG"), None)
+    check("...and neither can a run with no banner at all",
+          bh.assumed_accel_refusal({}, "QEMU TCG"), None)
+
+    # End to end: the refusal must reach the report, not just the predicate.
+    records = [
+        _accel_run("Hyper-V/WHPX", when="2026-08-19T01:00:00+00:00"),
+        _accel_run(None, when="2026-08-19T02:00:00+00:00",
+                   experiment="WHPX vs TCG: probe",
+                   entries={"a": 500.0, "b": 500.0, "c": 500.0}),
+    ]
+    sel = _accel_sel(bh, records, assume="QEMU TCG")
+    check("a refused record is listed, not merely omitted",
+          len(sel["refused"]), 1)
+    check("...and contributes no pair", len(sel["pairs"]), 0)
+
+
+def test_a_cross_accelerator_ratio_needs_both_sides_of_one_binary(bh):
+    """Two runs of two different kernels are not a measurement of an emulator.
+
+    Pairing is on `kernel_sha` -- the SHA-256 of the ELF that was measured --
+    and not on `src_digest`, because this comparison wants the same *binary*
+    run twice, where a layout band wants the same *source* built several ways.
+    A ratio taken across two different binaries measures the code and the
+    emulator at once and then reports the sum as the emulator, which is exactly
+    the error the 182%-of-placement finding says is available to be made.
+    """
+    unpaired = [_accel_run("QEMU TCG", sha="a" * 16),
+                _accel_run("Hyper-V/WHPX", sha="b" * 16,
+                           when="2026-08-19T02:00:00+00:00",
+                           entries={"a": 250.0, "b": 250.0, "c": 250.0})]
+    sel = _accel_sel(bh, unpaired)
+    check("two runs of two binaries are not a pair", len(sel["pairs"]), 0)
+    check("...and both images are reported as one-sided",
+          sorted(sel["one_sided"]), ["a" * 16, "b" * 16])
+    check("...naming which side ran each",
+          sorted(sel["one_sided"]["a" * 16]), ["QEMU TCG"])
+
+    paired = [_accel_run("QEMU TCG", sha="a" * 16),
+              _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                         when="2026-08-19T02:00:00+00:00",
+                         entries={"a": 250.0, "b": 250.0, "c": 250.0})]
+    sel = _accel_sel(bh, paired)
+    check("the same binary on both sides is one pair", len(sel["pairs"]), 1)
+    check("...over the benchmarks both sides measured",
+          sorted(sel["pairs"][0]["ratios"]), ["a", "b", "c"])
+    check("...and the ratio is baseline over candidate, so >1 means faster",
+          sel["pairs"][0]["ratios"]["a"], 4.0)
+    check("...with nothing left one-sided", sel["one_sided"], {})
+
+
+def test_one_shared_binary_is_never_presented_as_the_number(bh, tmpdir):
+    """The Q54 defect, made impossible to repeat silently.
+
+    x3.53 was published as the typical speedup. It was one layout arm's value;
+    the other five spanned it out to x3.97, and the "best case" row named a
+    different benchmark in four of the six. A single-pair comparison is that
+    same figure, and it looks identical to a six-pair one on the page -- so it
+    has to announce itself.
+    """
+    records = [_accel_run("QEMU TCG", sha="a" * 16),
+               _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                          when="2026-08-19T02:00:00+00:00",
+                          entries={"a": 250.0, "b": 250.0, "c": 250.0})]
+    out, code = _accel_view(bh, tmpdir, records)
+    check("a one-pair comparison still answers", code, 0)
+    check("...but warns that every figure is one code layout",
+          "only ONE kernel image ran on both accelerators" in out, True)
+    check("...and cites the table that already made this mistake",
+          "x3.53-x3.97" in out, True)
+    check("...and says what would produce the range instead",
+          "layout-sweep.py" in out, True)
+
+
+def test_a_range_is_reported_wherever_a_range_exists(bh, tmpdir):
+    """With several binaries shared, no row collapses to one arm's number.
+
+    Two pairs are constructed to disagree in every way the report has a row for:
+    the typical speedup differs, the count of benchmarks that got faster
+    differs, and -- the row Q54 got wrong -- the best case is a *different
+    benchmark* in each. That last one must refuse to name a benchmark rather
+    than pick one, because naming one is precisely what made the published
+    figure unreproducible against five of its six siblings.
+    """
+    records = [
+        _accel_run("QEMU TCG", sha="a" * 16, when="2026-08-19T01:00:00+00:00"),
+        _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                   when="2026-08-19T02:00:00+00:00",
+                   entries={"a": 500.0, "b": 250.0, "c": 1000.0}),
+        _accel_run("QEMU TCG", sha="b" * 16, when="2026-08-19T03:00:00+00:00"),
+        _accel_run("Hyper-V/WHPX", sha="b" * 16,
+                   when="2026-08-19T04:00:00+00:00",
+                   entries={"a": 200.0, "b": 400.0, "c": 800.0}),
+    ]
+    sel = _accel_sel(bh, records)
+    check("two shared binaries are two pairs", len(sel["pairs"]), 2)
+
+    out, code = _accel_view(bh, tmpdir, records)
+    check("the thin-pair warning is gone once a range exists",
+          "only ONE kernel image" in out, False)
+    check("the typical speedup is reported as a span",
+          "x2.00 - x2.50" in out, True)
+    check("...and so is the count of benchmarks that got faster",
+          "2-3 of 3" in out, True)
+    check("the best case refuses to name a benchmark when the pairs disagree",
+          "a DIFFERENT benchmark in 2 of 2 pairs (a, b)" in out, True)
+    check("...while a worst case the pairs agree on is named",
+          "x1.00 - x1.25  c" in out, True)
+
+    check("`_accel_span` says x3.53 for one value and a span for two",
+          (bh._accel_span([3.53]), bh._accel_span([3.53, 3.97])),
+          ("x3.53", "x3.53 - x3.97"))
+    check("...and collapses a span that rounds to one value",
+          bh._accel_span([3.531, 3.534]), "x3.53")
+
+
+def test_the_typical_speedup_is_a_median_not_a_ratio_of_totals(bh):
+    """A sum would report the accelerator as a slowdown while 95% sped up.
+
+    Totals are dominated by whichever benchmark is largest in absolute
+    nanoseconds, and under WHPX that is the device-bound handful that got ~30x
+    *slower*. The fixture reproduces that shape exactly: three benchmarks 4x
+    faster and one enormous one 30x slower. The median answers the question a
+    reader is actually asking -- what happens to a benchmark I pick -- and the
+    slow one is not hidden, it is the worst-case row.
+    """
+    base = {"slow": 1_000_000.0, "f1": 1000.0, "f2": 1000.0, "f3": 1000.0}
+    cand = {"slow": 30_000_000.0, "f1": 250.0, "f2": 250.0, "f3": 250.0}
+    sel = _accel_sel(bh, [
+        _accel_run("QEMU TCG", entries=base),
+        _accel_run("Hyper-V/WHPX", when="2026-08-19T02:00:00+00:00",
+                   entries=cand),
+    ])
+    summary = bh.summarise_accel_pair(sel["pairs"][0])
+    check("typical is the median ratio", summary["typical"], 4.0)
+    check("...where a ratio of totals would have said 'slower'",
+          sum(base.values()) / sum(cand.values()) < 1.0, True)
+    check("the benchmark that regressed is still the worst-case row",
+          summary["worst"][0], "slow")
+    check("...and is counted out of the ones that got faster",
+          (summary["faster"], summary["total"]), (3, 4))
+
+
+def test_the_host_load_caveat_describes_the_runs_the_table_came_from(bh):
+    """Computed over the paired runs, not over everything that qualified.
+
+    Those differ by a lot on the real history -- fourteen WHPX runs qualify and
+    three reach a pair -- and a caveat computed over the wider set describes
+    runs that contributed nothing to any printed number. It fails in both
+    directions: it can report broken instruments beside a table drawn entirely
+    from clean ones (which it did, printing "6/15 arms" under a three-run
+    table), or hide a broken one among clean runs that were never used.
+
+    It matters more here than anywhere else in this file, because the canary's
+    resolution floor is a TCG-only instrument -- see
+    `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT` -- so a WHPX column
+    can be one that no contamination check was watching.
+    """
+    paired = [_accel_run("QEMU TCG", sha="a" * 16),
+              _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                         when="2026-08-19T02:00:00+00:00",
+                         entries={"a": 250.0, "b": 250.0, "c": 250.0})]
+    unused = _accel_run("Hyper-V/WHPX", sha="z" * 16, canary=None,
+                        when="2026-08-19T03:00:00+00:00")
+    mix = bh._accel_canary_mix(_accel_sel(bh, paired + [unused]))
+    check("a qualifying run that reached no pair is not in the caveat",
+          bh.describe_canary_mix(mix, "runs"), "")
+
+    blind = [paired[0], dict(paired[1], canary=None)]
+    text = bh.describe_canary_mix(
+        bh._accel_canary_mix(_accel_sel(bh, blind)), "runs")
+    check("a run behind the table with no host-load check is named",
+          text, "1/2 runs carried no host-load check; 1/2 runs clean")
+    check("...and is called a run, because nothing here is an arm of anything",
+          "arms" in text, False)
+
+
+def test_the_selection_says_whether_the_missing_field_is_what_makes_it_thin(bh):
+    """Thin for want of runs, or thin for want of a field they forgot to write.
+
+    Those two call for opposite responses -- go and measure, versus go and
+    remember what you already measured -- and `recoverable` is the number that
+    tells them apart.
+
+    It counts only kernel images that are already present on one side, because
+    an unassigned run of a binary nobody else measured would not become a pair
+    however well it was labelled. Counting those would inflate the figure into a
+    promise that recording the field cannot keep.
+    """
+    records = [
+        _accel_run("QEMU TCG", sha="a" * 16, when="2026-08-19T01:00:00+00:00"),
+        _accel_run("Hyper-V/WHPX", sha="b" * 16,
+                   when="2026-08-19T02:00:00+00:00"),
+        # Same binary as the WHPX run above: labelling this would make a pair.
+        _accel_run(None, sha="b" * 16, when="2026-08-19T03:00:00+00:00"),
+        # A binary nothing else ran: labelling this would make nothing.
+        _accel_run(None, sha="z" * 16, when="2026-08-19T04:00:00+00:00"),
+        # Would not have qualified anyway, so it is not evidence about `accel`.
+        _accel_run(None, sha="b" * 16, profile="debug",
+                   when="2026-08-19T05:00:00+00:00"),
+    ]
+    sel = _accel_sel(bh, records)
+    check("only runs that would otherwise have qualified count as unassigned",
+          len(sel["unassigned"]), 2)
+    check("...and only those whose binary the other side ran are recoverable",
+          sel["recoverable"], 1)
+
+    lines = "\n".join(bh._accel_unusable_lines(sel))
+    check("the report says how many pairs the missing field is costing",
+          "would add 1 more pair(s)" in lines, True)
+    check("...and points at the flag that asserts it",
+          "--assume-missing-accel" in lines, True)
+    check("a same-day span is widened to minutes rather than reading 'X to X'",
+          bh._accel_stamp_span(["2026-08-19T03:40:00+00:00",
+                                "2026-08-19T16:15:00+00:00"]),
+          "2026-08-19T03:40 to 2026-08-19T16:15")
+    check("...while a multi-day span stays at whole days",
+          bh._accel_stamp_span(["2026-08-14T03:40:00+00:00",
+                                "2026-08-19T16:15:00+00:00"]),
+          "2026-08-14 to 2026-08-19")
+
+
+def test_an_accelerator_name_resolves_or_fails_two_different_ways(bh, tmpdir):
+    """"KVM has no runs here" and "you typed KVN" need opposite responses.
+
+    Go and produce the runs, versus fix the spelling. A tool that answers both
+    with one message sends half its readers the wrong way, so the catalogue is
+    the union of what the history recorded and what the kernel can detect, and
+    an unmatched name prints both lists.
+    """
+    records = [_accel_run("QEMU TCG"),
+               _accel_run("Hyper-V/WHPX", when="2026-08-19T02:00:00+00:00")]
+    check("an exact name resolves",
+          bh.resolve_accel_name(records, "QEMU TCG"), ("QEMU TCG", None))
+    check("...case-insensitively",
+          bh.resolve_accel_name(records, "qemu tcg"), ("QEMU TCG", None))
+    check("a unique substring reaches a name with a slash in it",
+          bh.resolve_accel_name(records, "whpx"), ("Hyper-V/WHPX", None))
+
+    name, error = bh.resolve_accel_name(records, "v")
+    check("an ambiguous fragment names the candidates instead of guessing",
+          (name, "matches" in (error or "")), (None, True))
+    check("an accelerator the kernel knows but the history lacks is a name",
+          bh.resolve_accel_name(records, "kvm"), ("KVM", None))
+    name, error = bh.resolve_accel_name(records, "nope")
+    check("...while an unknown one prints both catalogues",
+          (name, "Recorded in this history" in (error or ""),
+           "Known to the kernel" in (error or "")),
+          (None, True, True))
+
+    out, code = _accel_view(bh, tmpdir, records, spec="tcg")
+    check("a spec with no colon is a usage error, with an example",
+          (code, "--accel-compare tcg:whpx" in out), (2, True))
+    out, code = _accel_view(bh, tmpdir, records, spec="tcg:qemu tcg")
+    check("comparing an accelerator with itself is a usage error", code, 2)
+    out, code = _accel_view(bh, tmpdir, records, spec="nope:whpx")
+    check("an unresolvable name is a usage error", code, 2)
+
+    out, code = _accel_view(bh, tmpdir, records, spec="tcg:kvm")
+    check("but 'no run of one binary exists on both' is an ANSWER, not an error",
+          (code, "nothing to divide" in out), (0, True))
+
+
+def test_the_accel_pin_holds_the_comparison_to_one_source(bh):
+    """`--accel-pin` narrows the selection to one binary, by either identity.
+
+    `kernel_sha` is what pairs, but the pin also accepts a `src_digest` prefix,
+    because a reader who wants "the runs from that source" has the digest in
+    front of them and should not have to translate it into an ELF hash first.
+    """
+    records = [
+        _accel_run("QEMU TCG", sha="a" * 16),
+        _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                   when="2026-08-19T02:00:00+00:00",
+                   entries={"a": 250.0, "b": 250.0, "c": 250.0}),
+        _accel_run("QEMU TCG", sha="b" * 16, when="2026-08-19T03:00:00+00:00",
+                   src_digest="full:beef"),
+        _accel_run("Hyper-V/WHPX", sha="b" * 16,
+                   when="2026-08-19T04:00:00+00:00", src_digest="full:beef",
+                   entries={"a": 500.0, "b": 500.0, "c": 500.0}),
+    ]
+    check("unpinned, both binaries pair", len(_accel_sel(bh, records)["pairs"]),
+          2)
+    sel = _accel_sel(bh, records, pin="b" * 8)
+    check("a kernel_sha prefix selects one binary",
+          [pair["kernel_sha"] for pair in sel["pairs"]], ["b" * 16])
+    sel = _accel_sel(bh, records, pin="full:beef")
+    check("...and so does a src_digest prefix",
+          [pair["kernel_sha"] for pair in sel["pairs"]], ["b" * 16])
+    check("...with the runs it excluded reported, not silently gone",
+          sum(sel["rejected"].values()), 2)
+    check("a pin nothing matches yields no pairs and no crash",
+          len(_accel_sel(bh, records, pin="deadbeef")["pairs"]), 0)
+
+
+def test_positive_entries_is_a_median_that_drops_missing_measurements(bh):
+    """A zero is a benchmark the scorecard did not resolve, not a fast one.
+
+    Kept and guarded at the division it would become an infinity; kept and
+    divided *into* it would become a zero ratio and drag the worst-case row onto
+    a benchmark that was never measured. Dropping it is the only reading that
+    matches what the recorder meant.
+
+    The median is for the side that was sampled more than once -- a pad measured
+    on two days -- so that one bad run does not swing a side, while a side
+    sampled once is left exactly as it was.
+    """
+    check("a zero is dropped rather than divided by",
+          bh.positive_entries([{"entries": {"a": 0, "b": 10}}]), {"b": 10.0})
+    check("...and so is a negative",
+          bh.positive_entries([{"entries": {"a": -5, "b": 10}}]), {"b": 10.0})
+    check("a bool is not a measurement",
+          bh.positive_entries([{"entries": {"a": True, "b": 5}}]), {"b": 5.0})
+    check("one sample is left alone",
+          bh.positive_entries([{"entries": {"a": 7}}]), {"a": 7.0})
+    check("several samples of one side are combined by median, not mean",
+          bh.positive_entries([{"entries": {"a": 10}}, {"entries": {"a": 20}},
+                               {"entries": {"a": 900}}]), {"a": 20.0})
+    check("a record with no entries at all contributes nothing",
+          bh.positive_entries([{}, {"entries": {"a": 4}}]), {"a": 4.0})
+
+
+def test_the_accel_report_is_ascii_and_carries_its_own_reproduce_line(bh,
+                                                                     tmpdir):
+    """sec 240's rule is only satisfied if the next reader can re-run it.
+
+    A table pasted into `open-questions.md` outlives the shell it was produced
+    in, so the flags that produced it travel *inside* the report rather than in
+    prose above it -- including the assumption, which is the one flag that
+    changes what the numbers mean.
+
+    ASCII throughout, in both forms. This prints to a Windows console whose code
+    page is not UTF-8, where a multiplication sign is mojibake; `x3.53` pastes
+    into a document just as well.
+    """
+    records = [
+        _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                   entries={"a": 250.0, "b": 250.0, "c": 250.0}),
+        _accel_run(None, sha="a" * 16, when="2026-08-19T02:00:00+00:00"),
+    ]
+    out, code = _accel_view(bh, tmpdir, records, assume="tcg")
+    check("the assumption makes the pair", (code, "1 pair(s)" in out), (0, True))
+    check("...and the report is ASCII", out.isascii(), True)
+    check("...and says the figures rest on an assertion, not a measurement",
+          "That is your assertion, not a measurement" in out, True)
+    check("...and repeats the flag that produced it",
+          '--assume-missing-accel "QEMU TCG"' in out, True)
+    check("...and shows which runs went in, one line each",
+          out.count("recorded") >= 1 and out.count("assumed") >= 1, True)
+
+    out, code = _accel_view(bh, tmpdir, records, assume="tcg", markdown=True)
+    check("the markdown form is ASCII too", out.isascii(), True)
+    check("...and is a table, so it is pasted rather than transcribed",
+          "|" in out, True)
+    check("...and carries the --markdown flag in its own reproduce line",
+          "--markdown" in out, True)
+
+
 def main():
     """Run every `test_*` in this file, in definition order.
 
@@ -4888,9 +5445,9 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 103:
+    if len(tests) < 126:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 102. Discovery is broken, not the code.")
+              f"suite has at least 126. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

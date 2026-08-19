@@ -67,7 +67,12 @@ mod theme {
 // ============================================================================
 
 /// Inset (gap) between adjacent zones in pixels.
-const ZONE_GAP: f32 = 6.0;
+///
+/// Public because the desktop shell snaps through this module and its tests
+/// assert the resulting geometry; a private constant would force them to
+/// re-state `6.0`, which is how the shell ended up with a second, gapless snap
+/// implementation in the first place (see `design-decisions.md` §469).
+pub const ZONE_GAP: f32 = 6.0;
 
 /// How close (pixels) the cursor must be to a screen edge to trigger
 /// edge/corner snap detection.
@@ -195,13 +200,60 @@ impl SnapLayoutPreset {
     ///
     /// The arms compute in area-local coordinates and the origin is added once
     /// at the end, so a new layout cannot forget to apply it.
+    ///
+    /// # The gap is an affordance, not an invariant
+    ///
+    /// Every arm subtracts [`ZONE_GAP`] from the area before dividing it, which
+    /// is only meaningful when the area is big enough to give it away. At a
+    /// three-pixel-wide work area `(3.0 - 6.0) / 2.0` is a **negative**
+    /// half-width, and the second zone starts at 4.5 — outside the very
+    /// rectangle it is meant to tile. Degenerate sizes are not hypothetical
+    /// here: `DesktopShell::new(1, 1080)` is a legal shell and the
+    /// window-manager tests build one at widths down to zero.
+    ///
+    /// So the gap is *attempted* and kept only if it leaves every zone at
+    /// least `ZONE_GAP` in both dimensions; otherwise the layout is rebuilt
+    /// edge-to-edge. The rule is applied to the built zones rather than to each
+    /// preset's arithmetic so that a preset added later inherits it without
+    /// knowing it exists.
     pub fn build(self, area: WorkArea) -> SnapLayout {
-        let g = ZONE_GAP;
-        let name = self.label().to_string();
+        let spaced = self.zones_with_gap(area, ZONE_GAP);
+        let zones = if spaced
+            .iter()
+            .all(|z| z.width >= ZONE_GAP && z.height >= ZONE_GAP)
+        {
+            spaced
+        } else {
+            self.zones_with_gap(area, 0.0)
+        };
+
+        // The one place the work-area origin is applied. Doing it per-arm
+        // would be eleven chances to forget.
+        let zones = zones
+            .into_iter()
+            .map(|z| SnapZone {
+                x: z.x + area.x,
+                y: z.y + area.y,
+                ..z
+            })
+            .collect();
+
+        SnapLayout {
+            name: self.label().to_string(),
+            zones,
+        }
+    }
+
+    /// The preset's zones in **area-local** coordinates, separated by `g`.
+    ///
+    /// Split out of [`build`](Self::build) so the gap can be chosen by the
+    /// caller and the whole layout re-derived without it. Coordinates are
+    /// relative to the area's origin; `build` adds it.
+    fn zones_with_gap(self, area: WorkArea, g: f32) -> Vec<SnapZone> {
         let screen_w = area.width;
         let screen_h = area.height;
 
-        let zones = match self {
+        match self {
             Self::TwoEqualHalves => {
                 let half_w = (screen_w - g) / 2.0;
                 vec![
@@ -400,20 +452,7 @@ impl SnapLayoutPreset {
                     })
                     .collect()
             }
-        };
-
-        // The one place the work-area origin is applied. Doing it per-arm
-        // would be eleven chances to forget.
-        let zones = zones
-            .into_iter()
-            .map(|z| SnapZone {
-                x: z.x + area.x,
-                y: z.y + area.y,
-                ..z
-            })
-            .collect();
-
-        SnapLayout { name, zones }
+        }
     }
 }
 
@@ -1573,6 +1612,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_work_area_too_small_for_the_gap_gives_it_up_rather_than_going_negative() {
+        // Found by wiring this module into the shell, which snaps on work areas
+        // the shell's own tests take down to zero width. Every arm of
+        // `zones_with_gap` subtracts the gap before dividing, so at three
+        // pixels wide `(3 - 6) / 2` is a *negative* half-width and the second
+        // zone starts at 4.5 — outside the rectangle it is tiling. The
+        // in-bounds test above could not see it because it only ever ran on
+        // desktop-sized areas, where the subtraction is free.
+        for w in [0.0_f32, 1.0, 2.0, 3.0, 7.0, 11.0, 12.0, 17.0, 18.0, 19.0, 40.0] {
+            for h in [0.0_f32, 1.0, 5.0, 6.0, 13.0, 40.0] {
+                let area = WorkArea::new(3.0, 4.0, w, h);
+                for &preset in SnapLayoutPreset::all() {
+                    for z in &preset.build(area).zones {
+                        assert!(
+                            z.width >= 0.0 && z.height >= 0.0,
+                            "{preset:?} zone {} of {area:?} has negative extent {}x{}",
+                            z.id,
+                            z.width,
+                            z.height
+                        );
+                        assert!(
+                            z.x >= area.x - 0.01 && z.y >= area.y - 0.01,
+                            "{preset:?} zone {} of {area:?} starts outside it at ({}, {})",
+                            z.id,
+                            z.x,
+                            z.y
+                        );
+                        assert!(
+                            z.x + z.width <= area.right() + 0.01
+                                && z.y + z.height <= area.bottom() + 0.01,
+                            "{preset:?} zone {} of {area:?} ends outside it at ({}, {})",
+                            z.id,
+                            z.x + z.width,
+                            z.y + z.height
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_work_area_with_room_for_the_gap_still_gets_one() {
+        // The other half of the rule above: giving the gap up whenever it is
+        // inconvenient would satisfy that test completely, and would silently
+        // undo the separation between zones on every real screen.
+        let zones = SnapLayoutPreset::TwoEqualHalves.build(DESK).zones;
+        let seam = zones[0].x + zones[0].width;
+        assert!(
+            (zones[1].x - seam - ZONE_GAP).abs() < 0.01,
+            "expected a {ZONE_GAP}px gap, zone 0 ends at {seam} and zone 1 starts at {}",
+            zones[1].x
+        );
     }
 
     #[test]

@@ -3342,6 +3342,464 @@ def test_hot_symbols_report_a_stale_pattern_as_null_not_absence(bh, tmpdir):
           bh.elf_symbol_addresses(os.path.join(tmpdir, "absent.elf")), {})
 
 
+# ---------------------------------------------------------------------------
+# Layout padding (`SLATEOS_TEXT_PAD` -> `textpad=` in the boot banner)
+# ---------------------------------------------------------------------------
+
+
+def test_the_pad_is_read_from_the_banner(bh, tmpdir):
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "=== Kernel booting ===",
+        "[boot] build profile: sanitizer=none textpad=3072",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+    check("the pad is an int, taken from the kernel's own report",
+          bh.parse_text_pad(log), 3072)
+
+
+def test_no_banner_is_none_not_zero(bh, tmpdir):
+    """The distinction the whole field exists to preserve.
+
+    Every record on disk before this landed was written by a kernel with no
+    `textpad=` in its banner. If absence read as 0, all of them would join the
+    unpadded arm of a layout comparison, and the resulting "band" would be the
+    spread between builds that may or may not have differed in placement -- a
+    number with no defined meaning, used to *dismiss* regressions.
+    """
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "=== Kernel booting ===",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+    got = bh.parse_text_pad(log)
+    check("a pre-banner log says None", got, None)
+    check("...and None does not compare equal to 0", got == 0, False)
+
+
+def test_an_explicit_zero_is_zero(bh, tmpdir):
+    log = write(tmpdir, "serial.txt",
+                "[boot] build profile: sanitizer=none textpad=0\n")
+    got = bh.parse_text_pad(log)
+    check("an unpadded build reports 0", got, 0)
+    check("...and 0 is not None", got is None, False)
+
+
+def test_the_pad_survives_another_key_being_appended(bh, tmpdir):
+    """The banner is matched on its key, not on the whole line.
+
+    `sanitizer=` was added first and `textpad=` second; whatever is added third
+    must not silently stop either being read.
+    """
+    log = write(tmpdir, "serial.txt",
+                "[boot] build profile: sanitizer=none textpad=1024 lto=thin\n")
+    check("a third key does not hide the second", bh.parse_text_pad(log), 1024)
+
+
+def test_a_missing_log_says_nothing_rather_than_zero(bh, tmpdir):
+    check("an unreadable log cannot report a pad",
+          bh.parse_text_pad(os.path.join(tmpdir, "absent.txt")), None)
+
+
+def test_the_record_carries_the_pad_the_kernel_reported(bh, tmpdir):
+    import io
+    import json
+    import contextlib
+
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "[boot] build profile: sanitizer=none textpad=2048",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+        "[bench] CANARY 8 8 100 8 9 12 11 0 800 900",
+    ]) + "\n")
+    history = os.path.join(tmpdir, "history.jsonl")
+    with contextlib.redirect_stdout(io.StringIO()):
+        bh.main(["--serial", log, "--history", history, "--profile", "release"])
+    record = json.loads(open(history, encoding="utf-8").read().strip())
+    check("the record stores the pad the kernel reported",
+          record.get("text_pad"), 2048)
+
+
+def test_a_pre_banner_record_carries_no_pad_key_at_all(bh, tmpdir):
+    """Absent, not null.
+
+    Every other optional key in bench-history follows the same convention, for
+    the same reason: an explicit `text_pad: null` is a claim that somebody
+    looked, which invites a later reader to charitably treat it as a measured 0.
+    """
+    import io
+    import json
+    import contextlib
+
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+        "[bench] CANARY 8 8 100 8 9 12 11 0 800 900",
+    ]) + "\n")
+    history = os.path.join(tmpdir, "history.jsonl")
+    with contextlib.redirect_stdout(io.StringIO()):
+        bh.main(["--serial", log, "--history", history, "--profile", "release"])
+    record = json.loads(open(history, encoding="utf-8").read().strip())
+    check("no key, rather than a null one", "text_pad" in record, False)
+
+
+# ---------------------------------------------------------------------------
+# Layout-sensitivity calibration (scripts/layout-sweep.py -> layout_bands)
+#
+# The claim under test is narrow and worth stating plainly, because every test
+# below is an attempt to break it in one specific direction:
+#
+#   A movement may be dismissed as "code placement" ONLY when this exact
+#   benchmark has been directly measured, on this host and profile, across at
+#   least three deliberate .text offsets of one clean commit, and moved at
+#   least that far with no source change at all.
+#
+# Every clause in that sentence is load-bearing, and every one of them fails in
+# the same direction when it is dropped: a band that is too easily granted, or
+# too wide, dismisses a real regression. So the tests are deliberately
+# lopsided -- most of them assert that some *plausible-looking* evidence is
+# refused, and only two assert that a band is granted at all.
+# ---------------------------------------------------------------------------
+
+#: A benchmark suite that is identical in every sweep arm, so the only thing
+#: that can differ between arms is `b0`. Nineteen entries because
+#: `speed_factor` needs `MIN_SAMPLES_FOR_DRIFT` (8) ratios before it will
+#: report one at all -- with fewer, every arm would be uncorrectable and every
+#: group voided, and the band tests would pass for the wrong reason.
+_SWEEP_STABLE = {f"b{i}": 1000 for i in range(1, 20)}
+
+
+def _sweep_arms(pads, commit="xxx", host="H", profile="release", **overrides):
+    """One layout-sweep record per pad. `pads` maps pad bytes -> this arm's b0.
+
+    The arms are `experiment`-tagged exactly as `layout-sweep.py` tags them,
+    which is the whole point: it is what makes them invisible to
+    `comparable_records`, and therefore what a naive implementation of
+    `layout_arms` would have silently skipped.
+    """
+    return [
+        {
+            "host": host,
+            "profile": profile,
+            "commit": commit,
+            "text_pad": pad,
+            "experiment": f"layout sweep: textpad={pad} (identical source)",
+            "timestamp": f"2026-08-19T0{index}:00:00",
+            "entries": dict(_SWEEP_STABLE, b0=value),
+            **overrides,
+        }
+        for index, (pad, value) in enumerate(sorted(pads.items()))
+    ]
+
+
+def test_a_layout_band_is_the_peak_to_peak_of_the_arms(bh):
+    """Three layouts of one commit, spanning 500-600ns, is a 20% band.
+
+    Peak-to-peak over the *smallest*, not a deviation from the median, because
+    of what the band is compared against: a run-over-run percentage change
+    between two arbitrary layouts. The largest change placement alone can
+    produce between two of them is exactly (max - min) / min, so any narrower
+    summary would under-state the very quantity being used to excuse movements.
+    """
+    bands = bh.layout_bands(_sweep_arms({0: 500, 1024: 600, 2048: 550}),
+                            "H", "release")
+
+    check("the swept benchmark gets a band", "b0" in bands, True)
+    check("...whose width is peak-to-peak over the smallest",
+          round(bands["b0"][0], 6), 20.0)
+    check("...and which records how many layouts it rests on",
+          bands["b0"][1], 3)
+    check("...and which commit was swept", bands["b0"][2], "xxx")
+    # A benchmark that placement did not move must come back as a *measured*
+    # zero, not as absent: absent means "unswept", which is a different verdict
+    # with a different consequence downstream.
+    check("a benchmark placement did not move is a measured zero, not absent",
+          round(bands["b1"][0], 6), 0.0)
+
+
+def test_sweep_arms_are_read_even_though_they_are_experiments(bh):
+    """The guard against a calibration that cannot fire.
+
+    Every arm of a layout sweep is `experiment`-tagged, and `comparable_records`
+    -- the filter every other historical judgement in this file uses -- drops
+    experiments on purpose, because a padded kernel is not a kernel any checkout
+    reproduces and must never become the baseline an honest run is judged
+    against. Reusing that filter here would have been the obvious thing to do
+    and would have made `layout_arms` return nothing, forever, silently: a
+    calibration that cannot fire, presenting as a calibration that found no
+    sensitivity. This test asserts both halves, so that a later tidy-up which
+    "unifies the filtering" fails here instead of going unnoticed.
+    """
+    arms = _sweep_arms({0: 500, 1024: 600, 2048: 550})
+
+    check("the shared filter does refuse them (that part is correct)",
+          bh.comparable_records(arms, "H", "release"), [])
+    check("...but the layout calibration reads them anyway",
+          list(bh.layout_arms(arms, "H", "release")), ["xxx"])
+
+
+def test_two_layouts_are_not_a_band(bh):
+    """Two points define an interval containing both, by construction.
+
+    A two-point spread has no residual and no way to be wrong, so it cannot be
+    shown to be unrepresentative of the layouts nobody sampled -- and this
+    number's job is to *dismiss* movements, the direction where an
+    over-confident estimate hides real regressions. Same reasoning, and the same
+    floor of three, as `MIN_SAMPLES_FOR_POSITIONAL_MODEL`.
+    """
+    check("two arms yield no band",
+          bh.layout_bands(_sweep_arms({0: 500, 4096: 5000}), "H", "release"),
+          {})
+    check("...and three of the same spread do",
+          "b0" in bh.layout_bands(
+              _sweep_arms({0: 500, 4096: 5000, 1024: 900}), "H", "release"),
+          True)
+
+
+def test_a_record_with_no_pad_is_not_counted_as_an_unpadded_arm(bh):
+    """Absent `text_pad` means "placement unknown", never "placement zero".
+
+    ~70 historical records predate the `textpad=` banner. Folding absent into 0
+    would enrol every one of them into the unpadded arm of a comparison they
+    were never part of -- their spread is ordinary run-to-run noise plus months
+    of unrelated code change, and it would be reported as the amount placement
+    alone can move a benchmark. That is a wide band manufactured out of nothing,
+    in the direction that dismisses regressions.
+    """
+    arms = _sweep_arms({1024: 600, 2048: 550})
+    legacy = dict(_sweep_arms({0: 500})[0])
+    del legacy["text_pad"]
+
+    check("a pre-banner record does not make up the third arm",
+          bh.layout_bands(arms + [legacy], "H", "release"), {})
+
+
+def test_a_dirty_arm_is_not_a_layout_sample(bh):
+    """The construction rests on the arms sharing identical source.
+
+    `commit` is only a statement about the source when the tree is clean. A
+    dirty arm may differ from its siblings in *code*, and its contribution to
+    the spread would then be attributed to placement -- which is precisely the
+    confound the sweep exists to remove, reintroduced inside the instrument
+    meant to measure it.
+    """
+    arms = (_sweep_arms({0: 500, 1024: 600})
+            + _sweep_arms({2048: 5000}, dirty=True))
+
+    check("a dirty arm does not count toward the three",
+          bh.layout_bands(arms, "H", "release"), {})
+    check("...and it is the dirt, not the pad, that disqualified it",
+          "b0" in bh.layout_bands(
+              _sweep_arms({0: 500, 1024: 600, 2048: 5000}), "H", "release"),
+          True)
+
+
+def test_an_uncorrectable_arm_voids_the_whole_group(bh):
+    """No drift correction is worse than no band, so the group is dropped.
+
+    The arms are separate boots minutes to hours apart, and TCG is CPU-bound, so
+    whatever else the host was doing scales a whole arm at once. If one arm's
+    `speed_factor` cannot be computed, the tempting fallback is an uncorrected
+    1.0 -- but uncorrected host drift *inflates* the spread, and a wider band
+    dismisses more movements. The convenient fallback fails in the one direction
+    that hides real regressions, so the group is voided instead, which yields
+    "unmeasured", under which a movement stays a regression.
+    """
+    arms = _sweep_arms({0: 500, 1024: 600, 2048: 550})
+    # Too few benchmarks for `speed_factor` (MIN_SAMPLES_FOR_DRIFT = 8), so
+    # this arm's host speed is unknowable rather than merely unusual.
+    arms[2]["entries"] = {"b0": 550, "b1": 1000}
+
+    check("one uncorrectable arm voids every band in the group",
+          bh.layout_bands(arms, "H", "release"), {})
+
+
+def test_a_band_is_measured_on_the_host_and_profile_that_asked(bh):
+    """A sweep on another machine says nothing about this one.
+
+    The page-straddle penalty is a property of the emulator and the build, so a
+    debug-profile sweep, or one from a different host, is not evidence about a
+    release run here -- and admitting it would be admitting a band nobody
+    measured for the thing being judged.
+    """
+    arms = (_sweep_arms({0: 500, 1024: 600})
+            + _sweep_arms({2048: 5000}, host="OTHER"))
+    check("an arm from another host does not complete the sweep",
+          bh.layout_bands(arms, "H", "release"), {})
+
+    arms = (_sweep_arms({0: 500, 1024: 600})
+            + _sweep_arms({2048: 5000}, profile="debug"))
+    check("nor does one from another profile",
+          bh.layout_bands(arms, "H", "release"), {})
+
+
+def test_split_by_layout_excuses_only_on_positive_evidence(bh):
+    """Three-way, not two-way: explained / unexplained / *unmeasured*.
+
+    The two-way version is the bug. With no band for a benchmark there is no
+    evidence either way, and the only safe reading is that nobody looked. An
+    excuse granted by absence would silence the check in the ordinary case --
+    the case where nothing has been swept at all -- which is the same failure as
+    a check that cannot fire. Same asymmetry as `replication_verdict` and
+    `MODE_UNDECIDED`: only a positively evidenced verdict may excuse a finding.
+    """
+    rows = [
+        ("inside", 100, 110, 10.0, 10.0, None),
+        ("outside", 100, 200, 100.0, 100.0, None),
+        ("unswept", 100, 200, 100.0, 100.0, None),
+        # Equal to the band, not merely under it: the band is a measurement of
+        # what placement *did* do, so a movement of exactly that size is one
+        # placement has been shown to produce.
+        ("exactly", 100, 120, 20.0, 20.0, None),
+        # Improvements are excused on the same evidence as regressions. A band
+        # is a spread, not a direction -- the same relink that can slow a
+        # benchmark by 20% can speed it up by 20%, and excusing only the
+        # regressions would quietly turn layout noise into a stream of
+        # "improvements" nobody made.
+        ("faster", 100, 80, -20.0, -20.0, None),
+    ]
+    bands = {"inside": (20.0, 3, "xxx"), "outside": (20.0, 3, "xxx"),
+             "exactly": (20.0, 3, "xxx"), "faster": (20.0, 3, "xxx")}
+    unexplained, explained, unmeasured = bh.split_by_layout(rows, bands)
+
+    check("a movement inside a measured band is explained",
+          [r[0] for r in explained], ["inside", "exactly", "faster"])
+    check("a movement past its band is not explained",
+          [r[0] for r in unexplained], ["outside"])
+    check("a benchmark nobody swept is unmeasured, not explained",
+          [r[0] for r in unmeasured], ["unswept"])
+
+
+def test_a_movement_inside_a_measured_band_stops_being_a_regression(bh):
+    """End to end: the sweep withdraws a movement it can account for.
+
+    This is the measured failure the whole mechanism exists for. Under TCG a
+    loop whose backward branch crosses a guest page costs ~1.7x per iteration,
+    and whether it crosses is a property of the loop's *address*; relinking --
+    which every commit does -- re-rolls that for every function after the edited
+    file. The resulting movement replicates perfectly on every re-run, so it
+    arrived wearing the harness's strongest label. Here the same source, built
+    at three offsets, is shown to move `b0` further than the commit did.
+    """
+    history = (_sweep_arms({0: 500, 1024: 5000, 2048: 1000})
+               + _repl_history(bh, 2900, "xxx"))
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("a movement placement can account for does not fail the build",
+          failed, False)
+    check("...and is shown, under a heading that says what accounts for it",
+          "EXPLAINED BY CODE PLACEMENT" in out, True)
+    check("...and is not called a regression", "  REGRESSED (" in out, False)
+    check("...and the band that excused it is quoted, with its size",
+          "placement alone moves it 900% (3 layouts of xxx)" in out, True)
+    # The band is three samples out of every possible offset, so it cannot
+    # contain the worst pair among all of them. A reader who takes it as
+    # exhaustive would clear a near-miss that nothing has cleared.
+    check("...and the band is stated to be a lower bound",
+          "the band is a LOWER bound" in out, True)
+    check("...and the reader is told how to widen it",
+          "scripts/layout-sweep.py" in out, True)
+
+
+def test_a_movement_past_its_band_is_still_a_regression(bh):
+    """The other half, or the gate is indistinguishable from deleting the check.
+
+    A dismissal that only ever dismisses is not a check. Same construction as
+    above with the arms tightened to a 20% spread, so placement demonstrably
+    cannot account for a ~500% movement, and the finding must survive.
+    """
+    history = (_sweep_arms({0: 500, 1024: 600, 2048: 550})
+               + _repl_history(bh, 2900, "xxx"))
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("a movement past the measured band still fails the build",
+          failed, True)
+    check("...and keeps the confirmed heading", "  REGRESSED (" in out, True)
+    check("...and is not filed under code placement",
+          "EXPLAINED BY CODE PLACEMENT" in out, False)
+
+
+def test_an_unswept_benchmark_keeps_its_regression_and_says_so(bh):
+    """Unmeasured is not innocent -- but the reader must be told which it is.
+
+    The arms here carry `b1`-`b19` and no `b0`, so a band exists for the suite
+    but not for the benchmark that moved. The movement must survive, and the
+    report must say the verdict rests on nobody having looked rather than on
+    anybody having shown it -- otherwise "REGRESSED" reads as though placement
+    had been ruled out, which is exactly the over-claim that taught readers to
+    stop believing this instrument.
+    """
+    arms = _sweep_arms({0: 0, 1024: 0, 2048: 0})
+    for arm in arms:
+        arm["entries"] = dict(_SWEEP_STABLE)
+    history = arms + _repl_history(bh, 2900, "xxx")
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("an unswept movement still fails the build", failed, True)
+    check("...and is still called a regression", "  REGRESSED (" in out, True)
+    check("...and the report says placement was not ruled out for it",
+          "have no measured layout band" in out, True)
+    check("...and says the verdict rests on nobody having looked",
+          "not because anybody has shown it" in out, True)
+    check("...and gives the command that would settle it",
+          "layout-sweep.py --pads" in out, True)
+
+
+def test_the_most_recent_sweep_wins_over_the_best_sampled_one(bh):
+    """Recency beats arm count, and the reason is categorical, not statistical.
+
+    More sampled layouts really is a better lower bound of the true placement
+    sensitivity, so "most arms wins" is the tempting rule. It is still wrong: a
+    band is evidence about the hot loops that *exist*, and a sweep of a commit
+    whose code has since been rewritten is evidence about code that no longer
+    runs. Preferring it lets a wide, well-sampled, obsolete band dismiss a real
+    regression in today's code.
+
+    The converse error -- a barely-above-floor recent sweep giving a band too
+    narrow to excuse a genuine artifact -- fails the safe way: the movement
+    stays a regression and a human looks at it.
+    """
+    old = _sweep_arms({0: 500, 1024: 5000, 2048: 1000, 512: 700},
+                      commit="ancient")
+    for arm in old:
+        arm["timestamp"] = "2026-01-01T00:00:00"
+    new = _sweep_arms({0: 500, 1024: 600, 2048: 550}, commit="today")
+    for arm in new:
+        arm["timestamp"] = "2026-08-19T12:00:00"
+
+    # Deliberately fed oldest-last, so a rule that merely takes the final group
+    # would also pass; only the ordering is under test here.
+    bands = bh.layout_bands(new + old, "H", "release")
+
+    check("the recent 3-arm sweep beats the ancient 4-arm one",
+          bands["b0"][2], "today")
+    check("...so the band is the narrow recent one, not the wide stale one",
+          round(bands["b0"][0], 6), 20.0)
+    check("...and the reader is told which commit it came from",
+          "3 layouts of today" in bh.describe_layout_band(bands["b0"]), True)
+
+    # Arm count still decides between sweeps of equal recency -- there the
+    # categorical objection does not apply and more samples is simply better.
+    for arm in old:
+        arm["timestamp"] = "2026-08-19T12:00:00"
+    tied = bh.layout_bands(new + old, "H", "release")
+    check("at equal recency the better-sampled sweep wins",
+          tied["b0"][2], "ancient")
+
+
+def test_no_sweep_at_all_changes_nothing(bh):
+    """The ordinary case: no arms, no bands, and every finding stands.
+
+    Almost every history in this repo has never been swept. If the absence of a
+    sweep altered any verdict, the mechanism would have silently rewritten the
+    judgement of every run that predates it.
+    """
+    history = _repl_history(bh, 2900, "xxx")
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("no sweep leaves the regression intact", failed, True)
+    check("...and prints no placement heading",
+          "EXPLAINED BY CODE PLACEMENT" in out, False)
+    check("...and no band is computed from an unswept history",
+          bh.layout_bands(history, "H", "release"), {})
+
+
 def main():
     """Run every `test_*` in this file, in definition order.
 
@@ -3368,9 +3826,9 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 70:
+    if len(tests) < 93:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 70. Discovery is broken, not the code.")
+              f"suite has at least 93. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

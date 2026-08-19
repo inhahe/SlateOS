@@ -104,6 +104,32 @@ SCORE_RE = re.compile(
     r"(?:\s+(\d+)\s+(\d+)(?:\s+(-|\?|\d+!?))?)?\s*$"
 )
 
+# `[boot] build profile: sanitizer=<none|kasan-instrumented> textpad=<bytes>`
+#
+# `textpad` is the number of padding bytes `kernel/src/layout_pad.rs` prepended
+# to `.text` in this build, selected by `SLATEOS_TEXT_PAD`. It is the join key
+# for layout calibration: several builds of *identical source* at different pads
+# differ only in where the code sits, so the spread between their numbers is a
+# direct measurement of how much of a benchmark's movement code *placement* can
+# account for. Under TCG that is not a rounding error -- a loop that straddles a
+# 4 KiB guest page costs ~1.7x per iteration, deterministically, which is why
+# "replicates exactly" has never been the proof of a code regression the harness
+# was reading it as.
+#
+# Read from the log rather than taken as a flag, for the same reason the
+# sanitizer banner exists at all: the value that matters is the one the kernel
+# was *built* with, and a harness that reports what it *intended* to build
+# cannot notice a cache hit that silently reused the previous layout.
+#
+# Matched loosely on the `textpad=` key, not on the whole line, so a later key
+# can be appended to the banner without breaking this. Absent -> `None`, which
+# every consumer must keep distinct from `0`: `0` is "this build had no
+# padding", absent is "this kernel predates the banner and cannot say", and
+# folding the second into the first would silently enrol all 70-odd historical
+# records into the unpadded arm of a comparison they were never part of.
+TEXTPAD_RE = re.compile(r"^\[boot\] build profile:.*\btextpad=(\d+)",
+                        re.MULTILINE)
+
 #: `split` token values with no percentage attached.
 SPLIT_ABSENT = None      # the log predates the column entirely
 SPLIT_UNCHECKED = "-"    # the kernel ran no cross-check for this entry
@@ -523,6 +549,26 @@ def _trace_centi(whole, frac):
     """
     digits = (frac or "")[:2].ljust(2, "0")
     return int(whole) * 100 + int(digits)
+
+
+def parse_text_pad(path):
+    """Bytes of layout padding this kernel reports having been built with.
+
+    Returns an `int`, or `None` when the log carries no `textpad=` key at all --
+    which means the kernel predates the banner, *not* that it was unpadded. See
+    `TEXTPAD_RE`; the two must never be conflated.
+
+    Reads the file directly rather than taking already-parsed text, so that a
+    caller cannot accidentally hand it the scorecard section alone: the banner
+    is printed at kernel entry, thousands of lines before the first SCORE.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    match = TEXTPAD_RE.search(text)
+    return int(match.group(1)) if match else None
 
 
 TRACE_EDGES = ("start", "end")
@@ -2845,6 +2891,210 @@ def describe_band(band):
             f"(median {median:.0f}ns over {n} runs)")
 
 
+# ---------------------------------------------------------------------------
+# Layout sensitivity
+# ---------------------------------------------------------------------------
+
+#: Fewest distinct pad values before a layout band means anything.
+#:
+#: Three, not two, for the same reason `MIN_SAMPLES_FOR_POSITIONAL_MODEL` is
+#: three: two samples define an interval that contains both of them by
+#: construction. A two-point "spread" has no residual and no way to be wrong,
+#: so it cannot be shown to be unrepresentative of the layouts it did not
+#: sample -- and this number's job is to *dismiss* movements, which is the
+#: direction where an over-confident estimate hides real regressions.
+MIN_PADS_FOR_LAYOUT_BAND = 3
+
+
+def layout_arms(records, host, profile):
+    """Records that differ from one another *only* in where the code sits.
+
+    Returns `{commit: {pad: [record, ...]}}`, keeping only commits sampled at
+    at least `MIN_PADS_FOR_LAYOUT_BAND` distinct pads.
+
+    # Why this does not use `comparable_records`
+
+    `comparable_records` excludes `experiment`-tagged runs, and every arm of a
+    layout sweep is tagged as one -- correctly, because a padded kernel is not
+    a kernel any checkout reproduces and must never become the baseline an
+    honest run is judged against. But that is exactly the *opposite* of what is
+    wanted here: the sweep arms are not contaminating the reference, they *are*
+    the reference. Reusing the shared filter would have made this function
+    return nothing, forever, silently -- a calibration that cannot fire,
+    presenting as a calibration that found no sensitivity.
+
+    `dirty` records are excluded, because the whole construction rests on the
+    arms sharing identical source: `commit` is only a source identity on a
+    clean tree. Records with no `text_pad` are excluded because their placement
+    is unknown -- *not* assumed unpadded; see `TEXTPAD_RE`.
+    """
+    groups = {}
+    for record in records:
+        if record.get("host") != host or record_profile(record) != profile:
+            continue
+        if record_host_load(record) == HOST_LOAD_LOADED:
+            continue
+        if record.get("dirty"):
+            continue
+        pad = record.get("text_pad")
+        commit = record.get("commit")
+        if not isinstance(pad, int) or isinstance(pad, bool) or not commit:
+            continue
+        groups.setdefault(commit, {}).setdefault(pad, []).append(record)
+    return {commit: arms for commit, arms in groups.items()
+            if len(arms) >= MIN_PADS_FOR_LAYOUT_BAND}
+
+
+def layout_bands(records, host, profile):
+    """Per-benchmark spread attributable to code *placement* alone.
+
+    Returns `{name: (spread_pct, pads, commit)}`, where `spread_pct` is the
+    peak-to-peak spread across the sampled layouts as a percentage of the
+    smallest, and `pads` is how many distinct layouts it was measured over.
+    Empty when no commit has been swept -- which every consumer must treat as
+    "nobody measured this", never as "the sensitivity is zero".
+
+    # What the number means, and what it does not
+
+    Under QEMU's TCG a translation block is bounded by the guest 4 KiB page, so
+    a hot loop whose backward branch crosses a page boundary is retranslated
+    far more often and costs ~1.7x per iteration. Whether it crosses is a
+    property of the loop's *address*. Relinking the kernel -- which any commit
+    does -- re-rolls that for every function after the edited file. So two
+    builds of identical semantics can differ by that much on a benchmark, and
+    the difference replicates perfectly on every re-run, which is precisely the
+    signature the harness had been reading as proof of a code regression.
+
+    `scripts/layout-sweep.py` builds the same source at several deliberate
+    `.text` offsets. The spread between those arms is a *direct measurement* of
+    how much placement alone can move each benchmark.
+
+    Peak-to-peak of the smallest, not a deviation from the median, because of
+    what it is compared against: a run-over-run percentage change, where the
+    two runs are two arbitrary layouts. The largest change placement alone can
+    produce between two layouts is exactly (max - min) / min.
+
+    **It is a lower bound.** Three or four sampled layouts cannot contain the
+    worst pair among all layouts, so a benchmark whose movement sits just
+    outside its band is not thereby cleared -- it is merely not *explained*.
+    Consumers say so rather than implying the band is exhaustive.
+
+    # Drift correction, and why an uncorrectable arm voids the group
+
+    The arms are separate boots, minutes to hours apart, and TCG is CPU-bound,
+    so whatever else the host was doing scales a whole arm at once. Each arm is
+    divided by its own `speed_factor` against the group's per-benchmark
+    medians, which removes that.
+
+    If any arm's factor cannot be computed the entire group is dropped rather
+    than falling back to an uncorrected 1.0. Uncorrected host drift would
+    inflate the spread, and a wider layout band *dismisses* more movements --
+    so the convenient fallback fails in the one direction that hides real
+    regressions. Dropping the group yields "unmeasured", under which a movement
+    stays a regression. That is the direction to fail in.
+    """
+    groups = layout_arms(records, host, profile)
+    if not groups:
+        return {}
+
+    # The most *recent* sweep wins, and the number of arms only breaks ties.
+    #
+    # The other ordering -- most arms first -- is tempting, because more
+    # sampled layouts is a strictly better lower bound of the true placement
+    # sensitivity. It is still wrong here, and the reason is categorical rather
+    # than statistical: a band is evidence about the hot loops that *exist*, and
+    # a sweep of a commit whose code has since been rewritten is evidence about
+    # code that no longer runs. Preferring it means a wide, well-sampled,
+    # obsolete band could dismiss a real regression in today's code -- the one
+    # failure direction this whole mechanism is built to avoid.
+    #
+    # The converse error, preferring a barely-above-floor recent sweep and so
+    # getting a band too narrow to excuse a genuine layout artifact, fails the
+    # safe way: the movement stays a regression and a human looks at it. That
+    # asymmetry decides the ordering.
+    #
+    # No staleness cutoff is imposed on top, because any threshold would be
+    # arbitrary and would silently switch the answer to "unmeasured" at some
+    # commit count nobody chose. Provenance is reported instead:
+    # `describe_layout_band` names the commit the band came from, so a reader
+    # who recognises it as ancient can discount it themselves.
+    def group_key(item):
+        commit, arms = item
+        newest = max((r.get("timestamp", "") for pad in arms.values()
+                      for r in pad), default="")
+        return (newest, len(arms))
+
+    commit, arms = max(groups.items(), key=group_key)
+
+    # One entry map per pad: the median over repeats at that pad, so a layout
+    # measured twice does not get double weight and its own run-to-run noise is
+    # damped before it is read as placement sensitivity.
+    per_pad = {}
+    for pad, arm_records in arms.items():
+        acc = {}
+        for record in arm_records:
+            for name, value in (record.get("entries") or {}).items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    acc.setdefault(name, []).append(float(value))
+        per_pad[pad] = {n: statistics.median(v) for n, v in acc.items() if v}
+
+    medians = per_benchmark_median(
+        [{"entries": entries} for entries in per_pad.values()]
+    )
+    corrected = {}
+    for pad, entries in per_pad.items():
+        factor = speed_factor(entries, medians)
+        if not factor or factor <= 0:
+            # See the docstring: no correction is worse than no band.
+            return {}
+        corrected[pad] = {n: v / factor for n, v in entries.items()}
+
+    bands = {}
+    names = set.intersection(*(set(e) for e in corrected.values()))
+    for name in names:
+        values = [corrected[pad][name] for pad in corrected]
+        lo, hi = min(values), max(values)
+        if lo <= 0:
+            continue
+        bands[name] = ((hi - lo) * 100.0 / lo, len(corrected), commit)
+    return bands
+
+
+def describe_layout_band(band):
+    """Human-readable form of one `layout_bands` entry."""
+    spread, pads, commit = band
+    return (f"placement alone moves it {spread:.0f}% "
+            f"({pads} layouts of {commit})")
+
+
+def split_by_layout(rows, bands):
+    """Partition movements by whether code placement alone could explain them.
+
+    Returns `(unexplained, explained, unmeasured)`. Rows keep their original
+    shape; the layout band is *not* appended, because these lists are handed to
+    printers that unpack a fixed tuple -- the band is looked up again by name at
+    print time instead.
+
+    A row lands in `explained` only on positive evidence: a measured band for
+    that specific benchmark, at least as large as the movement. No band at all
+    means `unmeasured`, and an unmeasured movement is still a regression. That
+    asymmetry is deliberate and is the same one the replication gate uses --
+    only a *positively evidenced* verdict is allowed to excuse a finding,
+    because an excuse granted by absence would silence the check in the
+    ordinary case, which is the case where nothing has been swept.
+    """
+    unexplained, explained, unmeasured = [], [], []
+    for row in rows:
+        band = bands.get(row[0])
+        if band is None:
+            unmeasured.append(row)
+        elif abs(row[4]) <= band[0]:
+            explained.append(row)
+        else:
+            unexplained.append(row)
+    return unexplained, explained, unmeasured
+
+
 def split_by_band(flagged, bands, worse):
     """Partition threshold-crossing movements by `band_position`.
 
@@ -3185,6 +3435,29 @@ def report(previous, current_entries, threshold_pct,
     imp_unjudged, imp_unjudged_void = _withdraw_unstable(imp_unjudged)
     void_rows = reg_void + reg_unjudged_void + imp_void + imp_unjudged_void
 
+    # Code *placement*, checked before replication because it disqualifies on
+    # grounds the replication gate is blind to by construction.
+    #
+    # Replication asks "did the same binary produce this twice?" and a
+    # layout-caused movement answers yes every time -- the addresses are fixed,
+    # so the ~1.7x TCG page-straddle penalty is a property of the image, not of
+    # the run. That is why "replicated" was never the proof of a code regression
+    # the harness read it as, and why no amount of re-running settles it.
+    #
+    # The band comes from `scripts/layout-sweep.py`: the same source built at
+    # several deliberate `.text` offsets, so the spread between the arms is a
+    # measurement of what placement alone can do to each benchmark. A movement
+    # no larger than that is not evidence about the diff.
+    #
+    # Only a *measured* band excuses anything. A benchmark that has never been
+    # swept keeps its regression -- see `split_by_layout`.
+    lbands = (layout_bands(records, host, profile)
+              if records is not None and host is not None else {})
+    reg_unexplained, reg_layout, reg_unswept = split_by_layout(reg_out, lbands)
+    imp_unexplained, imp_layout, imp_unswept = split_by_layout(imp_out, lbands)
+    reg_out = reg_unexplained + reg_unswept
+    imp_out = imp_unexplained + imp_unswept
+
     # The replication gate, applied last because it is the strongest claim and
     # the one the word "REGRESSED" is now reserved for. A movement that left
     # the band is asked one further question: did this *same binary* produce it
@@ -3387,6 +3660,49 @@ def report(previous, current_entries, threshold_pct,
             "       deterministically. Settle it before reading the diff:\n"
             "         python scripts/straddle-check.py --compare "
             "<old-kernel-elf> <new-kernel-elf>"
+        )
+    # Movements a measured layout band already accounts for. Withdrawn, like
+    # MEASUREMENT VOID and unlike WITHIN ITS OWN RANGE: this is not "a small
+    # movement", it is a movement of exactly the size that two builds of
+    # *identical source* have been observed to produce on this benchmark.
+    if reg_layout or imp_layout:
+        print(
+            "  EXPLAINED BY CODE PLACEMENT -- NOT a finding in either "
+            "direction:\n"
+            "  (a sweep of this same source, rebuilt at several .text offsets, "
+            "moves these\n"
+            "   benchmarks at least this far with no source change at all.)"
+        )
+        for name, before, after, raw, adj, _band in sorted(
+                reg_layout + imp_layout, key=worst_first):
+            lb = lbands.get(name)
+            detail = f"; {describe_layout_band(lb)}" if lb else ""
+            print(
+                f"    {name}: {before}ns -> {after}ns "
+                f"({adj:+.0f}% vs suite, {raw:+.0f}% raw){detail}"
+            )
+        print(
+            "    -> the band is a LOWER bound: a handful of sampled layouts "
+            "cannot contain the worst\n"
+            "       pair among all of them, so a movement just *outside* its "
+            "band is not thereby cleared\n"
+            "       either -- only unexplained. Widen the sweep with "
+            "scripts/layout-sweep.py before\n"
+            "       treating a near-miss as code."
+        )
+    # Said out loud, because an uncalibrated benchmark and a benchmark with a
+    # zero band produce identical output otherwise -- and the whole point of
+    # this machinery is that those are different states. Printed only when
+    # there is something it would have judged, so a quiet run stays quiet.
+    if (reg_unswept or imp_unswept) and verdicts_mean_something:
+        print(
+            f"  ({len(reg_unswept) + len(imp_unswept)} of the movements above "
+            f"have no measured layout band, so placement has NOT been ruled "
+            f"out for them.\n"
+            f"   They are judged as code because nobody has measured "
+            f"otherwise, not because anybody has shown it.\n"
+            f"   Calibrate with: python scripts/layout-sweep.py "
+            f"--pads 0,1024,2048,3072)"
         )
     if reg_within or imp_within:
         _print_movements(
@@ -3698,6 +4014,11 @@ def main(argv=None):
                   f"different optimisation level, different numbers).")
 
     canary = parse_canary(args.serial)
+    # Read from the log, not from the environment: `SLATEOS_TEXT_PAD` in this
+    # process says what the *sweep driver asked for*, which is a different fact
+    # from what the kernel that just ran was compiled with. They diverge exactly
+    # when it matters most -- a stale build.
+    text_pad = parse_text_pad(args.serial)
     # Read once and used twice -- passed to the report so the replication gate
     # can find this binary's other runs, and stored in the record below so the
     # *next* run can find this one. Two `git_commit()` calls could disagree if
@@ -3831,6 +4152,15 @@ def main(argv=None):
         # default.
         if args.experiment:
             record["experiment"] = args.experiment
+        # How much padding was in front of `.text`, as reported by the kernel
+        # itself. Absent means the kernel predates the banner; `0` means it was
+        # built unpadded. Keeping those distinct is the whole value of the
+        # field: a layout band derived from records that were assumed unpadded
+        # would be a spread between builds that may or may not have differed in
+        # placement, i.e. a number with no defined meaning presented as a
+        # tolerance -- and it would be used to *dismiss* regressions.
+        if text_pad is not None:
+            record["text_pad"] = text_pad
         # Absent rather than null when the caller did not measure it: an
         # explicit `wall_seconds: null` invites a reader to treat it as zero,
         # and `dispersion_count`-style "absent means unknown" handling is

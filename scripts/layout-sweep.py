@@ -392,46 +392,185 @@ def bench_history():
 #:
 #: **Repo-relative, resolved by the child's cwd -- never the absolute path**
 #: `os.path.join(SCRIPT_DIR, ...)` would build. On Windows that absolute path is
-#: `D:\visual studio projects\...\boot-test.sh`, and the `bash` on PATH here is
-#: MSYS: it cannot open a drive-letter path with backslashes, and says so as the
-#: generic `No such file or directory`, exit 127. That killed the first real
-#: release sweep -- after its 34-minute self-test had passed, on the first arm,
-#: with a message claiming a script that is plainly present was missing.
+#: `D:\visual studio projects\...\boot-test.sh`, which WSL's bash cannot open;
+#: it says so as the generic `No such file or directory`, exit 127. That killed
+#: the first real release sweep -- after its 34-minute self-test had passed, on
+#: the first arm, with a message claiming a script that is plainly present was
+#: missing.
+#:
+#: The relative name is still right, but note that it was only ever half the
+#: story: the reason a *WSL* bash was reading it at all is `find_bash()` below,
+#: and until that existed, fixing the path merely moved the failure two lines
+#: down to "qemu-system-x86_64 not found".
 BOOT_TEST = "scripts/boot-test.sh"
 
+#: Where to look for a bash that can actually run the boot test, in order.
+#:
+#: `"bash"` is deliberately **last**, and that ordering is the entire point of
+#: this list; see `find_bash()`.
+BASH_CANDIDATES = (
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+    "/bin/bash",
+    "bash",
+)
 
-def preflight_boot_test(script: str = BOOT_TEST,
-                        root: str = PROJECT_ROOT) -> tuple[bool, str]:
-    """Can `bash` find, read and parse the boot test, from where the sweep runs?
 
-    Returns `(ok, message)`; the message is always worth printing, because the
-    successful case is the receipt that this check ran at all.
+def extract_dependency_probe(script_path: str | None = None) -> str:
+    """The boot test's own QEMU and OVMF discovery, lifted out verbatim.
 
-    `bash -n` parses the script without executing a line of it, so this proves
-    the *exact* argv the sweep loop is about to use resolves to a readable file
-    this bash understands -- in about fifty milliseconds. Every part of that
-    matters: the failure it exists to catch is invisible until the first arm,
-    which is one full build and one full boot into a run that costs hours, and
-    it reports itself as a missing file rather than an unusable path.
+    Returned as a shell fragment that exits non-zero exactly when the boot test
+    would exit non-zero for a missing dependency, and silently otherwise.
 
-    Deliberately not `os.path.exists`: the file existed the whole time. The
-    question is not whether Python can see it, it is whether *bash* can open it
-    under the exact string the sweep will pass, and only bash can answer that.
+    Extracted rather than restated. The candidate lists are four MSYS-style and
+    Windows-style paths that differ per machine and per bash flavour, and a
+    Python translation of them would be a second opinion about where QEMU is --
+    one that can say "found" while the boot test says "not found", which is the
+    worst possible answer from a preflight because it certifies the sweep and
+    then the sweep dies anyway. `test-boot-test.py` extracts the dirty check the
+    same way and for the same reason.
+    """
+    path = script_path or os.path.join(PROJECT_ROOT, BOOT_TEST)
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        lines = handle.read().splitlines()
+
+    try:
+        start = next(i for i, line in enumerate(lines)
+                     if line.strip() == "# Find QEMU")
+    except StopIteration:
+        raise RuntimeError(
+            f"{path} no longer contains a '# Find QEMU' block. This probe "
+            f"cannot be built, and rather than preflight nothing while looking "
+            f"like it preflighted something, it refuses.") from None
+
+    # Through the end of the OVMF guard: both dependencies, and nothing that
+    # depends on state set earlier in the script.
+    end = None
+    for index in range(start, len(lines)):
+        if lines[index].strip() == 'if [ -z "$OVMF" ]; then':
+            for close in range(index, len(lines)):
+                if lines[close].strip() == "fi":
+                    end = close + 1
+                    break
+            break
+    if end is None:
+        raise RuntimeError(
+            f"{path} has a '# Find QEMU' block but no OVMF guard after it, so "
+            f"the extracted fragment would check half the dependencies while "
+            f"reporting on all of them.")
+
+    fragment = "\n".join(lines[start:end])
+    for needed in ("qemu-system-x86_64", "OVMF"):
+        if needed not in fragment:
+            raise RuntimeError(
+                f"the fragment extracted from {path} does not mention "
+                f"{needed!r}; the block moved and this probe is checking the "
+                f"wrong lines.")
+    return fragment
+
+
+def bash_can_run_boot_test(bash: str, script: str = BOOT_TEST,
+                           root: str = PROJECT_ROOT) -> tuple[bool, str]:
+    """Can *this* bash parse the boot test **and** find what it needs to run?
+
+    Both halves, because on this machine they fail separately and the first
+    passing hid the second for a whole sweep attempt.
+
+    `bash -n` parses without executing a line, proving the exact argv the sweep
+    will use resolves to a readable file this bash understands. Deliberately not
+    `os.path.exists`: the file existed the whole time; the question is whether
+    *bash* can open it under the exact string that will be passed, and only bash
+    can answer that.
+
+    Then the boot test's own dependency discovery is run under the same bash.
+    That is what separates the two flavours here: both parse the script fine,
+    and only one of them can see QEMU.
     """
     try:
-        parsed = subprocess.run(["bash", "-n", script], cwd=root,
+        parsed = subprocess.run([bash, "-n", script], cwd=root,
                                 capture_output=True, text=True, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
-        return False, (f"layout-sweep: cannot run bash at all ({exc}); the "
-                       f"sweep needs it to invoke {script}.")
+        return False, f"cannot be run at all ({exc})"
     if parsed.returncode != 0:
-        detail = (parsed.stdout + parsed.stderr).strip()[-500:]
-        return False, (
-            f"layout-sweep: `bash -n {script}` failed (exit "
-            f"{parsed.returncode}) with cwd {root}, so the sweep would fail on "
-            f"its first arm -- after a full build and boot. Refusing to "
-            f"start.\n  {detail}")
-    return True, f"[layout-sweep] preflight: bash can run {script} from {root}"
+        detail = (parsed.stdout + parsed.stderr).strip()[-300:]
+        return False, (f"cannot parse {script} from {root} "
+                       f"(exit {parsed.returncode}): {detail}")
+
+    try:
+        probe = subprocess.run([bash, "-c", extract_dependency_probe()],
+                               cwd=root, capture_output=True, text=True,
+                               check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"cannot run the dependency probe ({exc})"
+    if probe.returncode != 0:
+        detail = (probe.stdout + probe.stderr).strip()[-300:]
+        return False, (f"parses {script} but cannot find what it needs to run "
+                       f"it: {detail}")
+    return True, "parses the boot test and can find QEMU and OVMF"
+
+
+def find_bash(candidates=BASH_CANDIDATES, script: str = BOOT_TEST,
+              root: str = PROJECT_ROOT) -> tuple[str | None, str]:
+    """The first bash that can actually run the boot test, and why the rest can't.
+
+    Returns `(path_or_None, message)`. The message is always printed: naming the
+    bash that was chosen is the receipt, and on failure the per-candidate
+    reasons are the entire diagnosis.
+
+    # Why bare `bash` is the last resort and not the first
+
+    Windows `CreateProcess` does not search `PATH` first. It searches the
+    application directory, the current directory, **`C:\\Windows\\System32`**,
+    the Windows directory, and only then `PATH`. On a machine with WSL
+    installed there is a `System32\\bash.exe`, so `subprocess.run(["bash", ...])`
+    launches **WSL's** bash no matter what `PATH` says -- and no matter what
+    `shutil.which("bash")` reports, because `which` implements a `PATH` search
+    and therefore answers a different question than the one that decides.
+    Measured here: `shutil.which("bash")` returns Git's
+    `C:\\Program Files\\Git\\usr\\bin\\bash.EXE`, while an actual
+    `subprocess.run(["bash", "-c", "pwd"])` prints `/mnt/d/...` -- the WSL
+    mount layout.
+
+    That distinction is not cosmetic. WSL's bash is a different machine: it has
+    its own filesystem view (`/mnt/d` rather than `/d`), its own `PATH`, and
+    **no QEMU, no MSVC and no Windows Rust toolchain**. It parses the boot test
+    perfectly and then cannot run it.
+
+    This cost the second release sweep attempt. The first died on the absolute
+    path -- WSL's bash cannot open `D:\\...\\boot-test.sh` and reported it as a
+    missing file. The relative-name fix made that error go away, which read as
+    the bug being solved; it was not. The sweep was still under WSL bash, and
+    the very next arm died at `ERROR: qemu-system-x86_64 not found`. One root
+    cause, two symptoms, and fixing the visible one moved the failure two lines
+    down the script.
+
+    So bash is resolved *explicitly*, most-specific first, and every candidate
+    must demonstrate it can find QEMU before it is accepted. `bash` remains in
+    the list because on a real Linux host it is the correct answer and the
+    absolute Windows paths are not -- but it is last, so it only wins when
+    nothing better exists.
+    """
+    reasons = []
+    for candidate in candidates:
+        if os.path.isabs(candidate) and not os.path.exists(candidate):
+            continue
+        ok, detail = bash_can_run_boot_test(candidate, script, root)
+        if ok:
+            note = ""
+            if candidate == "bash":
+                note = ("\n[layout-sweep]   (this is whatever the OS resolves "
+                        "`bash` to, which on Windows is System32 before PATH)")
+            return candidate, (f"[layout-sweep] preflight: using {candidate} "
+                               f"-- it {detail}{note}")
+        reasons.append(f"  {candidate}: {detail}")
+
+    return None, (
+        "layout-sweep: no usable bash. The sweep needs one that can both read "
+        f"{script} and find QEMU/OVMF the way that script looks for them, and "
+        "none of the candidates can:\n" + "\n".join(reasons) +
+        "\n  Refusing to start rather than failing on the first arm after a "
+        "full build.")
 
 
 def check_arm_counts(bh, pad: int, profile: str) -> tuple[bool, str]:
@@ -533,9 +672,9 @@ def run_sweep(pads: list[int], profile: str, serial: str) -> int:
         return 2
 
     script = BOOT_TEST
-    ok, message = preflight_boot_test(script)
+    bash, message = find_bash(script=script)
     print(message)
-    if not ok:
+    if bash is None:
         return 1
 
     for pad in pads:
@@ -546,7 +685,7 @@ def run_sweep(pads: list[int], profile: str, serial: str) -> int:
         env["BENCH_EXPERIMENT"] = (
             f"layout sweep: textpad={pad} (identical source, deliberately "
             f"perturbed code placement; see scripts/layout-sweep.py)")
-        proc = subprocess.run(["bash", script, "--bench",
+        proc = subprocess.run([bash, script, "--bench",
                                f"--profile={profile}"],
                               cwd=PROJECT_ROOT, env=env, check=False)
         if proc.returncode != 0:

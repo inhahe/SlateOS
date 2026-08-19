@@ -62,43 +62,111 @@ def check(label, got, want):
     return False
 
 
-def test_bash_can_actually_open_the_boot_test_this_sweep_will_invoke(ls):
-    """The regression that cost a 34-minute self-test and the first arm.
+def test_the_sweep_picks_a_bash_that_can_actually_run_the_boot_test(ls):
+    """The root cause behind two dead sweeps, and its two separate symptoms.
 
-    Both halves are the test. The repo-relative name must work, *and* the
-    absolute one must be shown to fail -- otherwise this passes on a platform
-    where both happen to work and stops defending anything on the one where it
-    matters.
+    Windows `CreateProcess` searches `System32` before `PATH`, so on a machine
+    with WSL installed `subprocess.run(["bash", ...])` launches WSL's bash
+    regardless of `PATH` -- and regardless of `shutil.which("bash")`, which
+    implements a `PATH` search and so answers a different question than the one
+    that decides. WSL's bash parses the boot test perfectly and has no QEMU.
+
+    Symptom one was `No such file or directory` on an absolute path; fixing
+    that made the error go away without fixing anything, and symptom two was
+    `ERROR: qemu-system-x86_64 not found` on the very next attempt. So the test
+    asserts the *capability*, not the parse.
     """
-    ok, message = ls.preflight_boot_test()
-    check("bash can find, read and parse the boot test as the sweep names it",
+    bash, message = ls.find_bash()
+    check("a usable bash is found", bash is not None, True)
+    check("...and it is named, so the choice is on the record",
+          "preflight" in message and (bash or "") in message, True)
+
+    ok, detail = ls.bash_can_run_boot_test(bash)
+    check("the chosen bash can find QEMU and OVMF, not merely parse the script",
           ok, True)
-    check("...and says so, so a passing preflight leaves a receipt",
-          "preflight" in message, True)
+    check("...and the receipt says which of the two it checked",
+          "QEMU" in detail, True)
 
-    # The exact string the old code built. On Linux this resolves fine and the
-    # check below is vacuous; on Windows it is the bug. Asserted as "not worse
-    # than the relative form" rather than "fails", so the test states a real
-    # invariant on both platforms.
-    absolute = os.path.join(REPO_ROOT, "scripts", "boot-test.sh")
-    abs_ok, _ = ls.preflight_boot_test(absolute)
-    check("the relative form is never the worse of the two",
-          ok or not abs_ok, True)
-    if not abs_ok:
-        print("      (this platform's bash cannot open the absolute path -- "
-              "the original bug, still present and still avoided)")
-
-    # And the constant itself: an absolute path here would reintroduce it.
-    check("the sweep names the boot test relatively",
+    # The constant itself: an absolute path here would reintroduce symptom one
+    # for any candidate that cannot open drive-letter paths.
+    check("the sweep still names the boot test relatively",
           os.path.isabs(ls.BOOT_TEST), False)
+
+    # `bash` must be the fallback, never the preference: it is the one entry
+    # whose meaning is decided by the OS rather than by this list.
+    check("bare `bash` is the last candidate, not the first",
+          ls.BASH_CANDIDATES[-1], "bash")
+
+
+def test_a_bash_that_cannot_find_qemu_is_rejected_however_well_it_parses(ls):
+    """The distinction the old preflight could not draw.
+
+    A `bash -n` check passes under WSL, and that pass is what let a sweep start
+    that could never finish. If both bashes exist on this machine, this asserts
+    the rejection directly; if only one does, it asserts the weaker but still
+    real invariant that whatever was chosen passes the dependency half.
+    """
+    wsl = r"C:\Windows\System32\bash.exe"
+    if not os.path.exists(wsl):
+        print("      (no WSL bash on this machine; the discriminating case "
+              "cannot be exercised here)")
+        chosen, _ = ls.find_bash()
+        ok, _ = ls.bash_can_run_boot_test(chosen)
+        check("the chosen bash still passes the dependency probe", ok, True)
+        return
+
+    parses = ls.subprocess.run([wsl, "-n", ls.BOOT_TEST], cwd=REPO_ROOT,
+                               capture_output=True, text=True)
+    check("WSL's bash parses the boot test perfectly", parses.returncode, 0)
+
+    ok, detail = ls.bash_can_run_boot_test(wsl)
+    check("...and is still rejected, because it cannot run it", ok, False)
+    check("...with the reason naming the dependency, not the syntax",
+          "cannot find what it needs" in detail, True)
+
+    chosen, _ = ls.find_bash()
+    check("so the sweep does not choose it",
+          os.path.normcase(chosen or "") == os.path.normcase(wsl), False)
+
+
+def test_the_dependency_probe_is_the_boot_tests_own(ls):
+    """A Python translation of the QEMU search would be a second opinion.
+
+    The candidate lists are MSYS- and Windows-style paths that differ per
+    machine and per bash flavour. A reimplementation that says "found" while
+    the boot test says "not found" is the worst answer a preflight can give: it
+    certifies the sweep, and then the sweep dies anyway.
+    """
+    fragment = ls.extract_dependency_probe()
+    check("the probe mentions QEMU", "qemu-system-x86_64" in fragment, True)
+    check("...and OVMF, so it is not checking half the dependencies",
+          "OVMF" in fragment, True)
+    check("...and it is the script's real search, not a rewrite",
+          'command -v "$candidate"' in fragment, True)
+
+    # It must refuse rather than silently probe nothing if the block moves.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        decoy = os.path.join(tmp, "boot-test.sh")
+        with open(decoy, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("#!/bin/sh\necho no dependency discovery here\n")
+        try:
+            ls.extract_dependency_probe(decoy)
+            outcome = "silently returned something"
+        except RuntimeError as exc:
+            outcome = "refused" if "Find QEMU" in str(exc) else str(exc)
+    check("a boot test whose dependency block moved makes the probe refuse",
+          outcome, "refused")
 
 
 def test_a_missing_boot_test_is_refused_before_any_build(ls):
     """The preflight must fail loudly, not fall through to the arms."""
-    ok, message = ls.preflight_boot_test("scripts/no-such-boot-test.sh")
-    check("a boot test that is not there fails the preflight", ok, False)
+    bash, message = ls.find_bash(script="scripts/no-such-boot-test.sh")
+    check("a boot test that is not there yields no usable bash", bash, None)
     check("...and the message says the sweep is refusing to start",
-          "Refusing to start" in message or "cannot run bash" in message, True)
+          "Refusing to start" in message, True)
+    check("...and lists what each candidate said, which is the diagnosis",
+          "cannot parse" in message, True)
 
 
 def test_pad_values_are_validated_before_hours_are_spent(ls):
@@ -292,9 +360,9 @@ def main():
     ls = load_module()
     tests = [(name, fn) for name, fn in list(globals().items())
              if name.startswith("test_") and callable(fn)]
-    if len(tests) < 6:
+    if len(tests) < 8:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 6. Discovery is broken, not the code.")
+              f"suite has at least 8. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

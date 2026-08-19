@@ -112,6 +112,62 @@ def extract_dirty_check(source=None):
     return fragment
 
 
+#: Every bash on this machine that can run a script at all.
+#:
+#: The suite runs against *all* of them, not against whichever one the OS hands
+#: back, because on Windows those are not the same and the difference decides
+#: the answer. `CreateProcess` searches `System32` before `PATH`, so a bare
+#: `subprocess.run(["bash", ...])` launches WSL's bash when WSL is installed --
+#: regardless of `PATH`, and regardless of `shutil.which("bash")`, which
+#: implements a `PATH` search and therefore answers a different question than
+#: the one that decides. Meanwhile `boot-test.sh` in production is run by Git's
+#: MSYS bash. Testing under only one of them validates a check that the other
+#: one will actually perform, and those two bashes carry *different gits* with
+#: different configs -- which is exactly the axis (`core.autocrlf`, pathspec
+#: handling) this check is sensitive to.
+BASH_CANDIDATES = (
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+    r"C:\Windows\System32\bash.exe",
+    "/bin/bash",
+    "bash",
+)
+
+
+def available_bashes(candidates=BASH_CANDIDATES):
+    """The distinct, working bashes among the candidates.
+
+    De-duplicated by what each one reports for its *own* `pwd` of a fixed
+    directory, which is the property that actually distinguishes them (`/d/...`
+    versus `/mnt/d/...`) -- not by path, since `bash` and an absolute candidate
+    are frequently the same binary under two names and running the suite twice
+    against one bash is wasted time dressed up as coverage.
+    """
+    found, seen = [], set()
+    probe = tempfile.mkdtemp(prefix="slateos-bash-probe-")
+    try:
+        for candidate in candidates:
+            if os.path.isabs(candidate) and not os.path.exists(candidate):
+                continue
+            try:
+                proc = subprocess.run([candidate, "-c", "pwd"], cwd=probe,
+                                      capture_output=True, text=True,
+                                      timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if proc.returncode != 0:
+                continue
+            view = proc.stdout.strip()
+            if not view or view in seen:
+                continue
+            seen.add(view)
+            found.append(candidate)
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+    return found
+
+
 class ScratchRepo:
     """A throwaway git repo shaped like this one, for running the check in.
 
@@ -120,19 +176,21 @@ class ScratchRepo:
     already believed.
     """
 
-    def __init__(self):
+    def __init__(self, bash="bash"):
+        self.bash = bash
         self.path = tempfile.mkdtemp(prefix="slateos-boot-test-")
-        # The path *as bash names it*, which on this machine is not the path as
-        # Python names it: `tempfile` hands back `C:\Users\...`, and the MSYS
-        # bash on PATH cannot open a drive-letter path with backslashes -- it
-        # reports `fatal: cannot change to 'C:\...': No such file or directory`
-        # from `git -C`, which the real check swallows with `2>/dev/null` and
-        # turns into a permanent "dirty". Asking bash for its own `pwd` is how
+        # The path *as this bash names it*, which is not the path as Python
+        # names it: `tempfile` hands back `C:\Users\...`, and WSL's bash cannot
+        # open a drive-letter path with backslashes at all -- it reports
+        # `fatal: cannot change to 'C:\...': No such file or directory` from
+        # `git -C`, which the real check swallows with `2>/dev/null` and turns
+        # into a permanent "dirty". Git's bash resolves the same directory to
+        # `/c/Users/...`. Asking each bash for its own `pwd` is how
         # boot-test.sh itself derives PROJECT_ROOT (`cd "$SCRIPT_DIR/.." &&
         # pwd`), so this reproduces the production form rather than inventing
-        # one.
+        # one -- and it is per-bash for the same reason.
         self.bash_path = subprocess.run(
-            ["bash", "-c", "pwd"], cwd=self.path,
+            [bash, "-c", "pwd"], cwd=self.path,
             capture_output=True, text=True, check=True).stdout.strip()
         self._git("init", "-q", ".")
         self._git("config", "user.email", "test@example.invalid")
@@ -143,11 +201,11 @@ class ScratchRepo:
             os.makedirs(os.path.dirname(full), exist_ok=True)
             # `newline="\n"` everywhere this class writes, and it is load-
             # bearing. Python's default text mode writes CRLF on Windows; the
-            # repo is then created by Windows git and inspected by the bash on
-            # PATH, which is WSL, whose git has its own config. The two
-            # disagree about line-ending normalisation, so every file reads as
-            # modified and the whole suite reports "dirty" for reasons that
-            # have nothing to do with the check under test.
+            # repo is then created by Windows git and inspected by whichever
+            # git the bash under test carries, and WSL's has its own config.
+            # The two disagree about line-ending normalisation, so every file
+            # reads as modified and the whole suite reports "dirty" for reasons
+            # that have nothing to do with the check under test.
             with open(full, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write("seed\n")
         self._git("add", "-A")
@@ -175,17 +233,17 @@ class ScratchRepo:
         to `bash -c`, for two reasons that both bite on this machine only:
 
         * A newline inside a single argv entry does not survive the Windows
-          command line that MSYS reconstructs -- it arrives as a space. The
+          command line the child reconstructs -- it arrives as a space. The
           fragment `BT_DIRTY=0\\ngit ...` then becomes `BT_DIRTY=0 git ...`,
           which is a *temporary environment assignment for git*, so the check
           runs, git's exit status is honoured, and `$BT_DIRTY` is still unset
           when it is read. The test failed by printing an empty string, not by
           disagreeing about dirtiness -- a mangling that looks like a bug in
           the thing under test.
-        * An absolute Windows path handed to MSYS bash cannot be opened at all;
-          see `layout-sweep.py`'s BOOT_TEST for the same lesson learned the
-          expensive way. The script is therefore written into `cwd` and named
-          relatively.
+        * An absolute Windows path handed to WSL's bash cannot be opened at
+          all; see `layout-sweep.py`'s BOOT_TEST and `find_bash` for the same
+          lesson learned the expensive way, twice. The script is therefore
+          written into `cwd` and named relatively.
 
         The file is untracked, which is exactly why it is safe to leave in the
         repo while the check runs: `git diff HEAD` does not see untracked
@@ -199,7 +257,7 @@ class ScratchRepo:
         with open(os.path.join(where, name), "w", encoding="utf-8",
                   newline="\n") as handle:
             handle.write(script)
-        proc = subprocess.run(["bash", name], cwd=where,
+        proc = subprocess.run([self.bash, name], cwd=where,
                               capture_output=True, text=True, check=False)
         out = proc.stdout.strip().splitlines()
         if out and out[-1] in ("0", "1"):
@@ -223,32 +281,38 @@ def test_the_harnesss_own_records_do_not_make_the_next_run_look_dirty():
     edit gets benchmarked under the previous commit's name.
     """
     fragment = extract_dirty_check()
-    repo = ScratchRepo()
-    try:
-        check("a freshly committed tree is clean", repo.dirty(fragment), 0)
+    bashes = available_bashes()
+    check("at least one bash is available to run the check under",
+          bool(bashes), True)
+    for bash in bashes:
+        tag = f"[{os.path.basename(os.path.dirname(bash)) or bash}]"
+        repo = ScratchRepo(bash)
+        try:
+            check(f"{tag} a freshly committed tree is clean",
+                  repo.dirty(fragment), 0)
 
-        repo.append("bench/history.jsonl")
-        check("...and stays clean after the bench recorder appends to it",
-              repo.dirty(fragment), 0)
+            repo.append("bench/history.jsonl")
+            check(f"{tag} ...and stays clean after the bench recorder appends",
+                  repo.dirty(fragment), 0)
 
-        repo.append("bench/boot-history.jsonl")
-        check("...and after the boot recorder appends to it",
-              repo.dirty(fragment), 0)
+            repo.append("bench/boot-history.jsonl")
+            check(f"{tag} ...and after the boot recorder appends to it",
+                  repo.dirty(fragment), 0)
 
-        repo.append("kernel/src/main.rs")
-        check("but a source edit is still dirty, records or no records",
-              repo.dirty(fragment), 1)
+            repo.append("kernel/src/main.rs")
+            check(f"{tag} but a source edit is still dirty, records or no "
+                  f"records", repo.dirty(fragment), 1)
 
-        repo.restore("kernel/src/main.rs")
-        check("...and reverting the source makes it clean again",
-              repo.dirty(fragment), 0)
+            repo.restore("kernel/src/main.rs")
+            check(f"{tag} ...and reverting the source makes it clean again",
+                  repo.dirty(fragment), 0)
 
-        repo.append("kernel/src/main.rs")
-        repo.stage("kernel/src/main.rs")
-        check("a *staged* source edit is dirty too (the diff is against HEAD, "
-              "not the index)", repo.dirty(fragment), 1)
-    finally:
-        repo.close()
+            repo.append("kernel/src/main.rs")
+            repo.stage("kernel/src/main.rs")
+            check(f"{tag} a *staged* source edit is dirty too (the diff is "
+                  f"against HEAD, not the index)", repo.dirty(fragment), 1)
+        finally:
+            repo.close()
 
 
 def test_the_check_reads_the_tree_under_test_not_the_callers_cwd():
@@ -261,23 +325,25 @@ def test_the_check_reads_the_tree_under_test_not_the_callers_cwd():
     subdirectory would report a kernel edit as a clean tree.
     """
     fragment = extract_dirty_check()
-    repo = ScratchRepo()
-    try:
-        repo.append("kernel/src/main.rs")
-        elsewhere = tempfile.mkdtemp(prefix="slateos-elsewhere-")
+    for bash in available_bashes():
+        tag = f"[{os.path.basename(os.path.dirname(bash)) or bash}]"
+        repo = ScratchRepo(bash)
         try:
-            check("a source edit is seen from an unrelated cwd",
-                  repo.dirty(fragment, cwd=elsewhere), 1)
-            check("...and the excluded records still are not",
-                  _only_records_dirty(fragment, elsewhere), 0)
+            repo.append("kernel/src/main.rs")
+            elsewhere = tempfile.mkdtemp(prefix="slateos-elsewhere-")
+            try:
+                check(f"{tag} a source edit is seen from an unrelated cwd",
+                      repo.dirty(fragment, cwd=elsewhere), 1)
+                check(f"{tag} ...and the excluded records still are not",
+                      _only_records_dirty(fragment, elsewhere, bash), 0)
+            finally:
+                shutil.rmtree(elsewhere, ignore_errors=True)
         finally:
-            shutil.rmtree(elsewhere, ignore_errors=True)
-    finally:
-        repo.close()
+            repo.close()
 
 
-def _only_records_dirty(fragment, cwd):
-    repo = ScratchRepo()
+def _only_records_dirty(fragment, cwd, bash="bash"):
+    repo = ScratchRepo(bash)
     try:
         repo.append("bench/history.jsonl")
         return repo.dirty(fragment, cwd=cwd)

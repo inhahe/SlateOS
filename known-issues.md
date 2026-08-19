@@ -40595,6 +40595,54 @@ the parser reads, which the next benchmark boot demonstrates for free — so it
 is tracked as a validation step on the next sweep rather than as an open
 defect.
 
+
+#### VALIDATION (2026-08-19, same day) -- the end-to-end re-run happened, both parts held, and it found a third cause
+
+The paragraph immediately above says the re-run "has not happened" and is
+"tracked as a validation step on the next sweep". It happened that afternoon.
+Recording the outcome here rather than editing that paragraph, because what it
+predicted and what it got are different in an instructive way.
+
+**Part 1 held.** Three commits were made *deliberately* while the sweep ran --
+`b3ee55d25` (design-decisions §240), `0d9da98c6` (a Q54 amendment) and
+`a8a62afba` (a known-issues entry), all root `*.md`. The tracked half of the
+digest was byte-identical across all three and the commit preceding them:
+`tracked:11d8ab60978a1b56` at `41581ca30`, `b3ee55d25`, `0d9da98c6` and
+`a8a62afba`. A documentation commit landing mid-sweep is no longer a new
+identity. That is the exact claim that could only be made on paper before.
+
+**Part 2 held, and earned its place.** The sweep still fragmented -- for a cause
+neither part 1 nor the four controls could have covered -- and part 2 caught it
+on the second arm and named it:
+
+```
+pad=0:    ('full:ace827eb370bec40', 'Hyper-V/WHPX')
+pad=1024: ('full:f75959ab7b96d782', 'Hyper-V/WHPX')
+```
+
+Same accelerator; the source digest alone moved. It stopped after ~24 minutes
+rather than spending ~72 on a band that could not form. Note that part 2's own
+message already lists "a regenerated `rootfs.ext4`" among the causes it exists
+to catch, and that is precisely what it caught -- written before anyone knew it
+was happening.
+
+**The third cause: the boot test was rewriting `rootfs.ext4`,** which is an
+input to the digest's artifact half. Measured `f62e019d` -> `b2ecc74d` across
+one boot on an idle tree. Fixed in `218028ced` by attaching the image with
+`snapshot=on`. Full write-up in
+`B-A-THE-BOOT-TEST-REWRITES-ROOTFS.EXT4, WHICH-IS-AN-INPUT-TO-THE-IDENTITY-OF-WHAT-IT-JUST-BOOTED`.
+
+**What this says about the reasoning in the paragraph above.** That paragraph
+argued the re-run was low-value because the mechanism was "covered from both
+ends by tests that do not need three hours". The tests it cites are sound and
+all still pass; they simply could not see this, because every one of them
+reasons about `bench/history.jsonl` *as recorded* and the defect was in what the
+act of booting does to the tree. The re-run was not confirming a fix -- it was
+the only thing in the project capable of observing that testing the system
+changes the system. The general lesson, which is worth more than the bug: a test
+that only inspects recorded output cannot detect that the recorder has side
+effects.
+
 ### B-A-AN-ORDINARY-RUN-NEARLY-JOINED-A-LAYOUT-BAND-AS-A-SEVENTH-ARM, AND ONLY ONE FIELD STOPPED IT (lane A, 2026-08-19) -- reopened and re-closed the same day: `bench-history.py` did stop it, but an ad-hoc analysis bypassed the guard entirely and published the merged numbers. See "AMENDMENT" at the end.
 
 **In short:** a "layout band" is a range of timings measured from six builds of

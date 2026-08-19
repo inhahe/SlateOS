@@ -1423,6 +1423,13 @@ record_boot_outcome() {
     if [ "${QEMU_CPU_OVERRIDDEN:-0}" = 1 ]; then
         why="${why:+$why; }QEMU_CPU=$QEMU_CPU (non-default guest CPU)"
     fi
+    # A non-default GPU also changes the display backend (egl-headless instead
+    # of none), so such a run is not comparable on wall time with a tracking
+    # run even when it passes -- which is precisely what the experiment tag is
+    # for.
+    if [ "${GPU_OVERRIDDEN:-0}" = 1 ]; then
+        why="${why:+$why; }SLATE_GPU=$GPU_DEVICE (non-default display device)"
+    fi
     if [ -n "$why" ]; then
         args+=(--experiment "$why")
     fi
@@ -1888,6 +1895,34 @@ QEMU_CPU="${QEMU_CPU:-qemu64,+smep,+smap,+umip}"
 # below), so a probe run cannot become the baseline a later honest run is judged
 # against.
 read -r -a QEMU_EXTRA_ARGS <<< "${QEMU_EXTRA:-}"
+
+# Which virtio-GPU device to present, and therefore which of the driver's two
+# resource-creation paths gets exercised:
+#
+#     SLATE_GPU=virtio-gpu-gl-pci ./scripts/boot-test.sh
+#
+# Default `virtio-gpu-pci` is the plain 2D device, which is what every tracking
+# run has always used.  `virtio-gpu-gl-pci` routes the same commands through
+# QEMU's virgl path, where the framebuffer has to be created with
+# RESOURCE_CREATE_3D and the SCANOUT bind or SET_SCANOUT is refused (see
+# kernel/src/virtio/gpu.rs::create_resource_3d).  That path has no other
+# coverage, so without this knob a regression in it is invisible here and only
+# surfaces when the graphics lane tries to run Mesa.
+#
+# Passing the device via QEMU_EXTRA cannot substitute for this: that *adds* a
+# second GPU, and the driver binds the first one it finds, so the GL device is
+# never the one under test.  The display backend has to move with it — a GL
+# device needs a real EGL context and QEMU refuses to start it under
+# `-display none` — which is the other thing a caller cannot express by
+# appending arguments.
+GPU_DEVICE="${SLATE_GPU:-virtio-gpu-pci}"
+if [ "$GPU_DEVICE" = "virtio-gpu-pci" ]; then
+    GPU_DISPLAY_ARGS=(-display none)
+    GPU_OVERRIDDEN=0
+else
+    GPU_DISPLAY_ARGS=(-display egl-headless)
+    GPU_OVERRIDDEN=1
+fi
 
 # Why this run is a deliberate probe rather than a tracking run, e.g.
 #
@@ -2413,7 +2448,7 @@ QEMU_START_EPOCH=$(date +%s)
     "${ROOTFS_ARGS[@]}" \
     "${WATCHDOG_ARGS[@]}" \
     "${MONITOR_ARGS[@]}" \
-    -device virtio-gpu-pci \
+    -device "$GPU_DEVICE" \
     -vga std \
     -device ati-vga,model=rv100 \
     -audiodev none,id=snd0 \
@@ -2427,7 +2462,7 @@ QEMU_START_EPOCH=$(date +%s)
     -device usb-kbd,bus=xhci0.0 \
     -serial "file:$SERIAL_FILE_WIN" \
     -pidfile "$PIDFILE_WIN" \
-    -display none \
+    "${GPU_DISPLAY_ARGS[@]}" \
     -no-reboot \
     -m 3072M \
     -cpu "$QEMU_CPU" \

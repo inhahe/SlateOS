@@ -589,10 +589,35 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # re-benchmarking, so a row stamped *newer* than the tree it measured hides
 # precisely the changes the check exists to catch -- and it fails silently, by
 # printing the reassuring branch.
+#
+# The two files this harness itself writes are excluded from the dirty check,
+# and that exclusion is the whole point of the pathspec below.  Both are
+# tracked; both are appended to by the recorders at the *end* of a run.  So a
+# clean tree stops being clean the moment the first run finishes, and every
+# subsequent run at the same commit stamps itself `"dirty": true` — not because
+# anything under test changed, but because the previous run recorded itself.
+# The signature is visible in bench/history.jsonl: 40515da89 has one clean row
+# followed by five dirty ones, 5e9a30a22 one clean then one dirty, with no
+# source commit in between.
+#
+# It is not a cosmetic mislabel either.  `dirty` means "the commit hash does not
+# identify the source that was built", and consumers act on it: layout_arms()
+# in bench-history.py drops dirty records outright, because a layout band is
+# only meaningful across arms that share identical source.  A six-arm sweep
+# would therefore have contributed exactly one usable arm — one below the
+# three-arm minimum — and reported no band at all, silently, after three hours
+# of QEMU.  A check that cannot fire, presenting as a check that found nothing.
+#
+# Excluding them is safe in the direction that matters.  Widening `dirty` hides
+# nothing; narrowing it admits records into comparisons.  These two files are
+# never compiled and never read by the kernel, so no edit to them can change
+# what was built — which is precisely and only what `dirty` is claiming about.
 BT_BRANCH="$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
 BT_HEAD="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
 BT_DIRTY=0
-git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null || BT_DIRTY=1
+git -C "$PROJECT_ROOT" diff --quiet HEAD -- . \
+    ':(exclude)bench/history.jsonl' \
+    ':(exclude)bench/boot-history.jsonl' 2>/dev/null || BT_DIRTY=1
 _bt_dirty=""
 [ "$BT_DIRTY" = 1 ] && _bt_dirty=" +uncommitted"
 echo "=== Tree under test: $PROJECT_ROOT [$BT_BRANCH @ $BT_HEAD$_bt_dirty] ==="

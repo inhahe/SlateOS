@@ -109,6 +109,18 @@ ENTRY_ALLOWED_CALLS = [
 ENTRY_SYM = "kernel_main"
 WINDOW_END_SUBSTRING = "6serial4init"
 
+# How a function nested *inside* `kernel_main` appears in a v0-mangled symbol:
+# the path component is length-prefixed, so `kernel_main`'s own `case` helpers
+# read as `...11kernel_main4case`, `...11kernel_mains_4case`,
+# `...11kernel_mains0_4case`, and so on (the `s_`/`sN_` are Rust's
+# disambiguators for repeated names in one scope).
+#
+# These are not separate subsystems that `kernel_main` calls; they are
+# `kernel_main`'s own body, carved up so each step gets its own stack frame.
+# `check_entry_order` therefore scans *through* them rather than treating a
+# call to one as a call out of the entry function.
+NESTED_ENTRY_SUBSTRING = f"{len(ENTRY_SYM)}{ENTRY_SYM}"
+
 # Functions that are checked for instrumentation but whose callees are NOT
 # followed.
 #
@@ -370,28 +382,86 @@ def check_entry_order(functions: dict[str, list[str]]) -> list[str]:
     Returns a list of problems (empty if fine). This is what keeps the root
     list from going stale: adding a call ahead of `serial::init` without
     listing it here is reported instead of silently escaping the walk.
+
+    The scan is in *flattened* program order: `kernel_main`'s body is split
+    across nested `case` helpers (`86a56f78c`, which cut its peak frame from
+    19 776 to 10 976 bytes by giving each step its own `#[inline(never)]`
+    scope), so the statements that run before the shadow exists — including
+    the `serial::init` that ends the window — live inside the first helper
+    rather than in `kernel_main` itself. A scan that looked only at
+    `kernel_main`'s own calls would see a call to `kernel_main::case` where it
+    expected `serial::init`, fail to find the window end anywhere, and then
+    report every remaining call in the function as a pre-shadow violation.
+    That is exactly what it did between `86a56f78c` and this fix, and because
+    the instrumented build is not part of the routine boot gate, nothing
+    noticed. Descending into the nested helpers keeps the check anchored to
+    what the code *does* rather than to how it is currently carved into
+    functions.
     """
     if ENTRY_SYM not in functions:
         return [f"entry symbol {ENTRY_SYM!r} not found"]
 
-    problems = []
+    problems: list[str] = []
+    missing: list[str] = []
     seen_end = False
-    for callee in calls_in(functions[ENTRY_SYM]):
-        if WINDOW_END_SUBSTRING in callee:
-            seen_end = True
-            break
-        if not any(allowed in callee for allowed in ENTRY_ALLOWED_CALLS):
-            problems.append(
-                f"{ENTRY_SYM}\n    calls {callee}\n    before "
-                f"{WINDOW_END_SUBSTRING} — it runs in the pre-shadow window "
-                f"but is not in ENTRY_ALLOWED_CALLS"
-            )
+    visited: set[str] = set()
+
+    def scan(owner: str, lines: list[str]) -> None:
+        nonlocal seen_end
+        for callee in calls_in(lines):
+            if seen_end:
+                return
+            if WINDOW_END_SUBSTRING in callee:
+                seen_end = True
+                return
+            if NESTED_ENTRY_SUBSTRING in callee and callee != ENTRY_SYM:
+                # A `case` helper: part of `kernel_main`'s straight-line body,
+                # so its calls are `kernel_main`'s calls for this purpose.
+                if callee in visited:
+                    continue
+                visited.add(callee)
+                body = functions.get(callee)
+                if body is None:
+                    # Reported rather than skipped: an unseen helper is a hole
+                    # in the window, and skipping it could hide the very call
+                    # this check exists to catch.
+                    missing.append(
+                        f"{owner}\n    calls {callee}\n    which has no "
+                        f"disassembly, so the pre-shadow window cannot be "
+                        f"followed through it"
+                    )
+                    continue
+                scan(callee, body)
+                continue
+            if not any(allowed in callee for allowed in ENTRY_ALLOWED_CALLS):
+                problems.append(
+                    f"{owner}\n    calls {callee}\n    before "
+                    f"{WINDOW_END_SUBSTRING} — it runs in the pre-shadow window "
+                    f"but is not in ENTRY_ALLOWED_CALLS"
+                )
+
+    scan(ENTRY_SYM, functions[ENTRY_SYM])
+
     if not seen_end:
-        problems.append(
-            f"no call to {WINDOW_END_SUBSTRING!r} found in {ENTRY_SYM}; "
-            "the pre-shadow window's end can no longer be located"
-        )
-    return problems
+        # Report *only* this. Without the anchor the scan never learned where
+        # the window ends, so it treated the whole function as pre-shadow and
+        # every entry in `problems` is an artefact of that — printing them
+        # alongside buries the one finding that is true and sends the reader
+        # off to exempt calls that were never in the window. This is not
+        # hypothetical: the real failure emitted ~40 such lines above the
+        # single accurate diagnosis.
+        return [
+            f"no call to {WINDOW_END_SUBSTRING!r} found in {ENTRY_SYM} or in "
+            f"the nested helpers it calls; the pre-shadow window's end can no "
+            f"longer be located.\n    Nothing else is reported: with the "
+            f"window unbounded every call looks like a violation, so any "
+            f"further output would be noise.\n    Most likely the code that "
+            f"calls it moved into a helper this scan does not recognise as "
+            f"part of {ENTRY_SYM} (see NESTED_ENTRY_SUBSTRING), or "
+            f"{WINDOW_END_SUBSTRING!r} was inlined and no longer appears as a "
+            f"call at all."
+        ]
+    return missing + problems
 
 
 def walk(

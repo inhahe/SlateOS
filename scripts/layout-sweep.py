@@ -705,12 +705,43 @@ def find_bash(candidates=BASH_CANDIDATES, script: str = BOOT_TEST,
         "full build.")
 
 
-def check_arm_counts(bh, pad: int, profile: str) -> tuple[bool, str]:
-    """Will the row this arm just wrote actually be *counted* as an arm?
+def check_arm_counts(bh, pad: int, profile: str,
+                     previous=None) -> tuple[bool, str, object]:
+    """Will the row this arm just wrote actually be *counted* as an arm, *and
+    counted beside the ones before it*?
 
-    Returns `(ok, message)`. The message is always printed: on success it is the
-    receipt that the check ran, which is the only thing distinguishing "the arm
-    was accepted" from "nobody asked".
+    Returns `(ok, message, group_key)`. The message is always printed: on
+    success it is the receipt that the check ran, which is the only thing
+    distinguishing "the arm was accepted" from "nobody asked". `group_key` is
+    this arm's `bh.arm_group_key`, to be handed back as `previous` on the next
+    call; `previous` is `None` for the first arm and otherwise the
+    `(pad, group_key)` of the arm before it.
+
+    # Two different questions, and why one guard cannot answer both
+
+    `bh.layout_arm_rejection` is a predicate over a *single* record: it answers
+    "will this row be kept?". A band, though, is not made of kept rows -- it is
+    made of kept rows that land in the **same group**, and no per-record
+    predicate can see that, because grouping is a relation between two records
+    and the predicate is only ever shown one.
+
+    That gap is not hypothetical; it is precisely the shape of the bug that
+    voided the 2026-08-19 sweep. All six arms passed `layout_arm_rejection`
+    individually -- every one was clean, committed, unloaded, correctly
+    profiled, correctly tagged -- and the sweep still produced no band, because
+    each landed in a group of one. Six green receipts, three hours, no result.
+    `arm_group_key` fixes the specific cause (a docs commit is no longer a new
+    identity), but it does not make the *class* of failure impossible: an arm
+    whose source digest differs for any reason -- a real edit landing mid-sweep,
+    a rebuilt service binary, a regenerated `rootfs.ext4`, an accelerator that
+    silently fell back to TCG on one run -- still splits the sweep in exactly
+    the same silent way. Comparing consecutive keys is the only check that sees
+    it, and it sees all of those causes at once without enumerating any of them.
+
+    Stopping is the right response rather than warning-and-continuing: once two
+    arms disagree about their source, every arm after this one is being spent to
+    fill a group that cannot reach `MIN_PADS_FOR_LAYOUT_BAND` either. Better to
+    surrender the hour still ahead than to spend it.
 
     # Why this is not paranoia
 
@@ -753,7 +784,7 @@ def check_arm_counts(bh, pad: int, profile: str) -> tuple[bool, str]:
     if not records:
         return False, ("layout-sweep: the run finished but wrote no history "
                        f"row at all ({bh.DEFAULT_HISTORY} is empty or "
-                       f"unreadable), so this arm cannot be part of a band.")
+                       f"unreadable), so this arm cannot be part of a band."), None
     record = records[-1]
     # Confirm it is *our* row before judging it. If something else appended
     # after the boot test did, this would otherwise pass or fail an arm on
@@ -765,7 +796,7 @@ def check_arm_counts(bh, pad: int, profile: str) -> tuple[bool, str]:
             f"{record.get('text_pad')!r}, not the {pad} this arm just ran. "
             f"Something else appended to the history during the sweep, so the "
             f"arms cannot be trusted to be the runs this script performed. "
-            f"Stopping.")
+            f"Stopping."), None
     host = platform.node() or "unknown"
     reason = bh.layout_arm_rejection(record, host, profile)
     if reason is not None:
@@ -774,9 +805,30 @@ def check_arm_counts(bh, pad: int, profile: str) -> tuple[bool, str]:
             f"`layout_arms()` will DISCARD its record: {reason}.\n"
             f"  Every remaining arm would be discarded for the same reason, so "
             f"the sweep would spend hours and produce no band. Stopping now "
-            f"instead.")
+            f"instead."), None
+
+    key = bh.arm_group_key(record)
+    if previous is not None:
+        previous_pad, previous_key = previous
+        if key != previous_key:
+            return False, (
+                f"layout-sweep: the pad={pad} arm is a valid arm, but it does "
+                f"not belong to the same group as the pad={previous_pad} arm "
+                f"before it, so the two will never be banded together:\n"
+                f"    pad={previous_pad}: {previous_key!r}\n"
+                f"    pad={pad}: {key!r}\n"
+                f"  The key is `(source digest, accelerator)`. A change in the "
+                f"first means the build inputs moved under the sweep -- an "
+                f"edit, a rebuilt service binary, a regenerated rootfs; a "
+                f"change in the second means QEMU used a different "
+                f"accelerator, which rescales every measurement.\n"
+                f"  Each arm would land in a group of one and no group would "
+                f"reach {bh.MIN_PADS_FOR_LAYOUT_BAND} pads, so the remaining "
+                f"arms would be hours spent on a band that cannot form. "
+                f"Stopping now instead. Re-run the sweep on a tree nothing "
+                f"else is touching."), key
     return True, (f"[layout-sweep] confirmed: the pad={pad} record is accepted "
-                  f"as an arm by bench-history.py")
+                  f"as an arm by bench-history.py, in group {key!r}"), key
 
 
 def run_sweep(pads: list[int], profile: str, serial: str) -> int:
@@ -790,6 +842,11 @@ def run_sweep(pads: list[int], profile: str, serial: str) -> int:
     disagree via a stale build, and a stale build is the one failure that would
     otherwise be completely invisible: the sweep would record two identical
     layouts under two different labels and report a band of zero.
+
+    Each arm's record is then checked twice: that `layout_arms()` will keep it
+    at all, and that it lands in the same group as the arm before it. The
+    second check is the one that catches a tree changing under a running sweep,
+    which every per-record check is structurally blind to.
     """
     bh = bench_history()
     minimum = bh.MIN_PADS_FOR_LAYOUT_BAND
@@ -809,6 +866,10 @@ def run_sweep(pads: list[int], profile: str, serial: str) -> int:
     if bash is None:
         return 1
 
+    # The previous arm's `(pad, group key)`, so each arm can be checked against
+    # the one before it rather than only against the rejection predicate, which
+    # is blind to grouping. See `check_arm_counts`.
+    previous = None
     for pad in pads:
         print(f"\n=== layout sweep: SLATEOS_TEXT_PAD={pad} "
               f"({profile}) ===", flush=True)
@@ -852,10 +913,11 @@ def run_sweep(pads: list[int], profile: str, serial: str) -> int:
         print(f"[layout-sweep] confirmed: the kernel that ran reports "
               f"textpad={reported}")
 
-        accepted, verdict = check_arm_counts(bh, pad, profile)
+        accepted, verdict, key = check_arm_counts(bh, pad, profile, previous)
         print(verdict, flush=True)
         if not accepted:
             return 1
+        previous = (pad, key)
     print(f"\n[layout-sweep] {len(pads)} arm(s) recorded. Analyse with:\n"
           f"    python scripts/bench-history.py --list")
     return 0

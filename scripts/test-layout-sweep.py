@@ -300,7 +300,7 @@ def test_an_arm_that_would_not_be_counted_stops_the_sweep(ls):
         base.update(overrides)
         return base
 
-    ok, message = ls.check_arm_counts(
+    ok, message, _ = ls.check_arm_counts(
         FakeHistory(bh, [record()]), 1024, "release")
     check("a clean, padded, committed arm is accepted", ok, True)
     check("...and says so, so acceptance is a receipt and not a silence",
@@ -312,15 +312,15 @@ def test_an_arm_that_would_not_be_counted_stops_the_sweep(ls):
     # `accel` absent, reading exactly like a TCG arm), and built from source
     # identical to the TCG sweep (so it shared that sweep's digest). Nothing
     # else in the record could have kept it out of the TCG band.
-    ok, message = ls.check_arm_counts(
+    ok, message, _ = ls.check_arm_counts(
         FakeHistory(bh, [record(experiment=None)]), 1024, "release")
     check("an untagged run is not an arm, however clean", ok, False)
-    ok, _ = ls.check_arm_counts(
+    ok, _, _ = ls.check_arm_counts(
         FakeHistory(bh, [record(experiment="WHPX vs TCG: a different probe")]),
         1024, "release")
     check("a differently-tagged experiment is not an arm either", ok, False)
 
-    ok, message = ls.check_arm_counts(
+    ok, message, _ = ls.check_arm_counts(
         FakeHistory(bh, [record(dirty=True)]), 1024, "release")
     check("a dirty arm stops the sweep", ok, False)
     check("...naming the reason rather than just failing",
@@ -328,30 +328,175 @@ def test_an_arm_that_would_not_be_counted_stops_the_sweep(ls):
     check("...and saying why continuing is pointless",
           "no band" in message, True)
 
-    ok, _ = ls.check_arm_counts(
+    ok, _, _ = ls.check_arm_counts(
         FakeHistory(bh, [record(text_pad=None)]), 1024, "release")
     check("an arm with no recorded pad stops the sweep", ok, False)
 
-    ok, _ = ls.check_arm_counts(
+    ok, _, _ = ls.check_arm_counts(
         FakeHistory(bh, [record(commit=None)]), 1024, "release")
     check("an arm with no commit stops the sweep", ok, False)
 
-    ok, message = ls.check_arm_counts(
+    ok, message, _ = ls.check_arm_counts(
         FakeHistory(bh, [record(profile="debug")]), 1024, "release")
     check("a debug arm cannot calibrate a release band", ok, False)
 
-    ok, message = ls.check_arm_counts(FakeHistory(bh, []), 1024, "release")
+    ok, message, _ = ls.check_arm_counts(FakeHistory(bh, []), 1024, "release")
     check("a run that wrote no row at all stops the sweep", ok, False)
     check("...distinguishing 'wrote nothing' from 'wrote something rejected'",
           "wrote no history row" in message, True)
 
     # The newest row must be *this* arm's. Judging someone else's row would
     # report a verdict about a different run as though it were about this one.
-    ok, message = ls.check_arm_counts(
+    ok, message, _ = ls.check_arm_counts(
         FakeHistory(bh, [record(text_pad=2048)]), 1024, "release")
     check("a newest row from some other run stops the sweep", ok, False)
     check("...because the arms would no longer be the runs this script did",
           "Something else appended" in message, True)
+
+
+def test_an_arm_that_lands_in_a_different_group_stops_the_sweep(ls):
+    """The check no per-record predicate can perform.
+
+    Every arm of the 2026-08-19 sweep passed `layout_arm_rejection` on its own
+    merits, and the sweep still yielded nothing, because each landed in a group
+    of one. `arm_group_key` removed that sweep's specific cause, but "each arm
+    is individually valid" still does not imply "the arms are comparable to
+    each other" -- grouping is a relation between two records, and a predicate
+    shown one record at a time cannot evaluate a relation.
+
+    So this asserts the relation directly: two arms whose keys differ must stop
+    the sweep, and the message must say which two and what changed, because the
+    operator's next question is always "changed how?".
+    """
+    import platform
+
+    bh = ls.bench_history()
+    host = platform.node() or "unknown"
+
+    def record(pad, **overrides):
+        base = {"host": host, "profile": "release", "text_pad": pad,
+                "commit": "abc1234", "dirty": False,
+                "src_digest": "full:1111111111111111", "accel": "TCG",
+                "experiment": f"{bh.LAYOUT_SWEEP_TAG}{pad} (identical source)"}
+        base.update(overrides)
+        return base
+
+    ok, message, first = ls.check_arm_counts(
+        FakeHistory(bh, [record(0)]), 0, "release")
+    check("the first arm has no predecessor to disagree with", ok, True)
+    check("...and it reports its group so the next arm can be compared",
+          first, ("full:1111111111111111", "TCG"))
+    check("...naming the group in the receipt, not just computing it",
+          "full:1111111111111111" in message, True)
+
+    ok, message, _ = ls.check_arm_counts(
+        FakeHistory(bh, [record(1024)]), 1024, "release", (0, first))
+    check("an arm matching the previous one's group continues the sweep",
+          ok, True)
+
+    # The dangerous case: individually flawless, collectively useless.
+    moved = record(2048, src_digest="full:2222222222222222")
+    ok, message, _ = ls.check_arm_counts(
+        FakeHistory(bh, [moved]), 2048, "release", (1024, first))
+    check("an arm whose source moved under the sweep stops it", ok, False)
+    check("...even though that arm is individually a valid arm",
+          bh.layout_arm_rejection(moved, host, "release"), None)
+    check("...naming both pads, so the divergence can be located in time",
+          "pad=1024" in message and "pad=2048" in message, True)
+    check("...and showing both keys rather than only asserting they differ",
+          "1111111111111111" in message and "2222222222222222" in message,
+          True)
+
+    # The accelerator is half the key, and the half most likely to change
+    # without anyone touching the tree: QEMU silently falls back to TCG when
+    # WHPX is unavailable, and a TCG arm is ~3.5x slower than a WHPX one. Two
+    # such arms in one band would report a code-placement sensitivity that is
+    # really a hypervisor difference.
+    ok, message, _ = ls.check_arm_counts(
+        FakeHistory(bh, [record(2048, accel="Hyper-V/WHPX")]),
+        2048, "release", (1024, first))
+    check("an arm that ran on a different accelerator stops the sweep",
+          ok, False)
+    check("...and says the accelerator rescales the measurements",
+          "accelerator" in message, True)
+
+
+def test_the_group_guard_shares_its_key_with_the_analyser(ls):
+    """A second statement of the grouping rule would drift from the first.
+
+    Same argument as the predicate coupling below: the sweep must ask
+    `bench-history.py` what group a record is in, not decide for itself, or the
+    sweep and the analyser can come to disagree about which arms are
+    comparable -- and the sweep's answer is the one nobody ever checks.
+    """
+    bh = ls.bench_history()
+    check("the analyser exposes the grouping key",
+          callable(getattr(bh, "arm_group_key", None)), True)
+
+    source = inspect.getsource(ls.check_arm_counts)
+    check("and the sweep calls it rather than restating it",
+          "arm_group_key" in source, True)
+
+
+def test_the_sweep_actually_threads_each_arms_key_to_the_next(ls):
+    """A correct guard that nobody calls is not a guard.
+
+    Written because the first version of this file tested the threading by
+    grepping `run_sweep` for the word "previous" -- which its own comment and
+    its `previous = None` initialiser satisfy. Deleting the line that advances
+    it (`previous = (pad, key)`) left `previous` as `None` for the whole sweep,
+    disarming the guard completely, and the suite stayed green. So this drives
+    `run_sweep` itself and records what each arm was actually told about its
+    predecessor.
+
+    Everything below `run_sweep` is stubbed -- bash, QEMU, the recorder -- but
+    `run_sweep`'s own control flow is the real thing, which is the only part
+    under test here.
+    """
+    import contextlib
+    import io
+    import tempfile
+    import types
+
+    handle = tempfile.NamedTemporaryFile(
+        suffix=".txt", delete=False, mode="w", encoding="utf-8")
+    handle.close()
+    serial = handle.name
+    seen = []
+
+    def fake_check(bh, pad, profile, previous=None):
+        seen.append((pad, previous))
+        return True, f"[stub] pad={pad}", f"key-{pad}"
+
+    def fake_run(argv, cwd=None, env=None, check=False):
+        # Stand in for the build+boot: emit the banner the sweep re-reads to
+        # confirm the kernel it got is the kernel it asked for.
+        pad = env["SLATEOS_TEXT_PAD"]
+        with open(serial, "w", encoding="utf-8") as out:
+            out.write(f"[boot] build profile: sanitizer=off textpad={pad}\n")
+        return types.SimpleNamespace(returncode=0)
+
+    saved = (ls.find_bash, ls.check_arm_counts, ls.subprocess.run)
+    ls.find_bash = lambda script: ("bash", "[stub] preflight")
+    ls.check_arm_counts = fake_check
+    ls.subprocess.run = fake_run
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = ls.run_sweep([0, 1024, 2048], "release", serial)
+    finally:
+        ls.find_bash, ls.check_arm_counts, ls.subprocess.run = saved
+        try:
+            os.unlink(serial)
+        except OSError:
+            pass
+
+    check("the stubbed sweep completes", rc, 0)
+    check("every arm is checked", [pad for pad, _ in seen], [0, 1024, 2048])
+    check("the first arm is told it has no predecessor", seen[0][1], None)
+    check("the second arm is told the first arm's pad and key",
+          seen[1][1], (0, "key-0"))
+    check("...and the third the second's, so the key advances every arm",
+          seen[2][1], (1024, "key-1024"))
 
 
 def test_the_guard_shares_its_predicate_with_the_analyser(ls):
@@ -468,9 +613,9 @@ def main():
     ls = load_module()
     tests = [(name, fn) for name, fn in list(globals().items())
              if name.startswith("test_") and callable(fn)]
-    if len(tests) < 10:
+    if len(tests) < 13:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 10. Discovery is broken, not the code.")
+              f"suite has at least 13. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

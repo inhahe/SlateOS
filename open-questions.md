@@ -1693,14 +1693,83 @@ Three things follow, and the third is the one that changes practice:
   now the rule for evidence quoted here, and it is cheap: the reason the old
   table could be checked at all is that the raw records were still on disk.
 
-## Q54 — [A] The emulator we test in has a second mode that is 3.5× faster and would fix our benchmark-noise problem — but it silently switches off three of the CPU security features the kernel is built around. Switch, split, or stay? — Status: OPEN
+#### Update 2026-08-19 (final) — the blocking measurement exists now, and it does *not* rescue the 10% rule
+
+Point 3 above said the WHPX band could not be trusted because the contamination
+canary refused every sample on both WHPX runs, and called re-running it "the
+single thing standing between this question and an answer". That re-run has now
+happened, cleanly: six arms, one source digest, one accelerator, and every arm
+reporting `canary_verdict: clean` with 13 valid samples, 0 invalid, 0 below the
+resolution floor.
+
+Reproduce with:
+
+```bash
+python scripts/bench-history.py --layout-bands --profile release
+```
+
+| band | median | mean | worst | over 10% | over 25% |
+|---|---|---|---|---|---|
+| **TCG** (today's default) | 26.0% | 40.6% | 182.0% | **61 of 86 (71%)** | 45 of 86 |
+| WHPX, *broken* canary (the caveated figures in point 3) | 5.4% | 12.8% | 94.1% | 35 of 86 | 13 of 86 |
+| **WHPX, clean canary** (this run) | **6.4%** | **11.1%** | **86.0%** | **29 of 86 (34%)** | 10 of 86 |
+
+**The headline answer: WHPX halves the problem and does not solve it.** The
+share of benchmarks that can move more than 10% from a rebuild that changes
+nothing falls from **71% to 34%** — a large improvement, and still a third of
+the suite. The worst case is 86.0% (`vfs_stat_breakdown_ns`). So the hope
+embedded in this question's framing — that Q53 might be answered by answering
+**Q54** instead, i.e. that switching accelerator would make `CLAUDE.md`'s 10%
+rule workable — **is now measured and false.** A 10% threshold is unusable on
+either accelerator. Q53 has to be decided on its own merits.
+
+**Point 3's caveat is discharged, and the caution it carried was right.**
+`design-decisions.md` §239 decided to *report* the broken-canary band with a
+warning rather than void it, on the grounds that a broken canary means "nobody
+knows", not "the band is wrong". That call is now testable, and it holds: the
+clean-canary band lands within a few points of the caveated one at every summary
+statistic (median 5.4 → 6.4, mean 12.8 → 11.1, worst 94.1 → 86.0). Voiding those
+figures would have discarded an accurate result.
+
+**But one thing the aggregate hides, and it matters for how a band may be
+used.** The two WHPX sweeps agree well in *distribution* and much less well
+*per benchmark*: median absolute difference 2.8 points, but the 90th percentile
+is 27.1 points, the maximum is 63.6, and the two sweeps **agree on the "is this
+benchmark over 10%?" verdict for only 60 of 86**. Some of that is real — the
+sweeps are of different source, and placement sensitivity is a property of a
+particular layout of particular code — but the consequence stands either way:
+
+> A layout band is trustworthy as a statement about *the suite* ("about a third
+> of these benchmarks can move >10% for free"). It is much weaker as a licence
+> to dismiss *one specific* benchmark's movement, because that benchmark's own
+> band is not stable across sweeps.
+
+That distinction was not visible before there were two comparable sweeps to put
+side by side, and it argues against any option that silently subtracts a
+per-benchmark band from a per-benchmark result.
+
+**What this does to the options.** Nothing here selects an option for you, but
+it removes one line of reasoning and sharpens another:
+
+- *Removed:* "wait for Q54; switching accelerator may make this moot." Measured
+  and false. 34% is not a workable false-positive rate for a rule that says
+  investigate every one.
+- *Sharpened:* any option built on per-benchmark bands needs to survive the
+  60-of-86 reproducibility above. An option that raises the threshold uniformly,
+  or that grades against the band as a distribution rather than per benchmark,
+  is not exposed to it.
+
+## Q54 — [A] The emulator we test in has a second mode that is 3.5× faster and roughly halves our benchmark-noise problem — but it silently switches off three of the CPU security features the kernel is built around. Switch, split, or stay? — Status: OPEN
 
 **In short:** Every test we run happens inside QEMU, a program that pretends to
 be a PC. It can do that two ways: by interpreting each machine instruction in
 software (what we use today), or by handing them to the real CPU's built-in
-virtualization hardware. The hardware way is 3.5× faster and would very likely
-fix the measurement problem in **Q53**, where 71% of our benchmarks move by more
-than 10% from a rebuild that changes nothing. But on this machine the hardware
+virtualization hardware. The hardware way is 3.5× faster and roughly halves
+the measurement problem in **Q53** — but does not remove it: the share of
+benchmarks that move by more than 10% from a rebuild that changes nothing falls
+from 71% to 34%, measured. (An earlier version of this paragraph said it "would
+very likely fix" that problem. That was a prediction; it has now been run, and
+it was too optimistic. See Q53's final update.) But on this machine the hardware
 way also silently drops three CPU security features that the kernel relies on,
 so 47 places where the kernel emits protective instructions would stop being
 exercised. I have verified there is no setting that gives both. So: keep
@@ -1923,9 +1992,13 @@ preference, and it is exactly the kind of thing that should not be traded for a
 Safe, and stable — nothing degrades over time. TCG remains the default and the
 kernel keeps being tested with its protections on, which is the conservative
 side to be stuck on. The standing cost is that the benchmark suite stays 3.5×
-slower and stays too noisy to grade against `CLAUDE.md`'s 10% rule, so **Q53
-stays stuck too** — its cheapest remaining fix is the one this question is
-about.
+slower and stays noisier than it needs to be. It does **not** block **Q53**
+any more: that question was measured on 2026-08-19 and a 10% rule is unusable on
+*either* accelerator (71% of benchmarks exceed it under TCG, 34% under WHPX), so
+Q53 must be decided on its own and answering this one would not settle it. An
+earlier version of this paragraph said Q53 "stays stuck too" and named this
+question as its cheapest fix; that was a prediction and it did not survive the
+measurement.
 
 
 # Resolved

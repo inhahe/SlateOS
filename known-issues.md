@@ -39907,3 +39907,153 @@ accelerator in `boot-test.sh` ever changes -- which is precisely what Q54 asks
 -- boots on either side of the change become indistinguishable, and clean
 streaks would span both. Record `accel` there too, from the same banner, when
 Q54 is answered either way.
+
+### B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT: ITS RESOLUTION FLOOR IS 100x TIGHTER THAN ITS OWN DERIVATION (lane A, 2026-08-19) -- OPEN, fix identified
+
+**In short:** Every benchmark run takes a small reference measurement a dozen
+times during the suite, to notice if the host machine got busy halfway through
+and quietly ruined the numbers. Under the emulator we use today it works. Under
+the *hardware-accelerated* emulator it fails **every single time** -- all 13
+samples rejected -- so a run has no contamination check at all and does not
+loudly say so. The cause is not the accelerator: it is a threshold that says
+"refuse to believe a measurement finer than 4 cycles", written when the
+measurement was rounded to whole cycles. It has been kept in hundredths of a
+cycle since 2026-08-14, so the threshold is now 100x tighter than the reasoning
+that produced it.
+
+**Where:** `kernel/src/bench.rs` -- `CANARY_MIN_RESOLVABLE` (~line 1524), applied
+in `measure_access_at()` (~line 1986); mirrored in `scripts/bench-history.py`
+`CANARY_MIN_RESOLVABLE` (~line 305), used at ~line 956.
+
+#### Observed
+
+Two WHPX runs, `2026-08-19T16:15:09` and `2026-08-19T17:05:40` (the first arm of
+the WHPX layout sweep), both record:
+
+```json
+"canary": {"invalid": 13, "samples": 0, "min": 0, "max": 0, "pct": 0, "spread": 0},
+"canary_verdict": "broken"
+```
+
+against every TCG run on the same host reading a clean `min=5, max=5,
+min_centi=504`. Serial from the WHPX arm, preserved at
+`build/evidence-whpx-sweep-arm0.log`:
+
+```
+[bench]   canary scale check: UNMEASURABLE at N=1024 (None) or N=2048 (None) -- the arms did not separate
+[bench]   memory_access_hot: UNMEASURED -- nop=940 store=1812 over 1024 stores/window, 500 interleaved rounds
+```
+
+#### The arithmetic, which is the whole bug
+
+`measure_access_at()` accepts the delta only if it clears
+`n * CANARY_MIN_RESOLVABLE`, i.e. **4 cycles per access**:
+
+| | nop | store | delta | required (`1024 x 4`) | verdict |
+|---|---|---|---|---|---|
+| TCG | 14156 | 19442 | **5286** | 4096 | accepted -- 5.16 cyc/store |
+| WHPX | 940 | 1812 | **872** | 4096 | **rejected**, every sample |
+
+A store to one hot static byte costs 0.85 cycles on the real CPU -- a
+store-buffer hit, which is the correct answer and not a measurement failure.
+Under TCG the same store costs 5.16 because every guest store goes through
+softmmu. **The threshold encodes TCG's cost as a law of nature**, and the
+constant's own doc comment says so out loud: *"the store really does cost ~5
+cycles, and a threshold cannot legislate the hardware faster."* On hardware it
+does not cost 5 cycles.
+
+Note also how little margin TCG had: 5286 against 4096 is **29%**. This was one
+modest TCG speedup away from failing on the platform it was designed for.
+
+#### Why the threshold is wrong on its own terms, not merely inconvenient
+
+`CANARY_MIN_RESOLVABLE` is documented as *derived, not invented*:
+
+> The per-access cost is an integer quotient, so at a per-access value of `m`
+> cycles one cycle of quantisation is `100 / m` percent. Once that exceeds
+> `CANARY_TOLERANCE_PCT`, any "spread" the canary reports is rounding rather
+> than host load.
+
+That derivation was correct when `measured` was `delta / n` in whole cycles. It
+has not been since `CENTI` was introduced: `measured` is now
+`delta * CENTI / n` in **hundredths**, and `CENTI`'s own doc comment states the
+consequence -- *"putting the quantisation step at 0.01 cycle (~0.2%)."*
+
+Redo the derivation at the current precision. One quantisation step is 1
+centicycle; requiring it to stay under the 25% tolerance gives
+
+```
+measured_centi >= 100 / CANARY_TOLERANCE_PCT = 4 centicycles = 0.04 cycles
+```
+
+The code demands 4 **cycles**. The bound is exactly `CENTI` -- 100x -- too
+strict, and the excess is precisely the unit change that was supposed to have
+removed the problem. Under the corrected bound WHPX's `delta = 872` clears
+`1024 x 0.04 = 41` comfortably and yields 85 centicycles = 0.85 cyc/store,
+which is the physically right answer.
+
+This is the class of defect this file keeps recording: a constant survived the
+change that invalidated its justification, stayed harmless on the one platform
+it was measured on, and failed silently on the first platform that differed.
+
+#### The fix
+
+Express the floor in the unit the quantity is now carried in. In
+`measure_access_at()` compare the *centicycle* per-access value against
+`CANARY_MIN_RESOLVABLE`, rather than comparing raw `delta` against
+`n * CANARY_MIN_RESOLVABLE`:
+
+```rust
+let measured = store
+    .checked_sub(nop)
+    .map(|delta| delta.saturating_mul(CENTI) / n)
+    .filter(|centi| *centi >= CANARY_MIN_RESOLVABLE);
+```
+
+`scripts/bench-history.py` must move in the same commit or the two disagree
+about which records are usable -- and its bound is *load-bearing for historical
+records*, which were written in whole cycles before `CENTI` existed (see its
+comment at lines 299-304: "retained solely to keep judging the historical
+records"). So the Python side needs **two** bounds, keyed on whether the record
+carries `min_centi`, not one bound applied to both eras. Tests for: a
+TCG-scale record, a WHPX-scale record, a pre-`CENTI` historical record, and
+the boundary at exactly 4 centicycles.
+
+**What the fix does not do.** It restores the *measurement*; it does not by
+itself make the contamination *verdict* trustworthy under WHPX. The 25% spread
+tolerance would then be applied to a 0.85-cycle quantity whose real variation
+across a suite has never been observed on this accelerator. Expect to have to
+re-derive the tolerance from records once the floor stops rejecting them --
+and do it from data, which is the standing lesson of `CANARY_TOLERANCE_PCT`'s
+own comment.
+
+#### Second, separate defect in the same measurement family
+
+The scattered-access scale check also fails under WHPX, and **its fix is not a
+constant**:
+
+```
+[bench]   scatter scale check: FAILED -- 18.5 cycles/scattered store at N=64 but 26.2 at N=128
+          (41% apart, tolerance 25%). A physical per-access cost cannot depend on how many
+          pages the loop walks, so this run's budget calibration is not a physical quantity.
+```
+
+The quoted premise is **false on real hardware**. Walking 256 KiB and walking
+512 KiB are different cache working sets, so a per-access cost genuinely does
+depend on how many pages the loop walks. The premise holds only under TCG,
+where each access is a softmmu call of constant cost and the cache hierarchy is
+invisible. So this check does not have a threshold bug -- it asserts a property
+that only an emulator has. Redesigning it means deciding what invariant *is*
+true across accelerators before touching the code; logged here, not guessed at.
+
+#### Consequences beyond this file
+
+This materially affects **Q54** (should we switch accelerator) and **Q53**
+(is the 10% regression threshold meaningful). Both treat "run the benchmarks
+somewhere faster than TCG" as the fix for the layout-noise problem. That move
+also silently disables contamination detection -- and the loss is worse than it
+sounds, because contamination matters *more* the faster the guest runs: under
+TCG the emulator's own overhead dominates, so a fixed host interruption is a
+small fraction of a long run; under WHPX the same interruption lands on a run
+3.5x shorter and is 3.5x the fraction. WHPX both needs the canary more and,
+today, provides it less. Q54 is amended accordingly.

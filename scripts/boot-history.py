@@ -165,6 +165,46 @@ _PANIC_RE = re.compile(r"PANIC|FATAL")
 _BENIGN_EXCEPTION_RE = re.compile(
     r"in userspace|deliberate|intentional|expected|self-test", re.IGNORECASE)
 
+#: Vectors whose handler prints and *returns*, so the line can never be evidence
+#: that the kernel died.
+#:
+#: This is a second, independent guard, and the first one having failed is why
+#: it exists. `_BENIGN_EXCEPTION_RE` relies on the kernel annotating deliberate
+#: faults, and on 2026-08-19 three that it did not annotate --
+#:
+#:     [idt] Running direction-flag self-test...
+#:     EXCEPTION: Breakpoint (#BP) at 0xffffffff813b56b6
+#:     [idt]   DF is clear on exception entry: OK
+#:
+#: -- turned a boot that merely ran out of clock into a `PANIC` verdict. Note
+#: what made that bug survive: `classify()` consults the exception list only on
+#: a run with no marker, so the mislabelling is invisible on every green boot
+#: and fires exactly on the failed one whose verdict someone needs.
+#:
+#: Annotating those lines (kernel/src/idt.rs, `ExpectedBreakpoint`) fixes the
+#: instance. This fixes the class: `#BP`'s handler is documented "Logged but
+#: non-fatal" and structurally returns, so *whatever* raised it, the kernel was
+#: still running afterwards. A stray breakpoint is still worth knowing about --
+#: it stays in `benign_exceptions` and is still printed -- it just cannot on its
+#: own mean "kernel died".
+_NONFATAL_VECTOR_RE = re.compile(r"\(#BP\)")
+
+
+def _can_be_fatal(exc: str) -> bool:
+    """Could this `EXCEPTION:` line be evidence that the kernel died?
+
+    Two independent reasons it could not: the kernel said the fault was on
+    purpose, or the vector's handler returns and so the kernel outlived it
+    either way. Only lines that clear both become `Serial.exceptions`; the rest
+    are still recorded (as `benign_exceptions`) and still printed, because "the
+    kernel survived it" is not the same claim as "nobody needs to see it".
+    """
+    if _BENIGN_EXCEPTION_RE.search(exc):
+        return False
+    if _NONFATAL_VECTOR_RE.search(exc):
+        return False
+    return True
+
 
 def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
     """Parse the serial log, or None if it does not exist / is empty.
@@ -195,8 +235,8 @@ def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
 
     marker_re = re.compile("^" + re.escape(marker), re.MULTILINE)
     all_exc = tuple(_EXCEPTION_RE.findall(text))
-    benign = tuple(e for e in all_exc if _BENIGN_EXCEPTION_RE.search(e))
-    fatal = tuple(e for e in all_exc if e not in benign)
+    benign = tuple(e for e in all_exc if not _can_be_fatal(e))
+    fatal = tuple(e for e in all_exc if _can_be_fatal(e))
     return Serial(
         path=path,
         text=text,

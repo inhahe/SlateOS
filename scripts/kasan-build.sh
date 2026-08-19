@@ -175,7 +175,42 @@ if [ ${#PROFILE_ARGS[@]} -gt 0 ]; then
 fi
 python "$SCRIPT_DIR/kasan-check-preshadow.py" "$KERNEL_BIN"
 
+# Timeout for an instrumented boot, used unless the caller passed --timeout=.
+#
+# boot-test.sh's 900s default is calibrated on an uninstrumented kernel, and an
+# instrumented one is not a little slower -- every load and store in the kernel
+# grows a shadow-byte lookup first.
+#
+# Measured 2026-08-19, same host, same QEMU, back to back:
+#
+#   uninstrumented   BOOT_OK at 285s
+#   instrumented     killed at the 900s default having reached serial line
+#                    26410 of the 27497 an uninstrumented boot prints before
+#                    BOOT_OK -- 96% of the way through, needing ~938s
+#
+# So the documented command in this script's own header ("--boot") was certain
+# to fail, and it failed in the most expensive way available: the harness had a
+# monitor attached, sampled the RIP of a perfectly healthy guest, found it (of
+# course) inside the KASAN shadow checker, and reported
+# "Wedged RIP = kernel::mm::kasan::byte_bad". A boot that missed the finish line
+# by under a minute was read as a kernel hang in the sanitizer.
+#
+# 3600 is ~3.8x the measured 938s. The margin is deliberately generous: the
+# cost of being wrong upward is waiting, and the cost of being wrong downward
+# is the paragraph above.  This is the same reasoning, and the same shape of
+# bug, as BENCH_TIMEOUT in boot-test.sh.
+KASAN_BOOT_TIMEOUT=3600
+
 if [ "$BOOT" -eq 1 ]; then
+    # An explicit --timeout= from the caller always wins.
+    boot_timeout_given=0
+    for arg in ${BOOT_ARGS[@]+"${BOOT_ARGS[@]}"}; do
+        case "$arg" in --timeout=*) boot_timeout_given=1 ;; esac
+    done
+    if [ "$boot_timeout_given" -eq 0 ]; then
+        BOOT_ARGS+=("--timeout=$KASAN_BOOT_TIMEOUT")
+        echo "=== Instrumented boot: raising timeout to ${KASAN_BOOT_TIMEOUT}s (measured need ~938s vs 285s uninstrumented) ==="
+    fi
     echo "=== Booting the instrumented kernel ==="
     exec "$SCRIPT_DIR/boot-test.sh" --no-build ${BOOT_ARGS[@]+"${BOOT_ARGS[@]}"}
 fi

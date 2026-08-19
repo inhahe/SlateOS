@@ -129,6 +129,30 @@ S_PTHREAD = _PROLOGUE + (
     "PANIC: unhandled page fault in kernel mode\n"
 )
 
+#: The IDT self-test breakpoints, verbatim from the KASAN boot of 2026-08-19
+#: that this pair of samples exists to keep from being misread again.
+#:
+#: They are UNannotated on purpose: this is the text the kernel emitted before
+#: `ExpectedBreakpoint` was added, and it is what proves the host-side guard
+#: stands on its own rather than merely agreeing with the kernel-side one.
+S_SELFTEST_BP_UNANNOTATED = (
+    "[idt] Running direction-flag self-test...\n"
+    "EXCEPTION: Breakpoint (#BP) at 0xffffffff813b56b6\n"
+    "[idt]   DF is clear on exception entry: OK\n"
+    "EXCEPTION: Breakpoint (#BP) at 0xffffffff813b56e7\n"
+    "[idt]   iretq restores the caller's DF: OK\n"
+    "[idt] Direction-flag self-test PASSED\n"
+)
+
+#: The same three lines as the kernel emits them now.
+S_SELFTEST_BP_ANNOTATED = S_SELFTEST_BP_UNANNOTATED.replace(
+    "(#BP) at 0xffffffff813b56b6\n",
+    "(#BP) at 0xffffffff813b56b6 (deliberate self-test)\n",
+).replace(
+    "(#BP) at 0xffffffff813b56e7\n",
+    "(#BP) at 0xffffffff813b56e7 (deliberate self-test)\n",
+)
+
 #: B-FORKEXEC-BOOT-HANG, 2026-06-12: a quiet stop *between* lines, right
 #: after the last thread of a process is reaped. No exception, no panic.
 S_FORKEXEC = _PROLOGUE + (
@@ -314,6 +338,64 @@ def test_non_deliberate_exception_still_reads_as_a_fault(bh):
     s = _serial(bh, S_PTHREAD)
     check("a kernel-mode page fault is still a fault", len(s.exceptions), 1)
     check("and is not filed as benign", s.benign_exceptions, ())
+
+
+def test_selftest_breakpoints_do_not_read_as_a_kernel_death(bh):
+    """Regression, 2026-08-19: a slow boot reported as PANIC.
+
+    A KASAN-instrumented boot ran past its 900s budget while still printing --
+    27 841 lines, no PANIC and no FATAL text anywhere -- and was recorded as
+    "PANIC: kernel died". The evidence the classifier acted on was three
+    `EXCEPTION: Breakpoint (#BP)` lines from the IDT self-tests, which every
+    boot prints and which the benign filter did not know about.
+
+    What made it survive so long is worth stating, because it is the shape of
+    the next bug of this kind: `classify()` looks at exceptions only when the
+    marker was never reached, so on every green boot the mislabelling is
+    unreachable, and it fires exactly on the failed boot whose verdict someone
+    is relying on.
+    """
+    s_text = _PROLOGUE + S_SELFTEST_BP_UNANNOTATED + "[shell] prompt ready\n"
+    s = _serial(bh, s_text)
+    check("an unannotated self-test #BP is not evidence of a death",
+          s.exceptions, ())
+    check("but it is still retained and reportable",
+          len(s.benign_exceptions), 2)
+    check("so a boot that merely ran out of clock reads as TIMEOUT",
+          bh.classify(s, 1), "TIMEOUT")
+
+
+def test_annotated_breakpoints_are_benign_by_the_kernels_own_word(bh):
+    """The kernel-side half: `ExpectedBreakpoint` marks its own `int3`s.
+
+    Checked separately from the host-side vector rule so that neither can
+    quietly become the only thing holding the verdict up. If the `(#BP)` rule
+    were deleted tomorrow this test would still pass, and vice versa.
+    """
+    s_text = _PROLOGUE + S_SELFTEST_BP_ANNOTATED + "[shell] prompt ready\n"
+    s = _serial(bh, s_text)
+    check("the annotation alone makes them benign", s.exceptions, ())
+    check("both are retained", len(s.benign_exceptions), 2)
+    check("and the kernel says so in the log itself",
+          all("deliberate self-test" in e for e in s.benign_exceptions), True)
+
+
+def test_a_breakpoint_is_never_fatal_but_a_page_fault_still_is(bh):
+    """The vector rule must be about the vector, not about breakpoints in general.
+
+    The danger in exempting a vector is exempting too much: a rule keyed on
+    "an EXCEPTION line near a self-test" would swallow a real #PF that happened
+    to land in the same neighbourhood.
+    """
+    s_text = _PROLOGUE + S_SELFTEST_BP_UNANNOTATED + (
+        "EXCEPTION: Page Fault (#PF) at 0xffffffff82713dc2, address=0x97, error=0x0\n"
+        "  Cause: not-present, read, kernel\n"
+    )
+    s = _serial(bh, s_text)
+    check("the #PF alongside them is still a fault", len(s.exceptions), 1)
+    check("and it is the #PF, not a #BP",
+          "#PF" in s.exceptions[0] if s.exceptions else False, True)
+    check("so the run still classifies as PANIC", bh.classify(s, 1), "PANIC")
 
 
 def test_fp_w1(bh):

@@ -1048,14 +1048,20 @@ if [ "$HARD_LOCKUP_WATCHDOG" -eq 1 ]; then
     echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT, $MONITOR_PORT_SRC) ==="
 fi
 
-# Capture the frozen guest CPU state over the HMP monitor socket, then resolve
-# RIP to a kernel symbol.  Called on timeout (guest still running) so the RIP is
-# the wedged instruction pointer.  Best-effort: prints a warning and returns
-# non-zero if the monitor is unreachable or the shell lacks /dev/tcp support.
+# Capture the guest CPU state over the HMP monitor socket, then resolve RIP to a
+# kernel symbol.  Best-effort: prints a warning and returns non-zero if the
+# monitor is unreachable or the shell lacks /dev/tcp support.
 #
-# Args: $1 = monitor TCP port, $2 = output file for the raw register dump.
+# $3 is the label to print the RIP under, and it is a required argument rather
+# than a default because the meaning of the sample depends entirely on which
+# caller took it.  From the stall detector the guest has demonstrably stopped
+# and "Wedged RIP" is a finding; from the plain timeout path the guest may well
+# have been running, and the same words would be an unfounded diagnosis.
+#
+# Args: $1 = monitor TCP port, $2 = output file for the raw register dump,
+#       $3 = label to print the RIP under (see above; required).
 capture_guest_state() {
-    local port="$1" out="$2"
+    local port="$1" out="$2" rip_label="$3"
     # HMP over a bash /dev/tcp socket.  Fire the read-only queries and let the
     # `timeout` bound the read — we deliberately do NOT send `quit`: quitting
     # provokes a QEMU shutdown that can hang mid-teardown (holding the monitor
@@ -1078,7 +1084,7 @@ capture_guest_state() {
     local rip
     rip="$(grep -oiE 'RIP=[0-9a-f]+' "$out" | head -n1 | cut -d= -f2 || true)"
     if [ -n "$rip" ]; then
-        echo "  Wedged RIP = 0x$rip"
+        echo "  $rip_label = 0x$rip"
         resolve_kernel_symbol "$rip"
     else
         echo "  (no RIP= line in monitor output; see $out)"
@@ -2301,9 +2307,16 @@ trap 'on_boot_exit "$?" exit' EXIT
 
 # Wait for BOOT_OK or timeout
 ELAPSED=0
-# Serial-stall tracking (only acted on when STALL_SECS > 0).  We remember the
-# serial log's last observed size and the elapsed time at which it last grew;
-# if (ELAPSED - last-growth) reaches STALL_SECS the kernel has gone silent.
+# Serial-stall tracking.  We remember the serial log's last observed size and
+# the elapsed time at which it last grew; if (ELAPSED - last-growth) reaches
+# STALL_SECS the kernel has gone silent.
+#
+# The *tracking* is unconditional even though the stall verdict is opt-in
+# (STALL_SECS > 0), because "was the guest still producing output when the
+# clock ran out?" is what decides whether a timeout means a hung kernel or
+# merely a budget too small for it.  Answering that only when the opt-in
+# detector happens to be armed is how a slow boot gets reported as a wedge --
+# see the timeout path below.
 STALL_LAST_SIZE=-1
 STALL_LAST_GROWTH=0
 while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
@@ -2351,16 +2364,16 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     # If the log has not grown for STALL_SECS seconds and the marker still isn't
     # present, treat it as a genuine hang (distinct from a slow host that would
     # eventually reach the marker) — capture the frozen RIP and exit 2.
-    if [ "$STALL_SECS" -gt 0 ] && [ -f "$SERIAL_FILE" ]; then
+    if [ -f "$SERIAL_FILE" ]; then
         cur_size=$(wc -c < "$SERIAL_FILE" 2>/dev/null || echo 0)
         if [ "$cur_size" -ne "$STALL_LAST_SIZE" ]; then
             STALL_LAST_SIZE=$cur_size
             STALL_LAST_GROWTH=$ELAPSED
-        elif [ $((ELAPSED - STALL_LAST_GROWTH)) -ge "$STALL_SECS" ]; then
+        elif [ "$STALL_SECS" -gt 0 ] && [ $((ELAPSED - STALL_LAST_GROWTH)) -ge "$STALL_SECS" ]; then
             echo "=== WEDGE: serial output stalled for ${STALL_SECS}s at ${ELAPSED}s (kernel not progressing; $WAIT_MARKER never reached) ==="
             if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then
                 RIPDUMP="${SERIAL_FILE%.txt}-regs.txt"
-                capture_guest_state "$MONITOR_PORT" "$RIPDUMP" || true
+                capture_guest_state "$MONITOR_PORT" "$RIPDUMP" "Wedged RIP" || true
             fi
             kill_qemu "$QEMU_PID"
             echo "=== Boot test FAILED (WEDGE: serial stalled) ==="
@@ -2369,15 +2382,32 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     fi
 done
 
-# Timed out (or QEMU died): the guest may be wedged.  If the diagnostic monitor
-# is attached and QEMU is still alive, capture the frozen RIP from the emulator
-# BEFORE we kill it.  This is the primary observability tool for the silent
-# BSP-dead hang, which never takes the injected NMI in-guest.
+# Timed out (or QEMU died).  If the diagnostic monitor is attached and QEMU is
+# still alive, capture the RIP from the emulator BEFORE we kill it.  This is the
+# primary observability tool for the silent BSP-dead hang, which never takes the
+# injected NMI in-guest.
+#
+# Say which kind of timeout this was.  The loop above has been watching the
+# serial log grow, so we know the answer rather than having to hedge: a log that
+# was still growing when the clock ran out is a kernel that was working, and
+# calling its RIP "wedged" sends the reader hunting a hang that never happened.
+# That is not hypothetical -- an instrumented (KASAN) boot on 2026-08-19 was
+# reported as "Wedged RIP = kasan::byte_bad" while it was in fact 27 000 lines
+# deep and still printing; the RIP was simply wherever the sample happened to
+# land, and under KASAN that is the shadow checker on nearly every sample.
 if [ "${#MONITOR_ARGS[@]}" -gt 0 ] && kill -0 "$QEMU_PID" 2>/dev/null; then
     if ! grep -q "^$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
-        echo "=== Timeout with guest still running: capturing wedged RIP via HMP monitor ==="
+        SINCE_GROWTH=$((ELAPSED - STALL_LAST_GROWTH))
+        if [ "$STALL_LAST_SIZE" -gt 0 ] && [ "$SINCE_GROWTH" -lt 10 ]; then
+            echo "=== Timeout at ${TIMEOUT}s with the guest STILL PRODUCING OUTPUT (serial grew ${SINCE_GROWTH}s ago) ==="
+            echo "=== This is a budget that was too small, not a hang. Re-run with a larger --timeout. ==="
+            RIP_LABEL="RIP when the clock ran out (guest was live; not a hang)"
+        else
+            echo "=== Timeout at ${TIMEOUT}s; serial last grew ${SINCE_GROWTH}s ago ($WAIT_MARKER never reached) ==="
+            RIP_LABEL="RIP at timeout"
+        fi
         RIPDUMP="${SERIAL_FILE%.txt}-regs.txt"
-        capture_guest_state "$MONITOR_PORT" "$RIPDUMP" || true
+        capture_guest_state "$MONITOR_PORT" "$RIPDUMP" "$RIP_LABEL" || true
     fi
 fi
 

@@ -1406,6 +1406,96 @@ recorded benchmark number is affected (`design-decisions.md` S229 means nothing
 is auto-corrected on this tool's say-so). The cost is only that future runs of
 this experiment need the note read alongside the verdict.
 
+## Q53 — [A] `CLAUDE.md` says to investigate any benchmark that slows by more than 10%. We have now measured that 71% of our benchmarks can slow by more than that from nothing at all. Change the rule? — Status: OPEN
+
+**In short:** `CLAUDE.md` tells every lane that if a change makes a benchmark
+more than 10% slower, stop and investigate before merging. I have now measured
+what our benchmarks do when *nothing is changed at all* — same source code,
+rebuilt so the machine code sits at slightly different addresses in memory. 61
+of our 86 benchmarks move by more than 10% on that alone. So for most of the
+suite the "10%" rule is asking people to investigate an effect smaller than the
+one the measurement makes up by itself. The number in `CLAUDE.md` is the
+operator's to change, not mine, which is why this is here.
+
+**Glossary, in case this is read cold:** *relink* — rebuilding the program so
+its pieces land at different memory addresses; happens on essentially every
+commit, and changes no behaviour. *QEMU* — the emulator our benchmarks run
+inside; it happens to run a tight loop noticeably slower when the loop
+straddles a particular memory boundary, so an address change alone can change a
+timing. *Band* — the measured range a benchmark moves across several such
+rebuilds; our stand-in for "how much of this number is meaningless".
+
+#### The evidence
+
+Six builds of the identical commit `b36a244bb`, differing only in a deliberate
+padding that shifts everything in memory, benchmarked back-to-back on an idle
+machine (4128 s). Full table in `known-issues.md`.
+
+| benchmarks that move by ≥ | count of 86 | share |
+|---|---|---|
+| 5% | 74 | 86% |
+| **10%** — the `CLAUDE.md` threshold | **61** | **71%** |
+| 20% | 51 | 59% |
+| 50% | 26 | 30% |
+| 100% | 10 | 12% |
+
+Median 26.0%. Worst 182.0%. And the benchmarks `CLAUDE.md` itself singles out
+as performance-critical are among the *worst*, not the best: `pick_next` 132%,
+`page_alloc_free` 92%, `page_fault` 85%, `ipc_channel` 83%, `syscall_dispatch`
+42%. That is not bad luck — they are tight hot loops, which is precisely what
+the emulator's penalty acts on.
+
+Two things this is **not**: it is not ordinary run-to-run noise (the
+measurement medians repeats within each build and then corrects each build
+against the others for machine drift before comparing), and it is not a
+complaint that the tooling ignores this. The harness already withdraws a
+movement that falls inside a measured band. The problem is only the sentence in
+`CLAUDE.md`, which a reader will apply to numbers no band has been measured
+for — and today that is every benchmark except these 86, on this one host, in
+this one build profile.
+
+#### Options
+
+| | *What changes:* |
+|---|---|
+| **A. Leave the 10% as written** | Nothing. The document keeps stating a threshold that, for 71% of benchmarks, is below what a no-op rebuild produces. Anyone who trusts it investigates phantoms, or — worse — reads a real 15% regression as "probably layout" without checking. |
+| **B. Restate it as "larger than that benchmark's measured band, or 10% if no band has been measured"** | The rule matches what the harness already does. A benchmark with a 132% band needs a >132% movement to be worth investigating; an unswept one keeps today's 10%. Honest, but it makes the guarantee for hot paths very weak — and says so out loud. |
+| **C. Raise the flat number** (e.g. to 30%, just above the median band) | One number, still simple. Wrong in both directions at once: too loose for the 25 quiet benchmarks, still far too tight for the 26 that move ≥50%. |
+| **D. Stop grading these benchmarks on QEMU** — treat emulator timings as smoke tests only, and get real regression numbers from hardware | The 10% rule becomes meaningful again, because the effect it is fighting is largely a TCG artefact. Costs a way to run the kernel on real hardware, which we do not currently have as routine infrastructure. |
+| **E. B now, D as the real fix** | Document says something true today; the hardware path is booked as the thing that makes the threshold trustworthy rather than merely honest. |
+
+**My recommendation: E.** B alone is the only option that makes the document
+true, and it costs one sentence. But B is an admission, not a solution — it
+concedes that we cannot detect a 100% regression in `pick_next`, which is not
+an acceptable end state for a scheduler hot path. D is the only option that
+actually restores the guarantee. I have not started D because "run the
+benchmark suite on real hardware" is a piece of infrastructure with its own
+prerequisites, and because whether it is worth building depends on how much you
+want these numbers to mean.
+
+Related but separate: **Q46** asks whether the non-bench boot test should also
+build release. This sweep is release-profile only; the `debug` profile has no
+band measured at all, and the majority of historical benchmark records are
+`opt-level = 0`.
+
+#### Why I did not just decide this
+
+The threshold lives in `CLAUDE.md`, which lane A may edit only on an explicit
+instruction from the operator. Beyond the rule, this one deserves asking on its
+merits: it is a gate that would be *loosened* on the strength of my own
+measurement, and loosening a gate using evidence you produced yourself is worth
+a second pair of eyes regardless of how good the evidence looks.
+
+#### If this is never answered
+
+Safe today, and it degrades slowly rather than suddenly. Nothing is blocked;
+the harness's own behaviour is already correct and is not affected by the
+wording. The cost is that the written rule and the measured reality disagree,
+so every future reader has to rediscover this on their own — and the failure
+mode is the quiet one, where a genuine regression in a hot path is waved
+through as "within the band" by someone who never checked whether a band was
+ever measured for it.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

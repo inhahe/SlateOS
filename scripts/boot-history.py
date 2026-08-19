@@ -71,6 +71,7 @@ regardless -- a broken recorder must not turn a green boot red.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import platform
@@ -85,6 +86,27 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
 DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "boot-history.jsonl")
+BENCH_HISTORY = os.path.join(SCRIPT_DIR, "bench-history.py")
+
+_BENCH_HISTORY_MODULE = None
+
+
+def bench_history():
+    """Import `bench-history.py` by path; its name is not an identifier.
+
+    Cached because the module compiles several dozen regexes at import and the
+    tests parse many logs, while a real run parses one.
+    """
+    global _BENCH_HISTORY_MODULE
+    if _BENCH_HISTORY_MODULE is None:
+        spec = importlib.util.spec_from_file_location("bench_history",
+                                                      BENCH_HISTORY)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot load {BENCH_HISTORY}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _BENCH_HISTORY_MODULE = module
+    return _BENCH_HISTORY_MODULE
 
 #: How much of a failing boot's serial log to keep, and how wide.
 #:
@@ -134,6 +156,26 @@ class Serial:
     #: the two populations look like one. `None` means "this log cannot say",
     #: which is a thing a consumer can decline to average.
     sanitizer: str | None = None
+    #: Which accelerator the kernel ran under, as the kernel itself reported it:
+    #: `"QEMU TCG"`, `"Hyper-V/WHPX"`, `"bare metal"`, or `None` when the log
+    #: carries no `[hypervisor]` banner at all.
+    #:
+    #: Here for exactly the reason `sanitizer` is, one variable over. A boot's
+    #: wall time is a property of the *pair* (build, accelerator), and this file
+    #: already knows it: `wall_populations`' docstring records two WHPX boots at
+    #: 168 s and 186 s against a TCG median of ~120 s for the same profile. It
+    #: keeps them out today by skipping `experiment` rows -- which works only
+    #: because every WHPX boot so far happened to be a tagged probe. That is a
+    #: property of how those runs were invoked, not one this file guarantees,
+    #: and Q53 is a live proposal to make WHPX the ordinary way to boot. The
+    #: first untagged WHPX boot would move the median by ~40% with nothing to
+    #: say why.
+    #:
+    #: Three-valued for the same reason and with the same force: `None` means
+    #: "this log cannot say", never "TCG". `bench-history.py`'s `ACCEL_RE` notes
+    #: that the conflation is provably wrong -- the first WHPX run on this host
+    #: predates the banner -- and the same records are described here.
+    accel: str | None = None
 
     @property
     def last_line(self) -> str:
@@ -273,7 +315,42 @@ def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
         benign_exceptions=benign,
         has_panic=bool(_PANIC_RE.search(text)),
         sanitizer=san_match.group(1) if san_match else None,
+        accel=_parse_accel(path),
     )
+
+
+def _parse_accel(path: str) -> str | None:
+    """Which accelerator this boot ran under, delegated not reimplemented.
+
+    `bench-history.py` owns the two `[hypervisor]` banner patterns and the
+    reasoning about why there have to be two of them (the kernel prints a
+    different sentence on bare metal, and a single pattern would render that
+    platform as "cannot say"). A second copy here would be a restatement of a
+    selector, which is the drift `design-decisions.md` sec 240 exists to forbid
+    -- and it would drift *silently*, because a pattern that stopped matching
+    returns the same `None` a pre-banner log does.
+
+    Failure to load that module is caught rather than raised, and this is the
+    one place in this file where swallowing an error is right. `boot-test.sh`
+    calls this script from its EXIT trap with `|| true`, so an exception here
+    does not surface -- it silently loses the record of the boot, which for a
+    *failing* boot is the most expensive outcome this script has. Losing the
+    accelerator label is cheap; losing the boot is not.
+
+    The answer on failure is `None` -- "this row cannot say" -- which is the
+    truth, and is a value every consumer here already declines to average.
+    It does not distinguish "the kernel did not print a banner" from "the
+    recorder could not read one", and deliberately no sentinel is invented for
+    that: the warning above names the difference where a human will see it, and
+    a `bench-history.py` too broken to import fails loudly within seconds
+    anyway, since `boot-test.sh` runs it directly on the same run.
+    """
+    try:
+        return bench_history().parse_accel(path)
+    except Exception as exc:                       # noqa: BLE001 - see above
+        print(f"boot-history: cannot read the accelerator banner: {exc}",
+              file=sys.stderr)
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -700,6 +777,14 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
         # consumer would have to guess -- which, on this file's history, means
         # guess "uninstrumented" and quietly mislabel the slow boots.
         rec["sanitizer"] = serial.sanitizer
+        # Written unconditionally, `null` included, for the same reason and by
+        # the same rule as `sanitizer` directly above: absent means "this row
+        # predates the field", `null` means "the log did not say", and a string
+        # means it did. Fold the first two together and a consumer has to guess,
+        # and on this file's history the guess would be "TCG" -- which
+        # bench-history.py's ACCEL_RE shows is provably wrong, since the first
+        # WHPX run on this host predates the banner.
+        rec["accel"] = serial.accel
         fps = fingerprints_for(serial, verdict)
         if fps:
             rec["fingerprints"] = fps
@@ -827,6 +912,40 @@ def sanitizer_of(rec: dict) -> str:
     return _SAN_UNKNOWN if val is None else str(val)
 
 
+#: Label for a record that cannot say which accelerator ran it. Prose, like
+#: `_SAN_UNKNOWN`, and for the same reason: it is printed beside real
+#: accelerator names and must not read like one of them.
+_ACCEL_UNKNOWN = "unknown accel (pre-banner)"
+
+
+def accel_of(rec: dict) -> str:
+    """Which accelerator population a record belongs to.
+
+    The exact twin of `sanitizer_of`, collapsing key-absent and key-null for
+    grouping while leaving them distinct in the file. Never folds either into a
+    named accelerator: see `bench-history.py`'s `ACCEL_RE`, and the record from
+    2026-08-19T16:15:09 that proves it.
+    """
+    if "accel" not in rec:
+        return _ACCEL_UNKNOWN
+    val = rec["accel"]
+    return _ACCEL_UNKNOWN if val is None else str(val)
+
+
+def population_of(rec: dict) -> str:
+    """The full label of the population a boot's duration belongs to.
+
+    A wall time is a property of the *pair* (build, accelerator) -- KASAN costs
+    ~3.4x and the accelerator ~1.4x on this host -- and neither factor makes the
+    other irrelevant, so the population is the pair and not either half. Kept as
+    one function rather than composed at each call site so that the printed
+    label and the grouping key cannot drift: a legend that names a different
+    partition from the one the numbers were computed over is worse than no
+    legend, because it is believed.
+    """
+    return f"{sanitizer_of(rec)} on {accel_of(rec)}"
+
+
 def _median(values: list[float]) -> float:
     ordered = sorted(values)
     mid = len(ordered) // 2
@@ -836,7 +955,7 @@ def _median(values: list[float]) -> float:
 
 
 def wall_populations(records: list[dict]) -> dict[str, list[float]]:
-    """Wall times grouped by build, never merged.
+    """Wall times grouped by build *and accelerator*, never merged.
 
     Experiment boots are excluded outright rather than given a population of
     their own, because "experiment" is not a build -- the probes have nothing in
@@ -844,6 +963,15 @@ def wall_populations(records: list[dict]) -> dict[str, list[float]]:
     186 s against a TCG median of ~120 s for the same profile, so leaving them
     in silently shifted a number whose entire purpose is to say what a normal
     boot costs.
+
+    That last sentence used to be the *whole* defence, and it was resting on a
+    coincidence. Those two boots were kept out because they happened to be
+    tagged `experiment`, which is a fact about how they were invoked and not a
+    rule this file applies -- and Q53 is a live proposal to make WHPX the
+    ordinary way to boot the tree, at which point the tag stops appearing and
+    the ~40% shift arrives with nothing to attribute it to. Grouping by the
+    accelerator makes the exclusion structural: an untagged WHPX boot now forms
+    its own population instead of moving the TCG one.
     """
     out: dict[str, list[float]] = {}
     for rec in records:
@@ -852,7 +980,7 @@ def wall_populations(records: list[dict]) -> dict[str, list[float]]:
         wall = rec.get("wall_seconds")
         if not isinstance(wall, (int, float)) or isinstance(wall, bool):
             continue
-        out.setdefault(sanitizer_of(rec), []).append(float(wall))
+        out.setdefault(population_of(rec), []).append(float(wall))
     return out
 
 
@@ -883,7 +1011,7 @@ def tail_clean_streak(records: list[dict]) -> int:
 
 
 def report_wall(records: list[dict]) -> None:
-    """Per-build wall-time standing.
+    """Per-build, per-accelerator wall-time standing.
 
     Deliberately prints no combined figure, not even when there is only one
     population -- because "only one population" is a fact about the records
@@ -896,7 +1024,7 @@ def report_wall(records: list[dict]) -> None:
     pops = wall_populations(records)
     if not pops:
         return
-    print("[boot-history] wall time by build:")
+    print("[boot-history] wall time by build and accelerator:")
     for name in sorted(pops):
         vals = pops[name]
         print(f"[boot-history]   {name}: {len(vals)} boot(s), "
@@ -904,8 +1032,9 @@ def report_wall(records: list[dict]) -> None:
               f"range {min(vals):.0f}-{max(vals):.0f}s")
     if len(pops) > 1:
         print("[boot-history]   (reported separately on purpose: a "
-              "KASAN-instrumented boot runs several times longer, so one "
-              "median over the mixture describes no build that exists)")
+              "KASAN-instrumented boot runs several times longer and a "
+              "hardware-virtualised one ~40% longer again on this host, so "
+              "one median over the mixture describes no build that exists)")
 
 
 def report(records: list[dict], current: dict | None) -> None:
@@ -915,7 +1044,10 @@ def report(records: list[dict], current: dict | None) -> None:
         why = VERDICT_HELP.get(verdict, "")
         print(f"[boot-history] {verdict}"
               + (f" -- {why}" if why else ""))
-        print(f"[boot-history] build: {sanitizer_of(current)}")
+        # Named as the pair, matching `wall_populations`' key exactly, so the
+        # line that says which population this boot is in and the block that
+        # prints that population's median cannot disagree about the partition.
+        print(f"[boot-history] build: {population_of(current)}")
         if hits:
             print("[boot-history] matches known issue(s): " + ", ".join(hits))
             for fp in FINGERPRINTS:
@@ -969,9 +1101,16 @@ def cmd_list(history_path: str, limit: int) -> int:
         # this column is what lets you see that without opening the JSON.
         san = sanitizer_of(rec)
         san_s = {"kasan-instrumented": "kasan", "none": "-"}.get(san, "?")
+        # Abbreviated on the same three-valued principle as the column beside
+        # it, and present for the same reason: a duration that looks wrong is
+        # almost always a row from the other *population*, and until this
+        # column existed only half of that population was visible. `?` is a row
+        # that cannot say, never a row assumed to be TCG.
+        accel_s = {"QEMU TCG": "tcg", "Hyper-V/WHPX": "whpx",
+                   "bare metal": "metal"}.get(accel_of(rec), "?")
         print(f"{rec.get('ts','?'):<26} {rec.get('commit','?'):<10} "
               f"{rec.get('verdict','?'):<17} {wall_s:>6} {san_s:<5} "
-              f"{rec.get('label','') or '-':<12} {fps}")
+              f"{accel_s:<5} {rec.get('label','') or '-':<12} {fps}")
     return 0
 
 

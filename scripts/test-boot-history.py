@@ -195,6 +195,17 @@ S_LIVELOCK = _PROLOGUE + (
 S_BANNER_KASAN = "[boot] build profile: sanitizer=kasan-instrumented\n"
 S_BANNER_NONE = "[boot] build profile: sanitizer=none\n"
 
+#: The `[hypervisor]` banner, in each of the three shapes the kernel emits.
+#: Verbatim from `kernel/src/hypervisor.rs`; `bench-history.py` owns the
+#: patterns that read them and this file's parser delegates to it, so these
+#: samples are also what keeps that delegation honest -- a copy of the regex
+#: here would agree with a broken copy there.
+S_BANNER_TCG = '[hypervisor] Detected: QEMU TCG (signature: "TCGTCGTCGTCG")\n'
+S_BANNER_WHPX = ('[hypervisor] Detected: Hyper-V/WHPX '
+                 '(signature: "Microsoft Hv")\n')
+S_BANNER_METAL = ("[hypervisor] Running on bare metal "
+                  "(no hypervisor detected)\n")
+
 
 def _serial(bh, text, marker="BOOT_OK"):
     """Parse a sample without touching the filesystem."""
@@ -861,7 +872,8 @@ def test_experiment_wall_times_do_not_move_the_median(bh):
     pops = bh.wall_populations(records)
     check("only one population, and the probe is not in it",
           {k: sorted(v) for k, v in pops.items()},
-          {bh.sanitizer_of(_rec("PASS")): [120.0, 120.0]})
+          {f"{bh.sanitizer_of(_rec('PASS'))} on {bh._ACCEL_UNKNOWN}":
+           [120.0, 120.0]})
 
 
 def test_unvalidated_fingerprint_reports_no_streak(bh):
@@ -1033,10 +1045,15 @@ def test_wall_times_are_never_averaged_across_builds(bh):
         {"verdict": "PASS", "wall_seconds": 900.0},
     ]
     pops = bh.wall_populations(records)
+    # The keys are the (build, accelerator) pair. Spelled out from the two
+    # constants rather than built with `population_of`, so this asserts the
+    # partition instead of restating the code that produces it.
+    plain = f"none on {bh._ACCEL_UNKNOWN}"
+    kasan = f"kasan-instrumented on {bh._ACCEL_UNKNOWN}"
     check("three populations kept apart", sorted(pops), sorted(
-        ["none", "kasan-instrumented", bh._SAN_UNKNOWN]))
-    check("uninstrumented median", bh._median(pops["none"]), 330.0)
-    check("instrumented median", bh._median(pops["kasan-instrumented"]), 1100.0)
+        [plain, kasan, f"{bh._SAN_UNKNOWN} on {bh._ACCEL_UNKNOWN}"]))
+    check("uninstrumented median", bh._median(pops[plain]), 330.0)
+    check("instrumented median", bh._median(pops[kasan]), 1100.0)
 
 
 def test_wall_populations_ignore_rows_without_a_duration(bh):
@@ -1046,7 +1063,8 @@ def test_wall_populations_ignore_rows_without_a_duration(bh):
                {"verdict": "PASS", "sanitizer": "none", "wall_seconds": None},
                {"verdict": "PASS", "sanitizer": "none", "wall_seconds": 300.0}]
     check("only the row with a duration counts",
-          bh.wall_populations(records)["none"], [300.0])
+          bh.wall_populations(records)[f"none on {bh._ACCEL_UNKNOWN}"],
+          [300.0])
 
 
 def test_report_prints_each_build_separately_and_no_combined_figure(bh):
@@ -1078,6 +1096,216 @@ def test_report_names_the_build_of_the_run_it_just_recorded(bh):
         bh.report([], {"verdict": "PASS", "sanitizer": "kasan-instrumented"})
     check_true("current run's build is printed",
                "build: kasan-instrumented" in buf.getvalue())
+
+
+# --------------------------------------------------------------------------
+# Accelerator (which emulator/hypervisor the boot ran under)
+# --------------------------------------------------------------------------
+
+
+def test_accel_read_from_the_banner(bh):
+    """All three shapes, because the kernel prints three and not two.
+
+    `bench-history.py` matches `Detected: ...` with one pattern and the
+    bare-metal sentence with another; a boot-history that exercised only the
+    first would still pass while bare metal silently rendered as "cannot say".
+    """
+    check("TCG banner parsed", _serial(bh, S_BANNER_TCG + S_PASS).accel,
+          "QEMU TCG")
+    check("WHPX banner parsed", _serial(bh, S_BANNER_WHPX + S_PASS).accel,
+          "Hyper-V/WHPX")
+    check("bare-metal banner parsed", _serial(bh, S_BANNER_METAL + S_PASS).accel,
+          "bare metal")
+
+
+def test_accel_parsing_is_really_delegated(bh):
+    """The delegation is the point, so assert it rather than assume it.
+
+    This file deliberately keeps no copy of the banner patterns
+    (`design-decisions.md` sec 240). A copy would be worse than duplication
+    here: a pattern that stopped matching returns the same `None` a pre-banner
+    log does, so the drift would never announce itself. Reading the answer back
+    out of `bench-history.py`'s own constant is what proves there is one
+    parser and not two that happen to agree today.
+    """
+    check("bare metal comes from bench-history's constant, not a literal",
+          _serial(bh, S_BANNER_METAL + S_PASS).accel,
+          bh.bench_history().ACCEL_BARE_METAL)
+    check("and the delegate is reached at all",
+          bh.bench_history().parse_accel.__module__, "bench_history")
+
+
+def test_an_unreadable_delegate_costs_the_label_not_the_boot(bh):
+    """The one place in this file where swallowing an error is right.
+
+    `boot-test.sh` calls this script from its EXIT trap with `|| true`, so an
+    exception raised here does not surface anywhere -- it silently loses the
+    record of the boot. For a *failing* boot that is the most expensive thing
+    this script can do. A missing accelerator label costs a row's grouping; a
+    missing row costs the evidence.
+    """
+    import io as _io
+    import contextlib
+    real = bh.bench_history
+
+    def broken():
+        raise RuntimeError("no bench-history today")
+
+    err = _io.StringIO()
+    bh.bench_history = broken
+    try:
+        with contextlib.redirect_stderr(err):
+            s = _serial(bh, S_BANNER_WHPX + S_PASS)
+            rec = bh.build_record(s, "PASS", _Args())
+    finally:
+        bh.bench_history = real
+    check("the boot is still recorded", rec["verdict"], "PASS")
+    check("with an accelerator of 'cannot say', never a guess", rec["accel"],
+          None)
+    check_true("and the failure is announced where a human sees it",
+               "accelerator banner" in err.getvalue())
+
+
+def test_absent_accel_banner_is_none_not_tcg(bh):
+    """The conflation this field exists to prevent, stated as a test.
+
+    A log with no `[hypervisor]` line cannot say what ran it. Reading that as
+    "TCG" is not a harmless default: the first WHPX run on this host
+    (2026-08-19T16:15:09) predates the banner, so the guess is *known* to be
+    wrong for a record already in the file -- and wrong in the direction that
+    drops a 168s boot into a population whose median is ~120s.
+    """
+    s = _serial(bh, S_PASS)
+    check("no banner -> None", s.accel, None)
+    check("and specifically not the string 'QEMU TCG'", s.accel == "QEMU TCG",
+          False)
+
+
+def test_record_carries_the_accel_even_when_unknown(bh):
+    """Present-and-null, not absent -- the same three-state rule as `sanitizer`.
+
+    Absent means "this row predates the field"; null means "the log did not
+    say". Omitting the key when unknown collapses those, and this file already
+    contains rows of both kinds.
+    """
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check_true("accel key always written", "accel" in rec)
+    check("unknown accelerator recorded as null", rec["accel"], None)
+    rec2 = bh.build_record(_serial(bh, S_BANNER_WHPX + S_PASS), "PASS", _Args())
+    check("known accelerator recorded verbatim", rec2["accel"], "Hyper-V/WHPX")
+    check("null survives serialisation",
+          json.loads(json.dumps(rec))["accel"], None)
+
+
+def test_accel_of_groups_the_two_ways_of_not_knowing(bh):
+    absent = {"verdict": "PASS"}
+    null = {"verdict": "PASS", "accel": None}
+    known = {"verdict": "PASS", "accel": "QEMU TCG"}
+    check("absent key groups as unknown", bh.accel_of(absent), bh.accel_of(null))
+    check("and never as a named accelerator",
+          bh.accel_of(absent) == bh.accel_of(known), False)
+    check("a named accelerator groups as itself", bh.accel_of(known),
+          "QEMU TCG")
+
+
+def test_population_is_the_pair_not_either_half(bh):
+    """Two boots that agree on the build and differ on the accelerator are two
+    populations, and so are two that agree on the accelerator and differ on the
+    build. Either half alone merges a pair that differs by ~1.4x or ~3.4x."""
+    tcg_plain = {"sanitizer": "none", "accel": "QEMU TCG"}
+    whpx_plain = {"sanitizer": "none", "accel": "Hyper-V/WHPX"}
+    tcg_kasan = {"sanitizer": "kasan-instrumented", "accel": "QEMU TCG"}
+    check("same build, different accelerator -> different populations",
+          bh.population_of(tcg_plain) == bh.population_of(whpx_plain), False)
+    check("same accelerator, different build -> different populations",
+          bh.population_of(tcg_plain) == bh.population_of(tcg_kasan), False)
+    check_true("and both halves are named in the label a human reads",
+               "none" in bh.population_of(tcg_plain)
+               and "QEMU TCG" in bh.population_of(tcg_plain))
+
+
+def test_an_untagged_whpx_boot_does_not_move_the_tcg_median(bh):
+    """The whole reason this change exists, with the real numbers.
+
+    `wall_populations`' docstring records two WHPX boots at 168s and 186s
+    against a TCG median near 120s. They stayed out of the TCG median only
+    because they happened to carry an `experiment` tag -- a fact about how they
+    were invoked, not a rule this file applies. Q53 proposes making WHPX the
+    ordinary way to boot the tree, at which point the tag stops appearing.
+
+    So the fixture is untagged on purpose. Under the old grouping the four rows
+    are one population with a median of 144s -- a duration no boot took, and
+    ~20% off both real ones, which is twice CLAUDE.md's regression threshold.
+    """
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "accel": "QEMU TCG",
+         "wall_seconds": 118.0},
+        {"verdict": "PASS", "sanitizer": "none", "accel": "QEMU TCG",
+         "wall_seconds": 122.0},
+        {"verdict": "PASS", "sanitizer": "none", "accel": "Hyper-V/WHPX",
+         "wall_seconds": 168.0},
+        {"verdict": "PASS", "sanitizer": "none", "accel": "Hyper-V/WHPX",
+         "wall_seconds": 186.0},
+    ]
+    pops = bh.wall_populations(records)
+    check("the two accelerators are two populations", sorted(pops),
+          ["none on Hyper-V/WHPX", "none on QEMU TCG"])
+    check("TCG median is the TCG boots'", bh._median(pops["none on QEMU TCG"]),
+          120.0)
+    check("WHPX median is the WHPX boots'",
+          bh._median(pops["none on Hyper-V/WHPX"]), 177.0)
+    check("and no population holds the pooled figure",
+          any(bh._median(v) == 144.0 for v in pops.values()), False)
+
+
+def test_report_prints_the_accelerator_beside_the_build(bh):
+    import contextlib
+    import io
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "accel": "QEMU TCG",
+         "wall_seconds": 120.0},
+        {"verdict": "PASS", "sanitizer": "none", "accel": "Hyper-V/WHPX",
+         "wall_seconds": 177.0},
+    ]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(records, {"verdict": "PASS", "sanitizer": "none",
+                            "accel": "Hyper-V/WHPX"})
+    out = buf.getvalue()
+    check_true("TCG population reported", "120s" in out)
+    check_true("WHPX population reported", "177s" in out)
+    check_true("the legend names the accelerator too",
+               "accelerator" in out)
+    check_true("and the current run is labelled with its own pair",
+               "build: none on Hyper-V/WHPX" in out)
+    # 148.5 is the mean of the two: the figure the old grouping produced, and
+    # one no boot on this host has ever taken.
+    check("no figure pooled across accelerators", "148" in out, False)
+
+
+def test_list_shows_the_accelerator(bh, tmpdir):
+    import contextlib
+    import io
+    path = os.path.join(tmpdir, "h.jsonl")
+    accels = ("QEMU TCG", "Hyper-V/WHPX", "bare metal", None)
+    with open(path, "w", encoding="utf-8") as fh:
+        for accel in accels:
+            # An explicit `sanitizer` so the column beside this one renders as
+            # `-`. Leave it out and *it* prints `?`, and a test that merely
+            # looked for a `?` somewhere on the line would be satisfied by the
+            # neighbour -- which is exactly how a row that cannot say could
+            # start claiming TCG without any test noticing.
+            rec = {"ts": "2026-08-19T00:00:00", "verdict": "PASS",
+                   "commit": "abc1234", "sanitizer": "none", "accel": accel}
+            fh.write(json.dumps(rec) + "\n")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.cmd_list(path, 10)
+    rows = [line.split() for line in buf.getvalue().splitlines() if line.strip()]
+    check("one row per record", len(rows), len(accels))
+    # Column 5: ts, commit, verdict, wall, sanitizer, accel, label, fingerprints.
+    check("each accelerator gets its own token, and 'cannot say' is not one of "
+          "them", [r[5] for r in rows], ["tcg", "whpx", "metal", "?"])
 
 
 # --------------------------------------------------------------------------

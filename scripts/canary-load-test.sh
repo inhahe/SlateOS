@@ -45,6 +45,12 @@
 #   ./scripts/canary-load-test.sh [n_spinners]
 #   ./scripts/canary-load-test.sh [n_spinners] --load-at=NAME [--load-until=NAME]
 #
+# `--at` / `--until` are accepted as aliases, and both flags take either
+# `--flag=VALUE` or `--flag VALUE`.  The aliases are the spelling the
+# controller (canary-load.py) uses and the one the write-ups in
+# known-issues.md quote, so both spellings have to work here or a published
+# command fails to run.
+#
 # Default 6 spinners.  With no `--load-at` the load runs for the whole QEMU
 # window, exactly as it did for P20.  Runs the ordinary `--bench` boot, so it
 # takes as long as that does.
@@ -95,24 +101,85 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 SPINNERS=6
 LOAD_AT=""
 LOAD_UNTIL=""
+DRY_RUN=0
 
-for arg in "$@"; do
+# Both spellings of each flag are accepted, and both the `=value` and the
+# space-separated form.
+#
+# Not politeness -- a correctness fix.  This wrapper originally took only
+# `--load-at=NAME`, while `canary-load.py`, which it drives, takes `--at NAME`.
+# Two write-ups in known-issues.md (RESULT P22's third attempt and PREDICTION
+# P23) therefore recorded the *controller's* spelling as the command to run, and
+# a reader pasting a registered command verbatim got `unknown argument: --at`.
+# A pre-registered experiment whose published command does not run is a
+# reproducibility hole, and correcting the prose in two places would leave the
+# trap armed for the third.  Accepting both spellings closes it at the source.
+#
+# `--` ends option parsing, so a benchmark someone one day names `--load-at`
+# cannot be swallowed as a flag.
+end_of_options=0
+while [ "$#" -gt 0 ]; do
+    arg="$1"
+    if [ "$end_of_options" -eq 1 ]; then
+        case "$arg" in
+            [0-9]*) SPINNERS="$arg"; shift; continue ;;
+            *) echo "unknown argument: $arg" >&2; exit 2 ;;
+        esac
+    fi
     case "$arg" in
+        --) end_of_options=1; shift ;;
         # An empty value is rejected rather than ignored. `--load-at=` with the
         # name lost to shell quoting would otherwise fall through to the
         # whole-window behaviour, and a whole-window run is indistinguishable
         # from an interior-window one until the grading at the end says it
         # could not discriminate -- 12 minutes later.
-        --load-at=)     echo "--load-at needs a benchmark name" >&2; exit 2 ;;
-        --load-until=)  echo "--load-until needs a benchmark name" >&2; exit 2 ;;
-        --load-at=*)    LOAD_AT="${arg#*=}" ;;
-        --load-until=*) LOAD_UNTIL="${arg#*=}" ;;
-        --spinners=*)   SPINNERS="${arg#*=}" ;;
-        -h|--help)      sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        [0-9]*)         SPINNERS="$arg" ;;
+        --load-at=|--at=)       echo "--load-at needs a benchmark name" >&2; exit 2 ;;
+        --load-until=|--until=) echo "--load-until needs a benchmark name" >&2; exit 2 ;;
+        --spinners=)            echo "--spinners needs a count" >&2; exit 2 ;;
+        --load-at=*|--at=*)       LOAD_AT="${arg#*=}"; shift ;;
+        --load-until=*|--until=*) LOAD_UNTIL="${arg#*=}"; shift ;;
+        --spinners=*)             SPINNERS="${arg#*=}"; shift ;;
+        # The space-separated form must reject a *missing* value as loudly as an
+        # empty one: `--at` as the final argument would otherwise bind LOAD_AT to
+        # the empty string and silently run the whole-window experiment.
+        #
+        # It must also reject a value that is itself a flag. `[ "$#" -ge 2 ]`
+        # alone counts `--at --dry-run` as well-formed and binds LOAD_AT to the
+        # literal string "--dry-run", which is not caught here at all -- it
+        # surfaces much later as an argparse usage dump from canary-load.py
+        # complaining about a benchmark name, or, for `--spinners --dry-run`,
+        # as "needs a non-negative integer, got: --dry-run". Both are exit 2, so
+        # the mistake is *reported*; neither says the flag was the problem, and
+        # the dropped `--dry-run` means the run that follows is not a dry one.
+        # No benchmark name or spinner count begins with `-`, so treating a
+        # leading `-` as a missing value costs nothing and names the real fault.
+        --load-at|--at)
+            case "${2-}" in ''|-*)
+                echo "--load-at needs a benchmark name" >&2; exit 2 ;; esac
+            LOAD_AT="$2"; shift 2 ;;
+        --load-until|--until)
+            case "${2-}" in ''|-*)
+                echo "--load-until needs a benchmark name" >&2; exit 2 ;; esac
+            LOAD_UNTIL="$2"; shift 2 ;;
+        --spinners)
+            case "${2-}" in ''|-*)
+                echo "--spinners needs a count" >&2; exit 2 ;; esac
+            SPINNERS="$2"; shift 2 ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        -h|--help)
+            sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        [0-9]*) SPINNERS="$arg"; shift ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
+
+# Validated here rather than left to the controller, which does not start until
+# QEMU is already up.  A non-numeric or zero spinner count would otherwise cost
+# the boot before saying so, and zero in particular produces a run that looks
+# like an experiment and applies no load at all.
+case "$SPINNERS" in
+    ''|*[!0-9]*) echo "--spinners needs a non-negative integer, got: $SPINNERS" >&2; exit 2 ;;
+esac
 
 if [ -z "$LOAD_AT" ] && [ -n "$LOAD_UNTIL" ]; then
     # --load-until alone would mean "load from the start of the suite until
@@ -248,6 +315,25 @@ if [ -n "$LOAD_AT" ]; then
             --positions-only --label "predicted from the previous run" \
             || echo "    (could not predict from the previous serial log; continuing)"
     fi
+fi
+
+# `--dry-run` stops here, which is the last line before anything is destroyed.
+#
+# Everything an invocation can get wrong has now been checked -- the flags
+# parsed, the spinner count validated, the window names confirmed against the
+# live/scored name map, and the landing positions predicted from the previous
+# run -- and nothing has been consumed but a second.  The next statement deletes
+# the previous run's serial log, so exiting *before* it is what makes a dry run
+# genuinely free: the last completed experiment's evidence is still there
+# afterwards.
+#
+# This exists because the flag-spelling bug it now guards against was found by
+# reading, not by running.  The published command for a pre-registered
+# experiment (`--at NAME`) did not parse, and nothing in the repository could
+# have told anyone that without booting QEMU for twelve minutes first.
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "=== dry run: arguments accepted, nothing booted, no files touched ==="
+    exit 0
 fi
 
 # Remove the previous run's serial log before the boot starts.

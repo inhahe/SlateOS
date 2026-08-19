@@ -707,6 +707,361 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 
 print()
+print("wrapper argument parsing")
+
+# The wrapper (`canary-load-test.sh`) is what a person actually types, and until
+# 2026-08-19 it accepted only `--load-at=NAME` while the controller it drives
+# takes `--at NAME`.  Two pre-registered experiments in known-issues.md quoted
+# the controller's spelling as the command to run, so the published command for
+# each did not parse -- and nothing in the repository could reveal that without
+# booting QEMU for twelve minutes, because the wrapper's first act is to build
+# and boot.
+#
+# `--dry-run` exists to make that reachable, and these tests are the reason it
+# has to keep working: they are the only thing standing between a renamed flag
+# and a registered experiment that silently cannot be run.  They cost about a
+# second because a dry run stops before the build.
+
+# Repo-relative, and passed with `cwd=REPO_ROOT`, because MSYS bash does not
+# accept a Windows-style absolute path as its script argument -- `bash
+# 'D:\...\canary-load-test.sh'` fails with "No such file or directory", which
+# reads like a missing file rather than a path-flavour mismatch.
+CANARY_LOAD_TEST = "scripts/canary-load-test.sh"
+
+
+def find_msys_bash():
+    """Git-for-Windows bash, located explicitly rather than taken from PATH.
+
+    **`bash` on the Windows PATH is WSL's**, at `C:\\Windows\\System32\\bash.exe`,
+    and `shutil.which("bash")` finds that one. It runs, so a test that used it
+    would look like it worked -- while actually exercising a Linux environment
+    with a `/mnt/d/...` view of the disk, no MSVC, and none of the toolchain the
+    script is written against. Every shell script in this repo is run under
+    Git/MSYS bash, so testing them under WSL would be testing something the
+    project never executes.
+
+    Candidates are *verified*, not assumed: `uname -o` must say `Msys`. A guess
+    that silently fell back to WSL is exactly the failure this function exists
+    to prevent, so an unverifiable candidate is skipped rather than used.
+    """
+    candidates = []
+    override = os.environ.get("MSYS_BASH")
+    if override:
+        candidates.append(override)
+    # Git bash usually reaches the Windows PATH via its own `usr\bin` or
+    # `mingw64\bin`; both sit beside a `bin\bash.exe` under the install root.
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        low = entry.lower().replace("/", "\\")
+        for marker in ("\\git\\usr\\bin", "\\git\\mingw64\\bin", "\\git\\bin"):
+            if low.endswith(marker):
+                root = entry
+                for _ in range(marker.count("\\")):
+                    root = os.path.dirname(root)
+                candidates.append(os.path.join(root, "bin", "bash.exe"))
+                candidates.append(os.path.join(root, "usr", "bin", "bash.exe"))
+    candidates += [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ]
+    seen = set()
+    for candidate in candidates:
+        key = os.path.normcase(os.path.abspath(candidate))
+        if key in seen or not os.path.exists(candidate):
+            continue
+        seen.add(key)
+        try:
+            probe = subprocess.run([candidate, "-c", "uname -o"],
+                                   capture_output=True, text=True, timeout=60)
+        except OSError:
+            continue
+        if probe.returncode == 0 and "msys" in probe.stdout.strip().lower():
+            return candidate
+    return None
+
+
+BASH = find_msys_bash()
+
+# Announced rather than assumed. If this ever names WSL's bash the whole section
+# is measuring the wrong shell, and a silent substitution is precisely the class
+# of error these tests exist to catch elsewhere.
+if BASH is None:
+    check_true("Git/MSYS bash was found", False,
+               "no bash.exe verified as MSYS; set MSYS_BASH to the right one. "
+               "`bash` on PATH is WSL's and would test a different environment.")
+else:
+    print(f"  ..   using {BASH}")
+
+
+def wrapper_env():
+    """The environment the wrapper needs, with this interpreter reachable.
+
+    A bash spawned from *this* process does not necessarily find `python` on
+    PATH even though the bash that launched this process did -- the MSYS/Windows
+    PATH round-trip does not preserve it. The wrapper calls `python` for its
+    name validation, so without this the accepting cases fail with
+    "python: command not found" and rc=2, which is indistinguishable from the
+    wrapper *rejecting* the arguments -- every rejection test would still pass
+    while every acceptance test failed for an unrelated reason.
+
+    Pinning the running interpreter also means the wrapper is tested against the
+    same Python the tests run under rather than whichever one happens to be
+    first on PATH.
+    """
+    env = os.environ.copy()
+    env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def run_wrapper(args):
+    """`canary-load-test.sh <args> --dry-run` -> (returncode, stdout+stderr).
+
+    With no MSYS bash this returns a sentinel rather than raising, so the
+    section reports one clear cause followed by ordinary failures instead of a
+    traceback that hides which checks would have run.
+    """
+    if BASH is None:
+        return None, "no MSYS bash available"
+    proc = subprocess.run(
+        [BASH, CANARY_LOAD_TEST, *args, "--dry-run"],
+        capture_output=True, text=True, cwd=REPO_ROOT, timeout=120,
+        env=wrapper_env(),
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def read_name_file():
+    """`build/canary-load-names.txt` -> `(live, aliases, scored)`, or None.
+
+    Parsed with `canary-load.py:read_known_names`'s exact rules, because the
+    point is to predict *its* verdict. A bare line is a live name, `alias
+    <scored> <live>` is a pairing, `scored <name>` is a scorecard name.
+    """
+    path = os.path.join(REPO_ROOT, "build", "canary-load-names.txt")
+    if not os.path.exists(path):
+        return None
+    live, aliases, scored = set(), {}, set()
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.split()
+            if not parts:
+                continue
+            if parts[0] == "alias" and len(parts) == 3:
+                aliases[parts[1]] = parts[2]
+            elif parts[0] == "scored" and len(parts) == 2:
+                scored.add(parts[1])
+            elif len(parts) == 1:
+                live.add(parts[0])
+    return live, aliases, scored
+
+
+NAMES = read_name_file()
+
+
+def usable_bound(name):
+    """Would the wrapper's name guard accept `name` as a window bound?
+
+    The guard is three stages and a name must survive all of them: it must be
+    a *scored* name (the grader can only place a window with those), it is then
+    alias-translated, and the result must be a *live* name (the controller can
+    only trigger on those). A name can be perfectly real and fail either --
+    `io_ring_nop_submit` is live but never scored, `isr_latency` is scored but
+    has no live line at all.
+
+    With no name file the wrapper skips validation entirely, so everything is
+    "usable" and the parser tests still mean what they say.
+    """
+    if NAMES is None:
+        return True
+    live, aliases, scored = NAMES
+    if not live or not scored:
+        return True
+    return name in scored and aliases.get(name, name) in live
+
+
+def pick_window():
+    """Two window bounds the name guard will accept, in suite order.
+
+    Hardcoding names here was a mistake once already: the fixture paired
+    `crypto_x25519` (fine) with `isr_latency` (scored, but with no live result
+    line), so five *parser* tests failed inside the *name guard* -- and the
+    failure output was a list of nearest-name suggestions, which reads like a
+    typo in the script under test rather than in the test's own data.
+
+    The names file is rewritten by every run, so any hardcoded pair is a
+    standing bet on the suite's composition that this section has no reason to
+    be making. P23's registered pair is preferred when it is still valid --
+    it keeps the assertions legible and is the pair the section most wants to
+    protect -- and otherwise a valid pair is derived.
+    """
+    preferred = ("io_ring_nop", "crypto_poly1305_1KiB")
+    if all(usable_bound(name) for name in preferred):
+        return preferred
+    if NAMES is None:
+        return preferred
+    _, _, scored = NAMES
+    usable = sorted(name for name in scored if usable_bound(name))
+    if len(usable) >= 2:
+        return usable[0], usable[-1]
+    return preferred
+
+
+WINDOW_AT, WINDOW_UNTIL = pick_window()
+print(f"  ..   window fixtures: --at {WINDOW_AT} --until {WINDOW_UNTIL}")
+
+# The name guard is a *precondition* of every accepting case below, not a thing
+# they test. Asserting it separately means a suite change that invalidates a
+# fixture reports itself as exactly that, instead of as five parser failures.
+check_true("the window fixtures are names the guard accepts",
+           usable_bound(WINDOW_AT) and usable_bound(WINDOW_UNTIL),
+           f"--at {WINDOW_AT} usable={usable_bound(WINDOW_AT)}, "
+           f"--until {WINDOW_UNTIL} usable={usable_bound(WINDOW_UNTIL)}")
+
+# Accepted spellings. Every one of these must reach the same window, because the
+# whole point is that a reader can paste whichever form a document happens to
+# use.  `--dry-run` echoes the window it parsed, which is what is asserted on.
+WANT_WINDOW = f"from '{WINDOW_AT}' until '{WINDOW_UNTIL}'"
+for label, args in [
+    ("the wrapper's own documented spelling",
+     [f"--load-at={WINDOW_AT}", f"--load-until={WINDOW_UNTIL}"]),
+    ("the controller's spelling, as quoted by P22 and P23",
+     ["--at", WINDOW_AT, "--until", WINDOW_UNTIL]),
+    ("the alias with =",
+     [f"--at={WINDOW_AT}", f"--until={WINDOW_UNTIL}"]),
+    ("the long flags space-separated",
+     ["--load-at", WINDOW_AT, "--load-until", WINDOW_UNTIL]),
+    ("mixed spellings in one invocation",
+     [f"--at={WINDOW_AT}", "--load-until", WINDOW_UNTIL]),
+]:
+    rc, out = run_wrapper(args)
+    check_true(label, rc == 0 and WANT_WINDOW in out,
+               f"rc={rc} out={out[-300:]}")
+
+# The spinner count, in each of its three forms.
+for label, args, want in [
+    ("a bare number still sets the spinner count", ["4"], "4 spinners"),
+    ("--spinners=N", ["--spinners=3"], "3 spinners"),
+    ("--spinners N", ["--spinners", "3"], "3 spinners"),
+]:
+    rc, out = run_wrapper(args)
+    check_true(label, rc == 0 and want in out, f"rc={rc} out={out[-300:]}")
+
+# Rejections. Each of these would otherwise produce a *plausible-looking* run
+# that answers a different question than the one asked -- which is worse than a
+# crash, because it is only detectable 12 minutes later at the grading step, and
+# only by someone who remembers what they meant to ask.
+#
+# Each case asserts the *reason* as well as the exit code. `rc == 2` alone is
+# not evidence the parser rejected anything: the wrapper also exits 2 from its
+# name guard, from a failed build, and from a `python` it could not find. This
+# section spent a debugging cycle on exactly that ambiguity in reverse -- five
+# acceptance tests failing at rc=2 for a reason that had nothing to do with what
+# they were testing -- and a rejection test that passes for the wrong reason is
+# the same defect with the sign flipped, only harder to notice because green.
+for label, args, want in [
+    ("an empty --load-at is refused", ["--load-at="],
+     "--load-at needs a benchmark name"),
+    ("an empty --at is refused", ["--at="],
+     "--load-at needs a benchmark name"),
+    ("an empty --load-until is refused", ["--load-until="],
+     "--load-until needs a benchmark name"),
+    ("--at followed by another flag is refused", ["--at"],
+     "--load-at needs a benchmark name"),
+    ("--until followed by another flag is refused",
+     ["--at", WINDOW_AT, "--until"], "--load-until needs a benchmark name"),
+    ("--spinners followed by another flag is refused", ["--spinners"],
+     "--spinners needs a count"),
+    ("a non-numeric spinner count is refused", ["--spinners=six"],
+     "--spinners needs a non-negative integer"),
+    ("--load-until without --load-at is refused", ["--until", WINDOW_UNTIL],
+     "--load-until requires --load-at"),
+    ("an unknown flag is refused", [f"--load-during={WINDOW_AT}"],
+     "unknown argument: --load-during"),
+]:
+    rc, out = run_wrapper(args)
+    check_true(label, rc == 2 and want in out,
+               f"rc={rc} wanted {want!r} in output; out={out[-300:]}")
+
+# The genuinely-trailing case, with nothing after the flag at all. These run
+# *without* `--dry-run` appended -- which is only safe because a value-less flag
+# is rejected in the argument loop, before the build and before any file is
+# touched. That is precisely the claim being tested: if one of these ever
+# stopped erroring, the wrapper would fall through to a real 12-minute boot, and
+# this test would be the thing that noticed.
+for label, args, want in [
+    ("--at as the final argument is refused", ["--at"],
+     "--load-at needs a benchmark name"),
+    ("--until as the final argument is refused", ["--at", WINDOW_AT, "--until"],
+     "--load-until needs a benchmark name"),
+    ("--spinners as the final argument is refused", ["--spinners"],
+     "--spinners needs a count"),
+]:
+    if BASH is None:
+        rc, out = None, "no MSYS bash available"
+    else:
+        proc = subprocess.run([BASH, CANARY_LOAD_TEST, *args],
+                              capture_output=True, text=True, cwd=REPO_ROOT,
+                              timeout=120, env=wrapper_env())
+        rc, out = proc.returncode, proc.stdout + proc.stderr
+    check_true(label, rc == 2 and want in out,
+               f"rc={rc} wanted {want!r} in output; out={out[-300:]}")
+
+# A dry run must leave the previous experiment's evidence alone. It exits before
+# the `rm -f "$SERIAL_FILE"` that a real run needs, and if that ever stops being
+# true a dry run would destroy the log of the last completed experiment -- the
+# one artefact that cannot be regenerated without another 12-minute boot.
+serial_path = os.path.join(REPO_ROOT, "build", "serial-test.txt")
+before = os.path.exists(serial_path)
+before_size = os.path.getsize(serial_path) if before else None
+run_wrapper(["--at", WINDOW_AT, "--until", WINDOW_UNTIL])
+check_true("a dry run does not delete the previous run's serial log",
+           os.path.exists(serial_path) == before
+           and (not before or os.path.getsize(serial_path) == before_size),
+           f"existed={before} size={before_size}")
+
+# And the registered P23 command itself, verbatim from known-issues.md. This is
+# the specific regression that motivated all of the above: if this line stops
+# parsing, a pre-registered experiment has become unrunnable as published.
+rc, out = run_wrapper(["--at", "io_ring_nop", "--until", "crypto_poly1305_1KiB"])
+check_true("PREDICTION P23's registered command parses",
+           rc == 0 and "from 'io_ring_nop' until 'crypto_poly1305_1KiB'" in out,
+           f"rc={rc} out={out[-300:]}")
+
+# The two-namespace trap, from both sides, on names taken from the current file
+# rather than assumed. Both of these are *real benchmarks* that a reader could
+# reasonably pass, and both are unusable as window bounds -- which is only
+# tolerable because the guard says so in a second instead of after a boot.
+if NAMES is not None:
+    live, aliases, scored = NAMES
+    # Scored but with no live result line to trigger on. Three of the suite's
+    # 86 scorecard names are in this state (`context_switch`, `ipc_channel_sync`,
+    # `isr_latency`): they are not aliased to anything, so there is no name a
+    # caller could pass that would work. Rejecting is correct; being *told* why
+    # is what makes it cheap.
+    orphans = sorted(n for n in scored if n not in aliases and n not in live)
+    if orphans:
+        rc, out = run_wrapper(["--at", orphans[0], "--until", WINDOW_UNTIL])
+        check_true("a scored name with no live result line is refused by name",
+                   rc == 2 and orphans[0] in out
+                   and "not a live benchmark name" in out,
+                   f"orphan={orphans[0]} rc={rc} out={out[-300:]}")
+    # Live but never scored -- the load would fire exactly where asked and the
+    # grader would then refuse to place the window, wasting the whole run. The
+    # guard must catch this *before* the boot, and must name the scorecard
+    # spelling to pass instead rather than leaving the caller to guess.
+    unscored = sorted(n for n in live if n not in scored and n in aliases.values())
+    if unscored:
+        back = next(s for s, lv in aliases.items() if lv == unscored[0])
+        rc, out = run_wrapper(["--at", unscored[0], "--until", WINDOW_UNTIL])
+        check_true("a live name that never reaches the scorecard is refused, "
+                   "naming the spelling to use instead",
+                   rc == 2 and "never reaches the scorecard" in out
+                   and back in out,
+                   f"live={unscored[0]} want-suggestion={back} "
+                   f"rc={rc} out={out[-300:]}")
+
+
+print()
 if FAILURES:
     print(f"{len(FAILURES)} FAILURE(S)")
     for failure in FAILURES:

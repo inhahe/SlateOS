@@ -3230,16 +3230,17 @@ def layout_arms(records, host, profile):
 def layout_bands(records, host, profile):
     """Per-benchmark spread attributable to code *placement* alone.
 
-    Returns `{name: (spread_pct, pads, provenance, accel)}`, where `spread_pct`
-    is the peak-to-peak spread across the sampled layouts as a percentage of
-    the smallest, `pads` is how many distinct layouts it was measured over, and
-    `provenance` names the commit the arms came from -- or the *range* of
-    commits, when a sweep spanned several without changing any build input.
-    `accel` is which emulator the arms ran on (`None` if they predate the
-    field) -- reported rather than assumed, because a band measured under one
-    accelerator says nothing about a run under the other. Empty when no commit
-    has been swept -- which every consumer must treat as "nobody measured
-    this", never as "the sensitivity is zero".
+    Returns `{name: (spread_pct, pads, provenance, accel, canaries)}`, where
+    `spread_pct` is the peak-to-peak spread across the sampled layouts as a
+    percentage of the smallest, `pads` is how many distinct layouts it was
+    measured over, and `provenance` names the commit the arms came from -- or
+    the *range* of commits, when a sweep spanned several without changing any
+    build input. `accel` is which emulator the arms ran on (`None` if they
+    predate the field) -- reported rather than assumed, because a band measured
+    under one accelerator says nothing about a run under the other. `canaries`
+    is `{CANARY_* verdict: how many arms had it}`. Empty when no commit has
+    been swept -- which every consumer must treat as "nobody measured this",
+    never as "the sensitivity is zero".
 
     # What the number means, and what it does not
 
@@ -3279,6 +3280,27 @@ def layout_bands(records, host, profile):
     so the convenient fallback fails in the one direction that hides real
     regressions. Dropping the group yields "unmeasured", under which a movement
     stays a regression. That is the direction to fail in.
+
+    # Why a broken canary is reported rather than voiding the band
+
+    The canary is the per-run instrument that answers "was the host quiet while
+    this ran?". All six arms of the 2026-08-19 WHPX sweep returned
+    `samples: 0, invalid: 13` -- every canary sample rejected, verdict `broken`
+    -- and the band they produced still printed as though nothing were wrong.
+    That is the failure this fixes: a band whose arms could not verify their
+    own conditions is not thereby *wrong*, but a reader must not be able to
+    mistake it for one that was checked.
+
+    Voiding the group instead would be the usual fail-safe direction, and it
+    was rejected here for one reason: unlike an uncorrectable drift factor, a
+    broken canary is not evidence that this band is wide -- it is evidence that
+    nobody knows. Voiding would discard the only WHPX measurement that exists
+    on the strength of a *separate*, already-diagnosed instrument bug (the
+    resolution floor, see `CANARY_MIN_RESOLVABLE`), and would go on discarding
+    every future WHPX sweep until that is fixed, silently. So the verdicts ride
+    along on the band and `describe_layout_band` says them out loud, on the
+    same principle that already governs `accel`: reported, never assumed. See
+    design-decisions.md sec 239.
     """
     groups = layout_arms(records, host, profile)
     if not groups:
@@ -3336,6 +3358,17 @@ def layout_bands(records, host, profile):
     else:
         provenance = "an unrecorded commit"
 
+    # Recomputed from each arm's raw `canary` rather than read from its stored
+    # `canary_verdict` string, because `canary_verdict()` has deliberately
+    # reclassified historical records as its resolution bounds tightened (see
+    # its docstring), and the stored string is whatever the *then*-current rule
+    # said. Reading it back would make a band's trust label depend on when its
+    # arms were run rather than on what they measured.
+    canaries = {}
+    for record in by_time:
+        verdict = canary_verdict(record.get("canary"))
+        canaries[verdict] = canaries.get(verdict, 0) + 1
+
     # One entry map per pad: the median over repeats at that pad, so a layout
     # measured twice does not get double weight and its own run-to-run noise is
     # damped before it is read as placement sensitivity.
@@ -3367,8 +3400,40 @@ def layout_bands(records, host, profile):
         if lo <= 0:
             continue
         bands[name] = ((hi - lo) * 100.0 / lo, len(corrected), provenance,
-                       accel)
+                       accel, canaries)
     return bands
+
+
+def describe_canary_mix(canaries):
+    """How the arms behind a band answered "was the host quiet?", in words.
+
+    Returns `""` when every arm was clean -- the only case that needs no
+    caveat, and the case where a caveat would be noise on every line.
+
+    Anything else is stated, and stated as a count out of the total rather than
+    as a bare adjective, because "2 of 6 arms" and "6 of 6 arms" call for
+    different reactions and a single word cannot tell them apart. `broken` is
+    spelled out as "could not measure host load" rather than left as jargon: a
+    reader who meets it in one line of `--list` output has no way to know it
+    means the instrument failed rather than the run failed, and the whole point
+    of printing it is that it should be understood without a detour into this
+    file.
+    """
+    total = sum(canaries.values())
+    if not total or canaries.get(CANARY_CLEAN) == total:
+        return ""
+    wording = {
+        CANARY_BROKEN: "could not measure host load",
+        CANARY_CONTAMINATED: "measured host load",
+        CANARY_ABSENT: "carried no host-load check",
+        CANARY_CLEAN: "clean",
+    }
+    # Worst first: the reason for printing this at all is the part that
+    # undermines the band, so it must not sit behind the reassuring part.
+    order = [CANARY_CONTAMINATED, CANARY_BROKEN, CANARY_ABSENT, CANARY_CLEAN]
+    parts = [f"{canaries[v]}/{total} arms {wording[v]}"
+             for v in order if canaries.get(v)]
+    return "; ".join(parts)
 
 
 def describe_layout_band(band):
@@ -3380,11 +3445,22 @@ def describe_layout_band(band):
     faster. When it is *not* known the description says so rather than staying
     silent, so that an unlabelled band cannot be mistaken for one that was
     checked.
+
+    The arms' canary verdicts are appended on the same grounds, and for a
+    concrete failure: every arm of the 2026-08-19 WHPX sweep had a *broken*
+    canary -- it could not tell whether the host was quiet -- and the band
+    printed exactly as confidently as one measured on a verified-idle machine.
+    A band is a licence to dismiss a movement as placement noise, so a reader
+    is entitled to know that the arms behind it could not check their own
+    conditions. Silence is reserved for the all-clean case, so that the caveat
+    appearing means something.
     """
-    spread, pads, provenance, accel = band
+    spread, pads, provenance, accel, canaries = band
     where = accel if accel else "accelerator not recorded"
+    caveat = describe_canary_mix(canaries)
     return (f"placement alone moves it {spread:.0f}% "
-            f"({pads} layouts of {provenance}, {where})")
+            f"({pads} layouts of {provenance}, {where}"
+            f"{'; ' + caveat if caveat else ''})")
 
 
 #: The single file the in-kernel benchmark suite is defined in, and the tree it
@@ -4558,7 +4634,7 @@ def cmd_layout_bands(history_path, profile):
               "has measured otherwise,\n  not because anybody has shown it.")
         return 0
 
-    _, pads, provenance, accel = next(iter(bands.values()))
+    _, pads, provenance, accel, canaries = next(iter(bands.values()))
     # The accelerator belongs in the header, not a footnote: this band is only
     # evidence about runs on the same one. Measured on a byte-identical binary,
     # the median benchmark is 3.5x faster under WHPX than under TCG, so a band
@@ -4568,12 +4644,21 @@ def cmd_layout_bands(history_path, profile):
           f"measured over {pads} layouts of {provenance}:")
     print("  (how far the SAME SOURCE moves when only its .text offset "
           "changes -- a LOWER bound)")
+    # Printed above the table rather than after it, because it qualifies every
+    # row: a reader who has already read the numbers has already formed the
+    # belief this line exists to temper. Silent when every arm was clean.
+    caveat = describe_canary_mix(canaries)
+    if caveat:
+        print(f"  WARNING: {caveat}. These arms could not confirm the machine "
+              f"was idle,\n  so part of this band may be host noise rather "
+              f"than placement -- and a band\n  that is too wide dismisses "
+              f"real regressions.")
     print()
     width = max(len(name) for name in bands)
     # Name breaks the tie, so that two runs of this view diff cleanly. Ties are
     # the common case, not the corner one: most benchmarks sit at 0.0% and
     # would otherwise come out in dict order, making every re-run look changed.
-    for name, (spread, _pads, _provenance, _accel) in sorted(
+    for name, (spread, _pads, _provenance, _accel, _canaries) in sorted(
             bands.items(), key=lambda item: (-item[1][0], item[0])):
         print(f"  {name:<{width}}  {spread:6.1f}%")
     print()

@@ -3910,7 +3910,8 @@ def test_a_movement_inside_a_measured_band_stops_being_a_regression(bh):
     check("...and is not called a regression", "  REGRESSED (" in out, False)
     check("...and the band that excused it is quoted, with its size",
           "placement alone moves it 900% (3 layouts of xxx, "
-          "accelerator not recorded)" in out, True)
+          "accelerator not recorded; 3/3 arms carried no host-load check)"
+          in out, True)
     # The band is three samples out of every possible offset, so it cannot
     # contain the worst pair among all of them. A reader who takes it as
     # exhaustive would clear a near-miss that nothing has cleared.
@@ -4018,6 +4019,84 @@ def test_the_most_recent_sweep_wins_over_the_best_sampled_one(bh):
     tied = bh.layout_bands(new + old, "H", "release")
     check("at equal recency the better-sampled sweep wins",
           tied["b0"][2], "ancient")
+
+
+def test_a_band_reports_whether_its_arms_could_check_the_host(bh):
+    """A band whose arms could not verify their own conditions must say so.
+
+    The failure this pins is a real one, not a hypothetical. Every arm of the
+    2026-08-19 WHPX sweep returned `samples: 0, invalid: 13` -- the canary
+    rejected all thirteen of its own measurements, so it could not tell whether
+    the host was idle -- and the band those six arms produced printed exactly as
+    confidently as one measured on a verified-quiet machine. A band is a licence
+    to dismiss a movement as noise, so the reader is entitled to know that the
+    instrument behind it failed.
+
+    `absent` is caveated alongside `broken` deliberately. A record with no
+    canary at all is not a record that passed; it is one nobody checked, and
+    the two are only distinguishable if the output refuses to treat silence as
+    a pass. Only an all-clean band prints nothing, so the caveat's *presence*
+    carries the information.
+    """
+    clean = {"samples": 10, "start": 100, "min": 40, "spread": 3.0,
+             "invalid": 0}
+    broken = {"samples": 0, "start": 0, "min": 0, "spread": 0, "invalid": 13,
+              "min_centi": 0}
+
+    all_clean = bh.layout_bands(
+        _sweep_arms({0: 500, 1024: 600, 2048: 550}, canary=clean),
+        "H", "release")
+    check("a band records the canary verdicts of its arms",
+          all_clean["b0"][4], {bh.CANARY_CLEAN: 3})
+    check("...and says nothing when every one of them was clean",
+          bh.describe_canary_mix(all_clean["b0"][4]), "")
+    check("...so an unqualified band means the arms really were checked",
+          bh.describe_layout_band(all_clean["b0"]),
+          "placement alone moves it 20% (3 layouts of xxx, "
+          "accelerator not recorded)")
+
+    all_broken = bh.layout_bands(
+        _sweep_arms({0: 500, 1024: 600, 2048: 550}, canary=broken),
+        "H", "release")
+    check("the six-WHPX-arm shape is classified broken, not clean",
+          all_broken["b0"][4], {bh.CANARY_BROKEN: 3})
+    check("...and the band says so in words a reader need not decode",
+          "3/3 arms could not measure host load"
+          in bh.describe_layout_band(all_broken["b0"]), True)
+    check("...while still reporting the band rather than voiding it",
+          round(all_broken["b0"][0], 6), 20.0)
+
+    # A count, not an adjective: "1 of 3" and "3 of 3" warrant different
+    # reactions and no single word separates them.
+    mixed = _sweep_arms({0: 500, 1024: 600, 2048: 550}, canary=clean)
+    mixed[1] = dict(mixed[1], canary=broken)
+    mixed_bands = bh.layout_bands(mixed, "H", "release")
+    check("a partly-broken sweep is counted, not collapsed to one word",
+          mixed_bands["b0"][4], {bh.CANARY_CLEAN: 2, bh.CANARY_BROKEN: 1})
+    check("...and the count reaches the reader",
+          "1/3 arms could not measure host load"
+          in bh.describe_layout_band(mixed_bands["b0"]), True)
+
+    # Worst-first ordering: the part that undermines the band must not sit
+    # behind the reassuring part, where a skimming reader stops early.
+    contaminated = {"samples": 10, "start": 100, "min": 40, "spread": 90.0,
+                    "invalid": 0}
+    order = bh.describe_canary_mix({bh.CANARY_CLEAN: 1, bh.CANARY_BROKEN: 1,
+                                    bh.CANARY_CONTAMINATED: 1})
+    check("the worst verdict is stated first",
+          order.startswith("1/3 arms measured host load"), True)
+    check("...and the clean arms last", order.endswith("1/3 arms clean"), True)
+    check("a measured-contamination canary is classified as such",
+          bh.canary_verdict(contaminated), bh.CANARY_CONTAMINATED)
+
+    # An arm with no canary field at all is unchecked, not passing.
+    unchecked = bh.layout_bands(_sweep_arms({0: 500, 1024: 600, 2048: 550}),
+                                "H", "release")
+    check("an arm that carried no canary is absent, not clean",
+          unchecked["b0"][4], {bh.CANARY_ABSENT: 3})
+    check("...and is caveated too, so silence cannot mean 'nobody looked'",
+          "3/3 arms carried no host-load check"
+          in bh.describe_layout_band(unchecked["b0"]), True)
 
 
 def test_an_aa_pair_is_never_explained_by_placement(bh):

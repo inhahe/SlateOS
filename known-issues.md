@@ -37228,8 +37228,91 @@ its position in the code implies.
 - **Sensitivity: not yet fairly measured.** 7 of 12 is bounded by the canary's
   8-benchmark sampling interval, which put a single sample inside the window. A
   window several times wider than 8 benchmarks is needed to measure it.
+  **Registered as PREDICTION P23 below** — a 32-benchmark window carrying four
+  samples, with the pass threshold derived from the model's own arithmetic
+  *before* the run, precisely so this paragraph cannot be marked correct after
+  the fact.
 - **P22(b): unchanged** — supported by one run, weakly (see the first attempt).
 - **P22(c): unchanged** — refuted-leaning.
 - **No correction is applied to any recorded value.** §229 stands: the model may
   now say *where*, which is all the printed line claims; it is not yet licensed
   to say *by how much*.
+
+### [A] PREDICTION P23 — sensitivity, measured with a window wide enough to carry it — registered 2026-08-19
+
+**Registered before the run exists.** Numbers below are derived from the model's
+arithmetic, not guessed; the derivation is written out so a later reader can
+check that the threshold was not chosen after seeing the answer.
+
+**In short:** the suite has a feature that guesses which of its measurements were
+disturbed by other activity on the machine. The last experiment showed it points
+at the *right place*, but it only caught 7 of the 12 disturbed measurements — and
+that looked like a weak result. We think it is not weak at all: the feature only
+takes a reading every 8th measurement, and the disturbed stretch was only 12 long,
+so it got exactly **one** reading inside it. This run makes the disturbed stretch
+32 long so it gets **four**, which is the first fair test of how much it catches.
+
+#### The run to make
+
+```
+scripts/canary-load-test.sh --at io_ring_nop --until crypto_poly1305_1KiB
+```
+
+Verified against the previous run's SCORE lines before registering: this lands
+the load on **positions 32–63, 32 of 86 benchmarks** — an interior window with
+32 benchmarks before it and 22 after. (`io_ring_nop` is a scorecard name; the
+controller triggers on its live line `io_ring_nop_submit`, and says so.)
+
+| | run 3 (graded) | this run |
+|---|---|---|
+| loaded window | positions 60–71 (12) | positions 32–63 (32) |
+| canary samples **inside** the window | **1** (position 64) | **4** (32, 40, 48, 56) |
+| provably-clean region | 58 | 38 (positions 0–23, 72–85) |
+
+#### The claims
+
+- **P23(a) — sensitivity ≥ 24 of 32 (75%).** *Falsified below 75%.* With four
+  samples inside the window instead of one, the model's flagged set should cover
+  most of it rather than a triangle around a single point.
+- **P23(b) — false positives remain 0 of 38.** *Falsified by any flag in the
+  provably-clean region.* This is the half of run 3's result that was **not**
+  resolution-limited, and widening the window is the obvious way to break it: a
+  model that quietly flags in proportion to window size would fail here and pass
+  (a).
+- **P23(c) — localisation stays 100%**: every flagged benchmark inside the window
+  widened by the sampling interval (24–71). *Falsified by any flag outside it.*
+
+#### Where 75% comes from
+
+`interpolate_trace` is a straight line between adjacent samples, and
+`report_positional_attribution` flags a factor above **1.10**. Run 3's one
+elevated sample read ×1.196 against its baseline, which reproduces its 7 exactly:
+the ramp crosses 1.10 at 4.09 positions either side of the peak, so positions
+61–67 flag and 60 and 68 do not — 7, in the window, all of them.
+
+Applying the same arithmetic to four contiguous elevated samples: the factor is
+**flat** at ×1.196 across 32–56 and ramps at each end, crossing 1.10 at position
+≈28.1 on the way up and ≈59.9 on the way down. Flagged: **29–59**. Intersected
+with the real window 32–63 that is **28 of 32 = 87.5%**, with 29–31 flagged
+outside the window but inside reach, and nothing in the clean region.
+
+So 87.5% is the arithmetic's own answer and **75% is the threshold**, leaving
+room for the elevation to be less uniform across a 3×-longer window than a
+single sample was — which is the physical thing this run actually measures, and
+the reason it is worth running rather than deriving.
+
+#### What each outcome licenses
+
+- **All three hold** → 7-of-12 was the sampling interval, as claimed, and
+  sensitivity is a property of the interval rather than of the model. The
+  remaining lever on it is `CANARY_SAMPLE_EVERY`, not the arithmetic.
+- **(a) fails while (b) and (c) hold** → the model attributes far less than its
+  own interpolation implies, and the 7-of-12 explanation in the run 3 write-up is
+  wrong and must be retracted there.
+- **(b) fails** → the more serious outcome. It would mean run 3's 0-of-58 was an
+  artefact of a narrow window, and the whole attribution claim weakens to
+  "flags a lot, some of it in the right place".
+
+**Not a licence to correct anything.** P23 is about *how much* of a disturbance
+the model finds, not about whether the factor is the right size to divide by —
+that is P22(b)/(c), still unmeasured. §229 stands either way.

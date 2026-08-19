@@ -188,6 +188,116 @@ def sha256(path: str) -> str:
     return digest.hexdigest()
 
 
+#: Source of the on-target self-test whose branches must all survive the
+#: optimiser. Read, not copied -- see `on_target_messages`.
+LAYOUT_PAD_SRC = os.path.join("kernel", "src", "layout_pad.rs")
+
+#: The function inside it whose messages are checked.
+LAYOUT_PAD_FN = "self_test_pad_is_first_in_text"
+
+# `\\[\s\S]` rather than `\\.`, because the escape that matters most here is a
+# backslash before a *newline* -- Rust's line continuation -- and `.` does not
+# match a newline. With `\\.` the multi-line FAIL message was skipped entirely
+# and the extractor found two branches instead of three.
+_SERIAL_PRINTLN_RE = re.compile(r'serial_println!\s*\(\s*"((?:[^"\\]|\\[\s\S])*)"')
+
+
+def on_target_messages(src_path: str | None = None,
+                       root: str = PROJECT_ROOT) -> list[str]:
+    """The longest literal fragment of each message `LAYOUT_PAD_FN` can print.
+
+    # What this is for
+
+    `self_test_pad_is_first_in_text` compares two linker symbols. LLVM
+    guarantees distinct globals have distinct addresses, so on the 2026-08-19
+    release sweep it answered the comparison itself -- always "different" --
+    and deleted the success branch outright. The kernel then halted on every
+    padded release boot. The evidence was that the success string did not
+    occur anywhere in the binary while the failure string did.
+
+    That is the check this reproduces: build a padded kernel, and require
+    *every* branch's message to be present in the image. A branch the
+    optimiser has folded away takes its string with it, because nothing else
+    references it. So string-presence is a direct, cheap proxy for
+    "the comparison is still being made at run time".
+
+    # Why the strings are extracted rather than written down here
+
+    A copy in this file would have to be kept in step with the kernel by hand,
+    and the moment it drifts the check reports on a message the kernel no
+    longer prints. Reading them from the source means rewording a message
+    updates the check in the same edit, and *deleting a branch* -- the thing
+    actually being guarded against -- is what makes the count drop.
+
+    # Why the longest fragment
+
+    `core::fmt` stores a format string as its literal pieces with the
+    arguments interleaved, so `"[layout_pad] {pad} pad byte(s) ..."` is not
+    contiguous in the binary. Searching for a whole formatted message would
+    never match. The pieces between placeholders *are* contiguous, and the
+    longest of them is both long enough to be unique and free of the shared
+    `[layout_pad] ` prefix that all three messages start with.
+
+    Raises `RuntimeError` rather than returning a short list if the function
+    or its messages cannot be found: a check that silently verifies fewer
+    branches than exist is the failure mode this whole module is about.
+    """
+    path = src_path or os.path.join(root, LAYOUT_PAD_SRC)
+    with open(path, "r", encoding="utf-8") as handle:
+        source = handle.read()
+
+    marker = f"pub fn {LAYOUT_PAD_FN}("
+    start = source.find(marker)
+    if start < 0:
+        raise RuntimeError(
+            f"{path} no longer defines `{LAYOUT_PAD_FN}`, so this check does "
+            f"not know what it is checking. Point LAYOUT_PAD_FN at whatever "
+            f"replaced it -- do not delete the check.")
+    # The function is the last item in the file; if that ever stops being
+    # true, a following `\npub fn ` / `\nfn ` bounds it.
+    rest = source[start + len(marker):]
+    end = min((i for i in (rest.find("\npub fn "), rest.find("\nfn "),
+                           rest.find("\npub const "))
+               if i >= 0), default=-1)
+    body = rest if end < 0 else rest[:end]
+
+    fragments = []
+    for literal in _SERIAL_PRINTLN_RE.findall(body):
+        # Rust's line continuation: a backslash before a newline eats the
+        # newline *and* the following indentation.
+        text = re.sub(r"\\\s*\n\s*", "", literal)
+        text = text.replace('\\"', '"').replace("\\\\", "\\")
+        pieces = [p for p in re.split(r"\{[^{}]*\}", text) if p.strip()]
+        if not pieces:
+            raise RuntimeError(
+                f"a `serial_println!` in `{LAYOUT_PAD_FN}` is entirely "
+                f"placeholders ({literal!r}), so it leaves no literal in the "
+                f"binary to look for.")
+        fragments.append(max(pieces, key=len))
+
+    if len(fragments) < 3:
+        raise RuntimeError(
+            f"expected at least 3 `serial_println!` messages in "
+            f"`{LAYOUT_PAD_FN}` (unpadded / misplaced / OK) but found "
+            f"{len(fragments)}: {fragments!r}. If a branch was legitimately "
+            f"removed, update this count; if one was *optimised* away, that "
+            f"is the bug this exists to catch and it has escaped into the "
+            f"source.")
+    if len(set(fragments)) != len(fragments):
+        raise RuntimeError(
+            f"two messages in `{LAYOUT_PAD_FN}` share their longest literal "
+            f"fragment ({fragments!r}), so finding one in the binary would "
+            f"not distinguish which branch survived. Reword one of them.")
+    return fragments
+
+
+def branches_present(binary: str, fragments: list[str]) -> list[str]:
+    """Which of `fragments` are missing from `binary`. Empty means all present."""
+    with open(binary, "rb") as handle:
+        image = handle.read()
+    return [f for f in fragments if f.encode("utf-8") not in image]
+
+
 # ---------------------------------------------------------------------------
 # --self-test
 # ---------------------------------------------------------------------------
@@ -217,7 +327,7 @@ def self_test(profile: str) -> int:
     Builds only -- no QEMU -- so this is minutes, not hours, and is the thing to
     re-run after any change to `layout_pad.rs`, `linker.ld` or `build.rs`.
 
-    Three claims, none of which the sweep can check for itself once it is
+    Four claims, none of which the sweep can check for itself once it is
     running:
 
       1. A malformed `SLATEOS_TEXT_PAD` fails the build rather than defaulting
@@ -229,6 +339,12 @@ def self_test(profile: str) -> int:
       3. A pad of exactly 4096 moves everything by exactly 4096 -- the negative
          control. It is a *correct* build that is *useless* as a sample, and the
          only way to know that is to demonstrate it.
+      4. The kernel's *own* on-target placement check still exists in the
+         optimised image. Claims 1-3 all read the ELF, and on 2026-08-19 they
+         all passed for a kernel that then halted on every boot: LLVM had
+         folded the on-target comparison to a constant and deleted its success
+         branch. An ELF that is correct says nothing about whether the code
+         that inspects it at run time was kept.
     """
     print(f"[layout-sweep] self-test on the '{profile}' profile\n")
 
@@ -307,6 +423,22 @@ def self_test(profile: str) -> int:
                 check(f"the linker emitted exactly the {pad} bytes the "
                       f"compiler was asked for",
                       hi_sym[0] - lo_sym[0], pad)
+
+            # Everything above inspects the *ELF*, which is why it all passed
+            # on 2026-08-19 while the kernel it described could not boot. The
+            # kernel's own on-target check had been folded to a constant
+            # "wrong" and its success path deleted, so the sweep died on its
+            # second arm after a 43-minute build. See `on_target_messages`.
+            missing = branches_present(path, on_target_messages())
+            check_true(
+                f"pad={pad}: every branch of {LAYOUT_PAD_FN}() survives the "
+                f"optimiser",
+                not missing,
+                f"missing from the image: {missing!r}\n         "
+                f"A branch whose message is absent was compiled out, which "
+                f"means the comparison is no longer being made at run time -- "
+                f"the check has become a constant. Read the two linker "
+                f"symbols through layout_pad::opaque_addr().")
 
             # Compare the *distribution* of shifts rather than one sampled
             # function: a single symbol proves nothing about the rest of the

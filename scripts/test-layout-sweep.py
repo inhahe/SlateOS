@@ -351,6 +351,96 @@ def test_the_guard_shares_its_predicate_with_the_analyser(ls):
           "layout_arm_rejection" in source, True)
 
 
+def test_the_on_target_messages_are_read_from_the_kernel_not_copied(ls):
+    """The branch-survival check must track the source it is checking.
+
+    Background: on 2026-08-19 LLVM folded `self_test_pad_is_first_in_text`'s
+    comparison of two linker symbols to a constant -- it guarantees distinct
+    globals have distinct addresses, and `linker.ld` deliberately makes these
+    two alias -- then deleted the success branch as unreachable. Every padded
+    release kernel halted at boot. `--self-test` passed throughout, because
+    every claim it made was about the ELF rather than about the code that
+    inspects the ELF at run time.
+
+    The new claim looks for each branch's message in the image. That only
+    works if the messages it looks for are the kernel's current ones, so they
+    are extracted from `layout_pad.rs` rather than written down twice.
+    """
+    fragments = ls.on_target_messages()
+    check("all three branches of the on-target check are found",
+          len(fragments), 3)
+    check("...and they are distinct, so a hit identifies which branch survived",
+          len(set(fragments)), 3)
+    check("...and none is a bare placeholder-free prefix shared by the others",
+          any("[layout_pad] " == f for f in fragments), False)
+    for fragment in fragments:
+        check(f"...and {fragment[:34]!r}... is long enough to be unique",
+              len(fragment) >= 20, True)
+
+    import tempfile
+    with open(os.path.join(REPO_ROOT, ls.LAYOUT_PAD_SRC), encoding="utf-8") as h:
+        real = h.read()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # A source whose function was renamed away must make the extractor
+        # refuse, not quietly check zero branches.
+        renamed = os.path.join(tmp, "renamed.rs")
+        with open(renamed, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(real.replace(f"pub fn {ls.LAYOUT_PAD_FN}(",
+                                      "pub fn something_else("))
+        try:
+            ls.on_target_messages(renamed)
+            outcome = "silently returned something"
+        except RuntimeError as exc:
+            outcome = "refused" if ls.LAYOUT_PAD_FN in str(exc) else str(exc)
+        check("a renamed on-target check makes the extractor refuse",
+              outcome, "refused")
+
+        # And a source with a branch deleted must make it refuse too -- that
+        # is the shape the bug takes if it ever reaches the source.
+        cut = os.path.join(tmp, "cut.rs")
+        marker = "[layout_pad] no padding in this build"
+        line = next(l for l in real.splitlines() if marker in l)
+        with open(cut, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(real.replace(line + "\n", ""))
+        try:
+            ls.on_target_messages(cut)
+            outcome = "silently returned something"
+        except RuntimeError as exc:
+            outcome = "refused" if "found 2" in str(exc) else str(exc)
+        check("a missing branch makes the extractor refuse rather than check "
+              "the remaining two", outcome, "refused")
+
+
+def test_a_binary_missing_a_branch_is_reported_as_missing(ls):
+    """`branches_present` must find absence, and must not be fooled by UTF-8.
+
+    Two of the three messages contain an em dash. A check that compared `str`
+    against a `bytes` image, or decoded the image as ASCII, would report every
+    branch missing and be dismissed as noise -- which is how a real failure
+    becomes an ignored one.
+    """
+    import tempfile
+    fragments = ls.on_target_messages()
+    with tempfile.TemporaryDirectory() as tmp:
+        image = os.path.join(tmp, "fake-kernel")
+        with open(image, "wb") as handle:
+            handle.write(b"\x7fELF" + b"\x00" * 64)
+            for fragment in fragments:
+                handle.write(fragment.encode("utf-8") + b"\x00")
+        check("a binary containing every message reports nothing missing",
+              ls.branches_present(image, fragments), [])
+
+        dropped = fragments[-1]
+        with open(image, "wb") as handle:
+            handle.write(b"\x7fELF" + b"\x00" * 64)
+            for fragment in fragments:
+                if fragment != dropped:
+                    handle.write(fragment.encode("utf-8") + b"\x00")
+        check("a binary whose success branch was folded away reports it",
+              ls.branches_present(image, fragments), [dropped])
+
+
 def main():
     """Run every `test_*` in this file, in definition order.
 
@@ -360,9 +450,9 @@ def main():
     ls = load_module()
     tests = [(name, fn) for name, fn in list(globals().items())
              if name.startswith("test_") and callable(fn)]
-    if len(tests) < 8:
+    if len(tests) < 10:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 8. Discovery is broken, not the code.")
+              f"suite has at least 10. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

@@ -1101,12 +1101,21 @@ fn ensure_shadow_mapped(shadow_va: u64) -> bool {
 
         // Zero the shadow frame via its HHDM alias before mapping so the
         // default state is "addressable" (0x00).
+        //
+        // `rawmem::fill_u8`, not `core::ptr::write_bytes`. This module's
+        // `sanitize(address = "off")` does not reach a `core` generic
+        // monomorphised into this crate (see `mm::rawmem`'s module docs and
+        // design-decisions.md §118/§119), so `write_bytes` here was an
+        // *instrumented* write — and the frame it writes to is one the buddy
+        // allocator just handed back, which may still carry `0xFA` from
+        // whatever heap object last lived in it. That made backing a shadow
+        // page report a use-after-free against KASAN's own bookkeeping.
         let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
         let frame_virt = phys.to_virt(hhdm) as *mut u8;
         // SAFETY: to_virt yields the HHDM alias of a freshly-allocated frame,
         // valid and writable for FRAME_SIZE bytes.
         unsafe {
-            core::ptr::write_bytes(frame_virt, 0, FRAME_SIZE);
+            crate::mm::rawmem::fill_u8(frame_virt, 0, FRAME_SIZE);
         }
 
         let frame_base = KASAN_SHADOW_BASE + (frame_idx as u64) * FRAME_SIZE as u64;
@@ -1137,8 +1146,17 @@ fn set_shadow(addr: u64, val: u8) {
     }
     // SAFETY: ensure_shadow_mapped guarantees the shadow byte is mapped
     // writable; `sv` is within the reserved shadow range.
+    //
+    // `rawmem::write_u8` rather than `core::ptr::write_volatile` for the same
+    // reason as `ensure_shadow_mapped`'s fill: a `core` generic monomorphised
+    // into this crate carries the default (instrumented) attribute regardless
+    // of this module's opt-out. A shadow write taking its own shadow check is
+    // the recursion this module is built to stay outside of — it happens to be
+    // harmless today only because the shadow window sits outside the covered
+    // range, which is a coincidence of the address-space layout rather than a
+    // property anyone is maintaining.
     unsafe {
-        core::ptr::write_volatile(sv as *mut u8, val);
+        crate::mm::rawmem::write_u8(sv as *mut u8, val);
     }
 }
 

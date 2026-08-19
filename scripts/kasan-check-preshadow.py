@@ -189,6 +189,28 @@ POISON_ROOT_SUBSTRINGS = [
     "2mm6poison12verify_freed",
     "2mm10quarantine11fill_poison",
     "2mm10quarantine15find_corruption",
+    # `mm::kasan`'s own shadow-mutation path.
+    #
+    # These were missing until 2026-08-19, and the omission was not a detail:
+    # `ensure_shadow_mapped` zeroed a freshly-allocated frame through
+    # `core::ptr::write_bytes` (lowered to `memset`), and that frame is the HHDM
+    # alias of memory the buddy allocator just handed back — which can still be
+    # marked `0xFA` from whatever heap object last lived in it. So KASAN's own
+    # bookkeeping write reported a use-after-free against KASAN's own
+    # bookkeeping. `set_shadow` had the same shape with `write_volatile`. See
+    # `known-issues.md` → `B-KASAN-SHADOW-BOOTSTRAP-SELF-REPORT`.
+    #
+    # The reason it was missed is instructive and is why it is listed here now
+    # rather than fixed and forgotten: the three modules above were added as
+    # roots because they *deliberately read poisoned memory*, and `mm::kasan`
+    # does not obviously belong to that category — it is the thing doing the
+    # poisoning. But it writes the shadow, and it touches frames of unknown
+    # poison state, so it is subject to the identical §118/§119 hazard. The
+    # category is "code that must not take a shadow check", not "code that reads
+    # poison", and `mm::kasan` is its charter member.
+    "2mm5kasan10set_shadow",
+    "2mm5kasan20ensure_shadow_mapped",
+    "2mm5kasan16clear_all_poison",
 ]
 
 # Roots that are allowed to be missing from the binary.
@@ -221,6 +243,33 @@ POISON_NO_EXPAND_SUBSTRINGS = [
     "2mm8kasan_rt6report",
     "4core3fmt",
     "9panicking",
+    # --- Cuts belonging to the `mm::kasan` roots added 2026-08-19 ---
+    #
+    # `ensure_shadow_mapped` backs a shadow page: it allocates a frame, zeroes
+    # it, installs a PTE for it, and shoots down the TLB. Exactly *one* of those
+    # accesses touches memory of unknown poison state — the zeroing of the
+    # freshly-allocated frame through its HHDM alias, which is the bug the root
+    # was added for (`B-KASAN-SHADOW-BOOTSTRAP-SELF-REPORT`). The other three are
+    # ordinary live kernel memory: the buddy allocator's own bookkeeping, the
+    # page-table pool's freelist, and an APIC MMIO register. Instrumentation
+    # there is correct and even desirable — it is how a bug in the allocator
+    # itself would be caught — so descending into them yields only noise. It
+    # yielded 35 findings on the first run, every one of them a `read_volatile`
+    # on a scheduler queue, a swap slot, or `apic_read`.
+    #
+    # Cut at the callee rather than by no-expanding `ensure_shadow_mapped`
+    # itself, which was the tempting shortcut. No-expanding the root would stop
+    # the walk from examining the root's *own* direct callees — and the bug
+    # being guarded against appears in the graph as precisely that: a `memset`
+    # called directly from `ensure_shadow_mapped`. Cutting the root would have
+    # produced a green check on the exact binary that had the bug in it.
+    #
+    # The length prefixes make these exact despite being substring tests:
+    # `11alloc_frame` cannot match `18alloc_frame_zeroed`.
+    "2mm5frame11alloc_frame",
+    "2mm5frame10free_frame",
+    "2mm10page_table13alloc_pt_page",
+    "3tlb11flush_range",
 ]
 
 # The third walk's violation rule is deliberately NOT the first two's.
@@ -285,16 +334,23 @@ POISON_ACCESSOR_SUBSTRINGS = ["4core3ptr", "4core10intrinsics"]
 # unrelated symbol that merely contains them.
 POISON_ACCESSOR_EXACT = {"memset", "memcpy", "memmove"}
 
-# What this branch is actually doing today: nothing, and that is the point.
+# What this branch is actually doing today.
 #
-# After the `rawmem` conversion, *zero* accessors of any kind are reachable from
-# the poison roots — the byte touching is all inline `asm!`, which emits no call
-# at all. So the accessor branch currently judges an empty set, and passes
-# because there is nothing to judge rather than because what it judged was
-# clean. That is the correct end state, but it is worth stating plainly, because
-# a check that is vacuous by accident and one that is vacuous by success look
-# identical from the exit code. The OK line reports the accessor count for
-# exactly this reason.
+# It used to do nothing. After the `rawmem` conversion, *zero* accessors of any
+# kind were reachable from the poison roots — the byte touching was all inline
+# `asm!`, which emits no call at all — so the branch judged an empty set and
+# passed because there was nothing to judge rather than because what it judged
+# was clean. That was worth stating plainly, because a check that is vacuous by
+# accident and one that is vacuous by success look identical from the exit code,
+# and it is why the OK line reports the accessor count at all.
+#
+# Since the `mm::kasan` roots were added (2026-08-19) the count is no longer
+# zero: the branch judges a small number of accessors and finds them
+# uninstrumented. That is a strict improvement — the branch is now *tested* on
+# every run rather than only prospectively — and it is the reason the count is
+# printed rather than merely the verdict. A drop back to zero would mean the
+# roots stopped reaching anything, i.e. a rename silently emptied the walk, and
+# is the number to watch.
 #
 # The branch earns its keep prospectively: it fires the moment someone
 # reintroduces a `core::ptr` call or a `memset` onto a poison path, which is the

@@ -123,6 +123,70 @@ unsafe extern "C" {
     static __layout_pad_end: u8;
 }
 
+/// Read a linker-defined symbol's address as an integer the optimiser must
+/// treat as unknown.
+///
+/// # Why this exists — the bug it fixes
+///
+/// LLVM's object model guarantees that two *distinct* global objects live at
+/// *distinct* addresses. That is a licence to constant-fold: given `&A` and
+/// `&B` for two different globals, `&A == &B` is `false` and the equal-branch
+/// is dead code, deletable without ever consulting the linker.
+///
+/// `__text_start` and `__layout_pad_start` are two distinct declarations. They
+/// are also, by construction, the *same address* — `linker.ld` emits them back
+/// to back with nothing between:
+///
+/// ```text
+/// .text : ALIGN(4K) {
+///     __text_start = .;
+///     __layout_pad_start = .;
+///     KEEP(*(.text.slateos_layout_pad))
+/// ```
+///
+/// So the source says "compare two addresses" and the optimiser reads
+/// "compare two distinct globals", concludes they differ, and compiles
+/// `self_test_pad_is_first_in_text` down to its failure path with the success
+/// path removed entirely. Measured on the 2026-08-19 release sweep: the string
+/// `"pad byte(s) at the head of .text"` did not occur *anywhere* in the padded
+/// release binary, while the FAIL string did. The self-test had become a check
+/// that always fires — the exact inverse of this project's signature defect
+/// (a check that cannot fire), and worse, because `main.rs` halts on it, so
+/// every optimised nonzero-pad kernel wedged at boot.
+///
+/// Passing the address through an empty `asm!` block with the value as an
+/// `inout` operand fixes it at the root. The compiler must assume the block
+/// wrote an arbitrary integer into that register, so nothing it knew about the
+/// symbol survives — including that it was a symbol at all. The comparison
+/// then has to happen at run time, against what the linker actually emitted,
+/// which is the only place the question has an answer.
+///
+/// `core::hint::black_box` would very likely work today, but its documentation
+/// is explicit that it guarantees nothing and may become a no-op. A check that
+/// silently reverts to always-failing on a compiler upgrade is not a check.
+#[must_use]
+fn opaque_addr(symbol: *const u8) -> usize {
+    let mut addr = symbol as usize;
+    // SAFETY: the template assembles to nothing — `/* {0} */` is an assembler
+    // comment, and exists only because rustc rejects an operand the template
+    // never names. So no instruction executes and there are no effects to
+    // describe. `inout(reg)` merely forces the value through a register the
+    // compiler must then treat as opaque. `nomem` is accurate (no memory is
+    // touched — note we take the *address*, never a load through it),
+    // `nostack` is accurate (nothing is pushed), and `preserves_flags` is
+    // accurate (no instruction runs, so no flag can change). Deliberately
+    // *not* `pure`: purity would let the optimiser reason about the result
+    // again, which is the whole thing being prevented.
+    unsafe {
+        core::arch::asm!(
+            "/* {0} */",
+            inout(reg) addr,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    addr
+}
+
 /// Padding bytes actually emitted, as measured by the **linker**.
 ///
 /// # Why this is not just `PAD_BYTES`
@@ -146,10 +210,17 @@ unsafe extern "C" {
 /// reintroduced by the tool meant to measure it. Reading the length through
 /// linker symbols the compiler cannot see makes every arm byte-identical apart
 /// from the padding itself.
+///
+/// Both addresses are read through [`opaque_addr`]. Nothing has been observed
+/// folding here — the `textpad=0` message survived into the binary that lost
+/// its sibling branch, so the `pad == 0` test was still being evaluated — but
+/// this rests on the same "two distinct globals cannot share an address"
+/// assumption that deleted the other branch, and the failure mode is a
+/// *silent* wrong length rather than a loud one. Read them the same way.
 #[must_use]
 pub fn pad_bytes() -> usize {
-    let start = core::ptr::addr_of!(__layout_pad_start) as usize;
-    let end = core::ptr::addr_of!(__layout_pad_end) as usize;
+    let start = opaque_addr(core::ptr::addr_of!(__layout_pad_start));
+    let end = opaque_addr(core::ptr::addr_of!(__layout_pad_end));
     end.saturating_sub(start)
 }
 
@@ -184,9 +255,13 @@ const _: () = assert!(parse_pad(Some("1048576")) == 1024 * 1024);
 /// So check it on the target, where it is true or not. Runs on every boot.
 /// Every value it reads comes from a linker symbol, so this function compiles
 /// to the same bytes in every build — see [`pad_bytes`].
+///
+/// Both addresses go through [`opaque_addr`], without which the optimiser
+/// answers the comparison itself, always with "different", and deletes the
+/// success path. See that function for the measurement.
 pub fn self_test_pad_is_first_in_text() -> crate::error::KernelResult<()> {
-    let text_start = core::ptr::addr_of!(__text_start) as usize;
-    let pad_start = core::ptr::addr_of!(__layout_pad_start) as usize;
+    let text_start = opaque_addr(core::ptr::addr_of!(__text_start));
+    let pad_start = opaque_addr(core::ptr::addr_of!(__layout_pad_start));
     let pad = pad_bytes();
 
     if pad == 0 {

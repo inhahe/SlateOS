@@ -834,6 +834,13 @@ def test_banner_survives_a_second_key_being_added(bh):
     text = "[boot] build profile: sanitizer=none opt=3 lto=thin\n" + S_PASS
     check("extra keys do not break the match", _serial(bh, text).sanitizer,
           "none")
+    # No longer hypothetical: `textpad=` was appended on 2026-08-19 for the
+    # layout-sensitivity sweep (kernel/src/layout_pad.rs). Assert the *real*
+    # banner, not just a stand-in for it -- the stand-in would have kept
+    # passing whatever the kernel actually printed.
+    real = "[boot] build profile: sanitizer=kasan-instrumented textpad=3072\n"
+    check("the real two-key banner still yields the sanitizer",
+          _serial(bh, real + S_PASS).sanitizer, "kasan-instrumented")
 
 
 def test_kasan_fp_still_matches_a_pre_banner_log(bh):

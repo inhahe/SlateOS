@@ -132,6 +132,7 @@ mod ksyms;
 mod ktimer;
 mod ktrace;
 mod kwarn;
+mod layout_pad;
 mod limine;
 mod loadavg;
 mod lockdep;
@@ -479,14 +480,33 @@ extern "C" fn kernel_main() -> ! {
     // value varies rather than the line's existence, absence is a third and
     // distinguishable state — "this kernel predates the banner" — which is what
     // a parser needs in order to decline to guess.
+    //
+    // `textpad=` is the same idea applied to code *placement*: under QEMU's TCG
+    // a loop that straddles a 4 KiB guest page costs ~1.7x per iteration, and
+    // relinking re-rolls that, so two builds of identical source can differ by
+    // that much on a benchmark. `SLATEOS_TEXT_PAD` deliberately perturbs the
+    // layout so the effect can be measured rather than guessed at; the value is
+    // reported here so a bench record can say which placement produced it,
+    // instead of the harness having to remember what it built.
     serial_println!(
-        "[boot] build profile: sanitizer={}",
+        "[boot] build profile: sanitizer={} textpad={}",
         if cfg!(kasan_instrumented) {
             "kasan-instrumented"
         } else {
             "none"
-        }
+        },
+        layout_pad::pad_bytes()
     );
+    // Fatal on purpose, and harmless in a normal build. With no padding this
+    // returns immediately, so an ordinary boot cannot reach the halt. In a
+    // sweep build a misplaced pad means every sample is a subset of every
+    // other one and the resulting "layout sensitivity" is an underestimate of
+    // unknown size — numbers that are worse than none, because they would be
+    // used to dismiss real regressions. Refusing to boot is the only outcome
+    // that cannot be mistaken for a clean run.
+    if layout_pad::self_test_pad_is_first_in_text().is_err() {
+        cpu::halt_loop();
+    }
     boot_timing::mark(boot_timing::Milestone::KernelEntry);
 
     // Lay down the boot-stack overflow canary now, while RSP is near the top

@@ -76,6 +76,16 @@ fn main() {
     println!("cargo:rustc-link-arg=-T{manifest}/linker.ld");
     println!("cargo:rerun-if-changed=linker.ld");
 
+    // `kernel/src/layout_pad.rs` reads this with `option_env!`, so cargo has to
+    // be told that changing it invalidates the build. Without this line a
+    // layout sweep would set a new pad value, get a cache hit, and measure the
+    // *previous* layout under the new label — a calibration that silently
+    // measures nothing, which is precisely the failure the pad exists to
+    // detect. (The kernel also prints the value it was actually built with in
+    // its boot banner, so a stale build is visible in the record too; belt and
+    // braces, because this one is invisible at the point where it matters.)
+    println!("cargo:rerun-if-env-changed=SLATEOS_TEXT_PAD");
+
     ada_build(Path::new(&manifest));
 }
 

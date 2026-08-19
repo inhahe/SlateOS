@@ -31,8 +31,10 @@ import contextlib
 import importlib.util
 import inspect
 import io
+import json
 import math
 import os
+import statistics
 import sys
 import tempfile
 
@@ -1175,23 +1177,37 @@ def test_profile_isolation(bh, tmpdir):
     # The load-bearing case: a release run must NOT pick up a debug baseline,
     # even though it is the most recent record for this host.
     check("a release run finds no baseline among debug-only records",
-          bh.previous_for_host([debug_old, debug_new], "H", "release"), None)
+          bh.previous_for_host([debug_old, debug_new], "H", "release", None),
+          None)
     check("a debug run does not pick up a release baseline",
-          bh.previous_for_host([debug_old, release], "H", "debug"), debug_old)
+          bh.previous_for_host([debug_old, release], "H", "debug", None),
+          debug_old)
     check("a release run finds the release record past a later debug one",
-          bh.previous_for_host([release, debug_new], "H", "release"), release)
+          bh.previous_for_host([release, debug_new], "H", "release", None),
+          release)
     check("legacy profile-less records are still matched by a debug run",
-          bh.previous_for_host([debug_old], "H", "debug"), debug_old)
+          bh.previous_for_host([debug_old], "H", "debug", None), debug_old)
     check("the host filter still applies within a profile",
-          bh.previous_for_host([other_host], "H", "release"), None)
+          bh.previous_for_host([other_host], "H", "release", None), None)
     check("the newest same-profile record wins",
-          bh.previous_for_host([debug_old, debug_new], "H", "debug"), debug_new)
+          bh.previous_for_host([debug_old, debug_new], "H", "debug", None),
+          debug_new)
 
-    # The default must stay "debug" so an old caller that passes no --profile
-    # keeps comparing against the legacy records rather than silently finding
-    # nothing.
-    check("the profile argument defaults to debug",
-          bh.previous_for_host([debug_old], "H"), debug_old)
+    # Neither window selector may be defaulted. `profile` used to default to
+    # `debug`, on the reasoning that an old caller passing no --profile should
+    # keep finding the legacy records. There is no such caller, and a selector
+    # that silently picks a population when the caller forgets to name one is
+    # the exact failure the accelerator filter was added to prevent: on this
+    # host the unnamed accelerator bucket holds sixty runs, so the wrong answer
+    # looks like a full and healthy history.
+    for fn in (bh.previous_for_host, bh.comparable_records):
+        try:
+            fn([debug_old], "H", "debug")
+        except TypeError:
+            pass
+        else:
+            check(fn.__name__ + " must not default its accelerator",
+                  False, True)
 
 
 def test_missing_log(bh, tmpdir):
@@ -1291,7 +1307,8 @@ def _run_position(bh, records, current, previous, host="h", profile="debug"):
     import contextlib
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        bh.report_run_position(records, host, profile, current, previous)
+        bh.report_run_position(records, host, profile, None, current,
+                               previous)
     return buf.getvalue()
 
 
@@ -1869,10 +1886,12 @@ def test_loaded_control_runs_are_never_a_baseline(bh):
     records = [good_old, control, good_new]
 
     check("a loaded control is excluded from the comparable window",
-          [r["commit"] for r in bh.comparable_records(records, "H", "release")],
+          [r["commit"] for r in
+           bh.comparable_records(records, "H", "release", None)],
           ["old", "new"])
     check("the previous-run baseline skips it",
-          bh.previous_for_host(records[:2], "H", "release")["commit"], "old")
+          bh.previous_for_host(records[:2], "H", "release", None)["commit"],
+          "old")
     check("an unlabelled record is still comparable",
           bh.record_host_load(good_old), bh.HOST_LOAD_UNKNOWN)
     check("a nonsense label reads as unknown rather than crashing",
@@ -2165,14 +2184,14 @@ def test_level_shift_catches_a_regression_the_other_checks_cannot_see(bh):
     stable = [1000] * 6
     # Eleven prior runs: eight flat (the reference), then three elevated.
     persisted = _shift_history(bh, stable + [1000, 1000] + [3000, 3000])
-    rows = bh.level_shifts(persisted, "H", "release",
+    rows = bh.level_shifts(persisted, "H", "release", None,
                            dict(persisted[-1]["entries"], v=3000))
     names = [r[0] for r in rows]
     check("a step that persisted is reported", names, ["v"])
 
     # Same current value, but the run before it was back at baseline.
     blipped = _shift_history(bh, stable + [1000, 1000] + [1000, 1000])
-    rows = bh.level_shifts(blipped, "H", "release",
+    rows = bh.level_shifts(blipped, "H", "release", None,
                            dict(blipped[-1]["entries"], v=3000))
     check("a one-run excursion of the same size is not",
           [r[0] for r in rows], [])
@@ -2180,13 +2199,13 @@ def test_level_shift_catches_a_regression_the_other_checks_cannot_see(bh):
     # And a flat history reports nothing at all.
     flat = _shift_history(bh, stable + [1000] * 4)
     check("a flat history is silent",
-          bh.level_shifts(flat, "H", "release",
+          bh.level_shifts(flat, "H", "release", None,
                           dict(flat[-1]["entries"], v=1000)), [])
 
     # Too little history is silence, not a finding: same rule as the bands.
     thin = _shift_history(bh, [1000, 1000, 1000])
     check("too little history cannot manufacture a shift",
-          bh.level_shifts(thin, "H", "release",
+          bh.level_shifts(thin, "H", "release", None,
                           dict(thin[-1]["entries"], v=9999)), [])
 
     # The percent threshold, pinned deliberately, because on the recorded
@@ -2200,9 +2219,9 @@ def test_level_shift_catches_a_regression_the_other_checks_cannot_see(bh):
     small = _shift_history(bh, stable + [1000, 1000] + [1100, 1100])
     current = dict(small[-1]["entries"], v=1100)
     check("a persistent move below the threshold is not reported",
-          bh.level_shifts(small, "H", "release", current), [])
+          bh.level_shifts(small, "H", "release", None, current), [])
     check("...and the same move is reported once the threshold allows it",
-          [r[0] for r in bh.level_shifts(small, "H", "release", current,
+          [r[0] for r in bh.level_shifts(small, "H", "release", None, current,
                                          threshold_pct=5.0)], ["v"])
 
 
@@ -2254,6 +2273,7 @@ def test_level_shift_replays_the_real_history_without_crying_wolf(bh):
     for i, record in enumerate(records):
         rows = bh.level_shifts(records[:i], record.get("host"),
                                bh.record_profile(record),
+                               bh.record_accel(record),
                                record.get("entries", {}))
         if rows:
             fired.append((i, [r[0] for r in rows]))
@@ -2458,7 +2478,7 @@ def test_mode_structure_separates_binaries_from_runs(bh):
         ("aaa", 6000), ("aaa", 6200),      # always below
         ("bbb", 11000), ("bbb", 12500),    # always above
     ])
-    verdict = bh.mode_structure(structured, "H", "release", "b", 7500)
+    verdict = bh.mode_structure(structured, "H", "release", None, "b", 7500)
     check("a split no repeat crosses is mode-structured",
           verdict.verdict, bh.MODE_STRUCTURED)
     check("...and it names both sides",
@@ -2469,7 +2489,7 @@ def test_mode_structure_separates_binaries_from_runs(bh):
         ("aaa", 6000), ("aaa", 6200),
         ("bbb", 6500), ("bbb", 12500),     # same commit, both sides
     ])
-    verdict = bh.mode_structure(noisy, "H", "release", "b", 7500)
+    verdict = bh.mode_structure(noisy, "H", "release", None, "b", 7500)
     check("a single commit spanning the split is run noise",
           verdict.verdict, bh.MODE_RUN_NOISE)
 
@@ -2489,14 +2509,14 @@ def test_mode_structure_abstains_without_evidence(bh):
     """
     single = _mode_records([("aaa", 6000), ("bbb", 12000)])
     check("one measurement per commit decides nothing",
-          bh.mode_structure(single, "H", "release", "b", 7500).verdict,
+          bh.mode_structure(single, "H", "release", None, "b", 7500).verdict,
           bh.MODE_UNDECIDED)
 
     one_sided = _mode_records([
         ("aaa", 6000), ("aaa", 6200),
         ("bbb", 6100), ("bbb", 6300),
     ])
-    verdict = bh.mode_structure(one_sided, "H", "release", "b", 7500)
+    verdict = bh.mode_structure(one_sided, "H", "release", None, "b", 7500)
     check("repeats all on one side decide nothing", verdict.verdict,
           bh.MODE_UNDECIDED)
     # Guard: this really is the one-sided shape, not an empty-repeats accident.
@@ -2509,7 +2529,7 @@ def test_mode_structure_abstains_without_evidence(bh):
               {"host": "H", "profile": "debug", "commit": "bbb",
                "entries": {"b": 12400}}]
     check("another profile's repeats are not evidence here",
-          bh.mode_structure(mixed, "H", "release", "b", 7500).verdict,
+          bh.mode_structure(mixed, "H", "release", None, "b", 7500).verdict,
           bh.MODE_UNDECIDED)
 
 
@@ -2532,7 +2552,8 @@ def test_mode_structure_on_the_real_history(bh):
         return
 
     http = bh.mode_structure(
-        records, "Logoplex3", "release", "http_build_response_1KiB", 7500)
+        records, "Logoplex3", "release", None,
+        "http_build_response_1KiB", 7500)
     check("the real bimodal series is mode-structured",
           http.verdict, bh.MODE_STRUCTURED)
     # Guard: the verdict must rest on real repeat evidence, not on an empty set.
@@ -2540,7 +2561,7 @@ def test_mode_structure_on_the_real_history(bh):
           len(http.repeats) >= 3, True)
 
     vfs = bh.mode_structure(
-        records, "Logoplex3", "release", "vfs_stat_root", 4200)
+        records, "Logoplex3", "release", None, "vfs_stat_root", 4200)
     check("the continuously-spread series is NOT mode-structured",
           vfs.verdict == bh.MODE_STRUCTURED, False)
 
@@ -2562,7 +2583,8 @@ def test_mode_split_search_finds_what_a_fixed_fence_misses(bh):
     if not records:
         check("the frozen history fixture is present", False, True)
         return
-    args = (records, "Logoplex3", "release", "http_build_response_1KiB")
+    args = (records, "Logoplex3", "release", None,
+            "http_build_response_1KiB")
 
     # Guard: the fence really must give the wrong answer, or this test is
     # asserting nothing and would keep passing if the search were deleted.
@@ -2581,7 +2603,7 @@ def test_mode_split_search_finds_what_a_fixed_fence_misses(bh):
 
     # A series that is not mode-structured must yield no split at all.
     none_found = bh.mode_split_search(
-        records, "Logoplex3", "release", "vfs_stat_root", 3600, 4488)
+        records, "Logoplex3", "release", None, "vfs_stat_root", 3600, 4488)
     check("no split is invented for a non-bimodal series",
           none_found, None)
 
@@ -2777,13 +2799,14 @@ def test_replication_evidence_must_be_the_same_binary_on_the_same_terms(bh):
     # the filtering out of `values_for_binary` is caught here too.
     history = _repl_history(bh, 500, "xxx")
     check("values_for_binary finds the repeat",
-          bh.values_for_binary(history, "H", "release", "b0",
+          bh.values_for_binary(history, "H", "release", None, "b0",
                                {"commit": "xxx"}), [500])
     check("...and refuses to match the unknown sentinel",
-          bh.values_for_binary(history, "H", "release", "b0",
+          bh.values_for_binary(history, "H", "release", None, "b0",
                                {"commit": bh.UNKNOWN_COMMIT}), [])
     check("...and refuses to match on no identity at all",
-          bh.values_for_binary(history, "H", "release", "b0", None), [])
+          bh.values_for_binary(history, "H", "release", None, "b0", None),
+          [])
 
 
 def test_binary_identity_is_the_image_not_the_commit(bh, tmpdir):
@@ -2866,10 +2889,11 @@ def test_binary_identity_is_the_image_not_the_commit(bh, tmpdir):
     unknowns = [{"host": "H", "profile": "release", "commit": "c1",
                  "dirty": True, "entries": {"b0": 500}}]
     check("two unidentifiable runs are not evidence about each other",
-          bh.values_for_binary(unknowns, "H", "release", "b0",
+          bh.values_for_binary(unknowns, "H", "release", None, "b0",
                                {"commit": "c1", "dirty": True}), [])
     check("...and no `this_run` at all finds nothing rather than everything",
-          bh.values_for_binary(unknowns, "H", "release", "b0", None), [])
+          bh.values_for_binary(unknowns, "H", "release", None, "b0", None),
+          [])
 
     # And the hash itself: same bytes, same value; different bytes, different.
     one = os.path.join(tmpdir, "k1")
@@ -3160,7 +3184,8 @@ def test_replication_declines_the_measured_false_positives(bh):
     run_b = records[at[1]]
     host, profile = run_b["host"], bh.record_profile(run_b)
     prior = records[:at[1]]
-    previous = bh.previous_for_host(prior, host, profile)
+    previous = bh.previous_for_host(prior, host, profile,
+                                    bh.record_accel(run_b))
     current = {name: (value, 10 ** 9, "OK", None, None)
                for name, value in run_b["entries"].items()}
 
@@ -3376,16 +3401,19 @@ def test_experiment_runs_are_recorded_but_never_a_baseline(bh, tmpdir):
           "excluded from every future baseline" in buf.getvalue(), True)
 
     check("an experiment record is not comparable history",
-          bh.comparable_records([record], record["host"], "release"), [])
+          bh.comparable_records([record], record["host"], "release", None),
+          [])
     check("...and so cannot be the previous run",
-          bh.previous_for_host([record], record["host"], "release"), None)
+          bh.previous_for_host([record], record["host"], "release", None),
+          None)
 
     # An ordinary run alongside it is still found, so the filter excludes the
     # probe rather than merely emptying the window.
     ordinary = dict(record)
     ordinary.pop("experiment")
     ordinary["timestamp"] = "2026-08-18T16:00:00+00:00"
-    window = bh.comparable_records([record, ordinary], record["host"], "release")
+    window = bh.comparable_records([record, ordinary], record["host"],
+                                   "release", None)
     check("the ordinary run beside it is still eligible", len(window), 1)
     check("...and it is the one without the label",
           window[0]["timestamp"], "2026-08-18T16:00:00+00:00")
@@ -3825,7 +3853,7 @@ def test_sweep_arms_are_read_even_though_they_are_experiments(bh):
     arms = _sweep_arms({0: 500, 1024: 600, 2048: 550})
 
     check("the shared filter does refuse them (that part is correct)",
-          bh.comparable_records(arms, "H", "release"), [])
+          bh.comparable_records(arms, "H", "release", None), [])
     # The key is `(commit, accel)`, not a bare commit: the accelerator is part
     # of the grouping key so that arms which ran on different accelerators
     # cannot land in one band at all. `None` here is "these records predate the
@@ -4664,14 +4692,14 @@ def test_a_sustained_shift_across_one_fixed_image_is_never_placement(bh):
 
     # The predicate itself, at its two ends.
     check("all-one-image is proof placement could not differ",
-          bh.placement_is_constant(fixed, "H", "release",
+          bh.placement_is_constant(fixed, "H", "release", None,
                                    {"kernel_sha": "frozen"}), True)
     unknown = _shift_with_sweep(bh, {0: 1000, 1024: 4000, 2048: 2000})
     check("...and unidentifiable runs are NOT proof of that",
-          bh.placement_is_constant(unknown, "H", "release",
+          bh.placement_is_constant(unknown, "H", "release", None,
                                    {"kernel_sha": "now"}), False)
     check("...nor is a run that cannot name its own image",
-          bh.placement_is_constant(fixed, "H", "release", None), False)
+          bh.placement_is_constant(fixed, "H", "release", None, None), False)
 
 
 def test_the_layout_veto_reads_the_same_window_the_shift_was_drawn_from(bh):
@@ -4684,7 +4712,7 @@ def test_the_layout_veto_reads_the_same_window_the_shift_was_drawn_from(bh):
     only restate the implementation.
     """
     history = _shift_with_sweep(bh, {})
-    reference, recent = bh.level_shift_window(history, "H", "release")
+    reference, recent = bh.level_shift_window(history, "H", "release", None)
     honest = [r for r in history if "text_pad" not in r]
 
     check("the corroborating runs are the newest honest ones",
@@ -4697,13 +4725,13 @@ def test_the_layout_veto_reads_the_same_window_the_shift_was_drawn_from(bh):
 
     current = dict(honest[-1]["entries"])
     check("the shift is found to begin with",
-          [r[0] for r in bh.level_shifts(history, "H", "release", current)],
+          [r[0] for r in bh.level_shifts(history, "H", "release", None, current)],
           ["v"])
 
     # Put one corroborating run back at baseline: the finding must vanish.
     recent[0]["entries"] = dict(recent[0]["entries"], v=1000)
     check("a run inside the corroboration window decides the verdict",
-          bh.level_shifts(history, "H", "release", current), [])
+          bh.level_shifts(history, "H", "release", None, current), [])
     recent[0]["entries"] = dict(recent[0]["entries"], v=3000)
 
     # The one run in neither window must not: that buffer is why
@@ -4713,7 +4741,7 @@ def test_the_layout_veto_reads_the_same_window_the_shift_was_drawn_from(bh):
           id(buffer_run) in set(map(id, reference + recent)), False)
     buffer_run["entries"] = dict(buffer_run["entries"], v=99999)
     check("...and changing it changes nothing",
-          [r[0] for r in bh.level_shifts(history, "H", "release", current)],
+          [r[0] for r in bh.level_shifts(history, "H", "release", None, current)],
           ["v"])
 
 
@@ -5419,6 +5447,343 @@ def test_the_accel_report_is_ascii_and_carries_its_own_reproduce_line(bh,
           "--markdown" in out, True)
 
 
+# ---------------------------------------------------------------------------
+# The accelerator partition, and the wall-clock axis it unblinded
+# ---------------------------------------------------------------------------
+
+_TCG = "QEMU TCG"
+_WHPX = "Hyper-V/WHPX"
+
+
+def _release_records(bh):
+    """The real release records, or `[]` if the history is missing."""
+    if not os.path.exists(HISTORY):
+        return []
+    return [r for r in bh.load_history(HISTORY)
+            if bh.record_profile(r) == "release"]
+
+
+def test_a_history_window_never_mixes_accelerators(bh):
+    """A run is judged only against runs on the same accelerator.
+
+    This is the same rule the build profile has always had, for a stronger
+    reason. `previous_for_host` argues that debug-vs-release is "a multiple
+    rather than a percentage" and that the drift correction cannot rescue it
+    because the ratio is not uniform across the suite. Both are true of the
+    accelerator and by more: WHPX is ~3.5x faster than TCG on the median
+    benchmark and ~30x *slower* on the device-bound ones, so a mixed window is
+    not a wider distribution, it is two of them.
+    """
+    tcg_old = _record(commit="tcg-old", accel=_TCG)
+    whpx = _record(commit="whpx", accel=_WHPX)
+    tcg_new = _record(commit="tcg-new", accel=_TCG)
+    legacy = _record(commit="legacy")
+    records = [tcg_old, whpx, tcg_new, legacy]
+
+    check("a TCG window holds only the TCG runs",
+          [r["commit"] for r in
+           bh.comparable_records(records, "H", "release", _TCG)],
+          ["tcg-old", "tcg-new"])
+    check("a WHPX window holds only the WHPX run",
+          [r["commit"] for r in
+           bh.comparable_records(records, "H", "release", _WHPX)],
+          ["whpx"])
+    check("the baseline skips across the boundary, not through it",
+          bh.previous_for_host(records, "H", "release", _TCG)["commit"],
+          "tcg-new")
+    check("...and a WHPX run's baseline is the WHPX one",
+          bh.previous_for_host(records, "H", "release", _WHPX)["commit"],
+          "whpx")
+
+
+def test_an_unrecorded_accelerator_is_a_value_not_an_assumption(bh):
+    """Absent must not be folded into TCG. It is its own bucket.
+
+    The module says so where `ACCEL_RE` is defined, and the reason is not
+    stylistic: the first WHPX run on this host was recorded *before* the field
+    existed, so an absent value is demonstrably not evidence of TCG. Folding
+    the two would pull that run into the TCG baseline, where a 3.5x population
+    would sit inside a band that then dismisses every regression under it.
+
+    The cost is real and is accepted: the first labelled TCG run finds no
+    history at all, and both banded axes correctly abstain. Abstaining loudly
+    beats certifying quietly -- the whole reason this file's verdict is
+    three-valued.
+    """
+    legacy = _record(commit="legacy")
+    blank = _record(commit="blank", accel="")
+    tcg = _record(commit="tcg", accel=_TCG)
+
+    check("a record with no accel field reads as unrecorded",
+          bh.record_accel(legacy), bh.ACCEL_UNRECORDED)
+    check("...and so does an empty string, rather than becoming its own value",
+          bh.record_accel(blank), bh.ACCEL_UNRECORDED)
+    check("a labelled record reads as itself", bh.record_accel(tcg), _TCG)
+
+    check("an unrecorded run is NOT admitted to the TCG window",
+          bh.comparable_records([legacy, blank], "H", "release", _TCG), [])
+    check("...and the TCG run is not admitted to the unrecorded one",
+          [r["commit"] for r in bh.comparable_records(
+              [legacy, blank, tcg], "H", "release", bh.ACCEL_UNRECORDED)],
+          ["legacy", "blank"])
+
+
+def test_the_partition_is_reported_when_it_empties_a_window(bh):
+    """A window the partition emptied must say so, and only then.
+
+    Without this the first labelled run after the schema change reads "too few
+    comparable runs (0 < 6)" beside a history file holding dozens of them --
+    a true sentence that describes a missing history rather than a deliberate
+    split, and the reader has no way to tell which.
+    """
+    legacy = [_record(commit=f"old{i}") for i in range(9)]
+    whpx = [_record(commit="w", accel=_WHPX)]
+    records = legacy + whpx
+
+    note = bh.accel_thinning_note(records, "H", "release", _TCG)
+    check("a window the partition emptied explains itself", note is not None,
+          True)
+    check("...naming the runs that predate the field",
+          "9 that predate the `accel` field" in (note or ""), True)
+    check("...and the runs on the other accelerator",
+          "1 on a different accelerator" in (note or ""), True)
+    check("...in ASCII, like everything else this file prints",
+          (note or "").isascii(), True)
+
+    # And it must stay quiet when the partition changed nothing, or it becomes
+    # a line that is always there and therefore never read. Note that this case
+    # keeps the excluded neighbours: a window that is long enough must stay
+    # silent *even though* there are runs next door, which is the only version
+    # of this check that can tell the length guard from the neighbour guard.
+    plenty = [_record(commit=f"t{i}", accel=_TCG) for i in range(6)]
+    check("a window with its own history says nothing about the neighbours",
+          bh.accel_thinning_note(plenty + records, "H", "release", _TCG), None)
+    check("nor does a short one with no neighbours to exclude",
+          bh.accel_thinning_note(plenty[:1], "H", "release", _TCG), None)
+
+    # The count must be of runs the *accelerator* filter removed, and nothing
+    # else. A record on another machine, in another profile, or under a
+    # deliberate load was never a candidate for this window, so counting it
+    # here would tell the reader that a run is sitting just the other side of
+    # the accelerator line when in fact it is the other side of three of them.
+    # That is not a cosmetic overcount: the note's whole claim is "these runs
+    # would be usable if you stayed on one accelerator", and for these it is
+    # false. Only the count can catch this -- the note fires either way.
+    strangers = [
+        _record(commit="elsewhere", host="OtherHost"),
+        _record(commit="debug", profile="debug"),
+        _record(commit="loaded", host_load="loaded"),
+        _record(commit="tagged", experiment="layout-sweep"),
+    ]
+    check("neighbours are counted, strangers are not",
+          bh.accel_window_thinning(records + strangers, "H", "release", _TCG),
+          bh.accel_window_thinning(records, "H", "release", _TCG))
+    check("...and the strangers really were there to be miscounted",
+          len(strangers), 4)
+
+
+def test_the_wall_band_fires_on_the_real_history(bh):
+    """Positive control: the wall axis is a detector, not just a recorder.
+
+    `known-issues.md` B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING shipped this axis
+    with an explicit caveat -- "until six timed runs exist, the wall axis is a
+    recorder, not a detector" -- because no stored record carried
+    `wall_seconds` at the time. Sixty-one now do, so the caveat has expired and
+    the claim it was standing in for has to be demonstrated rather than assumed.
+
+    Judged exactly as the tool judges: the *causal* window (records preceding
+    each run), which is what `--list` and the boot-time verdict both use, so
+    this control cannot pass on a band no printed verdict ever sees.
+
+    Both halves are asserted. A band that fires on nothing is indistinguishable
+    from no band; a band that fires on everything is indistinguishable from a
+    broken instrument, and would be the shape of the bug this test was written
+    while looking for -- a pooled window whose median comes from the wrong
+    population.
+    """
+    if not os.path.exists(HISTORY):
+        check("history.jsonl exists for the positive control", False, True)
+        return
+    records = bh.load_history(HISTORY)
+    fired = clean = 0
+    for index, record in enumerate(records):
+        wall = record.get("wall_seconds")
+        if not isinstance(wall, (int, float)):
+            continue
+        prior = bh.comparable_records(records[:index], record.get("host"),
+                                      bh.record_profile(record),
+                                      bh.record_accel(record))
+        history = [w for r in prior
+                   if isinstance(w := r.get("wall_seconds"), (int, float))]
+        verdict, _ = bh.wall_axis(wall, history)
+        if verdict == bh.RUN_CONTAMINATED:
+            fired += 1
+        elif verdict == bh.RUN_CLEAN:
+            clean += 1
+    check("the wall band condemns at least one real run", fired >= 1, True)
+    check("...and clears more than it condemns", clean > fired, True)
+
+
+def test_the_listing_rejudges_each_row_on_its_own_accelerator(bh, tmpdir):
+    """`--list` must use the same partition the boot-time verdict uses.
+
+    It is a separate code path with its own window construction, and it is the
+    one a reader actually browses: it re-judges every stored record rather than
+    printing the verdict that was filed with it, precisely so that a moved band
+    shows up on the old rows too. A pooled window here would condemn every WHPX
+    row against a TCG band -- the same defect, in the view most likely to be
+    believed, and invisible to any test of `comparable_records` alone.
+    """
+    walls = [128, 131, 129, 133, 130, 132, 131]
+    history = [_record(commit=f"t{i}", accel=_TCG, wall_seconds=w,
+                       timestamp=f"2026-08-19T0{i}:00:00+00:00",
+                       canary={"start": 200, "end": 202, "pct": 101,
+                               "samples": 10, "min": 200, "max": 202,
+                               "spread": 1})
+               for i, w in enumerate(walls)]
+    # A perfectly ordinary run on the other accelerator, whose wall time is
+    # simply what that accelerator costs. Judged against its own (empty)
+    # history it is `unknown`; judged against the TCG band it is condemned.
+    history.append(_record(commit="w", accel=_WHPX, wall_seconds=175,
+                           timestamp="2026-08-19T09:00:00+00:00",
+                           canary={"start": 200, "end": 202, "pct": 101,
+                                   "samples": 10, "min": 200, "max": 202,
+                                   "spread": 1}))
+    path = os.path.join(tmpdir, "history.jsonl")
+    with open(path, "w", encoding="utf-8") as handle:
+        for record in history:
+            handle.write(json.dumps(record) + "\n")
+
+    out, code = capture(bh.cmd_list, path)
+    check("the listing runs", code, 0)
+    rows = [ln for ln in out.splitlines() if "2026-08-19T" in ln]
+    check("every record is listed", len(rows), len(history))
+    check("...each naming the accelerator that selected its window",
+          all(("accel " + _TCG) in r for r in rows[:-1]), True)
+    check("the last TCG row was judged clean by its own band",
+          rows[-2].endswith("run clean"), True)
+    check("the WHPX row is not condemned by the TCG band",
+          rows[-1].endswith("run contaminated"), False)
+    check("...it abstains instead, having no history of its own",
+          rows[-1].endswith("run unknown"), True)
+
+
+def test_the_two_accelerators_are_measurably_different_populations(bh):
+    """The filter's premise, measured on this repo's own records.
+
+    Stated as a test rather than a comment because it is the one thing that
+    could make the partition wrong: if the two accelerators ever became
+    comparable, splitting the window would be throwing away history for no
+    reason, and this would be the check that noticed.
+
+    The wall-clock comparison uses the layout-sweep arms specifically, because
+    those are the only runs where the *same* pads were swept under both
+    accelerators -- an ordinary TCG run's wall time also carries whatever the
+    host was doing, and two of them ran past 400s.
+    """
+    records = _release_records(bh)
+    if not records:
+        check("history.jsonl exists for the population check", False, True)
+        return
+    tag = bh.LAYOUT_SWEEP_TAG
+    arms = [r for r in records if tag in (r.get("experiment") or "")]
+    tcg_wall = [r["wall_seconds"] for r in arms
+                if bh.record_accel(r) is bh.ACCEL_UNRECORDED
+                and isinstance(r.get("wall_seconds"), (int, float))]
+    whpx_wall = [r["wall_seconds"] for r in arms
+                 if bh.record_accel(r) == _WHPX
+                 and isinstance(r.get("wall_seconds"), (int, float))]
+    if not tcg_wall or not whpx_wall:
+        check("both accelerators swept the same pads", False, True)
+        return
+    check("the sweeps' wall times do not overlap at all",
+          max(tcg_wall) < min(whpx_wall), True)
+
+    # And the per-benchmark difference is a multiple, in both directions --
+    # which is why the drift correction cannot rescue a mixed window.
+    tcg = [r for r in records if bh.record_accel(r) == _TCG]
+    whpx = [r for r in records if bh.record_accel(r) == _WHPX]
+    ratios = []
+    for name, value in (tcg[0]["entries"].items() if tcg else ()):
+        others = [r["entries"][name] for r in whpx if name in r["entries"]]
+        if others and value:
+            ratios.append(statistics.median(others) / value)
+    check("both accelerators appear in the history at all", bool(ratios), True)
+    if ratios:
+        check("some benchmarks are several times faster on the other side",
+              min(ratios) < 0.5, True)
+        check("...and some are several times slower, so no single factor "
+              "describes the move", max(ratios) > 2.0, True)
+
+
+def test_no_unlabelled_run_in_the_window_is_hardware_virtualised(bh):
+    """The one assumption the partition still makes, checked against the data.
+
+    Grouping the ninety-odd records that predate the `accel` field with each
+    other assumes they are one population. That assumption is not free: one
+    record in this history is provably an unlabelled WHPX run (the 2026-08-19
+    probe that produced the field in the first place), and it is kept out of
+    every window only because it also carries an `experiment` tag -- a property
+    of how that probe was run, not something the window logic relies on.
+
+    So the assumption is checked rather than asserted, using a discriminator
+    built from the *labelled* records rather than a hand-picked benchmark: any
+    benchmark whose slowest labelled TCG reading is more than 4x faster than
+    the fastest labelled WHPX one separates the two by construction. Those come
+    out to be the device-bound ones -- an HPET read or an ARP lookup costs a VM
+    exit under hardware virtualisation and is emulated inline under TCG -- so
+    this is a structural signature, not a speed threshold.
+
+    The test proves it can fire before it reports that it did not: the known
+    unlabelled WHPX run must be flagged. Without that half, a discriminator
+    that silently became empty would read exactly like a clean history.
+    """
+    records = _release_records(bh)
+    if not records:
+        check("history.jsonl exists for the assumption check", False, True)
+        return
+    tcg = [r for r in records if bh.record_accel(r) == _TCG]
+    whpx = [r for r in records if bh.record_accel(r) == _WHPX]
+    if not tcg or not whpx:
+        check("both accelerators are labelled somewhere in the history",
+              False, True)
+        return
+
+    ceilings = {}
+    for name in set(tcg[0].get("entries", {})):
+        here = [r["entries"][name] for r in tcg if name in r["entries"]]
+        there = [r["entries"][name] for r in whpx if name in r["entries"]]
+        if here and there and min(there) > 4 * max(here):
+            ceilings[name] = max(here)
+    check("the labelled runs yield a discriminator at all",
+          bool(ceilings), True)
+
+    def virtualised(record):
+        """Benchmarks on which this record reads like a hardware-virtualised run."""
+        entries = record.get("entries", {})
+        return [n for n, ceiling in ceilings.items()
+                if isinstance(entries.get(n), (int, float))
+                and entries[n] > 4 * ceiling]
+
+    unlabelled = [r for r in records
+                  if bh.record_accel(r) is bh.ACCEL_UNRECORDED]
+    flagged = [r for r in unlabelled if virtualised(r)]
+    # Positive control, and the reason this test is worth having: the one
+    # unlabelled run we independently know ran under WHPX must be caught.
+    check("the discriminator catches the known unlabelled WHPX run",
+          [r.get("timestamp") for r in flagged],
+          ["2026-08-19T16:15:09+00:00"])
+    check("...and that run is excluded from every window anyway",
+          all(bh.record_experiment(r) for r in flagged), True)
+
+    # The claim itself: nothing that a window would actually use looks like it
+    # ran on the other accelerator.
+    window = bh.comparable_records(records, "Logoplex3", "release",
+                                   bh.ACCEL_UNRECORDED)
+    check("no run in the unlabelled window is hardware-virtualised",
+          [r.get("timestamp") for r in window if virtualised(r)], [])
+
+
 def main():
     """Run every `test_*` in this file, in definition order.
 
@@ -5445,9 +5810,9 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 126:
+    if len(tests) < 133:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 126. Discovery is broken, not the code.")
+              f"suite has at least 133. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

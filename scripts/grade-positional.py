@@ -243,7 +243,8 @@ def metric_of(entries, metric):
             if len(value) > index and value[index]}
 
 
-def baseline_for(bh, records, host, profile, metric, window=BASELINE_WINDOW):
+def baseline_for(bh, records, host, profile, accel, metric,
+                 window=BASELINE_WINDOW):
     """Median per-benchmark value over the recent *clean* runs on this host.
 
     Deliberately built from `comparable_records`, which already excludes
@@ -252,9 +253,19 @@ def baseline_for(bh, records, host, profile, metric, window=BASELINE_WINDOW):
     this is measuring -- and the runs this grader is used on are precisely the
     ones that get excluded, so the filter is load-bearing rather than
     decorative.
+
+    `accel` is part of that filter for a reason this caller feels harder than
+    most. Everything downstream is a *ratio* of this run's per-benchmark value
+    to the baseline's, and the accelerator moves per-benchmark values by ~3.5x
+    on the median one and ~30x the other way on the device-bound ones. Baseline
+    against the wrong accelerator and `measure_inflation` reports a thirty-fold
+    slowdown on `hpet_read` that no load caused -- which is exactly the
+    observation this grader exists to make, arrived at from the wrong premise.
     """
     key = METRICS[metric][1]
-    usable = [record for record in bh.comparable_records(records, host, profile)
+    usable = [record
+              for record in bh.comparable_records(records, host, profile,
+                                                  accel)
               if record.get(key)]
     acc = {}
     for record in usable[-window:]:
@@ -892,10 +903,14 @@ def main(argv=None):
 
     host = args.host or platform.node() or "unknown"
     records = bh.load_history(args.history)
+    # Read from this run's own serial log, not from a flag: the accelerator is
+    # a property of how the run was executed, and a graded run that had to be
+    # *told* which accelerator produced it could be told wrong.
+    accel = bh.parse_accel(args.serial)
     inflation = {
         metric: measure_inflation(
             metric_of(entries, metric),
-            baseline_for(bh, records, host, args.profile, metric))
+            baseline_for(bh, records, host, args.profile, accel, metric))
         for metric in METRICS
     }
 

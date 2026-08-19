@@ -1699,28 +1699,154 @@ def record_experiment(record):
     return why if isinstance(why, str) else ""
 
 
-def comparable_records(records, host, profile=LEGACY_PROFILE):
+#: What `record_accel` returns for a record written before the field existed.
+#:
+#: `None`, and emphatically **not** `"QEMU TCG"`. The reasoning is already set
+#: out above `ACCEL_RE` and is repeated here because this is the point where it
+#: would be most tempting to fold the two together: absent means "this kernel
+#: predates the banner and cannot say", and the first WHPX run on this host was
+#: recorded before the field existed, so an absent value is demonstrably not
+#: evidence of TCG.
+#:
+#: It is therefore a value in its own right, and it groups only with itself.
+ACCEL_UNRECORDED = None
+
+
+def record_accel(record):
+    """Which accelerator a record was measured under, or `ACCEL_UNRECORDED`.
+
+    Normalising helper rather than a bare `record.get("accel")` so that an
+    empty string -- which a future writer could produce from a log whose banner
+    parsed to nothing -- reads as "not recorded" instead of becoming a distinct
+    accelerator that no other record shares and that silently empties every
+    window it appears in.
+    """
+    accel = record.get("accel")
+    return accel if isinstance(accel, str) and accel else ACCEL_UNRECORDED
+
+
+def comparable_records(records, host, profile, accel):
     """Records that may legitimately serve as history for a run here.
 
-    Same host, same build profile, **not** a deliberately-loaded control, and
-    **not** a deliberate experiment (`record_experiment`).
+    Same host, same build profile, **same accelerator**, **not** a
+    deliberately-loaded control, and **not** a deliberate experiment
+    (`record_experiment`).
 
     Extracted because `previous_for_host` and `report_run_position` had each
     open-coded the host/profile filter, so a third rule (excluding controls)
     would otherwise have had to be added twice and could then be added to only
-    one of them. One filter, two callers.
+    one of them. One filter, many callers.
+
+    # Why the accelerator is one of the filters
+
+    For the same reason the build profile is, only more so. The profile note in
+    `previous_for_host` argues that `opt-level = 0` versus `3` is "a multiple
+    rather than a percentage", and that the drift correction cannot rescue it
+    because the ratio is not uniform across the suite. Both halves are true of
+    the accelerator and by a larger factor: measured on one byte-identical
+    binary (`kernel_sha 7a17cf6be2a1`, 2026-08-19), the median benchmark is
+    ~3.5x *faster* under Hyper-V/WHPX than under TCG, the best ~10x, and the
+    device-bound ones ~30x *slower*, because an HPET read costs a VM exit under
+    hardware virtualisation and is emulated inline under TCG. A window that
+    mixes the two does not have a wider spread; it has two populations.
+
+    Every consequence of mixing them is a silent one:
+
+    - the wall-clock axis judges a ~170 s WHPX run against a band built from
+      ~130 s TCG runs and reports host contention that never happened;
+    - conversely a handful of WHPX runs inflate that band until it no longer
+      fires on anything, which is the direction this file names repeatedly as
+      the dangerous one -- "a band inflated by a real difference dismisses
+      every regression inside its width";
+    - `previous_for_host` diffs across the boundary and reports the whole suite
+      as a 3.5x improvement and `hpet_read` as a 30x regression.
+
+    None of that is hypothetical arithmetic: it is what the fourteen WHPX
+    records in `bench/history.jsonl` would already do. They are excluded today
+    only because every one of them also happens to carry an `experiment` tag,
+    which is a property of how that sweep was run and not a property anything
+    here relies on.
+
+    `arm_group_key` has partitioned layout bands by accelerator since the field
+    existed. This is the same rule applied to the other window.
+
+    The first three clauses are `measurement_mismatch`'s, called rather than
+    restated -- see `design-decisions.md` sec 240, and note that this function
+    *was* the restatement until 2026-08-19. The last two are this window's own:
+    `layout_arm_rejection` shares the first three but must not share these,
+    since a layout arm is by definition an experiment and arms on different
+    accelerators form separate groups rather than being discarded.
     """
     return [
         record for record in records
-        if record.get("host") == host
-        and record_profile(record) == profile
-        and record_host_load(record) != HOST_LOAD_LOADED
+        if measurement_mismatch(record, host, profile) is None
+        and record_accel(record) == accel
         and not record_experiment(record)
     ]
 
 
-def previous_for_host(records, host, profile=LEGACY_PROFILE):
-    """Most recent record from the same host *and build profile*, or None.
+def accel_window_thinning(records, host, profile, accel):
+    """How many otherwise-comparable records the accelerator filter removed.
+
+    Returns `(unrecorded, other)`: records that pass every *other* filter but
+    carry no accelerator, and those that name a different one.
+
+    Exists because the filter's cost is otherwise invisible in exactly the
+    situation where it matters most. When the schema gained `accel` this host
+    had sixty comparable runs and no labelled ones, so the first labelled run
+    sees a window of length zero and both banded axes correctly answer "too few
+    comparable runs (0 < 6)" -- a true statement that reads like a missing
+    history rather than like a deliberate partition. The reader needs to be
+    told that sixty runs are sitting just the other side of a line, and why.
+
+    The "every *other* filter" is `comparable_records`' own clauses minus the
+    accelerator one, expressed by calling the same predicates rather than by
+    listing the same conditions again. A count that drifted from the filter it
+    describes would be worse than no count: it would report neighbours that the
+    window is not in fact excluding, or miss ones it is.
+    """
+    unrecorded = other = 0
+    for record in records:
+        if (measurement_mismatch(record, host, profile) is not None
+                or record_experiment(record)):
+            continue
+        found = record_accel(record)
+        if found == accel:
+            continue
+        if found is ACCEL_UNRECORDED:
+            unrecorded += 1
+        else:
+            other += 1
+    return unrecorded, other
+
+
+def accel_thinning_note(records, host, profile, accel):
+    """One sentence for `report_run_verdict`'s extra notes, or `None`.
+
+    Only spoken when the window is actually too short to band, because that is
+    the only case where the partition changed an answer. A run with plenty of
+    same-accelerator history does not need to hear about the runs next door.
+    """
+    window = comparable_records(records, host, profile, accel)
+    if len(window) >= MIN_WINDOW_FOR_BAND:
+        return None
+    unrecorded, other = accel_window_thinning(records, host, profile, accel)
+    if not unrecorded and not other:
+        return None
+    parts = []
+    if unrecorded:
+        parts.append(f"{unrecorded} that predate the `accel` field")
+    if other:
+        parts.append(f"{other} on a different accelerator")
+    where = "" if accel is ACCEL_UNRECORDED else f" ({accel})"
+    return (f"accelerator window: {len(window)} comparable run(s)"
+            f"{where}; {' and '.join(parts)} are excluded on purpose -- an "
+            f"accelerator changes the numbers by a multiple, not a percentage, "
+            f"so those runs would widen the bands rather than fill them")
+
+
+def previous_for_host(records, host, profile, accel):
+    """Most recent record from the same host/profile/accelerator, or None.
 
     Cross-host comparison is meaningless here -- a different machine or QEMU
     build moves every number at once -- so we would rather report "no baseline"
@@ -1733,11 +1859,17 @@ def previous_for_host(records, host, profile=LEGACY_PROFILE):
     by the drift correction: that removes a *uniform* factor, and the
     debug-to-release ratio is anything but uniform across the suite.
 
+    And harder again across accelerators, where the non-uniformity is not a
+    matter of degree: WHPX is ~3.5x faster than TCG on the median benchmark and
+    ~30x *slower* on the device-bound ones, so a cross-accelerator diff moves
+    the two halves of the suite in opposite directions at once. See
+    `comparable_records`.
+
     Deliberately-loaded control runs are skipped too (`comparable_records`):
     they are contaminated on purpose, and diffing the next honest run against
     one would report the *recovery* as a suite-wide improvement.
     """
-    window = comparable_records(records, host, profile)
+    window = comparable_records(records, host, profile, accel)
     return window[-1] if window else None
 
 
@@ -2062,7 +2194,7 @@ def speed_factor(entries, medians):
     return statistics.median(ratios)
 
 
-def report_run_position(records, host, profile, current, previous):
+def report_run_position(records, host, profile, accel, current, previous):
     """Say where this run and its baseline sit against the recent history.
 
     Why this exists on top of `global_drift`
@@ -2093,7 +2225,7 @@ def report_run_position(records, host, profile, current, previous):
     so a verdict never changes retroactively as later runs arrive, and the
     number printed at boot is the number still printed a week later.
     """
-    window = comparable_records(records, host, profile)[-SPEED_WINDOW:]
+    window = comparable_records(records, host, profile, accel)[-SPEED_WINDOW:]
     if len(window) < 2:
         return
 
@@ -2514,7 +2646,7 @@ LEVEL_SHIFT_PCT = 25.0
 LEVEL_SHIFT_TUKEY_K = 3.0
 
 
-def level_shift_window(records, host, profile):
+def level_shift_window(records, host, profile, accel):
     """The `(reference, recent)` run windows a sustained shift is judged over.
 
     `reference` is the clean pre-window baseline the shift is measured against;
@@ -2530,7 +2662,7 @@ def level_shift_window(records, host, profile):
     """
     if records is None or host is None:
         return [], []
-    window = comparable_records(records, host, profile)
+    window = comparable_records(records, host, profile, accel)
     # Causal and clean: drop the run being judged and the ones that could
     # already contain the shift, then take the window before them.
     reference = window[:-LEVEL_SHIFT_SKIP][-SPEED_WINDOW:] if len(
@@ -2538,7 +2670,7 @@ def level_shift_window(records, host, profile):
     return reference, window[-LEVEL_SHIFT_PERSIST:]
 
 
-def placement_is_constant(records, host, profile, this_run):
+def placement_is_constant(records, host, profile, accel, this_run):
     """Is every run a sustained shift is drawn from provably the SAME image?
 
     When it is, code placement is identical throughout and is the one
@@ -2555,14 +2687,15 @@ def placement_is_constant(records, host, profile, this_run):
     """
     if not this_run:
         return False
-    reference, recent = level_shift_window(records, host, profile)
+    reference, recent = level_shift_window(records, host, profile, accel)
     runs = list(reference) + list(recent) + [this_run]
     if len(runs) < 2:
         return False
     return all(same_image(runs[0], other) for other in runs[1:])
 
 
-def level_shifts(records, host, profile, current, threshold_pct=LEVEL_SHIFT_PCT):
+def level_shifts(records, host, profile, accel, current,
+                 threshold_pct=LEVEL_SHIFT_PCT):
     """Benchmarks sitting far off a baseline that PREDATES the recent runs.
 
     Returns `[(name, reference_median, value, adjusted_pct, band, n)]`, worst
@@ -2634,7 +2767,7 @@ def level_shifts(records, host, profile, current, threshold_pct=LEVEL_SHIFT_PCT)
     is below it and is NOT reported here. That is the same blind spot the
     run-over-run path has, not a new one.
     """
-    reference, recent = level_shift_window(records, host, profile)
+    reference, recent = level_shift_window(records, host, profile, accel)
     if len(reference) < MIN_WINDOW_FOR_BAND:
         return []
 
@@ -2756,13 +2889,13 @@ ModeVerdict = collections.namedtuple(
 )
 
 
-def repeats_by_commit(records, host, profile, name):
+def repeats_by_commit(records, host, profile, accel, name):
     """`{commit: [values]}` for commits measured more than once.
 
     Ordered by first appearance so the report is stable across runs.
     """
     by_commit = collections.OrderedDict()
-    for record in comparable_records(records, host, profile):
+    for record in comparable_records(records, host, profile, accel):
         value = record.get("entries", {}).get(name)
         commit = record.get("commit")
         if value is None or not commit:
@@ -2773,7 +2906,7 @@ def repeats_by_commit(records, host, profile, name):
     )
 
 
-def mode_structure(records, host, profile, name, split):
+def mode_structure(records, host, profile, accel, name, split):
     """Does `split` separate *binaries*, or merely *runs*?
 
     This is the question a "sustained shift" report cannot answer on its own,
@@ -2821,7 +2954,7 @@ def mode_structure(records, host, profile, name, split):
     actually separates the modes is at ~7500, between 6396 and 8546, and only a
     search over observed values finds it.
     """
-    repeats = repeats_by_commit(records, host, profile, name)
+    repeats = repeats_by_commit(records, host, profile, accel, name)
     straddling = collections.OrderedDict(
         (commit, values)
         for commit, values in repeats.items()
@@ -2843,7 +2976,7 @@ def mode_structure(records, host, profile, name, split):
     return ModeVerdict(verdict, repeats, straddling, below, above)
 
 
-def mode_split_search(records, host, profile, name, low, high):
+def mode_split_search(records, host, profile, accel, name, low, high):
     """Best `(split, ModeVerdict)` separating `low` from `high`, or `None`.
 
     Searches every split that could separate the baseline from the current
@@ -2868,7 +3001,7 @@ def mode_split_search(records, host, profile, name, low, high):
     """
     values = sorted({
         record["entries"][name]
-        for record in comparable_records(records, host, profile)
+        for record in comparable_records(records, host, profile, accel)
         if name in record.get("entries", {})
     })
     candidates = []
@@ -2879,7 +3012,7 @@ def mode_split_search(records, host, profile, name, low, high):
         candidates.append((upper - lower, split))
     # Widest gap first, so a tie between splits resolves to the most separated.
     for _gap, split in sorted(candidates, reverse=True):
-        verdict = mode_structure(records, host, profile, name, split)
+        verdict = mode_structure(records, host, profile, accel, name, split)
         if verdict.verdict == MODE_STRUCTURED:
             return split, verdict
     return None
@@ -3022,7 +3155,7 @@ def same_image(a, b):
     return bool(commit_a and commit_a == commit_b)
 
 
-def values_for_binary(records, host, profile, name, this_run):
+def values_for_binary(records, host, profile, accel, name, this_run):
     """Every comparable measurement of `name` recorded for `this_run`'s image.
 
     `this_run` is a record-shaped mapping -- `kernel_sha` / `commit` / `dirty`
@@ -3035,13 +3168,14 @@ def values_for_binary(records, host, profile, name, this_run):
         return []
     return [
         value
-        for record in comparable_records(records, host, profile)
+        for record in comparable_records(records, host, profile, accel)
         if same_image(record, this_run)
         and (value := record.get("entries", {}).get(name)) is not None
     ]
 
 
-def replication_verdict(records, host, profile, name, this_run, observed, band):
+def replication_verdict(records, host, profile, accel, name, this_run,
+                        observed, band):
     """Did a second run of this *same binary* also produce this movement?
 
     Why this gate exists, and why nothing cheaper works
@@ -3088,7 +3222,8 @@ def replication_verdict(records, host, profile, name, this_run, observed, band):
     """
     if band is None:
         return ReplicationVerdict(UNREPLICATED, [observed])
-    values = values_for_binary(records, host, profile, name, this_run) + [observed]
+    values = values_for_binary(records, host, profile, accel, name,
+                               this_run) + [observed]
     if len(values) < REPLICATION_MIN_RUNS:
         return ReplicationVerdict(UNREPLICATED, values)
     _lo, hi, _median, _n = band
@@ -3233,6 +3368,15 @@ def measurement_mismatch(record, host, profile):
     predicate is about being a *sweep arm*, which an accelerator comparison is
     not. So the shared part became this, and each caller words the answer for
     its own audience.
+
+    `comparable_records` and `accel_window_thinning` became consumers on
+    2026-08-19, having previously restated these same three clauses inline --
+    which is the drift this exists to prevent, sitting in the file that
+    prevents it. They add two clauses of their own on top (same accelerator,
+    not an experiment); those stay out of here because `layout_arm_rejection`
+    must not inherit them: a layout arm *is* an experiment by construction, and
+    arms on a different accelerator are grouped separately by `arm_group_key`
+    rather than discarded, so reporting either as a rejection would be false.
 
     `test-bench-history.py` asserts the equivalence directly rather than
     trusting the refactor: for every mismatch code, both predicates must reject.
@@ -4011,13 +4155,14 @@ def report_baseline_canary(previous):
 
 
 def report(previous, current_entries, threshold_pct,
-           records=None, host=None, profile=LEGACY_PROFILE, commit=None,
+           records=None, host=None, profile=LEGACY_PROFILE,
+           accel=ACCEL_UNRECORDED, commit=None,
            this_run=None, changed_files=None, bench_subsystems=None):
     """Print the run-over-run comparison. Returns True if anything regressed.
 
-    `records`/`host`/`profile` are optional only so that callers interested
-    purely in the run-over-run diff (the tests, chiefly) need not construct a
-    history.  When they are supplied, two things change: the run is placed
+    `records`/`host`/`profile`/`accel` are optional only so that callers
+    interested purely in the run-over-run diff (the tests, chiefly) need not
+    construct a history.  When they are supplied, two things change: the run is placed
     against the recent history for this host (`report_run_position`), and each
     threshold-crossing movement is checked against that benchmark's own recent
     range (`per_benchmark_bands`) before being called a regression.  The
@@ -4200,7 +4345,7 @@ def report(previous, current_entries, threshold_pct,
     # raises ("drifted relative to what?") and before the regressed/improved
     # lists, because it says whether those lists can be trusted at all.
     if records is not None and host is not None:
-        report_run_position(records, host, profile, current, previous)
+        report_run_position(records, host, profile, accel, current, previous)
 
     # Each threshold-crossing movement is now checked against the benchmark's
     # *own* recent spread before it is called a regression. The window is the
@@ -4209,7 +4354,7 @@ def report(previous, current_entries, threshold_pct,
     # boot still reads the same a week later.
     if records is not None and host is not None:
         bands = per_benchmark_bands(
-            comparable_records(records, host, profile)[-SPEED_WINDOW:]
+            comparable_records(records, host, profile, accel)[-SPEED_WINDOW:]
         )
     else:
         bands = {}
@@ -4314,7 +4459,7 @@ def report(previous, current_entries, threshold_pct,
     repl_verdicts = {}
     for row in reg_out:
         name, _before, after, _raw, _adj, band = row
-        rv = replication_verdict(records, host, profile, name, this_run,
+        rv = replication_verdict(records, host, profile, accel, name, this_run,
                                  after, band)
         repl_verdicts[name] = rv
         if rv.verdict == REPLICATED:
@@ -4576,7 +4721,8 @@ def report(previous, current_entries, threshold_pct,
     # is computed from its own pre-window reference and printed unconditionally
     # -- including on runs where the run-over-run lists are empty, which is
     # exactly when it is most needed.
-    shifts = level_shifts(records, host, profile, current) if records else []
+    shifts = (level_shifts(records, host, profile, accel, current)
+              if records else [])
     # Shifts that survive the mode-structure check -- i.e. the ones actually
     # worth bisecting for. Only these fail the build; see the return below.
     bisectable_shifts = []
@@ -4595,7 +4741,8 @@ def report(previous, current_entries, threshold_pct,
         # attributing the shift to layout would be the A/A mistake in its other
         # costume -- a filter correct for the ordinary case, applied to the one
         # case whose premise it violates.
-        fixed_layout = placement_is_constant(records, host, profile, this_run)
+        fixed_layout = placement_is_constant(records, host, profile, accel,
+                                             this_run)
         for name, median, value, adjusted, band, n in shifts:
             lo, hi, _med, _n = band
             print(
@@ -4607,10 +4754,10 @@ def report(previous, current_entries, threshold_pct,
             # separates binaries or runs. `http_build_response_1KiB` was
             # bisected across three commits before anyone asked; the answer was
             # "binaries", and there was no guilty commit. See mode_structure().
-            found = mode_split_search(records, host, profile, name,
+            found = mode_split_search(records, host, profile, accel, name,
                                       median, value)
             verdict = found[1] if found else mode_structure(
-                records, host, profile, name, hi)
+                records, host, profile, accel, name, hi)
             for line in describe_mode_verdict(name, verdict):
                 print(line)
             # A measured layout band is the second, independent way a shift can
@@ -5719,7 +5866,7 @@ def cmd_list(history_path):
         # must still read the same a week later, rather than being rewritten by
         # runs that had not happened yet.
         prior = comparable_records(records[:index], record.get("host"),
-                                   record_profile(record))
+                                   record_profile(record), record_accel(record))
         prior_stalls = [c for c in (dispersion_count(r) for r in prior)
                         if c is not None]
         prior_walls = [w for r in prior
@@ -5731,7 +5878,12 @@ def cmd_list(history_path):
             f"{len(entries):>3} benchmarks, {over} over hardware target, "
             f"canary {verdict}, stalls {'?' if stalls is None else stalls}, "
             f"wall {'?' if wall is None else f'{wall:g}s'}, "
-            f"load {record_host_load(record)}, run {run_v}"
+            f"load {record_host_load(record)}, "
+            # Shown because it now selects the window each verdict was reached
+            # in: two adjacent rows with different accelerators are judged
+            # against disjoint histories, and without this column that reads as
+            # an inexplicable jump from `clean` to `unknown`.
+            f"accel {record_accel(record) or '?'}, run {run_v}"
         )
     if broken:
         print(
@@ -5860,21 +6012,47 @@ def main(argv=None):
 
     host = platform.node() or "unknown"
     records = load_history(args.history)
-    previous = previous_for_host(records, host, args.profile)
+    # Parsed here rather than beside the other log reads below because the
+    # baseline lookup on the next line needs it: an accelerator changes every
+    # number by a multiple, so it selects the history exactly as the profile
+    # does. See `comparable_records`.
+    #
+    # Read from the log, not from the environment: `QEMU_EXTRA` in this process
+    # says what was *asked for*, and the banner says what the kernel *ran on*.
+    # They diverge on a typo, on a changed default, and on a silent fallback to
+    # TCG -- and a cross-accelerator comparison is wrong by ~3.5x, far more
+    # than any regression this tool is looking for.
+    accel = parse_accel(args.serial)
+    previous = previous_for_host(records, host, args.profile, accel)
 
-    # If there is no same-profile baseline but there *are* same-host records on
-    # another profile, say so explicitly. Otherwise the reader sees the generic
-    # "no baseline" line and reasonably concludes the history is empty, when in
-    # fact it is full of numbers that were deliberately not used.
+    # If there is no baseline but there *are* same-host records that one of the
+    # deliberate partitions excluded, say which. Otherwise the reader sees the
+    # generic "no baseline" line and reasonably concludes the history is empty,
+    # when in fact it is full of numbers that were deliberately not used.
     if previous is None:
-        other = [r for r in records
-                 if r.get("host") == host and record_profile(r) != args.profile]
+        same_host = [r for r in records if r.get("host") == host]
+        other = [r for r in same_host if record_profile(r) != args.profile]
         if other:
             profiles = sorted({record_profile(r) for r in other})
             print(f"  No baseline on the '{args.profile}' profile yet "
                   f"({len(other)} record(s) exist for this host on "
                   f"{', '.join(profiles)}, deliberately not compared: "
                   f"different optimisation level, different numbers).")
+        # The accelerator split is newer than the profile one and will surprise
+        # a reader who has sixty runs of history and is suddenly told there is
+        # no baseline, so it names the accelerators it declined and why.
+        elsewhere = [r for r in same_host
+                     if record_profile(r) == args.profile
+                     and record_accel(r) != accel]
+        if elsewhere:
+            names = sorted({record_accel(r) or "not recorded"
+                            for r in elsewhere})
+            mine = accel or "not recorded"
+            print(f"  No baseline under '{mine}' yet ({len(elsewhere)} "
+                  f"record(s) exist for this host and profile under "
+                  f"{', '.join(names)}, deliberately not compared: an "
+                  f"accelerator moves the median benchmark by ~3.5x and the "
+                  f"device-bound ones ~30x the other way).")
 
     canary = parse_canary(args.serial)
     # Read from the log, not from the environment: `SLATEOS_TEXT_PAD` in this
@@ -5882,12 +6060,7 @@ def main(argv=None):
     # from what the kernel that just ran was compiled with. They diverge exactly
     # when it matters most -- a stale build.
     text_pad = parse_text_pad(args.serial)
-    # Same argument, one layer out: the accelerator the kernel *ran on* is a
-    # fact about the run, and `QEMU_EXTRA` in this process is a fact about what
-    # was asked for. They diverge on a typo, on a changed default, and on a
-    # silent fallback -- and a cross-accelerator comparison is wrong by ~3.5x,
-    # far more than any regression this tool is looking for.
-    accel = parse_accel(args.serial)
+    # `accel` is parsed further up, beside the baseline lookup that needs it.
     # Read once and used twice -- passed to the report so the replication gate
     # can find this binary's other runs, and stored in the record below so the
     # *next* run can find this one. Two `git_commit()` calls could disagree if
@@ -5922,7 +6095,7 @@ def main(argv=None):
     bench_subsystems = benchmark_subsystems()
     regressed = report(previous, current_entries, args.threshold,
                        records=records, host=host, profile=args.profile,
-                       commit=commit, this_run=this_run,
+                       accel=accel, commit=commit, this_run=this_run,
                        changed_files=changed_files,
                        bench_subsystems=bench_subsystems)
 
@@ -5947,7 +6120,7 @@ def main(argv=None):
     # from the same window every other historical judgement here uses, so a
     # deliberately-loaded control can never become part of the band that
     # decides whether an honest run was quiet.
-    window = comparable_records(records, host, args.profile)
+    window = comparable_records(records, host, args.profile, accel)
     dispersions = [c for c in (dispersion_count(r) for r in window)
                    if c is not None]
     walls = [w for r in window
@@ -5956,6 +6129,12 @@ def main(argv=None):
     run_v, run_notes = run_verdict(verdict, here_dispersion, dispersions,
                                    args.wall_seconds, walls)
     extra = []
+    # Why both banded axes just said "too few comparable runs", when the file
+    # holds dozens. Printed with the axes rather than in place of them because
+    # it explains a verdict, it does not vote on one.
+    thinning = accel_thinning_note(records, host, args.profile, accel)
+    if thinning:
+        extra.append(thinning)
     if args.host_load != HOST_LOAD_UNKNOWN:
         extra.append(f"host load: recorded as '{args.host_load}' by the "
                      f"caller -- an assertion, not a measurement, so it does "

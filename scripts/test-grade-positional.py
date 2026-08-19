@@ -654,6 +654,16 @@ def _clean_pairs(bh, records):
     whichever machine happens to be running the tests, and a test that
     silently skips itself off the benchmark machine is a test that stops
     guarding the threshold exactly where the threshold is used.
+
+    Pairs are formed *within* an accelerator and then pooled, never across one.
+    The null being measured is how far two groups of benchmarks drift apart
+    between consecutive runs; a pair straddling the TCG/WHPX boundary does not
+    measure drift at all, it measures the accelerator, which moves per-benchmark
+    values by a multiple in both directions and would inflate the null until the
+    gate it calibrates could never fire. Pooling the pairs afterwards is sound
+    because each pair is already homogeneous -- and it keeps working once the
+    labelled records outnumber the unlabelled ones, which picking a single
+    bucket would not.
     """
     hosts = {}
     for record in records:
@@ -662,10 +672,14 @@ def _clean_pairs(bh, records):
     if not hosts:
         return "", []
     host = max(hosts, key=lambda h: hosts[h])
-    clean = [record for record in bh.comparable_records(records, host,
-                                                        "release")
-             if record.get("entries") and record.get("mean_ns")]
-    return host, list(zip(clean, clean[1:]))
+    pairs = []
+    for accel in {bh.record_accel(record) for record in records}:
+        clean = [record
+                 for record in bh.comparable_records(records, host, "release",
+                                                     accel)
+                 if record.get("entries") and record.get("mean_ns")]
+        pairs.extend(zip(clean, clean[1:]))
+    return host, pairs
 
 
 def null_region_rate(gp, bh, records):
@@ -968,6 +982,74 @@ def test_positions_only_mode_reports_the_window_and_nothing_else():
         check_true("reports the window", "positions 41-60" in text)
         check_true("carries the label", "predicted" in text)
         check_true("does not grade", gp.GRADE_SUPPORTED not in text)
+
+
+_WHPX_BANNER = ('[hypervisor] Detected: Hyper-V/WHPX (signature: "Microsoft '
+                'Hv")\n')
+
+
+def test_the_baseline_comes_from_this_runs_own_accelerator():
+    """Every number this grader prints is a ratio against a baseline run.
+
+    So the baseline must come from the same accelerator, and the accelerator
+    must be read from the graded run's own log rather than assumed. QEMU's two
+    accelerators move per-benchmark timings by ~3.5x on the median benchmark
+    and ~30x the other way on the device-bound ones -- non-uniformly, in both
+    directions -- so a baseline taken from the wrong one does not merely scale
+    the inflation (which would cancel in the region ratios and be harmless); it
+    *reshapes* it, manufacturing a disturbance in whichever region the two
+    accelerators happen to disagree about most.
+
+    The decoy below is built to that shape: it is the same run except that the
+    first thirty benchmarks are thirty times cheaper. Baseline against it and
+    the grader's undisturbed prefix looks catastrophically slow, the reference
+    median rises to meet the window's, and a real localised load reports as
+    never having reached the window at all.
+    """
+    gp = load_module(SCRIPT, "grade_positional")
+    bh = gp.load_bench_history()
+
+    mine = dict(_synthetic_baseline(), accel="Hyper-V/WHPX", commit="1111111")
+    decoy = _synthetic_baseline()
+    decoy["entries"] = {name: (value // 30 if name < "b30" else value)
+                        for name, value in decoy["entries"].items()}
+    decoy["mean_ns"] = {name: (value // 30 if name < "b30" else value)
+                        for name, value in decoy["mean_ns"].items()}
+
+    # The unit fact, stated where a reader can check it against one number.
+    base = gp.baseline_for(bh, [decoy, mine], SYNTH_HOST, "release",
+                           "Hyper-V/WHPX", "min")
+    check("the baseline is the run's own accelerator's, not the neighbour's",
+          base["b00"], mine["entries"]["b00"])
+    check("...and the neighbour really would have given a different answer",
+          decoy["entries"]["b00"] == mine["entries"]["b00"], False)
+
+    # And the same fact end to end, where the accelerator has to be *read*
+    # from the log rather than passed in by the test.
+    serial_fd, serial = tempfile.mkstemp(suffix=".txt")
+    history_fd, history = tempfile.mkstemp(suffix=".jsonl")
+    try:
+        with os.fdopen(serial_fd, "w") as out:
+            out.write(_WHPX_BANNER + _synthetic_serial())
+        with os.fdopen(history_fd, "w") as out:
+            for record in (decoy, mine):
+                out.write(json.dumps(record) + "\n")
+        check("the log states which accelerator ran it",
+              bh.parse_accel(serial), "Hyper-V/WHPX")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = gp.main(["--serial", serial, "--history", history,
+                          "--host", SYNTH_HOST, "--profile", "release",
+                          "--load-at", "b40", "--load-until", "b60"])
+        text = buf.getvalue()
+        check("the run grades against its own accelerator's baseline", rc, 0)
+        check_true("...reaching a verdict rather than abstaining",
+                   gp.GRADE_SUPPORTED in text)
+        check_true("...and the window is seen to have been loaded",
+                   "DISTURBED" in text)
+    finally:
+        os.unlink(serial)
+        os.unlink(history)
 
 
 def main():

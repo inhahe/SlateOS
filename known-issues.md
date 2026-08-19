@@ -40377,3 +40377,32 @@ which is the property that derivation was written for in the first place.
 changes what the suite measures.
 
 One statement of each rule, in one more place than planned.
+
+#### The derivation was validated against the real records before being written
+
+A design that rescues six recorded arms is a claim about data that already
+exists, so it can be tested before any of it is implemented.
+`build/srcdigest-proto.py` (read-only; safe to run while a sweep holds the
+tree) computes the proposed digest over `git ls-tree -r <commit>` with the
+exclusion list above, and was run against the arms as recorded. Four
+controls, all with a stated failure mode:
+
+| control | result |
+|---|---|
+| the four WHPX arms recorded so far, across **four different commits** | one digest, `397a6447…` — **groups** |
+| the TCG sweep commit `b36a244bb` | `1a167159…` — **discriminates**; a digest that matched here would band two unrelated sweeps |
+| a kernel-only commit (`d937ea7bd`, `kernel/src/layout_pad.rs`) vs its parent | digests differ — **sensitive** to the thing that matters |
+| a doc-only pair (`5850f706f` vs `5ea44e308`) | identical — **insensitive** to the thing that broke it |
+
+and the exclusion list audited directly: 101 of 13,427 paths excluded, of
+which 68 are `requests/`, 31 are root documents and 2 are the harness's own
+`bench/*.jsonl`. **Zero** lie under `kernel/`, `toolchain/`, `services/`,
+`.cargo/`, or `Cargo.{toml,lock}` — which is the assertion the
+`kernel/src/fs/declared.txt` trap made necessary, now checked rather than
+reasoned about.
+
+The third and fourth controls are the pair that matters, and they are worth
+stating as a single sentence: *a kernel edit changes the key and a
+documentation edit does not*, which is exactly what `commit` failed to do and
+the entire reason for the change. Neither control is implied by the first
+two — a digest could group the arms by being insensitive to everything.

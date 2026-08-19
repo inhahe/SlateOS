@@ -3783,6 +3783,78 @@ def test_the_most_recent_sweep_wins_over_the_best_sampled_one(bh):
           tied["b0"][2], "ancient")
 
 
+def _bands_view(bh, tmpdir, records, profile="release"):
+    """Run `--layout-bands` over a written history. -> stdout."""
+    import io
+    import json
+    import contextlib
+    import platform
+
+    path = os.path.join(tmpdir, "history.jsonl")
+    host = platform.node() or "unknown"
+    with open(path, "w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(dict(record, host=host)) + "\n")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.cmd_layout_bands(path, profile)
+    return buf.getvalue()
+
+
+def test_the_bands_view_distinguishes_unswept_from_insensitive(bh, tmpdir):
+    """Silence means two opposite things, and the reader must be told which.
+
+    A band is otherwise only visible as a side effect of a comparison, and only
+    for benchmarks that moved far enough to be listed. So "swept, and this
+    benchmark barely cares about placement" and "never swept, nothing is known"
+    both present as nothing at all -- while calling for opposite responses.
+    """
+    empty = _bands_view(bh, tmpdir, _repl_history(bh, 500, "xxx"))
+    check("an unswept history says so in as many words",
+          "no sweep has ever been run" in empty, True)
+    check("...and names the command that would fix it",
+          "layout-sweep.py --pads" in empty, True)
+    check("...and does not let the reader read silence as zero sensitivity",
+          "judged as code because nobody has measured otherwise" in empty, True)
+
+    swept = _bands_view(bh, tmpdir, _sweep_arms({0: 500, 1024: 600, 2048: 550}))
+    check("a swept history reports the band as a number",
+          "20.0%" in swept, True)
+    check("...and a benchmark placement barely moves as a measured near-zero",
+          "0.0%" in swept, True)
+    check("...and says over how many layouts, of which commit",
+          "3 layouts of xxx" in swept, True)
+    check("...and repeats that it is a lower bound",
+          "lower bounds" in swept, True)
+
+
+def test_the_bands_view_says_which_kind_of_nothing_it_found(bh, tmpdir):
+    """Three ways to have no band, three different actions.
+
+    Reporting only the conclusion is how a sweep that ran but silently failed to
+    qualify -- wrong profile, dirty tree, a voided arm -- would look exactly
+    like a sweep nobody ever ran, and the reader would re-run the sweep they
+    already have instead of fixing whatever disqualified it.
+    """
+    # Swept, but on the other profile.
+    wrong = _bands_view(bh, tmpdir,
+                        _sweep_arms({0: 500, 1024: 600, 2048: 550},
+                                    profile="debug"))
+    check("a sweep on another profile is not reported as 'never swept'",
+          "no sweep has ever been run" in wrong, False)
+    check("...it is reported as not qualifying, with the pads it does have",
+          "none qualify here" in wrong and "[0, 1024, 2048]" in wrong, True)
+
+    # Swept, qualifying, but one arm cannot be drift-corrected.
+    arms = _sweep_arms({0: 500, 1024: 600, 2048: 550})
+    arms[2]["entries"] = {"b0": 550, "b1": 1000}
+    voided = _bands_view(bh, tmpdir, arms)
+    check("a voided group is not reported as 'never swept'",
+          "no sweep has ever been run" in voided, False)
+    check("...it says the arms exist and the band was voided",
+          "every band was voided" in voided, True)
+
+
 def test_no_sweep_at_all_changes_nothing(bh):
     """The ordinary case: no arms, no bands, and every finding stands.
 
@@ -3826,9 +3898,9 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 93:
+    if len(tests) < 95:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 93. Discovery is broken, not the code.")
+              f"suite has at least 95. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

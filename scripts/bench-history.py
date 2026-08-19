@@ -3872,6 +3872,84 @@ def report(previous, current_entries, threshold_pct,
     return bool(run_over_run or bisectable_shifts)
 
 
+def cmd_layout_bands(history_path, profile):
+    """Print the measured code-placement sensitivity of each benchmark.
+
+    Exists because a band is otherwise only ever visible as a side effect of a
+    comparison, and then only for benchmarks that happened to move far enough
+    to be listed. That makes the two states a reader most needs to tell apart --
+    "swept, and this benchmark barely cares about placement" versus "never
+    swept, so nothing is known" -- look identical: silence in both cases. This
+    view distinguishes them explicitly.
+
+    It reports the swept commit and the number of layouts alongside every band,
+    because those are what decide whether a band should be believed: a band is
+    evidence about the hot loops that existed at that commit, and a reader who
+    recognises it as ancient is the only staleness check there is (see
+    `layout_bands` on why no automatic cutoff is imposed).
+    """
+    records = load_history(history_path)
+    if not records:
+        print(f"bench-history: no records in {history_path}")
+        return 0
+
+    host = platform.node() or "unknown"
+    bands = layout_bands(records, host, profile)
+    if not bands:
+        arms = layout_arms(records, host, profile)
+        print(f"No layout band has been measured for {host} / {profile}.")
+        # Distinguish the three ways to get here, because they call for three
+        # different actions and the bare "no band" is compatible with all of
+        # them. Reporting only the conclusion is how a sweep that silently
+        # failed to qualify would look exactly like a sweep never run.
+        swept = {}
+        for record in records:
+            pad = record.get("text_pad")
+            if isinstance(pad, int) and not isinstance(pad, bool):
+                swept.setdefault(record.get("commit") or "?", set()).add(pad)
+        if not swept:
+            print("  No run on any host/profile has recorded a textpad= at "
+                  "all, so no sweep has ever been run.")
+        elif not arms:
+            print("  Runs with a recorded pad exist, but none qualify here "
+                  "(wrong host or profile, dirty tree, or a loaded host):")
+            for commit, pads in sorted(swept.items()):
+                print(f"    {commit}: pads {sorted(pads)}")
+        else:
+            print(f"  {len(arms)} commit(s) have enough layouts, but every "
+                  f"band was voided -- an arm's host-drift factor could not "
+                  f"be computed, and an uncorrected band is worse than none.")
+        print(f"\n  Measure one with:\n"
+              f"    python scripts/layout-sweep.py --pads 0,1024,2048,3072 "
+              f"--profile {profile}")
+        print("  Until then every movement is judged as code because nobody "
+              "has measured otherwise,\n  not because anybody has shown it.")
+        return 0
+
+    _, pads, commit = next(iter(bands.values()))
+    print(f"Code-placement sensitivity on {host} / {profile}, measured over "
+          f"{pads} layouts of {commit}:")
+    print("  (how far the SAME SOURCE moves when only its .text offset "
+          "changes -- a LOWER bound)")
+    print()
+    width = max(len(name) for name in bands)
+    # Name breaks the tie, so that two runs of this view diff cleanly. Ties are
+    # the common case, not the corner one: most benchmarks sit at 0.0% and
+    # would otherwise come out in dict order, making every re-run look changed.
+    for name, (spread, _pads, _commit) in sorted(
+            bands.items(), key=lambda item: (-item[1][0], item[0])):
+        print(f"  {name:<{width}}  {spread:6.1f}%")
+    print()
+    worst = max(bands.values())[0]
+    print(f"  A movement smaller than a benchmark's own figure is not a "
+          f"finding. The largest\n  here is {worst:.1f}%, which is the size of "
+          f"'regression' this emulator can manufacture\n  from a relink alone.")
+    print("  These are lower bounds: a handful of sampled layouts cannot "
+          "contain the worst pair\n  among all of them, so a movement just "
+          "outside its band is unexplained, not cleared.")
+    return 0
+
+
 def cmd_list(history_path):
     """Print a one-line summary of every stored record.
 
@@ -3954,6 +4032,12 @@ def main(argv=None):
                         help="exit 1 if any benchmark regressed past the threshold")
     parser.add_argument("--list", action="store_true",
                         help="list stored records and exit")
+    parser.add_argument("--layout-bands", action="store_true",
+                        help="show the measured code-placement sensitivity per "
+                             "benchmark (from scripts/layout-sweep.py) and "
+                             "exit. Reports which commit was swept and over "
+                             "how many layouts, so a band can be judged for "
+                             "staleness before it is trusted.")
     parser.add_argument("--profile", default=LEGACY_PROFILE,
                         help="cargo build profile these numbers were measured "
                              "on (default: debug). Records are only ever "
@@ -3988,6 +4072,9 @@ def main(argv=None):
 
     if args.list:
         return cmd_list(args.history)
+
+    if args.layout_bands:
+        return cmd_layout_bands(args.history, args.profile)
 
     current_entries = parse_serial(args.serial)
     if not current_entries:

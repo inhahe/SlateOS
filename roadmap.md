@@ -547,8 +547,20 @@ Known-issues (open, kernel-owned):
   the nearest preceding symbol). A bytes-at-RIP dump is now emitted on kernel
   `#PF` (`5431facbd`) so the next occurrence settles it.
 - `B-FORKEXEC-BOOT-HANG` — intermittent hang at the glibc fork+exec self-test
-- `B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` — re-run with
-  `--hard-lockup-watchdog`
+- ~~`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`~~ — **NOT A
+  KERNEL BUG, closed 2026-08-19.** The "wedge" was never real: the instrumented
+  boot was healthy and simply slower than the harness budget. Two instrumented
+  boots have now reached `BOOT_OK` (1063 s, then 881 s) with **zero KASAN
+  reports** — so the heap corruption this profile was built to hunt did not
+  reproduce either. Three separate constants had to be fixed to get there, each
+  hidden behind the previous because the boot never got far enough to reach it:
+  `BENCH_TIMEOUT`, then `KASAN_BOOT_TIMEOUT` (whose expiry sampled a perfectly
+  healthy guest's RIP inside the shadow checker and reported it as
+  `Wedged RIP = kasan::byte_bad` — the "mid-print page fault" of the bug's
+  name), then the kernel's own `LIVENESS_ALERT_COUNT`. Fixing the third exposed
+  a genuine latent kernel bug — the liveness watchdog counted its own
+  breadcrumbs as kernel progress, capping the stall counter at 5 and making any
+  threshold above 6 unreachable. See `known-issues.md` (last two entries).
 - ~~`TD-FRAME-OWNER-1GIB`~~ — **RESOLVED 2026-08-14**: the owner array is no
   longer a fixed 65536-entry static (1 GiB at 16 KiB pages); it is carved from
   the frame-allocator metadata region alongside `page_info`/`refcount`/`cgroup`

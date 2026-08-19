@@ -1478,6 +1478,17 @@ build release. This sweep is release-profile only; the `debug` profile has no
 band measured at all, and the majority of historical benchmark records are
 `opt-level = 0`.
 
+**Update 2026-08-19 — option D may be much cheaper than stated above.** D was
+written as "get real numbers off hardware", i.e. infrastructure we do not have.
+But the penalty producing these bands is a *TCG* artefact — QEMU's software
+interpreter bounds a translation block at the guest page, so a hot loop whose
+backward branch straddles one costs ~1.7× per iteration. QEMU's hardware-
+accelerated mode (WHPX) has no translation blocks at all, and this host supports
+it. If the bands collapse under WHPX, the 10% threshold becomes meaningful
+without any new hardware. That has a cost of its own — WHPX silently disables
+SMEP/SMAP/UMIP here — and is asked as **Q54**, which also commits to measuring
+the WHPX bands so this stops being speculation.
+
 #### Why I did not just decide this
 
 The threshold lives in `CLAUDE.md`, which lane A may edit only on an explicit
@@ -1495,6 +1506,140 @@ so every future reader has to rediscover this on their own — and the failure
 mode is the quiet one, where a genuine regression in a hot path is waved
 through as "within the band" by someone who never checked whether a band was
 ever measured for it.
+
+## Q54 — [A] The emulator we test in has a second mode that is 3.5× faster and would fix our benchmark-noise problem — but it silently switches off three of the CPU security features the kernel is built around. Switch, split, or stay? — Status: OPEN
+
+**In short:** Every test we run happens inside QEMU, a program that pretends to
+be a PC. It can do that two ways: by interpreting each machine instruction in
+software (what we use today), or by handing them to the real CPU's built-in
+virtualization hardware. The hardware way is 3.5× faster and would very likely
+fix the measurement problem in **Q53**, where 71% of our benchmarks move by more
+than 10% from a rebuild that changes nothing. But on this machine the hardware
+way also silently drops three CPU security features that the kernel relies on,
+so 47 places where the kernel emits protective instructions would stop being
+exercised. I have verified there is no setting that gives both. So: keep
+testing the kernel we ship and keep the bad numbers, or get good numbers by
+testing a kernel that is missing part of its armour.
+
+**Glossary, in case this is read cold:** *TCG* — QEMU's software interpreter;
+today's default; slow, but emulates whatever CPU we ask for. *WHPX* — Windows
+Hypervisor Platform, QEMU using the real CPU's virtualization hardware; fast,
+but only offers features the real CPU and the hypervisor both support. *SMEP /
+SMAP / UMIP* — three CPU switches that make the kernel fault instead of
+proceeding if it is tricked into running or reading user memory at the wrong
+moment; defence against a large family of exploits. *`stac`/`clac`* — the two
+instructions the kernel must wrap around a deliberate access to user memory to
+temporarily lift SMAP; we insert them in 47 places at boot, but only if the CPU
+says it has SMAP. *VM exit* — when the guest touches an emulated device, the
+hardware has to stop and hand control to the host; costs ~13.5 µs.
+
+#### The evidence
+
+One byte-identical kernel (`kernel_sha 7a17cf6be2a10a26`), release profile, 86
+benchmarks, back to back on this host. Full analysis in `design-decisions.md`
+§237; the feature table in `known-issues.md` under
+`ENV-WHPX-CPU-HOST-FIRMWARE-GP`.
+
+| | TCG (today) | WHPX |
+|---|---|---|
+| Typical benchmark | — | **×3.53 faster** (82 of 86 faster) |
+| Best case | — | `ipc_channel_roundtrip_64k` ×10.36 |
+| Device-touching benchmarks | — | **~30× slower** — `hpet_read` 453 ns → 13534 ns |
+| SMEP / SMAP / UMIP | yes | **no** |
+| `stac`/`clac` sites patched in | 47 of 47 | **0 of 47** |
+| Write-combining measurable | no | yes (51.74× vs 1.02×) |
+
+Two things worth pulling out of that table.
+
+**It is not a speed dial, it is a different shape.** Everything CPU-bound gets
+much faster; everything that touches an emulated device gets ~30× *slower*,
+because each access now traps to the hypervisor instead of being computed
+inline. `hpet_read`, `net_arp_lookup` and `net_ns_arp_lookup` all collapse to
+the same ~13.5 µs regardless of what they were before — the cost of one VM exit.
+So switching does not just move the numbers, it changes which benchmarks are
+even meaningful.
+
+**The security-feature loss is not WHPX being unable to do it.** It is that our
+command line asks for `-cpu qemu64,+smep,+smap,+umip` and WHPX silently ignores
+the three `+` additions. The obvious repair — `-cpu host`, ask for the real
+CPU's features — **does not boot at all**: the firmware takes a #GP in early
+platform init, because `-cpu host` advertises VMX and WHPX does not implement
+the register the firmware then reads. That is recorded, with the crash log, as
+`ENV-WHPX-CPU-HOST-FIRMWARE-GP`. I tried it rather than assuming, so the
+either/or below is a measured fact about this host, not an inference:
+
+| | TCG | WHPX + `qemu64` | WHPX + `host` |
+|---|---|---|---|
+| Boots | yes | yes | **no — firmware #GP** |
+| SMEP/SMAP/UMIP | yes | **no** | n/a |
+
+**And the sharpest point against switching, which is easy to miss:** a benchmark
+measures the thing you run it on. Under WHPX we would be timing a kernel with
+the 47 `stac`/`clac` pairs *absent* — a build we do not ship. The numbers would
+be precise, reproducible, free of the layout artefact, and about a slightly
+different kernel. That is not fatal (the effect is bounded: `alternatives.rs`
+has exactly one `Feature` variant, `Smap`, so the whole difference is those two
+instructions on user-memory paths, and the ×10 results are on paths that never
+touch user memory) — but it should be said out loud before choosing, not
+discovered later.
+
+#### Options
+
+| | *What changes:* |
+|---|---|
+| **A. Stay on TCG** | Nothing. Benchmarks stay 3.5× slower and keep the layout noise that makes Q53 unanswerable; the hardening stays exercised on every boot. |
+| **B. Switch everything to WHPX** | Boot tests finish in about half the time, benchmarks become far less noisy — and SMEP/SMAP/UMIP stop being exercised anywhere, so a bug in the `stac`/`clac` insertion would no longer be caught by any test we run. |
+| **C. Split by purpose: boot/correctness on TCG, benchmarks on WHPX** | The boot gate still runs the shipped kernel with all its protections; the benchmark suite gets numbers that mean something. Costs a second QEMU run for a full release gate, and restarts the benchmark history — the `accel` key added in §237 correctly refuses to compare across accelerators, so today's baselines do not carry over. The device-bound benchmarks would need to stay on TCG or have their targets rewritten. |
+| **D. Run both, for everything** | Maximum coverage: a regression that only appears under one accelerator is caught. Roughly doubles the wall-clock cost of the gate, which is already ~6 min for a debug boot. |
+| **E. Sweep intermediate `-cpu` models first, then decide** | Possibly finds a model that boots under WHPX *and* carries SMEP/SMAP — which would collapse this whole question. Cheap to test (the answer is in the first 80 lines of serial output, one boot per model), but the augmentation-dropping above suggests WHPX ignores `+feature` for any base model, so the likely outcome is "no such model exists". |
+
+**My recommendation: E first — it is one boot per candidate and it might make the
+question disappear — then C.** C is right if E finds nothing, because the two
+accelerators' weaknesses are disjoint *by purpose*: losing SMAP coverage matters
+for the correctness gate, where a missing `stac` shows up as a fault; the layout
+artefact matters only for benchmarks, where it is currently making 71% of the
+suite unreadable. Splitting puts each weakness where it does not bite. The
+infrastructure for it already exists — §237 made the accelerator part of the
+comparison key precisely so two series can coexist without contaminating each
+other. I am not recommending B: giving up the only place SMEP/SMAP/UMIP are ever
+exercised, to make a benchmark faster, trades a security property for a
+convenience.
+
+**This partly unblocks Q53.** Q53's only option that actually restores the 10%
+regression threshold was **D — get real numbers off real hardware**, which I
+flagged as needing infrastructure we do not have. WHPX is a much cheaper
+candidate for the same job: the page-straddle penalty behind the layout noise is
+a *TCG translation-block artefact*, and WHPX has no translation blocks. Whether
+that is true is measurable in about an hour — see below.
+
+#### What I can do without an answer, and will unless told otherwise
+
+Run the layout sweep under WHPX. Same six padded builds as the Q53 sweep, same
+host, `QEMU_EXTRA="-accel whpx"`; `layout-sweep.py` already propagates the
+setting to every arm, and the `accel` key means the WHPX arms automatically form
+their own band group rather than mixing with the TCG ones. That converts
+"WHPX would probably fix the noise" into a measured band, and it changes no
+default and no committed configuration — it is a probe, and it will be recorded
+as one. If the bands stay wide under WHPX, option C loses most of its value and
+this question gets much easier to answer.
+
+#### Why I did not just decide this
+
+Switching the accelerator would stop exercising a security feature on every
+test we run. That is a user-visible security posture change, not a tooling
+preference, and it is exactly the kind of thing that should not be traded for a
+3.5× speedup by the person who wants the speedup. It also touches
+`scripts/boot-test.sh`'s defaults, which every lane depends on.
+
+#### If this is never answered
+
+Safe, and stable — nothing degrades over time. TCG remains the default and the
+kernel keeps being tested with its protections on, which is the conservative
+side to be stuck on. The standing cost is that the benchmark suite stays 3.5×
+slower and stays too noisy to grade against `CLAUDE.md`'s 10% rule, so **Q53
+stays stuck too** — its cheapest remaining fix is the one this question is
+about.
+
 
 # Resolved
 

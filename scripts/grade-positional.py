@@ -438,7 +438,8 @@ def resolve_window(positions, load_at, load_until):
     return lo, hi, None
 
 
-def grade(bh, canary, positions, lo, hi, inflation, clean_tolerance=0):
+def grade(bh, canary, positions, lo, hi, inflation, clean_tolerance=0,
+          record_problem=None):
     """Compare the model's flagged set against a known load window.
 
     `inflation` is `{name: measured slowdown}` from `measure_inflation`, and
@@ -499,6 +500,20 @@ def grade(bh, canary, positions, lo, hi, inflation, clean_tolerance=0):
             "whole suite -- there is no clean region to produce a false "
             "positive in, so this run cannot discriminate. Use a narrower "
             "window further from the ends of the suite."
+        )
+    elif record_problem is not None:
+        # Checked before the measured stimulus, because it is a better
+        # explanation, not a stronger one. When the controller admits the
+        # window had no right-hand edge, "the stimulus never reached the
+        # window" is a true statement that sends the reader to look for the
+        # wrong fault -- which is what happened on the second attempt, where
+        # the printed reason blamed the load's placement and the actual cause
+        # was a benchmark name that could never match.
+        result["verdict"] = GRADE_UNGRADED
+        result["reason"] = (
+            f"{LOAD_RECORD_PROBLEMS[record_problem]}. The labelled window is "
+            f"therefore not the window that was applied, so this run says "
+            f"nothing about the model, whatever the benchmarks show."
         )
     elif stimulus["problem"] is not None:
         # Without a measurable stimulus there is no way to tell a run that was
@@ -624,6 +639,25 @@ def print_grade(result, positions, load_at, load_until):
     print(f"  VERDICT: {result['verdict']} -- {result['reason']}")
 
 
+#: What the controller says went wrong, in the grader's words.
+#:
+#: Accepting these is not a retreat from "the load script is the claim under
+#: test". The asymmetry is deliberate and it is the whole point: a record's
+#: *confession* that a trigger never matched is admissible, because nothing
+#: about the model can follow from a window that was never bounded. Its
+#: *claim of success* remains inadmissible, and is still checked against the
+#: benchmarks. A defendant's admission is evidence; his denial is not.
+LOAD_RECORD_PROBLEMS = {
+    "at-never-matched":
+        "the load's trigger never matched a live benchmark line, so the load "
+        "was never applied",
+    "until-never-matched":
+        "the load's release never matched a live benchmark line, so the load "
+        "ran to the end of the boot and the labelled window has no "
+        "right-hand edge",
+}
+
+
 def print_load_record(path):
     """Report what the load controller says it did.
 
@@ -654,6 +688,65 @@ def print_load_record(path):
         print(line)
     print(f"    result lines    : {record.get('completions_during')} under "
           f"load, after {record.get('completions_before_on')} clean")
+    # The host's own measurement of whether it got busy. Still diagnostic, but
+    # of a different kind from the lines above: those are the controller's
+    # intentions, this is an instrument reading. It is the one number here
+    # that can distinguish "the load was switched on" from "the machine
+    # actually slowed down", which are the two claims the first two attempts
+    # conflated.
+    host = record.get("host_probe") or {}
+    if host.get("inflation") is not None:
+        print(f"    host canary     : x{host['inflation']:.2f} over "
+              f"{host['samples']} samples "
+              f"(the host's own cost of a fixed unit of work, "
+              f"loaded vs idle)")
+    problem = record_problem(record)
+    if problem:
+        print(f"    PROBLEM         : {LOAD_RECORD_PROBLEMS.get(problem, problem)}")
+
+
+def record_problem(record):
+    """Read the confession out of a record, deriving it if it is not stated.
+
+    The `problem` field is the controller's own summary, but the grader does
+    not depend on it. The two facts it summarises -- a `--at` that never
+    fired, a `--until` that never released -- are already in the record as
+    plain booleans, and deriving from those keeps this working on records
+    written before the field existed and on ones written by a controller
+    whose version we cannot see. A grader that can only detect the faults its
+    subject volunteers is not much of a grader.
+
+    A missing `until` is not a fault: an open-ended window is a legitimate
+    thing to ask for, and only a *labelled* right-hand edge that never
+    arrived makes the applied window differ from the label.
+    """
+    stated = record.get("problem")
+    if stated in LOAD_RECORD_PROBLEMS:
+        return stated
+    if record.get("at") and record.get("fired") is False:
+        return "at-never-matched"
+    if record.get("until") and record.get("released") is False:
+        return "until-never-matched"
+    return None
+
+
+def load_record_problem(path):
+    """The controller's own admission that the window is not the labelled one.
+
+    Returns None when there is no record, when it cannot be read, or when it
+    reports no problem -- absence of a confession is never taken as evidence
+    of innocence, which is what the measured stimulus gate is for.
+    """
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    return record_problem(record)
 
 
 def main(argv=None):
@@ -735,9 +828,15 @@ def main(argv=None):
     }
 
     result = grade(bh, canary, positions, lo, hi, inflation,
-                   clean_tolerance=args.clean_tolerance)
+                   clean_tolerance=args.clean_tolerance,
+                   record_problem=load_record_problem(args.load_record))
     if result["verdict"] == GRADE_UNGRADED and "covered" not in result:
         print(f"  {GRADE_UNGRADED}: {result['reason']}")
+        if args.load_record:
+            # Printed even on the early return, because when the verdict is
+            # UNGRADED *because* of the record, suppressing the record leaves
+            # the reader with an accusation and no exhibit.
+            print_load_record(args.load_record)
         return 1
     print_grade(result, positions, args.load_at, args.load_until)
     if args.load_record:

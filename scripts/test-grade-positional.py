@@ -374,6 +374,151 @@ def test_grader_refuses_a_run_whose_load_escaped_the_window():
           result["verdict"], gp.GRADE_MISPLACED)
 
 
+def test_a_confessed_broken_window_outranks_every_other_verdict():
+    """P22's second run: the trigger fired, the release name never existed.
+
+    The `--until` name was taken from the end-of-run scorecard, and 27 of the
+    86 scorecard names never appear as live result lines -- which are the only
+    lines the controller can match. So the load switched on at the labelled
+    place and then ran to the end of the boot. The label said "positions
+    61-73"; the applied window was "61 to the end".
+
+    That is not a fact about the model, and it must not be reported as one --
+    including when the benchmarks happen to look good. A run whose window is
+    not the window on the label is worth exactly nothing either way, so the
+    confession has to outrank SUPPORTED just as firmly as it outranks BLIND.
+    """
+    gp = load_module(SCRIPT, "grade_positional")
+    positions = synthetic_positions()
+    stimulus = landed_stimulus(positions, 41, 60)
+
+    # The model that would otherwise score a clean SUPPORTED.
+    good = StubModel(list(range(41, 61)))
+    check("without a confession this run is SUPPORTED",
+          gp.grade(good, {"trace": "x"}, positions, 41, 60,
+                   stimulus)["verdict"], gp.GRADE_SUPPORTED)
+    result = gp.grade(good, {"trace": "x"}, positions, 41, 60, stimulus,
+                      record_problem="until-never-matched")
+    check("a confessed broken window is UNGRADED even when the model looks "
+          "perfect", result["verdict"], gp.GRADE_UNGRADED)
+    check_true("and the reason names the missing right-hand edge",
+               "no right-hand edge" in result["reason"])
+
+    # ...and it outranks the measured-stimulus complaint, which would
+    # otherwise send the reader hunting for the wrong fault.
+    unloaded = landed_stimulus(positions, 41, 60, window=(1.00, 1.05))
+    result = gp.grade(StubModel([]), {"trace": "x"}, positions, 41, 60,
+                      unloaded, record_problem="at-never-matched")
+    check("a confession outranks the measured-stimulus complaint",
+          result["verdict"], gp.GRADE_UNGRADED)
+    check_true("and the reason blames the trigger, not the placement",
+               "never matched a live benchmark line" in result["reason"])
+    check_true("...and specifically not the placement",
+               "never reached the window" not in result["reason"])
+
+
+def test_only_a_recognised_confession_is_admitted():
+    """Absence of a confession is never read as evidence of innocence.
+
+    The controller is the claim under test, so `load_record_problem` may only
+    ever *add* a reason to distrust a run. A missing file, an unreadable one,
+    or one reporting a problem this grader does not understand all return
+    None -- leaving the measured stimulus gate to do its job -- rather than
+    excusing or condemning the run on the record's say-so.
+    """
+    gp = load_module(SCRIPT, "grade_positional")
+    check("no path is not a confession", gp.load_record_problem(None), None)
+    check("a missing file is not a confession",
+          gp.load_record_problem(os.path.join(tempfile.gettempdir(),
+                                              "p22-no-such-record.json")), None)
+    for label, body in (("unparseable", "{not json"),
+                        ("problem-free", '{"fired": true, "released": true}'),
+                        ("unknown problem", '{"problem": "gremlins"}')):
+        handle, path = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(handle, "w") as out:
+                out.write(body)
+            check(f"a {label} record is not a confession",
+                  gp.load_record_problem(path), None)
+        finally:
+            os.unlink(path)
+    handle, path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(handle, "w") as out:
+            json.dump({"problem": "until-never-matched"}, out)
+        check("a recognised problem is admitted",
+              gp.load_record_problem(path), "until-never-matched")
+    finally:
+        os.unlink(path)
+
+
+def test_a_confession_is_derived_when_the_record_does_not_state_it():
+    """The fault is detected from the record's facts, not its self-summary.
+
+    P22's second run was recorded by a controller that had no `problem` field
+    yet -- the field was added *because* of that run. Its record nonetheless
+    states plainly that a `--until` was asked for and never released, and
+    that is the whole of the fault. Reading it out of the booleans means the
+    grader keeps working on old records, and cannot be talked out of a
+    verdict by a controller that simply declines to accuse itself.
+    """
+    gp = load_module(SCRIPT, "grade_positional")
+    derive = gp.record_problem
+    check("a --until that never released is derived",
+          derive({"at": "b40", "fired": True,
+                  "until": "b60", "released": False}), "until-never-matched")
+    check("a --at that never fired is derived",
+          derive({"at": "b40", "fired": False}), "at-never-matched")
+    check("...and outranks the release, which could not fire either",
+          derive({"at": "b40", "fired": False,
+                  "until": "b60", "released": False}), "at-never-matched")
+    check("a complete run is not a confession",
+          derive({"at": "b40", "fired": True,
+                  "until": "b60", "released": True}), None)
+    check("an open-ended window is not a confession",
+          derive({"at": "b40", "fired": True, "released": False}), None)
+    check("a stated problem still wins over derivation",
+          derive({"problem": "at-never-matched", "at": "b40", "fired": True,
+                  "until": "b60", "released": False}), "at-never-matched")
+
+    # The real thing: the preserved record from P22's second attempt, which
+    # this grader must be able to convict on its own reading.
+    real = os.path.join(REPO_ROOT, "build", "canary-load-record.json")
+    if os.path.exists(real):
+        check("P22 run 2's own record is read as a broken window",
+              gp.load_record_problem(real), "until-never-matched")
+
+
+def test_end_to_end_a_confessed_broken_window_is_ungraded_and_exhibited():
+    """The verdict cites the record, so the record must be shown with it."""
+    gp = load_module(SCRIPT, "grade_positional")
+    record = {"fired": True, "released": False, "outcome": "ran-to-end",
+              "problem": "until-never-matched",
+              "load_seconds": 0.21, "suite_seconds_seen": 6.3,
+              "completions_during": 3, "completions_before_on": 41,
+              "host_probe": {"inflation": 3.11, "samples": 120}}
+    handle, record_path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(handle, "w") as out:
+            json.dump(record, out)
+        with synthetic_run() as args:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = gp.main(args + ["--load-at", "b40", "--load-until", "b60",
+                                     "--load-record", record_path])
+            text = buf.getvalue()
+            check("a confessed broken window does not exit 0", rc, 1)
+            check_true("the verdict is UNGRADED", gp.GRADE_UNGRADED in text)
+            check_true("and it is not blamed on the model",
+                       gp.GRADE_BLIND not in text
+                       and gp.GRADE_MISPLACED not in text)
+            check_true("the record is exhibited alongside the accusation",
+                       "PROBLEM" in text)
+            check_true("the host canary reading is shown", "x3.11" in text)
+    finally:
+        os.unlink(record_path)
+
+
 def test_a_region_is_disturbed_only_when_both_statistics_agree():
     """Either statistic alone moves this far between two undisturbed runs.
 

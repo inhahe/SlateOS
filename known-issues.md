@@ -39908,7 +39908,7 @@ accelerator in `boot-test.sh` ever changes -- which is precisely what Q54 asks
 streaks would span both. Record `accel` there too, from the same banner, when
 Q54 is answered either way.
 
-### B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT: ITS RESOLUTION FLOOR IS 100x TIGHTER THAN ITS OWN DERIVATION (lane A, 2026-08-19) -- OPEN, fix identified
+### B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT: ITS RESOLUTION FLOOR IS 100x TIGHTER THAN ITS OWN DERIVATION (lane A, 2026-08-19) -- FIXED 2026-08-19 in `bf565ae6a` + `26c139a81`; see "Resolution" at the end of this entry
 
 **In short:** Every benchmark run takes a small reference measurement a dozen
 times during the suite, to notice if the host machine got busy halfway through
@@ -40190,6 +40190,82 @@ release runs that had a working canary were flagged contaminated**. Q52 asks
 whether a grading gate should keep failing on noise it cannot distinguish
 from a real fault; the answer has to be sized against that 31%, not against
 an assumption that contamination is rare.
+
+#### Resolution (2026-08-19)
+
+Fixed in two commits, kernel then tooling, because either alone would have
+changed nothing observable.
+
+**`bf565ae6a` -- `kernel/src/bench.rs`.** `CANARY_MIN_RESOLVABLE` was replaced
+in place by `CANARY_MIN_RESOLVABLE_CENTI`, and the scaling now happens *before*
+the comparison, so the threshold and the quantity it judges are the same kind
+of thing. (Retaining the old constant, as the written plan proposed, would have
+left dead code: `bench-history.py` computes its own bound from
+`CANARY_TOLERANCE_PCT` and never imported the kernel's.)
+
+A refused measurement now carries *why*, as a new `ArmFailure` enum, because
+the causes need opposite responses from the reader and carry opposite
+evidential weight for the verdict:
+
+| variant | what happened | can it have hidden an excursion? |
+|---|---|---|
+| `NotSeparated` | arms inverted, or the store was elided | **yes** -- keeps the verdict UNKNOWN |
+| `BelowFloor(n)` | arms separated by a resolvable but sub-floor amount | no -- an excursion is large and would have cleared the floor |
+| `ScaleRejected` | the scale-invariance check refused it before it was read | yes |
+
+`ScaleRejected` did not exist in the plan and had to be added: the calibration
+block flattened a scale rejection to "no value" and the canary then re-inflated
+it into a *separation failure*, which is simply a false statement about what
+happened. A delta of exactly zero is `NotSeparated`, not `BelowFloor(0)` -- it
+resolves nothing, so noise of any size could sit between the arms, and the safe
+direction of error is UNKNOWN (a re-run) over CLEAN (a missed regression).
+
+Boundary cases are `const` assertions on the real `const fn`, following
+`layout_pad.rs`: a kernel `#[cfg(test)]` module never compiles here, so a test
+written that way could never fail. Mutation-checked -- `>=` to `>` on the floor
+fails the build.
+
+**`26c139a81` -- `scripts/bench-history.py`.** The same defect turned out to be
+present here in *three* places, not the one this entry predicted, and each is
+the same mistake: reading a whole-cycle field as though it were the whole story.
+
+1. `min` is rounded to whole cycles, so 0.87 cycles/access reads back as
+   `min == 0` -- bit-for-bit what a dead instrument writes. (Predicted above.)
+2. **`start` is rounded the same way**, and the pre-`invalid` heuristic "a zero
+   start means one endpoint measurement failed" condemned the identical good
+   records. Not predicted; found only because the new WHPX-scale test still
+   failed after fixing (1). It now applies only where there is no `invalid`
+   field to read, which is the only situation it was ever an inference about.
+3. Every failure counted against the verdict equally. `below_floor` -- the new
+   11th wire field -- is now subtracted, so the `BelowFloor` rejections that
+   remain after the floor fix cannot keep a fast guest ungradeable.
+
+`below_floor`'s absence stays distinguishable from zero on disk: a pre-fix
+record's failures are genuinely of unknown kind. The verdict *assumes* zero
+when judging such a record -- the conservative direction, which preserves every
+existing classification -- but never writes it.
+
+**Not retroactive, deliberately.** The six 2026-08-19 WHPX sweep arms recorded
+`samples: 0`, and `samples == 0` outranks the whole split: there is no finding
+to grade. They stay `broken` and the six-arm band keeps its `6/6 arms could not
+measure host load` caveat (see design-decisions.md §239). The fix stops such a
+run happening; it does not manufacture data for one that already did.
+
+**Verification.** 605 assertions in `scripts/test-bench-history.py`, including
+two new groups covering the boundary from both sides in both units. Six
+mutations checked and all caught: dropping the centi bound (12 failures),
+dropping its doubling (1), not subtracting `below_floor` (1), subtracting all
+of `invalid` (10), restoring the unconditional zero-start fallback (2), storing
+`below_floor` with a default (6).
+
+**One correction to the plan, recorded because the plan was wrong in the
+direction this whole entry is about.** `build/canary-fix-plan.md` §3.4 put the
+centicycle boundary at `CANARY_MIN_RESOLVABLE_CENTI` itself. That is one
+quantum short: a spread is `(hi - lo) / lo` across two independently-quantised
+samples, so it carries a quantum from *each* end -- `200/m` percent, not
+`100/m`. The whole-cycle branch has reasoned that way since P18 measured it;
+the plan simply failed to carry the doubling down with the unit, which is the
+same species of oversight as the original bug.
 
 ### B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS, AND ITS PER-ARM GUARD CANNOT SEE THIS (lane A, 2026-08-19) -- OPEN, fix designed
 

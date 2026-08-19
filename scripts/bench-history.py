@@ -2291,6 +2291,54 @@ LEVEL_SHIFT_PCT = 25.0
 LEVEL_SHIFT_TUKEY_K = 3.0
 
 
+def level_shift_window(records, host, profile):
+    """The `(reference, recent)` run windows a sustained shift is judged over.
+
+    `reference` is the clean pre-window baseline the shift is measured against;
+    `recent` is the runs that must corroborate it. Either may be empty, in
+    which case `level_shifts` reports nothing.
+
+    Extracted rather than inlined because two callers need the same answer and
+    a second copy of the slicing would drift silently: `level_shifts` reads the
+    values, and the layout veto in `report` needs to know *which runs* a shift
+    was drawn from in order to ask whether the kernel image ever changed across
+    them. A veto computed over a different window than the finding it vetoes is
+    a check that appears to fire on the evidence and does not.
+    """
+    if records is None or host is None:
+        return [], []
+    window = comparable_records(records, host, profile)
+    # Causal and clean: drop the run being judged and the ones that could
+    # already contain the shift, then take the window before them.
+    reference = window[:-LEVEL_SHIFT_SKIP][-SPEED_WINDOW:] if len(
+        window) > LEVEL_SHIFT_SKIP else []
+    return reference, window[-LEVEL_SHIFT_PERSIST:]
+
+
+def placement_is_constant(records, host, profile, this_run):
+    """Is every run a sustained shift is drawn from provably the SAME image?
+
+    When it is, code placement is identical throughout and is the one
+    explanation that can be ruled out by construction -- the same reasoning
+    that keeps the run-over-run layout split away from A/A pairs.
+
+    Returns True **only on proof**, never on ignorance. A run that cannot name
+    its own image (no `kernel_sha`, or a dirty tree with no clean commit) makes
+    the answer False, because "we do not know" is not "they are the same". That
+    asymmetry is the safe one: this predicate only ever *blocks* an excuse, so
+    answering False on ignorance leaves the layout band to be judged on its own
+    positive evidence, exactly as it is everywhere else. Answering True on
+    ignorance would instead let a missing hash veto a correct excuse.
+    """
+    if not this_run:
+        return False
+    reference, recent = level_shift_window(records, host, profile)
+    runs = list(reference) + list(recent) + [this_run]
+    if len(runs) < 2:
+        return False
+    return all(same_image(runs[0], other) for other in runs[1:])
+
+
 def level_shifts(records, host, profile, current, threshold_pct=LEVEL_SHIFT_PCT):
     """Benchmarks sitting far off a baseline that PREDATES the recent runs.
 
@@ -2363,13 +2411,7 @@ def level_shifts(records, host, profile, current, threshold_pct=LEVEL_SHIFT_PCT)
     is below it and is NOT reported here. That is the same blind spot the
     run-over-run path has, not a new one.
     """
-    if records is None or host is None:
-        return []
-    window = comparable_records(records, host, profile)
-    # Causal and clean: drop the run being judged and the ones that could
-    # already contain the shift, then take the window before them.
-    reference = window[:-LEVEL_SHIFT_SKIP][-SPEED_WINDOW:] if len(
-        window) > LEVEL_SHIFT_SKIP else []
+    reference, recent = level_shift_window(records, host, profile)
     if len(reference) < MIN_WINDOW_FOR_BAND:
         return []
 
@@ -2394,7 +2436,16 @@ def level_shifts(records, host, profile, current, threshold_pct=LEVEL_SHIFT_PCT)
     # that actually differs: host disturbance is random per run, while a code
     # regression is in every run after the commit. So a benchmark must sit above
     # the fence in the newest run AND in the ones just before it.
-    recent = window[-LEVEL_SHIFT_PERSIST:]
+    #
+    # WHAT PERSISTENCE DOES *NOT* SEPARATE -- read this before "simplifying" the
+    # layout veto in `report` away. The sentence above is true and incomplete: a
+    # code-*placement* artifact is also in every run after the commit, because
+    # the addresses are a property of the image and every re-run of that image
+    # reproduces them exactly. So persistence separates {code regression OR
+    # layout artifact} from host noise; it says nothing about which of the two
+    # it is holding. The discriminator for that lives in `report`, where a
+    # measured layout band (`layout_bands`) and `placement_is_constant` are
+    # consulted before a shift is counted as bisectable.
     if len(recent) < LEVEL_SHIFT_PERSIST:
         return []
 
@@ -3465,9 +3516,15 @@ def report(previous, current_entries, threshold_pct,
     #
     # The general shape of the mistake is worth naming: a filter that is correct
     # for the ordinary case, applied to the one case whose premise it violates.
-    lbands = (layout_bands(records, host, profile)
-              if records is not None and host is not None and not same_binary
-              else {})
+    #
+    # Computed once and filtered per consumer, rather than computed twice: the
+    # sustained-shift block below needs the same bands under a *different*
+    # precondition (its window can span several images even when the last two
+    # runs are one), so gating the computation itself on `same_binary` would
+    # have starved that consumer of a band it is entitled to.
+    all_lbands = (layout_bands(records, host, profile)
+                  if records is not None and host is not None else {})
+    lbands = {} if same_binary else all_lbands
     reg_unexplained, reg_layout, reg_unswept = split_by_layout(reg_out, lbands)
     imp_unexplained, imp_layout, imp_unswept = split_by_layout(imp_out, lbands)
     reg_out = reg_unexplained + reg_unswept
@@ -3763,6 +3820,14 @@ def report(previous, current_entries, threshold_pct,
             f"they persist):"
         )
         any_structured = False
+        any_layout = False
+        # Placement can only explain a shift if placement could have *changed*
+        # across the runs the shift is drawn from. When every one of them is
+        # provably the same image the addresses are identical throughout, and
+        # attributing the shift to layout would be the A/A mistake in its other
+        # costume -- a filter correct for the ordinary case, applied to the one
+        # case whose premise it violates.
+        fixed_layout = placement_is_constant(records, host, profile, this_run)
         for name, median, value, adjusted, band, n in shifts:
             lo, hi, _med, _n = band
             print(
@@ -3780,8 +3845,30 @@ def report(previous, current_entries, threshold_pct,
                 records, host, profile, name, hi)
             for line in describe_mode_verdict(name, verdict):
                 print(line)
+            # A measured layout band is the second, independent way a shift can
+            # fail to be about the code -- and it reaches cases mode-structure
+            # cannot. `mode_structure` needs the benchmark to have been *seen*
+            # at both modes across binaries in the recorded history, so the
+            # first commit whose relink lands a hot loop across a page boundary
+            # is MODE_UNDECIDED and fails the build; the band knows the same
+            # thing from a sweep, before the artifact has ever repeated.
+            #
+            # Same evidential rule as everywhere else: only a band measured for
+            # this exact benchmark, at least as large as the shift, excuses
+            # anything. Unswept keeps its regression.
+            lband = all_lbands.get(name)
+            explained = (not fixed_layout and lband is not None
+                         and abs(adjusted) <= lband[0])
+            if explained:
+                print(f"    -> NOT a code finding: code placement alone "
+                      f"covers this shift.\n"
+                      f"       Measured by a sweep of one source at several "
+                      f".text offsets:\n"
+                      f"       {describe_layout_band(lband)}.")
             if verdict.verdict == MODE_STRUCTURED:
                 any_structured = True
+            elif explained:
+                any_layout = True
             else:
                 bisectable_shifts.append(name)
         # Name the first thing to rule out. Under TCG a loop that lands across
@@ -3792,15 +3879,32 @@ def report(previous, current_entries, threshold_pct,
         # disassemblies), which is the argument for checking it *before*
         # reading diffs rather than after. See known-issues.md
         # B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x.
-        print(
-            "    -> rule out code layout before reading the diff:\n"
-            "       python scripts/straddle-check.py --compare "
-            "<old-kernel-elf> <new-kernel-elf>"
-        )
+        #
+        # Only when something is still *going* to be bisected. The advice is
+        # "rule this out before reading the diff", so printing it under a shift
+        # already attributed to placement -- by a measured sweep or by
+        # mode-structure -- tells the reader to go and establish what the line
+        # above it just established.
+        if bisectable_shifts:
+            print(
+                "    -> rule out code layout before reading the diff:\n"
+                "       python scripts/straddle-check.py --compare "
+                "<old-kernel-elf> <new-kernel-elf>"
+            )
         if any_structured:
             print(
                 "    -> at least one shift above is mode-structured and is "
                 "NOT counted as a regression by --fail-on-regression."
+            )
+        if any_layout:
+            print(
+                "    -> at least one shift above is covered by a measured "
+                "layout band and is\n"
+                "       NOT counted as a regression by --fail-on-regression. "
+                "The band is a LOWER\n"
+                "       bound on placement sensitivity, so this is 'not "
+                "evidence about the diff',\n"
+                "       not 'proven harmless'."
             )
 
     if added:

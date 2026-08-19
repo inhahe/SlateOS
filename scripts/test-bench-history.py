@@ -3918,6 +3918,193 @@ def test_no_sweep_at_all_changes_nothing(bh):
           bh.layout_bands(history, "H", "release"), {})
 
 
+def _shift_with_sweep(bh, sweep, shift_to=3000, kernel_sha=None):
+    """A history holding BOTH a persisted level shift in `v` and a layout sweep.
+
+    The two halves must coexist in one list because that is how they arrive in
+    reality -- `report` is handed a single history and has to draw the shift
+    from the honest runs and the band from the sweep arms. The sweep arms carry
+    `experiment`, so `comparable_records` keeps them out of the shift's window
+    while `layout_arms` deliberately reads them; a helper that built the two
+    halves separately would never exercise that separation.
+
+    Nine stable companions per record, not the six `_shift_history` uses, for
+    the reason that helper gives *plus* one it does not need: with only the
+    benchmark under test present, `speed_factor` *is* that benchmark's own
+    ratio and every correction cancels the very thing being measured -- and
+    below `MIN_SAMPLES_FOR_DRIFT` benchmarks it declines to answer at all,
+    which `level_shifts` absorbs as a 1.0 fallback but `layout_bands`
+    deliberately treats as "no band". Seven benchmarks therefore produce a
+    silently unswept history, and every layout assertion here would pass by
+    measuring nothing.
+    """
+    stable = {f"stable{i}": 1000 for i in range(9)}
+    history = []
+    for value in [1000] * 8 + [shift_to, shift_to]:
+        record = {"host": "H", "profile": "release",
+                  "entries": dict(stable, v=value)}
+        if kernel_sha:
+            record["kernel_sha"] = kernel_sha
+            record["commit"] = "aaa"
+        history.append(record)
+    history += [
+        {"host": "H", "profile": "release", "commit": "sweptcommit",
+         "text_pad": pad, "experiment": f"layout sweep: textpad={pad}",
+         "timestamp": f"2026-08-19T0{index}:00:00",
+         "entries": dict(stable, v=value)}
+        for index, (pad, value) in enumerate(sorted(sweep.items()))
+    ]
+    return history
+
+
+def _shift_report(bh, history, shift_to=3000, this_run=None):
+    """Run `report` over a `_shift_with_sweep` history. -> (stdout, failed)."""
+    import io, contextlib
+    previous = history[9]
+    current = {name: (value, 10000, "OK", None, None)
+               for name, value in previous["entries"].items()}
+    current["v"] = (shift_to, 10000, "OK", None, None)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        failed = bh.report(previous, current, 25.0, records=history,
+                           host="H", profile="release",
+                           this_run=this_run or {"kernel_sha": "now"})
+    return buf.getvalue(), failed
+
+
+def test_a_sustained_shift_inside_a_measured_layout_band_is_not_bisectable(bh):
+    """The second path to a build failure, closed the same way as the first.
+
+    `level_shifts` is wired into `--fail-on-regression` independently of the
+    run-over-run lists, and the layout band was not consulted there at all. The
+    gap is visible in that function's own reasoning: "host disturbance is
+    random per run, while a code regression is in every run after the commit."
+    True, and incomplete -- a code *placement* artifact is also in every run
+    after the commit, because the addresses are a property of the image and
+    every re-run of that image reproduces them exactly. So persistence
+    separates {code OR layout} from host noise and cannot say which it holds.
+
+    `mode_structure` does not close this. It needs the benchmark to have been
+    *seen* at both modes across binaries in the recorded history, so the first
+    commit whose relink lands a hot loop across a page boundary is
+    MODE_UNDECIDED -- and MODE_UNDECIDED fails the build, correctly, on the
+    evidence it has. A sweep knows the same thing before the artifact has ever
+    repeated, which is the whole reason to run one.
+    """
+    wide = _shift_with_sweep(bh, {0: 1000, 1024: 4000, 2048: 2000})
+    out, failed = _shift_report(bh, wide)
+    check("the sustained shift is still reported", "SUSTAINED SHIFT" in out,
+          True)
+    check("...and named as placement, not as a code finding",
+          "NOT a code finding: code placement alone covers this shift" in out,
+          True)
+    check("...and the band's provenance is printed with it",
+          "3 layouts of sweptcommit" in out, True)
+    check("...so it does not fail the build", failed, False)
+    check("...and the reader is told the band is a lower bound",
+          "LOWER" in out and "not 'proven harmless'" in out, True)
+    # The advice reads "rule out code layout before reading the diff". Under a
+    # shift the sweep has *already* attributed to layout it would send the
+    # reader to establish what the line above it just established.
+    check("...and is not told to go and rule out what was just ruled out",
+          "straddle-check.py --compare" in out, False)
+
+    # Same shift, same everything, a band too narrow to cover it.
+    narrow = _shift_with_sweep(bh, {0: 1000, 1024: 1100, 2048: 1050})
+    out, failed = _shift_report(bh, narrow)
+    check("a shift larger than its measured band is not explained",
+          "NOT a code finding" in out, False)
+    check("...and still fails the build", failed, True)
+    check("...and the straddle-check advice is printed for it",
+          "straddle-check.py --compare" in out, True)
+
+    # And the ordinary case: nothing swept, nothing excused.
+    unswept = _shift_with_sweep(bh, {})
+    out, failed = _shift_report(bh, unswept)
+    check("an unswept benchmark keeps its sustained shift",
+          "NOT a code finding" in out, False)
+    check("...and it still fails the build", failed, True)
+
+
+def test_a_sustained_shift_across_one_fixed_image_is_never_placement(bh):
+    """The A/A mistake in its other costume, refused before it can be made.
+
+    Placement can only explain a shift if placement could have *changed* across
+    the runs the shift is drawn from. When every one of them is provably the
+    same kernel image, the addresses are identical throughout and layout is the
+    one hypothesis ruled out by arithmetic rather than weighed against the
+    numbers -- exactly as in an A/A pair. A band wide enough to cover the shift
+    must not excuse it here, however well measured it is.
+
+    What such a series actually is, for the record: a host-level change
+    (thermal, background load) that persisted. Reporting it is right; calling
+    it code placement would be a false statement.
+    """
+    fixed = _shift_with_sweep(bh, {0: 1000, 1024: 4000, 2048: 2000},
+                              kernel_sha="frozen")
+    out, failed = _shift_report(bh, fixed, this_run={"kernel_sha": "frozen",
+                                                     "commit": "aaa"})
+    check("a band that would otherwise cover it does not excuse it",
+          "NOT a code finding" in out, False)
+    check("...and the shift still fails the build", failed, True)
+    check("...and the run-over-run half still sees the A/A pair",
+          "A/A COMPARISON" in out, True)
+
+    # The predicate itself, at its two ends.
+    check("all-one-image is proof placement could not differ",
+          bh.placement_is_constant(fixed, "H", "release",
+                                   {"kernel_sha": "frozen"}), True)
+    unknown = _shift_with_sweep(bh, {0: 1000, 1024: 4000, 2048: 2000})
+    check("...and unidentifiable runs are NOT proof of that",
+          bh.placement_is_constant(unknown, "H", "release",
+                                   {"kernel_sha": "now"}), False)
+    check("...nor is a run that cannot name its own image",
+          bh.placement_is_constant(fixed, "H", "release", None), False)
+
+
+def test_the_layout_veto_reads_the_same_window_the_shift_was_drawn_from(bh):
+    """`level_shift_window` has two callers and they must not drift apart.
+
+    A veto computed over a different window than the finding it vetoes is a
+    check that appears to fire on the evidence and does not -- this file's
+    recurring failure in yet another form. The windows are asserted
+    behaviourally rather than by re-deriving the slice arithmetic, which would
+    only restate the implementation.
+    """
+    history = _shift_with_sweep(bh, {})
+    reference, recent = bh.level_shift_window(history, "H", "release")
+    honest = [r for r in history if "text_pad" not in r]
+
+    check("the corroborating runs are the newest honest ones",
+          [id(r) for r in recent],
+          [id(r) for r in honest[-bh.LEVEL_SHIFT_PERSIST:]])
+    check("the baseline and the corroboration share no run",
+          set(map(id, reference)) & set(map(id, recent)), set())
+    check("no sweep arm is ever part of either window",
+          any("text_pad" in r for r in reference + recent), False)
+
+    current = dict(honest[-1]["entries"])
+    check("the shift is found to begin with",
+          [r[0] for r in bh.level_shifts(history, "H", "release", current)],
+          ["v"])
+
+    # Put one corroborating run back at baseline: the finding must vanish.
+    recent[0]["entries"] = dict(recent[0]["entries"], v=1000)
+    check("a run inside the corroboration window decides the verdict",
+          bh.level_shifts(history, "H", "release", current), [])
+    recent[0]["entries"] = dict(recent[0]["entries"], v=3000)
+
+    # The one run in neither window must not: that buffer is why
+    # LEVEL_SHIFT_PERSIST < LEVEL_SHIFT_SKIP.
+    buffer_run = honest[-bh.LEVEL_SHIFT_SKIP]
+    check("the buffer run really is in neither window",
+          id(buffer_run) in set(map(id, reference + recent)), False)
+    buffer_run["entries"] = dict(buffer_run["entries"], v=99999)
+    check("...and changing it changes nothing",
+          [r[0] for r in bh.level_shifts(history, "H", "release", current)],
+          ["v"])
+
+
 def main():
     """Run every `test_*` in this file, in definition order.
 
@@ -3944,9 +4131,9 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 96:
+    if len(tests) < 99:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 96. Discovery is broken, not the code.")
+              f"suite has at least 99. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

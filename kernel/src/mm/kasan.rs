@@ -1211,15 +1211,80 @@ fn get_shadow(addr: u64) -> u8 {
 // ---------------------------------------------------------------------------
 
 /// Mark every granule fully inside `[addr, addr+size)` with `val`.
+///
+/// # Why this is a bulk fill and not a loop over [`set_shadow`]
+///
+/// The shadow bytes for a contiguous address range are themselves contiguous —
+/// that is the whole point of a linear `(addr >> 3) + offset` mapping — so
+/// poisoning an N-byte region is one fill of N/8 shadow bytes, not N/8
+/// independent lookups. The original loop called `set_shadow` per granule, and
+/// each call redid `shadow_of`, the frame-index computation, the bitmap probe
+/// and a one-byte volatile store. For a 4 KiB large allocation that is 512
+/// full lookups to write 512 adjacent bytes.
+///
+/// This was not a theoretical inefficiency. It is what made KASAN-for-the-whole-
+/// boot (see `init`) unusable on its first attempt: the instrumented boot ran at
+/// ~4.9 serial lines/s and projected to ~5650 s against a 3600 s timeout, so it
+/// could never have finished. The per-granule work is paid on *every* heap alloc
+/// and free once the shadow is maintained for real.
+///
+/// The bitmap probe still happens once per 16 KiB shadow frame (i.e. per 128 KiB
+/// of covered memory), because a fill may span frames that are not all mapped
+/// yet. A frame that cannot be mapped is skipped rather than aborting the whole
+/// fill: that matches `set_shadow`'s existing behaviour and keeps the failure
+/// fail-open in the poison direction.
 fn poison_granules(addr: u64, size: u64, val: u8) {
     if size == 0 {
         return;
     }
-    let mut g = addr & !KASAN_GRANULE_MASK;
-    let end = addr + size;
-    while g + KASAN_GRANULE <= end {
-        set_shadow(g, val);
-        g += KASAN_GRANULE;
+    // Preserve the original semantics exactly: start at the granule *containing*
+    // `addr` (which may extend below it when `addr` is unaligned) and cover only
+    // granules that end at or before `addr + size`.
+    let first = addr & !KASAN_GRANULE_MASK;
+    let end = addr.wrapping_add(size);
+    if end < first.wrapping_add(KASAN_GRANULE) {
+        return;
+    }
+    let granules = (end.wrapping_sub(first)) >> KASAN_GRANULE_SHIFT;
+    fill_shadow(first, granules, val);
+}
+
+/// Write `val` to the `count` shadow bytes covering `count` consecutive granules
+/// starting at granule-aligned `first`, backing shadow frames as needed.
+///
+/// Splits at 16 KiB shadow-frame boundaries so each frame is checked/mapped once
+/// and then filled in a single pass. Ranges that fall outside the backed shadow
+/// window, and frames that cannot be mapped, are skipped — never faulted on.
+fn fill_shadow(first: u64, count: u64, val: u8) {
+    if count == 0 {
+        return;
+    }
+    let Some(mut sv) = shadow_of(first) else {
+        return;
+    };
+    let shadow_limit = KASAN_SHADOW_BASE.wrapping_add(KASAN_SHADOW_SIZE);
+    let mut remaining = count;
+    while remaining != 0 && sv < shadow_limit {
+        // Bytes left in the 16 KiB shadow frame containing `sv`.
+        let frame_end = (sv & !(FRAME_SIZE as u64 - 1)).wrapping_add(FRAME_SIZE as u64);
+        let mut chunk = frame_end.wrapping_sub(sv);
+        if chunk > remaining {
+            chunk = remaining;
+        }
+        if ensure_shadow_mapped(sv) {
+            // SAFETY: `ensure_shadow_mapped` returned true, so the whole 16 KiB
+            // frame containing `sv` is backed by a writable frame, and `chunk`
+            // was clamped to end at or before that frame's end — so
+            // `[sv, sv+chunk)` is mapped.
+            // `rawmem::fill_u8` rather than `write_bytes`: this module runs
+            // underneath the compiler's instrumentation, and `core`'s intrinsic
+            // is subject to LLVM's memory-intrinsic instrumentation.
+            unsafe {
+                crate::mm::rawmem::fill_u8(sv as *mut u8, val, chunk as usize);
+            }
+        }
+        sv = sv.wrapping_add(chunk);
+        remaining = remaining.wrapping_sub(chunk);
     }
 }
 

@@ -209,6 +209,7 @@ POISON_ROOT_SUBSTRINGS = [
     # category is "code that must not take a shadow check", not "code that reads
     # poison", and `mm::kasan` is its charter member.
     "2mm5kasan10set_shadow",
+    "2mm5kasan11fill_shadow",
     "2mm5kasan20ensure_shadow_mapped",
     "2mm5kasan16clear_all_poison",
 ]

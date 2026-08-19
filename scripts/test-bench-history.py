@@ -3707,6 +3707,111 @@ def _distinct_pads(record):
     return siblings + [record]
 
 
+def test_a_docs_commit_mid_sweep_does_not_split_the_arms(bh):
+    """The bug that voided a six-arm, ~4.5-hour WHPX sweep.
+
+    An arm takes ~75 minutes, so anything committed while a sweep runs lands
+    later arms on a different `commit`. Grouping on the commit hash then turns
+    six arms into six one-pad groups, `MIN_PADS_FOR_LAYOUT_BAND` rejects every
+    one, and the sweep reports no band at all -- silently, with no error and
+    nothing to attribute it to. The real sweep of 2026-08-19 spanned six
+    commits, every one of them documentation.
+
+    The arms are given *real* commits from this repository, because the
+    property under test is precisely that the digest resolves two different
+    spellings to one identity; synthetic hashes would fall through to the
+    unresolvable path and the test would pass without exercising anything.
+    """
+    import subprocess
+
+    try:
+        short = subprocess.run(
+            ["git", "-C", bh.REPO_ROOT, "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        full = subprocess.run(
+            ["git", "-C", bh.REPO_ROOT, "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        print("SKIP  docs-commit grouping (git unavailable)")
+        return
+
+    arms = (_sweep_arms({0: 500}, commit=short)
+            + _sweep_arms({1024: 600}, commit=full)
+            + _sweep_arms({2048: 550}, commit=short))
+    check("arms recorded under different commit spellings form one group",
+          len(bh.layout_arms(arms, "H", "release")), 1)
+    bands = bh.layout_bands(arms, "H", "release")
+    if not check("...so a band is produced where the commit proxy produced "
+                 "none", "b0" in bands, True):
+        # Degrade to a reported failure rather than a KeyError: an exception
+        # here would abort the whole suite and take every unrelated test with
+        # it, turning one regression into no information at all.
+        return
+    check("...and the provenance names commits, not an opaque digest",
+          short in bands["b0"][2], True)
+
+
+def test_an_untagged_run_is_not_a_sweep_arm(bh):
+    """The contamination the digest fix would otherwise have introduced.
+
+    `text_pad` is parsed from the kernel's own banner, so *every* run reports
+    one, and an ordinary unpadded run truthfully reports 0. Once arms are
+    grouped by source rather than by commit, such a run stops being isolated by
+    its differing commit hash and lands in a real sweep's group.
+
+    That is not hypothetical. The 16:15 run of 2026-08-19 was the WHPX-vs-TCG
+    probe: unpadded, on a kernel predating the accelerator banner (so `accel`
+    absent, reading exactly like a TCG arm), and built from source identical to
+    the TCG sweep (so it shared that sweep's digest). Every field that might
+    have separated it was blind. It would have joined the TCG band as a seventh
+    arm, contributing hardware-virtualised timings -- a median 3.5x faster --
+    to a band whose only purpose is to be compared against TCG runs.
+    """
+    arms = _sweep_arms({0: 500, 1024: 600, 2048: 550})
+    intruder = dict(arms[0], text_pad=0, entries=dict(_SWEEP_STABLE, b0=50),
+                    experiment="WHPX vs TCG: hardware virtualisation probe",
+                    timestamp="2026-08-19T09:00:00")
+
+    rejection = bh.layout_arm_rejection(intruder, "H", "release")
+    check("an untagged pad-bearing run is rejected as an arm",
+          rejection is not None, True)
+    check("...naming the reason rather than merely failing",
+          "not an arm of a layout sweep" in (rejection or ""), True)
+    check("...so it cannot widen a genuine sweep's band",
+          bh.layout_bands(arms + [intruder], "H", "release")["b0"][0],
+          bh.layout_bands(arms, "H", "release")["b0"][0])
+
+
+def test_a_recorded_digest_outranks_commit_and_survives_a_dirty_tree(bh):
+    """A row that measured its own source needs neither `commit` nor `dirty`.
+
+    `dirty` is computed with `git diff --quiet HEAD`, which cannot see
+    untracked files -- and the kernel `include_bytes!`s six gitignored service
+    binaries. A recorded `src_digest` covers those, so it asserts strictly more
+    than `commit` + `dirty` ever did, and a dirty tree stops being a reason to
+    discard a well-identified arm. That matters because the harness's own
+    writes are exactly what make later arms dirty.
+    """
+    arms = _sweep_arms({0: 500, 1024: 600, 2048: 550})
+    for index, arm in enumerate(arms):
+        arm["src_digest"] = "full:deadbeefdeadbeef"
+        arm["commit"] = f"unrelated{index}"
+        arm["dirty"] = True
+
+    check("a dirty arm carrying a digest is still an arm",
+          bh.layout_arm_rejection(arms[0], "H", "release"), None)
+    check("...and digest-identical arms band despite unrelated commits",
+          "b0" in bh.layout_bands(arms, "H", "release"), True)
+
+    # The two flavours must not be interchangeable: a row whose artifacts are
+    # unknown cannot be shown to share a build with one whose artifacts are
+    # pinned.
+    other = _sweep_arms({4096: 500}, commit="whatever")
+    other[0]["src_digest"] = "tracked:deadbeefdeadbeef"
+    check("a tracked: digest never groups with a full: one",
+          len(bh.layout_arms(arms + other, "H", "release")), 1)
+
+
 def test_an_uncorrectable_arm_voids_the_whole_group(bh):
     """No drift correction is worse than no band, so the group is dropped.
 

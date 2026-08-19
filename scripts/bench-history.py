@@ -308,6 +308,17 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
 DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "history.jsonl")
 
+# Imported by path rather than by a plain `import` because this file is itself
+# routinely loaded via importlib -- by its own test suite and by ad-hoc
+# analysis scripts -- in which case `sys.path[0]` is not `scripts/` and a bare
+# import would fail for reasons having nothing to do with the caller.
+if os.path.join(REPO_ROOT, "scripts") not in sys.path:
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+try:
+    import src_digest as _src_digest
+except ImportError:  # pragma: no cover -- a checkout missing the module
+    _src_digest = None
+
 #: Functions whose *address* has been shown to change their measured cost by
 #: several-fold under QEMU's TCG, with their machine code byte-identical.
 #:
@@ -3009,6 +3020,27 @@ def describe_band(band):
 #: direction where an over-confident estimate hides real regressions.
 MIN_PADS_FOR_LAYOUT_BAND = 3
 
+#: How a deliberate layout-sweep arm announces itself: `scripts/layout-sweep.py`
+#: puts this in `BENCH_EXPERIMENT`, and `layout_arm_rejection` matches on it.
+#: One statement of the string, imported by the producer, because two copies
+#: could drift and the symptom would be a whole sweep silently rejected.
+#:
+#: This is not decoration. `text_pad` is parsed from the kernel's own banner, so
+#: *every* run reports one -- an ordinary unpadded run truthfully says
+#: `textpad=0`. Without this tag such a run is indistinguishable from a
+#: deliberate pad=0 arm, and gets banded as one.
+#:
+#: That is not hypothetical, and it fails in the dangerous direction. The 16:15
+#: run of 2026-08-19 was the WHPX-vs-TCG probe: unpadded, so `textpad=0`; on a
+#: kernel predating the accelerator banner, so `accel` is absent and reads as
+#: `None` exactly like a TCG arm; and built from source identical to the TCG
+#: sweep, so it shares that sweep's digest. Every field that might have
+#: separated it from a genuine TCG arm was blind, and it would have joined the
+#: TCG band as a seventh arm -- contributing hardware-virtualised timings, a
+#: median 3.5x faster, to a band whose whole purpose is to be compared against
+#: TCG runs. A band inflated that way dismisses every regression inside it.
+LAYOUT_SWEEP_TAG = "layout sweep: textpad="
+
 
 def layout_arm_rejection(record, host, profile):
     """Why `layout_arms` would discard this record, or `None` if it keeps it.
@@ -3044,18 +3076,98 @@ def layout_arm_rejection(record, host, profile):
         return ("the host was loaded during this run, so its timings carry "
                 "contention as well as placement -- and an inflated spread "
                 "widens the band, which dismisses real regressions")
-    if record.get("dirty"):
-        return ("the tree was dirty, so `commit` does not identify the source "
-                "that was built and the arms cannot be shown to share one")
+    # `dirty` and `commit` are only consulted when the row does *not* carry a
+    # measured `src_digest`. A recorded digest identifies the built source
+    # directly -- including the untracked artifacts the kernel embeds, which
+    # `dirty` has never been able to see -- so for such a row the commit hash
+    # is provenance, not identity, and a dirty tree is no longer a reason to
+    # discard a perfectly well-identified arm. That is not a loosening for
+    # convenience: it removes a second silent way to void a three-hour sweep,
+    # since the harness's own writes are exactly what make later arms dirty.
+    if not record.get("src_digest"):
+        if record.get("dirty"):
+            return ("the tree was dirty and no `src_digest` was recorded, so "
+                    "`commit` does not identify the source that was built and "
+                    "the arms cannot be shown to share one")
     pad = record.get("text_pad")
     if not isinstance(pad, int) or isinstance(pad, bool):
         return ("no `text_pad` was recorded, so where this kernel's code sits "
                 "is unknown -- which is not the same as unpadded, and cannot "
                 "be assumed to be")
-    if not record.get("commit"):
-        return ("no `commit` was recorded, so this arm cannot be grouped with "
-                "the others as the same source")
+    if LAYOUT_SWEEP_TAG not in (record.get("experiment") or ""):
+        return ("this run was not an arm of a layout sweep -- every run "
+                "reports a `text_pad`, and an ordinary unpadded run truthfully "
+                "reports 0, so a pad alone does not make a record comparable "
+                "to a deliberately perturbed one; see LAYOUT_SWEEP_TAG")
+    if not record.get("src_digest") and not record.get("commit"):
+        return ("neither `src_digest` nor `commit` was recorded, so this arm "
+                "cannot be grouped with the others as the same source")
     return None
+
+
+#: Memoises `arm_group_key`'s git lookups. A derivation costs a `git ls-tree
+#: -r` over ~13k paths, and a sweep's arms are asked about repeatedly.
+_ARM_KEY_CACHE = {}
+
+
+def arm_group_key(record):
+    """The identity a record must share with another to be banded against it.
+
+    # Why this is not `record["commit"]`
+
+    It used to be, and that is a broken proxy for "the same source was built"
+    in both directions.
+
+    It **splits arms that are identical**: an arm takes ~75 minutes, so any
+    commit landing mid-sweep -- including a documentation commit, which cannot
+    change a build -- gives later arms a different `commit` string. Six arms
+    then become six one-pad groups, `MIN_PADS_FOR_LAYOUT_BAND` rejects every
+    one, and the sweep reports no band at all, silently. The six WHPX arms of
+    2026-08-19 were recorded under six different commits, every one of them a
+    docs commit; see known-issues.md
+    `B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS`.
+
+    It also **merges arms that differ**, which is the dangerous direction:
+    `dirty` cannot see untracked files, and the kernel embeds six gitignored
+    service binaries. Two arms that embed different `init` builds hash
+    identically under `commit` + `dirty` and band together, and a band inflated
+    by a real code difference dismisses every regression inside its width.
+
+    # The three tiers, in decreasing order of what they assert
+
+    1. A recorded `src_digest` -- the row measured its own source, artifacts
+       included. Tagged `full:`.
+    2. A digest *derived* from `commit` for rows written before the field
+       existed. Tagged `tracked:`; the artifact half is unrecoverable because
+       those bytes were never stored anywhere.
+    3. The bare `commit` string, when git cannot resolve it at all -- a branch
+       deleted, a row from another machine, a shallow clone.
+
+    Tier 3 is deliberately *today's behaviour*, unchanged: keying on the commit
+    groups only exact-commit matches, which is what this function did before
+    and merges nothing new. The tiers never collide with each other, because
+    the digests carry their tags and a commit hash does not, so a row whose
+    artifacts are unknown can never band with one whose artifacts are pinned.
+    """
+    digest = record.get("src_digest")
+    if not digest:
+        commit = record.get("commit")
+        if commit and _src_digest is not None:
+            if commit not in _ARM_KEY_CACHE:
+                try:
+                    _ARM_KEY_CACHE[commit] = _src_digest.src_digest_commit(
+                        REPO_ROOT, commit)
+                except Exception:
+                    # Falling back to a *constant* here would give every
+                    # unresolvable commit one key and band unrelated sweeps
+                    # together; falling back to the commit reproduces the old
+                    # behaviour exactly, which merges nothing that was not
+                    # already merged.
+                    _ARM_KEY_CACHE[commit] = commit
+            digest = _ARM_KEY_CACHE[commit]
+        else:
+            digest = commit
+    return (digest, record.get("accel"))
 
 
 def layout_arms(records, host, profile):
@@ -3105,7 +3217,11 @@ def layout_arms(records, host, profile):
         # `None` (the kernel predates the banner) is its own key rather than
         # being folded into TCG, so pre-field records still form the bands they
         # always did while never mixing with a record that actually said.
-        groups.setdefault((record["commit"], record.get("accel")), {}) \
+        #
+        # The source half of the key is `arm_group_key`, not `commit`: see that
+        # function for why a commit hash both splits identical arms and merges
+        # different ones.
+        groups.setdefault(arm_group_key(record), {}) \
               .setdefault(record["text_pad"], []).append(record)
     return {key: arms for key, arms in groups.items()
             if len(arms) >= MIN_PADS_FOR_LAYOUT_BAND}
@@ -3114,9 +3230,11 @@ def layout_arms(records, host, profile):
 def layout_bands(records, host, profile):
     """Per-benchmark spread attributable to code *placement* alone.
 
-    Returns `{name: (spread_pct, pads, commit, accel)}`, where `spread_pct` is
-    the peak-to-peak spread across the sampled layouts as a percentage of the
-    smallest, and `pads` is how many distinct layouts it was measured over.
+    Returns `{name: (spread_pct, pads, provenance, accel)}`, where `spread_pct`
+    is the peak-to-peak spread across the sampled layouts as a percentage of
+    the smallest, `pads` is how many distinct layouts it was measured over, and
+    `provenance` names the commit the arms came from -- or the *range* of
+    commits, when a sweep spanned several without changing any build input.
     `accel` is which emulator the arms ran on (`None` if they predate the
     field) -- reported rather than assumed, because a band measured under one
     accelerator says nothing about a run under the other. Empty when no commit
@@ -3193,7 +3311,30 @@ def layout_bands(records, host, profile):
                       for r in pad), default="")
         return (newest, len(arms))
 
-    (commit, accel), arms = max(groups.items(), key=group_key)
+    (_digest, accel), arms = max(groups.items(), key=group_key)
+
+    # Provenance for a human, derived from the arms rather than from the group
+    # key, because the key is now a source digest and "6 layouts of
+    # tracked:02c5a23a" tells a reader nothing they can act on. When the arms
+    # span several commits -- which is the normal case now that a docs commit
+    # mid-sweep no longer splits them -- say so explicitly and say why they
+    # were banded anyway, so that a reader who expected one commit per band is
+    # not left to guess whether two unrelated sweeps got merged.
+    by_time = sorted(
+        (r for pad in arms.values() for r in pad),
+        key=lambda r: r.get("timestamp", ""))
+    commits = []
+    for record in by_time:
+        commit = record.get("commit")
+        if commit and commit not in commits:
+            commits.append(commit)
+    if len(commits) == 1:
+        provenance = commits[0]
+    elif commits:
+        provenance = (f"{commits[0]}..{commits[-1]}, {len(commits)} commits "
+                      f"of identical build inputs")
+    else:
+        provenance = "an unrecorded commit"
 
     # One entry map per pad: the median over repeats at that pad, so a layout
     # measured twice does not get double weight and its own run-to-run noise is
@@ -3225,7 +3366,8 @@ def layout_bands(records, host, profile):
         lo, hi = min(values), max(values)
         if lo <= 0:
             continue
-        bands[name] = ((hi - lo) * 100.0 / lo, len(corrected), commit, accel)
+        bands[name] = ((hi - lo) * 100.0 / lo, len(corrected), provenance,
+                       accel)
     return bands
 
 
@@ -3239,10 +3381,10 @@ def describe_layout_band(band):
     silent, so that an unlabelled band cannot be mistaken for one that was
     checked.
     """
-    spread, pads, commit, accel = band
+    spread, pads, provenance, accel = band
     where = accel if accel else "accelerator not recorded"
     return (f"placement alone moves it {spread:.0f}% "
-            f"({pads} layouts of {commit}, {where})")
+            f"({pads} layouts of {provenance}, {where})")
 
 
 #: The single file the in-kernel benchmark suite is defined in, and the tree it
@@ -4362,19 +4504,49 @@ def cmd_layout_bands(history_path, profile):
         # different actions and the bare "no band" is compatible with all of
         # them. Reporting only the conclusion is how a sweep that silently
         # failed to qualify would look exactly like a sweep never run.
+        #
+        # Grouped by `arm_group_key`, the same key `layout_arms` uses, and not
+        # by `commit`. Listing this diagnostic per commit would show a sweep
+        # that spanned several docs commits as one row per arm -- reproducing,
+        # in the very message meant to explain the absence, the miscount that
+        # caused it.
         swept = {}
+        non_arms = 0
         for record in records:
             pad = record.get("text_pad")
-            if isinstance(pad, int) and not isinstance(pad, bool):
-                swept.setdefault(record.get("commit") or "?", set()).add(pad)
+            if not isinstance(pad, int) or isinstance(pad, bool):
+                continue
+            # Only genuine sweep arms are grouped. An ordinary run reports
+            # `textpad=0` truthfully, so listing every pad-bearing record
+            # under a shared group key would show a non-sweep run as though it
+            # were about to band with a sweep -- which is exactly the
+            # contamination LAYOUT_SWEEP_TAG exists to prevent, restated as a
+            # reassuring line of diagnostic output.
+            if LAYOUT_SWEEP_TAG not in (record.get("experiment") or ""):
+                non_arms += 1
+                continue
+            entry = swept.setdefault(arm_group_key(record),
+                                     {"pads": set(), "commits": []})
+            entry["pads"].add(pad)
+            commit = record.get("commit")
+            if commit and commit not in entry["commits"]:
+                entry["commits"].append(commit)
         if not swept:
-            print("  No run on any host/profile has recorded a textpad= at "
-                  "all, so no sweep has ever been run.")
+            print("  No run on any host/profile has recorded a layout-sweep "
+                  "arm at all, so no sweep has ever been run.")
+            if non_arms:
+                print(f"  ({non_arms} run(s) do record a textpad=, but none "
+                      f"was a deliberate sweep arm -- every run reports one.)")
         elif not arms:
-            print("  Runs with a recorded pad exist, but none qualify here "
+            print("  Sweep arms exist, but none qualify here "
                   "(wrong host or profile, dirty tree, or a loaded host):")
-            for commit, pads in sorted(swept.items()):
-                print(f"    {commit}: pads {sorted(pads)}")
+            for entry in sorted(swept.values(),
+                                key=lambda e: e["commits"] or [""]):
+                commits = entry["commits"] or ["(no commit recorded)"]
+                label = commits[0] if len(commits) == 1 else (
+                    f"{commits[0]}..{commits[-1]} ({len(commits)} commits, "
+                    f"identical build inputs)")
+                print(f"    {label}: pads {sorted(entry['pads'])}")
         else:
             print(f"  {len(arms)} commit(s) have enough layouts, but every "
                   f"band was voided -- an arm's host-drift factor could not "
@@ -4386,14 +4558,14 @@ def cmd_layout_bands(history_path, profile):
               "has measured otherwise,\n  not because anybody has shown it.")
         return 0
 
-    _, pads, commit, accel = next(iter(bands.values()))
+    _, pads, provenance, accel = next(iter(bands.values()))
     # The accelerator belongs in the header, not a footnote: this band is only
     # evidence about runs on the same one. Measured on a byte-identical binary,
     # the median benchmark is 3.5x faster under WHPX than under TCG, so a band
     # read across accelerators is wrong by far more than it is wide.
     where = accel if accel else "accelerator NOT recorded"
     print(f"Code-placement sensitivity on {host} / {profile} / {where}, "
-          f"measured over {pads} layouts of {commit}:")
+          f"measured over {pads} layouts of {provenance}:")
     print("  (how far the SAME SOURCE moves when only its .text offset "
           "changes -- a LOWER bound)")
     print()
@@ -4401,7 +4573,7 @@ def cmd_layout_bands(history_path, profile):
     # Name breaks the tie, so that two runs of this view diff cleanly. Ties are
     # the common case, not the corner one: most benchmarks sit at 0.0% and
     # would otherwise come out in dict order, making every re-run look changed.
-    for name, (spread, _pads, _commit, _accel) in sorted(
+    for name, (spread, _pads, _provenance, _accel) in sorted(
             bands.items(), key=lambda item: (-item[1][0], item[0])):
         print(f"  {name:<{width}}  {spread:6.1f}%")
     print()

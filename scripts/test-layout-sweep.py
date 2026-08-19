@@ -291,8 +291,12 @@ def test_an_arm_that_would_not_be_counted_stops_the_sweep(ls):
     host = platform.node() or "unknown"
 
     def record(**overrides):
+        # The experiment tag is part of what makes a row an *arm*, not
+        # decoration: every run reports a `text_pad`, so an untagged row is an
+        # ordinary run rather than a deliberately perturbed one.
         base = {"host": host, "profile": "release", "text_pad": 1024,
-                "commit": "abc1234", "dirty": False}
+                "commit": "abc1234", "dirty": False,
+                "experiment": f"{bh.LAYOUT_SWEEP_TAG}1024 (identical source)"}
         base.update(overrides)
         return base
 
@@ -301,6 +305,20 @@ def test_an_arm_that_would_not_be_counted_stops_the_sweep(ls):
     check("a clean, padded, committed arm is accepted", ok, True)
     check("...and says so, so acceptance is a receipt and not a silence",
           "accepted as an arm" in message, True)
+
+    # The regression test for the 2026-08-19 near-miss: an untagged run is not
+    # an arm, however clean and however well-padded. The WHPX-vs-TCG probe was
+    # unpadded (so `textpad=0`), on a kernel predating the accel banner (so
+    # `accel` absent, reading exactly like a TCG arm), and built from source
+    # identical to the TCG sweep (so it shared that sweep's digest). Nothing
+    # else in the record could have kept it out of the TCG band.
+    ok, message = ls.check_arm_counts(
+        FakeHistory(bh, [record(experiment=None)]), 1024, "release")
+    check("an untagged run is not an arm, however clean", ok, False)
+    ok, _ = ls.check_arm_counts(
+        FakeHistory(bh, [record(experiment="WHPX vs TCG: a different probe")]),
+        1024, "release")
+    check("a differently-tagged experiment is not an arm either", ok, False)
 
     ok, message = ls.check_arm_counts(
         FakeHistory(bh, [record(dirty=True)]), 1024, "release")

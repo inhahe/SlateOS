@@ -814,8 +814,13 @@ def run_sweep(pads: list[int], profile: str, serial: str) -> int:
               f"({profile}) ===", flush=True)
         env = dict(os.environ)
         env["SLATEOS_TEXT_PAD"] = str(pad)
+        # The prefix is `bh.LAYOUT_SWEEP_TAG`, not a literal, because
+        # `layout_arm_rejection` matches on it to tell a deliberate sweep arm
+        # from an ordinary run that merely happens to be unpadded. Two copies
+        # of that string would let the producer and the consumer drift, and the
+        # symptom would be a sweep whose arms are all silently rejected.
         env["BENCH_EXPERIMENT"] = (
-            f"layout sweep: textpad={pad} (identical source, deliberately "
+            f"{bh.LAYOUT_SWEEP_TAG}{pad} (identical source, deliberately "
             f"perturbed code placement; see scripts/layout-sweep.py)")
         proc = subprocess.run([bash, script, "--bench",
                                f"--profile={profile}"],

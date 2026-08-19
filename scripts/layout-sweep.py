@@ -475,6 +475,28 @@ def parse_pads(text: str) -> list[int]:
 
 
 def main(argv=None) -> int:
+    # Line-buffer stdout, because this script is never run interactively.
+    #
+    # Every invocation goes through `run-timeout.py` or a background job, so
+    # stdout is a pipe, and Python block-buffers pipes: a six-arm release sweep
+    # emits *nothing* for two and a half hours and then everything at once. That
+    # is indistinguishable from a hang, which is precisely the condition
+    # run-timeout.py exists to make visible -- its own docs promise output
+    # "streamed live (no buffering that hides progress)", and this script was
+    # quietly defeating that promise. Observed on the first real release run:
+    # four minutes in, the only evidence it was alive came from inspecting the
+    # process table.
+    #
+    # Line buffering rather than per-print `flush=True` because the latter has
+    # to be remembered at all 27 call sites and at every one added later, and
+    # forgetting it fails silently in the direction of looking hung.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        # Only on an exotic stdout; unbuffered output is a convenience here,
+        # never a correctness requirement, so a failure must not stop the sweep.
+        pass
+
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)

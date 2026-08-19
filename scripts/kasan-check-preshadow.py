@@ -855,14 +855,39 @@ def main() -> int:
     # after the `rawmem` conversion — whereas a non-zero accessor count means
     # the walk found accessors and cleared them. Both exit 0; conflating them in
     # the output would hide a check that had quietly stopped judging anything.
-    poison_accessors = sum(1 for name in poison_visited if is_poison_accessor(name))
+    poison_accessors = sorted(
+        name for name in poison_visited if is_poison_accessor(name)
+    )
     print(
         f"kasan-check-preshadow: OK — {len(pre_visited)} function(s) reachable "
         f"before the shadow is installed, {len(rt_visited)} on the check path, "
         f"and {len(poison_visited)} reachable from the deliberate "
-        f"poisoned-memory roots ({poison_accessors} of them raw byte "
+        f"poisoned-memory roots ({len(poison_accessors)} of them raw byte "
         f"accessors), none instrumented."
     )
+    # Name them, don't just count them.
+    #
+    # The count alone cannot distinguish "the same three accessors as last run,
+    # still uninstrumented" from "one of them dropped out and a different one
+    # appeared" — and the second is exactly the shape of a regression this
+    # check is meant to make visible, because *which* accessor a poison path
+    # reaches is the whole subject of the §118/§119 hazard. A `memset` newly
+    # appearing on a path that previously reached only `rawmem` is a real
+    # change of risk even though the verdict and the count are unchanged.
+    #
+    # Printed on success rather than only on failure: on failure the offending
+    # symbol is already named in the violation report, so the run that needs
+    # this line is the one that passes.
+    #
+    # As of 2026-08-19 the set is three: `memcpy`, and `core::ptr::drop_glue`
+    # monomorphised for `spin::MutexGuard<()>` and `spin::SpinMutexGuard<()>`.
+    # The two drop glues are worth a word, because "drop glue" does not sound
+    # like a byte accessor and the matcher only catches them because they live
+    # in `core::ptr`. That match is right rather than lucky: a guard's drop
+    # glue *is* the unlock, i.e. a store, and it runs on a poison path, so it
+    # is exactly the kind of `core`-owned access this walk exists to check.
+    for name in poison_accessors:
+        print(f"  raw byte accessor (uninstrumented): {name}")
     return 0
 
 

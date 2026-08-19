@@ -387,6 +387,52 @@ def bench_history():
     return module
 
 
+#: How the sweep names the boot test when it hands it to `bash`.
+#:
+#: **Repo-relative, resolved by the child's cwd -- never the absolute path**
+#: `os.path.join(SCRIPT_DIR, ...)` would build. On Windows that absolute path is
+#: `D:\visual studio projects\...\boot-test.sh`, and the `bash` on PATH here is
+#: MSYS: it cannot open a drive-letter path with backslashes, and says so as the
+#: generic `No such file or directory`, exit 127. That killed the first real
+#: release sweep -- after its 34-minute self-test had passed, on the first arm,
+#: with a message claiming a script that is plainly present was missing.
+BOOT_TEST = "scripts/boot-test.sh"
+
+
+def preflight_boot_test(script: str = BOOT_TEST,
+                        root: str = PROJECT_ROOT) -> tuple[bool, str]:
+    """Can `bash` find, read and parse the boot test, from where the sweep runs?
+
+    Returns `(ok, message)`; the message is always worth printing, because the
+    successful case is the receipt that this check ran at all.
+
+    `bash -n` parses the script without executing a line of it, so this proves
+    the *exact* argv the sweep loop is about to use resolves to a readable file
+    this bash understands -- in about fifty milliseconds. Every part of that
+    matters: the failure it exists to catch is invisible until the first arm,
+    which is one full build and one full boot into a run that costs hours, and
+    it reports itself as a missing file rather than an unusable path.
+
+    Deliberately not `os.path.exists`: the file existed the whole time. The
+    question is not whether Python can see it, it is whether *bash* can open it
+    under the exact string the sweep will pass, and only bash can answer that.
+    """
+    try:
+        parsed = subprocess.run(["bash", "-n", script], cwd=root,
+                                capture_output=True, text=True, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, (f"layout-sweep: cannot run bash at all ({exc}); the "
+                       f"sweep needs it to invoke {script}.")
+    if parsed.returncode != 0:
+        detail = (parsed.stdout + parsed.stderr).strip()[-500:]
+        return False, (
+            f"layout-sweep: `bash -n {script}` failed (exit "
+            f"{parsed.returncode}) with cwd {root}, so the sweep would fail on "
+            f"its first arm -- after a full build and boot. Refusing to "
+            f"start.\n  {detail}")
+    return True, f"[layout-sweep] preflight: bash can run {script} from {root}"
+
+
 def run_sweep(pads: list[int], profile: str, serial: str) -> int:
     """Build and `--bench`-boot the kernel once per pad value.
 
@@ -411,7 +457,12 @@ def run_sweep(pads: list[int], profile: str, serial: str) -> int:
               f"to produce a history no band can be computed from.")
         return 2
 
-    script = os.path.join(SCRIPT_DIR, "boot-test.sh")
+    script = BOOT_TEST
+    ok, message = preflight_boot_test(script)
+    print(message)
+    if not ok:
+        return 1
+
     for pad in pads:
         print(f"\n=== layout sweep: SLATEOS_TEXT_PAD={pad} "
               f"({profile}) ===", flush=True)

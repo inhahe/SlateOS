@@ -549,10 +549,20 @@ Known-issues (open, kernel-owned):
 - `B-FORKEXEC-BOOT-HANG` — intermittent hang at the glibc fork+exec self-test
 - ~~`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`~~ — **NOT A
   KERNEL BUG, closed 2026-08-19.** The "wedge" was never real: the instrumented
-  boot was healthy and simply slower than the harness budget. Two instrumented
-  boots have now reached `BOOT_OK` (1063 s, then 881 s) with **zero KASAN
+  boot was healthy and simply slower than the harness budget. Three instrumented
+  boots have now reached `BOOT_OK` (1063 s, 881 s, 951 s). ~~with **zero KASAN
   reports** — so the heap corruption this profile was built to hunt did not
-  reproduce either. Three separate constants had to be fixed to get there, each
+  reproduce either.~~ **Correction 2026-08-19: the "zero KASAN reports" claim
+  was false.** It was checked with a matcher (`BUG: KASAN`, `__asan_report`)
+  that this kernel never emits, so it could not have failed. The third boot in
+  fact produced 64 `[kasan] CRITICAL: use-after-free` reports — all spurious,
+  all on one 20-byte span — which exhausted the 64-report budget at line 26035
+  of 27701 and silently suppressed any *genuine* report after that. Root-caused
+  and fixed as `B-KASAN-STALE-POISON-ON-LIVE-SLOT`; the corruption hunt has
+  therefore still not had a clean instrumented run to draw a conclusion from.
+  The closure of *this* bug is unaffected — it rested on the boots reaching
+  `BOOT_OK` at all, not on their report counts.
+  Three separate constants had to be fixed to get there, each
   hidden behind the previous because the boot never got far enough to reach it:
   `BENCH_TIMEOUT`, then `KASAN_BOOT_TIMEOUT` (whose expiry sampled a perfectly
   healthy guest's RIP inside the shadow checker and reported it as

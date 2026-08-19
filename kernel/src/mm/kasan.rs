@@ -191,9 +191,19 @@ static MAP_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 ///   forward progress.
 /// * If the caller arrived with interrupts already disabled (an IRQ-context
 ///   allocation), re-enabling them is not ours to do, so a failed attempt gives
-///   up. The caller then simply leaves that shadow byte unwritten, which loses
-///   detection coverage for one allocation but is never a correctness problem —
-///   an unpoisoned shadow byte reads as "addressable" and fails open.
+///   up. The caller then simply leaves that shadow byte unwritten.
+///
+/// **A give-up is only harmless in one of the two directions, and the
+/// distinction is not academic.** Failing to *poison* loses detection coverage
+/// for one allocation and fails open: the byte stays `0x00`, reads as
+/// "addressable", and at worst a real violation goes unreported. Failing to
+/// *unpoison* fails **closed**: the byte keeps a stale `0xFA`/`0xFB` over memory
+/// that is now live, and every subsequent legitimate access to it is reported as
+/// a use-after-free, forever. (This comment previously claimed a give-up "is
+/// never a correctness problem"; that was true only of the poison direction, and
+/// the unpoison direction is precisely how a live slot ends up permanently
+/// marked freed — see the `disable()` wipe below, and
+/// `B-KASAN-STALE-POISON-ON-LIVE-SLOT` in `known-issues.md`.)
 fn with_map_lock<R>(f: impl FnOnce() -> R) -> Option<R> {
     let irqs_were_on = crate::cpu::interrupts_enabled();
     loop {
@@ -910,9 +920,122 @@ pub fn enable() {
     }
 }
 
-/// Disable KASAN checking + shadow maintenance.
+/// Disable KASAN checking + shadow maintenance, **and wipe every poison byte
+/// the enabled window left behind**.
+///
+/// # Why the wipe is part of disabling, not an optional extra
+///
+/// [`on_alloc`] and [`on_free`] are both gated on [`is_enabled`], and that pair
+/// of gates is only sound while the shadow is guaranteed clean whenever KASAN is
+/// off. The two gates are *not* symmetric in what they cost when they fire:
+///
+/// | Sequence | `on_free` poisons? | `on_alloc` unpoisons? | Result |
+/// |---|---|---|---|
+/// | freed off, reallocated on | no | yes | clean (harmless) |
+/// | freed on, reallocated on | yes | yes | correct |
+/// | **freed on, reallocated off** | **yes** | **no** | **`0xFA` over live memory, forever** |
+///
+/// The third row is not hypothetical. It is what actually happened: the boot
+/// self-tests turn KASAN on, free a heap slot (poisoning it `KASAN_FREE`), then
+/// turn KASAN back off — leaving a poisoned slot on the allocator's free list.
+/// The next allocation to reuse that slot runs `on_alloc`, which returns
+/// immediately because KASAN is off, so the poison is never cleared. In the
+/// *instrumented* build the compiler's `__asan_load*`/`__asan_store*` calls are
+/// emitted unconditionally and consult [`shadow_allows`], which is deliberately
+/// **not** gated on [`is_enabled`] — so every legitimate access to that live
+/// slot reports a use-after-free. One instrumented boot produced 64 such
+/// reports, 62 of them on a single 20-byte span long after the self-tests had
+/// finished, and they exhausted the 64-report budget at serial line 26035 of
+/// 27701. Every genuine violation in the remaining ~1600 lines was suppressed —
+/// in the one profile whose entire purpose is to find genuine violations.
+///
+/// Wiping here restores the invariant the gates rely on ("poison exists only
+/// while enabled") *by construction*, rather than requiring every present and
+/// future enable/disable window to remember to clean up after itself. The
+/// direction is also the safe one: a wiped shadow reads "addressable"
+/// everywhere, so the worst case is a missed report, never a false one.
+///
+/// # Cost
+///
+/// One pass over the `SHADOW_MAPPED` bitmap plus a 16 KiB fill per *mapped*
+/// shadow frame — i.e. proportional to the heap actually touched, not to the
+/// 8 GiB reservation. `disable()` is called at most a handful of times per boot
+/// (the two self-tests and the end of a corruption hunt), never on a hot path.
 pub fn disable() {
+    // Order matters: stop the hooks *first*. Wiping before clearing the flag
+    // would leave a window in which a hook still sees `enabled` and writes the
+    // very poison byte this wipe exists to remove.
     ENABLED.store(false, Ordering::Release);
+
+    // A hook on another CPU may already have passed its `is_enabled()` gate and
+    // still be inside `poison_granules`. No *new* poisoner can start after the
+    // store above, so re-wiping while the poison counter is still moving
+    // converges; `BYTES_POISONED` is bumped after the shadow writes it counts,
+    // so a poisoner that lands during a pass is visible to the check after it.
+    // This narrows an inherently racy window rather than closing it — the actual
+    // guarantee is that every caller disables at a quiescent point. The bound
+    // keeps a pathological interleaving from spinning here forever.
+    let mut frames = 0;
+    for _ in 0..4 {
+        let before = BYTES_POISONED.load(Ordering::Acquire);
+        frames = clear_all_poison();
+        if BYTES_POISONED.load(Ordering::Acquire) == before {
+            break;
+        }
+    }
+
+    if frames != 0 {
+        serial_println!(
+            "[kasan] disabled: wiped poison from {} mapped shadow frame(s)",
+            frames
+        );
+    }
+}
+
+/// Reset every *mapped* shadow frame to [`KASAN_ADDRESSABLE`], returning how
+/// many frames were cleared.
+///
+/// Only frames whose `SHADOW_MAPPED` bit is set are touched. Everything else in
+/// the shadow window resolves to the shared read-only zero page installed by
+/// `install_zero_shadow`, which already reads as addressable and must never be
+/// written (it is one page aliased across the whole reservation — a single store
+/// would appear as poison at millions of unrelated addresses, and it is mapped
+/// read-only precisely to make that impossible).
+///
+/// The fill goes through [`rawmem::fill_u8`] rather than
+/// `core::ptr::write_bytes` because this module is compiled into the
+/// instrumented kernel: the `core` intrinsic is subject to LLVM's memory-
+/// intrinsic instrumentation, and a shadow write that itself takes a shadow
+/// check underneath the sanitizer is the recursion this module exists outside
+/// of. See the "Raw memory access" section at the top of the file.
+fn clear_all_poison() -> u64 {
+    let mut frames = 0u64;
+    for (word_idx, word) in SHADOW_MAPPED.iter().enumerate() {
+        let mut w = word.load(Ordering::Acquire);
+        while w != 0 {
+            let bit = w.trailing_zeros() as usize;
+            // Clear the lowest set bit. `wrapping_sub` rather than `-` only to
+            // satisfy `clippy::arithmetic_side_effects`; `w != 0` here, so it
+            // cannot actually wrap.
+            w &= w.wrapping_sub(1);
+            let frame_idx = word_idx.wrapping_mul(64).wrapping_add(bit);
+            if frame_idx >= SHADOW_FRAMES {
+                break;
+            }
+            let va = KASAN_SHADOW_BASE.wrapping_add((frame_idx as u64) << FRAME_SIZE_SHIFT);
+            // SAFETY: the bitmap bit is set, so `install_shadow_frame` mapped
+            // this whole 16 KiB frame writable, and `frame_idx < SHADOW_FRAMES`
+            // keeps `va` inside the backed window. Nothing else may be writing
+            // it: `ENABLED` is already false, so no hook can begin a poison, and
+            // shadow bytes are only ever written by the hooks and by this
+            // function.
+            unsafe {
+                crate::mm::rawmem::fill_u8(va as *mut u8, KASAN_ADDRESSABLE, FRAME_SIZE);
+            }
+            frames = frames.wrapping_add(1);
+        }
+    }
+    frames
 }
 
 /// Whether KASAN is active (hot-path gate).
@@ -1209,22 +1332,41 @@ pub fn shadow_allows(addr: u64, size: usize) -> bool {
     byte_bad(last) == KASAN_ADDRESSABLE
 }
 
-/// Allocate, free, and return the address of a heap object whose shadow is
-/// therefore poisoned `KASAN_FREE` — a known-bad address for testing a checker.
+/// Allocate and free a heap object — whose shadow is therefore poisoned
+/// `KASAN_FREE` — and hand its address to `f` **for the duration of the call
+/// only**. `f` receives `None` if there is no such address to offer (KASAN not
+/// initialized, allocation failed, or the object landed outside the backed
+/// shadow window), in which case the caller must skip rather than fail.
 ///
-/// Returns `None` if the object landed outside the backed shadow window, in
-/// which case there is nothing to test against and the caller must skip rather
-/// than fail.
+/// # Why this takes a closure instead of returning the address
+///
+/// It used to be `fn self_test_freed_address() -> Option<u64>`, and that
+/// signature *was* the bug. The address it returned names a slot that is back on
+/// the allocator's free list while still marked `KASAN_FREE`, and nothing
+/// unmarked it: the caller was handed a live-once-reallocated address carrying
+/// permanent poison. See [`disable`] for what that cost — 62 spurious
+/// use-after-free reports on one 20-byte span, which then exhausted the
+/// 64-report budget two thirds of the way through an instrumented boot.
+///
+/// Scoping it to a closure makes the cleanup structural rather than a thing the
+/// caller must remember, and the cleanup is the *existing* state restore:
+///
+/// * if KASAN was already on, the poison is correct and stays — the slot really
+///   is free, and whichever allocation reuses it will run [`on_alloc`] (KASAN
+///   still being on) and clear it;
+/// * if KASAN was off, [`disable`] wipes the shadow on the way out.
+///
+/// Either way no poison outlives the test, and no future caller can reintroduce
+/// the leak by forgetting a cleanup step that no longer exists.
 ///
 /// Leaves [`ENABLED`] as it found it: this is called from a boot self-test, and
 /// silently turning KASAN on for the rest of the boot would change the
 /// performance profile of everything measured afterwards.
-#[must_use]
-pub fn self_test_freed_address() -> Option<u64> {
+pub fn with_self_test_freed_address<R>(f: impl FnOnce(Option<u64>) -> R) -> R {
     use alloc::alloc::{Layout, alloc, dealloc};
 
     if !INITED.load(Ordering::Acquire) {
-        return None;
+        return f(None);
     }
     let was_enabled = is_enabled();
     enable();
@@ -1232,7 +1374,7 @@ pub fn self_test_freed_address() -> Option<u64> {
     let layout = Layout::from_size_align(64, 8).expect("valid layout");
     // SAFETY: valid non-zero layout; null-checked immediately.
     let p = unsafe { alloc(layout) };
-    let result = if p.is_null() {
+    let addr = if p.is_null() {
         None
     } else {
         let a = p as u64;
@@ -1249,10 +1391,12 @@ pub fn self_test_freed_address() -> Option<u64> {
         }
     };
 
+    let out = f(addr);
+
     if !was_enabled {
         disable();
     }
-    result
+    out
 }
 
 /// The shadow byte that makes the single byte at `a` inaccessible, or
@@ -1561,8 +1705,67 @@ pub fn self_test() {
         );
     }
 
-    if !was_enabled {
-        disable();
+    // -- Test 6: disabling must not leave poison on a reusable slot ----------
+    //
+    // The regression test for the defect described at `disable()`. Its shape is
+    // the exact sequence that produced 62 spurious use-after-free reports on one
+    // instrumented boot: with KASAN on, free a slot (poisoning it), then turn
+    // KASAN off. The slot is now on the allocator's free list, and the next
+    // allocation to claim it will run `on_alloc`, which returns immediately
+    // because KASAN is off — so if `disable()` did not wipe, the poison is
+    // permanent and every legitimate access to that live memory is reported.
+    //
+    // The assertion is deliberately made against the shadow byte rather than
+    // against "did a report fire", because a report needs the *instrumented*
+    // toolchain, and this test has to hold in the ordinary build too — the
+    // uninstrumented build is where the poison is planted, and where the wipe
+    // either happens or does not.
+    //
+    // This runs last because it ends with KASAN off, which is the state the
+    // restore below wants in the common case.
+    let layout64 = Layout::from_size_align(64, 8).expect("valid layout");
+    // SAFETY: valid non-zero layout; null-checked below.
+    let p4 = unsafe { alloc(layout64) };
+    assert!(!p4.is_null(), "kasan self-test: alloc(64) failed");
+    let a4 = p4 as u64;
+    let coverable = shadow_of(a4).is_some() && shadow_of(a4 + 63).is_some();
+    // SAFETY: `p4` was allocated with `layout64` and is not dereferenced after
+    // this point — only its address is used, for shadow lookups.
+    unsafe {
+        dealloc(p4, layout64);
     }
+    if coverable {
+        assert_eq!(
+            get_shadow(a4),
+            KASAN_FREE,
+            "kasan: on_free did not poison the slot — test 6 cannot prove anything"
+        );
+        disable();
+        assert_eq!(
+            get_shadow(a4),
+            KASAN_ADDRESSABLE,
+            "kasan: disable() left stale poison on a freed slot the allocator can \
+             hand out again — see B-KASAN-STALE-POISON-ON-LIVE-SLOT"
+        );
+        // A wipe that cleared this one byte but missed the rest of the slot
+        // would still poison the reallocation, just later into it.
+        assert!(
+            shadow_allows(a4, 64),
+            "kasan: disable() wiped only part of the freed slot"
+        );
+        serial_println!("[kasan]   disable() wipes stale poison: OK");
+        if was_enabled {
+            enable();
+        }
+    } else {
+        serial_println!(
+            "[kasan]   disable() wipe test SKIPPED: slot {:#x} outside the covered window",
+            a4
+        );
+        if !was_enabled {
+            disable();
+        }
+    }
+
     serial_println!("[kasan] Self-test PASSED");
 }

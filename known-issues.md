@@ -30319,9 +30319,8 @@ warns, and on TCG it says plainly that it cannot tell.
 **2026-08-19 -- the manual QEMU run happened, and write-combining works.** The
 run was made the sanctioned way, via `QEMU_EXTRA` on a one-off `--experiment`
 boot; `scripts/boot-test.sh`'s accelerator is untouched and all three lanes still
-run TCG. Both logs are on disk (`build/serial-test.txt` = WHPX,
-`build/serial-canary-fail1.txt` = TCG), and each states its own accelerator from
-the guest's CPUID, so the pairing is not an assumption:
+run TCG. Each log states its own accelerator from the guest's CPUID, so the
+pairing below is not an assumption but a reading:
 
 | Accelerator | WC cycles | UC cycles | Ratio |
 |---|---|---|---|
@@ -30369,6 +30368,22 @@ platform that models memory types the WC-vs-UC line warns, and on TCG it says
 plainly that it cannot tell. Note the corollary for anyone reading a TCG boot
 log: a 1.02x reading there is *not* a regression report, it is the absence of a
 measurement.
+
+**Provenance, and a mistake worth not repeating.** The figures above were read
+from the two boots' serial logs and transcribed here; the WHPX log itself is
+gone. `build/serial-test.txt` is gitignored scratch that `boot-test.sh` deletes
+at the start of every boot, and a later WHPX run in the same session overwrote
+it before it had been copied anywhere. This file already warns about exactly that
+(see the `boot-history.jsonl` entry above: "gitignored scratch that the next run
+overwrites, so until now the evidence for a hang survived only if somebody pasted
+it in here before the next boot", which had already cost the
+`B-FORKEXEC-BOOT-HANG` investigation) -- and the warning was not heeded a second
+time. Nothing was actually lost here, because the numbers were transcribed before
+the overwrite and the benchmark half is committed in `bench/history.jsonl`; but
+the near-miss makes the rule concrete: **an experimental boot's log is evidence
+only once it has been copied out from under `build/`, and that copy must happen
+in the same step that reads it, not later.** `build/serial-canary-fail1.txt` (the
+TCG side) survived precisely because it had been given a stable name.
 
 ### BUG-BOOT-SPINLOCK-STALL-UNNAMED -- an intermittent boot hang reports `lock '?'` and `cpu 0 holds 0 lock(s)`, because lockdep is not yet enabled when the self-test battery runs -- 2026-08-17 -- OPEN (flaky; the diagnostic gap is the actionable part)
 

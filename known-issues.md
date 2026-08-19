@@ -40334,3 +40334,46 @@ which the derivation recovers, but to validate part 1 end-to-end on a sweep
 that is *deliberately* committed through. A fix for a silent-fragmentation
 bug that has never been observed to survive a commit mid-sweep is a fix on
 paper.
+
+#### A git-only digest would be under-inclusive — the kernel embeds six untracked binaries
+
+Found while auditing what part 1's digest must cover, and it changes the
+design: **a `src_digest` computed from git alone is wrong in the unsafe
+direction.** The kernel `include_bytes!`s six ring-3 service binaries, and
+none of them is tracked:
+
+```
+services/hello/target/x86_64-unknown-none/release/hello    tracked=NO exists=YES
+services/init/target/x86_64-unknown-none/release/init      tracked=NO exists=YES
+services/ticker/target/x86_64-unknown-none/release/ticker  tracked=NO exists=YES
+rootfs.ext4                                                tracked=NO
+```
+
+They are build artifacts, gitignored by design (`boot-test.sh` line 1483 has
+a whole comment about a fresh checkout not having them). So two arms that
+embed *different* `init` binaries would produce different kernels, hash
+identically under a tracked-files-only digest, and merge into one band --
+which is precisely the merge-two-different-kernels failure the exclusion-list
+argument above rules out. Ruling it out via the exclusion list and then
+re-admitting it through untracked files would be an odd way to lose.
+
+**The same hole is already in `dirty`, today.** `git diff --quiet HEAD -- .`
+cannot see untracked files, so `dirty == False` does not mean "the built
+kernel is reproducible from this commit" -- it means "the *tracked* files
+match HEAD". Rebuild `services/init` between two boots at one commit and both
+rows say `dirty: false`, and `layout_arms()` will happily band them across
+two different kernels. The existing TCG band rests on this too. It has
+probably never bitten, because a sweep runs its arms back-to-back and nothing
+rebuilds the services in between -- but "probably never" is the same
+guarantee the commit-proxy had until this morning.
+
+**So the digest has two halves**, and the second is free: enumerate the
+embedded artifacts by the *same derivation* `bootstrap-worktree.sh` already
+uses -- it greps `include_bytes!` out of `kernel/src` (line 106) rather than
+keeping a list -- and hash their contents alongside the tracked build inputs.
+A service added to the kernel is then covered without anyone remembering,
+which is the property that derivation was written for in the first place.
+`rootfs.ext4` joins them: every boot attaches it, and what it contains
+changes what the suite measures.
+
+One statement of each rule, in one more place than planned.

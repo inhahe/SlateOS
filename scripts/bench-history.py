@@ -2785,7 +2785,12 @@ def describe_replication(name, verdict, band):
     for `name` on this host, and a floor of 85% is the fact that decides
     whether any smaller movement in it is judgeable at all.
     """
-    if verdict.verdict != CONTRADICTED or not verdict.values:
+    # `None` is a legitimate argument, not a bug to assert on: the A/A listing
+    # passes every row it prints through here, and rows that never reached the
+    # replication gate (improvements, and regressions with too little history
+    # for a band) have no verdict. "No verdict" is not "contradicted", so the
+    # answer is the same empty list either way.
+    if verdict is None or verdict.verdict != CONTRADICTED or not verdict.values:
         return []
     _lo, hi, _median, _n = band
     values = sorted(verdict.values)
@@ -3222,16 +3227,95 @@ def report(previous, current_entries, threshold_pct,
     worst_first = lambda r: -r[4]  # noqa: E731 - reads better inline
     best_first = lambda r: r[4]    # noqa: E731
 
-    if reg_repl:
+    # An A/A pair prints none of the verdict headings below.
+    #
+    # The banner at the top of this report already states that no movement in
+    # this comparison can have been caused by code, and `--fail-on-regression`
+    # already declines to count any of it. Printing a `REGRESSED` list anyway
+    # left the reader holding two statements that contradict each other, with
+    # nothing but attentiveness deciding which one won -- and on 2026-08-19 the
+    # heading won: `lock_uncontended` was written up as `REGRESSED ...
+    # replicated` from an A/A run whose own banner said it could not be. Its two
+    # samples were 280 and 486 ns, which is a noise floor, not a finding.
+    #
+    # So the movements are still shown -- an A/A pair's spread is the single
+    # most useful number it produces, and hiding it would throw that away -- but
+    # under a heading that names what they are. Nothing is suppressed except the
+    # claim.
+    verdicts_mean_something = not same_binary
+    if same_binary:
+        aa_rows = (reg_repl + reg_unrep + reg_contra + reg_unjudged
+                   + imp_out + imp_unjudged)
+        if aa_rows:
+            print(
+                "  A/A MOVEMENT (the baseline is the SAME kernel image as this "
+                "run, so every number below is this host's measurement noise, "
+                "measured -- NOT a regression and NOT an improvement, in either "
+                "direction):"
+            )
+            for name, before, after, raw, adj, band in sorted(
+                    aa_rows, key=lambda row: -abs(row[4])):
+                detail = f"; {describe_band(band)}" if band else ""
+                print(
+                    f"    {name}: {before}ns -> {after}ns "
+                    f"({adj:+.0f}% vs suite, {raw:+.0f}% raw){detail}"
+                )
+                # The per-row detail is kept, not just the heading. It quotes
+                # the actual repeat samples, and "this binary produced 367 and
+                # 680 ns" is the one number an A/A pair exists to produce -- a
+                # measured noise floor for this benchmark on this host. A
+                # collective heading cannot say that per benchmark, and the
+                # per-benchmark figure is what decides whether any *smaller*
+                # movement in a real comparison is judgeable at all.
+                for line in describe_replication(
+                        name, repl_verdicts.get(name), band):
+                    print(line)
+            print(
+                "    -> this is the per-benchmark noise floor, and it is what "
+                "an A/A pair is for.\n"
+                "       Read it as the size of movement this host can produce "
+                "with no code change at\n"
+                "       all -- i.e. the size below which nothing in a real "
+                "comparison is judgeable."
+            )
+    if verdicts_mean_something and reg_repl:
         _print_movements(
             f"  REGRESSED (>{threshold_pct:g}% slower than the suite, outside "
             f"its own recent range, AND replicated -- every recorded run of "
-            f"this commit shows it):", reg_repl, worst_first)
-    if reg_unrep:
+            f"this same kernel image shows it, so it is not single-run noise):",
+            reg_repl, worst_first)
+        # What "replicated" does *not* mean, said where the word is used.
+        #
+        # A reader reasonably takes the strongest label the harness emits to
+        # mean "confirmed as a code effect". It does not: replication is a
+        # within-image test, and the comparison it decorates is between two
+        # *different* images. Relinking alone moves benchmarks under TCG --
+        # deterministically, so a layout artifact replicates exactly as
+        # perfectly as a real regression does, and arrives wearing this label.
+        # That is not hypothetical either; see the known-issues entry named
+        # below, where ten of thirteen perfectly-replicating movers got
+        # *faster* on a commit that touched only the scheduler.
+        print(
+            "    -> 'replicated' rules out noise, not layout. The baseline is a "
+            "DIFFERENT kernel image,\n"
+            "       and shifting a function's address re-rolls whether its loop "
+            "straddles a guest page,\n"
+            "       which costs ~1.7x per iteration under TCG and reproduces "
+            "every run. Before crediting\n"
+            "       the diff: check the changed files plausibly reach this "
+            "benchmark at all, and run\n"
+            "         python scripts/straddle-check.py --compare <old-kernel-elf>"
+            " <new-kernel-elf>\n"
+            "       See known-issues.md, 'the bench harness treats \"replicates "
+            "exactly\" as proof of a\n"
+            "       code regression, but that is also the signature of a "
+            "code-layout artifact'."
+        )
+    if verdicts_mean_something and reg_unrep:
         _print_movements(
             f"  REGRESSED, UNREPLICATED (>{threshold_pct:g}% slower than the "
-            f"suite and outside its own recent range, but this commit has "
-            f"been measured only once):", reg_unrep, worst_first)
+            f"suite and outside its own recent range, but this kernel image "
+            f"has been measured only once):", reg_unrep, worst_first)
         print(
             "    -> re-run `./scripts/boot-test.sh --bench` WITHOUT "
             "rebuilding to confirm. Two runs of one\n"
@@ -3242,7 +3326,7 @@ def report(previous, current_entries, threshold_pct,
             "       either replicated or contradicted -- unmeasured is not "
             "the same as absolved."
         )
-    if reg_contra:
+    if verdicts_mean_something and reg_contra:
         print(
             "  NOT REPLICATED (crossed the threshold and left its own range, "
             "but another run of this SAME binary did not -- withdrawn, and "
@@ -3257,20 +3341,53 @@ def report(previous, current_entries, threshold_pct,
             )
             for line in describe_replication(name, repl_verdicts[name], band):
                 print(line)
-    if reg_unjudged:
+    if verdicts_mean_something and reg_unjudged:
         _print_movements(
             f"  REGRESSED, UNCONFIRMED (>{threshold_pct:g}% slower than the "
             f"suite; too few prior runs to know this benchmark's spread):",
             reg_unjudged, worst_first)
-    if imp_out:
+    if verdicts_mean_something and imp_out:
         _print_movements(
             f"  IMPROVED (>{threshold_pct:g}% faster than the suite AND "
             f"outside its own recent range):", imp_out, best_first)
-    if imp_unjudged:
+    if verdicts_mean_something and imp_unjudged:
         _print_movements(
             f"  IMPROVED, UNCONFIRMED (>{threshold_pct:g}% faster than the "
             f"suite; too few prior runs to know this benchmark's spread):",
             imp_unjudged, best_first)
+    # The direction histogram, printed only when it is diagnostic -- i.e. when
+    # movement left the band in *both* directions in one comparison.
+    #
+    # This is the cheapest discriminator the harness has between code and
+    # layout, and it works because the two have different signatures. A code
+    # change moves what it touched, in the direction it pushed. Relinking moves
+    # whatever happens to land badly, in whichever direction each one lands --
+    # so a mixed histogram is evidence about the *set*, not about any one row,
+    # and it is evidence no per-benchmark statistic can supply. On 2026-08-19 a
+    # scheduler-only commit produced thirteen deterministic movers of which ten
+    # were faster; every one of them replicated perfectly, and reading them one
+    # at a time gave no way to see that.
+    #
+    # Deliberately not a verdict and deliberately not suppressive: an
+    # optimisation commit legitimately produces a mixed histogram too. It is
+    # printed as an observation with the check that settles it attached.
+    if verdicts_mean_something and reg_out and imp_out:
+        print(
+            f"  DIRECTION HISTOGRAM: {len(reg_out)} benchmark(s) left their own "
+            f"range slower and {len(imp_out)} left it faster in this one "
+            f"comparison."
+        )
+        print(
+            "    -> unless this commit was an optimisation, that mix is the "
+            "signature of code\n"
+            "       *placement* rather than code. Relinking shifts the address "
+            "of everything after\n"
+            "       the edited file, and under TCG that alone moves benchmarks "
+            "in both directions,\n"
+            "       deterministically. Settle it before reading the diff:\n"
+            "         python scripts/straddle-check.py --compare "
+            "<old-kernel-elf> <new-kernel-elf>"
+        )
     if reg_within or imp_within:
         _print_movements(
             f"  WITHIN ITS OWN RANGE (crossed {threshold_pct:g}% run-over-run, "

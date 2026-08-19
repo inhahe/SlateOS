@@ -2540,8 +2540,23 @@ def test_replication_promotes_what_every_run_of_the_commit_shows(bh):
 
     check("a replicated movement fails the build", failed, True)
     check("...and gets the confirmed heading", "  REGRESSED (" in out, True)
-    check("...which says what was replicated",
-          "every recorded run of this commit shows it" in out, True)
+    # "image", not "commit". The gate is `same_image`, and its own docstring
+    # says keying it on the commit made it blind to the very re-run it asks the
+    # reader to perform -- so a heading saying "commit" describes a check this
+    # harness deliberately does not implement.
+    check("...which says what was replicated, in the unit it was replicated in",
+          "every recorded run of this same kernel image shows it" in out, True)
+    check("...and does not claim the commit was that unit",
+          "every recorded run of this commit" in out, False)
+    # The heading is the strongest label the harness emits, and it must not read
+    # as "confirmed as a code effect". Replication is a within-image test while
+    # the comparison it decorates is between two *different* images, so a
+    # relinking artifact -- being deterministic -- replicates exactly as
+    # perfectly as a real regression and arrives wearing this same heading.
+    check("...and says what replication does NOT rule out",
+          "'replicated' rules out noise, not layout" in out, True)
+    check("...and names the check that settles it",
+          "straddle-check.py --compare" in out, True)
     check("...and is not withdrawn", "NOT REPLICATED" in out, False)
 
 
@@ -2829,6 +2844,120 @@ def test_an_aa_comparison_is_named_and_cannot_fail_the_build(bh):
     check("an ordinary comparison is not called A/A",
           "A/A COMPARISON" in out, False)
     check("...and still fails the build", failed, True)
+
+
+def test_an_aa_comparison_prints_no_verdict_heading_at_all(bh):
+    """The A/A banner and a `REGRESSED` list may not be emitted together.
+
+    Both were, and the heading won. On 2026-08-19 `lock_uncontended` was written
+    up as `REGRESSED ... replicated` out of a run whose own banner, four lines
+    above, said no movement in it could have been caused by code -- and whose
+    `--fail-on-regression` had already declined to count it. Its two samples
+    were 280 and 486 ns.
+
+    A report that contradicts itself is decided by whichever half the reader
+    happens to weigh, which is not a property a measuring instrument may have.
+    Only the *claim* is dropped: the movements are still listed, because the
+    spread of an A/A pair is the most useful thing it produces.
+    """
+    history = _repl_history(bh, 500, "xxx")
+    history[-1]["commit"] = "xxx"          # baseline IS the current commit
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("an A/A comparison still cannot fail the build", failed, False)
+    check("...and prints no confirmed-regression heading",
+          "  REGRESSED (" in out, False)
+    # Asserted heading by heading rather than on the bare word, because
+    # "REGRESSED" is a substring of three different headings and a loose check
+    # would pass while two of them still printed.
+    for heading in ("  REGRESSED, UNREPLICATED", "  REGRESSED, UNCONFIRMED",
+                    "  IMPROVED (", "  IMPROVED, UNCONFIRMED",
+                    "  NOT REPLICATED"):
+        check(f"...nor {heading.strip()}", heading in out, False)
+    # The movement itself is not hidden -- that would throw away the one number
+    # an A/A pair exists to produce.
+    check("...but the movement is still shown", "b0" in out, True)
+    check("...under a heading that says what it is",
+          "A/A MOVEMENT" in out, True)
+    check("...and says it is neither a regression nor an improvement",
+          "NOT a regression and NOT an improvement" in out, True)
+    check("...and tells the reader what the number is for",
+          "per-benchmark noise floor" in out, True)
+
+
+def test_an_aa_listing_keeps_the_per_benchmark_repeat_samples(bh):
+    """The A/A heading must not swallow the per-benchmark detail.
+
+    "This binary produced 500 and 3000 ns" is a measured noise floor for *this*
+    benchmark on this host, and it is the number that decides whether any
+    smaller movement in it is judgeable at all. A collective heading cannot say
+    that per benchmark, so the row detail is kept under the new heading rather
+    than dropped with the claim.
+    """
+    history = _repl_history(bh, 500, "xxx")
+    history[-1]["commit"] = "xxx"
+    out, _failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("the contradicting sample is still quoted",
+          "-> b0: another run of this same binary" in out, True)
+    check("...and the spread is still stated as a noise floor",
+          "500% spread with no code change" in out, True)
+
+
+def test_direction_histogram_fires_only_on_a_mixed_comparison(bh):
+    """A mixed direction histogram is evidence about the set, not about a row.
+
+    A code change moves what it touched, in the direction it pushed. Relinking
+    moves whatever lands badly, in whichever direction each one lands -- so
+    movement out of band in *both* directions at once is the signature of
+    placement rather than code, and it is a fact no per-benchmark statistic can
+    supply. On 2026-08-19 a scheduler-only commit produced thirteen perfectly
+    replicating movers of which ten were *faster*; read one at a time, there was
+    no way to see it.
+
+    It must stay silent on a one-directional comparison, or it would be advice
+    printed on every report and read on none.
+    """
+    import io
+    import contextlib
+
+    # Twenty stable benchmarks so the whole-suite drift median does not move,
+    # plus b0 slow and b1 fast against a long quiet history of both.
+    stable = {f"b{i}": 1000 for i in range(2, 22)}
+    history = [{"host": "H", "profile": "release", "commit": f"h{i}",
+                "kernel_sha": f"old{i:012d}",
+                "entries": dict(stable, b0=v, b1=v)}
+               for i, v in enumerate(_QUIET)]
+    previous = history[-1]
+
+    def run(b0, b1):
+        current = {name: (value, 10 ** 9, "OK", None, None)
+                   for name, value in previous["entries"].items()}
+        current["b0"] = (b0, 10 ** 9, "OK", None, None)
+        current["b1"] = (b1, 10 ** 9, "OK", None, None)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bh.report(previous, current, 25.0, records=history, host="H",
+                      profile="release", commit="new",
+                      this_run={"kernel_sha": "newimage", "commit": "new"})
+        return buf.getvalue()
+
+    mixed = run(3000, 100)
+    check("a mixed comparison prints the histogram",
+          "DIRECTION HISTOGRAM" in mixed, True)
+    check("...counting both directions",
+          "1 benchmark(s) left their own range slower and 1 left it faster"
+          in mixed, True)
+    check("...and names the check that settles it",
+          "straddle-check.py --compare" in mixed, True)
+    # Not a verdict: an optimisation commit legitimately produces a mixed
+    # histogram, so this is an observation with its own falsifier attached.
+    check("...without withdrawing the regression",
+          "  REGRESSED" in mixed, True)
+
+    slower_only = run(3000, 1000)
+    check("a one-directional comparison prints no histogram",
+          "DIRECTION HISTOGRAM" in slower_only, False)
 
 
 def test_replication_declines_the_measured_false_positives(bh):
@@ -3239,9 +3368,9 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 40:
+    if len(tests) < 70:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 40. Discovery is broken, not the code.")
+              f"suite has at least 70. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

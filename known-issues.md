@@ -38675,6 +38675,52 @@ sample from a distribution wider than the signal. That is the actual argument fo
 (3): without a calibrated per-benchmark layout band there is no experiment
 available at this noise level that can settle a 44% cross-image movement.
 
+#### Partly fixed — 2026-08-19: parts (1) and (4) landed; (2) and (3) remain
+
+`scripts/bench-history.py`:
+
+- **(1) The A/A contradiction is gone.** When the baseline record is the same
+  kernel image as this run, `report()` now emits **no verdict heading at all** --
+  not `REGRESSED`, not `REGRESSED, UNREPLICATED`, not `UNCONFIRMED`, not
+  `IMPROVED`, not `NOT REPLICATED`. The movements are still listed, under
+  `A/A MOVEMENT (... this host's measurement noise, measured -- NOT a regression
+  and NOT an improvement, in either direction)`, and the per-benchmark repeat
+  samples are kept beneath each row, because "this binary produced 363 and 680 ns"
+  is the one number an A/A pair exists to produce. Only the claim was dropped.
+  Replayed against the documented 602fc62e0 pair in `bench/history.jsonl`, the
+  four movements now read as a two-directional noise floor (+85%, +54%, +36%,
+  -29%) instead of as two confirmed regressions.
+- **(4) `REGRESSED ... replicated` no longer reads as "confirmed as a code
+  effect".** The heading says "every recorded run of this same *kernel image*"
+  (the gate is `same_image`; the old wording said "commit", which names a check
+  this harness deliberately does not implement -- see `binary_identity`), and it
+  is followed by an explicit statement of what replication does *not* rule out:
+  the baseline is a different image, relinking re-rolls whether a hot loop
+  straddles a guest page, that costs ~1.7x per iteration under TCG, and it
+  reproduces every run. The note points at `scripts/straddle-check.py --compare`.
+- **New, and not in the original three:** a **direction histogram**, printed when
+  movement left the band in both directions in one comparison. This is the
+  cheapest discriminator available and the only one that is evidence about the
+  *set* rather than a row -- a code change moves what it touched in the direction
+  it pushed, while relinking moves whatever lands badly in whichever direction it
+  lands. It is an observation, not a verdict, because an optimisation commit
+  legitimately produces a mixed histogram too; the falsifier is printed with it.
+
+Tests: `scripts/test-bench-history.py` gained three cases -- every verdict
+heading asserted absent by name under A/A (the bare word `REGRESSED` is a
+substring of three headings, so a loose check would pass with two of them still
+printing), the per-row repeat samples asserted still present, and the histogram
+asserted to fire on a mixed comparison and stay silent on a one-directional one.
+Discovery floor raised 40 -> 70.
+
+**Still open:** (2) needs a benchmark-to-source reachability map before a
+cross-image movement can be labelled `MOVED (image changed)` without deleting
+the signal -- every non-A/A comparison is cross-image by definition, so the
+label is only meaningful where the changed files demonstrably cannot reach the
+benchmark. (3) is unchanged and is still the only fix that makes cross-commit
+crypto/mm numbers trustworthy under TCG at all.
+
+
 ---
 
 ### [A] RESOLVED — a KASAN self-test left a freed heap slot permanently poisoned, so 62 of the instrumented build's 64 report slots were spent on false use-after-frees and the real report budget was exhausted two thirds of the way through the boot — 2026-08-19

@@ -1054,6 +1054,21 @@ struct ScoreEntry {
     /// property of healthy code and is the specific failure that makes one
     /// boot's `min` incomparable to another's.
     split: SplitCheck,
+    /// Index into [`MEASUREMENTS`] of the window this entry was measured in.
+    ///
+    /// Carried so the log can *state* the live-name/scored-name correspondence
+    /// instead of leaving a reader to infer it. At least six benchmarks record
+    /// under a name they did not measure under, and the two names go to
+    /// different places: the live `[bench] <name>: min=` line is what a
+    /// host-side tool can watch stream past *during* the run, while the `SCORE`
+    /// line is what ends up in `bench/history.jsonl`. A tool that needs both —
+    /// `scripts/canary-load.py` triggers on the first, `grade-positional.py`
+    /// scores against the second — cannot be given one name that serves both,
+    /// and the pairing cannot be soundly recovered from the log without this.
+    /// Order alignment in particular is *not* sound: `lock_uncontended` is
+    /// recorded after `lock_tracked_nested` but measured before it, so the two
+    /// orders genuinely interleave. See [`print_scorecard`]'s `MEASURED-AS`.
+    seq: usize,
 }
 
 /// Public view of a scorecard entry for the dashboard API.
@@ -1149,6 +1164,7 @@ fn record(name: &'static str, result: &BenchResult, target_ns: Option<u64>) {
         mean_ns: result.mean_ns,
         iterations: result.iterations,
         split: result.split,
+        seq: result.seq,
     });
     // Mark the *measurement* covered, keyed by index rather than by name.
     //
@@ -1259,6 +1275,28 @@ fn print_scorecard() {
                 entry.iterations,
                 entry.split
             ),
+        }
+    }
+
+    // The live-name/scored-name correspondence, stated rather than inferrable.
+    //
+    // A new line type rather than an eighth `SCORE` column: the `SCORE` format
+    // is append-only for *readers of old logs* (missing trailing columns are
+    // tolerated), which is not the same as tolerating an unexpected extra one,
+    // and three host-side parsers consume it. A line nobody matches on today
+    // cannot break any of them.
+    //
+    // Emitted only where the two names differ, because a line saying a name
+    // equals itself is noise, and 59 of them would bury the six that matter.
+    // See [`ScoreEntry::seq`] for why this cannot be recovered host-side.
+    {
+        let measurements = MEASUREMENTS.lock();
+        for entry in &*entries {
+            if let Some(m) = measurements.get(entry.seq) {
+                if m.name != entry.name {
+                    serial_println!("[bench] MEASURED-AS {} {}", entry.name, m.name);
+                }
+            }
         }
     }
 

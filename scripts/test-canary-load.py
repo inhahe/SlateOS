@@ -388,13 +388,114 @@ with tempfile.TemporaryDirectory() as tmpdir:
         wait_for=start_replay5, delay=0.3)
     check_true("a run writes the live names it saw", os.path.exists(names_path),
                names_path)
-    with open(names_path, encoding="utf-8") as handle:
-        written = {line.strip() for line in handle if line.strip()}
+    written, written_aliases, written_scored = cl.read_known_names(names_path)
     # Self-maintaining: the list the next run validates against is exactly the
     # set of names that could have triggered this one.
     check("the written list is the suite it saw", written, set(SUITE))
     check_true("and excludes the pre-marker self-test",
                "self_test_nop" not in written, sorted(written)[:5])
+    check("a log with no MEASURED-AS lines records no aliases",
+          written_aliases, {})
+
+
+# --------------------------------------------------------------------------
+print()
+print("scorecard names")
+
+# The trap that voided the second attempt: the caller passed a name off the
+# end-of-run scorecard, the controller can only match live result lines, and
+# nothing connected the two. The kernel now states the pairing outright
+# (`MEASURED-AS`), because it is the only party that knows it -- see
+# `ScoreEntry::seq` in kernel/src/bench.rs for why neither the log's ordering
+# nor the source's structure can be made to yield it.
+with tempfile.TemporaryDirectory() as tmpdir:
+    serial = os.path.join(tmpdir, "serial.txt")
+    with open(serial, "w", encoding="utf-8") as handle:
+        handle.write(
+            "[bench] vfs_write_16k: min=100 cycles (27ns), mean=1 cycles\n"
+            "[bench] SCORE vfs_throughput_16k_write 27 50000 PASS 30 100 0\n"
+            "[bench] MEASURED-AS vfs_throughput_16k_write vfs_write_16k\n"
+            "[bench] MEASURED-AS lock_uncontended lock_tracked\n"
+            "[bench] not a measured-as line at all\n")
+    found = cl.read_measured_as(serial)
+    check("both pairings are read back", found,
+          {"vfs_throughput_16k_write": "vfs_write_16k",
+           "lock_uncontended": "lock_tracked"})
+check("a serial that does not exist yields no pairings",
+      cl.read_measured_as(os.path.join(tempfile.gettempdir(), "no-such")), {})
+
+# The real second-attempt log, from a kernel that predates the line. It must
+# read back as "no pairings known", not as an error -- that is exactly the
+# state a first run after this change is in.
+_real_serial = os.path.join(REPO_ROOT, "build", "p22-run2-serial.txt")
+if os.path.exists(_real_serial):
+    check("the pre-change run 2 log simply has no pairings",
+          cl.read_measured_as(_real_serial), {})
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    names_path = os.path.join(tmpdir, "names.txt")
+    cl.write_known_names(names_path, ["b_one", "b_two"],
+                         {"scored_two": "b_two"})
+    names, aliases, _ = cl.read_known_names(names_path)
+    check("names survive the round trip", names, {"b_one", "b_two"})
+    check("and so do the pairings", aliases, {"scored_two": "b_two"})
+
+    # A file written before pairings existed must still read as a name list.
+    with open(names_path, "w", encoding="utf-8") as handle:
+        handle.write("b_one\nb_two\n")
+    names, aliases, _ = cl.read_known_names(names_path)
+    check("an older names file still reads as names", names, {"b_one", "b_two"})
+    check("...with no pairings rather than an error", aliases, {})
+
+# End to end: the scorecard name is accepted and the substitution is stated.
+# Announcing it is not politeness. A silent substitution is the same class of
+# fault as the silent non-match that voided the second attempt -- the window
+# ends up somewhere the label does not say, and nothing in the output admits it.
+rc, out = run_validation(["--at", "scored_05", "--check-names-only"],
+                         SUITE + ["alias scored_05 bench_05"])
+check("a scorecard name is translated, not refused", rc, 0)
+check_true("and the translation is stated",
+           "scored_05" in out and "bench_05" in out, out[-400:])
+
+rc, out = run_validation(["--at", "scored_no_such", "--check-names-only"],
+                         SUITE + ["alias scored_05 bench_05"])
+check("a name that is neither live nor a known scorecard name is still "
+      "refused", rc, 2)
+
+# The mirror-image trap. `bench_05` is a fine live name -- the load would fire
+# exactly where asked -- but if it never reaches the scorecard the grader
+# cannot place a window with it, and that is only discovered after the boot.
+_graded = SUITE + ["alias scored_05 bench_05", "scored scored_05",
+                   "scored bench_09"]
+rc, out = run_validation(["--at", "bench_05", "--check-names-only",
+                          "--require-scored"], _graded)
+check("a live-only name is refused when the run will be graded", rc, 2)
+check_true("and the caller is told the name it should have passed",
+           "scored_05" in out, out[-500:])
+rc, out = run_validation(["--at", "bench_05", "--check-names-only"], _graded)
+check("...but stands on its own without --require-scored", rc, 0)
+rc, out = run_validation(["--at", "scored_05", "--check-names-only",
+                          "--require-scored"], _graded)
+check("a name good in both namespaces passes the graded check", rc, 0)
+rc, out = run_validation(["--at", "bench_09", "--check-names-only",
+                          "--require-scored"], _graded)
+check("a name that needs no translation passes it too", rc, 0)
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    names_path = os.path.join(tmpdir, "names.txt")
+    cl.write_known_names(names_path, ["b_one"], {"s_one": "b_one"}, {"s_one"})
+    _, _, scored_back = cl.read_known_names(names_path)
+    check("scorecard names survive the round trip", scored_back, {"s_one"})
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    serial = os.path.join(tmpdir, "serial.txt")
+    with open(serial, "w", encoding="utf-8") as handle:
+        handle.write("[bench] SCORE page_alloc_free 601 1000 PASS 1319 500 16\n"
+                     "[bench] SCORE page_alloc_zeroed_free 3592 - TRACK 3791 5 0\n"
+                     "[bench] b_one: min=1 cycles\n")
+    check("both graded and tracked entries count as scored",
+          cl.read_scored_names(serial),
+          {"page_alloc_free", "page_alloc_zeroed_free"})
 
 
 # --------------------------------------------------------------------------

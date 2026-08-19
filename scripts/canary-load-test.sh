@@ -154,7 +154,7 @@ LOAD_NAMES="$PROJECT_ROOT/build/canary-load-names.txt"
 if [ -n "$LOAD_AT" ] && [ -f "$LOAD_NAMES" ]; then
     if ! python "$SCRIPT_DIR/canary-load.py" \
             --serial "$SERIAL_FILE" --check-names-only \
-            --known-names "$LOAD_NAMES" \
+            --known-names "$LOAD_NAMES" --require-scored \
             ${LOAD_AT:+--at "$LOAD_AT"} ${LOAD_UNTIL:+--until "$LOAD_UNTIL"}; then
         exit 2
     fi
@@ -312,7 +312,8 @@ python "$SCRIPT_DIR/canary-load.py" \
     ${LOAD_AT:+--at "$LOAD_AT"} ${LOAD_UNTIL:+--until "$LOAD_UNTIL"} \
     --spinners "$SPINNERS" --timeout 1800 \
     --ready-file "$LOAD_READY" --stop-file "$LOAD_STOP" \
-    --record "$LOAD_RECORD" --known-names "$LOAD_NAMES" --hold &
+    --record "$LOAD_RECORD" --known-names "$LOAD_NAMES" \
+    --require-scored --hold &
 LOAD_PID=$!
 
 # Wait for every spinner interpreter to be up before going any further, so the

@@ -493,27 +493,88 @@ def run(args):
     return record
 
 
+#: `[bench] MEASURED-AS <scored_name> <live_name>`, emitted by the kernel for
+#: each benchmark whose two names differ. See `ScoreEntry::seq` in
+#: `kernel/src/bench.rs` for why the pairing has to come from the kernel: it
+#: cannot be recovered from the log by aligning the two orders, because they
+#: genuinely interleave (`lock_uncontended` is recorded after
+#: `lock_tracked_nested` but measured before it), and it cannot be recovered
+#: from the source either, because six benchmarks build their `BenchResult` by
+#: hand and print a live line that matches neither their variable nor their
+#: struct's `name` field.
+MEASURED_AS_RE = re.compile(r"^\[bench\] MEASURED-AS (\S+) (\S+)\s*$")
+
+
+SCORE_NAME_RE = re.compile(r"^\[bench\] SCORE (\S+) ")
+
+
+def read_measured_as(path):
+    """Scrape the kernel's own statement of the scored -> live name pairing."""
+    aliases = {}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                match = MEASURED_AS_RE.match(line.rstrip("\r\n"))
+                if match:
+                    aliases[match.group(1)] = match.group(2)
+    except OSError:
+        return {}
+    return aliases
+
+
+def read_scored_names(path):
+    """The names that reached the scorecard, which is what the grader scores."""
+    scored = set()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                match = SCORE_NAME_RE.match(line)
+                if match:
+                    scored.add(match.group(1))
+    except OSError:
+        return set()
+    return scored
+
+
 def read_known_names(path):
-    """The live benchmark names a previous run saw, or None if unrecorded.
+    """What a previous run saw: `(live_names, scored_to_live, scored_names)`.
 
     Absence is not an error: the first run on a fresh checkout has no list
     yet, and refusing to run without one would make the guard impossible to
-    bootstrap.  It returns None (unknown) rather than an empty set (nothing
-    matches), because those must not behave the same way.
+    bootstrap.  The names come back as None (unknown) rather than an empty set
+    (nothing matches), because those must not behave the same way.
+
+    A bare line is a live name and an `alias <scored> <live>` line is a
+    pairing, so a file written before aliases existed still reads back as a
+    plain live-name list rather than as an empty one.
     """
     if not path or not os.path.exists(path):
-        return None
+        return None, {}, set()
+    names, aliases, scored = set(), {}, set()
     with open(path, encoding="utf-8") as handle:
-        names = {line.strip() for line in handle if line.strip()}
-    return names or None
+        for line in handle:
+            parts = line.split()
+            if not parts:
+                continue
+            if parts[0] == "alias" and len(parts) == 3:
+                aliases[parts[1]] = parts[2]
+            elif parts[0] == "scored" and len(parts) == 2:
+                scored.add(parts[1])
+            elif len(parts) == 1:
+                names.add(parts[0])
+    return (names or None), aliases, scored
 
 
-def write_known_names(path, names):
-    """Record this run's live names, so the next run can validate against it."""
+def write_known_names(path, names, aliases=None, scored=None):
+    """Record this run's live names and name pairings, for the next run."""
     try:
         with open(path, "w", encoding="utf-8") as handle:
             for name in sorted(set(names)):
                 handle.write(name + "\n")
+            for score_name, live in sorted((aliases or {}).items()):
+                handle.write(f"alias {score_name} {live}\n")
+            for name in sorted(scored or ()):
+                handle.write(f"scored {name}\n")
     except OSError as exc:
         # A guard that cannot be written is worth a warning, never a failed
         # run: the experiment itself succeeded or failed on its own terms.
@@ -556,6 +617,11 @@ def main(argv=None):
                              "run; --at/--until are checked against it before "
                              "anything is spawned, and it is rewritten from "
                              "this run's own names")
+    parser.add_argument("--require-scored", action="store_true",
+                        help="also require --at/--until to reach the "
+                             "scorecard; pass this when grade-positional.py "
+                             "will grade the run, since it can only place a "
+                             "window using scorecard names")
     parser.add_argument("--check-names-only", action="store_true",
                         help="validate --at/--until against --known-names and "
                              "exit; used before the boot starts, so a bad "
@@ -566,8 +632,51 @@ def main(argv=None):
         parser.error("--until requires --at (a prefix window cannot "
                      "discriminate; see P22)")
 
-    known = read_known_names(args.known_names)
+    known, aliases, scored = read_known_names(args.known_names)
+    if known and args.require_scored and scored:
+        # The other half of the two-namespace trap, and the one the live-name
+        # check alone cannot catch. `vfs_write_16k` is a perfectly good live
+        # name, so the load would fire exactly where asked -- and then
+        # grade-positional.py, which can only place a window using scorecard
+        # names, refuses it, and the boot that just ran for two and a half
+        # minutes is wasted. Checked against the *original* name, before any
+        # alias translation, because the original is the one the grader sees.
+        unscoreable = [(flag, name)
+                       for flag, name in (("--at", args.at),
+                                          ("--until", args.until))
+                       if name is not None and name not in scored]
+        if unscoreable:
+            for flag, name in unscoreable:
+                print(f"{flag} '{name}' never reaches the scorecard, so the "
+                      f"grader cannot place a window with it.", file=sys.stderr)
+                back = [s for s, live in aliases.items() if live == name]
+                if back:
+                    print(f"    it is measured under that name but scored as "
+                          f"'{back[0]}' -- pass that instead.", file=sys.stderr)
+                else:
+                    near = difflib.get_close_matches(name, sorted(scored), n=5,
+                                                     cutoff=0.4)
+                    if near:
+                        print(f"    closest scored names: {', '.join(near)}",
+                              file=sys.stderr)
+            return 2
     if known:
+        # A scorecard name is translated rather than refused, and the
+        # translation is announced. The grader scores against scorecard names
+        # and this script triggers on live ones, so for the ~6 benchmarks
+        # whose two names differ there is no single name the caller could
+        # pass that works for both -- refusing here would leave those
+        # benchmarks simply unusable as window bounds. Announcing it matters
+        # as much as doing it: a silent substitution is how the second
+        # attempt's window ended up somewhere other than its label.
+        for flag in ("at", "until"):
+            name = getattr(args, flag)
+            if name is not None and name not in known and name in aliases:
+                print(f"--{flag} '{name}' is a scorecard name; triggering on "
+                      f"its live result line '{aliases[name]}' instead "
+                      f"(the kernel reports them as the same benchmark).",
+                      file=sys.stderr)
+                setattr(args, flag, aliases[name])
         # Checked here rather than after the boot because the whole point is
         # to make a mistyped or scorecard-only name cost a second instead of
         # a 2.5-minute boot that produces an unusable run.
@@ -600,7 +709,9 @@ def main(argv=None):
 
     if args.known_names and record.get("completions"):
         write_known_names(args.known_names,
-                          [name for name, _ in record["completions"]])
+                          [name for name, _ in record["completions"]],
+                          read_measured_as(args.serial),
+                          read_scored_names(args.serial))
 
     if args.record:
         with open(args.record, "w", encoding="utf-8") as handle:

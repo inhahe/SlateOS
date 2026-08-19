@@ -38670,8 +38670,32 @@ run the shift is drawn from is provably one kernel image, since then the
 addresses are identical throughout and layout is the one hypothesis ruled out by
 arithmetic. See design-decisions.md §234, "Both paths to a build failure".
 
-Part (2) — `MOVED (image changed)` labelling — remains open, blocked on a
-defensible benchmark-to-source reachability map.
+**Part (2) landed 2026-08-19, in the opposite direction to how it was written
+above** — and the reversal is the whole reason it had stayed blocked. As stated,
+(2) reads "label cross-image movements `MOVED (image changed)` *unless* the
+changed files plausibly reach the benchmark". That phrasing needs proof of
+**non**-reachability to withdraw a regression, and nothing available here can
+supply it: a static map cannot see through helper functions, trait objects,
+inlining or LTO, so "I found no path" is not "there is no path". Worse, it fails
+in the unsafe direction — a missed path silently relabels a real regression as a
+build artifact.
+
+So the map is used one way only: **it may escalate, never dismiss.** A movement
+is excused solely by the *measured* layout band, exactly as before; the map then
+runs afterwards and, when the diff provably touches a subsystem the benchmark
+demonstrably enters, prints a warning that placement and the diff are now both
+live explanations and this measurement cannot separate them. Every uncertainty —
+no map entry, a `git diff` that failed, an unparseable `bench.rs` — resolves to
+silence, which changes no verdict. `benchmark_subsystems()` in
+`scripts/bench-history.py` derives the map by matching `score("name", …)` call
+sites in `kernel/src/bench.rs` against `mod::` paths in the surrounding function
+and resolving those to files under `kernel/src/`; it deliberately under-covers
+(67 of 86 benchmarks) and over-attributes (`vfs_stat_root` picks up `sync` and
+`lockdep`), both of which are the safe direction for an escalate-only signal.
+Wired into both excuse sites — the run-over-run `EXPLAINED BY CODE PLACEMENT`
+loop and the sustained-shift path — and pinned by three tests in
+`test-bench-history.py`, one of which asserts the one-directionality directly.
+See design-decisions.md §235.
 
 Until a sweep has actually been run, the original guidance stands: treat any
 flagged movement in a benchmark whose subsystem the commit did not touch as

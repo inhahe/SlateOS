@@ -2481,7 +2481,8 @@ def _repl_history(bh, earlier, earlier_commit, earlier_profile="release",
     return [first] + rest
 
 
-def _repl_report(bh, history, current_b0, commit):
+def _repl_report(bh, history, current_b0, commit,
+                 changed_files=None, bench_subsystems=None):
     """Run `report()` over `history` with `b0` at `current_b0`. -> (out, failed)."""
     import io
     import contextlib
@@ -2493,7 +2494,9 @@ def _repl_report(bh, history, current_b0, commit):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         failed = bh.report(previous, current, 25.0, records=history, host="H",
-                           profile="release", commit=commit)
+                           profile="release", commit=commit,
+                           changed_files=changed_files,
+                           bench_subsystems=bench_subsystems)
     return buf.getvalue(), failed
 
 
@@ -3696,6 +3699,20 @@ def test_a_movement_inside_a_measured_band_stops_being_a_regression(bh):
     check("...and the reader is told how to widen it",
           "scripts/layout-sweep.py" in out, True)
 
+    # Same withdrawal, same band, but the diff edits code `b0` provably runs.
+    # The verdict must not move -- placement still fully accounts for the
+    # movement -- but the silence must, because a second explanation is now
+    # live and this measurement cannot separate the two.
+    loud, loud_failed = _repl_report(
+        bh, history, 3000, "xxx",
+        bench_subsystems={"b0": {"kernel/src/sched/"}},
+        changed_files=["kernel/src/sched/rr.rs"])
+    check("...and when the diff edits the benchmark's own subsystem, it says so",
+          "provably runs" in loud, True)
+    check("...without turning into a build failure", loud_failed, False)
+    check("...and still under the same heading",
+          "EXPLAINED BY CODE PLACEMENT" in loud, True)
+
 
 def test_a_movement_past_its_band_is_still_a_regression(bh):
     """The other half, or the gate is indistinguishable from deleting the check.
@@ -3957,7 +3974,8 @@ def _shift_with_sweep(bh, sweep, shift_to=3000, kernel_sha=None):
     return history
 
 
-def _shift_report(bh, history, shift_to=3000, this_run=None):
+def _shift_report(bh, history, shift_to=3000, this_run=None,
+                  changed_files=None, bench_subsystems=None):
     """Run `report` over a `_shift_with_sweep` history. -> (stdout, failed)."""
     import io, contextlib
     previous = history[9]
@@ -3968,7 +3986,9 @@ def _shift_report(bh, history, shift_to=3000, this_run=None):
     with contextlib.redirect_stdout(buf):
         failed = bh.report(previous, current, 25.0, records=history,
                            host="H", profile="release",
-                           this_run=this_run or {"kernel_sha": "now"})
+                           this_run=this_run or {"kernel_sha": "now"},
+                           changed_files=changed_files,
+                           bench_subsystems=bench_subsystems)
     return buf.getvalue(), failed
 
 
@@ -4105,6 +4125,151 @@ def test_the_layout_veto_reads_the_same_window_the_shift_was_drawn_from(bh):
           ["v"])
 
 
+def test_the_benchmark_subsystem_map_is_read_out_of_bench_rs(bh, tmpdir):
+    """Derived from the source, over-attributing, and never a denylist.
+
+    Three properties, each of which is the safe direction of a choice that
+    could have gone the other way:
+
+    * The module list comes from `os.listdir` of `kernel/src`, not a table. A
+      table is a second place the truth lives, and when a module is renamed it
+      does not fail -- it silently stops recognising the module, which reads
+      exactly like a benchmark that touches nothing.
+    * `core::`, `u64::` and every other non-module `x::` fall out because they
+      are not in that listing. No denylist to keep current.
+    * A body that merely *mentions* a module counts. That over-attributes, and
+      over-attribution costs a human one look; the opposite costs a missed
+      escalation nobody ever hears about.
+    """
+    import os as _os
+    src = _os.path.join(tmpdir, "kernel", "src")
+    _os.makedirs(_os.path.join(src, "sched"))
+    _os.makedirs(_os.path.join(src, "mm"))
+    for leaf in ("lib.rs", "tlb.rs"):
+        open(_os.path.join(src, leaf), "w").close()
+    bench_rs = _os.path.join(tmpdir, "bench.rs")
+    with open(bench_rs, "w", encoding="utf-8") as handle:
+        handle.write(
+            "fn bench_pick_next() {\n"
+            "    let t = sched::spawn();\n"
+            "    let n = core::hint::black_box(t);\n"
+            "    score(\"pick_next\", n);\n"
+            "}\n"
+            "pub unsafe fn bench_fault() {\n"
+            "    mm::map(); tlb::flush();\n"
+            "    score(\"page_fault\", 1);\n"
+            "    score(\"page_fault_cow\", 2);\n"
+            "}\n"
+            "fn helper_with_no_score() {\n"
+            "    sched::yield_now();\n"
+            "}\n")
+
+    got = bh.benchmark_subsystems(bench_rs, src)
+    check("a benchmark is attributed to the module its body calls",
+          got.get("pick_next"), {"kernel/src/sched/", "kernel/src/bench.rs"})
+    check("...including every module it mentions, not just the first",
+          got.get("page_fault"),
+          {"kernel/src/mm/", "kernel/src/tlb.rs", "kernel/src/bench.rs"})
+    check("two scores in one body share that body's attribution",
+          got.get("page_fault_cow"), got.get("page_fault"))
+    check("`core::` is not a kernel module and does not become one",
+          any("core" in path for paths in got.values() for path in paths),
+          False)
+    check("a function that scores nothing is not a benchmark",
+          "helper_with_no_score" in got, False)
+    check("the harness itself reaches every benchmark by definition",
+          all("kernel/src/bench.rs" in paths for paths in got.values()), True)
+
+    # And against the real tree, because a map that is correct on a fixture and
+    # empty on `kernel/src/bench.rs` is a check that cannot fire.
+    real = bh.benchmark_subsystems()
+    check("the real bench.rs yields a non-trivial map", len(real) > 30, True)
+    check("...and pick_next still lands in the scheduler",
+          "kernel/src/sched/" in real.get("pick_next", set()), True)
+
+
+def test_a_layout_excused_movement_says_so_when_the_diff_edits_its_subsystem(bh):
+    """The hole in the layout excuse: a wide band can cover a real regression.
+
+    A measured band says "two builds of *identical source* moved this
+    benchmark at least this far". That is a true statement about placement and
+    it never becomes false. What it is not is a statement about the diff -- so
+    when the diff also edits code the benchmark provably runs, placement and
+    the diff are both live explanations and the measurement cannot separate
+    them. Withdrawing the movement is still right; withdrawing it in silence
+    is not, because the reader is never told the second explanation exists.
+
+    The escalation is asserted to be exactly that -- prose. `failed` must not
+    change, or this would have become a way for a *diff* to cause a build
+    failure that the evidence does not support.
+    """
+    wide = _shift_with_sweep(bh, {0: 1000, 1024: 4000, 2048: 2000})
+    subsystems = {"v": {"kernel/src/sched/", "kernel/src/bench.rs"}}
+
+    quiet, quiet_failed = _shift_report(bh, wide, bench_subsystems=subsystems,
+                                        changed_files=["kernel/src/mm/vma.rs"])
+    check("a diff elsewhere leaves the excuse unannotated",
+          "provably runs" in quiet, False)
+    check("...and does not fail the build", quiet_failed, False)
+
+    loud, loud_failed = _shift_report(
+        bh, wide, bench_subsystems=subsystems,
+        changed_files=["kernel/src/sched/rr.rs", "docs/notes.md"])
+    check("a diff inside the benchmark's own subsystem is called out",
+          "provably runs" in loud, True)
+    check("...naming the file, so the reader knows where to look",
+          "kernel/src/sched/rr.rs" in loud, True)
+    check("...and saying the two explanations cannot be told apart",
+          "BOTH live explanations" in loud and "them apart" in loud, True)
+    check("...while the unrelated file stays out of it",
+          "docs/notes.md" in loud, False)
+    check("...and it is still not counted as a regression",
+          loud_failed, False)
+    check("...and the movement is still withdrawn as placement",
+          "NOT a code finding" in loud, True)
+
+
+def test_the_diff_escalation_can_only_ever_escalate(bh):
+    """Every way of not knowing must produce silence, never an excuse.
+
+    This is the direction-of-failure argument that made the whole feature
+    tractable. `known-issues.md`'s standing fix is phrased "label it MOVED
+    *unless* the changed files plausibly reach the benchmark", which needs
+    proof of NON-reachability -- and nothing here can supply that, because the
+    map cannot see through helpers, trait objects, inlining or LTO. Phrased as
+    an escalation instead, every unknown resolves to "said nothing", and the
+    movement keeps whatever verdict the measurement gave it.
+    """
+    check("no map at all escalates nothing",
+          bh.diff_touches("v", None, ["kernel/src/sched/rr.rs"]), [])
+    check("no diff at all escalates nothing",
+          bh.diff_touches("v", {"v": {"kernel/src/sched/"}}, None), [])
+    check("an unmapped benchmark escalates nothing",
+          bh.diff_touches("other", {"v": {"kernel/src/sched/"}},
+                          ["kernel/src/sched/rr.rs"]), [])
+    check("a directory does not match a sibling that shares its prefix",
+          bh.diff_touches("v", {"v": {"kernel/src/sched/"}},
+                          ["kernel/src/scheduler_notes.md"]), [])
+    check("a file entry matches only itself",
+          bh.diff_touches("v", {"v": {"kernel/src/tlb.rs"}},
+                          ["kernel/src/tlb.rs", "kernel/src/tlbx.rs"]),
+          ["kernel/src/tlb.rs"])
+    check("windows separators in git output do not defeat the match",
+          bh.diff_touches("v", {"v": {"kernel/src/sched/"}},
+                          ["kernel\\src\\sched\\rr.rs"]),
+          ["kernel/src/sched/rr.rs"])
+    check("describe_diff_touch is silent when there is nothing to say",
+          bh.describe_diff_touch("v", {"v": {"kernel/src/sched/"}}, []), None)
+
+    # `changed_paths` must distinguish "nothing changed" from "never asked".
+    check("no base commit is not-established, not an empty diff",
+          bh.changed_paths(None), None)
+    check("an unknown commit is not-established either",
+          bh.changed_paths("0" * 40), None)
+    check("...and so is the placeholder the recorder writes",
+          bh.changed_paths(bh.UNKNOWN_COMMIT), None)
+
+
 def main():
     """Run every `test_*` in this file, in definition order.
 
@@ -4131,9 +4296,9 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 99:
+    if len(tests) < 102:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 99. Discovery is broken, not the code.")
+              f"suite has at least 102. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

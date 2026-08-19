@@ -3118,6 +3118,200 @@ def describe_layout_band(band):
             f"({pads} layouts of {commit})")
 
 
+#: The single file the in-kernel benchmark suite is defined in, and the tree it
+#: calls into. Both are read only to *derive* a map; neither is written.
+BENCH_SOURCE = os.path.join(REPO_ROOT, "kernel", "src", "bench.rs")
+KERNEL_SRC = os.path.join(REPO_ROOT, "kernel", "src")
+
+#: `score("name", ...)` -- how a benchmark result is named in `bench.rs`.
+#:
+#: Not `SCORE_RE`, which is taken 3000 lines up: that one matches the `SCORE …`
+#: *line the kernel prints on serial*, and this one matches the *call in the
+#: Rust source* that eventually prints it. Two files, two languages, one
+#: obvious name. Binding this to `SCORE_RE` silently rebound the other --
+#: module scope, no error, no warning -- and the tool then parsed zero
+#: benchmarks out of every log it was given. The suite caught it; nothing else
+#: would have, because an empty parse looks like a boot that scored nothing.
+SCORE_CALL_RE = re.compile(r'\bscore\(\s*"([^"]+)"')
+#: A column-0 `fn`, i.e. the start of a new benchmark body.
+BENCH_FN_RE = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?"
+                         r"(?:extern\s+\"C\"\s+)?fn\s+(\w+)")
+#: A `module::` path segment. Filtered against the real tree, so `core::` and
+#: `u64::` fall out on their own rather than needing a denylist that rots.
+MODPATH_RE = re.compile(r"\b([a-z][a-z0-9_]*)::")
+
+
+def kernel_modules(kernel_src=KERNEL_SRC):
+    """`{module name: repo-relative path}` for every top-level kernel module.
+
+    Derived from the directory listing rather than from a table, because a
+    table is a second place the truth lives and this one would rot silently --
+    a module renamed out from under it simply stops being recognised, which
+    looks exactly like a benchmark that touches nothing.
+    """
+    modules = {}
+    try:
+        entries = os.listdir(kernel_src)
+    except OSError:
+        return modules
+    for entry in sorted(entries):
+        path = os.path.join(kernel_src, entry)
+        if entry.endswith(".rs"):
+            modules[entry[:-3]] = f"kernel/src/{entry}"
+        elif os.path.isdir(path):
+            modules[entry] = f"kernel/src/{entry}/"
+    return modules
+
+
+def benchmark_subsystems(bench_source=BENCH_SOURCE, kernel_src=KERNEL_SRC):
+    """`{benchmark: {repo-relative kernel path, ...}}` a benchmark provably enters.
+
+    Read straight out of `kernel/src/bench.rs`: every `score("name", ...)` is
+    attributed to the column-0 `fn` it sits inside, and that function's body is
+    scanned for `module::` paths that name a real top-level kernel module. So
+    `pick_next` maps to `kernel/src/sched/` because its body calls
+    `sched::kill_task`.
+
+    # What this is for, and the one direction it may be used in
+
+    It answers "does this diff touch code the benchmark demonstrably runs?" --
+    and it may only ever be used to **escalate**, never to dismiss. A found
+    call is positive evidence; a *missing* one is not evidence of absence,
+    because this map cannot see through helper functions, trait objects,
+    inlining or LTO. `known-issues.md`'s standing fix (2) is phrased the other
+    way round -- "label it MOVED unless the changed files plausibly reach the
+    benchmark" -- and that phrasing is the reason it has stayed blocked: it
+    needs proof of NON-reachability, which nothing available here can supply
+    and a wrong answer to which hides a real regression.
+
+    # Deliberate imprecisions, both in the safe direction
+
+    - **It under-covers.** 67 of the 86 benchmarks in recent history are
+      mapped; the rest are scored through helpers or under generated names and
+      simply get no escalation. Silence from this map is worth nothing and is
+      never read as "the diff cannot reach it".
+    - **It over-attributes.** `vfs_stat_root` maps to `sync` and `lockdep` as
+      well as `fs`, because its body mentions them while setting the
+      measurement up. That yields escalations that a perfect call graph would
+      not, which costs a human a look -- the cheap failure, versus a dismissal
+      nobody sees.
+
+    `kernel/src/bench.rs` itself is included for every benchmark: a change to
+    the harness reaches the measurement by definition.
+    """
+    modules = kernel_modules(kernel_src)
+    try:
+        with open(bench_source, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return {}
+
+    bodies, current = {}, None
+    for line in lines:
+        match = BENCH_FN_RE.match(line)
+        if match:
+            current = match.group(1)
+            bodies.setdefault(current, [])
+        if current is not None:
+            bodies[current].append(line)
+
+    subsystems = {}
+    for body in bodies.values():
+        text = "\n".join(body)
+        names = SCORE_CALL_RE.findall(text)
+        if not names:
+            continue
+        paths = {modules[mod] for mod in MODPATH_RE.findall(text)
+                 if mod in modules}
+        paths.add("kernel/src/bench.rs")
+        for name in names:
+            subsystems.setdefault(name, set()).update(paths)
+    return subsystems
+
+
+def changed_paths(base_commit, repo_root=REPO_ROOT):
+    """Repo-relative files differing between `base_commit` and the WORKING TREE.
+
+    Returns `None` -- meaning "not established" -- rather than an empty list
+    whenever the question cannot be answered: no base commit, a commit this
+    repo does not have, or git unavailable. The distinction is the whole point;
+    an empty list would read as "this diff changed nothing", which is the one
+    answer that must never be produced by a failure.
+
+    Against the working tree, not against HEAD, because a benchmark run of a
+    dirty tree measured the uncommitted edits too. `git diff <base>` with no
+    second revision is exactly that comparison.
+    """
+    if not base_commit or base_commit == UNKNOWN_COMMIT:
+        return None
+    try:
+        probe = subprocess.run(
+            ["git", "-C", repo_root, "cat-file", "-e", f"{base_commit}^{{commit}}"],
+            capture_output=True, text=True, timeout=15, check=False)
+        if probe.returncode != 0:
+            return None
+        out = subprocess.run(
+            ["git", "-C", repo_root, "diff", "--name-only", base_commit],
+            capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return [line.strip() for line in out.stdout.splitlines() if line.strip()]
+
+
+def diff_touches(name, subsystems, changed):
+    """Changed files lying in a subsystem `name` provably enters. `[]` if none.
+
+    `changed is None` (the question was never answered) and `changed == []`
+    (this diff changed nothing) both yield `[]` here, which is correct for the
+    single use this has: an *escalation* fires only on a positive hit, so the
+    two cases are equivalent at the point of use. They are kept distinct in
+    `changed_paths` because a future consumer that dismissed on emptiness would
+    need to tell them apart, and by then the distinction would be gone.
+    """
+    paths = subsystems.get(name) if subsystems else None
+    if not paths or not changed:
+        return []
+    hits = []
+    for path in changed:
+        normalised = path.replace("\\", "/")
+        for owned in paths:
+            if (normalised == owned or
+                    (owned.endswith("/") and normalised.startswith(owned))):
+                hits.append(normalised)
+                break
+    return sorted(set(hits))
+
+
+def describe_diff_touch(name, subsystems, changed, limit=3):
+    """The one-line escalation, or `None` when the diff provably touches nothing.
+
+    Deliberately worded as "the measurement cannot distinguish", not "this is a
+    regression after all". A movement inside a measured layout band genuinely
+    carries no information about the diff -- placement alone fully accounts for
+    it -- and that stays true when the diff also edits the code under test.
+    What changes is that a second explanation is now live and equally
+    unfalsified, so silence would be the wrong output.
+    """
+    hits = diff_touches(name, subsystems, changed)
+    if not hits:
+        return None
+    # The file list goes on its own lines rather than into the sentence. A
+    # subsystem-wide diff can hit a dozen files, and inlining even three of
+    # them produced a 143-column line -- which wraps in whatever terminal the
+    # reader has, at whatever column, and takes the sentence with it.
+    lines = [f"       !! but this diff edits code {name} provably runs, so "
+             f"placement and the",
+             f"          diff are now BOTH live explanations and this "
+             f"measurement cannot tell",
+             f"          them apart. Read the diff:"]
+    lines += [f"            {path}" for path in hits[:limit]]
+    if len(hits) > limit:
+        lines.append(f"            ... and {len(hits) - limit} more")
+    return "\n".join(lines)
+
+
 def split_by_layout(rows, bands):
     """Partition movements by whether code placement alone could explain them.
 
@@ -3260,7 +3454,7 @@ def report_baseline_canary(previous):
 
 def report(previous, current_entries, threshold_pct,
            records=None, host=None, profile=LEGACY_PROFILE, commit=None,
-           this_run=None):
+           this_run=None, changed_files=None, bench_subsystems=None):
     """Print the run-over-run comparison. Returns True if anything regressed.
 
     `records`/`host`/`profile` are optional only so that callers interested
@@ -3295,6 +3489,18 @@ def report(previous, current_entries, threshold_pct,
     because a commit both over- and under-identifies a binary.  When no
     `this_run` is supplied, one is derived from `commit` so that callers
     predating the split (the tests, chiefly) keep the old meaning.
+
+    `changed_files`/`bench_subsystems` exist for one purpose and are permitted
+    only one direction of effect: annotating a movement that a measured layout
+    band has just *excused*, when the diff also edits code that benchmark
+    provably runs.  Withdrawing such a movement is right -- placement alone
+    fully accounts for a movement inside the band, and that stays true whatever
+    the diff says -- but withdrawing it *silently* is not, because the reader
+    is then never told that a second, equally unfalsified explanation exists.
+    Neither argument can ever cause a movement to be excused, only to be
+    escalated with a line of prose; both default to None, and None escalates
+    nothing.  See `benchmark_subsystems` for why the map may not be read in the
+    other direction.
     """
     if this_run is None and commit:
         this_run = {"commit": commit}
@@ -3753,6 +3959,10 @@ def report(previous, current_entries, threshold_pct,
                 f"    {name}: {before}ns -> {after}ns "
                 f"({adj:+.0f}% vs suite, {raw:+.0f}% raw){detail}"
             )
+            escalation = describe_diff_touch(name, bench_subsystems,
+                                             changed_files)
+            if escalation:
+                print(escalation)
         print(
             "    -> the band is a LOWER bound: a handful of sampled layouts "
             "cannot contain the worst\n"
@@ -3865,6 +4075,10 @@ def report(previous, current_entries, threshold_pct,
                       f"       Measured by a sweep of one source at several "
                       f".text offsets:\n"
                       f"       {describe_layout_band(lband)}.")
+                escalation = describe_diff_touch(name, bench_subsystems,
+                                                 changed_files)
+                if escalation:
+                    print(escalation)
             if verdict.verdict == MODE_STRUCTURED:
                 any_structured = True
             elif explained:
@@ -4249,9 +4463,19 @@ def main(argv=None):
     # against stored ones, and a comparison whose two sides have different
     # shapes is one that will one day be given the wrong side.
     this_run = {"kernel_sha": sha, "commit": commit, "dirty": args.dirty}
+    # What this comparison's diff actually edits, and which kernel subsystems
+    # each benchmark provably enters. Used in exactly one direction: to annotate
+    # a movement that a measured layout band has just excused, when the diff
+    # also edits code that benchmark runs. Both are derived from the *previous*
+    # run's commit, which is the base of the comparison being printed; a failure
+    # to derive either yields None, and None escalates nothing.
+    changed_files = changed_paths(previous.get("commit") if previous else None)
+    bench_subsystems = benchmark_subsystems()
     regressed = report(previous, current_entries, args.threshold,
                        records=records, host=host, profile=args.profile,
-                       commit=commit, this_run=this_run)
+                       commit=commit, this_run=this_run,
+                       changed_files=changed_files,
+                       bench_subsystems=bench_subsystems)
 
     # Reported *after* the comparison, so it qualifies the verdict the reader
     # has just seen rather than being buried above it. The verdict is *taken

@@ -38633,6 +38633,48 @@ commit did not touch as layout until shown otherwise — and check the *directio
 histogram* of all deterministic movers first, because a mixed one is diagnostic
 on its own.
 
+#### Further instance — 2026-08-19, the KASAN frame-hook change
+
+A clean worked example of why (1) and (2) are worth the effort, and of how much
+run time the absence of them costs. Two `--bench` runs of the *same* binary (the
+frame-unpoison hook, which touches only `mm/kasan.rs`, `mm/frame.rs` and
+`main.rs`):
+
+- **Run 1 flagged 12 regressions** of +26% to +91% — `vfs_stat_3comp`,
+  `syscall_dispatch`, `shm_create_close`, `net_ns_arp_lookup`, `ipc_pipe` and
+  friends. It also invalidated its own calibration three separate ways in the
+  same output: `scatter scale check: FAILED … this run's budget calibration is
+  not a physical quantity`, `CONTAMINATED: reference access cost spread 55% over
+  13 samples`, and `MEASUREMENT VOID` on two more. The regression section is
+  printed anyway, above the notice that says not to believe it.
+- **Run 2, same binary, no rebuild, calibration valid** (`scatter scale check:
+  OK`, 19% of a 25% tolerance): 11 of the 12 withdrew, several inverting to
+  `IMPROVED` — `shm_create_close` −46%, `syscall_dispatch` −40%,
+  `net_ns_arp_lookup` −41%. A mixed direction histogram, exactly as the
+  paragraph above predicts.
+
+The one survivor, `pick_next` (+44%, own range 492–651 ns), was reported
+`REGRESSED … replicated -- every recorded run of this commit shows it`. But
+"replicated" here only means *both runs of one image agree*; the comparison is
+still cross-image against `5e9a30a22`, which is precisely case (2). `pick_next`
+allocates no frames — the only `frame::alloc_order` under `kernel/src/sched/` is
+task-stack creation (`task.rs:1050`), not the pick path — so no edit in this
+change reaches it. Layout, by the standing rule.
+
+Two things this instance adds. First, **the `REGRESSED … replicated` wording is
+actively misleading for a cross-image pair** and should be reworded along with
+fix (1): a reader reasonably takes "replicated" to mean "confirmed as a code
+effect", when it only rules out single-run noise. Second, and the reason (3)
+matters more than it looks: **this host's own noise floor exceeds the effect
+sizes being reported.** The harness says so itself — "Two runs of one unchanged
+binary have been measured moving 85% apart" — and this pair demonstrated it live,
+with `page_alloc_zeroed_free` spanning 3625→5420 ns (50%) across two runs of one
+image. An A/B against a stashed build would therefore not have been decisive
+either; it would have cost ~20 minutes of rebuild and boot to produce another
+sample from a distribution wider than the signal. That is the actual argument for
+(3): without a calibrated per-benchmark layout band there is no experiment
+available at this noise level that can settle a 44% cross-image movement.
+
 ---
 
 ### [A] RESOLVED — a KASAN self-test left a freed heap slot permanently poisoned, so 62 of the instrumented build's 64 report slots were spent on false use-after-frees and the real report budget was exhausted two thirds of the way through the boot — 2026-08-19
@@ -38791,6 +38833,165 @@ negative grep, grep the source for the pattern** and confirm it can be produced
 at all. This is the identical hazard `scripts/boot-history.py`'s docstring
 already documents, which I had quoted approvingly earlier in the same session —
 a warning is not a guard, and only a matcher checked against the emitter is.
+
+---
+
+### [A] RESOLVED — KASAN poison survives a frame returning to the buddy allocator, so every large heap free permanently mismarks physical memory that is then reused for anything at all — 2026-08-19
+
+**Id:** `B-KASAN-POISON-SURVIVES-FRAME-REUSE`
+
+**Resolved 2026-08-19** by hooking the frame allocator (`frame::on_frames_allocated`
+→ `kasan::on_frame_alloc`) on all five allocation return sites. Measured on a
+whole-boot instrumented run (`scripts/kasan-build.sh --boot`, `BOOT_OK` in 937 s
+of a 3600 s budget, boot test PASSED):
+
+| | Before | After |
+|---|---|---|
+| KASAN reports | **64** by serial line 2092 (budget exhausted) | **3** in 27 592 lines |
+| of which false positives | 64 | **0** |
+| `map_lock_giveups` | 3, with "shadow coverage has holes this boot" | **0** |
+| shadow coverage | — | 2630 frames; 1 496 684 080 B poisoned / 4 294 571 020 B unpoisoned |
+
+All three surviving reports are *deliberate* self-test violations, and each is
+matched by the subsystem's own detector agreeing with KASAN: two from
+`kasan-rt`'s report-path test, and one from the heap slab-poison test's
+intentional overflow — `[kasan] … out-of-bounds (heap redzone) on write of 1
+bytes @ 0xffff800131b5c32c` against `[heap] BUFFER OVERFLOW detected!
+slot=0xffff800131b5c300, alloc=40, class=64, offset=44` (`0xc32c` = slot + 44).
+So the profile is now both quiet *and* demonstrably live — the failure shape
+called out at the bottom of this entry (a check that cannot fire, presenting as
+a check that found nothing) is excluded by the same evidence that shows it clean.
+
+Note that these three deliberate violations consume 3 of the 64-report budget on
+every instrumented boot. That is left as-is deliberately: the cost is negligible
+and the reports are positive evidence each boot that the detector still works.
+
+**In short:** KASAN marks memory "freed" when the heap frees it, and "usable"
+again when the heap hands it out. But *large* heap allocations do not come from
+the heap's own slabs — they come straight from the physical frame allocator, and
+freeing one gives those physical frames back to the frame allocator, which will
+happily reuse them for something that is not a heap object at all: a page table,
+a slab page, a DMA buffer. Nothing on those paths tells KASAN the memory is
+usable again, so the "freed" mark stays. From then on every legitimate access to
+that memory is reported as a use-after-free. Turning KASAN on for the whole boot
+(§233) surfaced this instantly: 64 reports — the entire per-boot report budget —
+inside the first 2092 lines of boot, after which real findings are suppressed.
+
+#### Evidence
+
+First instrumented boot with KASAN active from init:
+
+```
+499:[kasan] CRITICAL: use-after-free (freed heap) on write of 8 bytes @ 0xffff80007fe4f000
+513:[kasan] CRITICAL: use-after-free (freed heap) on write of 8 bytes @ 0xffff80007fe4e000
+527:[kasan] CRITICAL: use-after-free (freed heap) on write of 8 bytes @ 0xffff80007fe4d000
+541:[kasan] CRITICAL: use-after-free (freed heap) on write of 8 bytes @ 0xffff80007fe4c000
+555:[kasan] CRITICAL: use-after-free (freed heap) on read  of 8 bytes @ 0xffff80007fe4c000
+586:[kasan] CRITICAL: use-after-free (freed heap) on read  of 8 bytes @ 0xffff80007fe4c008
+604:[kasan] CRITICAL: use-after-free (freed heap) on read  of 8 bytes @ 0xffff80007fe4c010
+...
+```
+
+Three things identify this as stale poison rather than a real use-after-free:
+
+1. **The write addresses are 4 KiB apart and descending** — `…4f000`, `…4e000`,
+   `…4d000`, `…4c000` — which is a page walk, not an object.
+2. **All four share one identical 12-frame backtrace**, so they are one loop.
+3. **The reads that follow march `+0, +8, +0x10, +0x18, …` from the lowest of
+   them**, which is a linear scan of freshly acquired memory, i.e. exactly what a
+   *new owner* of a reused frame does.
+
+`0xffff80007fe4c000` is HHDM + `0x7fe4c000` ≈ 2.14 GiB into a 3 GiB guest — a
+direct-map alias of a physical frame, not a slab slot.
+
+#### The mechanism
+
+| Step | Code | Shadow effect |
+|---|---|---|
+| large alloc | `HeapInner::large_alloc` → `frame::alloc_order` → `to_virt(hhdm)` | `on_alloc` (heap.rs:1300) unpoisons |
+| large free | `GlobalAlloc::dealloc` → `on_free` (heap.rs:1332) | **whole region poisoned `0xFA`** |
+| ...then | `HeapInner::large_dealloc` → `frame::free_order` | frames go to the buddy allocator |
+| reuse | `frame::alloc_frame` for a page table / slab page / DMA buffer | **nothing unpoisons** |
+| any access | via the HHDM alias | reported as use-after-free, forever |
+
+This is `B-KASAN-STALE-POISON-ON-LIVE-SLOT` one layer down, and the same shape:
+*poison outliving the object because reuse happens through a path that does not
+unpoison.* The earlier fix put the teardown on `disable()`, which handles the
+enable/disable transition; it cannot help here, because KASAN never gets
+disabled — the poison outlives the *allocation*, not the *enabled window*.
+
+It has always been latent. It was invisible before §233 only because KASAN was
+never enabled long enough for a large free and a frame reuse to both land inside
+the same enabled window.
+
+#### The fix (as applied)
+
+**Hook the frame allocator, which is what Linux does** (`kasan_unpoison_pages()`
+on page alloc, `kasan_poison_pages()` on page free). Concretely:
+
+1. Add `kasan::on_frame_alloc(phys, bytes)` and call it from `frame::alloc_frame`
+   and `frame::alloc_order`, unpoisoning the HHDM alias of the returned frames
+   **before the allocator or its caller touches them** — a frame that is zeroed
+   through HHDM on the way out would otherwise take an instrumented access to
+   still-poisoned memory and report.
+2. That alone is a correctness fix and fails open: after it, no stale poison can
+   survive frame reuse regardless of what the frame becomes.
+
+**Re-entrancy is the trap to get right, and the first answer to it was wrong.**
+`unpoison_range` → `set_shadow` → `ensure_shadow_mapped` → `frame::alloc_frame`
+→ the new hook → `unpoison_range`… The shadow VA itself is outside the covered
+window so it does not recurse, but the *HHDM alias of a freshly allocated shadow
+frame* is inside it, and `ensure_shadow_mapped` zeroes exactly that. Each level
+covers 8x more memory so it terminates in practice, but "terminates in practice"
+is not the standard this module holds itself to (see the raw-accessor
+termination argument at the top of `kasan.rs`).
+
+The prescription originally written here — *"use an explicit per-CPU re-entrancy
+flag and skip the hook when already inside it"* — was implemented and is
+**wrong**. The flag is only sound with interrupts disabled (otherwise an
+IRQ-context allocation on the same CPU sees the flag set and skips its own
+unpoison), and disabling interrupts means every call reaches `with_map_lock` on
+its `!irqs_were_on` path — the one that **gives up instead of spinning**. A
+given-up unpoison fails *closed*: the stale `0xFA` stays on live memory and every
+later access to it is reported forever. That is this very bug, reintroduced by
+its own fix. The first boot with that version said so plainly:
+`map_lock_giveups=3` and `WARNING: 3 IRQ-context allocation(s) went unpoisoned
+(MAP_LOCK busy) — shadow coverage has holes this boot`, in a build where KASAN is
+live only for the self-test window. Whole-boot, firing on every frame allocation,
+it would have been far more.
+
+**The correct answer is not to guard the recursion but to not have it.** The hook
+writes exactly one value, `KASAN_ADDRESSABLE` (`0x00`), and an *unbacked* shadow
+frame already reads `0x00` — the entire shadow window resolves through a shared
+read-only zero page until something backs it (`ZERO_PT`'s 512 entries all point
+at one all-zero page; `get_shadow` likewise returns `KASAN_ADDRESSABLE` for an
+unmapped frame). So "back the shadow frame, then write zero into it" and "leave
+it alone" are the same result. `fill_shadow_with(..., IfUnmapped::Skip)` takes
+the second, which allocates nothing — no recursion, no guard, no interrupts-off
+window, no `MAP_LOCK`, no hole — at zero cost, because the skipped write was a
+no-op by construction. The fix still lands where it matters: poisoning *does*
+back the shadow frame, so any frame carrying stale `0xFA` necessarily has its
+shadow bit set and gets cleared.
+
+Generalised: **an unpoison-only path never needs to allocate shadow, and any
+design in which it does is buying a re-entrancy problem for nothing.**
+
+**Deliberately not doing (yet):** poisoning on frame *free*. That would add
+page-granularity use-after-free detection, which is a genuinely stronger check
+and attractive — but it is a new claim rather than the removal of a false one,
+and it risks its own false positives (the frame allocator writes its own
+metadata and freelist links through the HHDM alias of frames it has just
+freed). Land the unpoison side, get a clean whole-boot instrumented run, and
+consider poisoning-on-free as a separate change with its own boot evidence.
+
+#### Why this matters more than the report count suggests
+
+The 64-report budget is exhausted at line 2092 of a ~27700-line boot. Everything
+after that is unprotected, so the profile is at present *worse* than useless for
+its stated purpose (`B-KNULLJUMP`): it consumes its entire detection budget on
+false positives in the first 8% of the boot and then goes quiet, which reads
+exactly like a clean run. That is the same failure shape as the two entries above
+it — a check that cannot fire, presenting as a check that found nothing.
 
 ### [A] RESOLVED — KASAN's own shadow-page bootstrap wrote through an *instrumented* `core::ptr::write_bytes`, so backing a shadow page reported a use-after-free against KASAN's bookkeeping — 2026-08-19
 

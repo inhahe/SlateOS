@@ -210,6 +210,13 @@ POISON_ROOT_SUBSTRINGS = [
     # poison", and `mm::kasan` is its charter member.
     "2mm5kasan10set_shadow",
     "2mm5kasan11fill_shadow",
+    # The worker behind `fill_shadow`. Listed *separately* rather than relying on
+    # the entry above, because the v0 length prefix makes these substrings exact:
+    # `11fill_shadow` cannot match `16fill_shadow_with`. That precision is the
+    # point elsewhere in this file (it is what keeps `11alloc_frame` off
+    # `18alloc_frame_zeroed`), but it means a rename or a wrapper split silently
+    # moves the body out from under the root unless the new name is added here.
+    "2mm5kasan16fill_shadow_with",
     "2mm5kasan20ensure_shadow_mapped",
     "2mm5kasan16clear_all_poison",
 ]

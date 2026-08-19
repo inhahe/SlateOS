@@ -1070,6 +1070,29 @@ fn shadow_of(addr: u64) -> Option<u64> {
     Some(sv)
 }
 
+/// Is the 16 KiB shadow frame containing `shadow_va` already backed by a
+/// writable frame?
+///
+/// The read-only half of [`ensure_shadow_mapped`]'s fast path: one bitmap load,
+/// no lock, no allocation, and so callable from anywhere — which is the entire
+/// point, since it is what lets [`on_frame_alloc`] unpoison without being able
+/// to re-enter the frame allocator.
+///
+/// A `false` does not mean "no shadow"; it means the shadow is still the shared
+/// read-only zero page, i.e. it reads `0x00` / [`KASAN_ADDRESSABLE`]. Bits are
+/// only ever set (`fetch_or`, never cleared), so a `true` cannot go stale and a
+/// `false` can only become more true — a frame mapped concurrently is zeroed
+/// before its bit is published, so either way the range reads addressable.
+fn shadow_frame_is_backed(shadow_va: u64) -> bool {
+    let frame_idx = ((shadow_va.wrapping_sub(KASAN_SHADOW_BASE)) / FRAME_SIZE as u64) as usize;
+    if frame_idx >= SHADOW_FRAMES {
+        return false;
+    }
+    let word = frame_idx / 64;
+    let bit = 1u64 << (frame_idx % 64);
+    SHADOW_MAPPED[word].load(Ordering::Acquire) & bit != 0
+}
+
 /// Ensure the 16 KiB shadow frame containing `shadow_va` is mapped and zeroed.
 ///
 /// Cheap fast path: a single bitmap load. On the (rare) first touch of a
@@ -1249,13 +1272,50 @@ fn poison_granules(addr: u64, size: u64, val: u8) {
     fill_shadow(first, granules, val);
 }
 
+/// What [`fill_shadow_with`] should do about a range whose 16 KiB shadow frame
+/// is not yet backed by a writable frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IfUnmapped {
+    /// Back it, allocating a frame if necessary. Required whenever `val` is
+    /// anything other than [`KASAN_ADDRESSABLE`], since a non-zero shadow byte
+    /// has to be *recorded* somewhere to mean anything.
+    Map,
+    /// Leave it alone and skip the range.
+    ///
+    /// Only correct when `val == KASAN_ADDRESSABLE`, and then it is not an
+    /// approximation but an exact equivalence: an unbacked shadow frame still
+    /// resolves through the shared read-only zero page installed by
+    /// `early_init` (see the table at the top of this module — `ZERO_PT`'s 512
+    /// entries all point at one all-zero page), so it *already reads* `0x00`.
+    /// Writing zero over zero changes nothing.
+    ///
+    /// The point is not to save the write, it is to avoid the *allocation*.
+    /// Mapping a shadow frame calls `frame::alloc_frame`, so any unpoisoner
+    /// that maps is a unpoisoner that can be re-entered through the frame
+    /// allocator — and one that must therefore serialise against `MAP_LOCK`,
+    /// whose give-up path drops the unpoison entirely and so fails *closed*
+    /// (see [`with_map_lock`]). Skipping removes the allocation, and with it
+    /// the recursion, the lock, and the hole. See [`on_frame_alloc`].
+    Skip,
+}
+
 /// Write `val` to the `count` shadow bytes covering `count` consecutive granules
 /// starting at granule-aligned `first`, backing shadow frames as needed.
+fn fill_shadow(first: u64, count: u64, val: u8) {
+    fill_shadow_with(first, count, val, IfUnmapped::Map);
+}
+
+/// Write `val` to the `count` shadow bytes covering `count` consecutive granules
+/// starting at granule-aligned `first`.
 ///
 /// Splits at 16 KiB shadow-frame boundaries so each frame is checked/mapped once
 /// and then filled in a single pass. Ranges that fall outside the backed shadow
 /// window, and frames that cannot be mapped, are skipped — never faulted on.
-fn fill_shadow(first: u64, count: u64, val: u8) {
+fn fill_shadow_with(first: u64, count: u64, val: u8, if_unmapped: IfUnmapped) {
+    debug_assert!(
+        if_unmapped == IfUnmapped::Map || val == KASAN_ADDRESSABLE,
+        "IfUnmapped::Skip silently drops a non-zero shadow value"
+    );
     if count == 0 {
         return;
     }
@@ -1271,10 +1331,17 @@ fn fill_shadow(first: u64, count: u64, val: u8) {
         if chunk > remaining {
             chunk = remaining;
         }
-        if ensure_shadow_mapped(sv) {
-            // SAFETY: `ensure_shadow_mapped` returned true, so the whole 16 KiB
-            // frame containing `sv` is backed by a writable frame, and `chunk`
-            // was clamped to end at or before that frame's end — so
+        let backed = match if_unmapped {
+            IfUnmapped::Map => ensure_shadow_mapped(sv),
+            IfUnmapped::Skip => shadow_frame_is_backed(sv),
+        };
+        if backed {
+            // SAFETY: both arms establish that the whole 16 KiB frame containing
+            // `sv` is backed by a writable frame — `ensure_shadow_mapped` by
+            // installing one, `shadow_frame_is_backed` by observing the bit that
+            // is only published (with `Release`) after one is installed. A frame
+            // is never unmapped once mapped, so the observation cannot go stale.
+            // `chunk` was clamped to end at or before that frame's end, so
             // `[sv, sv+chunk)` is mapped.
             // `rawmem::fill_u8` rather than `write_bytes`: this module runs
             // underneath the compiler's instrumentation, and `core`'s intrinsic
@@ -1336,6 +1403,83 @@ pub fn on_free(ptr: *mut u8, slot: usize) {
     let addr = ptr as u64;
     poison_granules(addr, slot as u64, KASAN_FREE);
     BYTES_POISONED.fetch_add(slot as u64, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// Frame-allocator hook
+// ---------------------------------------------------------------------------
+
+/// Clear any stale poison from `frames` physical frames starting at `phys`.
+///
+/// Called by the frame allocator on every allocation, before the allocator or
+/// its caller touches the memory through the HHDM alias.
+///
+/// **Why this is needed at all.** KASAN poisons a heap slot on free, but the
+/// heap's `large_dealloc` hands whole frames back to the buddy allocator, which
+/// is free to redistribute them to a completely different subsystem. The poison
+/// travels with the frame: the next owner's first legitimate write to it is
+/// reported as a use-after-free that never happened. Without this hook, a
+/// whole-boot instrumented run drowns in false positives — 64 reports in the
+/// first 2092 serial lines, exhausting the report budget before the kernel
+/// finished bringing up its subsystems. See `B-KASAN-POISON-SURVIVES-FRAME-REUSE`
+/// in `known-issues.md`.
+///
+/// This mirrors Linux's `kasan_unpoison_pages()` on the page-alloc path. The
+/// symmetric `kasan_poison_pages()` on free is deliberately *not* implemented
+/// yet: poisoning freed frames is a new detection claim rather than the removal
+/// of a false one, and the frame allocator writes its own freelist metadata
+/// through the same HHDM alias, so it needs its own boot evidence first.
+///
+/// # Why this maps nothing, takes no lock, and disables no interrupts
+///
+/// It writes exactly one value — [`KASAN_ADDRESSABLE`], i.e. `0x00` — and an
+/// *unbacked* shadow frame already reads `0x00`, because the whole shadow window
+/// resolves through the shared read-only zero page until something backs it.
+/// So for this hook "back the shadow frame, then write zero into it" and "leave
+/// it alone" have identical results, and [`IfUnmapped::Skip`] takes the second.
+///
+/// That is what makes the hook safe to call from inside the frame allocator.
+/// The obvious implementation — plain [`fill_shadow`] — would map, mapping calls
+/// `frame::alloc_frame`, and the hook would re-enter itself through the very
+/// allocator that called it. Guarding *that* is where this went wrong on the
+/// first attempt: a per-CPU flag plus an interrupts-off window does cut the
+/// recursion, but it forces every call to reach [`with_map_lock`] with
+/// interrupts already off, which is precisely the case that gives up instead of
+/// spinning. A given-up *unpoison* fails **closed** — the stale `0xFA` stays on
+/// memory that is now live, and every later access to it is reported forever.
+/// The first boot with that version reported `map_lock_giveups=3` and warned
+/// that "shadow coverage has holes this boot"; under a whole-boot instrumented
+/// run, where this fires on every frame allocation, it would have been far more.
+///
+/// Not mapping removes the allocation, and with it the recursion, the guard, the
+/// interrupts-off window, the lock, and the hole — all at once. The cost is
+/// nil, because the skipped write was a no-op by construction.
+///
+/// `phys` is a physical address; the shadow covers the HHDM alias of it.
+#[inline]
+pub fn on_frame_alloc(phys: u64, frames: u64) {
+    if !is_enabled() || frames == 0 {
+        return;
+    }
+    let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
+    if hhdm == 0 {
+        return;
+    }
+    let Some(bytes) = frames.checked_mul(FRAME_SIZE as u64) else {
+        return;
+    };
+    let Some(base) = phys.checked_add(hhdm) else {
+        return;
+    };
+    // Frame-aligned, so `bytes` is a whole number of granules and there is no
+    // trailing partial granule to encode.
+    fill_shadow_with(
+        base,
+        bytes >> KASAN_GRANULE_SHIFT,
+        KASAN_ADDRESSABLE,
+        IfUnmapped::Skip,
+    );
+    BYTES_UNPOISONED.fetch_add(bytes, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------

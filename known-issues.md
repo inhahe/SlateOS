@@ -36802,3 +36802,642 @@ benchmarks to re-run*, not as evidence about any of them, and do not build a
 correction on it. The line's own printed caveat says the same thing, which is
 deliberate: the caveat has to survive being read by someone who never opens this
 file.
+
+---
+
+### [A] RESULT P22, first attempt — VOID: the stimulus never landed where the label said — 2026-08-18
+
+**In short:** we deliberately slowed the computer down during a known stretch of
+the benchmark suite, to see whether the drift model would point at that stretch.
+The tool that was supposed to apply the slowdown applied it too late and left it
+on too long, so the stretch we *labelled* as slowed was in fact untouched and a
+later stretch we labelled clean was the one that suffered. The grader, which
+took the label on trust, then reported that the model had looked in the wrong
+place — when in fact the model had pointed straight at the real disturbance.
+**This run grades nothing about P22(a) and must not be cited as evidence against
+it.** It does carry real evidence for P22(b), which does not depend on the label.
+
+Command, for the record:
+
+```
+scripts/canary-load-test.sh 6 --load-at=cp_try_wait_empty --load-until=net_veth_recv
+```
+
+Serial log preserved at `build/p22-loaded-serial.txt`, boot log at
+`build/p22-loaded-boot.log`. Both are kept because the run's *timings* are
+sound — it is only the label on them that is wrong, and the timings are what the
+P22(b) finding below rests on.
+
+#### What was claimed, and what actually happened
+
+The label said positions 30–55. Measured afterwards against the previous clean
+run — from the benchmark timings themselves, which are independent of both the
+canary (the instrument under test) and the load script (the claim under test):
+
+| region | positions | n | best-case | mean | |
+|---|---|---|---|---|---|
+| before the window | 0–29 | 30 | ×0.97 | ×0.88 | clean by construction |
+| **the labelled window** | 30–55 | 26 | **×0.99** | **×1.12** | **not disturbed** |
+| beyond the window's reach | 64–85 | 22 | **×1.40** | **×2.30** | **this is where the load went** |
+
+The load did not arrive in the window at all, and it was still running two
+sampling intervals past the point it was supposed to have been removed.
+
+#### Why — and the reason is arithmetic, not carelessness
+
+The whole 86-benchmark suite is a **~6 s tail of a ~131 s boot**, occupying
+about 350 of the run's 27,847 serial lines. A 26-benchmark interior window is
+therefore roughly **two seconds** long. Against that:
+
+- the bash follower polled with `sleep 1`, so the trigger was noticed up to a
+  second late — half the window, gone before anything started;
+- the load was then six `python -c` spin loops started as **new processes**
+  under MSYS, each of which is a fresh interpreter startup, so the first spinner
+  reached its loop later still;
+- and the release at `--load-until` paid the same poll latency again at the far
+  end, by which time the suite had moved on.
+
+Net effect: the load switched on after the labelled window had largely passed
+and switched off well into the region labelled clean. Nothing in the script was
+wrong in the sense of doing something other than it said; the costs it paid were
+simply larger than the thing it was measuring. That is the general shape of the
+error worth remembering — **a controller whose latency is comparable to the
+window it controls does not control that window.**
+
+#### The second failure, which is the dangerous one
+
+The grader took `--load-at`/`--load-until` as ground truth. Every flag the model
+raised in the escaped region was therefore counted as a **false positive**, and
+the run was reported `FAILED (misplaced)` — 22 of 44 "provably-clean" benchmarks
+flagged. Those 22 flags were the model **correctly reporting a real
+disturbance** that the run's own label denied.
+
+A grader that can convict a model for being right is worse than no grader. The
+general rule, which cost a whole run to learn and is now written at the top of
+`scripts/grade-positional.py`:
+
+> You cannot grade "did the model find the disturbance" until you have
+> established "there was a disturbance to find."
+
+#### What was changed before re-running (commit `2916a3d2f`)
+
+- **`scripts/canary-load.py`** replaces the bash follower. Spinners are spawned
+  *before* QEMU boots and park on a semaphore, so firing the load is a kernel
+  wakeup rather than six interpreter startups; the log is tailed in-process at
+  0.1 s; and a JSON record states what the controller actually did. The spinners
+  watch their own parent and exit if it dies, because an MSYS `kill` of a native
+  Windows process is `TerminateProcess` and runs no handler — the record is
+  written by asking the controller to stop via a file, never by signalling it.
+- **`scripts/grade-positional.py`** now measures the stimulus before it grades
+  the model, and returns `UNGRADED` — whatever the model did — unless both:
+  the labelled window ran measurably slower than the run's own untouched prefix
+  (*the load reached it*), and the region beyond the load's reach did not
+  (*the load stayed put*). Re-run against the void log above, it now says
+  `UNGRADED — the stimulus never reached the window`, and prints all three
+  regions so the reason is visible rather than inferred.
+- **The thresholds came out of the history, not out of a principle.** The first
+  draft reused the model's own 10% reporting threshold, which is *below the
+  instrument's noise floor*: across the 60 clean release runs on this host, 38%
+  of benchmarks move ≥10% on the mean from one run to the next. Requiring both
+  the best-case median (≥1.15) and the mean median (≥1.30) to fire costs **1
+  false positive in 236 clean region-pairs**, against a real disturbance that
+  measured 1.40 and 2.30. `scripts/test-grade-positional.py` re-derives that
+  rate from the real `bench/history.jsonl` on every run and fails if it drifts
+  above 5%, so a suite that gets noisier cannot quietly turn the gate back into
+  a rubber stamp.
+- **The baseline is the single previous clean run**, not a median of eight. An
+  8-run window spans eight commits of kernel changes, and those are not spread
+  evenly over the suite, so different *regions* acquire different apparent
+  drifts: it put the untouched prefix at ×0.70 where the previous run put it at
+  ×0.88 — an error larger than the disturbance being measured.
+
+#### The one real finding: evidence for P22(b)
+
+P22(b) — *"the benchmarks the model flags will be inflated relative to their own
+historical medians, and the ones it does not flag will not"* — makes **no
+reference to where the load was applied**, so the broken label does not touch
+it. On this run:
+
+| | n | best-case | mean |
+|---|---|---|---|
+| flagged by the model | 34 | ×1.31 | ×1.84 |
+| not flagged | 52 | ×0.97 | ×0.92 |
+
+That is a clean separation, and it is the first evidence of any kind that the
+model's flags correspond to benchmarks that really did run slowly.
+
+**Three limits on how far it goes**, all of which must survive with the number:
+
+1. **It is one observation, not 34.** The flagged benchmarks form a single
+   contiguous stretch at the end of the suite, because the load was one
+   contiguous stretch. "The model flagged the slow region" and "the model
+   flagged 34 benchmarks that were slow" are the same fact counted twice.
+2. **The magnitude does not track.** Correlating each benchmark's canary factor
+   against its measured inflation gives Pearson r = **+0.30** on the best case
+   and **+0.03** on the mean. The model's *binary* judgement carries the signal;
+   the size of the factor it prints carries almost none. That bears directly on
+   P22(c) and on §229's second objection to correcting automatically — a
+   correction multiplies by the factor, and the factor is what does not
+   correlate.
+3. **It says nothing about P22(a)**, which is the attribution claim the printed
+   line actually makes, and which needs a window whose ground truth is sound.
+
+#### Status
+
+- **P22(a): UNGRADED.** Re-run required, with the fixed stimulus.
+- **P22(b): supported by one run, weakly** — see the three limits above.
+- **P22(c): refuted-leaning.** r = +0.03 on the mean is not a ratio varying
+  systematically with benchmark kind; it is a ratio carrying no information.
+  Not recorded as a result because it was measured on a run whose stimulus was
+  uncontrolled, and it deserves a run where the disturbance is known.
+
+**The standing advice does not change**: treat the attribution line as a
+hypothesis about which benchmarks to re-run, not as evidence about any of them,
+and do not build a correction on it.
+
+
+---
+
+### [A] RESULT P22, second attempt — VOID: the window had no right-hand edge — 2026-08-18
+
+**In short:** the experiment was run again, with the stimulus-measuring gate
+that the first attempt's failure produced. It is void as well, for a different
+and more embarrassing reason: the benchmark name given as the *end* of the load
+window does not exist as far as the load controller is concerned, so the load
+switched on where it was told and then never switched off. The label said
+"positions 61-73". What actually happened was "position 61 to the end of the
+boot". Nothing about the drift model can be concluded from it, and — this is
+the point of writing it down — the benchmark numbers looked *good*.
+
+#### What happened
+
+The run was launched as:
+
+    ./scripts/canary-load-test.sh --bench         --load-at=crypto_sha256_1KiB --load-until=vfs_throughput_16k_write
+
+`vfs_throughput_16k_write` is a real benchmark. It is on the scorecard, it is
+in `bench/history.jsonl`, and `grade-positional.py` places a window with it
+without complaint. It is also a name the load controller can never see.
+
+The kernel prints two different things under two different names:
+
+| | printed when | name used | who reads it |
+|---|---|---|---|
+| live result line | as each benchmark finishes | `vfs_write_16k` | `canary-load.py`, live, to time the load |
+| `SCORE` line | after the whole suite | `vfs_throughput_16k_write` | `bench-history.py`, `grade-positional.py` |
+
+They agree for 59 of the 86 scored benchmarks and disagree for 27. `--at` and
+`--until` match the *live* line, because that is the only one that exists while
+the suite is still running. A human choosing a window reads the *scorecard*,
+because that is what the positions are numbered against. So the natural way to
+pick a window bound produces a name that cannot work, and nothing said so.
+
+The controller waited for a `vfs_throughput_16k_write` line that was never going
+to come, held the load until the harness stopped it, and exited **0**. Its
+record said `outcome: stopped`, `released: false` — the fault was written down
+and nothing looked at it.
+
+#### Why this run must be discarded even though it looks good
+
+Graded against the label, the model did well:
+
+- 13 of 13 benchmarks in the labelled window were flagged;
+- 27 of 30 flags were within reach of the labelled window;
+- 3 false positives, and they are adjacent (positions 49/50/51).
+
+The measured-stimulus gate refused it anyway, and was right to: the window's
+best-case ratio was ×1.07 against a 1.15 threshold. But the *reason* it printed
+— "the stimulus never reached the window" — was a true sentence pointing at the
+wrong fault. A reader would have gone looking for a load that was too weak or
+mistimed. The load was neither. It was unbounded.
+
+That is the general lesson, and it is the same one the first attempt taught in a
+different costume: **a run that cannot answer the question must say so for the
+right reason, or the next person debugs the wrong thing.**
+
+#### The part that is still unexplained
+
+The load ran to the end of the boot. Positions 81-85 should therefore have been
+the *most* disturbed benchmarks in the run. They measured clean — best-case
+×1.09, ×1.02, ×1.03, ×1.00, ×0.72 — and the in-kernel canary read 5.16 at
+sample 80, its undisturbed value. The spinners were checked and did not
+self-terminate (their deadline is `started + 1800 + 120`).
+
+So either the load stopped being effective before the suite ended, or the
+benchmarks at the end of the suite are insensitive to host CPU load. Both are
+possible and they have opposite implications for every future run. The serial
+log carries no timestamps, so nothing recorded in this run can distinguish them.
+
+This is the specific question the **host-side canary** added afterwards exists
+to answer: a thread on the host re-times a fixed unit of work every 50ms and
+timestamps each sample, so the next run can say when the machine actually became
+busy and when it stopped being busy, independently of anything the kernel
+reports. Until that has run, treat "the load was applied" and "the machine was
+slow" as two separate claims with no evidence connecting them.
+
+#### One more thing this run showed: the `mean` is not a usable per-benchmark statistic
+
+On the *undisturbed* prefix of this run, per-benchmark mean ratios ranged from
+×0.06 to ×34.10, while best-case ratios over the same benchmarks stayed within
+×0.9-×1.1. A single preemption inside one iteration of a 2000-iteration
+benchmark moves the mean by an order of magnitude; the best case only moves when
+every iteration was slowed.
+
+This is why the stimulus gate's two statistics are not equal partners, and
+§230 has been corrected to say so: the best-case ratio is the discriminating
+one and the mean is a weaker corroborating condition. Do not read a
+per-benchmark mean ratio as evidence of anything on its own.
+
+#### What was changed as a result
+
+1. **The kernel now states the pairing.** `[bench] MEASURED-AS <scored> <live>`,
+   printed for each benchmark whose two names differ. The kernel is the only
+   party that knows it — `BenchResult::seq` already indexes the measurement
+   window exactly — and neither host-side reconstruction is sound. Aligning the
+   two orders fails because they genuinely interleave (`lock_uncontended` is
+   recorded *after* `lock_tracked_nested` but measured *before* it); it mapped
+   `io_ring_nop` onto `page_fault_anonymous` and left `page_fault` with no
+   candidate at all. Parsing `bench.rs` recovers 21 of 27 and cannot recover the
+   six that build their `BenchResult` by hand — `isr_latency`'s struct says
+   "isr_latency" and the line it prints says "isr_hard_irq".
+2. **A scorecard name is now translated, and the translation is announced.**
+   Silence there would be the same fault in a nicer suit.
+3. **Both directions are refused before the boot.** `--known-names` rejects a
+   name that is not a live line; `--require-scored` rejects one the grader
+   could not place a window with. A bad name costs a second instead of a
+   two-and-a-half-minute boot.
+4. **The controller exits non-zero when a trigger or release never matched**,
+   and records `problem` saying which.
+5. **The grader accepts that confession** and grades UNGRADED on it *ahead of*
+   the measured-stimulus complaint, so the printed reason names the real fault.
+   It derives the same conclusion from the record's own booleans when the field
+   is absent, so it cannot be talked out of a verdict by an older or quieter
+   controller.
+6. **A host-side canary** now measures whether the host actually got busy.
+
+#### Status
+
+- **P22(a): still UNGRADED.** Two attempts, two void runs, no result.
+  *(Superseded 2026-08-19 — the third attempt graded SUPPORTED; see "RESULT P22,
+  third attempt" immediately below. This section is left exactly as written: it
+  records what was known at the time, and the two void runs are the reason the
+  third one could be trusted.)*
+- The model's apparent performance on this run (13/13 sensitivity, 3 false
+  positives) is **not** evidence and must not be cited as such. It was measured
+  against a window that is not the window that was applied.
+
+### [A] RESULT P22, third attempt — SUPPORTED: the model located a load it was not told about — 2026-08-19
+
+**In short:** the benchmark suite has a feature that tries to guess which of its
+own measurements were disturbed by other activity on the machine. Twice we tried
+to test it by deliberately slowing the computer down during a known stretch of
+the suite, and twice the test itself broke before it measured anything. The third
+attempt worked. The feature correctly picked out benchmarks inside the disturbed
+stretch and flagged **none** of the 58 benchmarks we can prove were undisturbed.
+One scary-looking number in the output — a monitor claiming the computer got
+*faster* while we were loading it — turned out to be a broken thermometer, not a
+real effect, and is fixed.
+
+#### The run
+
+```
+scripts/canary-load-test.sh --at crypto_sha256_1KiB --until vfs_stat_3comp
+```
+
+Load: 6 spinner processes, held 3.33 s of an 8.85 s suite (37.6%), over suite
+positions 60–71 (12 of 86 benchmarks). Fired and released on the correct
+benchmarks; the window had both edges, which is what the first two attempts
+lacked.
+
+| Region | best-case | mean | reading |
+|---|---|---|---|
+| clean prefix (60 benchmarks before the window) | ×0.97 | ×0.87 | the run's own speed, the reference |
+| **loaded window** (12) | **×1.34** | **×2.58** | **DISTURBED** (needs ×1.15 / ×1.30) |
+| beyond the model's reach (6) | ×1.03 | ×1.07 | clean |
+
+```
+VERDICT: SUPPORTED -- 7 of 12 loaded benchmarks flagged, 0 of 58 clean ones
+  sensitivity     : 7 of 12 loaded benchmarks flagged
+  localisation    : 7 of 7 flagged benchmarks were within reach
+  false positives : 0 of 58 provably-clean benchmarks flagged
+```
+
+The stimulus is measured **from the benchmarks**, independently of both the model
+under test and the load script's own claims — the distinction the first attempt
+was lost on.
+
+#### Why 7 of 12 is the ceiling, not a shortfall
+
+The obvious objection is that 7/12 sensitivity looks mediocre. It is in fact the
+instrument's resolution limit, and the run's own canary trace shows why:
+
+```
+[bench] CANARY-TRACE 0:5.17 8:5.16 16:5.16 24:5.16 32:5.16 40:5.16
+                     48:5.04 56:5.16 64:6.17 72:5.16 80:5.16
+```
+
+The canary is sampled **every 8 benchmarks**. The window is positions 60–71, so
+exactly **one** sample (position 64) falls inside it — 56 is before the window,
+72 is after. That one sample is the only elevated reading in the whole run
+(6.17 against a 5.16 baseline, ×1.196), and it is correctly inside the window.
+
+So the model was working from a single elevated sample and attributed 7
+benchmarks to it. It cannot attribute all 12 without a second sample inside the
+window. **Sensitivity here is bounded by the sampling interval, not by the
+model**; a fair sensitivity test needs a window several times wider than 8
+benchmarks, or a finer canary interval. What this run does establish cleanly is
+the claim P22(a) actually makes — *attribution*: 7 of 7 flagged benchmarks were
+within reach of the real window, and nothing outside it was flagged.
+
+The 0-of-58 false-positive result is not resolution-limited and is the stronger
+half of the finding.
+
+#### The x0.78 that nearly sank the write-up
+
+The load controller's host-side canary reported **x0.78** — a fixed unit of work
+on the host completing *faster* while six CPU burners ran. Backwards, and not
+something to write up around.
+
+It is an artefact of the statistic. Measured directly on this 12-core host, 12
+back-to-back trials, six spinners verifiably alive in every one:
+
+| statistic | median ratio | range | inverted (<1.0) |
+|---|---|---|---|
+| **median** (what was being reported) | ×1.106 | ×0.784 .. ×1.526 | **3 of 12** |
+| min | ×1.004 | ×0.999 .. ×1.036 | 0 materially |
+| trimmed 25% | ×1.005 | ×0.999 .. ×1.130 | 0 materially |
+
+One trial returned **×0.784** — run 3's number, from a load that was applied
+correctly. A separate zero-spinner control produced **×0.77** with no load at all.
+The median's run-to-run spread (1.95×) is simply wider than the effect it was
+being asked to detect.
+
+Recomputing run 3's canary best-case gives **×1.018**, and that is the *correct*
+reading: with 12 cores and 6 spinners the probe keeps a free core, so it should
+see almost nothing. Two ruled-out explanations, for the record: it is **not** a
+CPU frequency ramp (`min` was identical to three decimals across idle/loaded/idle
+— 0.247 / 0.246 / 0.246 ms), and **not** a baseline-composition artefact
+(comparing against temporally adjacent samples made it *worse*, ×0.716, not
+better).
+
+**Consequence: the host canary cannot answer "was the load applied", even in
+principle, at this spinner-to-core ratio.** It was the wrong instrument for that
+question and is now demoted to descriptive colour.
+
+#### What was fixed
+
+1. **Occupancy replaces inference.** Each spinner publishes its own
+   `process_time` into a shared cell; the controller snapshots them at fire and
+   at release. Six spinners across 3.3 s should burn ~20 s of CPU, and the ratio
+   of burned to available is the answer. It needs no baseline, cannot be
+   confounded by whatever else the host is doing, and does not care how many
+   cores the machine has. Verified end-to-end at 102% on a live 4-spinner run.
+2. **Best-case promoted, median demoted.** `inflation` now carries the best-case
+   ratio; the median is retained as `median_inflation`, explicitly labelled
+   unreliable. Old records are detected and labelled `(median, unreliable)` on
+   display rather than silently compared against new ones.
+3. **`load-not-applied`** joins the two existing confessions. Occupancy below
+   0.5 voids the run, admissible under the same rule as the others: the
+   controller reporting from the spinners' own clocks that they never ran is an
+   *admission* of an empty window, not a claim to have filled one. The grader
+   derives it independently rather than trusting the field.
+4. **A test that had quietly stopped testing anything.** `test-grade-positional`
+   checked its "run 2's broken record" case against `build/canary-load-record.json`
+   — the *live* output path, overwritten by every run. It had become a test of
+   whichever run happened last, and duly "failed" once run 3 succeeded there. Now
+   reads the preserved copy.
+5. **Sabotaged boots are labelled.** `canary-load-test.sh` restores
+   `bench/history.jsonl` (this run's numbers are deliberately poisoned) but not
+   `boot-history.jsonl`, so a loaded run left an anonymous 117 s entry that a
+   future reader would take for a boot-time regression. Now labelled
+   `p22-loaded`; `wall_seconds` there is displayed only, never used as a
+   baseline, so this is legibility rather than correctness.
+
+#### Note on the kernel delta
+
+This run carried one lane-A kernel change (the `MEASURED-AS` line, emitted in
+the post-suite reporting path). Its clean prefix measured ×0.97 best-case,
+matching run 2's ×0.96 — the change is inert with respect to the benchmarks, as
+its position in the code implies.
+
+#### Status
+
+- **P22(a): SUPPORTED.** Attribution works: 7 of 7 flagged benchmarks inside the
+  real window, 0 of 58 provably-clean benchmarks flagged. This supersedes
+  "still UNGRADED" above.
+- **Sensitivity: not yet fairly measured.** 7 of 12 is bounded by the canary's
+  8-benchmark sampling interval, which put a single sample inside the window. A
+  window several times wider than 8 benchmarks is needed to measure it.
+  **Registered as PREDICTION P23 below** — a 32-benchmark window carrying four
+  samples, with the pass threshold derived from the model's own arithmetic
+  *before* the run, precisely so this paragraph cannot be marked correct after
+  the fact.
+- **P22(b): unchanged** — supported by one run, weakly (see the first attempt).
+- **P22(c): unchanged** — refuted-leaning.
+- **No correction is applied to any recorded value.** §229 stands: the model may
+  now say *where*, which is all the printed line claims; it is not yet licensed
+  to say *by how much*.
+
+### [A] PREDICTION P23 — sensitivity, measured with a window wide enough to carry it — registered 2026-08-19
+
+**Registered before the run exists.** Numbers below are derived from the model's
+arithmetic, not guessed; the derivation is written out so a later reader can
+check that the threshold was not chosen after seeing the answer.
+
+**In short:** the suite has a feature that guesses which of its measurements were
+disturbed by other activity on the machine. The last experiment showed it points
+at the *right place*, but it only caught 7 of the 12 disturbed measurements — and
+that looked like a weak result. We think it is not weak at all: the feature only
+takes a reading every 8th measurement, and the disturbed stretch was only 12 long,
+so it got exactly **one** reading inside it. This run makes the disturbed stretch
+32 long so it gets **four**, which is the first fair test of how much it catches.
+
+#### The run to make
+
+```
+scripts/canary-load-test.sh --at io_ring_nop --until crypto_poly1305_1KiB
+```
+
+Verified against the previous run's SCORE lines before registering: this lands
+the load on **positions 32–63, 32 of 86 benchmarks** — an interior window with
+32 benchmarks before it and 22 after. (`io_ring_nop` is a scorecard name; the
+controller triggers on its live line `io_ring_nop_submit`, and says so.)
+
+| | run 3 (graded) | this run |
+|---|---|---|
+| loaded window | positions 60–71 (12) | positions 32–63 (32) |
+| canary samples **inside** the window | **1** (position 64) | **4** (32, 40, 48, 56) |
+| provably-clean region | 58 | 38 (positions 0–23, 72–85) |
+
+#### The claims
+
+- **P23(a) — sensitivity ≥ 24 of 32 (75%).** *Falsified below 75%.* With four
+  samples inside the window instead of one, the model's flagged set should cover
+  most of it rather than a triangle around a single point.
+- **P23(b) — false positives remain 0 of 38.** *Falsified by any flag in the
+  provably-clean region.* This is the half of run 3's result that was **not**
+  resolution-limited, and widening the window is the obvious way to break it: a
+  model that quietly flags in proportion to window size would fail here and pass
+  (a).
+- **P23(c) — localisation stays 100%**: every flagged benchmark inside the window
+  widened by the sampling interval (24–71). *Falsified by any flag outside it.*
+- **P23(d) — the whole-run verdict will again read `Canary OK`.** *Falsified if
+  it reads CONTAMINATED.* Added after discovering that run 3's did (see the
+  entry above): spread is a function of the excursion's **depth**, not its
+  extent, so tripling the window should not move it. If (a) and (d) both hold,
+  the positional model is shown to be the more sensitive of the two instruments
+  on windows differing by a factor of nearly three — a stronger claim for it
+  than P22(a) alone makes, and an argument against letting `Canary OK` be the
+  last word on whether a run is trustworthy.
+
+#### Caveat, registered rather than discovered afterwards
+
+The margin under the blindness cliff is **two samples**, not a comfortable
+distance. `trace_reference` is the median of the 11 positioned samples, so at 6
+elevated the baseline becomes the disturbance and sensitivity collapses to zero
+(table in the entry above). This window elevates 4 by design — 32, 40, 48, 56 —
+but samples 24 and 64 sit immediately outside the window's edges, and if the
+load's ramp-up or ramp-down elevates *both* of them even partially, the count
+reaches 6 and the median moves.
+
+So a **0% sensitivity result must be read as the cliff, not as a refutation of
+the model** — and it is checkable rather than a matter of interpretation: the
+run's own CANARY-TRACE says how many samples were elevated and which baseline
+the model chose. If that happens the correct response is to re-run narrower
+(24 wide, 3 samples, predicted 83%), not to reinterpret P23.
+
+#### Where 75% comes from
+
+`interpolate_trace` is a straight line between adjacent samples, and
+`report_positional_attribution` flags a factor above **1.10**. Run 3's one
+elevated sample read ×1.196 against its baseline, which reproduces its 7 exactly:
+the ramp crosses 1.10 at 4.09 positions either side of the peak, so positions
+61–67 flag and 60 and 68 do not — 7, in the window, all of them.
+
+Applying the same arithmetic to four contiguous elevated samples: the factor is
+**flat** at ×1.196 across 32–56 and ramps at each end, crossing 1.10 at position
+≈28.1 on the way up and ≈59.9 on the way down. Flagged: **29–59**. Intersected
+with the real window 32–63 that is **28 of 32 = 87.5%**, with 29–31 flagged
+outside the window but inside reach, and nothing in the clean region.
+
+So 87.5% is the arithmetic's own answer and **75% is the threshold**, leaving
+room for the elevation to be less uniform across a 3×-longer window than a
+single sample was — which is the physical thing this run actually measures, and
+the reason it is worth running rather than deriving.
+
+#### What each outcome licenses
+
+- **All three hold** → 7-of-12 was the sampling interval, as claimed, and
+  sensitivity is a property of the interval rather than of the model. The
+  remaining lever on it is `CANARY_SAMPLE_EVERY`, not the arithmetic.
+- **(a) fails while (b) and (c) hold** → the model attributes far less than its
+  own interpolation implies, and the 7-of-12 explanation in the run 3 write-up is
+  wrong and must be retracted there.
+- **(b) fails** → the more serious outcome. It would mean run 3's 0-of-58 was an
+  artefact of a narrow window, and the whole attribution claim weakens to
+  "flags a lot, some of it in the right place".
+
+**Not a licence to correct anything.** P23 is about *how much* of a disturbance
+the model finds, not about whether the factor is the right size to divide by —
+that is P22(b)/(c), still unmeasured. §229 stands either way.
+
+### [A] The contamination verdict said `Canary OK` on run 3 — the positional model is the more sensitive instrument, not a refinement of it — 2026-08-19
+
+**In short:** the suite has two ways of noticing that other activity on the
+machine spoiled its measurements. On the run where we deliberately spoiled them,
+the *older and more authoritative* one — the one whose word decides whether a
+run's numbers are trusted — said everything was fine. The newer one caught it.
+That is the opposite of the relationship they were assumed to have, and it means
+a run can be waved through by the gate while carrying a disturbance the other
+half of the same instrument can see.
+
+Found while deriving P23's threshold, not by looking for it. It was in run 3's
+serial log the whole time and the run 3 write-up above missed it.
+
+#### What run 3 actually printed
+
+```
+[bench] CANARY 5 5 100 5 6 22 13 0 504 617
+[bench] Canary OK: reference access cost stable across 13 samples (5.0-6.1 cycles, spread 22%).
+```
+
+Six CPU spinners, verifiably burning the host (occupancy measured directly), for
+**37.6% of the suite**. Inside the loaded window the benchmarks ran ×2.58 mean /
+×1.34 best-case slower than the clean prefix. And the verdict was **`Canary OK`**.
+
+22% against a `CANARY_TOLERANCE_PCT` of 25 — a **3-point** margin. This is not a
+rounding artefact: the kernel computes the spread in hundredths of a cycle
+(504/617 are the last two fields) precisely so the verdict is never rounded into
+existence, so 22% is the real figure.
+
+#### Why the spread verdict cannot see this
+
+Spread is `(max − min) / min` **over the samples**, and that is a function of the
+extremes only — it is completely blind to *how much* of the suite sits at the
+high end. One elevated sample out of 13 and six elevated out of 13 produce the
+**same** spread, so a disturbance can grow without limit in extent and never move
+this number. What moves it is the *depth* of the excursion, and a load that
+elevates the reference access by ×1.196 is simply not deep enough to clear 25%,
+however long it runs.
+
+The positional model asks the other question — where the samples sit relative to
+each other — and that is why it fired on the same data.
+
+**Consequence: these two are not a coarse check and a refinement of it. They are
+sensitive to orthogonal properties** (depth vs. extent), and the one that gates
+trust is the one blind to extent.
+
+#### The reverse failure: the positional model goes silent above half-suite coverage
+
+Measured against the real code (`scripts/positional-model-limits.py`), sweeping window
+width with the elevation held at run 3's ×1.196:
+
+| window width | samples inside | baseline | sensitivity | false positives |
+|---|---|---|---|---|
+| 8 | 1 | 5.16 | 4/8 | 0/62 |
+| 16 | 2 | 5.16 | 12/16 | 0/54 |
+| 24 | 3 | 5.16 | 20/24 | 0/46 |
+| 32 | 4 | 5.16 | 28/32 | 0/38 |
+| 40 | 5 | 5.16 | 36/40 | 0/30 |
+| **48** | **6** | **6.17** | **0/48** | 0/22 |
+| 56 | 7 | 6.17 | 0/56 | 0/14 |
+| 64 | 8 | 6.17 | 0/64 | 0/8 |
+
+`trace_reference` is the **median** of the samples, so once more than half of
+them are elevated *the disturbance becomes the baseline* and every factor lands
+at or below 1.0. Sensitivity does not degrade — it collapses from 90% to zero
+between two adjacent window widths.
+
+**This is a consequence of a deliberate choice, not an oversight.** The median is
+there so that a uniformly busy host produces factors of exactly 1.0 and is left
+to `global_drift`, which is the estimator built for it; a mean would let the
+burst drag the baseline toward itself. That reasoning is correct and the
+docstring states it.
+
+**But it leaves a band that neither estimator owns: coverage above ~50% and below
+100%.** There, the positional model is silent by construction, while
+`global_drift` derives one whole-suite factor from a run that is genuinely part
+clean and part disturbed — so it under-corrects the disturbed part and
+*over-corrects* the clean part, which is worse than not correcting at all. Nobody
+has measured that band; the two graded runs (P20 whole-suite, P22 12 of 86) sit
+on either side of it.
+
+Not filed as a bug against either estimator, because neither is behaving other
+than as designed. Filed because **both failure modes look exactly like a clean
+run** — `Canary OK` and "no stretch ran more than 10% above baseline" are the
+same two lines you get from an idle machine — and this file's standing maxim is
+that a check which cannot fire is indistinguishable from one that passes.
+
+#### What follows
+
+- **P23 gains a fourth claim** (registered below in the P23 entry): the whole-run
+  verdict will *again* read `Canary OK`, because widening the window changes the
+  extent and not the depth. If it does, the asymmetry is demonstrated twice
+  rather than once, on windows differing by a factor of nearly three.
+- **P23's window was sized under the cliff on purpose** — 4 of 11 positioned
+  samples — and the margin is two samples, which is thinner than it looks. See
+  the caveat added to that entry.
+- **Not repaired here.** Changing `trace_reference` to a low quantile would move
+  the cliff, and doing that in the same breath as running the experiment that
+  measures the model would be tuning the instrument to its own test. The
+  measurement comes first.

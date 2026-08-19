@@ -38628,10 +38628,39 @@ Three parts, in increasing cost:
    and the only one that makes cross-commit crypto/mm numbers trustworthy under
    TCG at all.
 
-Until (3) exists, treat any flagged movement in a benchmark whose subsystem the
-commit did not touch as layout until shown otherwise — and check the *direction
-histogram* of all deterministic movers first, because a mixed one is diagnostic
-on its own.
+**Part (3) landed 2026-08-19** — the mechanism exists; see design-decisions.md
+§234. `SLATEOS_TEXT_PAD=<bytes>` emits a `#[used]` array into
+`.text.slateos_layout_pad`, which `kernel/linker.ld` places first in `.text` so
+it shifts every function; the boot banner reports `textpad=<n>`;
+`bench-history.py` records it per run and computes a per-benchmark band from the
+spread across arms; movements inside a *measured* band are withdrawn from
+`REGRESSED` under an `EXPLAINED BY CODE PLACEMENT` heading. Verified objectively
+rather than by assertion: `python scripts/layout-sweep.py --self-test` builds
+real kernels and checks that every one of 115,542 shared `.text` symbols moved by
+exactly the pad, that malformed pads fail the build, and — as a negative
+control — that a 4096-byte pad is *rejected* as a sample because it preserves
+every page-straddle relationship. That control earned its keep immediately: it
+caught a const-fold in the first draft that made the unpadded arm ~256 bytes
+shorter in *code*, reintroducing the very confound the sweep exists to remove.
+
+Two things this does **not** yet do, so read reports accordingly:
+
+- **No sweep has been run yet**, so no band exists for anything. Until one is
+  (`python scripts/layout-sweep.py --pads 0,1024,2048,3072`), every movement is
+  `unmeasured` and keeps its regression — deliberately; see §234 for why absence
+  of evidence must not excuse. The report now says so, per run, naming the
+  command that would settle it.
+- **A band is a lower bound.** Three or four sampled layouts cannot contain the
+  worst pair among all of them, so a movement just outside its band is
+  *unexplained*, not cleared.
+
+Part (2) — `MOVED (image changed)` labelling — remains open, blocked on a
+defensible benchmark-to-source reachability map.
+
+Until a sweep has actually been run, the original guidance stands: treat any
+flagged movement in a benchmark whose subsystem the commit did not touch as
+layout until shown otherwise — and check the *direction histogram* of all
+deterministic movers first, because a mixed one is diagnostic on its own.
 
 #### Further instance — 2026-08-19, the KASAN frame-hook change
 

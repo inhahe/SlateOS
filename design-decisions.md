@@ -22484,3 +22484,107 @@ is 3600 s, ~3.8x the previously measured need, and was set generously for
 exactly this kind of growth. If a future measurement puts a whole-boot
 instrumented run near that ceiling, raise the constant rather than narrowing the
 window — a narrowed window is the state this entry exists to leave behind.
+
+---
+
+## §234 — Layout sensitivity is measured by deliberately perturbing layout, and an unmeasured benchmark stays a regression
+
+**Date:** 2026-08-19
+**Decided by:** Claude (autonomous)
+
+**In short:** The benchmark harness kept reporting confident, repeatable
+"regressions" that were not code changes at all — they were the *addresses* the
+code happened to land at. QEMU runs a loop noticeably slower when the loop
+straddles a 4 KiB boundary in memory, and every commit relinks the kernel and so
+re-rolls that dice for every function. The fix is to build the *same source*
+several times at deliberately different offsets and measure how far each
+benchmark moves with no source change at all; a later movement smaller than that
+is not reported as a finding. The decision recorded here is what to do when a
+benchmark has *not* been swept: it keeps its regression, rather than being
+excused.
+
+### The confound
+
+Under QEMU's TCG a translation block is bounded by the guest 4 KiB page, so a
+hot loop whose backward branch crosses a page boundary is retranslated far more
+often — measured at ~1.7x per iteration. Whether it crosses is a property of the
+loop's *address*, not of its code. Relinking, which any commit does, shifts
+every function after the edited file.
+
+What made this worse than ordinary noise is that it is *deterministic*. The
+harness's strongest label, `REGRESSED (...every recorded run of this same kernel
+image shows it)`, is awarded on replication — and a layout artifact replicates
+perfectly, every time, forever. Replication asks "did the same binary produce
+this twice?", and a fixed-address artifact answers yes. It is blind to layout by
+construction, so the artifact arrives wearing the best label the harness has.
+
+### The mechanism
+
+`kernel/src/layout_pad.rs` emits a `#[used]` byte array into
+`.text.slateos_layout_pad`, sized by `SLATEOS_TEXT_PAD` at build time and empty
+by default. `kernel/linker.ld` places that section *first* in `.text`, so its
+size shifts every other function. `scripts/layout-sweep.py` builds and benches
+several pads; `bench-history.py` records the pad in each history record and
+computes a per-benchmark band from the spread across arms.
+
+Three implementation choices are worth recording because the obvious
+alternatives are wrong in ways that do not show up as failures:
+
+- **The kernel reads the pad from the linker symbols bracketing the section,
+  never from the Rust constant.** Reading the constant let the compiler fold
+  `if PAD_BYTES == 0` away in the unpadded build, which made that build's code
+  ~256 bytes shorter — so the baseline arm differed from the padded arms *in
+  code as well as in placement*, reintroducing the exact confound the sweep
+  exists to isolate. This was caught by the sweep's own negative control, which
+  saw shifts of 4096, 4336 *and* 4352 where a pure placement change must produce
+  a single uniform number. After the fix: `+3072 .. +3072` and `+4096 .. +4096`
+  across all 115,542 shared `.text` symbols, 0 unmoved.
+- **A pad that is a multiple of 4096 is rejected as a sweep sample**, by a
+  negative control in `--self-test`. It shifts everything by a whole page and
+  therefore *preserves every straddle relationship* — a sample that looks like a
+  sample, moves the whole image, and measures nothing.
+- **The boot-time placement check is fatal.** It is unreachable in a normal
+  build (pad 0 returns immediately), and in a sweep build a misplaced pad makes
+  every arm a subset of every other, yielding a sensitivity underestimate of
+  unknown size — numbers worse than none, because they would be used to dismiss
+  real regressions.
+
+### The decision: what "unmeasured" means
+
+The band's job is to *dismiss* movements, so every uncertainty must be resolved
+in the direction that dismisses fewer. Three consequences, all deliberate:
+
+| Situation | Chosen behaviour | The tempting alternative, and why it is wrong |
+|---|---|---|
+| Benchmark never swept | Stays a regression, with a printed note that placement was **not** ruled out | Excusing it would silence the check in the ordinary case — nothing has been swept — which is the same failure as a check that cannot fire |
+| Only two layouts sampled | No band at all | Two points define an interval containing both by construction: no residual, no way to be wrong, and it would be reported as if it were a measurement |
+| One arm's host-drift factor uncomputable | The whole group is voided | Falling back to an uncorrected 1.0 lets host drift inflate the spread, widening the band — failing in the one direction that hides regressions |
+| Record predates the `textpad=` banner | Excluded (absent ≠ 0) | Folding absent into 0 would enrol ~70 historical records into the unpadded arm of a sweep they were never part of, manufacturing a wide band out of months of unrelated code change |
+
+The general principle, shared with `replication_verdict` and `MODE_UNDECIDED`:
+**only a positively-evidenced verdict may excuse a finding.** An excuse granted
+by absence is indistinguishable from having no check.
+
+### Which sweep applies, when more than one exists
+
+The most **recent** sweep wins; arm count only breaks ties. "Most arms wins" is
+the tempting rule, because more sampled layouts genuinely is a better lower
+bound of the true sensitivity. It is still wrong, for a categorical rather than
+a statistical reason: a band is evidence about the hot loops that *exist*, and a
+sweep of a commit whose code has since been rewritten is evidence about code
+that no longer runs. Preferring it lets a wide, well-sampled, obsolete band
+dismiss a real regression in today's code. The converse error — a
+barely-above-floor recent sweep giving a band too narrow to excuse a genuine
+artifact — fails the safe way: the movement stays a regression and a human looks
+at it. No staleness cutoff is imposed on top, because any threshold would be
+arbitrary and would silently flip the answer to "unmeasured" at some commit
+count nobody chose; the report names the commit the band came from instead, so a
+reader who recognises it as ancient can discount it.
+
+### What this does not do
+
+The band is a **lower bound**, and the report says so in as many words. Three or
+four sampled layouts cannot contain the worst pair among all layouts, so a
+movement just *outside* its band is not thereby cleared — it is merely not
+*explained*. The alternative, presenting the band as exhaustive, would let a
+near-miss be waved through by a number that was never entitled to clear it.

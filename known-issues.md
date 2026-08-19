@@ -38534,3 +38534,101 @@ The concrete review rule: for any counter used as a liveness or progress signal,
 enumerate who increments it. If the observer is on that list, the observer's
 threshold has a ceiling it can never cross, and that ceiling is invisible in the
 constant's definition.
+
+### [A] OPEN — the bench harness treats "replicates exactly" as proof of a code regression, but that is also the signature of a code-*layout* artifact under TCG — 2026-08-19
+
+**In short:** the benchmark harness guards hard against random noise: it will not
+call something a regression until the same slowdown shows up in a second run of
+the same binary. That guard is sound as far as it goes, but it only rules out
+*noise*. It does not rule out the other thing that reproduces perfectly — the
+compiler having moved unrelated code to a different address. Changing one file
+shifts the address of everything linked after it, and under emulation that alone
+can move an unrelated benchmark by 2× in either direction, identically every run.
+So the harness's highest-confidence verdict is reached by both a real regression
+and a pure artifact, and it cannot presently tell them apart.
+
+#### The evidence
+
+Commit `5e9a30a22` changed three kernel files — `sched/mod.rs` (+308 lines),
+`idt.rs` (+73), `serial.rs` (+2). It touched **no crypto, IPC, VFS, net, mm or
+HTTP code**. Comparing the two `--bench` runs of that image against the last run
+of `d7c311deb`, thirteen benchmarks moved >25% *and* agreed between the two runs
+to within 10%:
+
+| direction | count | examples |
+|---|---|---|
+| slower | 3 | `crypto_sha512_64B` 1921 → **3661, 3661** ns (1.91×) |
+| **faster** | **10** | `crypto_poly1305_1KiB` 13693 → 4977, 5081 (0.37×); `page_fault` 4592 → 2092, 2097 (0.46×); `vfs_read_256` 20256 → 11198, 10451 |
+
+`crypto_sha512_64B` reproduced to **within 4 cycles out of 13582, twice**, against
+a historical band of 1867–1929 ns across seven prior runs on two commits. That is
+not noise by any definition the harness uses — and it is exactly what it will
+report as `REGRESSED … replicated`.
+
+#### Why it is nonetheless not a regression, proved two independent ways
+
+1. **Direction.** Ten of the thirteen got *faster*, with identical replication
+   confidence. A change can only add work; nothing in a liveness-watchdog edit
+   makes Poly1305 2.7× faster. So the deterministic-mover set demonstrably
+   contains movements that cannot have been caused by the code — which is enough,
+   on its own, to establish that "replicated exactly" does not imply "caused by
+   this commit."
+2. **The metric is a minimum.** These benchmarks report `min` over 500–2000
+   iterations. The commit's added work lives in the timer-tick path and runs at
+   most once per `WATCHDOG_CHECK_INTERVAL` (500 ticks), so almost every iteration
+   sees none of it — and **a periodic interrupt cannot raise a minimum**. Only a
+   *per-iteration constant* moves a min, and code placement is one; added periodic
+   work is not.
+
+Both point at the same mechanism: the image grew, everything linked after
+`sched/mod.rs` shifted address, and QEMU's TCG — which retranslates guest code
+into host code cache — is strongly sensitive to that placement.
+
+#### Why this matters more than a wrong verdict on one commit
+
+The harness is unusually careful everywhere else, and the surrounding text says
+so at length: it cancels whole-suite drift, it withdraws unreplicated claims, it
+warns that the canary is blind to host descheduling, it refuses to treat an A/A
+pair's movement as code. Every one of those guards addresses *variance*. None
+addresses *bias from relinking*, and because a layout artifact survives every
+variance guard, it arrives at the reader wearing the harness's strongest label.
+
+That inverts the intended reading exactly the way the liveness watchdog's own
+breadcrumb did: the mechanism that is supposed to increase confidence is the one
+that manufactures it.
+
+#### Concretely, this run
+
+No regression is attributed to `5e9a30a22`. The three "slower" movers are
+`crypto_sha512_64B` (layout, per above), `firewall_check` (102 then 78 ns against
+a 45–79 band — the second run lands *inside* the band, so unreplicated), and
+`ipc_channel` (723, 755 against a 532–1011 band — inside it). `lock_uncontended`
+was reported `REGRESSED … replicated` by the A/A run despite that run's own
+banner stating no movement in it can have been caused by code; its two samples
+are 280 and 486 ns, which is bimodal, not replicated. That last one is a
+straightforward bug in the replication predicate and is the cheapest part to fix.
+
+#### What the fix looks like
+
+Three parts, in increasing cost:
+
+1. **Fix the A/A contradiction.** When the baseline image sha equals this run's,
+   suppress the `REGRESSED` section outright rather than printing it under a
+   banner that says it cannot mean anything. Presently both are emitted and the
+   reader must notice they contradict.
+2. **Record the image sha per benchmark comparison and label cross-image
+   movements as `MOVED (image changed)`, not `REGRESSED`,** unless the changed
+   files plausibly reach the benchmark. The harness already records
+   `kernel_sha`; it just is not consulted for this.
+3. **Separate layout from mechanism directly** by benchmarking the same source
+   twice with a deliberate no-op layout perturbation (e.g. a padding `#[used]`
+   static sized to shift the text segment). Two builds of identical semantics
+   that disagree by 2× would let the harness *calibrate* a per-benchmark layout
+   sensitivity band, and report movement only outside it. This is the real fix
+   and the only one that makes cross-commit crypto/mm numbers trustworthy under
+   TCG at all.
+
+Until (3) exists, treat any flagged movement in a benchmark whose subsystem the
+commit did not touch as layout until shown otherwise — and check the *direction
+histogram* of all deterministic movers first, because a mixed one is diagnostic
+on its own.

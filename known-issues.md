@@ -38697,6 +38697,39 @@ loop and the sustained-shift path — and pinned by three tests in
 `test-bench-history.py`, one of which asserts the one-directionality directly.
 See design-decisions.md §235.
 
+**A sweep now checks, arm by arm, that its arms count (2026-08-19).** Two sweep
+attempts have been voided, and the second is the one that shaped this: it would
+have built and booted six kernels over ~3 hours, printed six confirmations,
+exited 0, and produced no band whatsoever — because the dirty-flag bug above
+made every run after the first record itself as `dirty`, and `layout_arms()`
+drops a `dirty` record. The only symptom would have been `--layout-bands`
+printing nothing, hours later, with the cause a guess.
+
+Note what every existing check verified: that the *run* succeeded. It built, it
+booted, it printed the pad it was asked for. That was never the question.
+`layout_arms()` has four further ways to refuse a record — `dirty`, a loaded
+host, a missing commit, the wrong profile — and a completely successful run
+satisfies them exactly as easily as a failed one does.
+
+So `layout-sweep.py` now calls `check_arm_counts()` after every arm, which asks
+`bench-history.py`'s `layout_arm_rejection()` whether the row just written will
+be *counted*, and aborts naming the reason if not. That predicate is the one
+`layout_arms()` itself applies — extracted, not copied. A copy would agree today
+and drift on the next edit to either, after which it would certify every arm of
+a sweep that yields no band, which is the outcome it exists to prevent; a
+drifted copy is worse than no check. It also confirms the newest row is *this*
+arm's before judging it, since otherwise a concurrent append would have the
+verdict for one run reported as though it were about another.
+
+There is deliberately no cheaper pre-flight. The rejection reasons are
+properties of a record, and the record does not exist until a run produces it;
+`dirty` in particular is computed by `boot-test.sh` with its own pathspec
+exclusions, and predicting it in Python would be a third statement of that rule.
+A pre-flight that disagrees with the real check is worse than none — it would
+clear a sweep that then records six discarded arms, with a green pre-flight
+standing as evidence the tree was fine. One arm (~20 min) is the price of one
+statement per rule.
+
 Until a sweep has actually been run, the original guidance stands: treat any
 flagged movement in a benchmark whose subsystem the commit did not touch as
 layout until shown otherwise — and check the *direction histogram* of all

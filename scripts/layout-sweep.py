@@ -56,6 +56,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -433,6 +434,80 @@ def preflight_boot_test(script: str = BOOT_TEST,
     return True, f"[layout-sweep] preflight: bash can run {script} from {root}"
 
 
+def check_arm_counts(bh, pad: int, profile: str) -> tuple[bool, str]:
+    """Will the row this arm just wrote actually be *counted* as an arm?
+
+    Returns `(ok, message)`. The message is always printed: on success it is the
+    receipt that the check ran, which is the only thing distinguishing "the arm
+    was accepted" from "nobody asked".
+
+    # Why this is not paranoia
+
+    Everything up to here verifies that the *run* succeeded -- it built, it
+    booted, it printed the pad it was asked for. None of that is the question.
+    The question is whether `layout_arms()` will keep the record, and it has
+    four other ways to say no (`dirty`, a loaded host, a missing commit, the
+    wrong profile) that a perfectly successful run satisfies just as easily as
+    a failed one.
+
+    Two sweeps have been voided already. The second is the instructive one: it
+    would have built and booted six kernels over ~3 hours, printed six
+    confirmations, exited 0, and produced no band whatsoever, because a bug in
+    the boot test made every run after the first record itself as `dirty`. The
+    only signal would have been `--layout-bands` printing nothing, hours later,
+    at which point the cause is a guess. Asking after arm one costs one
+    `load_history()` and turns three silent hours into a twenty-minute failure
+    with the reason attached.
+
+    The predicate is `bh.layout_arm_rejection`, which is the function
+    `layout_arms` itself uses -- not a copy. A copy would be a second statement
+    of the same rule, free to agree with the first today and disagree after the
+    next edit to either, which is exactly the class of bug this whole guard
+    exists to catch.
+
+    # Why this runs *after* an arm rather than before the sweep
+
+    A pre-flight version would save the ~20 minutes this one spends before it
+    can speak. It was considered and rejected: the rejection reasons are
+    properties of a *record*, and the record does not exist until a run
+    produces it. `dirty` in particular is computed by `boot-test.sh`, with its
+    own pathspec exclusions; predicting it here would mean restating that
+    command a third time, in a third language, and a preflight that disagrees
+    with the real check is worse than no preflight -- it would clear a sweep
+    that then records six discarded arms, with a green preflight standing as
+    evidence that the tree was fine. Twenty minutes is the price of having one
+    statement of each rule instead of two.
+    """
+    records = bh.load_history(bh.DEFAULT_HISTORY)
+    if not records:
+        return False, ("layout-sweep: the run finished but wrote no history "
+                       f"row at all ({bh.DEFAULT_HISTORY} is empty or "
+                       f"unreadable), so this arm cannot be part of a band.")
+    record = records[-1]
+    # Confirm it is *our* row before judging it. If something else appended
+    # after the boot test did, this would otherwise pass or fail an arm on
+    # evidence from a different run entirely -- and report the verdict as
+    # though it were about this one.
+    if record.get("text_pad") != pad:
+        return False, (
+            f"layout-sweep: the newest history row reports text_pad="
+            f"{record.get('text_pad')!r}, not the {pad} this arm just ran. "
+            f"Something else appended to the history during the sweep, so the "
+            f"arms cannot be trusted to be the runs this script performed. "
+            f"Stopping.")
+    host = platform.node() or "unknown"
+    reason = bh.layout_arm_rejection(record, host, profile)
+    if reason is not None:
+        return False, (
+            f"layout-sweep: the pad={pad} arm ran successfully but "
+            f"`layout_arms()` will DISCARD its record: {reason}.\n"
+            f"  Every remaining arm would be discarded for the same reason, so "
+            f"the sweep would spend hours and produce no band. Stopping now "
+            f"instead.")
+    return True, (f"[layout-sweep] confirmed: the pad={pad} record is accepted "
+                  f"as an arm by bench-history.py")
+
+
 def run_sweep(pads: list[int], profile: str, serial: str) -> int:
     """Build and `--bench`-boot the kernel once per pad value.
 
@@ -500,6 +575,11 @@ def run_sweep(pads: list[int], profile: str, serial: str) -> int:
             return 1
         print(f"[layout-sweep] confirmed: the kernel that ran reports "
               f"textpad={reported}")
+
+        accepted, verdict = check_arm_counts(bh, pad, profile)
+        print(verdict, flush=True)
+        if not accepted:
+            return 1
     print(f"\n[layout-sweep] {len(pads)} arm(s) recorded. Analyse with:\n"
           f"    python scripts/bench-history.py --list")
     return 0

@@ -2957,6 +2957,54 @@ def describe_band(band):
 MIN_PADS_FOR_LAYOUT_BAND = 3
 
 
+def layout_arm_rejection(record, host, profile):
+    """Why `layout_arms` would discard this record, or `None` if it keeps it.
+
+    Exists so that a sweep can ask, arm by arm, whether the row it just spent
+    twenty minutes producing will actually be *counted* -- using the very
+    predicate that decides, not a restatement of it. A restatement is the
+    failure this guard exists to prevent, one level up: it would drift from
+    `layout_arms` and then pass every arm of a sweep that `layout_arms`
+    silently drops.
+
+    That is not hypothetical. Two sweeps have already been voided this way. The
+    first died on a path bug and at least died loudly; the second would have
+    run to completion, printed six successful arms, and produced no band at
+    all, because the harness's own `bench/history.jsonl` write made every run
+    after the first at that commit `dirty` -- and a `dirty` record is dropped
+    here. A sweep is the most expensive thing this repo does; discovering at
+    the end that it measured nothing is the worst available outcome, and it is
+    entirely preventable by asking after the first arm rather than the last.
+
+    The reasons are prose, not codes, because the only consumer is a human
+    staring at an aborted sweep who needs to know what to change before
+    spending the three hours again.
+    """
+    if record.get("host") != host:
+        return (f"host is {record.get('host')!r}, but the band is being "
+                f"computed for {host!r}; arms from different machines are "
+                f"different measurements")
+    if record_profile(record) != profile:
+        return (f"profile is {record_profile(record)!r}, not {profile!r}; "
+                f"a debug arm cannot calibrate a release band")
+    if record_host_load(record) == HOST_LOAD_LOADED:
+        return ("the host was loaded during this run, so its timings carry "
+                "contention as well as placement -- and an inflated spread "
+                "widens the band, which dismisses real regressions")
+    if record.get("dirty"):
+        return ("the tree was dirty, so `commit` does not identify the source "
+                "that was built and the arms cannot be shown to share one")
+    pad = record.get("text_pad")
+    if not isinstance(pad, int) or isinstance(pad, bool):
+        return ("no `text_pad` was recorded, so where this kernel's code sits "
+                "is unknown -- which is not the same as unpadded, and cannot "
+                "be assumed to be")
+    if not record.get("commit"):
+        return ("no `commit` was recorded, so this arm cannot be grouped with "
+                "the others as the same source")
+    return None
+
+
 def layout_arms(records, host, profile):
     """Records that differ from one another *only* in where the code sits.
 
@@ -2978,20 +3026,18 @@ def layout_arms(records, host, profile):
     arms sharing identical source: `commit` is only a source identity on a
     clean tree. Records with no `text_pad` are excluded because their placement
     is unknown -- *not* assumed unpadded; see `TEXTPAD_RE`.
+
+    The per-record test lives in `layout_arm_rejection` so that a sweep can run
+    the identical predicate on each arm as it is produced, rather than a copy
+    of it that is free to drift; see that function for why that matters enough
+    to be worth the indirection.
     """
     groups = {}
     for record in records:
-        if record.get("host") != host or record_profile(record) != profile:
+        if layout_arm_rejection(record, host, profile) is not None:
             continue
-        if record_host_load(record) == HOST_LOAD_LOADED:
-            continue
-        if record.get("dirty"):
-            continue
-        pad = record.get("text_pad")
-        commit = record.get("commit")
-        if not isinstance(pad, int) or isinstance(pad, bool) or not commit:
-            continue
-        groups.setdefault(commit, {}).setdefault(pad, []).append(record)
+        groups.setdefault(record["commit"], {}) \
+              .setdefault(record["text_pad"], []).append(record)
     return {commit: arms for commit, arms in groups.items()
             if len(arms) >= MIN_PADS_FOR_LAYOUT_BAND}
 

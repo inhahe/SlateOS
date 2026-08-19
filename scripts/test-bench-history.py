@@ -3593,6 +3593,65 @@ def test_a_dirty_arm_is_not_a_layout_sample(bh):
           True)
 
 
+def test_the_arm_predicate_is_the_one_layout_arms_actually_applies(bh):
+    """`layout_arm_rejection` exists so a sweep can ask, mid-run, whether the
+    arm it just spent twenty minutes on will be counted. That is only worth
+    anything if it is the *same* rule `layout_arms` applies -- a second copy
+    would agree today, drift on the next edit to either, and then certify every
+    arm of a sweep that produces no band. Which is exactly the outcome it is
+    there to prevent, so a drifted copy is worse than no check at all.
+
+    Asserted as an equivalence over a matrix rather than case by case: the
+    property is "for every record, keeping it and having no rejection reason
+    are the same statement", and that is what has to survive future edits.
+
+    Honest about its own reach, because a test that cannot fail is this
+    project's signature bug and this one is *nearly* one: while `layout_arms`
+    delegates, the equivalence holds by construction, and mutating the shared
+    predicate moves both sides together (verified -- doing so is caught by the
+    semantic tests above, not by this one). What it does catch is the failure
+    it is actually for: someone re-inlining the rule into `layout_arms` and
+    dropping a clause. Mutation-checked by re-inlining the pre-refactor body
+    without its `dirty` check, which this test fails on.
+    """
+    host, profile = "H", "release"
+    cases = {
+        "clean": {},
+        "dirty": {"dirty": True},
+        "other host": {"host": "OTHER"},
+        "other profile": {"profile": "debug"},
+        "loaded host": {"host_load": bh.HOST_LOAD_LOADED},
+        "no pad": {"text_pad": None},
+        "bool pad": {"text_pad": True},
+        "no commit": {"commit": None},
+    }
+    for label, override in cases.items():
+        record = _sweep_arms({1024: 500}, **override)[0]
+        kept = bool(bh.layout_arms(_distinct_pads(record), host, profile))
+        rejected = bh.layout_arm_rejection(record, host, profile)
+        check(f"{label}: kept by layout_arms iff no rejection reason",
+              kept, rejected is None)
+        if rejected is not None:
+            check(f"...and {label} explains itself in prose",
+                  len(rejected) > 20, True)
+
+
+def _distinct_pads(record):
+    """The record under test, plus two siblings, at three distinct pads.
+
+    `layout_arms` needs `MIN_PADS_FOR_LAYOUT_BAND` distinct pads before it
+    returns a commit at all, so a single record can never be "kept" no matter
+    how valid it is. The siblings are unimpeachable and share its commit, so
+    whether the group survives is decided by the record under test alone --
+    unless the override *is* the commit or the pad, in which case the record
+    genuinely cannot join any group, which is the correct answer too.
+    """
+    siblings = _sweep_arms({4096 + 1: 500, 4096 + 2: 500},
+                           commit=record.get("commit") or "xxx",
+                           host="H", profile="release")
+    return siblings + [record]
+
+
 def test_an_uncorrectable_arm_voids_the_whole_group(bh):
     """No drift correction is worse than no band, so the group is dropped.
 
@@ -4296,7 +4355,7 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 102:
+    if len(tests) < 103:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
               f"suite has at least 102. Discovery is broken, not the code.")
         return 1

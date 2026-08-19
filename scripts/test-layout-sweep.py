@@ -187,6 +187,102 @@ def test_the_arm_minimum_comes_from_the_analyser_not_a_local_copy(ls):
           f"needs {minimum} distinct layouts" in buf.getvalue(), True)
 
 
+class FakeHistory:
+    """A `bench-history` module whose history is whatever the test says.
+
+    Everything except `load_history`/`DEFAULT_HISTORY` is the *real* module, so
+    `layout_arm_rejection` under test is the function `layout_arms` actually
+    calls. Stubbing that too would make this suite assert only that the sweep
+    calls something -- and the entire value of the guard is that it calls
+    *that* something.
+    """
+
+    def __init__(self, real, records):
+        self._real = real
+        self._records = records
+        self.DEFAULT_HISTORY = "<fake>"
+
+    def load_history(self, path):
+        return self._records
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_an_arm_that_would_not_be_counted_stops_the_sweep(ls):
+    """The guard against a third silently-voided sweep.
+
+    The failure it exists to catch is not a failed run. It is a *successful*
+    one whose record `layout_arms()` discards -- which is what a dirty tree
+    produces, and which cost the second sweep attempt three hours that would
+    have ended in `--layout-bands` printing nothing.
+    """
+    import platform
+
+    bh = ls.bench_history()
+    host = platform.node() or "unknown"
+
+    def record(**overrides):
+        base = {"host": host, "profile": "release", "text_pad": 1024,
+                "commit": "abc1234", "dirty": False}
+        base.update(overrides)
+        return base
+
+    ok, message = ls.check_arm_counts(
+        FakeHistory(bh, [record()]), 1024, "release")
+    check("a clean, padded, committed arm is accepted", ok, True)
+    check("...and says so, so acceptance is a receipt and not a silence",
+          "accepted as an arm" in message, True)
+
+    ok, message = ls.check_arm_counts(
+        FakeHistory(bh, [record(dirty=True)]), 1024, "release")
+    check("a dirty arm stops the sweep", ok, False)
+    check("...naming the reason rather than just failing",
+          "dirty" in message and "commit" in message, True)
+    check("...and saying why continuing is pointless",
+          "no band" in message, True)
+
+    ok, _ = ls.check_arm_counts(
+        FakeHistory(bh, [record(text_pad=None)]), 1024, "release")
+    check("an arm with no recorded pad stops the sweep", ok, False)
+
+    ok, _ = ls.check_arm_counts(
+        FakeHistory(bh, [record(commit=None)]), 1024, "release")
+    check("an arm with no commit stops the sweep", ok, False)
+
+    ok, message = ls.check_arm_counts(
+        FakeHistory(bh, [record(profile="debug")]), 1024, "release")
+    check("a debug arm cannot calibrate a release band", ok, False)
+
+    ok, message = ls.check_arm_counts(FakeHistory(bh, []), 1024, "release")
+    check("a run that wrote no row at all stops the sweep", ok, False)
+    check("...distinguishing 'wrote nothing' from 'wrote something rejected'",
+          "wrote no history row" in message, True)
+
+    # The newest row must be *this* arm's. Judging someone else's row would
+    # report a verdict about a different run as though it were about this one.
+    ok, message = ls.check_arm_counts(
+        FakeHistory(bh, [record(text_pad=2048)]), 1024, "release")
+    check("a newest row from some other run stops the sweep", ok, False)
+    check("...because the arms would no longer be the runs this script did",
+          "Something else appended" in message, True)
+
+
+def test_the_guard_shares_its_predicate_with_the_analyser(ls):
+    """A copy of the rule would agree today and drift tomorrow.
+
+    This asserts the coupling directly: the acceptance test the sweep runs is
+    `bench-history.py`'s own, so the two cannot disagree about what an arm is.
+    """
+    bh = ls.bench_history()
+    check("the analyser exposes the per-record predicate",
+          callable(getattr(bh, "layout_arm_rejection", None)), True)
+
+    source = inspect.getsource(ls.check_arm_counts)
+    check("and the sweep calls it rather than restating it",
+          "layout_arm_rejection" in source, True)
+
+
 def main():
     """Run every `test_*` in this file, in definition order.
 
@@ -196,9 +292,9 @@ def main():
     ls = load_module()
     tests = [(name, fn) for name, fn in list(globals().items())
              if name.startswith("test_") and callable(fn)]
-    if len(tests) < 4:
+    if len(tests) < 6:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 4. Discovery is broken, not the code.")
+              f"suite has at least 6. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

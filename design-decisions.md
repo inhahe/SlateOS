@@ -22933,8 +22933,8 @@ a comparison group, so a mixed comparison cannot be constructed at all.
 ### The measurement that forced it
 
 Run 2026-08-19, one byte-identical kernel (`kernel_sha 7a17cf6be2a10a26` —
-literally the same bytes, so there is no code difference and no code *placement*
-difference either), release profile, 86 benchmarks, on this host:
+literally the same bytes on disk, so no code difference and no code *placement*
+difference), release profile, 86 benchmarks, on this host:
 
 | | |
 |---|---|
@@ -22958,6 +22958,44 @@ slower.
 had merely rescaled our timing calibration, every benchmark would have moved by
 one common factor. Instead one barely moves while another drops 87%. The
 differences are differences in what the machine actually does.
+
+### Correction: the accelerator was not the *only* difference
+
+Noticed while writing the follow-up question, and recorded here rather than
+quietly fixed, because the original phrasing of this section ("the same bytes, so
+there is no code difference") was an overclaim about what *executed*.
+
+The two boots differ in three CPU features as well as the accelerator:
+
+| | TCG | WHPX |
+|---|---|---|
+| SMEP / SMAP / UMIP | true | **false** |
+| `[alt]` patch sites applied | 47 of 47 | **0 of 47** |
+| everything else (SSE4, POPCNT, AVX, XSAVE, AES-NI, RDRAND, RDTSCP, 1 GiB pages) | absent | absent |
+
+The cause is not WHPX's nature but our command line: `boot-test.sh` passes
+`-cpu qemu64,+smep,+smap,+umip`, and under WHPX the three `+` augmentations are
+silently dropped — the base model is otherwise identical, which is why every
+other feature matches exactly.
+
+**The runtime consequence is bounded and it is knowable, not a vague caveat.**
+`alternatives.rs` has exactly one `Feature` variant, `Smap`, so all 47 sites are
+`stac`/`clac` insertions on kernel paths that touch user memory. SMEP and UMIP
+add no instructions at all — they are CR4 bits that turn certain accesses into
+faults. So the entire executed-code difference is: under TCG, user-memory
+accesses carry a `stac`/`clac` pair that under WHPX is absent.
+
+That confounds the user-copy and syscall-boundary benchmarks by an unknown but
+small amount, and leaves the headline numbers standing, because the largest
+effects are on paths that never touch user memory: `ipc_channel_roundtrip_64k`
+(×10.36), `sched_pick_next_d1`/`d256` (×8.20/×8.40), `io_ring_nop` (×9.57),
+`crypto_x25519` (×8.27). Two emulated instructions cannot produce ×8 on a
+benchmark that does not execute them.
+
+**It does not weaken the decision below; it strengthens it.** The grouping key
+was adopted because a cross-accelerator comparison is meaningless. This shows the
+accelerator drags *other* machine properties along with it, so the records being
+separated differ by even more than the argument assumed.
 
 ### Why the value is read from the guest, not from the flag we passed
 

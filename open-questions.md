@@ -1509,97 +1509,189 @@ ever measured for it.
 
 #### Update 2026-08-19 (later) — option D has been measured, and the answer is "mostly yes, but you cannot yet trust the remainder"
 
+> **CORRECTED 2026-08-19 (later still).** The TCG column of the table below
+> was wrong, and wrong in the direction that flattered the conclusion. It has
+> been replaced with numbers `bench-history.py --layout-bands` now reproduces
+> on demand, and the sixth WHPX arm is included. See "How the first version of
+> this table came to be wrong" at the end — it is the same defect this whole
+> question is about, committed by the analysis rather than by the harness.
+
 **In short:** the guess that most of this noise is an artifact of the emulator
 (rather than something real about our code) has now been tested rather than
-argued, by building the *same* kernel at five deliberately different code
-placements and running the suite on the faster emulator mode. The noise
-collapses — the typical benchmark's placement-only spread falls from **36.5%
-to 4.9%**, and the worst offenders fall by two orders of magnitude. But it
-does not collapse to nothing, and the instrument that would tell us whether
-the remainder is placement or merely a busy PC is broken on that emulator
-mode. So this changes the recommendation without yet settling the question.
+argued, by building the *same* kernel at six deliberately different code
+placements and running the suite on the faster emulator mode. The noise does
+fall a long way — the typical benchmark's placement-only spread goes from
+**26.0% to 5.4%**, and the number of benchmarks too noisy to grade nearly
+halves. But it does not collapse to nothing; fourteen benchmarks get *worse*;
+and the instrument that would tell us whether the remainder is placement or
+merely a busy PC is broken on that emulator mode. So this changes the
+recommendation without settling the question.
 
-**The measurement.** Five arms so far (a sixth is building), identical source,
-`.text` padded by 0/1024/1536/2048/2560 bytes, all under `-accel whpx`,
-compared against the existing six-arm TCG sweep at `b36a244bb`:
+**The measurement.** Six arms, identical source, `.text` padded by
+0/1024/1536/2048/2560/3072 bytes, all under `-accel whpx`, compared against
+the six-arm TCG sweep at `b36a244bb` — the same six arms Q53's head table is
+drawn from, so the two agree by construction:
 
 | | TCG | WHPX |
 |---|---|---|
-| median placement band | **36.5%** | **4.9%** |
-| mean | 104.9% | 11.9% |
-| worst benchmark | 2466% (`hpet_read`) | 93.8% (`firewall_check`) |
-| benchmarks whose band exceeds the 10% regression threshold | **71 of 86** | **35 of 86** |
-| benchmarks whose band exceeds 25% | 51 | 12 |
+| median placement band | **26.0%** | **5.4%** |
+| mean | 40.6% | 12.8% |
+| worst benchmark | 182.0% (`heap_raw_alloc_free_4096`) | 94.1% (`firewall_check`) |
+| benchmarks whose band exceeds the 10% regression threshold | **61 of 86** | **35 of 86** |
+| benchmarks whose band exceeds 25% | 45 | 13 |
 
-WHPX is narrower on **78 of 86** benchmarks. The page-straddle explanation is
-confirmed about as directly as it can be: the benchmarks that were absurd
-under TCG are the ones that collapse.
+WHPX is narrower on **72 of 86** benchmarks, and the page-straddle explanation
+survives the correction: the benchmarks that were worst under TCG are still
+the ones that collapse, and they are tight hot loops, which is what the
+translation-block penalty acts on.
 
 ```
 benchmark                            TCG      WHPX
-hpet_read                        2466.0%      2.3%
-net_ns_arp_lookup                1389.4%      2.3%
-net_arp_lookup                   1332.9%      3.2%
-vfs_throughput_16k_read           168.7%      3.7%
-heap_raw_alloc_free_4096          179.4%     24.7%
-vfs_stat_breakdown_resolve        140.8%     18.8%
+heap_raw_alloc_free_4096          182.0%     30.8%
+vfs_throughput_16k_read           148.3%      3.9%
+vfs_stat_breakdown_resolve        142.8%     18.5%
+pick_next                         132.0%     13.3%
+ipc_eventfd                       126.1%     15.4%
+http_gzip_8KiB                    101.0%      3.0%
 ```
+
+`pick_next` is the one to look at: it is the scheduler hot path `CLAUDE.md`
+names as performance-critical, it was the headline embarrassment of the
+original Q53 evidence at 132%, and under WHPX it is 13.3%. That is the single
+strongest argument on this page for moving off TCG.
 
 **Why this does not settle it.** Three reasons, in increasing order of how
 much they should bother you:
 
 1. **35 of 86 benchmarks still have a placement band wider than the 10%
-   threshold this question is about.** A 7.4x improvement in the median is not
+   threshold this question is about.** A 4.8x improvement in the median is not
    the same as the problem going away. On those 35, a movement under ~10-30%
    still cannot be read as a regression.
 
-2. **Eight benchmarks are *wider* under WHPX**, and the identity of two of
-   them is a warning rather than a curiosity. `isr_latency` goes 53.2% ->
-   69.9%, and `firewall_check` 51.2% -> 93.8%. `isr_latency` is the control
-   benchmark from the original WHPX comparison — the one that barely changed
-   (x0.862) and thereby proved the other speedups were real. A benchmark that
-   does *not* speed up under hardware virtualisation has no translation blocks
-   to lose, so removing them cannot make it *more* placement-sensitive. Its
-   band getting wider is evidence that something other than placement is in
-   these numbers.
+2. **Fourteen benchmarks are *wider* under WHPX**, and the identity of three
+   of them is a warning rather than a curiosity:
+
+   | benchmark | TCG | WHPX |
+   |---|---|---|
+   | `firewall_check` | 52.3% | **94.1%** |
+   | `isr_latency` | 25.4% | **84.4%** |
+   | `ipc_channel_roundtrip_64k` | 4.2% | **50.6%** |
+
+   `isr_latency` is the control benchmark from the original WHPX comparison —
+   the one that barely changed (x0.862) and thereby proved the other speedups
+   were real. A benchmark that does *not* speed up under hardware
+   virtualisation has no translation blocks to lose, so removing them cannot
+   make it *more* placement-sensitive. `ipc_channel_roundtrip_64k` is worse
+   still: it goes from *quiet* (4.2%, comfortably inside the 10% rule) to 50.6%,
+   a twelvefold widening with no placement mechanism that could explain it.
+   Something other than placement is in these numbers, and the correction made
+   this worse rather than better — the first version of this table reported
+   eight wideners, not fourteen, and did not include this one.
 
 3. **We cannot tell how much of the residue is placement and how much is a
-   busy PC, because the detector for that is broken on WHPX.** Every one of
-   these arms recorded `canary_verdict: broken` — see known-issues.md
-   `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`. The canary's
-   resolution floor is 100x tighter than its own derivation, which TCG clears
-   by 26% and WHPX misses by 4.6x, so on WHPX it refuses every sample. And the
-   loss bites hardest exactly here: host interference matters *more* the
-   faster the guest runs (a fixed interruption is a larger fraction of a 3.5x
-   shorter run), so the accelerator with the narrowest true placement band is
-   also the one whose measurements are most exposed to the noise we can no
-   longer detect.
+   busy PC, because the detector for that was broken on WHPX when these arms
+   ran.** Every one of them recorded `canary_verdict: broken` — see
+   known-issues.md `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`.
+   The canary's resolution floor was 100x tighter than its own derivation,
+   which TCG clears by 26x and WHPX missed by 4.6x, so on WHPX it refused
+   every sample. And the loss bites hardest exactly here: host interference
+   matters *more* the faster the guest runs (a fixed interruption is a larger
+   fraction of a 3.5x shorter run), so the accelerator with the narrowest true
+   placement band is also the one whose measurements are most exposed to the
+   noise we can no longer detect.
 
-   Worse, nothing says so. `layout_arm_rejection()` screens arms on
-   `host_load`, which is a **hand-supplied label** (`unknown` on every one of
-   these runs), and never consults the **measured** `canary_verdict` sitting
+   **That bug is now fixed** (`bf565ae6a` + `26c139a81`), but the fix is not
+   retroactive and must not be: a record whose canary refused every sample
+   does not become trustworthy because the next kernel's canary works. These
+   six arms stay `broken`, and the band above keeps its caveat until the sweep
+   is re-run on a kernel that carries the fix. That re-run is now the single
+   thing standing between this question and an answer.
+
+   Worse, nothing in the tooling says so. `layout_arm_rejection()` screens arms
+   on `host_load`, which is a **hand-supplied label** (`unknown` on every one
+   of these runs), and never consults the **measured** `canary_verdict` sitting
    in the same record. So the band above was computed from six runs of
-   explicitly unknown contamination and reported as though it were clean.
+   explicitly unknown contamination. `describe_layout_band` now prints the
+   warning that `--layout-bands` emits above the table
+   (`WARNING: 6/6 arms could not measure host load`), so it is at least no
+   longer silent — but it is reported, not screened, deliberately: see
+   design-decisions.md §239 on why a broken canary is evidence that nobody
+   knows rather than evidence the band is wrong.
 
 **What this does to the options.** Option D ("run the benchmarks somewhere
-faster than TCG") is now the best-supported option on the table — 7.4x on the
-median is not a marginal gain — but it is *gated on the canary fix*, not
-merely improved by it. Without a working contamination check the WHPX band
-cannot be distinguished from WHPX host noise, and adopting a threshold
-derived from it would bake that confusion into the gate. The order is
-therefore: fix the canary floor, re-run the sweep, and only then set a
+faster than TCG") is still the best-supported option on the table — 4.8x on
+the median, and 132% -> 13.3% on `pick_next`, is not a marginal gain — but it
+is *gated on a re-run*, not merely improved by one. The canary fix has landed;
+the arms above predate it. Without a working contamination check the WHPX band
+cannot be distinguished from WHPX host noise, and adopting a threshold derived
+from it would bake that confusion into the gate. The order is therefore:
+re-run the sweep on a kernel carrying the canary fix, and only then set a
 threshold from the result.
+
+Note that the correction to this table **weakened** the case for D without
+overturning it: the median improvement drops from a claimed 7.4x to a measured
+4.8x, the worst-benchmark collapse from a claimed 26x to a measured 1.9x, and
+the count of benchmarks that get *worse* rises from eight to fourteen. If the
+recommendation had rested on the headline ratios it would have moved. It rests
+on `pick_next` and on 61 -> 35 benchmarks crossing the threshold, and both
+survive.
 
 **A note on how this was obtained**, because it affects how much to trust it:
 the six arms were recorded under six different commits (documentation commits
 landed while the sweep ran), so `bench-history.py` filed them as six unrelated
-one-arm experiments and would have reported no band at all. The numbers above
-come from regrouping the arms by a digest of the build-relevant tree — which
-is verified identical across all six commits — using the *unmodified* band
-machinery on top. See known-issues.md
-`B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS`. The
-regrouping is the fix that is about to land, not a fudge for this table, and
-the numbers will be reproduced by `--layout-bands` once it does.
+one-arm experiments and would have reported no band at all. The fix — grouping
+arms by a digest of the build-relevant tree, which is verified identical across
+all six commits — has now landed, so the numbers above are no longer a
+one-off analysis: `python scripts/bench-history.py --layout-bands --profile
+release` prints them. See known-issues.md
+`B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS`.
+
+#### How the first version of this table came to be wrong
+
+Worth reading, because the mistake is the one this whole question is about,
+made by the analysis instead of by the harness.
+
+The TCG column as first published claimed a median band of **36.5%**, a mean
+of **104.9%**, and a worst benchmark of **2466%** (`hpet_read`). None of those
+is reproducible from the six TCG arms, which give **26.0% / 40.6% / 182.0%** —
+and the correct figures were sitting a few hundred lines up this same page, in
+Q53's own head table, disagreeing with it.
+
+`hpet_read`'s actual TCG placement band is **6.2%**. A four-hundred-fold error
+does not come from an arithmetic slip; in this dataset a figure of that size
+arises for exactly one reason, which is comparing a WHPX timing against a TCG
+one (`hpet_read` is 446 ns under TCG and 13,680 ns under WHPX — an HPET read
+costs a VM exit under hardware virtualisation and is emulated inline under
+TCG). Adding the unpadded 16:15 WHPX probe of the same day to the TCG arm set
+and taking a raw peak-to-peak reproduces all three of the old table's top rows
+at the same rank and within a factor of 1.2 (2969% / 1714% / 1624% against the
+claimed 2466% / 1389% / 1333%). The lower rows of the old table are close to
+the clean TCG numbers, so it was a *mixture*, and I cannot fully reconstruct
+how it was produced — only what contaminated it.
+
+That probe is the subject of known-issues.md
+`B-A-AN-ORDINARY-RUN-NEARLY-JOINED-A-LAYOUT-BAND-AS-A-SEVENTH-ARM`: it matches
+a genuine sweep arm on every field the banding code compares — same host, same
+profile, unloaded, `text_pad: 0` truthfully, `accel` absent truthfully, and the
+identical kernel tree — and is separated *only* by not carrying the layout
+sweep's tag. `bench-history.py` rejects it and always did. A hand-written
+analysis that selected arms itself did not, and so made exactly the merge the
+tag exists to prevent, in the exact direction the tag's comment warns about.
+
+Three things follow, and the third is the one that changes practice:
+
+- The near-miss documented in that entry is no longer only a near-miss. The
+  merge happened, in an ad-hoc script, and its output reached this page — a
+  document whose entire purpose is to inform an operator decision.
+- It failed in the predicted direction. Inflating TCG's noise makes the case
+  for moving off TCG look stronger than it is, which is the answer the analysis
+  was hoping for. That is what "fails silently and plausibly" looks like.
+- **Numbers in this file must come from a command the reader can re-run.**
+  Every figure in the corrected table is printed by
+  `bench-history.py --layout-bands`, which routes through
+  `layout_arm_rejection` and therefore cannot pick up an untagged run. That is
+  now the rule for evidence quoted here, and it is cheap: the reason the old
+  table could be checked at all is that the raw records were still on disk.
 
 ## Q54 — [A] The emulator we test in has a second mode that is 3.5× faster and would fix our benchmark-noise problem — but it silently switches off three of the CPU security features the kernel is built around. Switch, split, or stay? — Status: OPEN
 

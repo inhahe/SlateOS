@@ -40595,7 +40595,7 @@ the parser reads, which the next benchmark boot demonstrates for free — so it
 is tracked as a validation step on the next sweep rather than as an open
 defect.
 
-### B-A-AN-ORDINARY-RUN-NEARLY-JOINED-A-LAYOUT-BAND-AS-A-SEVENTH-ARM, AND ONLY ONE FIELD STOPPED IT (lane A, 2026-08-19) -- CLOSED as already-prevented; recorded because the margin was one field
+### B-A-AN-ORDINARY-RUN-NEARLY-JOINED-A-LAYOUT-BAND-AS-A-SEVENTH-ARM, AND ONLY ONE FIELD STOPPED IT (lane A, 2026-08-19) -- reopened and re-closed the same day: `bench-history.py` did stop it, but an ad-hoc analysis bypassed the guard entirely and published the merged numbers. See "AMENDMENT" at the end.
 
 **In short:** a "layout band" is a range of timings measured from six builds of
 the *same* kernel placed at six different code offsets; its job is to say how
@@ -40675,11 +40675,72 @@ string) the spurious direction requires someone to type the sentinel by hand
 into `BENCH_EXPERIMENT`, which is as close to unreachable as a declared field
 gets.
 
-**Nothing to do.** No code change; the guard held, and the `LAYOUT_SWEEP_TAG`
-comment already names this run rather than describing a scenario. What was
-missing was the entry you are reading -- the standing rule is that an observed
-near-miss goes in the tracker, not only in the comment on the code that
-survived it, because the tracker is what gets read when someone is deciding
-whether a field is worth keeping. If a future change proposes deriving "is
-this an arm?" from the data instead of the declaration, this entry is the
-counterexample: on 2026-08-19 the data was identical and the answer was no.
+**Nothing to do in `bench-history.py`.** No code change; the guard held, and
+the `LAYOUT_SWEEP_TAG` comment already names this run rather than describing a
+scenario. What was missing was the entry you are reading -- the standing rule
+is that an observed near-miss goes in the tracker, not only in the comment on
+the code that survived it, because the tracker is what gets read when someone
+is deciding whether a field is worth keeping. If a future change proposes
+deriving "is this an arm?" from the data instead of the declaration, this
+entry is the counterexample: on 2026-08-19 the data was identical and the
+answer was no.
+
+#### AMENDMENT (2026-08-19, same day) -- it was not a near-miss. The merge happened, outside the harness, and reached the operator's decision queue
+
+Written a few hours after the above, and it downgrades that verdict. The
+sentence "the guard held" is true of `bench-history.py` and false of the
+project, because the guard is only reached by code that *calls* it.
+
+**What happened.** The WHPX-vs-TCG comparison table in `open-questions.md`
+Q53 -- the evidence for that question's option D -- was produced by a
+hand-written analysis that selected and grouped arms itself instead of going
+through `layout_arm_rejection()`. Its TCG column therefore included this very
+16:15 probe among the TCG arms. Published figures versus the truth:
+
+| | as published | actual TCG band |
+|---|---|---|
+| median | 36.5% | **26.0%** |
+| mean | 104.9% | **40.6%** |
+| worst | 2466% (`hpet_read`) | **182.0%** (`heap_raw_alloc_free_4096`) |
+| `hpet_read` | 2466% | **6.2%** |
+
+`hpet_read` is the cleanest possible fingerprint: it costs a VM exit under
+hardware virtualisation (13,680 ns) and is emulated inline under TCG (446 ns),
+so admitting one WHPX row to a TCG band inflates it ~30x. Re-adding the probe
+to the TCG arms and taking a raw peak-to-peak reproduces the old table's top
+three rows at the same rank and within a factor of 1.2. The lower rows are
+near the clean numbers, so the published table was a mixture and cannot be
+fully reconstructed -- only diagnosed.
+
+**It failed in the predicted direction, which is the whole point.** Inflating
+TCG's noise makes the case for abandoning TCG look stronger. The corrected
+numbers still favour that option but by 4.8x on the median rather than 7.4x,
+with the worst-benchmark collapse falling from 26x to 1.9x and the count of
+benchmarks that get *worse* under WHPX rising from eight to fourteen. An
+analysis that contaminates its own baseline in favour of its own hypothesis is
+exactly the silent, plausible failure the direction-of-error argument in this
+entry predicts -- and it was found only because the numbers were re-derived
+from the raw records while updating the table for a sixth arm, not because
+anything flagged them.
+
+**So the corrected lesson is not "keep the tag".** It is that a predicate is
+not a guard unless it is on the only path. `layout_arm_rejection()`'s own
+docstring already says this about a *restatement* of it drifting; this is the
+same failure with the restatement written in an analysis script rather than in
+`layout-sweep.py`. Two consequences, both adopted:
+
+1. **Evidence quoted in `open-questions.md` must be reproducible by a command
+   the reader can re-run.** Every figure in the corrected Q53 table is printed
+   by `bench-history.py --layout-bands`, which routes through
+   `layout_arm_rejection` and so cannot pick up an untagged run. Recorded in
+   the Q53 entry itself so it is found by the next person writing evidence
+   there rather than only by someone reading this file.
+2. **An ad-hoc analysis that groups records must call the real predicate.**
+   `build/whpx-band-preview.py` did -- it monkeypatches the *key* and reuses
+   `layout_arm_rejection` unmodified, which is why its WHPX column is correct
+   and survived the re-derivation intact. That is the pattern to copy; the TCG
+   column was produced by something that did not, and did not survive.
+
+The original verdict above is left as written rather than edited, because
+"CLOSED, the guard held" being wrong within hours of being written is itself
+the useful record.

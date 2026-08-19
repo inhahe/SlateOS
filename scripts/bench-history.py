@@ -4694,6 +4694,14 @@ def main(argv=None):
                              "whoever ran it, not a measurement. 'loaded' "
                              "marks a deliberately-poisoned control run, which "
                              "is then excluded from every baseline.")
+    parser.add_argument("--src-digest", default="",
+                        help="identity of the source that was built, from "
+                             "scripts/src_digest.py. Unlike --commit this "
+                             "covers the untracked binaries the kernel embeds, "
+                             "and unlike --commit it is unchanged by a "
+                             "documentation commit landing mid-sweep. Omit it "
+                             "rather than passing an empty value if it could "
+                             "not be computed.")
     parser.add_argument("--commit", default="",
                         help="commit the measured kernel was built from. Pass "
                              "the value read BEFORE the build: this tool runs "
@@ -4848,6 +4856,13 @@ def main(argv=None):
             # Stored so a later comparison can qualify itself instead of
             # treating the hash as if it identified the code.
             "dirty": bool(args.dirty),
+            # What `commit` + `dirty` only pretended to be: an identity for the
+            # source that was built, covering the untracked binaries the kernel
+            # embeds. Omitted entirely when it could not be computed, because
+            # an absent field reads as unknown downstream and unknown refuses
+            # to group -- whereas an empty string would group every such row
+            # together. See scripts/src_digest.py and `arm_group_key`.
+            **({"src_digest": args.src_digest} if args.src_digest else {}),
             # The target is static and already lives in baselines.toml, so
             # only the measured number goes here.
             "entries": {n: v[0] for n, v in current_entries.items()},

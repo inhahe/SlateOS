@@ -623,6 +623,46 @@ _bt_dirty=""
 echo "=== Tree under test: $PROJECT_ROOT [$BT_BRANCH @ $BT_HEAD$_bt_dirty] ==="
 unset _bt_dirty
 
+# A digest of the source this run is about to build, recorded alongside the
+# commit because the commit is not an identity and never was.
+#
+# Two things it fixes, both of which have already cost a sweep:
+#
+#   - `commit` SPLITS identical builds.  A layout sweep spends ~75 min per arm,
+#     so any commit landing while it runs -- a documentation commit will do --
+#     gives later arms a different hash.  bench-history.py's layout_arms() then
+#     groups six identical arms into six one-pad groups and reports no band at
+#     all, silently.  That is exactly what happened to the WHPX sweep of
+#     2026-08-19, whose six arms carry six different commits.
+#
+#   - `dirty` MERGES different builds.  `git diff --quiet HEAD` cannot see
+#     untracked files, and the kernel include_bytes!s six gitignored service
+#     binaries while every boot attaches rootfs.ext4.  Rebuild a service
+#     between two arms and both rows still say `dirty: false` at one commit.
+#
+# Captured HERE, before the build, for the same reason BT_HEAD is: the record
+# must describe the source that went *into* the kernel under test.  Re-deriving
+# it at exit would describe whatever the tree became afterwards, and would do
+# so in the direction that hides changes.
+#
+# Never fatal.  A missing digest is recorded as absent, which downstream treats
+# as "unknown" and therefore refuses to group -- the safe direction.  A boot
+# test that failed because a digest could not be computed would be strictly
+# worse than one that simply did not record it.
+BT_SRC_DIGEST=""
+if command -v python &>/dev/null; then
+    BT_SRC_DIGEST="$(python "$PROJECT_ROOT/scripts/src_digest.py" \
+                     --root "$PROJECT_ROOT" 2>/dev/null || true)"
+elif command -v python3 &>/dev/null; then
+    BT_SRC_DIGEST="$(python3 "$PROJECT_ROOT/scripts/src_digest.py" \
+                     --root "$PROJECT_ROOT" 2>/dev/null || true)"
+fi
+if [ -n "$BT_SRC_DIGEST" ]; then
+    echo "=== Source digest: $BT_SRC_DIGEST ==="
+else
+    echo "=== Source digest: unavailable (rows will not be groupable) ==="
+fi
+
 # Convert to Windows paths if running under MSYS/Git Bash (QEMU needs them).
 to_win_path() {
     if command -v cygpath &>/dev/null; then
@@ -1251,6 +1291,11 @@ print_bench_results() {
     # why re-deriving it at exit is wrong, and wrong in the hiding direction.
     local bench_args=(--serial "$file" --profile "$BENCH_PROFILE"
                       --host-load "$HOST_LOAD" --commit "${BT_HEAD:-unknown}")
+    # Omitted entirely rather than passed empty when it could not be computed:
+    # an absent field is unknown, and unknown must not group.
+    if [ -n "${BT_SRC_DIGEST:-}" ]; then
+        bench_args+=(--src-digest "$BT_SRC_DIGEST")
+    fi
     # The ELF that was actually measured, so the record carries the addresses of
     # the placement-sensitive functions alongside their timings.
     if [ -f "${KERNEL_BIN:-}" ]; then
@@ -1337,6 +1382,9 @@ record_boot_outcome() {
     local args=(--serial "$SERIAL_FILE" --exit-code "$rc"
                 --marker "$WAIT_MARKER" --profile "${BENCH_PROFILE:-debug}"
                 --commit "${BT_HEAD:-unknown}" --branch "${BT_BRANCH:-unknown}")
+    if [ -n "${BT_SRC_DIGEST:-}" ]; then
+        args+=(--src-digest "$BT_SRC_DIGEST")
+    fi
     if [ "${BT_DIRTY:-0}" = 1 ]; then
         args+=(--dirty)
     fi

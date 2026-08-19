@@ -638,6 +638,11 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
     rec: dict = {
         "ts": _now_iso(),
         "commit": args.commit or git_commit(),
+        # Omitted entirely when unavailable rather than stored empty: an absent
+        # field reads as unknown, and unknown refuses to group, whereas an
+        # empty string would group every such row together. See
+        # scripts/src_digest.py.
+        **({"src_digest": args.src_digest} if args.src_digest else {}),
         "branch": args.branch or git_branch(),
         # True when the tree carried uncommitted changes at build time, so the
         # `commit` above names the nearest ancestor rather than what ran.  A
@@ -1006,6 +1011,11 @@ def main(argv=None) -> int:
                         help="commit the tested kernel was built from; pass "
                              "the value read BEFORE the build, since HEAD can "
                              "move during a run (default: ask git now)")
+    parser.add_argument("--src-digest", default="",
+                        help="identity of the source that was built, from "
+                             "scripts/src_digest.py; covers the untracked "
+                             "binaries the kernel embeds, which `commit` and "
+                             "`dirty` between them cannot see")
     parser.add_argument("--branch", default="",
                         help="branch the tested kernel was built from "
                              "(default: ask git now)")

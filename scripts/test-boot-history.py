@@ -710,6 +710,32 @@ def test_caller_supplied_commit_wins_over_git(bh):
     check_true("no supplied commit falls back to git", clean["commit"])
 
 
+def test_an_uncomputable_source_digest_is_absent_not_empty(bh):
+    """Absent means unknown; empty would be a value that every row shares.
+
+    `commit` and `dirty` between them never identified the built source -- the
+    kernel `include_bytes!`s six gitignored service binaries that
+    `git diff --quiet HEAD` cannot see -- so runs now stamp themselves with a
+    `src_digest` instead. boot-test.sh omits the flag entirely when it could
+    not compute one, and this pins the half of that contract living here.
+
+    The distinction is the whole safety property. Downstream, `arm_group_key`
+    treats an absent digest as unknown and falls back to a key that groups
+    nothing new. An empty string is not unknown: it is a value, equal to every
+    other empty string, so a fleet of rows that all failed to compute a digest
+    would silently band together as though they shared a build.
+    """
+    args = _Args()
+    args.src_digest = "full:0123456789abcdef"
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("a supplied digest is recorded", rec.get("src_digest"),
+          "full:0123456789abcdef")
+
+    absent = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check("an uncomputable digest leaves the key out entirely",
+          "src_digest" in absent, False)
+
+
 class _Args:
     exit_code = 1
     marker = "BOOT_OK"
@@ -722,6 +748,12 @@ class _Args:
     commit = ""
     branch = ""
     dirty = False
+    # Empty is the ordinary case here too: boot-test.sh omits the flag when the
+    # digest could not be computed, and build_record() must then leave the key
+    # out entirely rather than store an empty one. An absent field reads as
+    # unknown downstream and refuses to group; a shared empty string would
+    # group every such row together. See scripts/src_digest.py.
+    src_digest = ""
     # Empty is the ordinary case -- a boot of the tree, not a probe. The
     # experiment path has its own tests below.
     experiment = ""

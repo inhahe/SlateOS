@@ -38645,11 +38645,27 @@ shorter in *code*, reintroducing the very confound the sweep exists to remove.
 
 Two things this does **not** yet do, so read reports accordingly:
 
-- **No sweep has been run yet**, so no band exists for anything. Until one is
+- **No sweep has completed yet**, so no band exists for anything. Until one does
   (`python scripts/layout-sweep.py --pads 0,1024,2048,3072`), every movement is
   `unmeasured` and keeps its regression — deliberately; see §234 for why absence
   of evidence must not excuse. The report now says so, per run, naming the
   command that would settle it.
+
+  Three attempts on 2026-08-19 were voided, and each one bought a guard, so the
+  history is worth keeping rather than summarising as "it kept failing":
+
+  | Attempt | Died | Cause | Guard added |
+  |---|---|---|---|
+  | 1 | arm 1, 1 s | `bash` resolved to WSL's, which cannot open the Windows path | — (misdiagnosed as MSYS; the "fix" only moved the error) |
+  | 2 | arm 1, 1 s | same root cause, now showing as `qemu-system-x86_64 not found` — WSL's bash has no QEMU | `find_bash()`: each candidate must *parse the boot test* **and** *find QEMU and OVMF using the boot test's own search* |
+  | 3 | arm 2, 43 min | the kernel's layout-pad self-test had been folded to a constant FAIL, so every padded release kernel halted at boot | `--self-test` claim 4: every branch of the on-target check must be present in the optimised image |
+
+  Attempts 1 and 2 are one root cause seen twice — the first "fix" addressed the
+  message rather than the cause, which is why the second attempt failed two
+  lines further down. The separate guard against a sweep that *runs* but
+  produces no band (`check_arm_counts()`, which applies `bench-history.py`'s own
+  `layout_arm_rejection()` to each arm's record as it lands) was added between
+  attempts 2 and 3 and has not yet had to fire.
 - **A band is a lower bound.** Three or four sampled layouts cannot contain the
   worst pair among all of them, so a movement just outside its band is
   *unexplained*, not cleared.

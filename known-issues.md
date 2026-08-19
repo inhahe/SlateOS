@@ -40027,6 +40027,43 @@ re-derive the tolerance from records once the floor stops rejecting them --
 and do it from data, which is the standing lesson of `CANARY_TOLERANCE_PCT`'s
 own comment.
 
+#### The failure is not merely undetected, it is *misattributed* -- fix the message too
+
+Worse than a silent failure, because it sends the reader somewhere there is
+nothing to find. The suite prints, verbatim:
+
+```
+CANARY BROKEN: 13 measurement(s) failed - contamination is UNKNOWN for this run, not clean
+A reference access cost of zero is not a fast machine, it is a failed measurement:
+  the A/B arms did not separate.
+Two causes need opposite responses: (1) the store was optimised away ... or
+  (2) host load exceeded the ~5-cycle A/B signal and inverted the arms ...
+```
+
+Every clause of that is false under WHPX:
+
+- **"the A/B arms did not separate"** -- they separated by 872 cycles. The
+  instrument *refused* the delta; it did not fail to obtain one.
+- **"A reference access cost of zero is not a fast machine"** -- here it very
+  nearly is one. The message was written against the release-profile
+  optimiser-elision bug, where zero really did mean no signal, and it
+  generalises that case to all cases.
+- **"the ~5-cycle A/B signal"** -- 5 cycles is TCG's number, quoted as a
+  property of the measurement itself.
+- **"Two causes"** -- there are three, and the third is the one that fired. A
+  reader following either offered branch re-runs on an idle machine (which
+  will never help) or audits the optimiser (which is innocent).
+
+So the fix has a third part beside the kernel bound and the Python bound:
+`measure_access_at()` should distinguish *arms did not separate*
+(`checked_sub` failed, or delta is genuinely ~0) from *delta was below the
+resolution floor*, and the report must name the latter as its own cause --
+"the guest is faster than this instrument can resolve" -- with the measured
+per-access figure printed rather than suppressed. A diagnostic that offers a
+closed list of causes must either be exhaustive or say it is not; this one
+asserted exhaustiveness (*"Two causes"*) and was wrong the first time it met a
+new platform.
+
 #### Second, separate defect in the same measurement family
 
 The scattered-access scale check also fails under WHPX, and **its fix is not a

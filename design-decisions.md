@@ -20135,11 +20135,25 @@ pure noise:
 | best-case ratio | 0.998 | 1.124 | 1.609 |
 | mean ratio | 1.001 | 1.678 | 2.585 |
 
-Neither statistic's p95 clears its own threshold, yet both run well past it at
-the extreme — which is precisely why **both are required to agree**. Requiring
-the best-case median ≥ 1.15 *and* the mean median ≥ 1.30 fires on **1 of those
-236 clean region-pairs (0.4%)**, against a real disturbance that measured 1.40
-and 2.30.
+The two statistics are **not** equally good, and the table says which is which.
+The best-case p95 (1.124) sits just below its 1.15 threshold, so best-case alone
+already fires on under 5% of clean pairs. The mean's p95 (1.678) is far *above*
+its 1.30 threshold — on the tightest single-host subset the mean alone fires on
+**13% of clean region-pairs**, three times the ceiling. So the mean is not a
+second opinion of equal weight: **the best-case ratio is the discriminating
+statistic, and the mean is a weaker corroborating condition** that mostly rules
+out a best-case fluke. Requiring both — best-case median ≥ 1.15 *and* mean median
+≥ 1.30 — fires on **1 of those 236 clean region-pairs (0.4%)**.
+
+That asymmetry is not a defect to be tuned away; it is a property of what the two
+numbers measure. The best case is the fastest iteration a benchmark achieved, so
+it moves only when *every* iteration was slowed — a frequency or cache effect
+that lasts. The mean is dragged by single outlier iterations, and one preemption
+inside one iteration of a 2000-iteration benchmark can move it by an order of
+magnitude. Measured on an *undisturbed* prefix, per-benchmark mean ratios ranged
+from ×0.06 to ×34 while best-case ratios stayed within ×0.9–×1.1. A region median
+tames that, but it does not make the mean into a precise instrument, and no
+threshold on it could.
 
 `scripts/test-grade-positional.py` re-derives that rate from the real
 `bench/history.jsonl` on every run and fails if it climbs above 5%. A suite that

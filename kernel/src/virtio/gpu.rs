@@ -77,6 +77,10 @@ const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
 const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+/// `RESOURCE_CREATE_3D` — the first command in the 3D block (0x0200 is
+/// `CTX_CREATE`, so this is 0x0200 + 4).  Only sent when the device offered
+/// `VIRTIO_GPU_F_VIRGL`; see [`create_resource_3d`] for why we need it at all.
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_3D: u32 = 0x0204;
 
 // GPU response types.
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
@@ -84,6 +88,32 @@ const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 
 // GPU pixel formats.
 const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
+
+// ---------------------------------------------------------------------------
+// Feature bits and 3D resource parameters
+// ---------------------------------------------------------------------------
+
+/// `VIRTIO_GPU_F_VIRGL` (page-0 bit 0): the device understands the 3D command
+/// block.  We accept it not to render 3D but to be allowed to *create* the
+/// scanout resource with the 3D command, which is the only way to ask for the
+/// `SCANOUT` bind — see [`create_resource_3d`].
+const VIRTIO_GPU_F_VIRGL: u32 = 1 << 0;
+
+/// `PIPE_TEXTURE_2D`.  The `target` of a 3D resource that is a flat 2D image.
+const VIRGL_TARGET_TEXTURE_2D: u32 = 2;
+
+// Bind flags (virglrenderer `virglrenderer.h`, `VIRGL_RES_BIND_*`).  These are
+// the exact three the working configuration was verified with; see
+// `create_resource_3d`.
+const VIRGL_RES_BIND_RENDER_TARGET: u32 = 1 << 1;
+const VIRGL_RES_BIND_SAMPLER_VIEW: u32 = 1 << 3;
+const VIRGL_RES_BIND_SCANOUT: u32 = 1 << 18;
+
+/// `VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP`: row 0 of the backing store is the top
+/// row of the image.  QEMU's `RESOURCE_CREATE_2D` sets this unconditionally,
+/// and our framebuffer is laid out the same way, so the 3D path must set it too
+/// or the picture comes out vertically mirrored.
+const VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP: u32 = 1 << 0;
 
 // ---------------------------------------------------------------------------
 // GPU control message structures (repr(C) for DMA)
@@ -149,6 +179,39 @@ struct VirtioGpuResourceCreate2d {
     width: u32,
     height: u32,
 }
+
+/// RESOURCE_CREATE_3D request.
+///
+/// The trailing `_padding` is part of the wire format, not Rust padding: the
+/// device compares the descriptor length against `sizeof(struct
+/// virtio_gpu_resource_create_3d)` and *silently drops* a short command
+/// (QEMU's `VIRTIO_GPU_FILL_CMD` returns without setting an error, so the
+/// guest sees `OK_NODATA` for a command that did nothing).  The static
+/// assertion below is what keeps that failure mode from ever being reached.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioGpuResourceCreate3d {
+    hdr: VirtioGpuCtrlHdr,
+    resource_id: u32,
+    target: u32,
+    format: u32,
+    bind: u32,
+    width: u32,
+    height: u32,
+    depth: u32,
+    array_size: u32,
+    last_level: u32,
+    nr_samples: u32,
+    flags: u32,
+    _padding: u32,
+}
+
+// The wire size the device checks against.  24-byte header + 12 little-endian
+// u32s.  A mismatch here is not a compile error anywhere else in this file --
+// the command would simply be accepted and ignored at run time -- so it is
+// asserted at compile time instead.
+const _: () = assert!(core::mem::size_of::<VirtioGpuResourceCreate3d>() == 72);
+const _: () = assert!(core::mem::size_of::<VirtioGpuCtrlHdr>() == 24);
 
 /// RESOURCE_ATTACH_BACKING request header.
 #[repr(C)]
@@ -276,12 +339,18 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     // --- Device initialization sequence (modern transport §3.1) ---
 
     // Steps 1-5 (reset, ACKNOWLEDGE, DRIVER, feature negotiation, FEATURES_OK).
-    // We want no optional GPU features -- 2D only, no VIRGL, no EDID -- so the
-    // requested page-0 mask is empty; `negotiate` still accepts
-    // VIRTIO_F_VERSION_1 on our behalf, which the previous open-coded sequence
-    // here did not.  QEMU's virtio-gpu tolerated that omission; a stricter
-    // device would not have.
-    transport.negotiate(0)?;
+    // `negotiate` accepts VIRTIO_F_VERSION_1 on our behalf, which the previous
+    // open-coded sequence here did not.  QEMU's virtio-gpu tolerated that
+    // omission; a stricter device would not have.
+    //
+    // The one page-0 feature we ask for is VIRGL, and not because we render 3D:
+    // it is the device's own statement that it understands the 3D command
+    // block, and on such a device the framebuffer *must* be created with
+    // RESOURCE_CREATE_3D or it can never be scanned out.  See
+    // `create_resource_3d`.  A plain 2D device does not offer the bit, we do
+    // not get it, and the 2D path below is used unchanged.
+    let accepted = transport.negotiate(VIRTIO_GPU_F_VIRGL)?;
+    let virgl = accepted & VIRTIO_GPU_F_VIRGL != 0;
 
     // 6. Read device config.
     let _events_read = transport.read_device_config32(0);
@@ -339,13 +408,33 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     device.height = height;
 
     // Create a 2D resource.
-    let resource_id = create_resource_2d(&mut device, width, height)?;
+    // On a virgl device the 3D create is the only one that can be scanned out.
+    // If it fails anyway we still try the 2D create rather than giving up: a
+    // device that offers VIRGL but rejects the 3D create is not one we have
+    // seen, and on it the 2D path is no worse than not coming up at all.  The
+    // retry cannot collide with the failed resource id — `next_resource_id`
+    // has already advanced past it.
+    let resource_id = if virgl {
+        match create_resource_3d(&mut device, width, height) {
+            Ok(id) => id,
+            Err(e) => {
+                serial_println!(
+                    "[virtio-gpu] 3D resource create failed ({e:?}); falling back to 2D \
+                     (scanout is unlikely to work)"
+                );
+                create_resource_2d(&mut device, width, height)?
+            }
+        }
+    } else {
+        create_resource_2d(&mut device, width, height)?
+    };
     device.resource_id = resource_id;
     serial_println!(
-        "[virtio-gpu] Created resource {} ({}x{})",
+        "[virtio-gpu] Created resource {} ({}x{}, {})",
         resource_id,
         width,
-        height
+        height,
+        if virgl { "3D/scanout bind" } else { "2D" }
     );
 
     // Allocate framebuffer backing memory.
@@ -580,6 +669,81 @@ fn create_resource_2d(dev: &mut VirtioGpuDevice, width: u32, height: u32) -> Ker
 
     if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
         serial_println!("[virtio-gpu] RESOURCE_CREATE_2D: resp={:#x}", resp_type);
+        return Err(KernelError::IoError);
+    }
+    Ok(resource_id)
+}
+
+/// Create the framebuffer as a 2D texture via the *3D* command, so we can ask
+/// for the `SCANOUT` bind.
+///
+/// This exists for one reason: on a virgl-capable device, a resource created
+/// with `RESOURCE_CREATE_2D` can never be scanned out on a Windows host, and
+/// nothing in the protocol says so.  The chain is:
+///
+/// 1. QEMU routes *every* command through the virgl path as soon as the device
+///    is `virtio-gpu-gl`, whether or not the guest negotiated
+///    `VIRTIO_GPU_F_VIRGL`.
+/// 2. Its `RESOURCE_CREATE_2D` handler hardcodes `bind = RENDER_TARGET`.  The
+///    guest cannot influence it — the 2D command has no `bind` field.
+/// 3. virglrenderer only allocates the shared D3D11 texture for a resource
+///    whose bind includes `SCANOUT` (`vrend_resource_d3d_init`).
+/// 4. On Windows, `virgl_renderer_resource_get_info_ext` — which QEMU calls on
+///    `SET_SCANOUT` — returns `EINVAL` for any resource that has no D3D11
+///    texture.
+///
+/// So `SET_SCANOUT` answers `ERR_INVALID_RESOURCE_ID` (0x1203) for a resource
+/// the device itself just created successfully, and every intermediate step
+/// reports success: virglrenderer's create/attach/transfer return codes are
+/// discarded by QEMU, so this is the *only* observable symptom.  OVMF's own
+/// VirtioGpuDxe driver fails identically, which is what ruled out a bug on our
+/// side.  Verified against QEMU 11.1.0-rc3 with `-device virtio-gpu-gl-pci
+/// -display egl-headless`; `virgl_renderer_init` is called with
+/// `D3D11_SHARE_TEXTURE`, confirming step 3 is live on this host.
+///
+/// `RESOURCE_CREATE_3D` carries an explicit `bind`, is dispatched by QEMU
+/// unconditionally, and passes the guest's value through verbatim — so it is
+/// the only way for the guest to say "this one is a scanout".  The bind set
+/// below is exactly the one the fix was verified with.
+fn create_resource_3d(dev: &mut VirtioGpuDevice, width: u32, height: u32) -> KernelResult<u32> {
+    let resource_id = dev.next_resource_id;
+    dev.next_resource_id = dev.next_resource_id.wrapping_add(1);
+
+    let req = VirtioGpuResourceCreate3d {
+        hdr: VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_RESOURCE_CREATE_3D),
+        resource_id,
+        target: VIRGL_TARGET_TEXTURE_2D,
+        format: VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+        bind: VIRGL_RES_BIND_RENDER_TARGET
+            | VIRGL_RES_BIND_SAMPLER_VIEW
+            | VIRGL_RES_BIND_SCANOUT,
+        width,
+        height,
+        depth: 1,
+        array_size: 1,
+        last_level: 0,
+        nr_samples: 0,
+        flags: VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
+        _padding: 0,
+    };
+    // SAFETY: VirtioGpuResourceCreate3d is #[repr(C)], so its byte layout
+    // matches the virtio wire format.  The slice covers exactly its size.
+    let req_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &req as *const _ as *const u8,
+            core::mem::size_of::<VirtioGpuResourceCreate3d>(),
+        )
+    };
+
+    let resp_type = send_ctrl_cmd(
+        dev,
+        req_bytes,
+        512,
+        core::mem::size_of::<VirtioGpuCtrlHdr>(),
+    )?;
+
+    if resp_type != VIRTIO_GPU_RESP_OK_NODATA {
+        serial_println!("[virtio-gpu] RESOURCE_CREATE_3D: resp={:#x}", resp_type);
         return Err(KernelError::IoError);
     }
     Ok(resource_id)

@@ -1341,6 +1341,43 @@ honest zeros), `kernel/src/virtio/gpu.rs:284` (`negotiate(0)` — requests no
 features), `scripts/boot-test.sh:2262,2276` (`-device virtio-gpu-pci`,
 `-display none`).
 
+### UPDATE 2026-08-19 (lane A): option A is **done**. The question is now only B vs C.
+
+**In short:** the kernel-side half described in option A above has been built
+and tested, so you are no longer choosing whether to do it — it exists. What is
+still yours to decide is whether to start the Mesa port (**B**) or leave 3D
+parked and just keep the record straight (**C**). Option A is now a description
+of the tree, not a proposal.
+
+`SLATE_GPU=virtio-gpu-gl-pci ./scripts/boot-test.sh` boots the 3D-capable
+device green — full display bring-up, primary display present, whole test suite
+passing — and the default device is unchanged and separately re-tested. The
+`SET_SCANOUT: resp=0x1203` regression quoted above is fixed.
+
+**The cause was not what this entry guessed.** It says the 3D engine "rejects
+the simple 2D memory buffer we hand it", which is close but not actionable. The
+actual reason: the emulator's translation of our "make me a 2D image" command
+hardcodes the buffer's usage flags and gives the guest no field to change them,
+and its 3D engine only allocates the Windows-shareable texture that displaying
+requires when those flags say *scanout*. So no buffer made with that command
+could ever be displayed on this host, by any guest — including the PC's own
+firmware, which fails identically. The fix is to allocate the framebuffer with
+the richer 3D-flavoured command, which does carry the flags. Reasoning and
+rejected alternatives: `design-decisions.md` §243; evidence and the debugger
+session: `known-issues.md`, 2026-08-19 RESOLVED.
+
+**The caveat in this entry still stands in full, and is worth restating because
+option A's completion makes it easy to over-read.** Nothing renders 3D. The
+driver issues exactly one command from the 3D set — the one that allocates the
+framebuffer — and never creates a rendering context or submits a command
+stream. `3D_FEATURES = 0` and the empty capset list in `virtgpu_uapi.rs` are
+still correct and still untouched. "The 3D device boots" is not "3D works".
+
+**If this is never answered:** unchanged — nothing breaks, nothing degrades. One
+thing did get *better*: the deferral's cited premise is now not merely stale but
+visibly so, since the environment it says does not exist is a documented flag on
+the test harness.
+
 ---
 
 

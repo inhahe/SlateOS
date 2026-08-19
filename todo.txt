@@ -54026,6 +54026,20 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##     1, no primary display) because QEMU's virtio-gpu-gl routes through
 ##     virglrenderer even when we accept no page-0 features. That kernel-side
 ##     fix is LANE A's and is the gate on any harness flip.
+##     -- DONE 2026-08-19. Root cause was not feature negotiation at all:
+##     QEMU's RESOURCE_CREATE_2D hardcodes bind=RENDER_TARGET, virglrenderer
+##     only allocates the shared D3D11 texture when bind includes
+##     VIRGL_RES_BIND_SCANOUT, and without that texture SET_SCANOUT's
+##     get_info_ext returns EINVAL on Windows. The driver now creates the
+##     framebuffer with RESOURCE_CREATE_3D (0x0204) + the SCANOUT bind when the
+##     device offers VIRTIO_GPU_F_VIRGL, and accepts that bit for that sole
+##     purpose. `SLATE_GPU=virtio-gpu-gl-pci ./scripts/boot-test.sh` boots the
+##     GL device green (marked an experiment); the default device is unchanged
+##     and separately re-tested. See design-decisions.md S243, the 2026-08-19
+##     RESOLVED entry in known-issues.md, and the follow-up appended to
+##     requests/a-c-the-virgl-test-environment-...md. The harness flip is no
+##     longer gated on the kernel; whether to flip the DEFAULT device is a
+##     separate question and has NOT been done.
 ##   * S11 (/proc/sys/vm/overcommit_memory + commit policy): PREMISE FIRED, but
 ##     benignly -- the work overtook the prose rather than the prose blocking
 ##     the work. The entry still said "the vm/ subtree stays omitted (the

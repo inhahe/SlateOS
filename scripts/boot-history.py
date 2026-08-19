@@ -284,6 +284,30 @@ def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
 #: clean streak; everything else is a recurrence candidate.
 CLEAN_VERDICTS = frozenset({"PASS", "PASS_TOOLING", "BENCH_INCOMPLETE"})
 
+
+def is_experiment(rec: dict) -> bool:
+    """Whether this row is a deliberate probe rather than a boot of the tree.
+
+    A probe runs the kernel under conditions no checkout reproduces -- foreign
+    emulator flags, a hand-patched binary -- so its outcome is evidence about
+    the probe, not about the tree. It is recorded (never discarded: the reason
+    a thing was tried and what happened is exactly what stops it being tried
+    again) but it is kept out of every statistic that describes the tree's
+    health.
+
+    **Absent means "not an experiment", deliberately, even though absent is also
+    what every row written before this field looked like.** That is the opposite
+    of the rule `bench-history.py` applies to `accel` and `text_pad`, where
+    absent must never be folded into a known value -- and the difference is the
+    direction each error fails in. There, folding absent into a value *widens* a
+    band, and a wider band dismisses real regressions silently. Here, treating
+    an old probe as a normal boot can only *shorten* a clean streak or *add* a
+    failure to the counts, which shows up as a boot someone goes and looks at.
+    Under-counting failures would be the dangerous direction, and this cannot
+    do it. So the ambiguity is resolved toward the side that fails loudly.
+    """
+    return bool(rec.get("experiment"))
+
 VERDICT_HELP = {
     "PASS": "marker reached, every gate green",
     "PASS_TOOLING": "kernel booted; the harness failed to produce an artefact",
@@ -628,6 +652,23 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
         "label": args.label,
         "profile": args.profile,
     }
+    # Why this run is not a normal boot, or absent when it is one. Set for a
+    # deliberate probe -- non-default emulator flags, a hand-patched kernel --
+    # and stored for the same reason `bench/history.jsonl` stores it: such a run
+    # is not reproducible from a checkout, so it must not be counted as evidence
+    # about the tree.
+    #
+    # This exists because a probe was silently counted as a regression. On
+    # 2026-08-19 a one-off `-cpu host` boot, run only to find out whether WHPX
+    # could carry SMEP/SMAP/UMIP, died in OVMF before our kernel loaded -- a
+    # fact about QEMU, not about us -- and landed here as a TIMEOUT that reset
+    # the consecutive-clean streak to 0 after a long run of passes. Four open
+    # kernel issues have closure conditions written as counts of consecutive
+    # clean boots, so a streak that any experiment can zero is not merely untidy:
+    # it postpones closing real issues, and it trains a reader to shrug at
+    # failures in this file.
+    if args.experiment:
+        rec["experiment"] = args.experiment
     if args.wall_seconds is not None:
         rec["wall_seconds"] = args.wall_seconds
     if serial is not None:
@@ -694,11 +735,23 @@ def streaks(records: list[dict]) -> list[Streak]:
     `since_last` counts *records*, not clean records: a boot that failed for a
     different reason is still a boot in which this fingerprint did not appear,
     which is what the known-issues closure bars mean by "routine boots count".
+
+    Experiment boots are the exception, and excluding them is the whole reason
+    this function may be trusted to close an issue. That argument -- "a boot
+    that failed differently is still a boot where this did not appear" --
+    silently assumes the kernel *ran*. A probe need not have: the `-cpu host`
+    boot of 2026-08-19 died in OVMF before our kernel was loaded, so it could
+    not have exhibited any kernel fingerprint whatever. Counting it would be
+    recording the absence of a symptom in a run that had no opportunity to
+    show one, and `since_last` is exactly what several `known-issues.md`
+    closure bars are written in terms of. This is the direction this module
+    exists to prevent: not a missed failure, but a manufactured clean streak.
     """
+    tree = [r for r in records if not is_experiment(r)]
     out = []
     for fp in FINGERPRINTS:
-        st = Streak(fp=fp, recorded=len(records))
-        for rec in records:
+        st = Streak(fp=fp, recorded=len(tree))
+        for rec in tree:
             hit = fp.id in (rec.get("fingerprints") or [])
             if hit:
                 st.occurrences += 1
@@ -778,14 +831,50 @@ def _median(values: list[float]) -> float:
 
 
 def wall_populations(records: list[dict]) -> dict[str, list[float]]:
-    """Wall times grouped by build, never merged."""
+    """Wall times grouped by build, never merged.
+
+    Experiment boots are excluded outright rather than given a population of
+    their own, because "experiment" is not a build -- the probes have nothing in
+    common with each other. Two WHPX boots recorded on 2026-08-19 took 168 s and
+    186 s against a TCG median of ~120 s for the same profile, so leaving them
+    in silently shifted a number whose entire purpose is to say what a normal
+    boot costs.
+    """
     out: dict[str, list[float]] = {}
     for rec in records:
+        if is_experiment(rec):
+            continue
         wall = rec.get("wall_seconds")
         if not isinstance(wall, (int, float)) or isinstance(wall, bool):
             continue
         out.setdefault(sanitizer_of(rec), []).append(float(wall))
     return out
+
+
+def tail_clean_streak(records: list[dict]) -> int:
+    """How many times running the *tree* has booted clean, most recent first.
+
+    A named function rather than a loop inside `report()` because several
+    `known-issues.md` closure bars are written in terms of this number, so it is
+    a published quantity that has to be testable on its own — and because the
+    probe-skipping rule below is the kind that a second, inlined copy would
+    quietly fail to acquire.
+
+    Experiment boots are stepped over, not counted and not treated as a break.
+    Neither alternative is right: a probe is not a clean boot of the tree, so it
+    cannot extend the streak, and it is not a boot of the tree at all, so it
+    cannot end one either. Skipping is what makes this number mean "the tree has
+    booted clean this many times running", whatever was probed in between.
+    """
+    streak = 0
+    for rec in reversed(records):
+        if is_experiment(rec):
+            continue
+        if rec.get("verdict") in CLEAN_VERDICTS:
+            streak += 1
+        else:
+            break
+    return streak
 
 
 def report_wall(records: list[dict]) -> None:
@@ -828,17 +917,22 @@ def report(records: list[dict], current: dict | None) -> None:
                 if fp.id in hits and fp.note:
                     print(f"[boot-history]   {fp.id}: {fp.note}")
 
-    clean = sum(1 for r in records if r.get("verdict") in CLEAN_VERDICTS)
-    print(f"[boot-history] {len(records)} boot(s) recorded, {clean} clean "
-          f"({len(records) - clean} not)")
+    # Probes are set aside before anything is counted, not filtered at each
+    # call site: the streak and the totals must agree about what a boot is, and
+    # two separate filters are two chances to disagree.
+    tree = [r for r in records if not is_experiment(r)]
+    probes = len(records) - len(tree)
 
-    tail_clean = 0
-    for rec in reversed(records):
-        if rec.get("verdict") in CLEAN_VERDICTS:
-            tail_clean += 1
-        else:
-            break
-    print(f"[boot-history] current consecutive clean streak: {tail_clean}")
+    clean = sum(1 for r in tree if r.get("verdict") in CLEAN_VERDICTS)
+    print(f"[boot-history] {len(tree)} boot(s) recorded, {clean} clean "
+          f"({len(tree) - clean} not)")
+    if probes:
+        print(f"[boot-history] {probes} experiment boot(s) excluded "
+              f"(deliberate probes under non-default conditions; they say "
+              f"nothing about the tree)")
+
+    print("[boot-history] current consecutive clean streak: "
+          f"{tail_clean_streak(records)}")
     report_wall(records)
 
 
@@ -900,6 +994,13 @@ def main(argv=None) -> int:
     parser.add_argument("--wall-seconds", type=float, default=None)
     parser.add_argument("--label", default="",
                         help="free-form run tag, e.g. 'soak-iter3'")
+    parser.add_argument("--experiment", default="",
+                        help="why this boot is a deliberate probe rather than "
+                             "a boot of the tree (non-default emulator flags, "
+                             "a hand-patched kernel). Recorded, then excluded "
+                             "from the clean streak and the wall-time medians. "
+                             "boot-test.sh sets this automatically whenever "
+                             "QEMU_EXTRA or BENCH_EXPERIMENT is set.")
     parser.add_argument("--profile", default="debug")
     parser.add_argument("--commit", default="",
                         help="commit the tested kernel was built from; pass "

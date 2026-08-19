@@ -722,6 +722,9 @@ class _Args:
     commit = ""
     branch = ""
     dirty = False
+    # Empty is the ordinary case -- a boot of the tree, not a probe. The
+    # experiment path has its own tests below.
+    experiment = ""
 
 
 # --------------------------------------------------------------------------
@@ -752,6 +755,81 @@ def test_streak_resets_on_a_match(bh):
     st = {s.fp.id: s for s in bh.streaks(records)}["W1"]
     check("streak resets at the match", st.since_last, 2)
     check("occurrence counted", st.occurrences, 1)
+
+
+def _probe(verdict, why="QEMU_EXTRA=-accel whpx (non-default emulator flags)"):
+    """A boot run under conditions no checkout reproduces."""
+    r = _rec(verdict)
+    r["experiment"] = why
+    return r
+
+
+def test_an_experiment_boot_is_not_evidence_about_the_tree(bh):
+    """A deliberate probe must not touch any statistic describing the tree.
+
+    The failure this prevents is not hypothetical. On 2026-08-19 a one-off
+    `-cpu host` boot -- run purely to find out whether WHPX could carry
+    SMEP/SMAP/UMIP -- died inside OVMF before our kernel was loaded, and landed
+    in the history as a plain TIMEOUT. It reset a long consecutive-clean streak
+    to zero, and four open kernel issues have closure conditions written as
+    counts of consecutive clean boots.
+
+    Both directions are asserted, because only one of them is safe. Excluding
+    the probe from the *streak* is a correction; excluding it from
+    `since_last` is a correctness requirement, since a boot that never reached
+    our kernel cannot be evidence that a kernel bug failed to reappear.
+    """
+    records = [_rec("PASS"), _probe("TIMEOUT"), _rec("PASS")]
+
+    # A probe in the middle is stepped over, not treated as a break: the tree
+    # booted clean twice running, and nothing about the tree happened between.
+    check("a probe does not break the clean streak",
+          bh.tail_clean_streak(records), 2)
+    check("...and the same records without the tag do break it",
+          bh.tail_clean_streak([_rec("PASS"), _rec("TIMEOUT"), _rec("PASS")]),
+          1)
+
+    # The dangerous direction: a probe must not advance a closure bar.
+    st = {s.fp.id: s for s in bh.streaks(records)}["W1"]
+    check("a probe is not counted toward a fingerprint's clean run",
+          st.since_last, 2)
+    check("...and it is not counted among the records considered",
+          st.recorded, 2)
+
+
+def test_a_probe_that_passed_is_excluded_just_the_same(bh):
+    """Exclusion follows from being a probe, never from having failed.
+
+    A rule that only skipped *failed* experiments would be worse than none: it
+    would quietly inflate every clean streak with boots that never tested the
+    tree, which is the one error this module exists to prevent. The two WHPX
+    boots of 2026-08-19 both passed, and both are equally uninformative.
+    """
+    records = [_rec("PASS"), _probe("PASS"), _probe("PASS")]
+    check("passing probes do not pad the streak",
+          bh.tail_clean_streak(records), 1)
+
+    st = {s.fp.id: s for s in bh.streaks(records)}["W1"]
+    check("...nor a fingerprint's clean run", st.since_last, 1)
+
+
+def test_experiment_wall_times_do_not_move_the_median(bh):
+    """`wall time by build` must describe a boot someone can actually run.
+
+    Measured, not supposed: the two WHPX boots took 168 s and 186 s against a
+    TCG median near 120 s for the same profile, so leaving them in shifts the
+    only number that answers "how long should this take?".
+    """
+    def timed(wall, probe=False):
+        r = _probe("PASS") if probe else _rec("PASS")
+        r["wall_seconds"] = wall
+        return r
+
+    records = [timed(120), timed(120), timed(186, probe=True)]
+    pops = bh.wall_populations(records)
+    check("only one population, and the probe is not in it",
+          {k: sorted(v) for k, v in pops.items()},
+          {bh.sanitizer_of(_rec("PASS")): [120.0, 120.0]})
 
 
 def test_unvalidated_fingerprint_reports_no_streak(bh):

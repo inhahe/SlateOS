@@ -1343,6 +1343,31 @@ record_boot_outcome() {
     if [ -n "${BOOT_LABEL:-}" ]; then
         args+=(--label "$BOOT_LABEL")
     fi
+    # Mirrors the benchmark recorder's experiment rule, and must keep mirroring
+    # it. A run that no checkout reproduces is not evidence about the tree, and
+    # that is as true of its boot outcome as of its timings -- but only the
+    # benchmark half used to say so. The gap let a deliberate `-cpu host` probe,
+    # which died in OVMF before our kernel was even loaded, land as a plain
+    # TIMEOUT and reset the consecutive-clean streak that four open kernel
+    # issues use as their closure bar.
+    #
+    # Every reason is collected into one string rather than the first one
+    # winning, because a probe is often several at once (foreign accelerator
+    # *and* foreign CPU model), and the reader of a row a month from now needs
+    # all of them to know what was actually run.
+    local why=""
+    if [ -n "${BENCH_EXPERIMENT:-}" ]; then
+        why="$BENCH_EXPERIMENT"
+    fi
+    if [ -n "${QEMU_EXTRA:-}" ]; then
+        why="${why:+$why; }QEMU_EXTRA=$QEMU_EXTRA (non-default emulator flags)"
+    fi
+    if [ "${QEMU_CPU_OVERRIDDEN:-0}" = 1 ]; then
+        why="${why:+$why; }QEMU_CPU=$QEMU_CPU (non-default guest CPU)"
+    fi
+    if [ -n "$why" ]; then
+        args+=(--experiment "$why")
+    fi
     if [ -n "${QEMU_START_EPOCH:-}" ]; then
         local wall=$(( ${QEMU_END_EPOCH:-$(date +%s)} - QEMU_START_EPOCH ))
         if [ "$wall" -ge 0 ]; then
@@ -1746,6 +1771,16 @@ fi
 # known-issues.md).  Requesting them explicitly makes the boot test actually
 # exercise those paths — and makes a future `clac` in the ISR stubs testable
 # rather than dead code.  Override with QEMU_CPU=... to test other models.
+#
+# The override is remembered here rather than inferred later by comparing
+# against the default string: a default edited in this line would silently stop
+# matching such a comparison, and the consequence of a missed match is a probe
+# recorded as an ordinary boot of the tree.
+if [ -n "${QEMU_CPU:-}" ]; then
+    QEMU_CPU_OVERRIDDEN=1
+else
+    QEMU_CPU_OVERRIDDEN=0
+fi
 QEMU_CPU="${QEMU_CPU:-qemu64,+smep,+smap,+umip}"
 
 # Extra QEMU arguments, for diagnosing emulator-side effects without touching

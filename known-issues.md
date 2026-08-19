@@ -39837,7 +39837,7 @@ of base model, so the likely outcome is either `qemu64`'s feature set or
 `host`'s crash. If someone does try, the cheap probe is the `[cpu] Feature
 detection:` block in the first 80 lines of serial: it answers in one boot.
 
-### TD-A-A-BARE-METAL-RUN-RECORDS-ITS-ACCELERATOR-AS-ABSENT, WHICH IS THE ONE CONFLATION §237 EXISTS TO PREVENT (lane A, 2026-08-19) -- OPEN
+### TD-A-A-BARE-METAL-RUN-RECORDS-ITS-ACCELERATOR-AS-ABSENT, WHICH IS THE ONE CONFLATION §237 EXISTS TO PREVENT (lane A, 2026-08-19) -- FIXED 2026-08-19; see "Resolution" at the end of this entry. The `boot-history.jsonl` sibling at the end remains OPEN.
 
 **In short:** Every benchmark record now stores which emulator it ran on, so
 that a fast run under hardware acceleration is never compared against a slow one
@@ -39907,6 +39907,56 @@ accelerator in `boot-test.sh` ever changes -- which is precisely what Q54 asks
 -- boots on either side of the change become indistinguishable, and clean
 streaks would span both. Record `accel` there too, from the same banner, when
 Q54 is answered either way.
+
+#### Resolution (2026-08-19)
+
+Fixed as designed, script-side, in `scripts/bench-history.py`: a second
+anchored pattern `BARE_METAL_RE` for the kernel's other sentence, and a named
+constant `ACCEL_BARE_METAL = "bare metal"` — the same string as
+`Hypervisor::name()`'s `None` variant (`kernel/src/hypervisor.rs:77`), so the
+field's vocabulary stays the kernel's own and the harness invents no token of
+its own. `parse_accel()` tries `ACCEL_RE` first and falls back to the second,
+so the three platforms now get three answers: a vendor label, `"bare metal"`,
+and `None` for a log that predates both banners.
+
+**Three tests, and the third is the one that matters.** The first two check
+the parser; on their own they would pass for a parser that gets the *relation*
+between the three answers wrong, so both assert the relation directly
+(`parse_accel(metal) == parse_accel(old)` is `False`, and likewise against
+TCG). The third — `test_a_bare_metal_arm_does_not_band_with_a_pre_banner_one`
+— reconstructs the exact case the entry identified as surviving only by luck:
+identical source, three arms from real hardware and three from a pre-banner
+kernel at the *same* commit. Before the fix those six formed one group. They
+now form two. That is the assertion the entry was actually about; the parser
+returning a new string is only the means.
+
+**Non-crossing is asserted, not reasoned about.** The two patterns cannot
+match each other's line, and the test says so of both directions. This is
+belt-and-braces — the literals diverge immediately after `[hypervisor] ` and
+the kernel emits exactly one per boot — but the failure it rules out is worse
+than the bug being fixed: a loosened `ACCEL_RE` would capture some fragment of
+the bare-metal sentence as a *vendor name*, filing the run under an
+accelerator that does not exist. `None` at least announced that something was
+unknown; a plausible-looking wrong vendor announces nothing. The anchoring is
+tested the same way, with a line that merely quotes the banner.
+
+**Mutation-verified, four mutations, all caught:** bare-metal detection
+removed entirely, i.e. the original bug (2 failures); `ACCEL_BARE_METAL` set
+back to `None` (3); the line anchor dropped so a quoted banner counts (1);
+`ACCEL_RE` loosened to swallow the bare-metal line and capture a nonexistent
+vendor (2).
+
+**Not retroactive, and it does not need to be.** No row on disk was written by
+a bare-metal boot — this machine has never run one — so no existing record
+changes meaning and none is rewritten. The fix is entirely forward-looking, by
+design: it works on logs as they are *read*, which is why it was preferable to
+changing the kernel's output. The day the first bare-metal log is produced, it
+parses correctly without anyone remembering this entry existed.
+
+**The `boot-history.jsonl` sibling above is still open** and is deliberately
+left so: it is gated on Q54 being answered, since what makes it bite is the
+default accelerator *changing*, and recording a field to guard a change nobody
+has decided to make yet is guesswork about which change it will be.
 
 ### B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT: ITS RESOLUTION FLOOR IS 100x TIGHTER THAN ITS OWN DERIVATION (lane A, 2026-08-19) -- FIXED 2026-08-19 in `bf565ae6a` + `26c139a81`; see "Resolution" at the end of this entry
 

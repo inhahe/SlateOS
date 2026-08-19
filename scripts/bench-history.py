@@ -160,6 +160,37 @@ TEXTPAD_RE = re.compile(r"^\[boot\] build profile:.*\btextpad=(\d+)",
 ACCEL_RE = re.compile(r"^\[hypervisor\] Detected: (.+?) \(signature:",
                       re.MULTILINE)
 
+# The other half of the same banner, and the reason `ACCEL_RE` alone was not
+# enough. `kernel/src/hypervisor.rs:235` prints the `Detected:` line *only*
+# inside `if hv.is_virtual()`; on real hardware it prints this sentence
+# instead. Reading only the first pattern therefore returned `None` for a
+# bare-metal boot -- and `None` is defined two paragraphs up to mean "this
+# kernel predates the banner and cannot say". Two genuinely different
+# platforms rendering as one value is the precise conflation §237 exists to
+# forbid, arriving by the back door.
+#
+# It is not a hypothetical platform: bare metal is Q53 option D and the
+# fallback in Q54, and it is the only option on the table that fully restores
+# CLAUDE.md's 10% regression threshold, because the layout noise behind it is
+# a TCG artefact. The very first thing that work produces is a set of records
+# this parser would have mislabelled -- silently, and into a group that looks
+# entirely plausible.
+#
+# Fixed here rather than in the kernel because this works on logs already
+# written; the kernel has always printed enough to tell the two apart, and
+# only the reader was blind. Anchored at the line start like its sibling, and
+# with the parenthetical included, so that the two patterns cannot cross-match
+# a line meant for the other.
+BARE_METAL_RE = re.compile(
+    r"^\[hypervisor\] Running on bare metal \(no hypervisor detected\)",
+    re.MULTILINE)
+
+#: What `parse_accel` returns for a bare-metal boot. Deliberately the same
+#: string as `Hypervisor::name()`'s `None` variant (`kernel/src/hypervisor.rs`
+#: line 77), so the field's vocabulary stays the kernel's own and no token is
+#: invented that exists only in the harness.
+ACCEL_BARE_METAL = "bare metal"
+
 #: `split` token values with no percentage attached.
 SPLIT_ABSENT = None      # the log predates the column entirely
 SPLIT_UNCHECKED = "-"    # the kernel ran no cross-check for this entry
@@ -663,11 +694,26 @@ def parse_text_pad(path):
 def parse_accel(path):
     """Which accelerator this kernel ran on, as the guest itself reported it.
 
-    Returns e.g. `"QEMU TCG"` or `"Hyper-V/WHPX"`, or `None` when the log
-    carries no `[hypervisor] Detected:` line at all -- which means the kernel
-    predates the banner, **not** that it ran on TCG. See `ACCEL_RE`; conflating
-    the two is provably wrong, because the first WHPX run was recorded before
-    this field existed.
+    Returns e.g. `"QEMU TCG"` or `"Hyper-V/WHPX"` under a hypervisor,
+    `ACCEL_BARE_METAL` on real hardware, or `None` when the log carries
+    *neither* banner -- which means the kernel predates them, **not** that it
+    ran on TCG. See `ACCEL_RE`; conflating the two is provably wrong, because
+    the first WHPX run was recorded before this field existed.
+
+    # Why two patterns rather than one
+
+    The kernel prints one sentence when it is running under something and a
+    different one when it is not, so a single pattern can only ever recognise
+    one of the two platforms and must return "cannot say" for the other. Which
+    of the three answers a bare-metal boot gets is the whole question: `None`
+    pools it with every pre-banner record, and pooling is what widens a band,
+    and a wider band dismisses real regressions in silence.
+
+    The patterns are tried in order and both are anchored, but the order is a
+    readability choice, not a correctness one -- they are mutually exclusive by
+    construction, since the kernel emits exactly one of them per boot and the
+    two literals share no prefix past `[hypervisor] `. `test-bench-history.py`
+    asserts the non-crossing directly rather than leaving it to be re-derived.
 
     Reads the file directly rather than taking already-parsed text, for the same
     reason `parse_text_pad` does: the line is printed during early boot,
@@ -680,7 +726,9 @@ def parse_accel(path):
     except OSError:
         return None
     match = ACCEL_RE.search(text)
-    return match.group(1).strip() if match else None
+    if match:
+        return match.group(1).strip()
+    return ACCEL_BARE_METAL if BARE_METAL_RE.search(text) else None
 
 
 TRACE_EDGES = ("start", "end")

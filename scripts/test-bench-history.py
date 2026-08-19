@@ -3508,6 +3508,137 @@ def test_hot_symbols_report_a_stale_pattern_as_null_not_absence(bh, tmpdir):
 
 
 # ---------------------------------------------------------------------------
+# Which accelerator the kernel ran on (`[hypervisor]` banner -> `accel`)
+# ---------------------------------------------------------------------------
+
+
+def test_bare_metal_is_its_own_accelerator_not_an_absent_one(bh, tmpdir):
+    """Three platforms, three answers -- and the third used to be missing.
+
+    `kernel/src/hypervisor.rs` prints `Detected: <name> (signature: ...)` when
+    it is running under something, and `Running on bare metal (no hypervisor
+    detected)` when it is not. The parser knew only the first, so a bare-metal
+    boot returned `None` -- the value defined to mean "this kernel predates the
+    banner and cannot say".
+
+    That fold is the one design-decisions.md §237 exists to forbid, and the
+    argument is not about tidiness: two platforms sharing a value share a
+    grouping key, arms from different platforms then form one band, and a band
+    is a range used to *dismiss* movements. One spanning bare metal and TCG
+    would dismiss essentially every regression this harness exists to catch --
+    silently, and the group it produced would look entirely plausible.
+
+    Nor is bare metal a hypothetical platform. It is Q53 option D and the
+    fallback in Q54, and it is the only option on the table that fully restores
+    CLAUDE.md's 10% threshold, because the layout noise behind that threshold
+    is a TCG artefact. The first artefact that work produces is a log this
+    parser must not mislabel.
+    """
+    # The literals below are copied from the kernel, not paraphrased. A
+    # paraphrase tests the test's idea of the banner rather than the banner,
+    # which is how the bare-metal sentence went unread in the first place.
+    virt = write(tmpdir, "virt.txt", "\n".join([
+        "=== Kernel booting ===",
+        '[hypervisor] Detected: QEMU TCG (signature: "TCGTCGTCGTCG")',
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+    metal = write(tmpdir, "metal.txt", "\n".join([
+        "=== Kernel booting ===",
+        "[hypervisor] Running on bare metal (no hypervisor detected)",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+    old = write(tmpdir, "old.txt", "\n".join([
+        "=== Kernel booting ===",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+
+    check("a hypervisor boot still reports its vendor label",
+          bh.parse_accel(virt), "QEMU TCG")
+    check("a bare-metal boot reports bare metal",
+          bh.parse_accel(metal), bh.ACCEL_BARE_METAL)
+    check("a pre-banner log still says None",
+          bh.parse_accel(old), None)
+
+    # Each assertion above is satisfiable by a parser that gets the
+    # *relationship* between the three wrong, so state the relationship too.
+    check("...and bare metal is not the same answer as 'cannot say'",
+          bh.parse_accel(metal) == bh.parse_accel(old), False)
+    check("...nor the same answer as TCG",
+          bh.parse_accel(metal) == bh.parse_accel(virt), False)
+
+    # The vocabulary is the kernel's own (`Hypervisor::name()`'s None variant),
+    # so the field never carries a token that exists only in the harness.
+    check("the token is the kernel's own word for it",
+          bh.ACCEL_BARE_METAL, "bare metal")
+
+
+def test_the_two_hypervisor_patterns_cannot_read_each_others_lines(bh, tmpdir):
+    """Neither pattern may fire on the line meant for the other.
+
+    They are mutually exclusive by construction -- the kernel emits exactly one
+    per boot, and the literals diverge immediately after `[hypervisor] `. But
+    "by construction" is an argument, and an argument is precisely what
+    `CANARY_MIN_RESOLVABLE`'s derivation and commit-as-source-identity both
+    were, right up until they turned out to be false. Cheaper to assert it.
+
+    The failure ruled out here is worse than the bug being fixed: if `ACCEL_RE`
+    could match the bare-metal sentence it would capture some fragment of it as
+    a vendor name, and the run would be filed under an accelerator that does
+    not exist -- a value that is not even recognisable as wrong, where `None`
+    at least announced that something was unknown.
+    """
+    virt_line = ('[hypervisor] Detected: Hyper-V/WHPX '
+                 '(signature: "Microsoft Hv")')
+    metal_line = "[hypervisor] Running on bare metal (no hypervisor detected)"
+
+    check("the Detected pattern ignores the bare-metal sentence",
+          bh.ACCEL_RE.search(metal_line), None)
+    check("the bare-metal pattern ignores the Detected line",
+          bh.BARE_METAL_RE.search(virt_line), None)
+
+    # Anchored at line start, like its sibling: a line that merely quotes the
+    # sentence -- a log message, a test name, this docstring echoed into a
+    # serial log -- is not the kernel reporting its platform.
+    quoted = write(tmpdir, "quoted.txt", "\n".join([
+        "[test] checking: [hypervisor] Running on bare metal "
+        "(no hypervisor detected)",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+    check("a quoted banner mid-line is not a platform report",
+          bh.parse_accel(quoted), None)
+
+
+def test_a_bare_metal_arm_does_not_band_with_a_pre_banner_one(bh):
+    """The consequence, at the level where it would have done damage.
+
+    The test above proves the parser returns three values; this proves the
+    three values do the work. The saving grace before the fix was only that the
+    grouping key also carries source identity, so an old absent-accel record
+    and a bare-metal one at *different* commits did not in fact collide. That
+    was luck, not design: it fails the moment anyone benchmarks a commit that
+    also has pre-banner history -- which is every commit before 2026-08-19.
+
+    So the case constructed here is exactly that one: identical source, three
+    arms from real hardware and three from a pre-banner kernel. It is the case
+    that used to merge, and merging it would produce a band from two platforms
+    whose ratio is unbounded.
+    """
+    metal = _sweep_arms({0: 500, 1024: 600, 2048: 550},
+                        accel=bh.ACCEL_BARE_METAL)
+    # Same commit, same pads, same numbers, no accelerator recorded at all:
+    # that is what a pre-banner kernel's rows look like.
+    unknown = [{k: v for k, v in r.items() if k != "accel"} for r in metal]
+
+    groups = bh.layout_arms(metal + unknown, "H", "release")
+    check("bare metal and 'cannot say' are two groups, not one",
+          len(groups), 2)
+    accels = {key[1] for key in groups}
+    check("...one keyed by bare metal, by name", bh.ACCEL_BARE_METAL in accels,
+          True)
+    check("...the other still keyed by 'cannot say'", None in accels, True)
+
+
+# ---------------------------------------------------------------------------
 # Layout padding (`SLATEOS_TEXT_PAD` -> `textpad=` in the boot banner)
 # ---------------------------------------------------------------------------
 

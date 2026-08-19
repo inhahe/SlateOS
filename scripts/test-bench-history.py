@@ -454,6 +454,115 @@ def test_canary_trace_absence_is_not_an_error(bh, tmpdir):
                                 "[bench] CANARY-TRACE 0:5.15\n")), None)
 
 
+def test_canary_arms_attach_to_the_trace_they_belong_to(bh, tmpdir):
+    """The two raw arms must reach the record, alongside the value they made.
+
+    The traced figure is `(store - nop) * 100 / n` -- a *difference*, so a move
+    in it is ambiguous between the two arms, and the two mean opposite things. A
+    dearer store arm is the host getting slower at the thing being measured; a
+    cheaper nop arm is the measurement's own baseline shifting, which is an
+    instrument artefact and no evidence about the host at all. Every trace
+    recorded before this line existed computed both arms and threw them away,
+    which is why the ~5.79-centicycle cluster cannot be attributed today.
+
+    So the arms have to survive into the record next to the derived value, and
+    -- the part with teeth -- next to the *right* value.
+    """
+    log = write(tmpdir, "canary-arms.txt",
+                "[bench] SCORE a 10 1 PASS\n"
+                "[bench] CANARY 5 5 100 5 5 0 13 0 515 517\n"
+                "[bench] CANARY-TRACE 0:5.15 8:5.17 end:5.15\n"
+                "[bench] CANARY-ARMS 0:1000:1515 8:1000:1517 end:1000:1515\n")
+    got = bh.parse_canary(log)
+    check("each traced sample gains its two arms",
+          [(s["nop"], s["store"]) for s in (got or {}).get("trace", [])],
+          [(1000, 1515), (1000, 1517), (1000, 1515)])
+    check("and keeps the derived value it already had",
+          [s["centi"] for s in (got or {}).get("trace", [])],
+          [515, 517, 515])
+    check("the endpoint label survives the merge",
+          (got or {})["trace"][-1]["edge"], "end")
+
+    # The arms are raw totals, not a rescaled value: `n` is not on the line and
+    # reconstructing it from the quotient would round-trip through the very
+    # division whose ambiguity the arms exist to resolve.
+    check("arms are parsed as raw integers, undivided",
+          bh.parse_canary_arms(" 0:123456789:987654321"),
+          [{"pos": 0, "nop": 123456789, "store": 987654321}])
+
+
+def test_canary_arms_never_merge_onto_the_wrong_sample(bh, tmpdir):
+    """A misaligned arm is worse than a missing one, so a disagreement drops all.
+
+    A missing arm is a gap: the consumer sees no `nop` key and knows to say
+    nothing. A *misplaced* arm is evidence pointing confidently at the wrong
+    slot, and nothing downstream can detect it -- it would produce exactly the
+    wrong attribution the arms were added to prevent. The trace is the older,
+    independently useful record, so it survives intact and the arms are what
+    get dropped.
+    """
+    base = ("[bench] CANARY 5 5 100 5 5 0 13 0 515 517\n"
+            "[bench] CANARY-TRACE 0:5.15 8:5.17 end:5.15\n")
+
+    short = bh.parse_canary(write(tmpdir, "canary-arms-short.txt", base +
+                                  "[bench] CANARY-ARMS 0:1000:1515\n"))
+    check("a truncated arms line merges nothing",
+          any("nop" in s for s in (short or {})["trace"]), False)
+    check("and leaves the trace entirely intact",
+          [s["centi"] for s in (short or {})["trace"]], [515, 517, 515])
+
+    # Same length, mismatched labels: position 24 was never traced. Merging by
+    # ordinal alone would file 24's arms under 8.
+    skewed = bh.parse_canary(write(
+        tmpdir, "canary-arms-skewed.txt", base +
+        "[bench] CANARY-ARMS 0:1000:1515 24:1000:1517 end:1000:1515\n"))
+    check("equal length is not enough -- the labels must agree too",
+          any("nop" in s for s in (skewed or {})["trace"]), False)
+
+    # An endpoint against a positioned sample is the same failure wearing a
+    # different label, and is the one an ordinal-only merge is likeliest to hit:
+    # a failed calibration records one endpoint instead of two.
+    edge_skew = bh.parse_canary(write(
+        tmpdir, "canary-arms-edge.txt", base +
+        "[bench] CANARY-ARMS 0:1000:1515 end:1000:1517 8:1000:1515\n"))
+    check("an endpoint may not merge onto a positioned sample",
+          any("nop" in s for s in (edge_skew or {})["trace"]), False)
+
+
+def test_canary_arms_absence_is_not_an_error(bh, tmpdir):
+    """Every canary record on disk predates the arms, so absence is the norm.
+
+    A reader must be able to tell "the arms were not recorded" from "the arms
+    were recorded and were equal". The first is 79 existing records; the second
+    would be a finding.
+    """
+    plain = write(tmpdir, "canary-arms-absent.txt",
+                  "[bench] CANARY 5 5 100 5 5 0 13 0 515 517\n"
+                  "[bench] CANARY-TRACE 0:5.15 end:5.15\n")
+    got = bh.parse_canary(plain)
+    check("a trace without arms keeps every sample",
+          len((got or {})["trace"]), 2)
+    check("and no sample claims an arm it does not have",
+          any("nop" in s or "store" in s for s in (got or {})["trace"]), False)
+
+    # Arms with no trace to attach to are dropped rather than stood up as a
+    # second, parallel sample list -- that would hand every consumer a second
+    # shape to handle for a case that does not occur in a whole log.
+    orphan = bh.parse_canary(write(
+        tmpdir, "canary-arms-orphan.txt",
+        "[bench] CANARY 5 5 100 5 5 0 13 0 515 517\n"
+        "[bench] CANARY-ARMS 0:1000:1515\n"))
+    check("arms without a trace create no trace key",
+          "trace" in (orphan or {}), False)
+    check("but the canary itself still parses",
+          (orphan or {}).get("pct"), 100)
+
+    # And arms before any canary have nothing to attach to at all.
+    check("arms with no canary at all yield no canary",
+          bh.parse_canary(write(tmpdir, "canary-arms-nocanary.txt",
+                                "[bench] CANARY-ARMS 0:1000:1515\n")), None)
+
+
 def _trace(*pairs):
     """Build a trace list from `(pos_or_edge, centi)` pairs."""
     out = []

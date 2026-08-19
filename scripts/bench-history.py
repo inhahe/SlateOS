@@ -178,6 +178,32 @@ CANARY_TRACE_RE = re.compile(
 )
 CANARY_TRACE_SAMPLE_RE = re.compile(r"(\S+?):(\d+)(?:\.(\d+))?")
 
+# `[bench] CANARY-ARMS <pos>:<nop>:<store> ...`
+#
+# The same samples as CANARY-TRACE, as the two raw arm totals each traced value
+# was derived from. Emitted on its own line, so this regex and the one above are
+# independent and an old log missing this line parses exactly as before.
+#
+# Why the arms are worth storing when the derived value is already here: the
+# value is `(store - nop) * 100 / n`, a *difference*, so a move in it is
+# ambiguous between the two arms -- and the two mean opposite things. A dearer
+# store arm is the host getting slower at the thing being measured. A *cheaper
+# nop arm* is the measurement's own baseline shifting, which is an instrument
+# artefact and says nothing about the host.
+#
+# That ambiguity is the open question this exists to close. Across every trace
+# recorded up to 2026-08-19 the samples cluster at ~5.04, ~5.16 and ~5.79
+# centicycles with nothing in between, and the top cluster is +12.3% over the
+# middle one -- discrete, repeatable in magnitude, and independent of position,
+# which is the profile of a mechanism rather than of drift. Which arm moved
+# decides whether that is a real host state or an artefact of the A/B, and the
+# arms were computed and discarded on every run recorded before this line
+# existed. See known-issues.md.
+CANARY_ARMS_RE = re.compile(
+    r"^\[bench\]\s+CANARY-ARMS((?:\s+\S+?:\d+:\d+)*)\s*$"
+)
+CANARY_ARMS_SAMPLE_RE = re.compile(r"(\S+?):(\d+):(\d+)")
+
 # Percent deviation at which a run is called contaminated. Must match
 # `CANARY_TOLERANCE_PCT` in `kernel/src/bench.rs`; the kernel prints its own
 # verdict, and this recomputes it so a replayed/old log is judged by the same
@@ -536,12 +562,83 @@ def parse_canary_trace(text):
     return samples
 
 
+def parse_canary_arms(text):
+    """Parse the sample list off a CANARY-ARMS line into a list of dicts.
+
+    Each element is `{"pos": <int> or None, "nop": <int>, "store": <int>}`, in
+    the order the samples were taken, with `"edge"` present on an endpoint --
+    the same shape and the same ordering as `parse_canary_trace`, deliberately,
+    because the two lists are merged elementwise by `merge_canary_arms` and a
+    pair of lists that are merged elementwise but *shaped* differently is a pair
+    that will eventually be merged offset by one.
+
+    The arms are raw cycle totals for the two A/B arms, not a derived value: the
+    traced centicycle figure is `(store - nop) * 100 / n`. They are stored
+    unreduced on purpose -- `n` is not on this line, and reconstructing it from
+    the quotient would round-trip through the very division whose ambiguity the
+    arms exist to resolve.
+    """
+    samples = []
+    for pos, nop, store in CANARY_ARMS_SAMPLE_RE.findall(text):
+        sample = {
+            "pos": None if pos in TRACE_EDGES else int(pos),
+            "nop": int(nop),
+            "store": int(store),
+        }
+        if pos in TRACE_EDGES:
+            sample["edge"] = pos
+        samples.append(sample)
+    return samples
+
+
+def _same_trace_slot(trace_sample, arm_sample):
+    """True when two samples name the same slot of the same suite.
+
+    Compares the label only -- `pos` and `edge` -- because that is all the two
+    lines share; the trace carries a derived value and the arms carry the totals
+    it was derived from, so there is nothing else to cross-check against.
+    """
+    return (trace_sample.get("pos") == arm_sample.get("pos")
+            and trace_sample.get("edge") == arm_sample.get("edge"))
+
+
+def merge_canary_arms(trace, arms):
+    """Attach `nop`/`store` to each trace sample, or return the trace unchanged.
+
+    Merging is all-or-nothing. The two lines are emitted from one walk of one
+    array, so in a well-formed log they agree in length and label at every slot;
+    if they do not, the log is not one this function can align, and attaching
+    arms to the wrong sample would produce exactly the confident-but-wrong
+    attribution the arms were added to prevent. A missing arm is a gap -- the
+    caller sees no `nop` key and knows to say nothing. A *misplaced* arm is
+    evidence pointing at the wrong slot, and no consumer downstream can detect
+    it. So a disagreement drops every arm rather than any trace sample: the
+    trace is the older, independently-useful record and must survive intact.
+
+    Returns a new list; the inputs are not modified.
+    """
+    if len(trace) != len(arms):
+        return trace
+    if not all(_same_trace_slot(t, a) for t, a in zip(trace, arms)):
+        return trace
+    merged = []
+    for trace_sample, arm_sample in zip(trace, arms):
+        sample = dict(trace_sample)
+        sample["nop"] = arm_sample["nop"]
+        sample["store"] = arm_sample["store"]
+        merged.append(sample)
+    return merged
+
+
 def parse_canary(path):
     """Extract the contamination canary as a dict, or None.
 
     Keys: `start`, `end`, `pct` always; `min`, `max`, `spread`, `samples`
     only when the log carries mid-suite sampling; `trace` only when the log
-    carries the per-sample CANARY-TRACE line.
+    carries the per-sample CANARY-TRACE line. Each `trace` sample additionally
+    carries `nop`/`store` when the log also has the matching CANARY-ARMS line
+    and the two agree slot for slot -- a log predating that line, or one whose
+    two lines disagree, yields a trace with no arms rather than an error.
 
     None means the log has no canary at all, in which case contamination is
     *unknown* for that run -- materially different from "known clean", and
@@ -565,6 +662,17 @@ def parse_canary(path):
                     samples = parse_canary_trace(trace_match.group(1))
                     if samples:
                         result["trace"] = samples
+                    continue
+                arms_match = CANARY_ARMS_RE.match(stripped)
+                if arms_match and result is not None and "trace" in result:
+                    # Only ever merged onto an existing trace, never stored
+                    # alone. The kernel emits both lines from one walk of one
+                    # array, so arms without a trace means a truncated or
+                    # interleaved log -- and standing the arms up as a second,
+                    # parallel sample list would hand every consumer a second
+                    # shape to handle for no case that occurs in a whole log.
+                    result["trace"] = merge_canary_arms(
+                        result["trace"], parse_canary_arms(arms_match.group(1)))
                     continue
                 match = CANARY_RE.match(stripped)
                 if match:

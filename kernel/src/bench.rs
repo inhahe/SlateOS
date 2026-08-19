@@ -1639,6 +1639,51 @@ static CANARY_TRACE_POS: [core::sync::atomic::AtomicU32; CANARY_TRACE_MAX] =
     [const { core::sync::atomic::AtomicU32::new(0) }; CANARY_TRACE_MAX];
 static CANARY_TRACE_VAL: [AtomicU64; CANARY_TRACE_MAX] =
     [const { AtomicU64::new(0) }; CANARY_TRACE_MAX];
+/// The two raw arm totals behind each traced sample.
+///
+/// # Why the derived value alone was not enough
+///
+/// The traced value is `(store - nop) * 100 / n`: a *difference*, so a move in
+/// it is ambiguous between the two arms, and the two have opposite meanings. A
+/// dearer store arm is the host getting slower at the thing being measured; a
+/// *cheaper nop arm* is the measurement's own baseline shifting, which is an
+/// instrument artefact and no evidence about the host at all.
+///
+/// That ambiguity is not academic. Across every trace recorded up to
+/// 2026-08-19 the samples fall into three tight clusters -- ~5.04, ~5.16 and
+/// ~5.79 centicycles -- with nothing in between, and the top cluster is +12.3%
+/// over the middle one. A discrete, repeatable, position-independent step is
+/// the profile of a specific mechanism rather than of drift, and identifying it
+/// would raise the positional model's noise floor at no cost in sensitivity
+/// (see known-issues.md, "the recurring 581-centicycle canary event"). But the
+/// arms were computed, used, and thrown away, so the one question that
+/// discriminates -- *which arm moved* -- could not be asked of any run already
+/// recorded.
+///
+/// `measure_access_cost` has always returned both arms; only the trace dropped
+/// them. Keeping them costs two atomics per sample on a path that runs eleven
+/// times per boot.
+static CANARY_TRACE_NOP: [AtomicU64; CANARY_TRACE_MAX] =
+    [const { AtomicU64::new(0) }; CANARY_TRACE_MAX];
+static CANARY_TRACE_STORE: [AtomicU64; CANARY_TRACE_MAX] =
+    [const { AtomicU64::new(0) }; CANARY_TRACE_MAX];
+
+/// One A/B reference measurement: the derived per-access cost and both arms.
+///
+/// Carried as a struct rather than a bare `Option<u64>` because the arms are
+/// what makes a surprising value diagnosable, and every path that produces one
+/// of these previously had them in hand and dropped them. A tuple would do the
+/// same job; the names are here because `(Option<u64>, u64, u64)` at a call
+/// site is exactly the shape in which a nop and a store get swapped.
+#[derive(Clone, Copy)]
+struct ArmSample {
+    /// Per-access cost in centicycles, or `None` if the arms did not separate.
+    measured: Option<u64>,
+    /// Total for the arm that only loops.
+    nop: u64,
+    /// Total for the arm that loops *and* stores.
+    store: u64,
+}
 
 /// Fold one reference measurement into the running extremes.
 ///
@@ -1647,7 +1692,10 @@ static CANARY_TRACE_VAL: [AtomicU64; CANARY_TRACE_MAX] =
 /// dear at the same positions across two runs is the suite's own cache/TLB
 /// residue, whereas one that is dear at different positions each run is host
 /// load. See known-issues.md P19.
-fn canary_record(measured: u64, pos: u32) {
+///
+/// `nop`/`store` are the raw arms the value was derived from — see
+/// [`CANARY_TRACE_NOP`] for why a difference alone cannot be interpreted.
+fn canary_record(measured: u64, nop: u64, store: u64, pos: u32) {
     CANARY_MIN.fetch_min(measured, Ordering::Relaxed);
     CANARY_MAX.fetch_max(measured, Ordering::Relaxed);
     let slot = CANARY_SAMPLES.fetch_add(1, Ordering::Relaxed) as usize;
@@ -1656,6 +1704,13 @@ fn canary_record(measured: u64, pos: u32) {
     if let (Some(p), Some(v)) = (CANARY_TRACE_POS.get(slot), CANARY_TRACE_VAL.get(slot)) {
         p.store(pos, Ordering::Relaxed);
         v.store(measured, Ordering::Relaxed);
+    }
+    // Separate `if let`: the arms are a strictly additive record, so a future
+    // change that resizes one pair of arrays and not the other must lose the
+    // arms rather than silently drop the sample they belong to.
+    if let (Some(n), Some(s)) = (CANARY_TRACE_NOP.get(slot), CANARY_TRACE_STORE.get(slot)) {
+        n.store(nop, Ordering::Relaxed);
+        s.store(store, Ordering::Relaxed);
     }
 }
 
@@ -1676,8 +1731,9 @@ fn canary_record(measured: u64, pos: u32) {
 fn maybe_canary_sample() {
     let n = CANARY_SCORED.fetch_add(1, Ordering::Relaxed);
     if n.wrapping_rem(CANARY_SAMPLE_EVERY) == 0 {
-        match measure_access_cost().0 {
-            Some(measured) => canary_record(measured, n),
+        let sample = measure_access_cost();
+        match sample.measured {
+            Some(measured) => canary_record(measured, sample.nop, sample.store, n),
             // Do not fold a failed measurement into the extremes: a `0` would
             // drag CANARY_MIN to zero and make the spread meaningless (or,
             // once every sample fails, make it a serene 0%). Count it instead,
@@ -1691,9 +1747,9 @@ fn maybe_canary_sample() {
 
 /// One amplified A/B measurement of a guest memory access, in cycles.
 ///
-/// Returns `(measured, nop, store)` — the per-access cost, and the two raw
-/// arm totals behind it. `measured` is `None` when the two arms failed to
-/// separate: see "Why this returns an Option" below.
+/// Returns an [`ArmSample`] — the per-access cost, and the two raw arm totals
+/// behind it. `measured` is `None` when the two arms failed to separate: see
+/// "Why this returns an Option" below.
 ///
 /// Factored into its own function because this same measurement is taken
 /// **twice** per suite: once before the benchmarks, to calibrate the budgets,
@@ -1749,7 +1805,7 @@ fn maybe_canary_sample() {
 /// number. Reporting 0 is how the canary spent nine consecutive runs certifying
 /// nothing at all — see known-issues.md
 /// B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.
-fn measure_access_cost() -> (Option<u64>, u64, u64) {
+fn measure_access_cost() -> ArmSample {
     measure_access_at(CANARY_STORES_PER_WINDOW)
 }
 
@@ -1820,7 +1876,7 @@ unsafe impl Sync for SyncUnsafeScatterBuf {}
 /// [`measure_access_at`], and for the same reasons -- the nop arm here strides
 /// the identical index sequence without storing, so the address arithmetic
 /// cancels in the subtraction and only the store's softmmu cost is left.
-fn measure_scattered_access_cost() -> (Option<u64>, u64, u64) {
+fn measure_scattered_access_cost() -> ArmSample {
     measure_scattered_at(SCATTER_STORES)
 }
 
@@ -1831,7 +1887,7 @@ const SCATTER_STORES: u64 = (SCATTER_BYTES / SCATTER_STRIDE) as u64;
 /// [`measure_access_at`] is: so the scale-invariance check can run it at two
 /// scales. Halving the count walks half the buffer, which is still all
 /// distinct pages, so a physical per-access cost must not move.
-fn measure_scattered_at(count: u64) -> (Option<u64>, u64, u64) {
+fn measure_scattered_at(count: u64) -> ArmSample {
     let base = SCATTER_BUF.0.get().cast::<u8>();
     let n = core::hint::black_box(core::cmp::min(count, SCATTER_STORES));
     let stride = core::hint::black_box(SCATTER_STRIDE as u64);
@@ -1874,7 +1930,11 @@ fn measure_scattered_at(count: u64) -> (Option<u64>, u64, u64) {
         .checked_sub(nop)
         .filter(|delta| *delta >= n.saturating_mul(CANARY_MIN_RESOLVABLE))
         .map(|delta| delta.saturating_mul(CENTI) / n);
-    (measured, nop, store)
+    ArmSample {
+        measured,
+        nop,
+        store,
+    }
 }
 
 /// One A/B reference measurement at a given trip count.
@@ -1883,7 +1943,7 @@ fn measure_scattered_at(count: u64) -> (Option<u64>, u64, u64) {
 /// two scales and check that the answer does not depend on the scale — see
 /// [`scale_invariance_check`]. A per-access cost that changes when N changes is
 /// not a measurement of the access.
-fn measure_access_at(trip: u64) -> (Option<u64>, u64, u64) {
+fn measure_access_at(trip: u64) -> ArmSample {
     static CALIBRATION_BYTE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
     let cell = CALIBRATION_BYTE.as_ptr();
     // Opaque on purpose: a trip count the optimiser can see is a trip count it
@@ -1931,7 +1991,11 @@ fn measure_access_at(trip: u64) -> (Option<u64>, u64, u64) {
         // away and leave a single digit whose quantisation step is 20% of
         // itself.
         .map(|delta| delta.saturating_mul(CENTI) / n);
-    (measured, nop, store)
+    ArmSample {
+        measured,
+        nop,
+        store,
+    }
 }
 
 /// Check that the reference measurement does not depend on how many times it
@@ -1954,8 +2018,8 @@ fn measure_access_at(trip: u64) -> (Option<u64>, u64, u64) {
 ///
 /// Returns `true` if the two scales agree within `CANARY_TOLERANCE_PCT`.
 fn scale_invariance_check(base: u64) -> bool {
-    let (small, _, _) = measure_access_at(base);
-    let (large, _, _) = measure_access_at(base.saturating_mul(2));
+    let small = measure_access_at(base).measured;
+    let large = measure_access_at(base.saturating_mul(2)).measured;
     let (Some(a), Some(b)) = (small, large) else {
         serial_println!(
             "[bench]   canary scale check: UNMEASURABLE at N={} ({:?}) or N={} ({:?}) — \
@@ -2025,8 +2089,8 @@ fn scale_invariance_check(base: u64) -> bool {
 /// doubling would walk past [`SCATTER_BYTES`] and wrap onto pages already
 /// resident -- which is itself scale-dependence, introduced by the test.
 fn scatter_scale_invariance_check() -> bool {
-    let (half, _, _) = measure_scattered_at(SCATTER_STORES / 2);
-    let (full, _, _) = measure_scattered_at(SCATTER_STORES);
+    let half = measure_scattered_at(SCATTER_STORES / 2).measured;
+    let full = measure_scattered_at(SCATTER_STORES).measured;
     let (Some(a), Some(b)) = (half, full) else {
         serial_println!(
             "[bench]   scatter scale check: UNMEASURABLE at N={} ({:?}) or N={} ({:?}) — \
@@ -2134,28 +2198,32 @@ fn report_arm_failure_causes(invalid: u32) {
 /// percentage of `start`, so 100 means the host was equally loaded at both
 /// ends. The pair is recorded unconditionally rather than only on failure —
 /// a verdict alone would leave no way to ever calibrate the threshold.
-fn report_canary(start: Option<u64>) {
-    let (end, end_nop, end_store) = measure_access_cost();
+fn report_canary(start: ArmSample) {
+    let end = measure_access_cost();
     // The endpoints are samples too, so fold them in before reading extremes —
     // but only the ones that measured something.
     // Paired with their sentinels rather than relying on iteration order: a
     // failed calibration records no start, so the *ordinal* of an endpoint
     // sample in the trace does not identify it. See `CANARY_POS_END`.
     for (endpoint, pos) in [(start, CANARY_POS_START), (end, CANARY_POS_END)] {
-        match endpoint {
+        match endpoint.measured {
             // Endpoints are not at a suite position; they bracket the suite.
             // The sentinels keep them out of the *interpolation* domain while
             // still naming which side of the suite each one measures.
-            Some(measured) => canary_record(measured, pos),
+            Some(measured) => canary_record(measured, endpoint.nop, endpoint.store, pos),
             None => {
                 CANARY_INVALID.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
+    // Bound before `end` is shadowed below: the arm-failure messages report the
+    // last sample's raw arms, and that is precisely the case where `measured`
+    // is `None` and the arms are the only thing left to report.
+    let (end_nop, end_store) = (end.nop, end.store);
     // Guard the division: a missing start means the calibration itself failed,
     // and the run's budgets are already untrustworthy in that case.
-    let (start, end) = (start.unwrap_or(0), end.unwrap_or(0));
+    let (start, end) = (start.measured.unwrap_or(0), end.measured.unwrap_or(0));
     let pct = if start > 0 {
         end.saturating_mul(100) / start
     } else {
@@ -2255,6 +2323,37 @@ fn report_canary(start: Option<u64>) {
                     serial_print!(" end:{}.{:02}", centi / CENTI, centi % CENTI);
                 }
                 _ => serial_print!(" {}:{}.{:02}", pos, centi / CENTI, centi % CENTI),
+            }
+        }
+        serial_println!("");
+
+        // The same samples, as the two raw arm totals they were derived from.
+        //
+        // A separate line rather than extra fields on CANARY-TRACE, for the
+        // same reason the trace is not extra fields on CANARY: the trace *is*
+        // parsed now (`bench-history.py`'s `CANARY_TRACE_RE`, which postdates
+        // the comment above claiming nothing parses it), and widening a line a
+        // parser already matches is how a record written today stops being
+        // readable by the tool that wrote it. Appending a line is free; every
+        // existing reader ignores what it does not recognise.
+        //
+        // Positions are repeated rather than implied by order, so the two lines
+        // can be read independently and a dropped sample cannot silently
+        // misalign the arms against the values.
+        serial_print!("[bench] CANARY-ARMS");
+        for slot in 0..(samples as usize).min(CANARY_TRACE_MAX) {
+            let (Some(p), Some(n), Some(s)) = (
+                CANARY_TRACE_POS.get(slot),
+                CANARY_TRACE_NOP.get(slot),
+                CANARY_TRACE_STORE.get(slot),
+            ) else {
+                continue;
+            };
+            let (nop, store) = (n.load(Ordering::Relaxed), s.load(Ordering::Relaxed));
+            match p.load(Ordering::Relaxed) {
+                CANARY_POS_START => serial_print!(" start:{}:{}", nop, store),
+                CANARY_POS_END => serial_print!(" end:{}:{}", nop, store),
+                pos => serial_print!(" {}:{}:{}", pos, nop, store),
             }
         }
         serial_println!("");
@@ -2441,7 +2540,11 @@ pub fn run_all() {
         // cost that changes when the loop length changes is measuring the loop,
         // not the store. Costs two extra A/B runs, once per boot.
         let scale_ok = scale_invariance_check(CANARY_STORES_PER_WINDOW);
-        let (measured, nop, store) = measure_access_cost();
+        let ArmSample {
+            measured,
+            nop,
+            store,
+        } = measure_access_cost();
         // A scale-dependent measurement is not a measurement. Discard it rather
         // than let it calibrate ~60 budgets, and fall through to the same
         // "UNMEASURED" reporting path the arms-did-not-separate case uses --
@@ -2465,7 +2568,11 @@ pub fn run_all() {
         // compensating fudge factors this block used to carry, and what made
         // the clamp below bind on 100% of recorded runs.
         let scatter_scale_ok = scatter_scale_invariance_check();
-        let (scattered, s_nop, s_store) = measure_scattered_access_cost();
+        let ArmSample {
+            measured: scattered,
+            nop: s_nop,
+            store: s_store,
+        } = measure_scattered_access_cost();
         let scattered = if scatter_scale_ok { scattered } else { None };
         // UNIT CHANGE: `scattered` is centicycles (see CENTI), but its consumer
         // divides a raw cycle delta by it (`accesses(delta, access_floor)`), so
@@ -2581,7 +2688,19 @@ pub fn run_all() {
                 CANARY_ROUNDS
             ),
         }
-        (floor, measured)
+        // The whole sample, not just the derived value: the canary's start
+        // endpoint is traced like every other sample, and a trace that records
+        // the arms for ten samples and not for the eleventh has a hole exactly
+        // where a reader would look first. `measured` is re-wrapped rather than
+        // passed through because the scale check above may have rejected it.
+        (
+            floor,
+            ArmSample {
+                measured,
+                nop,
+                store,
+            },
+        )
     };
     // `access_floor` is the SCATTERED cost from here down -- now only the "N
     // accesses" figures, since the budgets became absolute per-profile cycle

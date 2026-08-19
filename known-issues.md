@@ -25619,6 +25619,33 @@ would reset every streak faster than it could grow.
 
 Rationale and the alternatives considered: design-decisions.md §209.
 
+**Amended 2026-08-19: deliberate probes are excluded, and were not before.** A
+gap in the above that only showed up when it fired. A run under a deliberately
+non-default configuration — `QEMU_EXTRA`, an overridden `QEMU_CPU`, or a
+`BENCH_EXPERIMENT` arm — was recorded as an ordinary boot of the tree, because
+`boot-history.jsonl` had no `experiment` field at all (`bench/history.jsonl` had
+carried one since the layout sweeps). On 2026-08-19 the `-cpu host` probe of
+`ENV-WHPX-CPU-HOST-FIRMWARE-GP` died inside OVMF *before our kernel was loaded*,
+landed as a plain `TIMEOUT`, and reset the streak to **0** — a fact about which
+CPU models WHPX accepts, silently retargeting four entries' closure bars in this
+file.
+
+The second half is worse, and is why this is amended here rather than merely
+fixed in code. `--streaks` counts a differently-failing boot toward a
+fingerprint's `since_last`, on the argument *"a boot that failed differently is
+still a boot in which this did not appear."* That argument assumes the kernel
+**ran**. A probe need not have. Counting one is a manufactured clean streak
+arriving through the one door with no guard on it — property 2 above, defeated
+from the other side.
+
+Fixed in `6cb8d893e`: `boot-test.sh` now records *why* a run was
+non-representative, and the clean streak, the fingerprint streaks and the
+wall-time medians all step over such rows. Probes still appear in `--list` —
+they are excluded from *inference*, not hidden — and the report prints how many
+were set aside, so a shrunken denominator is never silent. The three rows that
+predated the field were backfilled in `554b2e3d0`; the three-condition test for
+when editing an append-only log is legitimate at all is design-decisions.md §238.
+
 ## B-A-THE-BOOT-LOCK-HAS-NO-QUEUE-SO-A-POLITE-WAITER-CAN-BE-OVERTAKEN-FOREVER (lane B, 2026-08-16)
 
 **Status: ✅ FIXED 2026-08-16 by lane A in `74f2bff75`** — ticket queue in

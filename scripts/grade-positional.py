@@ -655,7 +655,23 @@ LOAD_RECORD_PROBLEMS = {
         "the load's release never matched a live benchmark line, so the load "
         "ran to the end of the boot and the labelled window has no "
         "right-hand edge",
+    # Admissible for the same reason as the other two, and by the same rule:
+    # this is the controller reporting, from its spinners' own CPU clocks,
+    # that they did not run. That is a confession of an empty window, not a
+    # claim to have filled one.
+    "load-not-applied":
+        "the spinners consumed almost no CPU across the window, so whatever "
+        "the benchmarks felt it was not the intended stimulus",
 }
+
+#: Mirrors `OCCUPANCY_FLOOR` in `canary-load.py`. Duplicated rather than
+#: imported because the grader must be able to read a record produced by a
+#: *different* version of the controller -- including one that predates the
+#: field, or one whose floor was set differently -- and a grader that adopted
+#: its subject's threshold could be talked out of a conviction by the
+#: defendant. The number is not load-bearing for good runs: run 3 sat far
+#: above it, and the floor only catches spinners that never ran.
+OCCUPANCY_FLOOR = 0.5
 
 
 def print_load_record(path):
@@ -688,18 +704,38 @@ def print_load_record(path):
         print(line)
     print(f"    result lines    : {record.get('completions_during')} under "
           f"load, after {record.get('completions_before_on')} clean")
-    # The host's own measurement of whether it got busy. Still diagnostic, but
-    # of a different kind from the lines above: those are the controller's
-    # intentions, this is an instrument reading. It is the one number here
-    # that can distinguish "the load was switched on" from "the machine
-    # actually slowed down", which are the two claims the first two attempts
-    # conflated.
+    # What the spinners actually did, from their own CPU clocks. This is the
+    # only line in this block that can distinguish "the load was switched on"
+    # from "the load actually ran" -- the distinction the first two attempts
+    # conflated, and one the host canary below turned out to be incapable of
+    # making at all.
+    occupancy = record.get("host_occupancy") or {}
+    if occupancy.get("occupancy") is not None:
+        print(f"    spinner CPU     : {occupancy['occupancy'] * 100:.0f}% "
+              f"occupancy ({occupancy['cpu_seconds_total']:.2f}s burned of "
+              f"{occupancy['expected_cpu_seconds']:.2f}s available across "
+              f"{occupancy['spinners']} spinner(s))")
+
     host = record.get("host_probe") or {}
     if host.get("inflation") is not None:
-        print(f"    host canary     : x{host['inflation']:.2f} over "
+        # Records written before RESULT P22 carry the *median* ratio in
+        # `inflation`; newer ones carry the best-case. They are told apart by
+        # the presence of `median_inflation`, and labelled accordingly rather
+        # than silently compared -- run 3's median read x0.78 ("the host got
+        # faster under load") where its best-case read x1.02, and only the
+        # second of those is a measurement.
+        legacy = "median_inflation" not in host
+        stat = "median, unreliable" if legacy else "best-case"
+        print(f"    host canary     : x{host['inflation']:.2f} ({stat}) over "
               f"{host['samples']} samples "
               f"(the host's own cost of a fixed unit of work, "
               f"loaded vs idle)")
+        if not legacy and host.get("median_inflation") is not None:
+            print(f"                      median x{host['median_inflation']:.2f}"
+                  f" -- retained for comparison only; its run-to-run spread on"
+                  f" this host exceeds the effect it measures")
+        print("                      near x1.00 is expected when the host has"
+              " more cores than spinners, and is not evidence either way")
     problem = record_problem(record)
     if problem:
         print(f"    PROBLEM         : {LOAD_RECORD_PROBLEMS.get(problem, problem)}")
@@ -727,6 +763,10 @@ def record_problem(record):
         return "at-never-matched"
     if record.get("until") and record.get("released") is False:
         return "until-never-matched"
+    occupancy = record.get("host_occupancy") or {}
+    if occupancy.get("occupancy") is not None \
+            and occupancy["occupancy"] < OCCUPANCY_FLOOR:
+        return "load-not-applied"
     return None
 
 

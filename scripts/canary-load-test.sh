@@ -267,7 +267,17 @@ fi
 rm -f "$SERIAL_FILE"
 
 # Start the boot in the background so load can be applied mid-run.
-python "$SCRIPT_DIR/run-timeout.py" --poll 60 1800 \
+#
+# BOOT_LABEL marks the entry this leaves in bench/boot-history.jsonl.  The
+# benchmark history is backed up and restored below because this run's numbers
+# are deliberately sabotaged, but the *boot* history is not restored -- the
+# boot itself really happened and its PASS is a real data point.  Its
+# `wall_seconds` is not, being inflated by the load we applied on purpose, so
+# the entry is labelled rather than left anonymous: a reader scanning
+# `boot-history.py list` would otherwise see an unexplained slow boot and have
+# no way to know it was sabotage.  (Only displayed, never used as a baseline,
+# so this is a legibility fix and not a correctness one.)
+BOOT_LABEL="p22-loaded" python "$SCRIPT_DIR/run-timeout.py" --poll 60 1800 \
     "$SCRIPT_DIR/boot-test.sh" --bench > "$LOG" 2>&1 &
 BOOT_PID=$!
 

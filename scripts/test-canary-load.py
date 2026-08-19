@@ -141,15 +141,21 @@ def replay(path, names, per_line=0.03, preamble=True):
     return thread
 
 
-def run_controller(serial, extra, wait_for=None, delay=0.0):
-    """Run the controller as a subprocess; return (record, returncode)."""
+def run_controller(serial, extra, wait_for=None, delay=0.0, spinners=0):
+    """Run the controller as a subprocess; return (record, returncode).
+
+    `spinners` defaults to 0 so the suite does not saturate the machine it is
+    running on: every test here is about the controller's bookkeeping, which
+    is independent of how much CPU the spinners burn.  The one test that is
+    *about* the burning passes a real count.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         record_path = os.path.join(tmp, "record.json")
         ready_path = os.path.join(tmp, "ready")
         stop_path = os.path.join(tmp, "stop")
         proc = subprocess.Popen(
             [sys.executable, CANARY_LOAD, "--serial", serial,
-             "--spinners", "0", "--timeout", "60",
+             "--spinners", str(spinners), "--timeout", "60",
              "--stop-file", stop_path, "--ready-file", ready_path,
              "--record", record_path, "--hold"] + extra,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -518,8 +524,30 @@ check("idle median comes only from before the load",
       summary["idle_median_s"], 0.001)
 check("loaded median comes only from the window",
       summary["loaded_median_s"], 0.004)
-check("inflation is the ratio of the two", summary["inflation"], 4.0)
 check("every sample is counted", summary["samples"], 8)
+
+# `inflation` is the *best-case* ratio, not the median one.  RESULT P22: the
+# median's run-to-run spread on this host (1.95x over 12 trials) is wider than
+# the effect it is meant to detect, and it read x0.78 both for a correctly
+# loaded run and for a control with literally zero spinners.  The median is
+# still reported, but demoted and labelled.
+check("inflation is the best-case ratio", summary["inflation"], 2.0)
+check("the median ratio is kept, but separately",
+      summary["median_inflation"], 4.0)
+check_true("and it is labelled unreliable",
+           "unreliable" in summary["median_inflation_note"],
+           summary["median_inflation_note"])
+check("best-case idle is the mean of the fastest quarter",
+      summary["idle_best_s"], 0.001)
+check("best-case loaded likewise", summary["loaded_best_s"], 0.002)
+
+# The best-case statistic must be the *stable* one: a single wild outlier in
+# the window moves the median but must barely touch it.
+outlier = ([(0.1, 0.001)] * 8
+           + [(1.0 + 0.1 * i, 0.001) for i in range(7)] + [(1.8, 0.500)])
+spiked = cl.summarise_probe(outlier, 1.0, 2.0)
+check_true("one outlier does not move the best-case ratio",
+           abs(spiked["inflation"] - 1.0) < 0.01, spiked["inflation"])
 
 # A load that never fired has no loaded side, and must not be reported as
 # "made no difference" -- that would be an exoneration nobody measured.
@@ -531,6 +559,52 @@ check("but its idle median is still reported", never["idle_median_s"], 0.001)
 empty_window = cl.summarise_probe([(0.1, 0.001), (2.5, 0.001)], 1.0, 2.0)
 check("a window no sample fell into yields no inflation",
       empty_window["inflation"], None)
+
+
+# --------------------------------------------------------------------------
+# 7b. Occupancy -- the direct measurement that replaces the inference
+# --------------------------------------------------------------------------
+# The canary above describes what the host felt; this says what the spinners
+# actually did.  It is the figure that answers "was the load applied", and it
+# exists because the canary demonstrably cannot: on a 12-core host six
+# spinners leave the probe a free core.
+print()
+print("spinner occupancy")
+
+check("no snapshots means no measurement",
+      cl.summarise_occupancy(None, None, 3.0), None)
+check("mismatched snapshots are refused",
+      cl.summarise_occupancy([0.0], [1.0, 2.0], 3.0), None)
+check("a zero-length window yields no ratio",
+      cl.summarise_occupancy([0.0], [1.0], 0)["occupancy"], None)
+
+full = cl.summarise_occupancy([0.0, 0.0, 0.0, 0.0],
+                              [3.0, 3.0, 3.0, 3.0], 3.0)
+check("four spinners with a core each score 1.0", full["occupancy"], 1.0)
+check("their burned CPU is the snapshot delta",
+      full["cpu_seconds_total"], 12.0)
+check("expected CPU is spinners x window", full["expected_cpu_seconds"], 12.0)
+check("none of them counts as idle", full["idle_spinners"], 0)
+
+# The failure this exists to catch: processes that were nominally started but
+# never actually ran.  A standalone probe once did exactly this and reported a
+# confident ratio with zero live spinners.
+dead = cl.summarise_occupancy([0.0] * 4, [0.0] * 4, 3.0)
+check("spinners that never ran score 0", dead["occupancy"], 0.0)
+check("and every one is named as idle", dead["idle_spinners"], 4)
+check_true("which is below the floor", dead["occupancy"] < cl.OCCUPANCY_FLOOR)
+
+half = cl.summarise_occupancy([0.0] * 4, [3.0, 3.0, 0.0, 0.0], 3.0)
+check("partial scheduling is reported proportionally",
+      half["occupancy"], 0.5)
+check("and the starved ones are counted", half["idle_spinners"], 2)
+
+# A CPU clock cannot run backwards; if a snapshot pair says it did, the
+# reading is garbage and must not become negative "credit" that masks another
+# spinner's idleness.
+backwards = cl.summarise_occupancy([5.0, 0.0], [0.0, 3.0], 3.0)
+check("a backwards clock contributes nothing rather than a negative",
+      backwards["cpu_seconds_total"], 3.0)
 
 
 with tempfile.TemporaryDirectory() as tmpdir:
@@ -582,6 +656,54 @@ with tempfile.TemporaryDirectory() as tmpdir:
     check_true("and none of them precedes the trigger by more than one poll",
                all(t >= record["fired_at"] - poll for t in inside),
                f"fired {record['fired_at']}, times {inside}")
+
+    # This run asked for no spinners, so there is nothing to have occupied a
+    # core.  The honest report is "not measured", never a reassuring number.
+    check("a zero-spinner run reports no occupancy",
+          record["host_occupancy"], None)
+    check_true("and is not accused of failing to apply a load it never had",
+               record.get("problem") is None, record.get("problem"))
+
+
+# --------------------------------------------------------------------------
+# 7c. Occupancy, end to end, with spinners that really run
+# --------------------------------------------------------------------------
+# The only test here that burns real CPU, and the only one that can: whether
+# a spinner gets scheduled is a fact about the operating system, not about
+# this script's bookkeeping, so it cannot be established synthetically.
+print()
+print("spinner occupancy (live)")
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    serial = os.path.join(tmpdir, "serial.txt")
+
+    def start_replay7():
+        replay(serial, SUITE, per_line=0.02).join()
+
+    record, rc, out = run_controller(
+        serial, ["--at", "bench_10", "--until", "bench_20"],
+        wait_for=start_replay7, delay=0.3, spinners=2)
+
+    occ = record["host_occupancy"]
+    check_true("a loaded run measures spinner occupancy", occ is not None,
+               f"record problem={record.get('problem')!r}")
+    if occ is not None:
+        check("one CPU figure per spinner",
+              len(occ["cpu_seconds"]), record["spinners"])
+        check("no spinner was starved", occ["idle_spinners"], 0)
+        check_true("occupancy clears the floor",
+                   occ["occupancy"] >= cl.OCCUPANCY_FLOOR,
+                   f"occupancy {occ['occupancy']}")
+        # Upper bound too: a spinner cannot burn more CPU than wall time, so
+        # a figure far above 1.0 would mean the window or the clocks are
+        # wrong.  The slack absorbs the ~15.6 ms granularity of the Windows
+        # CPU clock against a window of well under a second.
+        check_true("and does not exceed what wall time allows",
+                   occ["occupancy"] <= 2.0, f"occupancy {occ['occupancy']}")
+    check_true("a correctly-loaded run is not flagged as unapplied",
+               record.get("problem") is None, record.get("problem"))
+    check_true("the summary states the occupancy in words",
+               "spinner occupancy" in out, out[-400:])
 
 
 print()

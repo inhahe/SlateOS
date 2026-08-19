@@ -189,12 +189,82 @@ def _host_probe(samples, stop_probe, origin):
             stop_probe.wait(slack)
 
 
+#: Fraction of a spinner's theoretical CPU time below which the load is not
+#: credibly "applied".  A spinner that had a core to itself for the whole
+#: window scores 1.0; one that was never scheduled scores 0.0.  The host has
+#: more cores than this experiment uses spinners, and QEMU's own threads are
+#: the only other serious competitor, so a healthy run sits near 1.0 -- run 3
+#: measured well above this bar.  The threshold is set low deliberately: its
+#: job is to catch spinners that did not run *at all* (the failure mode that
+#: silently voided an earlier standalone probe), not to police scheduling
+#: jitter, and a tight bar here would reject good runs on a busy desktop.
+OCCUPANCY_FLOOR = 0.5
+
+
+def summarise_occupancy(before, after, window_seconds):
+    """How much CPU the spinners actually burned across the load window.
+
+    This is the canary's real instrument, and it is a direct measurement
+    rather than an inference.  `before` and `after` are snapshots of the
+    spinners' own `process_time` clocks taken at fire and at release; the
+    difference is CPU-seconds genuinely consumed.  Divided by the wall time
+    they were supposed to be consuming it for, it yields an occupancy per
+    spinner: 1.0 means "had a core throughout", 0.0 means "never ran".
+
+    Unlike the timing probe this needs no baseline, cannot be confounded by
+    what else the host happens to be doing, and does not care how many cores
+    the machine has.  RESULT P22 is why it exists: the probe's median ratio
+    has a run-to-run spread of 1.95x on this host and reported x0.78 -- the
+    host apparently *speeding up* under load -- for a run whose load was in
+    fact applied correctly.
+    """
+    if not before or not after or len(before) != len(after):
+        return None
+    burned = [max(0.0, b - a) for a, b in zip(before, after)]
+    total = sum(burned)
+    # Wall time is the denominator per spinner, so the ideal total is
+    # spinners x window.  A zero-length window would make the ratio
+    # meaningless rather than infinite, so it is reported as unavailable.
+    expected = len(burned) * window_seconds if window_seconds else None
+    return {
+        "spinners": len(burned),
+        "window_s": round(window_seconds, 4) if window_seconds else None,
+        "cpu_seconds": [round(v, 4) for v in burned],
+        "cpu_seconds_total": round(total, 4),
+        "expected_cpu_seconds": round(expected, 4) if expected else None,
+        "occupancy": round(total / expected, 3) if expected else None,
+        "idle_spinners": sum(1 for v in burned
+                             if window_seconds and v < 0.1 * window_seconds),
+    }
+
+
 def summarise_probe(samples, fired_at, released_at):
     """Reduce the host canary to what a reader needs to judge the stimulus.
 
     The ratio is what matters, not the absolute cost: the unit of work's
     idle duration is a property of this host and this Python build, and
     comparing it against anything but itself would be meaningless.
+
+    Both a median and a best-case ratio are reported, and the *best-case* one
+    is the trustworthy figure.  Measured over 12 back-to-back trials on this
+    host with six spinners verifiably running throughout:
+
+        statistic     median ratio   range           inverted (<1.0)
+        median        x1.106         x0.784..x1.526   3 of 12
+        min           x1.004         x0.999..x1.036   0 of 12 materially
+        trimmed 25%   x1.005         x0.999..x1.130   0 of 12 materially
+
+    The median's 1.95x spread swallows the effect it is meant to detect, and
+    one trial produced x0.784 -- indistinguishable from the x0.782 that run 3
+    reported and that cost a day's investigation.  A median in this position
+    is not a weak measurement, it is a misleading one, so `inflation` now
+    carries the best-case ratio and the median is retained only as
+    `median_inflation`, explicitly labelled unreliable.
+
+    None of these ratios should be read as confirming the load: with more
+    cores than spinners the probe keeps a free core and *correctly* reports
+    almost no effect.  `summarise_occupancy` is the instrument that answers
+    "was the load applied"; this one only describes what the host felt.
     """
     if not samples:
         return None
@@ -202,25 +272,51 @@ def summarise_probe(samples, fired_at, released_at):
     during = [d for t, d in samples
               if fired_at is not None and t >= fired_at
               and (released_at is None or t < released_at)]
+
+    def best(v):
+        """Mean of the fastest quarter: a best-case that averages over
+        several observations instead of staking everything on the single
+        luckiest one, which is what makes it stable without making it as
+        noise-prone as the median."""
+        if not v:
+            return None
+        return statistics.fmean(sorted(v)[:max(1, len(v) // 4)])
+
     idle = statistics.median(before) if before else None
     busy = statistics.median(during) if during else None
+    idle_best, busy_best = best(before), best(during)
     return {
         "samples": len(samples),
         "idle_median_s": round(idle, 6) if idle is not None else None,
         "loaded_median_s": round(busy, 6) if busy is not None else None,
+        "idle_best_s": round(idle_best, 6) if idle_best is not None else None,
+        "loaded_best_s": round(busy_best, 6) if busy_best is not None else None,
         # None rather than 1.0 when either side is missing: "the load made no
         # difference" and "there was nothing to compare" are different
         # statements, and only one of them is evidence.
-        "inflation": round(busy / idle, 3)
-                     if (idle and busy) else None,
+        "inflation": round(busy_best / idle_best, 3)
+                     if (idle_best and busy_best) else None,
+        "median_inflation": round(busy / idle, 3)
+                            if (idle and busy) else None,
+        "median_inflation_note": "unreliable: 1.95x run-to-run spread on this"
+                                 " host; see RESULT P22",
     }
 
 
-def _spin(go, stop, deadline):
+def _spin(go, stop, deadline, cpu_slot=None):
     """One CPU burner: block until `go`, then loop until `stop`.
 
     A tight pure-Python loop with no I/O and no sleeping, which is what
     contends with TCG emulation for a core.
+
+    `cpu_slot` is this spinner's cell in a shared array, into which it
+    publishes its own accumulated CPU time.  That is the whole point of the
+    parameter: whether the load was actually applied is a question about CPU
+    *consumed*, and this is the only party that can answer it directly.  The
+    controller's timing probe can only guess at it from the outside, and
+    RESULT P22 established that on a 12-core host the guess is worthless --
+    six spinners leave the probe a free core, so its median moved by less
+    than its own run-to-run noise, and inverted outright in 3 trials of 12.
 
     The self-defence checks matter as much as the loop.  MSYS `kill` of a
     native Windows process is `TerminateProcess`: no signal handler runs, no
@@ -230,6 +326,15 @@ def _spin(go, stop, deadline):
     rebooted.
     """
     parent = multiprocessing.parent_process()
+
+    def publish():
+        # Written on every chunk boundary and once more on the way out, so a
+        # reader that samples at an arbitrary moment is stale by at most one
+        # chunk (single-digit ms against a window of seconds).  `process_time`
+        # is this process's own CPU clock, so it counts only time the spinner
+        # was actually scheduled -- which is exactly the quantity in question.
+        if cpu_slot is not None:
+            cpu_slot.value = time.process_time()
 
     def should_quit():
         if stop.is_set() or time.monotonic() > deadline:
@@ -242,12 +347,14 @@ def _spin(go, stop, deadline):
     # semaphore wakes immediately when `go` is set.
     while not go.is_set():
         if should_quit():
+            publish()
             return
         go.wait(1.0)
 
     while True:
         for _ in range(SPIN_CHUNK):
             pass
+        publish()
         if should_quit():
             return
 
@@ -333,9 +440,21 @@ def run(args):
     started = time.monotonic()
     deadline = started + args.timeout + args.grace
 
+    # One cell per spinner, into which it publishes its own CPU clock.
+    # Separate `Value`s rather than one `Array`: slicing a ctypes array yields
+    # a *copy*, so handing a spinner `arr[i:i+1]` would give it a private list
+    # to write into and the controller would read zeros forever -- a silent
+    # null result dressed up as a measurement, which is the exact failure this
+    # code exists to rule out.
+    #
+    # `lock=False` because each cell has exactly one writer and one reader, a
+    # double is written atomically on every platform this runs on, and a stale
+    # read costs at worst one chunk of age -- whereas locking on every chunk
+    # would inject contention into the very measurement being taken.
+    cpu = [ctx.Value("d", 0.0, lock=False) for _ in range(args.spinners)]
     workers = [
-        ctx.Process(target=_spin, args=(go, stop, deadline), daemon=True)
-        for _ in range(args.spinners)
+        ctx.Process(target=_spin, args=(go, stop, deadline, slot), daemon=True)
+        for slot in cpu
     ]
     for worker in workers:
         worker.start()
@@ -377,16 +496,24 @@ def run(args):
     first_seen_at = None
     lines_before_on = 0
     during = []
+    cpu_at_fire = None
+    cpu_at_release = None
 
     def fire():
-        nonlocal on_at
+        nonlocal on_at, cpu_at_fire
+        # Snapshot before `go`, so no spinner can have burned anything that
+        # lands inside the window's opening balance.
+        cpu_at_fire = [slot.value for slot in cpu]
         go.set()
         on_at = time.monotonic()
 
     def release():
-        nonlocal off_at
+        nonlocal off_at, cpu_at_release
         stop.set()
         off_at = time.monotonic()
+        # Snapshot after `stop`: a spinner publishes on its way out, so this
+        # captures the final chunk rather than truncating the window early.
+        cpu_at_release = [slot.value for slot in cpu]
 
     if args.at is None:
         # No trigger: the whole-window behaviour the P20 control used.
@@ -478,16 +605,37 @@ def run(args):
             "host_probe": summarise_probe(probe_samples, fired_rel,
                                           released_rel),
             "host_probe_samples": probe_samples,
+            # The direct measurement, and the one to believe. See
+            # `summarise_occupancy`.
+            "host_occupancy": summarise_occupancy(
+                cpu_at_fire, cpu_at_release,
+                (off_at - on_at) if (on_at is not None
+                                     and off_at is not None) else None),
         })
         # A `--until` that never matched is not a detail.  The window has no
         # right-hand edge, so the run answers a different question from the
         # one asked, and the caller must be able to tell without reading the
         # JSON.  See the module docstring: this is exactly how the second
         # attempt was lost.
+        #
+        # Order is deliberate: a window with no edge is reported ahead of an
+        # unapplied load, because a run that measured the wrong interval is
+        # not made interpretable by having applied its load correctly, whereas
+        # the reverse leaves a well-formed window that simply contained no
+        # stimulus.  Both are fatal; the first is the more fundamental defect.
+        occupancy = record.get("host_occupancy") or {}
         if args.until is not None and not record["released"]:
             record["problem"] = "until-never-matched"
         elif args.at is not None and not record["fired"]:
             record["problem"] = "at-never-matched"
+        elif (occupancy.get("occupancy") is not None
+                and occupancy["occupancy"] < OCCUPANCY_FLOOR):
+            # The spinners were nominally running but barely got scheduled, so
+            # whatever the benchmarks felt, it was not the intended stimulus.
+            # Caught here rather than left for a human to notice in the JSON:
+            # an earlier standalone probe ran with *zero* live spinners and
+            # reported a confident ratio, and nothing in the output said so.
+            record["problem"] = "load-not-applied"
         tail.close()
 
     return record
@@ -738,12 +886,44 @@ def main(argv=None):
     # The host's own account of whether it was actually busy.  Printed next to
     # the controller's intentions on purpose: "I set the flag" and "the machine
     # got slower" are different claims, and only the second one is a stimulus.
+    # Occupancy first, and on its own line, because it is the one figure here
+    # that actually answers "was the load applied".  The canary below it is
+    # descriptive colour; printing them the other way round is how a x0.78
+    # came to be read as a result.
+    occ = record.get("host_occupancy")
+    if occ and occ.get("occupancy") is not None:
+        verdict = ("load applied" if occ["occupancy"] >= OCCUPANCY_FLOOR
+                   else "LOAD NOT APPLIED")
+        print(f"  spinner occupancy : {occ['occupancy'] * 100:.0f}% "
+              f"({occ['cpu_seconds_total']:.2f}s CPU burned of "
+              f"{occ['expected_cpu_seconds']:.2f}s possible across "
+              f"{occ['spinners']} spinner(s)) -- {verdict}")
+        if occ["idle_spinners"]:
+            print(f"  WARNING           : {occ['idle_spinners']} spinner(s) "
+                  f"burned almost no CPU", file=sys.stderr)
+    elif record.get("spinners") == 0:
+        # A deliberate zero-spinner control, not a failure. Said out loud
+        # because "no occupancy line" and "occupancy of nothing" would
+        # otherwise look identical in the output.
+        print("  spinner occupancy : n/a -- 0 spinners requested (control "
+              "run: no load was meant to be applied)")
+    else:
+        print("  spinner occupancy : NOT MEASURED -- treat any apparent "
+              "stimulus below with suspicion")
+
     host = record.get("host_probe")
     if host and host.get("inflation") is not None:
-        print(f"  host canary       : x{host['inflation']:.2f} "
-              f"({host['idle_median_s'] * 1e3:.2f}ms idle -> "
-              f"{host['loaded_median_s'] * 1e3:.2f}ms under load, "
-              f"{host['samples']} samples)")
+        # Best-case, not median.  The median's spread on this host is wider
+        # than the effect, so it is printed only as a parenthetical and only
+        # to keep old logs comparable.
+        print(f"  host canary       : x{host['inflation']:.2f} best-case "
+              f"({host['idle_best_s'] * 1e3:.2f}ms idle -> "
+              f"{host['loaded_best_s'] * 1e3:.2f}ms under load, "
+              f"{host['samples']} samples; "
+              f"median x{host['median_inflation']:.2f}, unreliable)")
+        print("  note              : with more cores than spinners the probe "
+              "keeps a free core, so a ratio near x1 here is expected and is "
+              "not evidence either way -- see occupancy above.")
     elif host:
         print(f"  host canary       : not comparable "
               f"({host['samples']} samples, no idle/loaded contrast)")
@@ -756,7 +936,17 @@ def main(argv=None):
         print(f"  PROBLEM           : never saw '{args.until}' -- the load was "
               f"applied but never released, so it ran to the end of the boot "
               f"and the window has no right-hand edge.", file=sys.stderr)
-    if problem:
+    elif problem == "load-not-applied":
+        print(f"  PROBLEM           : the window was bounded correctly, but "
+              f"the spinners burned only "
+              f"{occ['cpu_seconds_total']:.2f}s of CPU where "
+              f"{occ['expected_cpu_seconds']:.2f}s was available -- the load "
+              f"was not actually applied, so the window is empty.",
+              file=sys.stderr)
+    if problem in ("at-never-matched", "until-never-matched"):
+        # Only the name-matching failures have anything to do with names;
+        # printing this under an occupancy failure would send the reader off
+        # to check a spelling that is not the problem.
         print("    The live result line and the end-of-run SCORE line do not "
               "always agree; --at/--until match the live line. Pass "
               "--known-names to have this checked before the boot.",

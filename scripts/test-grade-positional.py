@@ -481,12 +481,44 @@ def test_a_confession_is_derived_when_the_record_does_not_state_it():
           derive({"problem": "at-never-matched", "at": "b40", "fired": True,
                   "until": "b60", "released": False}), "at-never-matched")
 
+    # A window with both edges intact but no load inside it. The spinners'
+    # own CPU clocks say they never ran, so the window is empty -- a distinct
+    # fault from a mislabelled one, and equally fatal.
+    bounded = {"at": "b40", "fired": True, "until": "b60", "released": True}
+    check("spinners that burned no CPU are a confession",
+          derive({**bounded,
+                  "host_occupancy": {"occupancy": 0.0}}), "load-not-applied")
+    check("as are spinners that barely ran",
+          derive({**bounded,
+                  "host_occupancy": {"occupancy": 0.2}}), "load-not-applied")
+    check("a healthy occupancy is not a confession",
+          derive({**bounded, "host_occupancy": {"occupancy": 0.98}}), None)
+    check("nor is an unmeasured one -- silence is not an admission",
+          derive({**bounded, "host_occupancy": None}), None)
+    check("a broken window outranks an empty one",
+          derive({"at": "b40", "fired": True, "until": "b60",
+                  "released": False,
+                  "host_occupancy": {"occupancy": 0.0}}),
+          "until-never-matched")
+    check("and records predating the field are unaffected",
+          derive(bounded), None)
+
     # The real thing: the preserved record from P22's second attempt, which
-    # this grader must be able to convict on its own reading.
-    real = os.path.join(REPO_ROOT, "build", "canary-load-record.json")
+    # this grader must be able to convict on its own reading -- the controller
+    # of the day wrote no `problem` field at all, so the conviction has to be
+    # derived from `released: False` alone.
+    #
+    # The *preserved* copy, not `build/canary-load-record.json`: that is the
+    # live output path, which every subsequent run overwrites. Pointed at it,
+    # this check silently became a test of whichever run happened to be last
+    # (and duly "failed" once run 3 succeeded there).
+    real = os.path.join(REPO_ROOT, "build", "p22-run2-record.keep.json")
     if os.path.exists(real):
         check("P22 run 2's own record is read as a broken window",
               gp.load_record_problem(real), "until-never-matched")
+        check("even though that record states no problem itself",
+              json.loads(open(real, encoding="utf-8").read()).get("problem"),
+              None)
 
 
 def test_end_to_end_a_confessed_broken_window_is_ungraded_and_exhibited():

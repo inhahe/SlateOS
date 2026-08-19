@@ -703,6 +703,102 @@ def parse_canary(path):
     return result
 
 
+#: How a single traced sample's two arms moved, relative to the run's own
+#: typical arms. The derived canary value cannot distinguish these -- it is a
+#: difference, so every one of them is just "a bigger number" -- and they mean
+#: materially different things. See known-issues.md, "the canary's arms
+#: separate three mechanisms".
+ARM_QUIET = "quiet"
+ARM_ARTEFACT = "artefact"
+ARM_SCALED = "scaled"
+ARM_DISTURBED = "disturbed"
+ARM_UNCLASSIFIED = "unclassified"
+
+#: A move at or below this (percent, either arm) is not a move.
+ARM_QUIET_PCT = 0.5
+#: Two arms whose moves agree within this many percentage points moved
+#: *together* -- i.e. the whole measurement scaled, rather than the measured
+#: work changing relative to the baseline.
+ARM_PROPORTIONAL_PP = 1.0
+
+
+def classify_arm_sample(sample, ref_nop, ref_store):
+    """Say which arm moved, and therefore what kind of event this sample is.
+
+    Returns one of the ARM_* constants, or None when the sample carries no arms
+    (every record written before arm recording existed, which is most of them).
+
+    The classification rests on an asymmetry of minima, not on a statistical
+    model. The canary value is a minimum over ~500 rounds, so:
+
+    - a minimum moves **up** only if essentially *every* round was slower;
+    - a minimum moves **down** if a *single* round happened to be faster.
+
+    Hence a lone arm moving is cheap and means nothing about the host -- one
+    lucky round in one arm -- while both arms moving up together is expensive
+    and means the host really was slower for the whole window. That is why
+    ARM_ARTEFACT is a verdict about the *instrument* and ARM_DISTURBED is a
+    verdict about the *host*, from what is otherwise the same-looking number.
+
+    ARM_SCALED is both arms moving together by the same proportion: the whole
+    measurement sped up or slowed down uniformly, which moves the reported
+    difference without anything having gone wrong with the measurement.
+
+    ARM_UNCLASSIFIED is a real outcome and not a bucket of last resort. With
+    only a few dozen arm samples on disk, forcing every shape into one of the
+    named classes would manufacture confidence the data does not support.
+    """
+    if "nop" not in sample or "store" not in sample:
+        return None
+    if not ref_nop or not ref_store:
+        return None
+    d_nop = (sample["nop"] / ref_nop - 1) * 100
+    d_store = (sample["store"] / ref_store - 1) * 100
+    moved_nop = abs(d_nop) > ARM_QUIET_PCT
+    moved_store = abs(d_store) > ARM_QUIET_PCT
+    if not moved_nop and not moved_store:
+        return ARM_QUIET
+    if moved_nop != moved_store:
+        # Exactly one arm moved. No host state slows (or speeds) the nop loop
+        # without touching the store loop interleaved with it.
+        return ARM_ARTEFACT
+    if abs(d_nop - d_store) <= ARM_PROPORTIONAL_PP:
+        return ARM_SCALED
+    if d_nop > 0 and d_store > 0:
+        return ARM_DISTURBED
+    return ARM_UNCLASSIFIED
+
+
+def classify_canary_trace(trace):
+    """Classify every armed sample in a trace against the run's own baseline.
+
+    Returns a list the same length as `trace`, holding an ARM_* string per
+    sample, or None where that sample has no arms.
+
+    The reference is the run's **median** arm, taken from the run itself rather
+    than from any stored constant. Two reasons, and both matter: the absolute
+    arm totals are a property of the host and the build, so a constant would
+    rot the first time either changed; and the median is unmoved by the very
+    excursions being classified, which a mean would not be.
+
+    The assumption the median carries is that *most* of a run's samples are
+    quiet, and that is an assumption rather than a guarantee: the run at
+    2026-08-19T03:45:54 has 6 of 13 samples in one displaced state, one sample
+    short of moving the median onto the displaced value and inverting every
+    label in that run. If a run ever does cross that line, its excursions will
+    be reported as quiet and its quiet samples as excursions. There is no
+    within-run defence against it -- a run that is mostly displaced has no
+    internal baseline left -- so the fix, should it start happening, is a
+    cross-run reference, which needs more arm-bearing history than exists.
+    """
+    armed = [s for s in trace if "nop" in s and "store" in s]
+    if not armed:
+        return [None] * len(trace)
+    ref_nop = statistics.median(s["nop"] for s in armed)
+    ref_store = statistics.median(s["store"] for s in armed)
+    return [classify_arm_sample(s, ref_nop, ref_store) for s in trace]
+
+
 #: The canary's four possible outcomes. Four rather than two, because
 #: "no canary in the log", "the canary could not measure", "the canary
 #: measured contamination" and "the canary measured a quiet host" are four
@@ -914,7 +1010,58 @@ def print_canary_summary(canary):
               "known-issues.md B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING, and "
               "read the run-level verdict below rather than this line.")
 
+    _report_arm_signatures(canary)
     return verdict
+
+
+#: What each arm signature means, in the reader's terms. Deliberately phrased
+#: as what it licenses concluding, since the whole point is that the derived
+#: canary number licenses none of these distinctions on its own.
+_ARM_MEANING = {
+    ARM_ARTEFACT: ("one arm moved and the other did not - one lucky round in "
+                   "one arm, NOT a host event; the canary figure moved for a "
+                   "reason that says nothing about this run"),
+    ARM_SCALED: ("both arms moved together by the same proportion - the whole "
+                 "measurement scaled uniformly, which moves the canary figure "
+                 "without anything having gone wrong"),
+    ARM_DISTURBED: ("both arms rose together - a real host disturbance over "
+                    "the canary's whole window; check the benchmarks in that "
+                    "sampling interval before trusting them"),
+    ARM_UNCLASSIFIED: ("both arms moved, but not in a shape seen before - "
+                       "worth looking at by hand"),
+}
+
+
+def _report_arm_signatures(canary):
+    """Print the per-sample arm classification, when the log carries arms.
+
+    Silent when it does not, which is every record written before arm recording
+    existed. Silence is correct there: absent arms are not evidence of a quiet
+    instrument, and printing "no artefacts detected" for a run that could not
+    have detected one would be the same false assurance this whole line of work
+    exists to remove.
+    """
+    trace = canary.get("trace") or []
+    labels = [c for c in classify_canary_trace(trace) if c is not None]
+    if not labels:
+        return
+    counts = collections.Counter(labels)
+    notable = [k for k in (ARM_ARTEFACT, ARM_SCALED, ARM_DISTURBED,
+                           ARM_UNCLASSIFIED) if counts.get(k)]
+    if not notable:
+        print(f"  Arm check: all {counts[ARM_QUIET]} sampled arm pair(s) "
+              f"quiet - no excursion of any kind in this run.")
+        return
+    print(f"  Arm check: {counts.get(ARM_QUIET, 0)} of {len(labels)} sampled "
+          f"arm pair(s) quiet; the rest break down as:")
+    for kind in notable:
+        print(f"    {counts[kind]}x {kind}: {_ARM_MEANING[kind]}")
+    if counts.get(ARM_ARTEFACT):
+        print("  An 'artefact' sample means the canary's own number is "
+              "untrustworthy at that sample, in EITHER direction: a lucky nop "
+              "round inflates it (false alarm), a lucky store round deflates "
+              "it (masks real load). See known-issues.md, 'the canary's arms "
+              "separate three mechanisms'.")
 
 
 def display_path(path):

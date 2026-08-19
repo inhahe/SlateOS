@@ -563,6 +563,96 @@ def test_canary_arms_absence_is_not_an_error(bh, tmpdir):
                                 "[bench] CANARY-ARMS 0:1000:1515\n")), None)
 
 
+def test_arm_classification_separates_artefact_from_host(bh, tmpdir):
+    """The arms must sort excursions the derived value cannot tell apart.
+
+    Every value below is a real recorded arm pair from bench/history.jsonl on
+    2026-08-19, not a constructed one, because the whole claim is about what
+    actually occurs on this host. The reference is the modal quiet pair
+    nop=14156 store=19444.
+    """
+    ref = (14156, 19444)
+    c = lambda nop, store: bh.classify_arm_sample(
+        {"nop": nop, "store": store}, *ref)
+
+    check("the modal pair is quiet", c(14156, 19444), bh.ARM_QUIET)
+    check("and so is a pair a few cycles off it", c(14160, 19460), bh.ARM_QUIET)
+
+    # centi=579. store is bit-identical to the mode; nop alone fell 4.6%.
+    # No host state slows or speeds the nop loop without touching the store
+    # loop interleaved with it, so this is one lucky round in one arm.
+    check("a nop-only drop is an instrument artefact",
+          c(13506, 19444), bh.ARM_ARTEFACT)
+    # centi=477, the mirror case: a lucky store round, which *deflates* the
+    # reported figure and so masks contamination rather than inventing it.
+    check("a store-only drop is the same artefact, masking instead of alarming",
+          c(14158, 19044), bh.ARM_ARTEFACT)
+
+    # centi=504/506. Both arms fall by the same proportion: the measurement
+    # scaled uniformly, which moves the difference without anything being wrong.
+    check("both arms falling together is a uniform scaling",
+          c(13836, 19004), bh.ARM_SCALED)
+    check("...and it is still a scaling a few cycles either way",
+          c(13830, 19012), bh.ARM_SCALED)
+
+    # centi=641 and 766. Both arms up 34-45%: to lift a *minimum*, essentially
+    # every round of both arms must have been slower, which is a real host
+    # state and not something one lucky round can fake.
+    check("both arms rising together is a real host disturbance",
+          c(19466, 26040), bh.ARM_DISTURBED)
+    check("...at either observed magnitude", c(20320, 28170), bh.ARM_DISTURBED)
+
+    # A sample with no arms is not classifiable, and must say so rather than
+    # being lumped in with "quiet" -- 79 records on disk have no arms, and
+    # reading them as quiet would be a fabricated clean bill of health.
+    check("a sample with no arms classifies as None",
+          bh.classify_arm_sample({"centi": 516}, *ref), None)
+    check("...and so does one measured against no reference",
+          bh.classify_arm_sample({"nop": 1, "store": 2}, 0, 0), None)
+
+
+def test_arm_classification_uses_the_run_as_its_own_baseline(bh, tmpdir):
+    """The reference is per-run and is the median, not a stored constant.
+
+    The absolute arm totals are a property of this host and this build, so a
+    baked-in constant would go wrong the first time either changed. And it must
+    be the median rather than the mean: the mean is dragged by the very
+    excursions being classified, which is how a single +44% sample can make its
+    thirteen quiet neighbours look displaced.
+    """
+    # A whole run scaled to different absolute totals -- a faster host, or a
+    # different build -- must still read as quiet throughout.
+    scaled_run = [{"pos": i, "centi": 516, "nop": 7078, "store": 9722}
+                  for i in range(13)]
+    check("a run at wholly different absolute totals is still quiet",
+          set(bh.classify_canary_trace(scaled_run)), {bh.ARM_QUIET})
+
+    # One big excursion among twelve quiet samples. Against the mean the
+    # excursion would drag the reference up and mislabel the quiet ones.
+    trace = [{"pos": i, "centi": 516, "nop": 14156, "store": 19444}
+             for i in range(12)]
+    trace.append({"pos": 96, "centi": 766, "nop": 20320, "store": 28170})
+    got = bh.classify_canary_trace(trace)
+    check("the lone excursion is the only sample labelled disturbed",
+          got.count(bh.ARM_DISTURBED), 1)
+    check("...and it is the last one", got[-1], bh.ARM_DISTURBED)
+    check("...leaving every other sample quiet",
+          set(got[:-1]), {bh.ARM_QUIET})
+
+    # An unarmed trace yields a same-length list of None, so callers can zip it
+    # against the trace without a length check.
+    bare = [{"pos": 0, "centi": 516}, {"pos": 8, "centi": 517}]
+    check("an unarmed trace classifies as all-None, same length",
+          bh.classify_canary_trace(bare), [None, None])
+
+    # Mixed: a trace where only some samples carry arms still classifies the
+    # armed ones and reports None for the rest.
+    mixed = [{"pos": 0, "centi": 516, "nop": 14156, "store": 19444},
+             {"pos": 8, "centi": 516}]
+    check("an unarmed sample among armed ones is None, not quiet",
+          bh.classify_canary_trace(mixed), [bh.ARM_QUIET, None])
+
+
 def _trace(*pairs):
     """Build a trace list from `(pos_or_edge, centi)` pairs."""
     out = []

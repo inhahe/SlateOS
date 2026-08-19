@@ -38654,6 +38654,22 @@ Two things this does **not** yet do, so read reports accordingly:
   worst pair among all of them, so a movement just outside its band is
   *unexplained*, not cleared.
 
+**Both paths to a build failure now consult the band (2026-08-19).** The first
+version taught only the run-over-run comparison about layout, leaving
+`level_shifts()` — the *sustained*-shift check, wired into
+`--fail-on-regression` independently — able to fail a build on a placement
+artifact. The gap was in that function's own stated reasoning: "host disturbance
+is random per run, while a code regression is in every run after the commit",
+which is true and incomplete, because a layout artifact is *also* in every run
+after the commit. `mode_structure()` does not cover it either — it needs the
+benchmark to have been seen at both modes across binaries, so the first commit
+exhibiting an artifact is `MODE_UNDECIDED` and fails. A sustained shift is now
+excused on the same positive evidence as everywhere else, plus one precondition
+specific to this path: `placement_is_constant()` blocks the excuse when every
+run the shift is drawn from is provably one kernel image, since then the
+addresses are identical throughout and layout is the one hypothesis ruled out by
+arithmetic. See design-decisions.md §234, "Both paths to a build failure".
+
 Part (2) — `MOVED (image changed)` labelling — remains open, blocked on a
 defensible benchmark-to-source reachability map.
 

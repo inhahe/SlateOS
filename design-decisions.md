@@ -22588,3 +22588,57 @@ four sampled layouts cannot contain the worst pair among all layouts, so a
 movement just *outside* its band is not thereby cleared — it is merely not
 *explained*. The alternative, presenting the band as exhaustive, would let a
 near-miss be waved through by a number that was never entitled to clear it.
+
+### Both paths to a build failure, not just the loud one
+
+There are two independent ways a movement can fail `--fail-on-regression`: the
+run-over-run comparison, and `level_shifts()` — a *sustained* shift off a
+baseline older than the last three runs, which exists because a regression that
+appears and then persists is invisible run-over-run by construction. The first
+version of this work taught only the first path about layout.
+
+That was a real hole, and the reasoning that hid it is written in
+`level_shifts()`' own comment: *"host disturbance is random per run, while a
+code regression is in every run after the commit."* True, and incomplete — **a
+layout artifact is also in every run after the commit**, because the addresses
+are a property of the image and every re-run of that image reproduces them
+exactly. Persistence therefore separates {code *or* layout} from host noise and
+cannot say which of the two it is holding.
+
+`mode_structure()` does not cover it either. That check needs the benchmark to
+have been *seen* at both of its modes across different binaries in the recorded
+history, so the very first commit whose relink lands a hot loop across a page
+boundary is `MODE_UNDECIDED` — which fails the build, correctly, on the evidence
+it has. A sweep knows the same thing before the artifact has ever repeated,
+which is the whole reason to run one.
+
+So the band now applies to sustained shifts on the same terms as everywhere
+else — a band measured for that exact benchmark, at least as large as the shift
+— **plus** one extra precondition that is specific to this path:
+
+> Placement can only explain a shift if placement could have *changed* across
+> the runs the shift is drawn from.
+
+`placement_is_constant()` answers that, and answers `True` **only on proof**: if
+every run in the shift's reference and corroboration windows, and the run being
+judged, are provably one kernel image, then the addresses are identical
+throughout and layout is ruled out by arithmetic rather than weighed against the
+numbers. Such a series is a host-level change (thermal, background load) that
+persisted; reporting it is right, calling it code placement would be a false
+statement. This is the same mistake as filing an A/A movement under "explained
+by code placement", in a different costume — *a filter that is correct for the
+ordinary case, applied to the one case whose premise it violates*.
+
+Ignorance is deliberately **not** proof. A run with no `kernel_sha`, or a dirty
+tree with no clean commit, makes the predicate `False`, because "we do not know"
+is not "they are the same". That direction is the safe one here precisely
+because this predicate only ever *blocks* an excuse: answering `False` on
+ignorance leaves the band to be judged on its own positive evidence, exactly as
+it is everywhere else, whereas answering `True` would let a missing hash veto a
+correct excuse.
+
+One structural note, because it is the kind of thing that decays: the window a
+shift is drawn from is now computed once, by `level_shift_window()`, and read by
+both the finding and its veto. A veto computed over a different window than the
+finding it vetoes is a check that appears to fire on the evidence and does not —
+this project's signature failure, and it would be invisible.

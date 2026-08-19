@@ -194,10 +194,26 @@ SPLIT_UNRESOLVED = "?"   # cross-checked, but the timer could not resolve it
 # both "the extremes were 5 and 7" (a 40% spread) and "spread = 47" -- the
 # 2026-08-14T22:1x record does exactly that. Their presence is also the only
 # signal that a record's `spread` is trustworthy at all: see canary_verdict.
+#
+# An eleventh field, `<below_floor>`, counts how many of the `<invalid>`
+# failures were *not* separation failures: the arms separated, but by less than
+# the instrument can resolve. It is appended rather than folded into `invalid`
+# because `invalid` is already on disk in ~100 records with a settled meaning,
+# and because the two carry opposite evidential weight -- a sample that resolved
+# a small figure cannot have hidden an excursion, which is large, whereas one
+# whose arms inverted might have been the excursion itself.
+#
+# Its ABSENCE must stay distinguishable from zero. A record without this field
+# was written by a kernel that could not tell the two failure kinds apart, so
+# its failures are genuinely of unknown kind; storing a 0 would assert that
+# every historical failure was a separation failure, which nobody measured.
+# `canary_verdict` may still *assume* zero when judging such a record, because
+# that assumption is the conservative one (unknown-kind failures keep the
+# verdict BROKEN), but the record itself must not claim it.
 CANARY_RE = re.compile(
     r"^\[bench\]\s+CANARY\s+(\d+)\s+(\d+)\s+(\d+)"
     r"(?:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)"
-    r"(?:\s+(\d+)(?:\s+(\d+)\s+(\d+))?)?)?\s*$"
+    r"(?:\s+(\d+)(?:\s+(\d+)\s+(\d+)(?:\s+(\d+))?)?)?)?\s*$"
 )
 
 # `[bench] CANARY-TRACE start:<cycles> <pos>:<cycles> ... end:<cycles>`
@@ -296,13 +312,45 @@ CANARY_TOLERANCE_PCT = 25
 #: which now computes the spread in hundredths of a cycle (`CENTI` in
 #: `kernel/src/bench.rs`) and so never rounds the verdict into existence.
 #:
-#: What this constant still does, and why it is kept: the kernel now applies the
-#: identical bound to `delta` *before* emitting a sample, so no record written by
+#: CORRECTION 2026-08-19: this comment used to end "the kernel now applies the
+#: identical bound to `delta` before emitting a sample, so no record written by
 #: the current kernel can fail this test -- on live data it is a check that
-#: cannot fire. It is retained solely to keep judging the **historical** records
-#: written before that filter existed. Deleting it as dead code would silently
-#: re-admit the 15:57 and 16:16 records as usable.
+#: cannot fire." Both halves were false, and their falseness is the bug this
+#: pair of constants now exists to keep separate.
+#:
+#: The bound was *not* identical: the kernel compared a raw cycle delta against
+#: `n * 4`, i.e. four **whole cycles** per access, while the value it went on to
+#: store was in hundredths. It was 100x too strict, and it fired on every arm of
+#: every WHPX run -- `samples: 0, invalid: 13`, thirteen times, six sweeps
+#: running. And it can certainly fire here: a WHPX guest resolves ~0.87
+#: cycles/access, so `min` (whole cycles, rounded) reads **0** on a perfectly
+#: good record. Judging that record by this constant would return CANARY_BROKEN
+#: for the whole life of the platform.
+#:
+#: Hence two bounds rather than one, applied to whichever unit the record
+#: actually carries -- see `canary_verdict`. This one keeps judging the
+#: **historical** whole-cycle records (deleting it would silently re-admit the
+#: 15:57 and 16:16 records as usable); `CANARY_MIN_RESOLVABLE_CENTI` judges
+#: every record written since the extremes went to hundredths.
 CANARY_MIN_RESOLVABLE = math.ceil(100 / CANARY_TOLERANCE_PCT)
+
+#: The same bound, one unit down: the smallest per-access cost *in hundredths*
+#: whose spread is measurable.
+#:
+#: The derivation is unchanged and that is the point -- the quantum is one unit
+#: of whatever the figure is stored in, so at a minimum of `m` units, one unit
+#: of quantisation is `100/m` percent, and the bound is where that reaches the
+#: tolerance. Only the unit moved. Writing it as the same expression rather than
+#: as `CANARY_MIN_RESOLVABLE * 100` is deliberate: the two are numerically
+#: unequal (4, not 400), and the reason is that the quantum shrank by the same
+#: factor the figure grew by. A constant defined as "the old one times a hundred"
+#: would encode exactly the confusion that produced the kernel bug.
+#:
+#: Must match `CANARY_MIN_RESOLVABLE_CENTI` in `kernel/src/bench.rs`, which
+#: filters individual samples with it. This file applies twice that bound,
+#: because a *spread* is taken across two quantised samples and so carries two
+#: quanta -- the same doubling the whole-cycle path below has always applied.
+CANARY_MIN_RESOLVABLE_CENTI = math.ceil(100 / CANARY_TOLERANCE_PCT)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
@@ -787,7 +835,7 @@ def parse_canary(path):
                 match = CANARY_RE.match(stripped)
                 if match:
                     (start, end, pct, lo, hi, spread, samples,
-                     invalid, lo_centi, hi_centi) = match.groups()
+                     invalid, lo_centi, hi_centi, below_floor) = match.groups()
                     result = {
                         "start": int(start),
                         "end": int(end),
@@ -805,6 +853,12 @@ def parse_canary(path):
                     if lo_centi is not None and hi_centi is not None:
                         result["min_centi"] = int(lo_centi)
                         result["max_centi"] = int(hi_centi)
+                    # Stored only when the log actually said it. See CANARY_RE:
+                    # the absence of this key is the record's way of saying its
+                    # failures are of unknown kind, and a default would erase
+                    # that distinction permanently on write.
+                    if below_floor is not None:
+                        result["below_floor"] = int(below_floor)
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -945,6 +999,14 @@ def canary_verdict(canary):
     over-tolerance spread is CONTAMINATED even alongside failures; only a
     *within*-tolerance spread with failures present is BROKEN, because a failed
     sample is not a quiet one and could have hidden the excursion.
+
+    "Failures present" then had to be narrowed once more, because it was not
+    true of all of them. A sample refused for resolving a cost *below the
+    instrument's floor* did resolve something, and what it resolved was small --
+    an excursion is large and would have cleared the floor. Such a sample hides
+    nothing, so it is subtracted out (`below_floor`). Without that, correcting
+    the kernel's 100x-too-strict floor would have bought nothing: WHPX runs
+    would have gone on being ungradeable, just for a different stated reason.
     """
     if canary is None:
         return CANARY_ABSENT
@@ -958,42 +1020,91 @@ def canary_verdict(canary):
     # exact shape of the nine dead release records.
     if canary["start"] <= 0 and "spread" not in canary:
         return CANARY_BROKEN
-    # A minimum below one cycle of usable resolution means the arms barely
-    # separated: `min == 0` is the fully-eliminated case the pre-`invalid` logs
-    # express, and `min` of 1-2 is the same failure caught mid-collapse. Either
-    # way the spread computed from it is quantisation noise. See
-    # CANARY_MIN_RESOLVABLE for why the bound is derived rather than picked.
+    # Is the record's own minimum big enough for a spread taken across it to
+    # mean anything? Same question either way, asked in whichever unit the
+    # record actually stores -- and it MUST be asked in that unit. Judging a
+    # centicycle record by the whole-cycle bound is what would return
+    # CANARY_BROKEN for every WHPX run ever recorded: a real 0.87 cycles/access
+    # rounds to `min == 0`, which is indistinguishable from a dead instrument if
+    # you only look at the rounded field. See CANARY_MIN_RESOLVABLE.
     low = canary.get("min")
-    if low is not None and low < CANARY_MIN_RESOLVABLE:
-        return CANARY_BROKEN
-    # A whole-cycle record's `spread` may be two roundings wide.
-    #
-    # CANARY_MIN_RESOLVABLE bounds *one* cycle of quantisation at the tolerance,
-    # but a spread is taken across two samples. So on a record that predates the
-    # centicycle extremes, a per-access cost below twice that bound cannot
-    # support either verdict: `min=5 max=7` is consistent with a true spread
-    # anywhere from 17% to 60%, which straddles the 25% tolerance. Neither
-    # "contaminated" nor "clean" is assertable, and "the instrument could not
-    # measure" is exactly what CANARY_BROKEN means.
-    #
-    # This deliberately RECLASSIFIES two historical records -- 21:37 from
-    # `contaminated` and 21:56 from `clean`, both to `broken`. That is a
-    # correction, not a loss: those runs really were unable to resolve their own
-    # quantity, and the later centicycle run showed the true figure (47%) sits
-    # between what the two of them claimed. Records carrying `min_centi` are
-    # exempt because their spread was computed at 0.01-cycle resolution.
-    if "min_centi" not in canary and low is not None:
+    low_centi = canary.get("min_centi")
+    if low_centi is not None:
+        # Two quanta, not one: a spread is `(hi - lo) / lo`, so it carries a
+        # rounding from each endpoint. This is the same doubling the whole-cycle
+        # branch below applies, and it is applied here too now -- the previous
+        # code exempted centicycle records from it entirely, on the grounds that
+        # their spread "was computed at 0.01-cycle resolution". True, and beside
+        # the point: the resolution is finer but it is still finite, so the
+        # argument scales down with the unit rather than disappearing.
+        # Numerically it changes nothing on any record yet written (TCG resolves
+        # ~500 centi against a bound of 8); it is here so the rule does not have
+        # to be rediscovered the next time the unit moves.
+        if low_centi < 2 * CANARY_MIN_RESOLVABLE_CENTI:
+            return CANARY_BROKEN
+    elif low is not None:
+        # A minimum below one cycle of usable resolution means the arms barely
+        # separated: `min == 0` is the fully-eliminated case the pre-`invalid`
+        # logs express, and `min` of 1-2 is the same failure caught
+        # mid-collapse. Either way the spread computed from it is quantisation
+        # noise.
+        if low < CANARY_MIN_RESOLVABLE:
+            return CANARY_BROKEN
+        # A whole-cycle record's `spread` may be two roundings wide.
+        #
+        # CANARY_MIN_RESOLVABLE bounds *one* cycle of quantisation at the
+        # tolerance, but a spread is taken across two samples. So on a record
+        # that predates the centicycle extremes, a per-access cost below twice
+        # that bound cannot support either verdict: `min=5 max=7` is consistent
+        # with a true spread anywhere from 17% to 60%, which straddles the 25%
+        # tolerance. Neither "contaminated" nor "clean" is assertable, and "the
+        # instrument could not measure" is exactly what CANARY_BROKEN means.
+        #
+        # This deliberately RECLASSIFIES two historical records -- 21:37 from
+        # `contaminated` and 21:56 from `clean`, both to `broken`. That is a
+        # correction, not a loss: those runs really were unable to resolve their
+        # own quantity, and the later centicycle run showed the true figure
+        # (47%) sits between what the two of them claimed.
         if low < 2 * CANARY_MIN_RESOLVABLE and canary.get("samples"):
             return CANARY_BROKEN
     if "spread" in canary:
         over = canary["spread"] > CANARY_TOLERANCE_PCT
     else:
         over = abs(canary["pct"] - 100) > CANARY_TOLERANCE_PCT
-    # Arm-separation failures are decisive only when the samples that *did*
-    # measure came back quiet. `invalid` is authoritative when present (the
-    # kernel counted its own failures); on older logs a zero start is the same
-    # thing, one failed endpoint measurement.
-    if not over and (canary.get("invalid", 0) > 0 or canary["start"] <= 0):
+    # Failed measurements are decisive only when the samples that *did* measure
+    # came back quiet. `invalid` is authoritative when present (the kernel
+    # counted its own failures); on older logs a zero start is the same thing,
+    # one failed endpoint measurement.
+    #
+    # But only the failures that could have HIDDEN something count here, which
+    # is `invalid` minus `below_floor`. The argument for BROKEN is "a failed
+    # sample is not a quiet one -- it could have been the excursion", and that
+    # holds for a sample whose arms inverted and fails for one that resolved a
+    # small figure and was refused for being small. An excursion is large; it
+    # would have cleared the floor comfortably. Counting below-floor rejections
+    # here is what would keep every fast guest permanently ungradeable even
+    # after the kernel's floor was corrected.
+    #
+    # `below_floor` defaults to 0 when the record predates the field, and that
+    # default is an assumption rather than a reading -- deliberately the
+    # conservative one. It attributes every failure of unknown kind to the
+    # could-have-hidden-something side, so an old record keeps the verdict it
+    # already had. The field is never *stored* with that default (see
+    # CANARY_RE); an assumption made at judgement time can be revisited, one
+    # written to disk cannot.
+    #
+    # The `start <= 0` fallback applies ONLY to records with no `invalid` field.
+    # It is the pre-`invalid` logs' way of saying one endpoint measurement
+    # failed, and at whole-cycle scale that inference was sound. At sub-cycle
+    # scale it is the *same unit bug a third time*: a WHPX endpoint of 0.87
+    # cycles/access is written as `start = 0` because `start` is rounded to
+    # whole cycles, so a perfectly good record would be condemned by a heuristic
+    # meant for a dead one. Where the kernel counted its own failures there is
+    # nothing to infer, and the inference is exactly wrong.
+    unresolved = canary.get("invalid", 0) - canary.get("below_floor", 0)
+    counted_own_failures = "invalid" in canary
+    if not over and (unresolved > 0
+                     or (not counted_own_failures and canary["start"] <= 0)):
         return CANARY_BROKEN
     return CANARY_CONTAMINATED if over else CANARY_CLEAN
 

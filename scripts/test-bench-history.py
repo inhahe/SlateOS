@@ -943,6 +943,168 @@ def test_canary_broken_is_not_contamination(bh, tmpdir):
                bh.CANARY_CLEAN}), 4)
 
 
+def test_the_resolution_floor_is_applied_in_the_records_own_unit(bh, tmpdir):
+    """A fast guest must not be mistaken for a dead instrument.
+
+    This is the regression test for
+    B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT. The kernel's
+    resolution floor was derived when the per-access figure was a whole number
+    of cycles and was never re-derived when `CENTI` made it hundredths, so it
+    rejected deltas 100x larger than its own justification supported. Under TCG
+    that is invisible (~5.0 cycles clears a 0.04-cycle bound 125x over); under
+    WHPX it is total (~0.87 cycles, refused outright), and all six arms of the
+    2026-08-19 WHPX layout sweep recorded `samples: 0, invalid: 13`.
+
+    This file had the mirror of the same defect: it judged `min`, which is
+    rounded to whole cycles, against the whole-cycle bound. A real 0.87
+    cycles/access rounds to `min == 0`, which is bit-for-bit what a dead
+    instrument writes. Fixing only the kernel would have moved the failure here
+    and changed nothing observable -- the sweep would still have been
+    ungradeable, for a freshly-stated reason.
+    """
+    v = bh.canary_verdict
+
+    # Both bounds are derived from the tolerance, not chosen, and they are
+    # numerically EQUAL while meaning different things -- 4 cycles and 4
+    # centicycles. That coincidence is why the kernel bug survived: the constant
+    # still looked right after its unit changed underneath it. Asserting the
+    # derivation rather than the number is what keeps the two independent.
+    check("the whole-cycle bound follows from the tolerance",
+          bh.CANARY_MIN_RESOLVABLE, math.ceil(100 / bh.CANARY_TOLERANCE_PCT))
+    check("the centicycle bound follows from the same tolerance",
+          bh.CANARY_MIN_RESOLVABLE_CENTI,
+          math.ceil(100 / bh.CANARY_TOLERANCE_PCT))
+
+    # 1. TCG scale: ~5.04 cycles/access. The case that always worked, kept as
+    #    the control -- a fix that broke this would be trading one platform for
+    #    the other.
+    tcg = {"start": 5, "end": 5, "pct": 100, "min": 5, "max": 5, "spread": 1,
+           "samples": 12, "invalid": 0, "min_centi": 504, "max_centi": 509}
+    check("a TCG-scale record is clean", v(tcg), bh.CANARY_CLEAN)
+
+    # 2. WHPX scale: 0.87 cycles/access, so `min` rounds to 0 while `min_centi`
+    #    carries the real figure. THIS is the case that was broken.
+    whpx = {"start": 0, "end": 0, "pct": 100, "min": 0, "max": 0, "spread": 3,
+            "samples": 12, "invalid": 0, "min_centi": 87, "max_centi": 90}
+    check("a WHPX-scale record is clean, not broken", v(whpx), bh.CANARY_CLEAN)
+    check("...and is not blamed on the host either",
+          bh.canary_is_contaminated(whpx), False)
+    # The whole point: the rounded field alone cannot tell these apart.
+    dead = dict(whpx, min_centi=0, max_centi=0, spread=0)
+    check("a genuinely dead instrument at the same `min` is still broken",
+          v(dead), bh.CANARY_BROKEN)
+    # The same unit bug a THIRD time, in the zero-start fallback. `start` is
+    # rounded to whole cycles too, so a WHPX endpoint of 0.87 cycles writes
+    # `start = 0` -- which the pre-`invalid` heuristic reads as a failed endpoint
+    # measurement. That inference is only available when the record does not
+    # count its own failures, and the two cases must stay separable.
+    check("a legacy record with no failure count still falls back on start",
+          v({"start": 0, "end": 200, "pct": 0}), bh.CANARY_BROKEN)
+    check("...but a record that counted its own failures is judged by that",
+          v(dict(whpx, start=0, end=0, invalid=0)), bh.CANARY_CLEAN)
+    check("...including when the count is non-zero",
+          v(dict(whpx, start=0, end=0, invalid=2)), bh.CANARY_BROKEN)
+
+    # 3. A pre-`CENTI` record has no centicycle extremes, so the whole-cycle
+    #    bound must still govern it. Relaxing that would re-admit the 15:57 and
+    #    16:16 release records the constant exists to reject.
+    historical = {"start": 3, "end": 3, "pct": 100, "min": 3, "max": 3,
+                  "spread": 0, "samples": 10}
+    check("a pre-CENTI record is still judged in whole cycles",
+          v(historical), bh.CANARY_BROKEN)
+
+    # 4. The centicycle boundary, from both sides.
+    #
+    #    DEVIATION from build/canary-fix-plan.md, which put this boundary at
+    #    `CANARY_MIN_RESOLVABLE_CENTI` itself. That was one quantum short. The
+    #    spread is `(hi - lo) / lo` across two independently-quantised samples,
+    #    so it carries a quantum from each end: at a minimum of `m` centi, the
+    #    worst case is `200/m` percent, not `100/m`. The whole-cycle branch has
+    #    reasoned that way since P18 measured it; the plan simply did not carry
+    #    the doubling down with the unit. Numerically it changes no record yet
+    #    written -- TCG resolves ~500 centi and WHPX ~87, against a bound of 8.
+    bound = 2 * bh.CANARY_MIN_RESOLVABLE_CENTI
+    quiet = {"start": 1, "end": 1, "pct": 100, "min": 0, "max": 0, "spread": 0,
+             "samples": 9, "invalid": 0}
+    check("exactly at the doubled centicycle bound, a verdict is supportable",
+          v(dict(quiet, min_centi=bound, max_centi=bound)), bh.CANARY_CLEAN)
+    check("one centicycle under it, it is not",
+          v(dict(quiet, min_centi=bound - 1, max_centi=bound)),
+          bh.CANARY_BROKEN)
+
+    # 5. The whole-cycle boundary, with the control that says WHICH bound
+    #    rejected it. `min = CANARY_MIN_RESOLVABLE` clears the single-quantum
+    #    test and is caught by the doubled one; `min = 2 *` clears both. Without
+    #    the second assertion a future change could delete either bound and this
+    #    test would go on passing on the strength of the other.
+    check("a whole-cycle record at the single bound is caught by the doubling",
+          v(dict(quiet, min=bh.CANARY_MIN_RESOLVABLE,
+                 max=bh.CANARY_MIN_RESOLVABLE)),
+          bh.CANARY_BROKEN)
+    check("...and at twice it, both bounds are satisfied",
+          v(dict(quiet, min=2 * bh.CANARY_MIN_RESOLVABLE,
+                 max=2 * bh.CANARY_MIN_RESOLVABLE)),
+          bh.CANARY_CLEAN)
+
+
+def test_below_floor_failures_do_not_hide_an_excursion(bh, tmpdir):
+    """A sample refused for being *small* cannot have been the big thing.
+
+    `invalid` counts every reference measurement that produced no per-access
+    figure, and the UNKNOWN verdict rests on "a failed sample is not a quiet one
+    -- it could have been the excursion". That argument holds for a sample whose
+    arms inverted and fails for one that resolved a cost below the instrument's
+    floor: an excursion is *large* and would have cleared the floor comfortably.
+
+    Without this split, correcting the kernel's floor would have bought nothing.
+    Every WHPX run would have gone on being ungradeable -- not because it
+    measured nothing, but because the leftover rejections still counted against
+    it.
+    """
+    v = bh.canary_verdict
+
+    # The eleventh wire field, and the tenth-field line that predates it.
+    eleven = bh.parse_canary(write(
+        tmpdir, "canary-below-floor.txt",
+        "[bench] CANARY 5 5 100 5 5 1 9 4 504 509 4\n"))
+    check("the below_floor count parses", eleven.get("below_floor"), 4)
+    ten = bh.parse_canary(write(
+        tmpdir, "canary-no-below-floor.txt",
+        "[bench] CANARY 5 5 100 5 5 1 9 4 504 509\n"))
+    # ABSENCE, not zero. A record written before the kernel could tell the two
+    # failure kinds apart has failures of genuinely unknown kind; storing 0
+    # would assert they were all separation failures, which nobody measured.
+    check("an older record carries no below_floor key at all",
+          "below_floor" in ten, False)
+    check("...and is judged as though its failures could have hidden something",
+          v(ten), bh.CANARY_BROKEN)
+
+    # All four failures accounted for as below-floor: nothing is left that could
+    # have hidden an excursion, so the quiet samples are allowed to speak.
+    check("failures that were all below-floor do not veto a quiet spread",
+          v(eleven), bh.CANARY_CLEAN)
+    # One unaccounted-for failure is enough to put it back to UNKNOWN.
+    check("a single unresolved failure among them still does",
+          v(dict(eleven, below_floor=3)), bh.CANARY_BROKEN)
+
+    # Nothing measured at all outranks the split entirely -- this is the exact
+    # shape of all six 2026-08-19 WHPX sweep arms, and it stays BROKEN. The fix
+    # stops such a run happening; it does not retroactively grade one.
+    check("zero valid samples is broken even when every failure is explained",
+          v({"start": 0, "end": 0, "pct": 0, "min": 0, "max": 0, "spread": 0,
+             "samples": 0, "invalid": 13, "below_floor": 13}),
+          bh.CANARY_BROKEN)
+
+    # And a measured over-tolerance spread still outranks both: below-floor
+    # rejections are evidence for neither side, so they must not soften a
+    # positive finding into an UNKNOWN.
+    check("an over-tolerance spread is contamination whatever the failures were",
+          v({"start": 5, "end": 9, "pct": 180, "min": 5, "max": 9,
+             "spread": 62, "samples": 9, "invalid": 4, "below_floor": 4,
+             "min_centi": 504, "max_centi": 820}),
+          bh.CANARY_CONTAMINATED)
+
+
 def test_dispersion(bh, tmpdir):
     """A benchmark's own mean/min catches stalls the canary certifies as clean.
 

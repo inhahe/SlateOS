@@ -820,6 +820,27 @@ pub enum DropdownId {
     NarratorVerbosity,
 }
 
+impl DropdownId {
+    /// Every dropdown in the application.
+    ///
+    /// Exists so a test can walk the whole set and check each one is reachable.
+    /// Three of these were drawn with nothing that could open them, and the
+    /// only cheap way to keep an eleventh from joining them is to iterate the
+    /// enum rather than trust that whoever adds it also wires it.
+    pub const ALL: [Self; 10] = [
+        Self::Resolution,
+        Self::RefreshRate,
+        Self::Scale,
+        Self::OutputDevice,
+        Self::InputDevice,
+        Self::IpConfig,
+        Self::DiagnosticLevel,
+        Self::ColorFilter,
+        Self::CursorSize,
+        Self::NarratorVerbosity,
+    ];
+}
+
 impl Default for SettingsState {
     fn default() -> Self {
         Self::new()
@@ -1322,32 +1343,650 @@ const PILL_HEIGHT: f32 = 28.0;
 /// How far below the row's top edge the pills sit.
 const PILL_INSET_Y: f32 = 8.0;
 /// Distance from the content's left edge to the first pill — the same right
-/// column the toggles and dropdowns on other rows use.
-const PILL_ROW_X: f32 = 350.0;
+/// column the toggles and dropdowns on other rows use, which is why it is that
+/// column's constant rather than a second copy of the number.
+const PILL_ROW_X: f32 = CONTROL_COLUMN_DX;
+
+/// The rectangle of pill `index` in a row drawn at (`x`, `y`), as
+/// `(x, y, width, height)`. The only place a pill's position is computed —
+/// both the drawing and the click band come from here.
+fn pill_rect(index: usize, x: f32, y: f32) -> (f32, f32, f32, f32) {
+    #[allow(clippy::cast_precision_loss)]
+    let px = x + (index as f32) * PILL_PITCH;
+    (px, y + PILL_INSET_Y, PILL_WIDTH, PILL_HEIGHT)
+}
 
 /// Draw a row of pills, the selected one filled with the accent color.
 fn render_pill_row(tree: &mut RenderTree, x: f32, y: f32, items: &[(&str, bool)]) {
     for (idx, (label, active)) in items.iter().enumerate() {
-        let px = x + (idx as f32) * PILL_PITCH;
+        let (px, py, pw, ph) = pill_rect(idx, x, y);
         let (bg, fg) = if *active {
             (COL_ACCENT, COL_CRUST)
         } else {
             (COL_SURFACE1, COL_SUBTEXT0)
         };
-        fill_rounded(tree, px, y + PILL_INSET_Y, PILL_WIDTH, PILL_HEIGHT, bg, 6.0);
-        tree.text(px + 10.0, y + PILL_INSET_Y + 7.0, label, fg, 12.0);
+        fill_rounded(tree, px, py, pw, ph, bg, 6.0);
+        tree.text(px + 10.0, py + 7.0, label, fg, 12.0);
     }
 }
 
-/// Which pill of a row drawn at (`x`, `y`) the click landed on, if any.
-fn pill_row_hit(mx: f32, my: f32, x: f32, y: f32, count: usize) -> Option<usize> {
-    if my < y + PILL_INSET_Y || my >= y + PILL_INSET_Y + PILL_HEIGHT {
-        return None;
+/// A 0–100 percentage as the 0.0–1.0 fraction [`render_slider`] takes.
+fn percent_norm(percent: u8) -> f32 {
+    f32::from(percent) / 100.0
+}
+
+// --- Buttons and text fields ----------------------------------------------
+
+/// Width of the button [`render_button`] draws for `label`. The click target
+/// reads this rather than remeasuring, for the same reason the pills do.
+fn button_width(label: &str) -> f32 {
+    text::padded_width(label, 12.0, 13.0, FontWeightHint::Regular)
+}
+
+/// Draw a filled push button with its top-left corner at (`x`, `y`).
+fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) {
+    fill_rounded(tree, x, y, button_width(label), BUTTON_HEIGHT, color, 6.0);
+    tree.text(x + 12.0, y + 8.0, label, COL_CRUST, 13.0);
+}
+
+/// Draw a read-only text field showing `value`, inset within a row at `y`.
+fn render_text_field(tree: &mut RenderTree, x: f32, y: f32, value: &str, width: f32) {
+    let field_y = y + 6.0;
+    let field_h = 32.0;
+    fill_rounded(tree, x, field_y, width, field_h, COL_SURFACE0, 6.0);
+    tree.push(RenderCommand::StrokeRect {
+        x,
+        y: field_y,
+        width,
+        height: field_h,
+        color: COL_OVERLAY0,
+        line_width: 1.0,
+        corner_radii: CornerRadii::all(6.0),
+    });
+    text_clipped(
+        tree,
+        x + 8.0,
+        field_y + 8.0,
+        value,
+        COL_TEXT,
+        13.0,
+        width - 16.0,
+    );
+}
+
+// --- Theme cards and colour swatches ---------------------------------------
+//
+// Grids rather than rows, so they get their geometry named here for the same
+// reason the pills do: the card the user sees and the card the click resolves
+// to have to be computed from one set of numbers.
+
+/// Width of a theme-mode card on the Themes page.
+const THEME_CARD_WIDTH: f32 = 140.0;
+/// Height of a theme-mode card.
+const THEME_CARD_HEIGHT: f32 = 100.0;
+/// Gap between one theme-mode card's right edge and the next card's left.
+const THEME_CARD_SPACING: f32 = 16.0;
+
+/// Draw one theme-mode card with its top-left corner at (`x`, `y`).
+fn render_theme_card(tree: &mut RenderTree, x: f32, y: f32, mode: ThemeMode, selected: bool) {
+    let card_bg = if selected { COL_SURFACE1 } else { COL_SURFACE0 };
+    fill_rounded(
+        tree,
+        x,
+        y,
+        THEME_CARD_WIDTH,
+        THEME_CARD_HEIGHT,
+        card_bg,
+        8.0,
+    );
+
+    if selected {
+        tree.push(RenderCommand::StrokeRect {
+            x,
+            y,
+            width: THEME_CARD_WIDTH,
+            height: THEME_CARD_HEIGHT,
+            color: COL_ACCENT,
+            line_width: 2.0,
+            corner_radii: CornerRadii::all(8.0),
+        });
     }
-    (0..count).find(|idx| {
-        let px = x + (*idx as f32) * PILL_PITCH;
-        mx >= px && mx < px + PILL_WIDTH
-    })
+
+    // Theme preview (mini window mockup)
+    let preview_x = x + 15.0;
+    let preview_y = y + 12.0;
+    let (win_bg, win_text) = match mode {
+        ThemeMode::Light => (Color::from_hex(0xEFF1F5), Color::from_hex(0x4C4F69)),
+        ThemeMode::Dark => (Color::from_hex(0x1E1E2E), Color::from_hex(0xCDD6F4)),
+        ThemeMode::System => (Color::from_hex(0x313244), Color::from_hex(0xBAC2DE)),
+    };
+    fill_rounded(
+        tree,
+        preview_x,
+        preview_y,
+        THEME_CARD_WIDTH - 30.0,
+        50.0,
+        win_bg,
+        4.0,
+    );
+    tree.text(preview_x + 8.0, preview_y + 18.0, "Aa", win_text, 16.0);
+
+    let label_color = if selected { COL_ACCENT } else { COL_SUBTEXT0 };
+    tree.text(
+        x + THEME_CARD_WIDTH / 2.0 - 16.0,
+        y + THEME_CARD_HEIGHT - 22.0,
+        mode.label(),
+        label_color,
+        13.0,
+    );
+}
+
+// --- Pointer size buttons ---------------------------------------------------
+
+/// How many pointer sizes the Interaction page offers.
+const POINTER_SIZE_COUNT: usize = 5;
+/// Width of one pointer-size button.
+const POINTER_BUTTON_WIDTH: f32 = 32.0;
+/// Height of one pointer-size button.
+const POINTER_BUTTON_HEIGHT: f32 = 26.0;
+/// Distance from one pointer-size button's left edge to the next.
+const POINTER_BUTTON_PITCH: f32 = 40.0;
+/// How far below the row's top edge the pointer-size buttons sit.
+const POINTER_BUTTON_INSET_Y: f32 = 10.0;
+
+/// The pointer size the button at `index` selects. Sizes run 1..=5, indices
+/// 0..5, and this is the one place that off-by-one is written down.
+fn pointer_size_of(index: usize) -> u8 {
+    u8::try_from(index).unwrap_or(0).saturating_add(1)
+}
+
+/// Draw one pointer-size button, inset within a row whose top edge is `y`.
+fn render_pointer_size_button(tree: &mut RenderTree, x: f32, y: f32, size: u8, active: bool) {
+    let (bg, fg) = if active {
+        (COL_ACCENT, COL_CRUST)
+    } else {
+        (COL_SURFACE1, COL_SUBTEXT0)
+    };
+    fill_rounded(
+        tree,
+        x,
+        y + POINTER_BUTTON_INSET_Y,
+        POINTER_BUTTON_WIDTH,
+        POINTER_BUTTON_HEIGHT,
+        bg,
+        4.0,
+    );
+    let label = size.to_string();
+    tree.text(x + 12.0, y + POINTER_BUTTON_INSET_Y + 6.0, &label, fg, 12.0);
+}
+
+/// Diameter of an accent-colour swatch.
+const SWATCH_SIZE: f32 = 36.0;
+/// Gap between adjacent swatches, both across and down.
+const SWATCH_SPACING: f32 = 10.0;
+/// Swatches per row of the accent-colour grid.
+const SWATCH_COLS: usize = 6;
+
+/// Where the swatch at `index` of the accent grid sits, relative to the grid's
+/// top-left corner. The one place the grid's row-major order is written down.
+fn swatch_offset(index: usize) -> (f32, f32) {
+    #[allow(clippy::cast_precision_loss)]
+    let col = (index % SWATCH_COLS) as f32;
+    #[allow(clippy::cast_precision_loss)]
+    let row = (index / SWATCH_COLS) as f32;
+    (
+        col * (SWATCH_SIZE + SWATCH_SPACING),
+        row * (SWATCH_SIZE + SWATCH_SPACING),
+    )
+}
+
+/// Draw one accent swatch, ringed when it is the chosen one.
+fn render_swatch(tree: &mut RenderTree, x: f32, y: f32, color: Color, selected: bool) {
+    fill_rounded(
+        tree,
+        x,
+        y,
+        SWATCH_SIZE,
+        SWATCH_SIZE,
+        color,
+        SWATCH_SIZE / 2.0,
+    );
+    if selected {
+        // The ring stands off the swatch on every side, so it is that much
+        // wider and its corner radius that much larger — one number, not three.
+        const RING_GAP: f32 = 3.0;
+        let ring = SWATCH_SIZE + 2.0 * RING_GAP;
+        tree.push(RenderCommand::StrokeRect {
+            x: x - RING_GAP,
+            y: y - RING_GAP,
+            width: ring,
+            height: ring,
+            color: COL_TEXT,
+            line_width: 2.0,
+            corner_radii: CornerRadii::all(ring / 2.0),
+        });
+    }
+}
+
+// ============================================================================
+// Page layout: one walk down the page, both drawn and hit-tested
+// ============================================================================
+//
+// Every settings page used to be written twice. `render_*_page` walked a `y`
+// cursor down the page emitting rows, and `handle_*_click` re-derived the same
+// cursor from scratch — `base_y + 24.0 + 12.0 + 120.0 + SECTION_SPACING +
+// 24.0 + 12.0` — to work out what a click had landed on. Two spellings of one
+// layout are two layouts, and these had already drifted apart: the Sound page
+// drew an Input Device dropdown that nothing could open, because the handler's
+// arithmetic stopped three rows short of it. Three of the ten dropdowns were
+// unreachable that way, and so was every per-app permission toggle outside the
+// Location section, and the pointer-size buttons on the Interaction page.
+//
+// So the walk exists once. A page is described by one `build_*_page` method
+// that calls into a `PageSink`, and there are two sinks. `DrawSink` paints
+// each row as the cursor passes it; `HitSink` paints nothing and remembers
+// which row's band contained the pointer. The row drawn at a given y *is* the
+// row clicked there, because a single function put both of them there — the
+// same collapse `pill_rect` above already applies within one row, and
+// `dropdown_layout` applies to the popup.
+
+/// Distance from the content column's left edge to the column the row controls
+/// — toggles, dropdown buttons, sliders, pill rows — are drawn in.
+const CONTROL_COLUMN_DX: f32 = 350.0;
+
+/// How far a row's click band reaches left of the content column. Matches the
+/// inset of the selection highlight the list rows paint, so the band and the
+/// visible row start at the same place.
+const ROW_HIT_INSET: f32 = 8.0;
+
+/// How wide a row's click band is: enough to cover the label, the control in
+/// the right column, and the value text beside it. A row holds exactly one
+/// control, so the whole row is that control's target — a 44-pixel toggle is a
+/// needle to thread with a mouse, and the label is what the user is aiming at
+/// anyway.
+const ROW_HIT_WIDTH: f32 = 620.0;
+
+/// Vertical space a section header occupies: the title, its divider, and the
+/// gap beneath. The same total [`render_section_header`] returns.
+const SECTION_HEADER_HEIGHT: f32 = 36.0;
+
+/// Height of a button drawn by [`render_button`].
+const BUTTON_HEIGHT: f32 = 32.0;
+
+/// Which of a page's per-application permission lists a toggle belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionKind {
+    Location,
+    Camera,
+    Microphone,
+    Background,
+}
+
+/// A boolean setting, named so a click can find its field without the click
+/// handler knowing where on the page the row was drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToggleId {
+    NightLight,
+    OutputMuted,
+    SystemSounds,
+    ProxyEnabled,
+    AutoLogin,
+    LocationEnabled,
+    CameraEnabled,
+    MicrophoneEnabled,
+    /// The per-app switch at `index` of `kind`'s list.
+    AppPermission(PermissionKind, usize),
+    MonoAudio,
+    VisualAlerts,
+    NarratorEnabled,
+    StickyKeys,
+    FilterKeys,
+    ToggleKeys,
+    OnscreenKeyboard,
+    MouseKeys,
+    HighContrast,
+    ReduceAnimations,
+    ReduceTransparency,
+    AutoUpdate,
+}
+
+/// A row of small selectable buttons — see [`render_pill_row`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PillId {
+    Transparency,
+    AnimationSpeed,
+}
+
+/// A one-of-many choice laid out as something other than a pill row: a grid of
+/// cards or swatches, a list of rows, a strip of numbered buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectId {
+    ThemeMode,
+    AccentColor,
+    Adapter,
+    Account,
+    PointerSize,
+}
+
+/// A push button that does something when pressed.
+///
+/// Only buttons with an effect are listed. The rest of the page's buttons —
+/// Change Password, Add/Remove Account, Clear Activity History, Go Back, Fresh
+/// Start, Manage Family Settings — have no state behind them yet, so they
+/// register no click target rather than swallowing a click and doing nothing.
+/// See known-issues.md `C-SETTINGS-BUTTONS-WITH-NOTHING-BEHIND-THEM`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ButtonId {
+    CheckForUpdates,
+}
+
+/// What a click on a page landed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowHit {
+    Dropdown(DropdownId),
+    Toggle(ToggleId),
+    Pill(PillId, usize),
+    Select(SelectId, usize),
+    Press(ButtonId),
+}
+
+/// The one description of a settings page, interpreted either as drawing or as
+/// hit-testing.
+///
+/// Implementors provide the four primitives — where the cursor is, how to move
+/// it, how to draw at it, and how to register a click target. Everything a
+/// page actually says (`section`, `toggle_row`, `dropdown_row`, …) is a
+/// provided method built from those, so a row's geometry is written down once
+/// for both sinks and cannot drift between them.
+trait PageSink {
+    /// Left edge of the content column.
+    fn x(&self) -> f32;
+
+    /// Top edge of the row about to be emitted.
+    fn y(&self) -> f32;
+
+    /// Move the cursor down by `dy`.
+    fn advance(&mut self, dy: f32);
+
+    /// Draw at the cursor. `f` receives the render tree and the cursor's
+    /// `(x, y)`; [`HitSink`] discards it unevaluated.
+    fn draw(&mut self, f: impl FnOnce(&mut RenderTree, f32, f32));
+
+    /// Register `what` as clickable over the given rectangle, in absolute
+    /// window coordinates. [`DrawSink`] discards it.
+    fn hit_rect(&mut self, x: f32, y: f32, w: f32, h: f32, what: RowHit);
+
+    // ---- provided: the vocabulary a page is written in ----
+
+    /// The column every row's control sits in.
+    fn control_x(&self) -> f32 {
+        self.x() + CONTROL_COLUMN_DX
+    }
+
+    /// A section title with its divider rule.
+    fn section(&mut self, title: &str) {
+        self.draw(|tree, x, y| {
+            render_section_header(tree, x, y, title);
+        });
+        self.advance(SECTION_HEADER_HEIGHT);
+    }
+
+    /// The blank space between one section and the next.
+    fn gap(&mut self) {
+        self.advance(SECTION_SPACING);
+    }
+
+    /// A line of explanatory prose beneath a section header.
+    fn note(&mut self, text: &str, height: f32) {
+        self.draw(|tree, x, y| tree.text(x, y + 4.0, text, COL_SUBTEXT0, 13.0));
+        self.advance(height);
+    }
+
+    /// A labelled row: text on the left, `control` drawn at the control
+    /// column, and — when `what` is `Some` — the whole row as its click band.
+    fn row(
+        &mut self,
+        label: &str,
+        what: Option<RowHit>,
+        height: f32,
+        control: impl FnOnce(&mut RenderTree, f32, f32),
+    ) {
+        let control_x = self.control_x();
+        if let Some(what) = what {
+            let (x, y) = (self.x(), self.y());
+            self.hit_rect(x - ROW_HIT_INSET, y, ROW_HIT_WIDTH, height, what);
+        }
+        self.draw(|tree, x, y| {
+            render_setting_row(tree, x, y, label, 0.0);
+            control(tree, control_x, y);
+        });
+        self.advance(height);
+    }
+
+    /// Note where a dropdown's closed button sits, so its popup can be drawn
+    /// against it. Only [`AnchorSink`] records this; the default ignores it.
+    fn dropdown_anchor(&mut self, _id: DropdownId, _x: f32, _y: f32) {}
+
+    /// A row whose control is a closed dropdown button.
+    fn dropdown_row(&mut self, label: &str, id: DropdownId, value: &str) {
+        let (cx, y) = (self.control_x(), self.y());
+        self.dropdown_anchor(id, cx, y);
+        self.row(
+            label,
+            Some(RowHit::Dropdown(id)),
+            ITEM_HEIGHT,
+            |tree, cx, y| {
+                render_dropdown_button(tree, cx, y, value, DROPDOWN_WIDTH);
+            },
+        );
+    }
+
+    /// A row whose control is an on/off switch.
+    fn toggle_row(&mut self, label: &str, id: ToggleId, on: bool) {
+        self.row(
+            label,
+            Some(RowHit::Toggle(id)),
+            ITEM_HEIGHT,
+            |tree, cx, y| {
+                render_toggle(tree, cx, y + 12.0, on);
+            },
+        );
+    }
+
+    /// An indented per-application switch, as used by the permission lists.
+    /// Tighter than a full row, and its own label rather than a setting row's.
+    fn app_toggle_row(&mut self, label: &str, id: ToggleId, on: bool) {
+        let height = ITEM_HEIGHT - 8.0;
+        let control_x = self.control_x();
+        let (x, y) = (self.x(), self.y());
+        self.hit_rect(x, y, ROW_HIT_WIDTH, height, RowHit::Toggle(id));
+        self.draw(|tree, x, y| {
+            tree.text(x + 16.0, y + 14.0, label, COL_SUBTEXT1, 13.0);
+            render_toggle(tree, control_x, y + 12.0, on);
+        });
+        self.advance(height);
+    }
+
+    /// A row whose control is a slider, with an optional readout beside it.
+    /// Sliders are not draggable yet, so the row registers no click target.
+    fn slider_row(&mut self, label: &str, value: f32, readout: Option<&str>) {
+        self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
+            render_slider(tree, cx, y, value);
+            if let Some(readout) = readout {
+                tree.text(
+                    cx + SLIDER_WIDTH + 12.0,
+                    y + 14.0,
+                    readout,
+                    COL_SUBTEXT0,
+                    12.0,
+                );
+            }
+        });
+    }
+
+    /// A row that only reports a value; nothing to click.
+    fn value_row(&mut self, label: &str, value: &str, color: Color) {
+        self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
+            tree.text(cx, y + 14.0, value, color, 13.0);
+        });
+    }
+
+    /// A row whose control is a read-only text field.
+    fn field_row(&mut self, label: &str, value: &str, width: f32) {
+        self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
+            render_text_field(tree, cx, y, value, width);
+        });
+    }
+
+    /// A row whose control is a strip of pills, one of them selected.
+    fn pill_row(&mut self, label: &str, id: PillId, items: &[(&str, bool)]) {
+        let pill_x = self.x() + PILL_ROW_X;
+        let y = self.y();
+        for idx in 0..items.len() {
+            let (px, py, pw, ph) = pill_rect(idx, pill_x, y);
+            self.hit_rect(px, py, pw, ph, RowHit::Pill(id, idx));
+        }
+        self.row(label, None, ITEM_HEIGHT, |tree, _cx, y| {
+            render_pill_row(tree, pill_x, y, items);
+        });
+    }
+
+    /// A button offset from the cursor by (`dx`, `dy`). Buttons sit inside
+    /// blocks of bespoke content, so this does not move the cursor — the
+    /// caller advances past the whole block.
+    fn button_at(&mut self, dx: f32, dy: f32, label: &str, color: Color, what: Option<RowHit>) {
+        if let Some(what) = what {
+            let (x, y) = (self.x(), self.y());
+            self.hit_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, what);
+        }
+        self.draw(|tree, x, y| render_button(tree, x + dx, y + dy, label, color));
+    }
+
+    /// One row of a selectable list: a click anywhere in it selects `index`,
+    /// and `draw` paints the row's contents at the cursor.
+    fn list_row(
+        &mut self,
+        id: SelectId,
+        index: usize,
+        height: f32,
+        pitch: f32,
+        draw: impl FnOnce(&mut RenderTree, f32, f32),
+    ) {
+        let (x, y) = (self.x(), self.y());
+        self.hit_rect(
+            x - ROW_HIT_INSET,
+            y,
+            ROW_HIT_WIDTH,
+            height,
+            RowHit::Select(id, index),
+        );
+        self.draw(draw);
+        self.advance(pitch);
+    }
+}
+
+/// The sink that paints the page.
+struct DrawSink<'a> {
+    tree: &'a mut RenderTree,
+    x: f32,
+    y: f32,
+}
+
+impl PageSink for DrawSink<'_> {
+    fn x(&self) -> f32 {
+        self.x
+    }
+    fn y(&self) -> f32 {
+        self.y
+    }
+    fn advance(&mut self, dy: f32) {
+        self.y += dy;
+    }
+    fn draw(&mut self, f: impl FnOnce(&mut RenderTree, f32, f32)) {
+        f(self.tree, self.x, self.y);
+    }
+    fn hit_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _what: RowHit) {}
+}
+
+/// The sink that answers "what is under the pointer?".
+///
+/// It walks the identical sequence of calls `DrawSink` does and keeps the
+/// first target whose rectangle contains the point. First rather than last
+/// because the old hand-written handlers returned on their first match, and
+/// because a page's bands are disjoint by construction anyway — if two ever
+/// overlap, the earlier one is the one drawn underneath the pointer first.
+struct HitSink {
+    mx: f32,
+    my: f32,
+    x: f32,
+    y: f32,
+    hit: Option<RowHit>,
+}
+
+impl PageSink for HitSink {
+    fn x(&self) -> f32 {
+        self.x
+    }
+    fn y(&self) -> f32 {
+        self.y
+    }
+    fn advance(&mut self, dy: f32) {
+        self.y += dy;
+    }
+    fn draw(&mut self, _f: impl FnOnce(&mut RenderTree, f32, f32)) {}
+    fn hit_rect(&mut self, x: f32, y: f32, w: f32, h: f32, what: RowHit) {
+        if self.hit.is_none() && self.mx >= x && self.mx < x + w && self.my >= y && self.my < y + h
+        {
+            self.hit = Some(what);
+        }
+    }
+}
+
+/// The sink that answers "where was this dropdown's button drawn?".
+///
+/// The popup used to carry its own table of anchor coordinates — a third copy
+/// of each page's arithmetic, and the one that decided *where the list appears*
+/// rather than merely where a click lands. Walking the page for the answer
+/// means a popup cannot open somewhere other than under its own button.
+struct AnchorSink {
+    want: DropdownId,
+    x: f32,
+    y: f32,
+    found: Option<(f32, f32)>,
+}
+
+impl PageSink for AnchorSink {
+    fn x(&self) -> f32 {
+        self.x
+    }
+    fn y(&self) -> f32 {
+        self.y
+    }
+    fn advance(&mut self, dy: f32) {
+        self.y += dy;
+    }
+    fn draw(&mut self, _f: impl FnOnce(&mut RenderTree, f32, f32)) {}
+    fn hit_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _what: RowHit) {}
+    fn dropdown_anchor(&mut self, id: DropdownId, x: f32, y: f32) {
+        if self.found.is_none() && id == self.want {
+            self.found = Some((x, y));
+        }
+    }
+}
+
+/// The indented run of per-app switches beneath a permission's master toggle.
+///
+/// One function for all four lists, taking the list it is describing, so a
+/// click on a Camera row cannot resolve against the Location list's indices —
+/// which is what a per-list copy of this loop invites.
+fn build_permission_list<S: PageSink>(s: &mut S, kind: PermissionKind, apps: &[AppPermission]) {
+    for (idx, app) in apps.iter().enumerate() {
+        s.app_toggle_row(
+            &app.app_name,
+            ToggleId::AppPermission(kind, idx),
+            app.allowed,
+        );
+    }
 }
 
 // ============================================================================
@@ -1612,86 +2251,114 @@ impl SettingsState {
         }
     }
 
-    /// Dispatch to the correct page renderer.
-    fn render_current_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
+    /// Describe the current page to `sink`, top to bottom.
+    ///
+    /// The single walk. [`Self::render_current_page`] runs it through a
+    /// [`DrawSink`] to paint the page and [`Self::row_at`] runs it through a
+    /// [`HitSink`] to find what a click hit, so the two can never disagree
+    /// about where a row is.
+    fn build_page<S: PageSink>(&self, sink: &mut S) {
         match self.current_page {
-            SettingsPage::Display => self.render_display_page(tree, x, start_y),
-            SettingsPage::Sound => self.render_sound_page(tree, x, start_y),
-            SettingsPage::Themes => self.render_themes_page(tree, x, start_y),
-            SettingsPage::Colors => self.render_colors_page(tree, x, start_y),
-            SettingsPage::NetworkStatus => self.render_network_page(tree, x, start_y),
-            SettingsPage::Proxy => self.render_proxy_page(tree, x, start_y),
+            SettingsPage::Display => self.build_display_page(sink),
+            SettingsPage::Sound => self.build_sound_page(sink),
+            SettingsPage::Themes => self.build_themes_page(sink),
+            SettingsPage::Colors => self.build_colors_page(sink),
+            SettingsPage::NetworkStatus => self.build_network_page(sink),
+            SettingsPage::Proxy => self.build_proxy_page(sink),
             SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
-                self.render_accounts_page(tree, x, start_y);
+                self.build_accounts_page(sink);
             }
             SettingsPage::Permissions | SettingsPage::Capabilities => {
-                self.render_privacy_page(tree, x, start_y);
+                self.build_privacy_page(sink);
             }
             SettingsPage::Visual | SettingsPage::Audio | SettingsPage::Interaction => {
-                self.render_accessibility_page(tree, x, start_y);
+                self.build_accessibility_page(sink);
             }
             SettingsPage::SystemUpdates | SettingsPage::Recovery | SettingsPage::Snapshots => {
-                self.render_update_page(tree, x, start_y);
+                self.build_update_page(sink);
             }
-            _ => self.render_placeholder_page(tree, x, start_y),
+            _ => self.build_placeholder_page(sink),
         }
+    }
+
+    /// Left edge of the content column, in window coordinates.
+    fn content_x() -> f32 {
+        SIDEBAR_WIDTH + CONTENT_PADDING
+    }
+
+    /// Top edge of the page content, in window coordinates.
+    fn content_top() -> f32 {
+        HEADER_HEIGHT + 8.0
+    }
+
+    /// Paint the current page.
+    fn render_current_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
+        let mut sink = DrawSink {
+            tree,
+            x,
+            y: start_y,
+        };
+        self.build_page(&mut sink);
+    }
+
+    /// What the page control at (`mx`, `my`) is, if the point is on one.
+    fn row_at(&self, mx: f32, my: f32) -> Option<RowHit> {
+        let mut sink = HitSink {
+            mx,
+            my,
+            x: Self::content_x(),
+            y: Self::content_top(),
+            hit: None,
+        };
+        self.build_page(&mut sink);
+        sink.hit
     }
 
     // --- Display page ---
 
-    fn render_display_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let mut y = start_y;
-        let right_x = x + 350.0;
+    fn build_display_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Monitor Arrangement");
+        let monitors = self.monitor_count;
+        s.draw(move |tree, x, y| Self::render_monitor_preview(tree, x, y, monitors));
+        s.advance(120.0);
+        s.gap();
 
-        // Monitor preview
-        y = render_section_header(tree, x, y, "Monitor Arrangement");
-        self.render_monitor_preview(tree, x, y);
-        y += 120.0 + SECTION_SPACING;
+        s.section("Resolution & Scaling");
+        let res_label = RESOLUTIONS
+            .get(self.resolution_index)
+            .map_or_else(|| "Unknown".to_string(), |r| r.label());
+        s.dropdown_row("Resolution", DropdownId::Resolution, &res_label);
 
-        // Resolution
-        y = render_section_header(tree, x, y, "Resolution & Scaling");
-        render_setting_row(tree, x, y, "Resolution", 0.0);
-        let res = RESOLUTIONS.get(self.resolution_index);
-        let res_label = res
-            .map(|r| r.label())
-            .unwrap_or_else(|| "Unknown".to_string());
-        render_dropdown_button(tree, right_x, y, &res_label, DROPDOWN_WIDTH);
-        y += ITEM_HEIGHT;
-
-        // Refresh rate
-        render_setting_row(tree, x, y, "Refresh Rate", 0.0);
         let rate = REFRESH_RATES
             .get(self.refresh_rate_index)
             .copied()
             .unwrap_or(60);
-        let rate_label = format!("{} Hz", rate);
-        render_dropdown_button(tree, right_x, y, &rate_label, DROPDOWN_WIDTH);
-        y += ITEM_HEIGHT;
+        let rate_label = format!("{rate} Hz");
+        s.dropdown_row("Refresh Rate", DropdownId::RefreshRate, &rate_label);
 
-        // Scaling
-        render_setting_row(tree, x, y, "Display Scaling", 0.0);
-        render_dropdown_button(tree, right_x, y, self.scale.label(), DROPDOWN_WIDTH);
-        y += ITEM_HEIGHT + SECTION_SPACING;
+        s.dropdown_row("Display Scaling", DropdownId::Scale, self.scale.label());
+        s.gap();
 
-        // Night light
-        y = render_section_header(tree, x, y, "Night Light");
-        render_setting_row(tree, x, y, "Night Light", 0.0);
-        render_toggle(tree, right_x, y + 12.0, self.night_light_enabled);
-        y += ITEM_HEIGHT;
+        s.section("Night Light");
+        s.toggle_row(
+            "Night Light",
+            ToggleId::NightLight,
+            self.night_light_enabled,
+        );
 
         if self.night_light_enabled {
-            render_setting_row(tree, x, y, "Color Temperature", 0.0);
-            render_slider(tree, right_x, y, self.night_light_temperature);
-            y += ITEM_HEIGHT;
-
-            // Temperature labels
-            tree.text(right_x, y, "Warm", COL_PEACH, 11.0);
-            tree.text(right_x + SLIDER_WIDTH - 30.0, y, "Cool", COL_ACCENT, 11.0);
+            s.slider_row("Color Temperature", self.night_light_temperature, None);
+            // Range labels, sitting on the row boundary beneath the slider.
+            s.draw(|tree, x, y| {
+                let cx = x + CONTROL_COLUMN_DX;
+                tree.text(cx, y, "Warm", COL_PEACH, 11.0);
+                tree.text(cx + SLIDER_WIDTH - 30.0, y, "Cool", COL_ACCENT, 11.0);
+            });
         }
     }
 
     /// Render a simplified monitor arrangement preview.
-    fn render_monitor_preview(&self, tree: &mut RenderTree, x: f32, y: f32) {
+    fn render_monitor_preview(tree: &mut RenderTree, x: f32, y: f32, monitor_count: u8) {
         let preview_bg_w = 500.0;
         let preview_bg_h = 110.0;
         fill_rounded(tree, x, y, preview_bg_w, preview_bg_h, COL_SURFACE0, 8.0);
@@ -1699,13 +2366,15 @@ impl SettingsState {
         let monitor_w = 100.0;
         let monitor_h = 70.0;
         let spacing = 20.0;
-        let total_w =
-            (self.monitor_count as f32) * monitor_w + ((self.monitor_count as f32) - 1.0) * spacing;
+        #[allow(clippy::cast_precision_loss)]
+        let count = monitor_count as f32;
+        let total_w = count * monitor_w + (count - 1.0) * spacing;
         let start_x = x + (preview_bg_w - total_w) / 2.0;
         let start_y = y + (preview_bg_h - monitor_h) / 2.0;
 
-        for i in 0..self.monitor_count {
-            let mx = start_x + (i as f32) * (monitor_w + spacing);
+        for i in 0..monitor_count {
+            #[allow(clippy::cast_precision_loss)]
+            let mx = start_x + f32::from(i) * (monitor_w + spacing);
             // Monitor bezel
             fill_rounded(tree, mx, start_y, monitor_w, monitor_h, COL_SURFACE2, 4.0);
             // Screen area
@@ -1718,8 +2387,9 @@ impl SettingsState {
                 COL_ACCENT,
                 2.0,
             );
-            // Monitor number
-            let num_label = format!("{}", i + 1);
+            // Monitor number. Displays are numbered from one; `saturating_add`
+            // rather than `+` because `monitor_count` is a `u8` the caller sets.
+            let num_label = i.saturating_add(1).to_string();
             tree.text(
                 mx + monitor_w / 2.0 - 4.0,
                 start_y + monitor_h / 2.0 - 12.0,
@@ -1732,414 +2402,361 @@ impl SettingsState {
 
     // --- Sound page ---
 
-    fn render_sound_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let mut y = start_y;
-        let right_x = x + 350.0;
-
-        // Output section
-        y = render_section_header(tree, x, y, "Output");
-        render_setting_row(tree, x, y, "Output Device", 0.0);
+    fn build_sound_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Output");
         let output_name = self
             .output_devices
             .get(self.output_device_index)
-            .map(|d| d.name.as_str())
-            .unwrap_or("None");
-        render_dropdown_button(tree, right_x, y, output_name, DROPDOWN_WIDTH);
-        y += ITEM_HEIGHT;
+            .map_or("None", |d| d.name.as_str());
+        s.dropdown_row("Output Device", DropdownId::OutputDevice, output_name);
 
-        // Volume slider
-        render_setting_row(tree, x, y, "Volume", 0.0);
-        let vol_norm = self.output_volume as f32 / 100.0;
-        render_slider(tree, right_x, y, vol_norm);
-        // Volume percentage label
-        let vol_label = format!("{}%", self.output_volume);
-        tree.text(
-            right_x + SLIDER_WIDTH + 12.0,
-            y + 14.0,
-            &vol_label,
-            COL_SUBTEXT0,
-            12.0,
+        s.slider_row(
+            "Volume",
+            percent_norm(self.output_volume),
+            Some(&format!("{}%", self.output_volume)),
         );
-        y += ITEM_HEIGHT;
+        s.toggle_row("Mute", ToggleId::OutputMuted, self.output_muted);
+        s.gap();
 
-        // Mute toggle
-        render_setting_row(tree, x, y, "Mute", 0.0);
-        render_toggle(tree, right_x, y + 12.0, self.output_muted);
-        y += ITEM_HEIGHT + SECTION_SPACING;
-
-        // Input section
-        y = render_section_header(tree, x, y, "Input");
-        render_setting_row(tree, x, y, "Input Device", 0.0);
+        s.section("Input");
         let input_name = self
             .input_devices
             .get(self.input_device_index)
-            .map(|d| d.name.as_str())
-            .unwrap_or("None");
-        render_dropdown_button(tree, right_x, y, input_name, DROPDOWN_WIDTH);
-        y += ITEM_HEIGHT;
+            .map_or("None", |d| d.name.as_str());
+        s.dropdown_row("Input Device", DropdownId::InputDevice, input_name);
 
-        render_setting_row(tree, x, y, "Input Volume", 0.0);
-        let in_vol_norm = self.input_volume as f32 / 100.0;
-        render_slider(tree, right_x, y, in_vol_norm);
-        let in_vol_label = format!("{}%", self.input_volume);
-        tree.text(
-            right_x + SLIDER_WIDTH + 12.0,
-            y + 14.0,
-            &in_vol_label,
-            COL_SUBTEXT0,
-            12.0,
+        s.slider_row(
+            "Input Volume",
+            percent_norm(self.input_volume),
+            Some(&format!("{}%", self.input_volume)),
         );
-        y += ITEM_HEIGHT + SECTION_SPACING;
+        s.gap();
 
-        // System sounds
-        y = render_section_header(tree, x, y, "System Sounds");
-        render_setting_row(tree, x, y, "Enable System Sounds", 0.0);
-        render_toggle(tree, right_x, y + 12.0, self.system_sounds_enabled);
-        y += ITEM_HEIGHT + SECTION_SPACING;
+        s.section("System Sounds");
+        s.toggle_row(
+            "Enable System Sounds",
+            ToggleId::SystemSounds,
+            self.system_sounds_enabled,
+        );
+        s.gap();
 
-        // Per-app volume
-        y = render_section_header(tree, x, y, "Per-Application Volume");
+        s.section("Per-Application Volume");
         for app_vol in &self.app_volumes {
-            render_setting_row(tree, x, y, &app_vol.app_name, 0.0);
-            let app_norm = app_vol.volume as f32 / 100.0;
-            render_slider(tree, right_x, y, app_norm);
-            let app_label = format!("{}%", app_vol.volume);
-            tree.text(
-                right_x + SLIDER_WIDTH + 12.0,
-                y + 14.0,
-                &app_label,
-                COL_SUBTEXT0,
-                12.0,
-            );
-            // Mute indicator
-            if app_vol.muted {
+            s.row(&app_vol.app_name, None, ITEM_HEIGHT, move |tree, cx, y| {
+                render_slider(tree, cx, y, percent_norm(app_vol.volume));
+                let label = format!("{}%", app_vol.volume);
                 tree.text(
-                    right_x + SLIDER_WIDTH + 50.0,
+                    cx + SLIDER_WIDTH + 12.0,
                     y + 14.0,
-                    "(muted)",
-                    COL_RED,
-                    11.0,
+                    &label,
+                    COL_SUBTEXT0,
+                    12.0,
                 );
-            }
-            y += ITEM_HEIGHT;
+                if app_vol.muted {
+                    tree.text(cx + SLIDER_WIDTH + 50.0, y + 14.0, "(muted)", COL_RED, 11.0);
+                }
+            });
         }
     }
 
     // --- Themes page ---
 
-    fn render_themes_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let mut y = start_y;
+    fn build_themes_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Theme Mode");
 
-        // Theme mode selection
-        y = render_section_header(tree, x, y, "Theme Mode");
-        let card_w = 140.0;
-        let card_h = 100.0;
-        let card_spacing = 16.0;
+        let selected = self.appearance.settings.theme_mode;
         for (idx, mode) in ThemeMode::ALL.iter().enumerate() {
-            let cx = x + (idx as f32) * (card_w + card_spacing);
-            let is_selected = *mode == self.appearance.settings.theme_mode;
-
-            // Card background
-            let card_bg = if is_selected {
-                COL_SURFACE1
-            } else {
-                COL_SURFACE0
-            };
-            fill_rounded(tree, cx, y, card_w, card_h, card_bg, 8.0);
-
-            // Selection border
-            if is_selected {
-                tree.push(RenderCommand::StrokeRect {
-                    x: cx,
-                    y,
-                    width: card_w,
-                    height: card_h,
-                    color: COL_ACCENT,
-                    line_width: 2.0,
-                    corner_radii: CornerRadii::all(8.0),
-                });
-            }
-
-            // Theme preview (mini window mockup)
-            let preview_x = cx + 15.0;
-            let preview_y = y + 12.0;
-            let preview_w = card_w - 30.0;
-            let preview_h = 50.0;
-
-            let (win_bg, win_text) = match mode {
-                ThemeMode::Light => (Color::from_hex(0xEFF1F5), Color::from_hex(0x4C4F69)),
-                ThemeMode::Dark => (Color::from_hex(0x1E1E2E), Color::from_hex(0xCDD6F4)),
-                ThemeMode::System => (Color::from_hex(0x313244), Color::from_hex(0xBAC2DE)),
-            };
-            fill_rounded(
-                tree, preview_x, preview_y, preview_w, preview_h, win_bg, 4.0,
+            #[allow(clippy::cast_precision_loss)]
+            let dx = (idx as f32) * (THEME_CARD_WIDTH + THEME_CARD_SPACING);
+            let (x, y) = (s.x(), s.y());
+            s.hit_rect(
+                x + dx,
+                y,
+                THEME_CARD_WIDTH,
+                THEME_CARD_HEIGHT,
+                RowHit::Select(SelectId::ThemeMode, idx),
             );
-            tree.text(preview_x + 8.0, preview_y + 18.0, "Aa", win_text, 16.0);
-
-            // Label
-            let label_y = y + card_h - 22.0;
-            let label_color = if is_selected {
-                COL_ACCENT
-            } else {
-                COL_SUBTEXT0
-            };
-            tree.text(
-                cx + card_w / 2.0 - 16.0,
-                label_y,
-                mode.label(),
-                label_color,
-                13.0,
-            );
+            let mode = *mode;
+            s.draw(move |tree, x, y| {
+                render_theme_card(tree, x + dx, y, mode, mode == selected);
+            });
         }
-        y += card_h + SECTION_SPACING;
+        s.advance(THEME_CARD_HEIGHT);
+        s.gap();
 
         // Transparency. A row of levels rather than the on/off switch this
         // page used to show: the setting has four values, and a switch that
         // meant "Off or whatever it was" would forget a user's choice of
         // Full every time they turned it off and on again.
-        y = render_section_header(tree, x, y, "Effects");
-        render_setting_row(tree, x, y, "Transparency", 0.0);
+        s.section("Effects");
         let levels: Vec<(&str, bool)> = TransparencyLevel::ALL
             .iter()
             .map(|l| (l.label(), *l == self.appearance.settings.transparency))
             .collect();
-        render_pill_row(tree, x + PILL_ROW_X, y, &levels);
-        y += ITEM_HEIGHT;
+        s.pill_row("Transparency", PillId::Transparency, &levels);
 
-        // Animation speed
-        render_setting_row(tree, x, y, "Animation Speed", 0.0);
         let speeds: Vec<(&str, bool)> = AnimationSpeed::ALL
             .iter()
-            .map(|s| (s.label(), *s == self.appearance.settings.animation_speed))
+            .map(|sp| (sp.label(), *sp == self.appearance.settings.animation_speed))
             .collect();
-        render_pill_row(tree, x + PILL_ROW_X, y, &speeds);
+        s.pill_row("Animation Speed", PillId::AnimationSpeed, &speeds);
     }
 
     // --- Colors page (accent color picker) ---
 
-    fn render_colors_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let mut y = start_y;
+    fn build_colors_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Accent Color");
+        s.draw(|tree, x, y| {
+            tree.text(
+                x,
+                y,
+                "Choose an accent color for buttons, links, and highlights:",
+                COL_SUBTEXT0,
+                13.0,
+            );
+        });
+        s.advance(28.0);
 
-        y = render_section_header(tree, x, y, "Accent Color");
-        tree.text(
-            x,
-            y,
-            "Choose an accent color for buttons, links, and highlights:",
-            COL_SUBTEXT0,
-            13.0,
-        );
-        y += 28.0;
-
-        // Color grid
-        let swatch_size = 36.0;
-        let swatch_spacing = 10.0;
-        let cols = 6;
-
-        for (idx, accent) in AccentColor::presets().iter().enumerate() {
-            let col = idx % cols;
-            let row = idx / cols;
-            let sx = x + (col as f32) * (swatch_size + swatch_spacing);
-            let sy = y + (row as f32) * (swatch_size + swatch_spacing);
-
+        let presets = AccentColor::presets();
+        let light = self.appearance.settings.theme_mode.is_light();
+        let chosen = self.appearance.settings.accent_color;
+        for (idx, accent) in presets.iter().enumerate() {
+            let (dx, dy) = swatch_offset(idx);
+            let (x, y) = (s.x(), s.y());
+            s.hit_rect(
+                x + dx,
+                y + dy,
+                SWATCH_SIZE,
+                SWATCH_SIZE,
+                RowHit::Select(SelectId::AccentColor, idx),
+            );
             // The swatch shows what this accent will actually look like in
             // the mode the user is in — the light palette is a darkened set,
             // so showing the dark one would promise a colour they won't get.
-            let color = if self.appearance.settings.theme_mode.is_light() {
+            let color = if light {
                 accent.color_light()
             } else {
                 accent.color()
             };
-            fill_rounded(
-                tree,
-                sx,
-                sy,
-                swatch_size,
-                swatch_size,
-                color,
-                swatch_size / 2.0,
-            );
-
-            // Selection ring
-            if *accent == self.appearance.settings.accent_color {
-                tree.push(RenderCommand::StrokeRect {
-                    x: sx - 3.0,
-                    y: sy - 3.0,
-                    width: swatch_size + 6.0,
-                    height: swatch_size + 6.0,
-                    color: COL_TEXT,
-                    line_width: 2.0,
-                    corner_radii: CornerRadii::all((swatch_size + 6.0) / 2.0),
-                });
-            }
+            let selected = *accent == chosen;
+            s.draw(move |tree, x, y| {
+                render_swatch(tree, x + dx, y + dy, color, selected);
+            });
         }
 
-        let grid_rows = AccentColor::presets().len().div_ceil(cols);
-        y += (grid_rows as f32) * (swatch_size + swatch_spacing) + SECTION_SPACING;
+        #[allow(clippy::cast_precision_loss)]
+        let grid_rows = presets.len().div_ceil(SWATCH_COLS) as f32;
+        s.advance(grid_rows * (SWATCH_SIZE + SWATCH_SPACING));
+        s.gap();
 
-        // Preview of current accent color
-        y = render_section_header(tree, x, y, "Preview");
+        s.section("Preview");
         let preview_color = self.appearance.settings.effective_accent();
-
-        // Sample button
-        fill_rounded(tree, x, y, 120.0, 36.0, preview_color, 6.0);
-        tree.text(x + 20.0, y + 10.0, "Sample Button", COL_CRUST, 13.0);
-
-        // Sample link text
-        tree.text(x + 150.0, y + 10.0, "Sample link text", preview_color, 13.0);
-
-        // Sample progress bar
-        y += 50.0;
-        fill_rounded(tree, x, y, 300.0, 8.0, COL_SURFACE1, 4.0);
-        fill_rounded(tree, x, y, 200.0, 8.0, preview_color, 4.0);
+        s.draw(move |tree, x, y| {
+            fill_rounded(tree, x, y, 120.0, 36.0, preview_color, 6.0);
+            tree.text(x + 20.0, y + 10.0, "Sample Button", COL_CRUST, 13.0);
+            tree.text(x + 150.0, y + 10.0, "Sample link text", preview_color, 13.0);
+        });
+        s.advance(50.0);
+        s.draw(move |tree, x, y| {
+            fill_rounded(tree, x, y, 300.0, 8.0, COL_SURFACE1, 4.0);
+            fill_rounded(tree, x, y, 200.0, 8.0, preview_color, 4.0);
+        });
     }
 
     // --- Network status page ---
 
-    fn render_network_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let mut y = start_y;
-        let right_x = x + 350.0;
-
-        // Adapter list
-        y = render_section_header(tree, x, y, "Network Adapters");
+    fn build_network_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Network Adapters");
+        let control_x = s.control_x();
         for (idx, adapter) in self.adapters.iter().enumerate() {
-            let row_y = y;
-            let is_selected = idx == self.selected_adapter;
-            let row_bg = if is_selected {
-                COL_SURFACE0
-            } else {
-                Color::TRANSPARENT
-            };
-            fill_rounded(tree, x - 8.0, row_y, 600.0, ITEM_HEIGHT, row_bg, 6.0);
+            let selected = idx == self.selected_adapter;
+            s.list_row(
+                SelectId::Adapter,
+                idx,
+                ITEM_HEIGHT,
+                ITEM_HEIGHT + 4.0,
+                move |tree, x, y| {
+                    let row_bg = if selected {
+                        COL_SURFACE0
+                    } else {
+                        Color::TRANSPARENT
+                    };
+                    fill_rounded(tree, x - 8.0, y, 600.0, ITEM_HEIGHT, row_bg, 6.0);
 
-            // Status indicator
-            let status_color = if adapter.connected {
-                COL_GREEN
-            } else {
-                COL_OVERLAY0
-            };
-            fill_rounded(tree, x, row_y + 18.0, 10.0, 10.0, status_color, 5.0);
+                    let status_color = if adapter.connected {
+                        COL_GREEN
+                    } else {
+                        COL_OVERLAY0
+                    };
+                    fill_rounded(tree, x, y + 18.0, 10.0, 10.0, status_color, 5.0);
 
-            // Adapter name and type
-            tree.text(x + 20.0, row_y + 8.0, &adapter.name, COL_TEXT, 14.0);
-            tree.text(
-                x + 20.0,
-                row_y + 26.0,
-                adapter.adapter_type.label(),
-                COL_SUBTEXT0,
-                11.0,
+                    tree.text(x + 20.0, y + 8.0, &adapter.name, COL_TEXT, 14.0);
+                    tree.text(
+                        x + 20.0,
+                        y + 26.0,
+                        adapter.adapter_type.label(),
+                        COL_SUBTEXT0,
+                        11.0,
+                    );
+
+                    let status_text = if adapter.connected {
+                        &adapter.ip_address
+                    } else {
+                        "Disconnected"
+                    };
+                    tree.text(control_x, y + 14.0, status_text, COL_SUBTEXT0, 13.0);
+                },
             );
-
-            // IP address or status
-            let status_text = if adapter.connected {
-                &adapter.ip_address
-            } else {
-                "Disconnected"
-            };
-            tree.text(right_x, row_y + 14.0, status_text, COL_SUBTEXT0, 13.0);
-
-            y += ITEM_HEIGHT + 4.0;
         }
-        y += SECTION_SPACING;
+        s.gap();
 
-        // IP Configuration for selected adapter
-        y = render_section_header(tree, x, y, "IP Configuration");
-        render_setting_row(tree, x, y, "Mode", 0.0);
-        render_dropdown_button(
-            tree,
-            right_x,
-            y,
-            self.ip_config_mode.label(),
-            DROPDOWN_WIDTH,
-        );
-        y += ITEM_HEIGHT;
+        s.section("IP Configuration");
+        s.dropdown_row("Mode", DropdownId::IpConfig, self.ip_config_mode.label());
 
         if self.ip_config_mode == IpConfigMode::Static {
-            render_setting_row(tree, x, y, "IP Address", 0.0);
-            self.render_text_field(tree, right_x, y, &self.static_ip, 180.0);
-            y += ITEM_HEIGHT;
-
-            render_setting_row(tree, x, y, "Gateway", 0.0);
-            self.render_text_field(tree, right_x, y, &self.static_gateway, 180.0);
-            y += ITEM_HEIGHT;
+            s.field_row("IP Address", &self.static_ip, 180.0);
+            s.field_row("Gateway", &self.static_gateway, 180.0);
         }
-        y += SECTION_SPACING;
+        s.gap();
 
-        // DNS
-        y = render_section_header(tree, x, y, "DNS Servers");
-        render_setting_row(tree, x, y, "Primary DNS", 0.0);
-        self.render_text_field(tree, right_x, y, &self.dns_primary, 180.0);
-        y += ITEM_HEIGHT;
-
-        render_setting_row(tree, x, y, "Secondary DNS", 0.0);
-        self.render_text_field(tree, right_x, y, &self.dns_secondary, 180.0);
+        s.section("DNS Servers");
+        s.field_row("Primary DNS", &self.dns_primary, 180.0);
+        s.field_row("Secondary DNS", &self.dns_secondary, 180.0);
     }
 
     // --- Proxy page ---
 
-    fn render_proxy_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let mut y = start_y;
-        let right_x = x + 350.0;
-
-        y = render_section_header(tree, x, y, "Proxy Configuration");
-
-        render_setting_row(tree, x, y, "Use Proxy Server", 0.0);
-        render_toggle(tree, right_x, y + 12.0, self.proxy_enabled);
-        y += ITEM_HEIGHT;
+    fn build_proxy_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Proxy Configuration");
+        s.toggle_row(
+            "Use Proxy Server",
+            ToggleId::ProxyEnabled,
+            self.proxy_enabled,
+        );
 
         if self.proxy_enabled {
-            render_setting_row(tree, x, y, "Proxy Address", 0.0);
-            self.render_text_field(tree, right_x, y, &self.proxy_address, 220.0);
-            y += ITEM_HEIGHT;
-
-            render_setting_row(tree, x, y, "Port", 0.0);
-            self.render_text_field(tree, right_x, y, &self.proxy_port, 80.0);
+            s.field_row("Proxy Address", &self.proxy_address, 220.0);
+            s.field_row("Port", &self.proxy_port, 80.0);
         }
     }
 
     // --- Accounts page ---
 
-    fn render_accounts_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let mut y = start_y;
-        let right_x = x + 350.0;
+    fn build_accounts_page<S: PageSink>(&self, s: &mut S) {
+        if self.current_page == SettingsPage::LoginOptions {
+            self.build_login_options_page(s);
+            return;
+        }
 
-        if let SettingsPage::LoginOptions = self.current_page {
-            // Login Options sub-page
-            y = render_section_header(tree, x, y, "Login Options");
+        // User account list (default UserAccounts page)
+        s.section("User Accounts");
 
-            render_setting_row(tree, x, y, "Auto-login on startup", 0.0);
-            render_toggle(tree, right_x, y + 12.0, self.auto_login_enabled);
-            y += ITEM_HEIGHT;
+        let control_x = s.control_x();
+        for (idx, account) in self.user_accounts.iter().enumerate() {
+            let selected = idx == self.selected_account;
+            s.list_row(SelectId::Account, idx, 60.0, 64.0, move |tree, x, y| {
+                let row_bg = if selected {
+                    COL_SURFACE0
+                } else {
+                    Color::TRANSPARENT
+                };
+                fill_rounded(tree, x - 8.0, y, 620.0, 60.0, row_bg, 8.0);
 
-            // Password change button
-            render_setting_row(tree, x, y, "Password", 0.0);
-            self.render_button(tree, right_x, y + 6.0, "Change Password", COL_ACCENT);
-            y += ITEM_HEIGHT + SECTION_SPACING;
+                // Avatar placeholder
+                let avatar_size = 40.0;
+                fill_rounded(
+                    tree,
+                    x + 4.0,
+                    y + 10.0,
+                    avatar_size,
+                    avatar_size,
+                    COL_SURFACE2,
+                    avatar_size / 2.0,
+                );
+                tree.text(x + 16.0, y + 20.0, "\u{1F464}", COL_TEXT, 16.0);
 
-            // Account picture
-            y = render_section_header(tree, x, y, "Account Picture");
-            tree.text(
-                x,
-                y + 4.0,
-                "Choose a picture for your account:",
-                COL_SUBTEXT0,
-                13.0,
+                text_bold(tree, x + 56.0, y + 12.0, &account.name, COL_TEXT, 14.0);
+                tree.text(x + 56.0, y + 32.0, &account.email, COL_SUBTEXT0, 12.0);
+
+                let badge_color = account.account_type.color();
+                fill_rounded(tree, control_x, y + 18.0, 90.0, 22.0, badge_color, 4.0);
+                tree.text(
+                    control_x + 8.0,
+                    y + 22.0,
+                    account.account_type.label(),
+                    COL_CRUST,
+                    11.0,
+                );
+
+                if account.is_current {
+                    tree.text(control_x + 100.0, y + 22.0, "(You)", COL_ACCENT, 11.0);
+                }
+            });
+        }
+        s.gap();
+
+        s.button_at(0.0, 0.0, "+ Add Account", COL_ACCENT, None);
+        s.button_at(140.0, 0.0, "- Remove Account", COL_RED, None);
+        s.advance(44.0);
+        s.gap();
+
+        // Current user details
+        if let Some(account) = self.user_accounts.get(self.selected_account) {
+            s.section("Account Details");
+            s.value_row("Name", &account.name, COL_TEXT);
+            s.value_row("Email", &account.email, COL_TEXT);
+            s.value_row(
+                "Account Type",
+                account.account_type.label(),
+                account.account_type.color(),
             );
-            y += 28.0;
+            s.value_row("Login Count", &account.login_count.to_string(), COL_TEXT);
+            s.value_row("Last Login", &account.last_login, COL_TEXT);
 
-            // Picture selection grid (placeholder icons)
+            // Family safety for child accounts
+            if account.account_type == AccountType::Child {
+                s.gap();
+                s.section("Family Safety");
+                s.note("Screen time limits and content filters are active", 24.0);
+                s.button_at(0.0, 0.0, "Manage Family Settings", COL_PEACH, None);
+            }
+        }
+    }
+
+    fn build_login_options_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Login Options");
+        s.toggle_row(
+            "Auto-login on startup",
+            ToggleId::AutoLogin,
+            self.auto_login_enabled,
+        );
+
+        s.row("Password", None, ITEM_HEIGHT, |tree, cx, y| {
+            render_button(tree, cx, y + 6.0, "Change Password", COL_ACCENT);
+        });
+        s.gap();
+
+        s.section("Account Picture");
+        s.note("Choose a picture for your account:", 28.0);
+
+        // Picture selection grid (placeholder icons). Not yet clickable:
+        // nothing stores which picture is chosen, so the first is always the
+        // selected one. See known-issues.md.
+        let icons = [
+            "\u{1F464}",
+            "\u{1F468}",
+            "\u{1F469}",
+            "\u{1F474}",
+            "\u{1F475}",
+            "\u{1F476}",
+        ];
+        s.draw(move |tree, x, y| {
             let icon_size = 48.0;
             let icon_spacing = 12.0;
-            let icons = [
-                "\u{1F464}",
-                "\u{1F468}",
-                "\u{1F469}",
-                "\u{1F474}",
-                "\u{1F475}",
-                "\u{1F476}",
-            ];
             for (idx, icon) in icons.iter().enumerate() {
+                #[allow(clippy::cast_precision_loss)]
                 let ix = x + (idx as f32) * (icon_size + icon_spacing);
-                let is_selected = idx == 0; // first is default selected
+                let is_selected = idx == 0;
                 let bg = if is_selected {
                     COL_SURFACE1
                 } else {
@@ -2159,745 +2776,584 @@ impl SettingsState {
                 }
                 tree.text(ix + 12.0, y + 12.0, icon, COL_TEXT, 20.0);
             }
-            return;
-        }
+        });
+        s.advance(48.0);
+    }
 
-        // User account list (default UserAccounts page)
-        y = render_section_header(tree, x, y, "User Accounts");
+    // --- Privacy page ---
 
-        for (idx, account) in self.user_accounts.iter().enumerate() {
-            let row_y = y;
-            let is_selected = idx == self.selected_account;
-            let row_bg = if is_selected {
-                COL_SURFACE0
+    /// The Capabilities sub-page: a read-only summary of which apps hold
+    /// which permissions. Nothing on it is clickable, so it is pure drawing.
+    fn render_capabilities_summary(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
+        let mut y = start_y;
+        // App permissions summary sub-page
+        y = render_section_header(tree, x, y, "App Permissions Summary");
+        tree.text(
+            x,
+            y + 4.0,
+            "Overview of which apps have access to sensitive resources:",
+            COL_SUBTEXT0,
+            13.0,
+        );
+        y += 32.0;
+
+        // Summary table header
+        text_bold(tree, x, y, "App", COL_TEXT, 13.0);
+        text_bold(tree, x + 200.0, y, "Location", COL_TEXT, 13.0);
+        text_bold(tree, x + 290.0, y, "Camera", COL_TEXT, 13.0);
+        text_bold(tree, x + 370.0, y, "Mic", COL_TEXT, 13.0);
+        text_bold(tree, x + 440.0, y, "Background", COL_TEXT, 13.0);
+        y += 24.0;
+
+        // Divider
+        tree.push(RenderCommand::Line {
+            x1: x,
+            y1: y,
+            x2: x + 560.0,
+            y2: y,
+            color: COL_SURFACE1,
+            width: 1.0,
+        });
+        y += 8.0;
+
+        // Build summary from all apps mentioned
+        let all_apps = [
+            "Maps",
+            "Weather",
+            "Camera",
+            "Browser",
+            "Video Chat",
+            "Social Media",
+            "Voice Recorder",
+            "Email",
+            "Music Player",
+        ];
+        for app_name in all_apps {
+            let loc = self.location_apps.iter().find(|a| a.app_name == app_name);
+            let cam = self.camera_apps.iter().find(|a| a.app_name == app_name);
+            let mic = self.microphone_apps.iter().find(|a| a.app_name == app_name);
+            let bg = self.background_apps.iter().find(|a| a.app_name == app_name);
+
+            tree.text(x, y + 4.0, app_name, COL_TEXT, 12.0);
+
+            let check = "\u{2713}";
+            let cross = "\u{2717}";
+
+            // Location
+            if let Some(p) = loc {
+                let (sym, col) = if p.allowed {
+                    (check, COL_GREEN)
+                } else {
+                    (cross, COL_RED)
+                };
+                tree.text(x + 220.0, y + 4.0, sym, col, 13.0);
             } else {
-                Color::TRANSPARENT
-            };
-            fill_rounded(tree, x - 8.0, row_y, 620.0, 60.0, row_bg, 8.0);
-
-            // Avatar placeholder
-            let avatar_size = 40.0;
-            fill_rounded(
-                tree,
-                x + 4.0,
-                row_y + 10.0,
-                avatar_size,
-                avatar_size,
-                COL_SURFACE2,
-                avatar_size / 2.0,
-            );
-            tree.text(x + 16.0, row_y + 20.0, "\u{1F464}", COL_TEXT, 16.0);
-
-            // Name and email
-            text_bold(tree, x + 56.0, row_y + 12.0, &account.name, COL_TEXT, 14.0);
-            tree.text(x + 56.0, row_y + 32.0, &account.email, COL_SUBTEXT0, 12.0);
-
-            // Account type badge
-            let badge_color = account.account_type.color();
-            let badge_label = account.account_type.label();
-            let badge_x = right_x;
-            fill_rounded(tree, badge_x, row_y + 18.0, 90.0, 22.0, badge_color, 4.0);
-            tree.text(badge_x + 8.0, row_y + 22.0, badge_label, COL_CRUST, 11.0);
-
-            // Current user indicator
-            if account.is_current {
-                tree.text(badge_x + 100.0, row_y + 22.0, "(You)", COL_ACCENT, 11.0);
+                tree.text(x + 220.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+            }
+            // Camera
+            if let Some(p) = cam {
+                let (sym, col) = if p.allowed {
+                    (check, COL_GREEN)
+                } else {
+                    (cross, COL_RED)
+                };
+                tree.text(x + 310.0, y + 4.0, sym, col, 13.0);
+            } else {
+                tree.text(x + 310.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+            }
+            // Mic
+            if let Some(p) = mic {
+                let (sym, col) = if p.allowed {
+                    (check, COL_GREEN)
+                } else {
+                    (cross, COL_RED)
+                };
+                tree.text(x + 385.0, y + 4.0, sym, col, 13.0);
+            } else {
+                tree.text(x + 385.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+            }
+            // Background
+            if let Some(p) = bg {
+                let (sym, col) = if p.allowed {
+                    (check, COL_GREEN)
+                } else {
+                    (cross, COL_RED)
+                };
+                tree.text(x + 465.0, y + 4.0, sym, col, 13.0);
+            } else {
+                tree.text(x + 465.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
             }
 
-            y += 64.0;
-        }
-        y += SECTION_SPACING;
-
-        // Add/Remove buttons
-        self.render_button(tree, x, y, "+ Add Account", COL_ACCENT);
-        self.render_button(tree, x + 140.0, y, "- Remove Account", COL_RED);
-        y += 44.0 + SECTION_SPACING;
-
-        // Current user details
-        if let Some(account) = self.user_accounts.get(self.selected_account) {
-            y = render_section_header(tree, x, y, "Account Details");
-
-            render_setting_row(tree, x, y, "Name", 0.0);
-            tree.text(right_x, y + 14.0, &account.name, COL_TEXT, 13.0);
-            y += ITEM_HEIGHT;
-
-            render_setting_row(tree, x, y, "Email", 0.0);
-            tree.text(right_x, y + 14.0, &account.email, COL_TEXT, 13.0);
-            y += ITEM_HEIGHT;
-
-            render_setting_row(tree, x, y, "Account Type", 0.0);
-            tree.text(
-                right_x,
-                y + 14.0,
-                account.account_type.label(),
-                account.account_type.color(),
-                13.0,
-            );
-            y += ITEM_HEIGHT;
-
-            render_setting_row(tree, x, y, "Login Count", 0.0);
-            let login_str = format!("{}", account.login_count);
-            tree.text(right_x, y + 14.0, &login_str, COL_TEXT, 13.0);
-            y += ITEM_HEIGHT;
-
-            render_setting_row(tree, x, y, "Last Login", 0.0);
-            tree.text(right_x, y + 14.0, &account.last_login, COL_TEXT, 13.0);
-            y += ITEM_HEIGHT;
-
-            // Family safety for child accounts
-            if account.account_type == AccountType::Child {
-                y += SECTION_SPACING;
-                y = render_section_header(tree, x, y, "Family Safety");
-                tree.text(
-                    x,
-                    y + 4.0,
-                    "Screen time limits and content filters are active",
-                    COL_SUBTEXT0,
-                    13.0,
-                );
-                y += 24.0;
-                self.render_button(tree, x, y, "Manage Family Settings", COL_PEACH);
-            }
+            y += 28.0;
         }
     }
 
     // --- Privacy page ---
 
-    fn render_privacy_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let mut y = start_y;
-        let right_x = x + 350.0;
-
-        if let SettingsPage::Capabilities = self.current_page {
-            // App permissions summary sub-page
-            y = render_section_header(tree, x, y, "App Permissions Summary");
-            tree.text(
-                x,
-                y + 4.0,
-                "Overview of which apps have access to sensitive resources:",
-                COL_SUBTEXT0,
-                13.0,
-            );
-            y += 32.0;
-
-            // Summary table header
-            text_bold(tree, x, y, "App", COL_TEXT, 13.0);
-            text_bold(tree, x + 200.0, y, "Location", COL_TEXT, 13.0);
-            text_bold(tree, x + 290.0, y, "Camera", COL_TEXT, 13.0);
-            text_bold(tree, x + 370.0, y, "Mic", COL_TEXT, 13.0);
-            text_bold(tree, x + 440.0, y, "Background", COL_TEXT, 13.0);
-            y += 24.0;
-
-            // Divider
-            tree.push(RenderCommand::Line {
-                x1: x,
-                y1: y,
-                x2: x + 560.0,
-                y2: y,
-                color: COL_SURFACE1,
-                width: 1.0,
-            });
-            y += 8.0;
-
-            // Build summary from all apps mentioned
-            let all_apps = [
-                "Maps",
-                "Weather",
-                "Camera",
-                "Browser",
-                "Video Chat",
-                "Social Media",
-                "Voice Recorder",
-                "Email",
-                "Music Player",
-            ];
-            for app_name in all_apps {
-                let loc = self.location_apps.iter().find(|a| a.app_name == app_name);
-                let cam = self.camera_apps.iter().find(|a| a.app_name == app_name);
-                let mic = self.microphone_apps.iter().find(|a| a.app_name == app_name);
-                let bg = self.background_apps.iter().find(|a| a.app_name == app_name);
-
-                tree.text(x, y + 4.0, app_name, COL_TEXT, 12.0);
-
-                let check = "\u{2713}";
-                let cross = "\u{2717}";
-
-                // Location
-                if let Some(p) = loc {
-                    let (sym, col) = if p.allowed {
-                        (check, COL_GREEN)
-                    } else {
-                        (cross, COL_RED)
-                    };
-                    tree.text(x + 220.0, y + 4.0, sym, col, 13.0);
-                } else {
-                    tree.text(x + 220.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
-                }
-                // Camera
-                if let Some(p) = cam {
-                    let (sym, col) = if p.allowed {
-                        (check, COL_GREEN)
-                    } else {
-                        (cross, COL_RED)
-                    };
-                    tree.text(x + 310.0, y + 4.0, sym, col, 13.0);
-                } else {
-                    tree.text(x + 310.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
-                }
-                // Mic
-                if let Some(p) = mic {
-                    let (sym, col) = if p.allowed {
-                        (check, COL_GREEN)
-                    } else {
-                        (cross, COL_RED)
-                    };
-                    tree.text(x + 385.0, y + 4.0, sym, col, 13.0);
-                } else {
-                    tree.text(x + 385.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
-                }
-                // Background
-                if let Some(p) = bg {
-                    let (sym, col) = if p.allowed {
-                        (check, COL_GREEN)
-                    } else {
-                        (cross, COL_RED)
-                    };
-                    tree.text(x + 465.0, y + 4.0, sym, col, 13.0);
-                } else {
-                    tree.text(x + 465.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
-                }
-
-                y += 28.0;
-            }
+    fn build_privacy_page<S: PageSink>(&self, s: &mut S) {
+        if self.current_page == SettingsPage::Capabilities {
+            s.draw(|tree, x, y| self.render_capabilities_summary(tree, x, y));
             return;
         }
 
         // Location access (default Permissions page)
-        y = render_section_header(tree, x, y, "Location");
-        render_setting_row(tree, x, y, "Allow apps to access location", 0.0);
-        render_toggle(tree, right_x, y + 12.0, self.location_enabled);
-        y += ITEM_HEIGHT;
-
+        s.section("Location");
+        s.toggle_row(
+            "Allow apps to access location",
+            ToggleId::LocationEnabled,
+            self.location_enabled,
+        );
         if self.location_enabled {
-            for app in &self.location_apps {
-                tree.text(x + 16.0, y + 14.0, &app.app_name, COL_SUBTEXT1, 13.0);
-                render_toggle(tree, right_x, y + 12.0, app.allowed);
-                y += ITEM_HEIGHT - 8.0;
-            }
+            build_permission_list(s, PermissionKind::Location, &self.location_apps);
         }
-        y += SECTION_SPACING;
+        s.gap();
 
-        // Camera access
-        y = render_section_header(tree, x, y, "Camera");
-        render_setting_row(tree, x, y, "Allow apps to access camera", 0.0);
-        render_toggle(tree, right_x, y + 12.0, self.camera_enabled);
-        y += ITEM_HEIGHT;
-
+        s.section("Camera");
+        s.toggle_row(
+            "Allow apps to access camera",
+            ToggleId::CameraEnabled,
+            self.camera_enabled,
+        );
         if self.camera_enabled {
-            for app in &self.camera_apps {
-                tree.text(x + 16.0, y + 14.0, &app.app_name, COL_SUBTEXT1, 13.0);
-                render_toggle(tree, right_x, y + 12.0, app.allowed);
-                y += ITEM_HEIGHT - 8.0;
-            }
+            build_permission_list(s, PermissionKind::Camera, &self.camera_apps);
         }
-        y += SECTION_SPACING;
+        s.gap();
 
-        // Microphone access
-        y = render_section_header(tree, x, y, "Microphone");
-        render_setting_row(tree, x, y, "Allow apps to access microphone", 0.0);
-        render_toggle(tree, right_x, y + 12.0, self.microphone_enabled);
-        y += ITEM_HEIGHT;
-
+        s.section("Microphone");
+        s.toggle_row(
+            "Allow apps to access microphone",
+            ToggleId::MicrophoneEnabled,
+            self.microphone_enabled,
+        );
         if self.microphone_enabled {
-            for app in &self.microphone_apps {
-                tree.text(x + 16.0, y + 14.0, &app.app_name, COL_SUBTEXT1, 13.0);
-                render_toggle(tree, right_x, y + 12.0, app.allowed);
-                y += ITEM_HEIGHT - 8.0;
-            }
+            build_permission_list(s, PermissionKind::Microphone, &self.microphone_apps);
         }
-        y += SECTION_SPACING;
+        s.gap();
 
-        // Background apps
-        y = render_section_header(tree, x, y, "Background Apps");
-        tree.text(
-            x,
-            y + 4.0,
-            "Choose which apps can run in the background:",
-            COL_SUBTEXT0,
-            13.0,
-        );
-        y += 28.0;
+        s.section("Background Apps");
+        s.note("Choose which apps can run in the background:", 28.0);
+        build_permission_list(s, PermissionKind::Background, &self.background_apps);
+        s.gap();
 
-        for app in &self.background_apps {
-            tree.text(x + 16.0, y + 14.0, &app.app_name, COL_SUBTEXT1, 13.0);
-            render_toggle(tree, right_x, y + 12.0, app.allowed);
-            y += ITEM_HEIGHT - 8.0;
-        }
-        y += SECTION_SPACING;
-
-        // Diagnostics
-        y = render_section_header(tree, x, y, "Diagnostics & Data");
-        render_setting_row(tree, x, y, "Diagnostic data collection", 0.0);
-        render_dropdown_button(
-            tree,
-            right_x,
-            y,
+        s.section("Diagnostics & Data");
+        s.dropdown_row(
+            "Diagnostic data collection",
+            DropdownId::DiagnosticLevel,
             self.diagnostic_level.label(),
-            DROPDOWN_WIDTH,
         );
-        y += ITEM_HEIGHT + SECTION_SPACING;
+        s.gap();
 
-        // Activity history
-        y = render_section_header(tree, x, y, "Activity History");
-        tree.text(
-            x,
-            y + 4.0,
-            "Clear your activity history stored on this device.",
-            COL_SUBTEXT0,
-            13.0,
-        );
-        y += 28.0;
-        self.render_button(tree, x, y, "Clear Activity History", COL_RED);
+        s.section("Activity History");
+        s.note("Clear your activity history stored on this device.", 28.0);
+        s.button_at(0.0, 0.0, "Clear Activity History", COL_RED, None);
     }
 
     // --- Accessibility page ---
 
-    fn render_accessibility_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let mut y = start_y;
-        let right_x = x + 350.0;
-
+    fn build_accessibility_page<S: PageSink>(&self, s: &mut S) {
         match self.current_page {
-            SettingsPage::Audio => {
-                // Audio accessibility sub-page
-                y = render_section_header(tree, x, y, "Audio Accessibility");
-
-                render_setting_row(tree, x, y, "Mono audio", 0.0);
-                render_toggle(tree, right_x, y + 12.0, self.mono_audio);
-                y += ITEM_HEIGHT;
-
-                render_setting_row(tree, x, y, "Visual alerts for sounds", 0.0);
-                render_toggle(tree, right_x, y + 12.0, self.visual_alerts);
-                y += ITEM_HEIGHT + SECTION_SPACING;
-
-                // Narrator
-                y = render_section_header(tree, x, y, "Narrator");
-                render_setting_row(tree, x, y, "Enable Narrator", 0.0);
-                render_toggle(tree, right_x, y + 12.0, self.narrator_enabled);
-                y += ITEM_HEIGHT;
-
-                if self.narrator_enabled {
-                    render_setting_row(tree, x, y, "Voice Rate", 0.0);
-                    render_slider(tree, right_x, y, self.narrator_rate);
-                    tree.text(right_x, y + 36.0, "Slow", COL_SUBTEXT0, 11.0);
-                    tree.text(
-                        right_x + SLIDER_WIDTH - 24.0,
-                        y + 36.0,
-                        "Fast",
-                        COL_SUBTEXT0,
-                        11.0,
-                    );
-                    y += ITEM_HEIGHT + 16.0;
-
-                    render_setting_row(tree, x, y, "Verbosity", 0.0);
-                    render_dropdown_button(
-                        tree,
-                        right_x,
-                        y,
-                        self.narrator_verbosity.label(),
-                        DROPDOWN_WIDTH,
-                    );
-                }
-                return;
-            }
-            SettingsPage::Interaction => {
-                // Input/Interaction accessibility sub-page
-                y = render_section_header(tree, x, y, "Keyboard");
-
-                render_setting_row(tree, x, y, "Sticky Keys", 0.0);
-                render_toggle(tree, right_x, y + 12.0, self.sticky_keys);
-                y += ITEM_HEIGHT;
-                tree.text(
-                    x + 16.0,
-                    y - 4.0,
-                    "Press modifier keys one at a time",
-                    COL_SUBTEXT0,
-                    11.0,
-                );
-                y += 12.0;
-
-                render_setting_row(tree, x, y, "Filter Keys", 0.0);
-                render_toggle(tree, right_x, y + 12.0, self.filter_keys);
-                y += ITEM_HEIGHT;
-                tree.text(
-                    x + 16.0,
-                    y - 4.0,
-                    "Ignore brief or repeated keystrokes",
-                    COL_SUBTEXT0,
-                    11.0,
-                );
-                y += 12.0;
-
-                render_setting_row(tree, x, y, "Toggle Keys", 0.0);
-                render_toggle(tree, right_x, y + 12.0, self.toggle_keys);
-                y += ITEM_HEIGHT;
-                tree.text(
-                    x + 16.0,
-                    y - 4.0,
-                    "Play a sound when pressing Caps/Num/Scroll Lock",
-                    COL_SUBTEXT0,
-                    11.0,
-                );
-                y += 12.0;
-
-                render_setting_row(tree, x, y, "On-Screen Keyboard", 0.0);
-                render_toggle(tree, right_x, y + 12.0, self.onscreen_keyboard);
-                y += ITEM_HEIGHT + SECTION_SPACING;
-
-                // Mouse
-                y = render_section_header(tree, x, y, "Mouse & Pointer");
-
-                render_setting_row(tree, x, y, "Pointer Size", 0.0);
-                // Render pointer size as segmented buttons (1-5)
-                for i in 1u8..=5 {
-                    let btn_x = right_x + ((i - 1) as f32) * 40.0;
-                    let is_active = i == self.pointer_size;
-                    let btn_bg = if is_active { COL_ACCENT } else { COL_SURFACE1 };
-                    let btn_fg = if is_active { COL_CRUST } else { COL_SUBTEXT0 };
-                    fill_rounded(tree, btn_x, y + 10.0, 32.0, 26.0, btn_bg, 4.0);
-                    let size_label = format!("{}", i);
-                    tree.text(btn_x + 12.0, y + 16.0, &size_label, btn_fg, 12.0);
-                }
-                y += ITEM_HEIGHT;
-
-                render_setting_row(tree, x, y, "Mouse Keys (numpad controls pointer)", 0.0);
-                render_toggle(tree, right_x, y + 12.0, self.mouse_keys);
-                return;
-            }
-            _ => {} // Visual (default)
+            SettingsPage::Audio => self.build_audio_accessibility_page(s),
+            SettingsPage::Interaction => self.build_interaction_accessibility_page(s),
+            _ => self.build_visual_accessibility_page(s),
         }
+    }
 
-        // Display section
-        y = render_section_header(tree, x, y, "Display");
-
-        render_setting_row(tree, x, y, "Text Size", 0.0);
-        let text_size_norm = (self.text_size_percent as f32 - 50.0) / 200.0;
-        render_slider(tree, right_x, y, text_size_norm);
-        let size_label = format!("{}%", self.text_size_percent);
-        tree.text(
-            right_x + SLIDER_WIDTH + 12.0,
-            y + 14.0,
-            &size_label,
-            COL_SUBTEXT0,
-            12.0,
+    fn build_audio_accessibility_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Audio Accessibility");
+        s.toggle_row("Mono audio", ToggleId::MonoAudio, self.mono_audio);
+        s.toggle_row(
+            "Visual alerts for sounds",
+            ToggleId::VisualAlerts,
+            self.visual_alerts,
         );
-        y += ITEM_HEIGHT;
-        // Range labels
-        tree.text(right_x, y - 8.0, "50%", COL_SUBTEXT0, 11.0);
-        tree.text(
-            right_x + SLIDER_WIDTH - 28.0,
-            y - 8.0,
-            "250%",
-            COL_SUBTEXT0,
-            11.0,
+        s.gap();
+
+        s.section("Narrator");
+        s.toggle_row(
+            "Enable Narrator",
+            ToggleId::NarratorEnabled,
+            self.narrator_enabled,
         );
-        y += 8.0;
 
-        render_setting_row(tree, x, y, "High Contrast", 0.0);
-        render_toggle(tree, right_x, y + 12.0, self.high_contrast);
-        y += ITEM_HEIGHT;
+        if self.narrator_enabled {
+            s.slider_row("Voice Rate", self.narrator_rate, None);
+            s.draw(|tree, x, y| {
+                let cx = x + CONTROL_COLUMN_DX;
+                tree.text(cx, y - 12.0, "Slow", COL_SUBTEXT0, 11.0);
+                tree.text(
+                    cx + SLIDER_WIDTH - 24.0,
+                    y - 12.0,
+                    "Fast",
+                    COL_SUBTEXT0,
+                    11.0,
+                );
+            });
+            s.advance(16.0);
 
-        render_setting_row(tree, x, y, "Cursor Size", 0.0);
-        render_dropdown_button(tree, right_x, y, self.cursor_size.label(), DROPDOWN_WIDTH);
-        y += ITEM_HEIGHT;
-
-        render_setting_row(tree, x, y, "Reduce Animations", 0.0);
-        render_toggle(tree, right_x, y + 12.0, self.reduce_animations);
-        y += ITEM_HEIGHT + SECTION_SPACING;
-
-        // Visual section
-        y = render_section_header(tree, x, y, "Color & Transparency");
-
-        render_setting_row(tree, x, y, "Color Filters", 0.0);
-        render_dropdown_button(tree, right_x, y, self.color_filter.label(), DROPDOWN_WIDTH);
-        y += ITEM_HEIGHT;
-
-        render_setting_row(tree, x, y, "Reduce Transparency", 0.0);
-        render_toggle(tree, right_x, y + 12.0, self.reduce_transparency);
-        y += ITEM_HEIGHT;
-
-        // Color filter preview
-        if self.color_filter != ColorFilter::None {
-            y += 8.0;
-            fill_rounded(tree, x, y, 300.0, 40.0, COL_SURFACE0, 6.0);
-            tree.text(
-                x + 12.0,
-                y + 12.0,
-                "Color filter active: ",
-                COL_SUBTEXT0,
-                12.0,
-            );
-            tree.text(
-                x + 150.0,
-                y + 12.0,
-                self.color_filter.label(),
-                COL_ACCENT,
-                12.0,
+            s.dropdown_row(
+                "Verbosity",
+                DropdownId::NarratorVerbosity,
+                self.narrator_verbosity.label(),
             );
         }
     }
 
-    // --- Update page ---
+    fn build_interaction_accessibility_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Keyboard");
 
-    fn render_update_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
-        let mut y = start_y;
-        let right_x = x + 350.0;
+        for (label, id, on, hint) in [
+            (
+                "Sticky Keys",
+                ToggleId::StickyKeys,
+                self.sticky_keys,
+                "Press modifier keys one at a time",
+            ),
+            (
+                "Filter Keys",
+                ToggleId::FilterKeys,
+                self.filter_keys,
+                "Ignore brief or repeated keystrokes",
+            ),
+            (
+                "Toggle Keys",
+                ToggleId::ToggleKeys,
+                self.toggle_keys,
+                "Play a sound when pressing Caps/Num/Scroll Lock",
+            ),
+        ] {
+            s.toggle_row(label, id, on);
+            s.draw(move |tree, x, y| tree.text(x + 16.0, y - 4.0, hint, COL_SUBTEXT0, 11.0));
+            s.advance(12.0);
+        }
 
+        s.toggle_row(
+            "On-Screen Keyboard",
+            ToggleId::OnscreenKeyboard,
+            self.onscreen_keyboard,
+        );
+        s.gap();
+
+        s.section("Mouse & Pointer");
+
+        // Pointer size as a strip of numbered buttons, one per size.
+        let chosen = self.pointer_size;
+        for idx in 0..POINTER_SIZE_COUNT {
+            #[allow(clippy::cast_precision_loss)]
+            let dx = CONTROL_COLUMN_DX + (idx as f32) * POINTER_BUTTON_PITCH;
+            let (x, y) = (s.x(), s.y());
+            s.hit_rect(
+                x + dx,
+                y + POINTER_BUTTON_INSET_Y,
+                POINTER_BUTTON_WIDTH,
+                POINTER_BUTTON_HEIGHT,
+                RowHit::Select(SelectId::PointerSize, idx),
+            );
+            let size = pointer_size_of(idx);
+            s.draw(move |tree, x, y| {
+                render_pointer_size_button(tree, x + dx, y, size, size == chosen);
+            });
+        }
+        s.row("Pointer Size", None, ITEM_HEIGHT, |_tree, _cx, _y| {});
+
+        s.toggle_row(
+            "Mouse Keys (numpad controls pointer)",
+            ToggleId::MouseKeys,
+            self.mouse_keys,
+        );
+    }
+
+    fn build_visual_accessibility_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Display");
+
+        let text_size_norm = (f32::from(self.text_size_percent) - 50.0) / 200.0;
+        s.slider_row(
+            "Text Size",
+            text_size_norm,
+            Some(&format!("{}%", self.text_size_percent)),
+        );
+        // Range labels, on the boundary between this row and the next.
+        s.draw(|tree, x, y| {
+            let cx = x + CONTROL_COLUMN_DX;
+            tree.text(cx, y - 8.0, "50%", COL_SUBTEXT0, 11.0);
+            tree.text(
+                cx + SLIDER_WIDTH - 28.0,
+                y - 8.0,
+                "250%",
+                COL_SUBTEXT0,
+                11.0,
+            );
+        });
+        s.advance(8.0);
+
+        s.toggle_row("High Contrast", ToggleId::HighContrast, self.high_contrast);
+        s.dropdown_row(
+            "Cursor Size",
+            DropdownId::CursorSize,
+            self.cursor_size.label(),
+        );
+        s.toggle_row(
+            "Reduce Animations",
+            ToggleId::ReduceAnimations,
+            self.reduce_animations,
+        );
+        s.gap();
+
+        s.section("Color & Transparency");
+        s.dropdown_row(
+            "Color Filters",
+            DropdownId::ColorFilter,
+            self.color_filter.label(),
+        );
+        s.toggle_row(
+            "Reduce Transparency",
+            ToggleId::ReduceTransparency,
+            self.reduce_transparency,
+        );
+
+        if self.color_filter != ColorFilter::None {
+            s.advance(8.0);
+            let label = self.color_filter.label();
+            s.draw(move |tree, x, y| {
+                fill_rounded(tree, x, y, 300.0, 40.0, COL_SURFACE0, 6.0);
+                tree.text(
+                    x + 12.0,
+                    y + 12.0,
+                    "Color filter active: ",
+                    COL_SUBTEXT0,
+                    12.0,
+                );
+                tree.text(x + 150.0, y + 12.0, label, COL_ACCENT, 12.0);
+            });
+            s.advance(40.0);
+        }
+    }
+
+    fn build_update_page<S: PageSink>(&self, s: &mut S) {
         match self.current_page {
             SettingsPage::Recovery => {
-                // Recovery sub-page
-                y = render_section_header(tree, x, y, "Recovery Options");
-                tree.text(
-                    x,
-                    y + 4.0,
-                    "If your PC isn't working well, recovering may help.",
-                    COL_SUBTEXT0,
-                    13.0,
-                );
-                y += 32.0;
-
-                // Go back option
-                fill_rounded(tree, x, y, 580.0, 80.0, COL_SURFACE0, 8.0);
-                text_bold(
-                    tree,
-                    x + 16.0,
-                    y + 12.0,
-                    "Go Back to Previous Version",
-                    COL_TEXT,
-                    14.0,
-                );
-                tree.text(
-                    x + 16.0,
-                    y + 34.0,
-                    "Revert to the previous OS build. Available for 10 days",
-                    COL_SUBTEXT0,
-                    12.0,
-                );
-                tree.text(x + 16.0, y + 50.0, "after an update.", COL_SUBTEXT0, 12.0);
-                self.render_button(tree, x + 440.0, y + 28.0, "Go Back", COL_PEACH);
-                y += 96.0;
-
-                // Fresh start
-                fill_rounded(tree, x, y, 580.0, 80.0, COL_SURFACE0, 8.0);
-                text_bold(tree, x + 16.0, y + 12.0, "Fresh Start", COL_TEXT, 14.0);
-                tree.text(
-                    x + 16.0,
-                    y + 34.0,
-                    "Reinstall the OS while keeping your personal files.",
-                    COL_SUBTEXT0,
-                    12.0,
-                );
-                tree.text(
-                    x + 16.0,
-                    y + 50.0,
-                    "All apps and settings will be removed.",
-                    COL_SUBTEXT0,
-                    12.0,
-                );
-                self.render_button(tree, x + 440.0, y + 28.0, "Reset", COL_RED);
+                self.build_recovery_page(s);
                 return;
             }
             SettingsPage::Snapshots => {
-                // Snapshots sub-page (system restore points)
-                y = render_section_header(tree, x, y, "System Snapshots");
-                tree.text(
-                    x,
-                    y + 4.0,
-                    "Package generation snapshots for safe rollback:",
-                    COL_SUBTEXT0,
-                    13.0,
-                );
-                y += 32.0;
-
-                let snapshots = [
-                    ("Gen 42", "2026-05-17 09:00", "Current"),
-                    ("Gen 41", "2026-05-15 14:30", "After KB5032100"),
-                    ("Gen 40", "2026-05-10 11:00", "After KB5031980"),
-                    ("Gen 39", "2026-05-01 08:45", "After compositor update"),
-                ];
-
-                for (name, date, desc) in snapshots {
-                    let is_current = desc == "Current";
-                    let bg = if is_current {
-                        COL_SURFACE1
-                    } else {
-                        COL_SURFACE0
-                    };
-                    fill_rounded(tree, x, y, 580.0, 48.0, bg, 6.0);
-
-                    text_bold(tree, x + 12.0, y + 8.0, name, COL_TEXT, 13.0);
-                    tree.text(x + 12.0, y + 28.0, desc, COL_SUBTEXT0, 11.0);
-                    tree.text(right_x, y + 16.0, date, COL_SUBTEXT0, 12.0);
-
-                    if is_current {
-                        tree.text(x + 520.0, y + 16.0, "\u{2713}", COL_GREEN, 16.0);
-                    }
-
-                    y += 56.0;
-                }
+                Self::build_snapshots_page(s);
                 return;
             }
             _ => {} // SystemUpdates (default)
         }
 
-        // Version info
-        y = render_section_header(tree, x, y, "System Information");
-        fill_rounded(tree, x, y, 580.0, 60.0, COL_SURFACE0, 8.0);
-        text_bold(tree, x + 16.0, y + 12.0, "Slate OS", COL_TEXT, 16.0);
-        tree.text(x + 16.0, y + 36.0, &self.os_version, COL_SUBTEXT0, 13.0);
-        y += 72.0;
+        s.section("System Information");
+        let version = self.os_version.clone();
+        s.draw(move |tree, x, y| {
+            fill_rounded(tree, x, y, 580.0, 60.0, COL_SURFACE0, 8.0);
+            text_bold(tree, x + 16.0, y + 12.0, "Slate OS", COL_TEXT, 16.0);
+            tree.text(x + 16.0, y + 36.0, &version, COL_SUBTEXT0, 13.0);
+        });
+        s.advance(72.0);
 
-        // Check for updates
-        let btn_label = if self.checking_for_updates {
+        // The button's label changes while a check is running, and the label is
+        // what `button_width` measures — so the click band follows the wider
+        // "Check for Updates" down to the narrower "Checking...", rather than
+        // staying at whichever width happened to be hard-coded.
+        let checking = self.checking_for_updates;
+        let btn_label = if checking {
             "Checking..."
         } else {
             "Check for Updates"
         };
-        self.render_button(tree, x, y, btn_label, COL_ACCENT);
-        if !self.checking_for_updates {
-            tree.text(
-                x + 160.0,
-                y + 10.0,
-                "Your device is up to date",
-                COL_GREEN,
-                13.0,
-            );
+        s.button_at(
+            0.0,
+            0.0,
+            btn_label,
+            COL_ACCENT,
+            Some(RowHit::Press(ButtonId::CheckForUpdates)),
+        );
+        if !checking {
+            s.draw(|tree, x, y| {
+                tree.text(
+                    x + 160.0,
+                    y + 10.0,
+                    "Your device is up to date",
+                    COL_GREEN,
+                    13.0,
+                );
+            });
         }
-        y += 44.0 + SECTION_SPACING;
+        s.advance(44.0);
+        s.gap();
 
-        // Auto-update
-        y = render_section_header(tree, x, y, "Update Preferences");
-        render_setting_row(tree, x, y, "Automatic updates", 0.0);
-        render_toggle(tree, right_x, y + 12.0, self.auto_update_enabled);
-        y += ITEM_HEIGHT;
-
-        // Active hours
-        render_setting_row(tree, x, y, "Active hours (no restart)", 0.0);
+        s.section("Update Preferences");
+        s.toggle_row(
+            "Automatic updates",
+            ToggleId::AutoUpdate,
+            self.auto_update_enabled,
+        );
         let hours_label = format!(
             "{:02}:00 - {:02}:00",
             self.active_hours_start, self.active_hours_end
         );
-        tree.text(right_x, y + 14.0, &hours_label, COL_TEXT, 13.0);
-        y += ITEM_HEIGHT + SECTION_SPACING;
+        s.value_row("Active hours (no restart)", &hours_label, COL_TEXT);
+        s.gap();
 
-        // Advanced deferral
-        y = render_section_header(tree, x, y, "Advanced");
-        render_setting_row(tree, x, y, "Defer feature updates (days)", 0.0);
-        let defer_feat_norm = self.defer_feature_days as f32 / 365.0;
-        render_slider(tree, right_x, y, defer_feat_norm);
-        let feat_label = format!("{} days", self.defer_feature_days);
-        tree.text(
-            right_x + SLIDER_WIDTH + 12.0,
-            y + 14.0,
-            &feat_label,
-            COL_SUBTEXT0,
-            12.0,
+        s.section("Advanced");
+        s.slider_row(
+            "Defer feature updates (days)",
+            f32::from(self.defer_feature_days) / 365.0,
+            Some(&format!("{} days", self.defer_feature_days)),
         );
-        y += ITEM_HEIGHT;
-
-        render_setting_row(tree, x, y, "Defer quality updates (days)", 0.0);
-        let defer_qual_norm = self.defer_quality_days as f32 / 30.0;
-        render_slider(tree, right_x, y, defer_qual_norm);
-        let qual_label = format!("{} days", self.defer_quality_days);
-        tree.text(
-            right_x + SLIDER_WIDTH + 12.0,
-            y + 14.0,
-            &qual_label,
-            COL_SUBTEXT0,
-            12.0,
+        s.slider_row(
+            "Defer quality updates (days)",
+            f32::from(self.defer_quality_days) / 30.0,
+            Some(&format!("{} days", self.defer_quality_days)),
         );
-        y += ITEM_HEIGHT + SECTION_SPACING;
+        s.gap();
 
-        // Update history
-        y = render_section_header(tree, x, y, "Update History");
+        s.section("Update History");
         for entry in &self.update_history {
-            fill_rounded(tree, x, y, 580.0, 44.0, COL_SURFACE0, 6.0);
-
-            tree.text(x + 12.0, y + 8.0, &entry.kb_number, COL_TEXT, 13.0);
-            tree.text(x + 120.0, y + 8.0, &entry.description, COL_SUBTEXT0, 12.0);
-            tree.text(x + 12.0, y + 26.0, &entry.date, COL_OVERLAY0, 11.0);
-
-            // Status badge
-            let status_color = entry.status.color();
-            let status_label = entry.status.label();
-            fill_rounded(tree, x + 490.0, y + 12.0, 72.0, 20.0, status_color, 4.0);
-            tree.text(x + 500.0, y + 15.0, status_label, COL_CRUST, 11.0);
-
-            y += 52.0;
+            let (kb, desc, date) = (
+                entry.kb_number.clone(),
+                entry.description.clone(),
+                entry.date.clone(),
+            );
+            let (status_color, status_label) = (entry.status.color(), entry.status.label());
+            s.draw(move |tree, x, y| {
+                fill_rounded(tree, x, y, 580.0, 44.0, COL_SURFACE0, 6.0);
+                tree.text(x + 12.0, y + 8.0, &kb, COL_TEXT, 13.0);
+                tree.text(x + 120.0, y + 8.0, &desc, COL_SUBTEXT0, 12.0);
+                tree.text(x + 12.0, y + 26.0, &date, COL_OVERLAY0, 11.0);
+                fill_rounded(tree, x + 490.0, y + 12.0, 72.0, 20.0, status_color, 4.0);
+                tree.text(x + 500.0, y + 15.0, status_label, COL_CRUST, 11.0);
+            });
+            s.advance(52.0);
         }
     }
 
-    // --- Helper: render a button ---
+    /// The Recovery sub-page: two cards, each with a button that has no state
+    /// behind it yet and so registers no click target.
+    fn build_recovery_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Recovery Options");
+        s.note("If your PC isn't working well, recovering may help.", 32.0);
 
-    #[allow(dead_code)]
-    fn render_button(&self, tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) {
-        let btn_w = text::padded_width(label, 12.0, 13.0, FontWeightHint::Regular);
-        let btn_h = 32.0;
-        fill_rounded(tree, x, y, btn_w, btn_h, color, 6.0);
-        tree.text(x + 12.0, y + 8.0, label, COL_CRUST, 13.0);
+        s.draw(|tree, x, y| {
+            fill_rounded(tree, x, y, 580.0, 80.0, COL_SURFACE0, 8.0);
+            text_bold(
+                tree,
+                x + 16.0,
+                y + 12.0,
+                "Go Back to Previous Version",
+                COL_TEXT,
+                14.0,
+            );
+            tree.text(
+                x + 16.0,
+                y + 34.0,
+                "Revert to the previous OS build. Available for 10 days",
+                COL_SUBTEXT0,
+                12.0,
+            );
+            tree.text(x + 16.0, y + 50.0, "after an update.", COL_SUBTEXT0, 12.0);
+        });
+        s.button_at(440.0, 28.0, "Go Back", COL_PEACH, None);
+        s.advance(96.0);
+
+        s.draw(|tree, x, y| {
+            fill_rounded(tree, x, y, 580.0, 80.0, COL_SURFACE0, 8.0);
+            text_bold(tree, x + 16.0, y + 12.0, "Fresh Start", COL_TEXT, 14.0);
+            tree.text(
+                x + 16.0,
+                y + 34.0,
+                "Reinstall the OS while keeping your personal files.",
+                COL_SUBTEXT0,
+                12.0,
+            );
+            tree.text(
+                x + 16.0,
+                y + 50.0,
+                "All apps and settings will be removed.",
+                COL_SUBTEXT0,
+                12.0,
+            );
+        });
+        s.button_at(440.0, 28.0, "Reset", COL_RED, None);
+        s.advance(96.0);
+    }
+
+    /// The Snapshots sub-page: package generations available for rollback.
+    /// Read-only until the package manager exposes a rollback call.
+    fn build_snapshots_page<S: PageSink>(s: &mut S) {
+        s.section("System Snapshots");
+        s.note("Package generation snapshots for safe rollback:", 32.0);
+
+        let snapshots = [
+            ("Gen 42", "2026-05-17 09:00", "Current"),
+            ("Gen 41", "2026-05-15 14:30", "After KB5032100"),
+            ("Gen 40", "2026-05-10 11:00", "After KB5031980"),
+            ("Gen 39", "2026-05-01 08:45", "After compositor update"),
+        ];
+
+        for (name, date, desc) in snapshots {
+            let control_x = s.control_x();
+            let is_current = desc == "Current";
+            s.draw(move |tree, x, y| {
+                let bg = if is_current {
+                    COL_SURFACE1
+                } else {
+                    COL_SURFACE0
+                };
+                fill_rounded(tree, x, y, 580.0, 48.0, bg, 6.0);
+                text_bold(tree, x + 12.0, y + 8.0, name, COL_TEXT, 13.0);
+                tree.text(x + 12.0, y + 28.0, desc, COL_SUBTEXT0, 11.0);
+                tree.text(control_x, y + 16.0, date, COL_SUBTEXT0, 12.0);
+                if is_current {
+                    tree.text(x + 520.0, y + 16.0, "\u{2713}", COL_GREEN, 16.0);
+                }
+            });
+            s.advance(56.0);
+        }
     }
 
     // --- Placeholder for unimplemented pages ---
 
-    fn render_placeholder_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
+    fn build_placeholder_page<S: PageSink>(&self, s: &mut S) {
         let page_name = self.current_page.label();
-        text_bold(tree, x, start_y + 20.0, page_name, COL_TEXT, 22.0);
-        tree.text(
-            x,
-            start_y + 56.0,
-            "This page is under construction.",
-            COL_SUBTEXT0,
-            14.0,
-        );
+        s.draw(move |tree, x, y| {
+            text_bold(tree, x, y + 20.0, page_name, COL_TEXT, 22.0);
+            tree.text(
+                x,
+                y + 56.0,
+                "This page is under construction.",
+                COL_SUBTEXT0,
+                14.0,
+            );
 
-        // Visual placeholder: a card with icon
-        let card_y = start_y + 100.0;
-        fill_rounded(tree, x, card_y, 400.0, 150.0, COL_SURFACE0, 12.0);
-        tree.text(x + 170.0, card_y + 50.0, "\u{1F6A7}", COL_PEACH, 36.0);
-        tree.text(
-            x + 120.0,
-            card_y + 110.0,
-            "Coming soon...",
-            COL_SUBTEXT0,
-            14.0,
-        );
-    }
-
-    // --- Helper: render a text field ---
-
-    fn render_text_field(&self, tree: &mut RenderTree, x: f32, y: f32, value: &str, width: f32) {
-        let field_y = y + 6.0;
-        let field_h = 32.0;
-        fill_rounded(tree, x, field_y, width, field_h, COL_SURFACE0, 6.0);
-        tree.push(RenderCommand::StrokeRect {
-            x,
-            y: field_y,
-            width,
-            height: field_h,
-            color: COL_OVERLAY0,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(6.0),
+            // Visual placeholder: a card with icon
+            let card_y = y + 100.0;
+            fill_rounded(tree, x, card_y, 400.0, 150.0, COL_SURFACE0, 12.0);
+            tree.text(x + 170.0, card_y + 50.0, "\u{1F6A7}", COL_PEACH, 36.0);
+            tree.text(
+                x + 120.0,
+                card_y + 110.0,
+                "Coming soon...",
+                COL_SUBTEXT0,
+                14.0,
+            );
         });
-        text_clipped(
-            tree,
-            x + 8.0,
-            field_y + 8.0,
-            value,
-            COL_TEXT,
-            13.0,
-            width - 16.0,
-        );
+        s.advance(250.0);
     }
 
     // --- Dropdown overlay rendering ---
+
+    /// Where the closed button for `id` sits on the current page, or `None` if
+    /// the page does not have that dropdown on it.
+    fn dropdown_button_at(&self, id: DropdownId) -> Option<(f32, f32)> {
+        let mut sink = AnchorSink {
+            want: id,
+            x: Self::content_x(),
+            y: Self::content_top(),
+            found: None,
+        };
+        self.build_page(&mut sink);
+        sink.found
+    }
 
     /// Where the open dropdown's popup goes, or `None` if none is open.
     ///
@@ -2906,29 +3362,26 @@ impl SettingsState {
     /// from the one drawn under the pointer — the failure that made these
     /// dropdowns unusable was precisely that only the renderer knew where
     /// anything was.
+    ///
+    /// The anchor comes from walking the page rather than from a table of
+    /// per-dropdown coordinates, so the popup opens under the button the user
+    /// pressed even after the rows above it change height.
     #[must_use]
     pub fn dropdown_layout(&self) -> Option<DropdownLayout> {
         let dropdown_id = self.open_dropdown?;
+        // No anchor means the page moved out from under an open dropdown. Draw
+        // nothing rather than guess a position; the next click closes it.
+        let (dropdown_x, dropdown_y) = self.dropdown_button_at(dropdown_id)?;
 
-        let (items, selected, dropdown_x, dropdown_y) = match dropdown_id {
+        let (items, selected) = match dropdown_id {
             DropdownId::Resolution => {
                 let items: Vec<String> = RESOLUTIONS.iter().map(|r| r.label()).collect();
-                (
-                    items,
-                    self.resolution_index,
-                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
-                    HEADER_HEIGHT + 180.0,
-                )
+                (items, self.resolution_index)
             }
             DropdownId::RefreshRate => {
                 let items: Vec<String> =
                     REFRESH_RATES.iter().map(|r| format!("{} Hz", r)).collect();
-                (
-                    items,
-                    self.refresh_rate_index,
-                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
-                    HEADER_HEIGHT + 228.0,
-                )
+                (items, self.refresh_rate_index)
             }
             DropdownId::Scale => {
                 let items: Vec<String> = ScalePercent::ALL
@@ -2941,29 +3394,17 @@ impl SettingsState {
                         .iter()
                         .position(|s| *s == self.scale)
                         .unwrap_or(0),
-                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
-                    HEADER_HEIGHT + 276.0,
                 )
             }
             DropdownId::OutputDevice => {
                 let items: Vec<String> =
                     self.output_devices.iter().map(|d| d.name.clone()).collect();
-                (
-                    items,
-                    self.output_device_index,
-                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
-                    HEADER_HEIGHT + 68.0,
-                )
+                (items, self.output_device_index)
             }
             DropdownId::InputDevice => {
                 let items: Vec<String> =
                     self.input_devices.iter().map(|d| d.name.clone()).collect();
-                (
-                    items,
-                    self.input_device_index,
-                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
-                    HEADER_HEIGHT + 250.0,
-                )
+                (items, self.input_device_index)
             }
             DropdownId::IpConfig => {
                 let items = vec![
@@ -2975,12 +3416,7 @@ impl SettingsState {
                 } else {
                     1
                 };
-                (
-                    items,
-                    sel,
-                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
-                    HEADER_HEIGHT + 300.0,
-                )
+                (items, sel)
             }
             DropdownId::DiagnosticLevel => {
                 let items: Vec<String> = DiagnosticLevel::ALL
@@ -2991,12 +3427,7 @@ impl SettingsState {
                     .iter()
                     .position(|d| *d == self.diagnostic_level)
                     .unwrap_or(0);
-                (
-                    items,
-                    sel,
-                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
-                    HEADER_HEIGHT + 200.0,
-                )
+                (items, sel)
             }
             DropdownId::ColorFilter => {
                 let items: Vec<String> = ColorFilter::ALL
@@ -3007,12 +3438,7 @@ impl SettingsState {
                     .iter()
                     .position(|f| *f == self.color_filter)
                     .unwrap_or(0);
-                (
-                    items,
-                    sel,
-                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
-                    HEADER_HEIGHT + 200.0,
-                )
+                (items, sel)
             }
             DropdownId::CursorSize => {
                 let items: Vec<String> = CursorSize::ALL
@@ -3023,12 +3449,7 @@ impl SettingsState {
                     .iter()
                     .position(|c| *c == self.cursor_size)
                     .unwrap_or(0);
-                (
-                    items,
-                    sel,
-                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
-                    HEADER_HEIGHT + 160.0,
-                )
+                (items, sel)
             }
             DropdownId::NarratorVerbosity => {
                 let items: Vec<String> = NarratorVerbosity::ALL
@@ -3039,12 +3460,7 @@ impl SettingsState {
                     .iter()
                     .position(|v| *v == self.narrator_verbosity)
                     .unwrap_or(0);
-                (
-                    items,
-                    sel,
-                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
-                    HEADER_HEIGHT + 250.0,
-                )
+                (items, sel)
             }
         };
 
@@ -3377,45 +3793,105 @@ impl SettingsState {
             }
         }
 
-        // Content area clicks — delegate to page-specific handlers
-        let content_x = SIDEBAR_WIDTH + CONTENT_PADDING;
-        let right_x = content_x + 350.0;
-
-        match self.current_page {
-            SettingsPage::Display => {
-                self.handle_display_click(mx, my, right_x);
-            }
-            SettingsPage::Sound => {
-                self.handle_sound_click(mx, my, right_x);
-            }
-            SettingsPage::Themes => {
-                self.handle_themes_click(mx, my, content_x);
-            }
-            SettingsPage::Colors => {
-                self.handle_colors_click(mx, my, content_x);
-            }
-            SettingsPage::NetworkStatus => {
-                self.handle_network_click(mx, my, content_x, right_x);
-            }
-            SettingsPage::Proxy => {
-                self.handle_proxy_click(mx, my, right_x);
-            }
-            SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
-                self.handle_accounts_click(mx, my, right_x);
-            }
-            SettingsPage::Permissions => {
-                self.handle_privacy_click(mx, my, right_x);
-            }
-            SettingsPage::Visual | SettingsPage::Audio | SettingsPage::Interaction => {
-                self.handle_accessibility_click(mx, my, right_x);
-            }
-            SettingsPage::SystemUpdates => {
-                self.handle_update_click(mx, my, right_x);
-            }
-            _ => {}
+        // Content area clicks — ask the page itself what is under the pointer,
+        // rather than a per-page handler that re-derives the row positions.
+        if let Some(hit) = self.row_at(mx, my) {
+            self.apply_row_hit(hit);
         }
 
         EventResult::Consumed
+    }
+
+    /// Apply the effect of clicking `hit`.
+    ///
+    /// Nothing here knows where anything was drawn — that is the whole point of
+    /// the split. [`row_at`](Self::row_at) turns a point into a named control,
+    /// and this turns a named control into a state change.
+    fn apply_row_hit(&mut self, hit: RowHit) {
+        match hit {
+            RowHit::Dropdown(id) => self.show_dropdown(id),
+            RowHit::Toggle(id) => {
+                if let Some(flag) = self.toggle_mut(id) {
+                    *flag = !*flag;
+                }
+            }
+            RowHit::Pill(PillId::Transparency, idx) => {
+                if let Some(level) = TransparencyLevel::ALL.get(idx) {
+                    self.appearance.settings.transparency = *level;
+                }
+            }
+            RowHit::Pill(PillId::AnimationSpeed, idx) => {
+                if let Some(speed) = AnimationSpeed::ALL.get(idx) {
+                    self.appearance.settings.animation_speed = *speed;
+                }
+            }
+            RowHit::Select(SelectId::ThemeMode, idx) => {
+                if let Some(mode) = ThemeMode::ALL.get(idx) {
+                    self.appearance.settings.theme_mode = *mode;
+                }
+            }
+            RowHit::Select(SelectId::AccentColor, idx) => {
+                if let Some(accent) = AccentColor::presets().get(idx) {
+                    self.appearance.settings.accent_color = *accent;
+                }
+            }
+            RowHit::Select(SelectId::Adapter, idx) => {
+                if idx < self.adapters.len() {
+                    self.selected_adapter = idx;
+                }
+            }
+            RowHit::Select(SelectId::Account, idx) => {
+                if idx < self.user_accounts.len() {
+                    self.selected_account = idx;
+                }
+            }
+            RowHit::Select(SelectId::PointerSize, idx) => {
+                self.pointer_size = pointer_size_of(idx);
+            }
+            RowHit::Press(ButtonId::CheckForUpdates) => {
+                self.checking_for_updates = !self.checking_for_updates;
+            }
+        }
+    }
+
+    /// The field behind a named boolean setting.
+    ///
+    /// One match for every switch on every page, so a new toggle is wired by
+    /// adding one arm here rather than by inventing a new run of coordinates.
+    /// `None` when a per-app index no longer exists — the lists are editable in
+    /// principle, and a stale index must not panic.
+    fn toggle_mut(&mut self, id: ToggleId) -> Option<&mut bool> {
+        Some(match id {
+            ToggleId::NightLight => &mut self.night_light_enabled,
+            ToggleId::OutputMuted => &mut self.output_muted,
+            ToggleId::SystemSounds => &mut self.system_sounds_enabled,
+            ToggleId::ProxyEnabled => &mut self.proxy_enabled,
+            ToggleId::AutoLogin => &mut self.auto_login_enabled,
+            ToggleId::LocationEnabled => &mut self.location_enabled,
+            ToggleId::CameraEnabled => &mut self.camera_enabled,
+            ToggleId::MicrophoneEnabled => &mut self.microphone_enabled,
+            ToggleId::AppPermission(kind, index) => {
+                let list = match kind {
+                    PermissionKind::Location => &mut self.location_apps,
+                    PermissionKind::Camera => &mut self.camera_apps,
+                    PermissionKind::Microphone => &mut self.microphone_apps,
+                    PermissionKind::Background => &mut self.background_apps,
+                };
+                &mut list.get_mut(index)?.allowed
+            }
+            ToggleId::MonoAudio => &mut self.mono_audio,
+            ToggleId::VisualAlerts => &mut self.visual_alerts,
+            ToggleId::NarratorEnabled => &mut self.narrator_enabled,
+            ToggleId::StickyKeys => &mut self.sticky_keys,
+            ToggleId::FilterKeys => &mut self.filter_keys,
+            ToggleId::ToggleKeys => &mut self.toggle_keys,
+            ToggleId::OnscreenKeyboard => &mut self.onscreen_keyboard,
+            ToggleId::MouseKeys => &mut self.mouse_keys,
+            ToggleId::HighContrast => &mut self.high_contrast,
+            ToggleId::ReduceAnimations => &mut self.reduce_animations,
+            ToggleId::ReduceTransparency => &mut self.reduce_transparency,
+            ToggleId::AutoUpdate => &mut self.auto_update_enabled,
+        })
     }
 
     fn handle_hover(&mut self, mx: f32, my: f32) -> EventResult {
@@ -3427,334 +3903,6 @@ impl SettingsState {
 
         self.sidebar_hovered = None;
         EventResult::Ignored
-    }
-
-    // --- Page-specific click handlers ---
-
-    fn handle_display_click(&mut self, _mx: f32, my: f32, right_x: f32) {
-        let base_y = HEADER_HEIGHT + 8.0;
-        // After monitor preview (section header + 120px preview + spacing + section header)
-        let settings_start = base_y + 24.0 + 12.0 + 120.0 + SECTION_SPACING + 24.0 + 12.0;
-
-        let _ = right_x;
-
-        // Resolution row
-        let res_y = settings_start;
-        if my >= res_y && my < res_y + ITEM_HEIGHT {
-            self.show_dropdown(DropdownId::Resolution);
-            return;
-        }
-
-        // Refresh rate row
-        let rate_y = res_y + ITEM_HEIGHT;
-        if my >= rate_y && my < rate_y + ITEM_HEIGHT {
-            self.show_dropdown(DropdownId::RefreshRate);
-            return;
-        }
-
-        // Scale row
-        let scale_y = rate_y + ITEM_HEIGHT;
-        if my >= scale_y && my < scale_y + ITEM_HEIGHT {
-            self.show_dropdown(DropdownId::Scale);
-            return;
-        }
-
-        // Night light toggle
-        let nl_section_y = scale_y + ITEM_HEIGHT + SECTION_SPACING + 24.0 + 12.0;
-        if my >= nl_section_y && my < nl_section_y + ITEM_HEIGHT {
-            self.night_light_enabled = !self.night_light_enabled;
-        }
-    }
-
-    fn handle_sound_click(&mut self, _mx: f32, my: f32, _right_x: f32) {
-        let base_y = HEADER_HEIGHT + 8.0;
-        let section_y = base_y + 24.0 + 12.0;
-
-        // Output device
-        if my >= section_y && my < section_y + ITEM_HEIGHT {
-            self.show_dropdown(DropdownId::OutputDevice);
-            return;
-        }
-
-        // Mute toggle (third row in output section)
-        let mute_y = section_y + ITEM_HEIGHT * 2.0;
-        if my >= mute_y && my < mute_y + ITEM_HEIGHT {
-            self.output_muted = !self.output_muted;
-            return;
-        }
-
-        // System sounds toggle
-        let sys_section_y = section_y + ITEM_HEIGHT * 3.0 + SECTION_SPACING * 2.0 + 72.0;
-        if my >= sys_section_y && my < sys_section_y + ITEM_HEIGHT {
-            self.system_sounds_enabled = !self.system_sounds_enabled;
-        }
-    }
-
-    fn handle_themes_click(&mut self, mx: f32, my: f32, content_x: f32) {
-        let base_y = HEADER_HEIGHT + 8.0;
-        let cards_y = base_y + 24.0 + 12.0;
-        let card_w = 140.0;
-        let card_h = 100.0;
-        let card_spacing = 16.0;
-
-        // Theme mode cards
-        if my >= cards_y && my < cards_y + card_h {
-            for (idx, mode) in ThemeMode::ALL.iter().enumerate() {
-                let cx = content_x + (idx as f32) * (card_w + card_spacing);
-                if mx >= cx && mx < cx + card_w {
-                    self.appearance.settings.theme_mode = *mode;
-                    return;
-                }
-            }
-        }
-
-        // Transparency levels
-        let effects_y = cards_y + card_h + SECTION_SPACING + 24.0 + 12.0;
-        let pill_x = content_x + PILL_ROW_X;
-        if let Some(idx) = pill_row_hit(mx, my, pill_x, effects_y, TransparencyLevel::ALL.len())
-            && let Some(level) = TransparencyLevel::ALL.get(idx)
-        {
-            self.appearance.settings.transparency = *level;
-            return;
-        }
-
-        // Animation speed
-        let anim_y = effects_y + ITEM_HEIGHT;
-        if let Some(idx) = pill_row_hit(mx, my, pill_x, anim_y, AnimationSpeed::ALL.len())
-            && let Some(speed) = AnimationSpeed::ALL.get(idx)
-        {
-            self.appearance.settings.animation_speed = *speed;
-        }
-    }
-
-    fn handle_colors_click(&mut self, mx: f32, my: f32, content_x: f32) {
-        let base_y = HEADER_HEIGHT + 8.0;
-        // Section header + description text
-        let grid_y = base_y + 24.0 + 12.0 + 28.0;
-        let swatch_size = 36.0;
-        let swatch_spacing = 10.0;
-        let cols = 6;
-
-        // Color swatches
-        for (idx, accent) in AccentColor::presets().iter().enumerate() {
-            let col = idx % cols;
-            let row = idx / cols;
-            let sx = content_x + (col as f32) * (swatch_size + swatch_spacing);
-            let sy = grid_y + (row as f32) * (swatch_size + swatch_spacing);
-
-            if mx >= sx && mx < sx + swatch_size && my >= sy && my < sy + swatch_size {
-                self.appearance.settings.accent_color = *accent;
-                return;
-            }
-        }
-    }
-
-    fn handle_network_click(&mut self, mx: f32, my: f32, content_x: f32, right_x: f32) {
-        let base_y = HEADER_HEIGHT + 8.0;
-        let adapters_y = base_y + 24.0 + 12.0;
-
-        let _ = (right_x, mx);
-
-        // Adapter list clicks
-        for (idx, _adapter) in self.adapters.iter().enumerate() {
-            let row_y = adapters_y + (idx as f32) * (ITEM_HEIGHT + 4.0);
-            if my >= row_y && my < row_y + ITEM_HEIGHT {
-                self.selected_adapter = idx;
-                return;
-            }
-        }
-
-        // IP config dropdown
-        let ip_section_y = adapters_y
-            + (self.adapters.len() as f32) * (ITEM_HEIGHT + 4.0)
-            + SECTION_SPACING
-            + 24.0
-            + 12.0;
-        if my >= ip_section_y && my < ip_section_y + ITEM_HEIGHT && mx >= content_x + 350.0 {
-            self.show_dropdown(DropdownId::IpConfig);
-        }
-    }
-
-    fn handle_proxy_click(&mut self, _mx: f32, my: f32, _right_x: f32) {
-        let base_y = HEADER_HEIGHT + 8.0;
-        let toggle_y = base_y + 24.0 + 12.0;
-
-        if my >= toggle_y && my < toggle_y + ITEM_HEIGHT {
-            self.proxy_enabled = !self.proxy_enabled;
-        }
-    }
-
-    fn handle_accounts_click(&mut self, _mx: f32, my: f32, _right_x: f32) {
-        let base_y = HEADER_HEIGHT + 8.0;
-
-        match self.current_page {
-            SettingsPage::LoginOptions => {
-                let toggle_y = base_y + 24.0 + 12.0;
-                if my >= toggle_y && my < toggle_y + ITEM_HEIGHT {
-                    self.auto_login_enabled = !self.auto_login_enabled;
-                }
-            }
-            _ => {
-                // Account list selection
-                let list_y = base_y + 24.0 + 12.0;
-                for (idx, _) in self.user_accounts.iter().enumerate() {
-                    let row_y = list_y + (idx as f32) * 64.0;
-                    if my >= row_y && my < row_y + 60.0 {
-                        self.selected_account = idx;
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    fn handle_privacy_click(&mut self, mx: f32, my: f32, right_x: f32) {
-        let base_y = HEADER_HEIGHT + 8.0;
-        let section_y = base_y + 24.0 + 12.0;
-
-        // Location master toggle
-        if my >= section_y
-            && my < section_y + ITEM_HEIGHT
-            && mx >= right_x
-            && mx < right_x + TOGGLE_WIDTH
-        {
-            self.location_enabled = !self.location_enabled;
-            return;
-        }
-
-        // Per-app toggles for location
-        if self.location_enabled {
-            let mut y = section_y + ITEM_HEIGHT;
-            for app in &mut self.location_apps {
-                if my >= y
-                    && my < y + ITEM_HEIGHT - 8.0
-                    && mx >= right_x
-                    && mx < right_x + TOGGLE_WIDTH
-                {
-                    app.allowed = !app.allowed;
-                    return;
-                }
-                y += ITEM_HEIGHT - 8.0;
-            }
-        }
-    }
-
-    fn handle_accessibility_click(&mut self, mx: f32, my: f32, right_x: f32) {
-        let base_y = HEADER_HEIGHT + 8.0;
-
-        match self.current_page {
-            SettingsPage::Audio => {
-                let section_y = base_y + 24.0 + 12.0;
-                // Mono audio toggle
-                if my >= section_y
-                    && my < section_y + ITEM_HEIGHT
-                    && mx >= right_x
-                    && mx < right_x + TOGGLE_WIDTH
-                {
-                    self.mono_audio = !self.mono_audio;
-                    return;
-                }
-                // Visual alerts toggle
-                let va_y = section_y + ITEM_HEIGHT;
-                if my >= va_y
-                    && my < va_y + ITEM_HEIGHT
-                    && mx >= right_x
-                    && mx < right_x + TOGGLE_WIDTH
-                {
-                    self.visual_alerts = !self.visual_alerts;
-                    return;
-                }
-                // Narrator toggle
-                let narrator_section_y = va_y + ITEM_HEIGHT + SECTION_SPACING + 24.0 + 12.0;
-                if my >= narrator_section_y
-                    && my < narrator_section_y + ITEM_HEIGHT
-                    && mx >= right_x
-                    && mx < right_x + TOGGLE_WIDTH
-                {
-                    self.narrator_enabled = !self.narrator_enabled;
-                }
-            }
-            SettingsPage::Interaction => {
-                let section_y = base_y + 24.0 + 12.0;
-                let mut y = section_y;
-                // Sticky keys
-                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
-                    self.sticky_keys = !self.sticky_keys;
-                    return;
-                }
-                y += ITEM_HEIGHT + 12.0;
-                // Filter keys
-                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
-                    self.filter_keys = !self.filter_keys;
-                    return;
-                }
-                y += ITEM_HEIGHT + 12.0;
-                // Toggle keys
-                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
-                    self.toggle_keys = !self.toggle_keys;
-                    return;
-                }
-                y += ITEM_HEIGHT + 12.0;
-                // On-screen keyboard
-                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
-                    self.onscreen_keyboard = !self.onscreen_keyboard;
-                }
-            }
-            _ => {
-                // Visual page
-                let section_y = base_y + 24.0 + 12.0;
-                let mut y = section_y + ITEM_HEIGHT; // skip text size slider row
-                y += 8.0; // range labels
-
-                // High contrast toggle
-                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
-                    self.high_contrast = !self.high_contrast;
-                    return;
-                }
-                y += ITEM_HEIGHT;
-                // Cursor size dropdown
-                if my >= y && my < y + ITEM_HEIGHT {
-                    self.show_dropdown(DropdownId::CursorSize);
-                    return;
-                }
-                y += ITEM_HEIGHT;
-                // Reduce animations
-                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
-                    self.reduce_animations = !self.reduce_animations;
-                    return;
-                }
-                y += ITEM_HEIGHT + SECTION_SPACING + 24.0 + 12.0;
-                // Color filter dropdown
-                if my >= y && my < y + ITEM_HEIGHT {
-                    self.show_dropdown(DropdownId::ColorFilter);
-                    return;
-                }
-                y += ITEM_HEIGHT;
-                // Reduce transparency
-                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
-                    self.reduce_transparency = !self.reduce_transparency;
-                }
-            }
-        }
-    }
-
-    fn handle_update_click(&mut self, _mx: f32, my: f32, right_x: f32) {
-        let base_y = HEADER_HEIGHT + 8.0;
-
-        // Version info section takes 72px, then check button at y + 72
-        let check_btn_y = base_y + 24.0 + 12.0 + 72.0;
-        if my >= check_btn_y && my < check_btn_y + 32.0 {
-            self.checking_for_updates = !self.checking_for_updates;
-            return;
-        }
-
-        // Auto-update toggle
-        let prefs_y = check_btn_y + 44.0 + SECTION_SPACING + 24.0 + 12.0;
-        if my >= prefs_y && my < prefs_y + ITEM_HEIGHT {
-            self.auto_update_enabled = !self.auto_update_enabled;
-        }
-
-        let _ = right_x;
     }
 
     /// Opens `id`'s dropdown, scrolled so the current choice is on screen.
@@ -4423,27 +4571,242 @@ mod tests {
         assert!(tree.len() > 30);
     }
 
+    // ---- Clicking what is actually drawn ----
+    //
+    // These ask the page where it put a control and then click there, rather
+    // than recomputing the position from the same constants the page used. A
+    // test that carries its own copy of the layout arithmetic passes happily
+    // while the real hit test disagrees with the real renderer — which is the
+    // exact bug this file was restructured to make impossible, so the tests
+    // must not reintroduce it one level up.
+
+    /// A sink that records every click band the page registers.
+    struct RectSink {
+        x: f32,
+        y: f32,
+        rects: Vec<(RowHit, (f32, f32, f32, f32))>,
+    }
+
+    impl PageSink for RectSink {
+        fn x(&self) -> f32 {
+            self.x
+        }
+        fn y(&self) -> f32 {
+            self.y
+        }
+        fn advance(&mut self, dy: f32) {
+            self.y += dy;
+        }
+        fn draw(&mut self, _f: impl FnOnce(&mut RenderTree, f32, f32)) {}
+        fn hit_rect(&mut self, x: f32, y: f32, w: f32, h: f32, what: RowHit) {
+            self.rects.push((what, (x, y, w, h)));
+        }
+    }
+
+    /// Every click band the current page registers, in the order it draws them.
+    fn hit_bands(state: &SettingsState) -> Vec<(RowHit, (f32, f32, f32, f32))> {
+        let mut sink = RectSink {
+            x: SettingsState::content_x(),
+            y: SettingsState::content_top(),
+            rects: Vec::new(),
+        };
+        state.build_page(&mut sink);
+        sink.rects
+    }
+
+    /// The middle of the band the current page gives `what`, or `None` if it
+    /// has none.
+    fn center_of(state: &SettingsState, what: RowHit) -> Option<(f32, f32)> {
+        hit_bands(state)
+            .into_iter()
+            .find(|(w, _)| *w == what)
+            .map(|(_, (x, y, w, h))| (x + w / 2.0, y + h / 2.0))
+    }
+
+    /// Click the middle of `what`'s band on `page`. Panics if the page has no
+    /// such band, which is the failure these tests are looking for.
+    fn click_control(state: &mut SettingsState, page: SettingsPage, what: RowHit) {
+        state.current_page = page;
+        let (cx, cy) = center_of(state, what)
+            .unwrap_or_else(|| panic!("{} has no click target for {what:?}", page.label()));
+        state.handle_click(cx, cy);
+    }
+
+    /// Every page the sidebar can reach.
+    fn all_pages() -> Vec<SettingsPage> {
+        SettingsCategory::ALL
+            .iter()
+            .flat_map(|c| c.pages().iter().copied())
+            .collect()
+    }
+
+    /// The switches a page currently offers.
+    fn toggles_on_page(state: &SettingsState) -> Vec<ToggleId> {
+        hit_bands(state)
+            .into_iter()
+            .filter_map(|(what, _)| match what {
+                RowHit::Toggle(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `page` with every switch on it turned on.
+    ///
+    /// Several controls only exist once the feature above them is enabled —
+    /// the narrator's verbosity, the per-app permission lists — and a sweep
+    /// over the default state would report those as unreachable when they are
+    /// merely not shown yet.
+    fn fully_expanded(page: SettingsPage) -> SettingsState {
+        let mut state = SettingsState::new();
+        state.current_page = page;
+        // Turning one switch on can reveal another, so repeat until the set
+        // stops growing. Bounded because nothing here turns a switch back off.
+        for _ in 0..8 {
+            let mut changed = false;
+            for id in toggles_on_page(&state) {
+                if let Some(flag) = state.toggle_mut(id)
+                    && !*flag
+                {
+                    *flag = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        state
+    }
+
+    /// A state sitting on the page that draws `id`'s row, or `None` if no page
+    /// draws it at all.
+    fn state_showing(id: DropdownId) -> Option<SettingsState> {
+        all_pages()
+            .into_iter()
+            .map(fully_expanded)
+            .find(|s| center_of(s, RowHit::Dropdown(id)).is_some())
+    }
+
+    #[test]
+    fn test_every_dropdown_has_something_that_opens_it() {
+        // Three of the ten were drawn with no opener at all: the page's click
+        // handler stopped short of them. Walking the enum rather than a list
+        // written by hand is what makes this catch the eleventh as well.
+        for id in DropdownId::ALL {
+            let mut state =
+                state_showing(id).unwrap_or_else(|| panic!("no page draws a row for {id:?}"));
+            let (cx, cy) = center_of(&state, RowHit::Dropdown(id)).expect("just found it");
+            state.handle_click(cx, cy);
+            assert_eq!(
+                state.open_dropdown,
+                Some(id),
+                "clicking {id:?}'s row on {} opened {:?}",
+                state.current_page.label(),
+                state.open_dropdown
+            );
+        }
+    }
+
+    #[test]
+    fn test_an_open_dropdown_appears_under_its_own_button() {
+        // The popup used to carry a hand-written anchor per dropdown, so it
+        // could open several rows away from the button that was pressed.
+        for id in DropdownId::ALL {
+            let mut state =
+                state_showing(id).unwrap_or_else(|| panic!("no page draws a row for {id:?}"));
+            let (cx, cy) = center_of(&state, RowHit::Dropdown(id)).expect("just found it");
+            state.handle_click(cx, cy);
+            let layout = state
+                .dropdown_layout()
+                .unwrap_or_else(|| panic!("{id:?} opened but has no layout"));
+            assert!(
+                (layout.x - SettingsState::content_x() - CONTROL_COLUMN_DX).abs() < 0.01,
+                "{id:?} popup is not in the control column"
+            );
+            // The popup is pulled up if it would run off the bottom, so it may
+            // sit above the row — never below it.
+            assert!(
+                layout.y <= cy,
+                "{id:?} popup starts at {} but its button is at {cy}",
+                layout.y
+            );
+        }
+    }
+
+    #[test]
+    fn test_every_toggle_on_every_page_flips_its_own_field() {
+        // A toggle wired to the wrong field is invisible until someone changes
+        // a setting and a different one moves. Reading the field back through
+        // its own id catches that, and catches a toggle that flips nothing.
+        for page in all_pages() {
+            for id in toggles_on_page(&fully_expanded(page)) {
+                let mut state = fully_expanded(page);
+                let before = *state
+                    .toggle_mut(id)
+                    .unwrap_or_else(|| panic!("{id:?} has no field"));
+                let (cx, cy) = center_of(&state, RowHit::Toggle(id))
+                    .unwrap_or_else(|| panic!("{id:?} vanished between walks"));
+                state.handle_click(cx, cy);
+                let after = *state
+                    .toggle_mut(id)
+                    .unwrap_or_else(|| panic!("{id:?} has no field"));
+                assert_ne!(
+                    before,
+                    after,
+                    "clicking {id:?} on {} changed nothing",
+                    page.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_every_per_app_permission_switch_is_clickable() {
+        // Only the Location list had a handler; Camera, Microphone and
+        // Background were drawn and inert.
+        let mut state = fully_expanded(SettingsPage::Permissions);
+        for kind in [
+            PermissionKind::Location,
+            PermissionKind::Camera,
+            PermissionKind::Microphone,
+            PermissionKind::Background,
+        ] {
+            let count = match kind {
+                PermissionKind::Location => state.location_apps.len(),
+                PermissionKind::Camera => state.camera_apps.len(),
+                PermissionKind::Microphone => state.microphone_apps.len(),
+                PermissionKind::Background => state.background_apps.len(),
+            };
+            assert!(count > 0, "{kind:?} has no apps to test with");
+            for idx in 0..count {
+                let id = ToggleId::AppPermission(kind, idx);
+                let before = *state.toggle_mut(id).expect("app exists");
+                let (cx, cy) = center_of(&state, RowHit::Toggle(id))
+                    .unwrap_or_else(|| panic!("{kind:?} app {idx} has no click target"));
+                state.handle_click(cx, cy);
+                assert_ne!(before, *state.toggle_mut(id).expect("app exists"));
+            }
+        }
+    }
+
     // ---- Personalization: the shared appearance model ----
     //
-    // These drive the click handlers directly rather than through
-    // `handle_event`, which would write to the user's real `appearance.yaml`.
-    // The write itself is covered by `appearance`'s own config tests, which
-    // point $HOME at a temporary directory; what needs testing here is that
-    // the panel's geometry and the model agree.
-
-    /// Where the Themes page draws its pill rows, mirroring the layout in
-    /// `render_themes_page` / `handle_themes_click`.
-    fn themes_effects_y() -> f32 {
-        let cards_y = HEADER_HEIGHT + 8.0 + 24.0 + 12.0;
-        cards_y + 100.0 + SECTION_SPACING + 24.0 + 12.0
-    }
+    // These drive `handle_click` rather than `handle_event`, which would write
+    // to the user's real `appearance.yaml`. The write itself is covered by
+    // `appearance`'s own config tests, which point $HOME at a temporary
+    // directory; what needs testing here is that the panel's geometry and the
+    // model agree.
 
     #[test]
     fn test_theme_mode_card_click_sets_the_mode() {
         let mut state = SettingsState::new();
-        let cards_y = HEADER_HEIGHT + 8.0 + 24.0 + 12.0;
         // Second card: Light, since ThemeMode::ALL is Dark, Light, System.
-        state.handle_themes_click(100.0 + 156.0, cards_y + 10.0, 100.0);
+        click_control(
+            &mut state,
+            SettingsPage::Themes,
+            RowHit::Select(SelectId::ThemeMode, 1),
+        );
         assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Light);
     }
 
@@ -4451,11 +4814,13 @@ mod tests {
     fn test_every_transparency_level_can_be_picked() {
         // The row this replaced was an on/off switch, which could not express
         // Subtle or Moderate at all.
-        let y = themes_effects_y();
         for (idx, level) in TransparencyLevel::ALL.iter().enumerate() {
             let mut state = SettingsState::new();
-            let px = 100.0 + PILL_ROW_X + (idx as f32) * PILL_PITCH + 4.0;
-            state.handle_themes_click(px, y + PILL_INSET_Y + 4.0, 100.0);
+            click_control(
+                &mut state,
+                SettingsPage::Themes,
+                RowHit::Pill(PillId::Transparency, idx),
+            );
             assert_eq!(
                 state.appearance.settings.transparency,
                 *level,
@@ -4467,11 +4832,13 @@ mod tests {
 
     #[test]
     fn test_every_animation_speed_can_be_picked() {
-        let y = themes_effects_y() + ITEM_HEIGHT;
         for (idx, speed) in AnimationSpeed::ALL.iter().enumerate() {
             let mut state = SettingsState::new();
-            let px = 100.0 + PILL_ROW_X + (idx as f32) * PILL_PITCH + 4.0;
-            state.handle_themes_click(px, y + PILL_INSET_Y + 4.0, 100.0);
+            click_control(
+                &mut state,
+                SettingsPage::Themes,
+                RowHit::Pill(PillId::AnimationSpeed, idx),
+            );
             assert_eq!(state.appearance.settings.animation_speed, *speed);
         }
     }
@@ -4479,10 +4846,12 @@ mod tests {
     #[test]
     fn test_a_click_in_the_gap_between_pills_changes_nothing() {
         let mut state = SettingsState::new();
-        let y = themes_effects_y();
-        // Between the first and second pill.
-        let gap = 100.0 + PILL_ROW_X + PILL_WIDTH + 2.0;
-        state.handle_themes_click(gap, y + PILL_INSET_Y + 4.0, 100.0);
+        state.current_page = SettingsPage::Themes;
+        let (px, py) = center_of(&state, RowHit::Pill(PillId::Transparency, 0))
+            .expect("the transparency row has pills");
+        // Between the first and second pill: past the first pill's right edge,
+        // short of where the second begins.
+        state.handle_click(px + PILL_WIDTH / 2.0 + 2.0, py);
         assert_eq!(
             state.appearance.settings.transparency,
             AppearanceSettings::default().transparency
@@ -4495,18 +4864,34 @@ mod tests {
         // array; the model has fourteen named accents and this walks all of
         // them, so a swatch that cannot be reached is a failing test rather
         // than a colour nobody can select.
-        let grid_y = HEADER_HEIGHT + 8.0 + 24.0 + 12.0 + 28.0;
         for (idx, accent) in AccentColor::presets().iter().enumerate() {
             let mut state = SettingsState::new();
-            let sx = 100.0 + ((idx % 6) as f32) * 46.0 + 4.0;
-            let sy = grid_y + ((idx / 6) as f32) * 46.0 + 4.0;
-            state.handle_colors_click(sx, sy, 100.0);
+            click_control(
+                &mut state,
+                SettingsPage::Colors,
+                RowHit::Select(SelectId::AccentColor, idx),
+            );
             assert_eq!(
                 state.appearance.settings.accent_color,
                 *accent,
                 "swatch {idx} should select {}",
                 accent.label()
             );
+        }
+    }
+
+    #[test]
+    fn test_every_pointer_size_can_be_picked() {
+        // The Interaction page drew five size buttons and had no handler for
+        // any of them.
+        for idx in 0..POINTER_SIZE_COUNT {
+            let mut state = SettingsState::new();
+            click_control(
+                &mut state,
+                SettingsPage::Interaction,
+                RowHit::Select(SelectId::PointerSize, idx),
+            );
+            assert_eq!(state.pointer_size, pointer_size_of(idx));
         }
     }
 
@@ -4878,7 +5263,10 @@ mod tests {
                 DropdownId::Scale,
                 DropdownId::CursorSize,
             ] {
-                let mut state = SettingsState::new();
+                // On the page that actually draws it: the popup is anchored to
+                // its own button, so opening it from elsewhere has no position
+                // to be checked against.
+                let mut state = state_showing(id).unwrap_or_else(|| panic!("no page draws {id:?}"));
                 state.window_height = height;
                 state.show_dropdown(id);
                 let layout = state.dropdown_layout().expect("a dropdown is open");

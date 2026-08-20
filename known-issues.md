@@ -42837,7 +42837,17 @@ on the crate.
 
 ---
 
-## `C-THREE-SETTINGS-DROPDOWNS-HAVE-NO-OPENER`
+## `C-THREE-SETTINGS-DROPDOWNS-HAVE-NO-OPENER` — **fixed**
+
+**Fixed** by collapsing every Settings page into a single description walked by
+two interpreters, so the row drawn at a given position *is* the row clicked
+there. See `design-decisions.md` §475. The three dropdowns turned out to be a
+symptom rather than three omissions: the same duplication had also left every
+per-app permission switch outside the Location list inert, and all five
+pointer-size buttons on the Interaction page. `DropdownId::ALL` now exists so
+`test_every_dropdown_has_something_that_opens_it` can walk the enum, and eight
+further tests click controls at the coordinates the page itself reports. A
+one-row drift injected into the hit test fails nine of them.
 
 **In short:** the Settings app draws three rows that look like the other
 dropdowns and show a current value — "Input Device", "Diagnostic data
@@ -44760,3 +44770,75 @@ missing test. The first move on a NOT PINNED line is to ask what the mutation
 actually changes for a caller — not to write a test that forces the mutation to
 be observable, which here would have meant asserting on a `y` outside the
 screen.
+
+---
+
+## `C-SETTINGS-BUTTONS-WITH-NOTHING-BEHIND-THEM`
+
+**In short:** the Settings app draws seven push buttons that do nothing when
+clicked, because there is no state for them to change yet. They are not broken
+wiring — the features they would trigger (changing a password, reinstalling the
+OS, rolling back a package generation) do not exist. Right now clicking one is
+silently ignored, which is honest but unhelpful; a user cannot tell "not
+implemented" from "my click missed".
+
+**Where:** `apps/settings/src/main.rs`. The `ButtonId` enum lists the buttons a
+click can reach, and has exactly one variant, `CheckForUpdates`. Every other
+`button_at(…)` call passes `None` for its click target, so no band is
+registered:
+
+| Button | Page | What it would need |
+|---|---|---|
+| Change Password | User Accounts | an account/credential service |
+| Add Account, Remove Account | User Accounts | the same |
+| Manage Family Settings | User Accounts | the same |
+| Clear Activity History | Permissions | a stored activity log |
+| Go Back (to previous version) | Recovery | package-generation rollback (`pkg`) |
+| Reset (Fresh Start) | Recovery | a reinstall path |
+
+The Snapshots page is the same shape: it lists four package generations and
+marks the current one, and none of the rows is selectable. So is the account
+picture grid on User Accounts, which is drawn and inert.
+
+**Why it is `None` rather than a target that does nothing:** a registered band
+swallows the click. A button that consumes a click and produces no effect is
+worse than one that ignores it, because the pointer-level feedback ("nothing
+happened here") is the only signal the user gets either way, and swallowing
+also blocks anything drawn beneath from ever receiving it.
+
+**How to confirm:** `grep -n 'button_at(' apps/settings/src/main.rs` and count
+the calls whose last argument is `None`.
+
+**The proper fix, in two parts.** The visible half is cheap and can be done now:
+draw a button with no target in a disabled style (dimmed fill, muted label) so
+the UI stops promising an action it cannot perform. The real half is per-button
+and each waits on a service that does not exist — `pkg` generation rollback for
+Recovery and Snapshots, an accounts service for the four account buttons. Add a
+`ButtonId` variant and an `apply_row_hit` arm as each lands; the `None` at the
+call site is the single place that has to change.
+
+---
+
+## `C-SETTINGS-SLIDERS-CANNOT-BE-DRAGGED`
+
+**In short:** every slider in the Settings app — volume, brightness, night-light
+warmth, text size, narrator voice rate, the two update-deferral sliders — draws
+its current value correctly and cannot be moved with the mouse. The keyboard
+arrow keys change some of them; the pointer changes none.
+
+**Where:** `apps/settings/src/main.rs`, `PageSink::slider_row`. It registers no
+click band at all (`self.row(label, None, …)`), with a comment saying so. The
+drawing side, `render_slider`, is complete.
+
+**How to confirm:** open Sound, drag the volume slider, watch it not move.
+
+**The proper fix:** sliders need press-drag-release, not a click. That means the
+page walk has to yield a band tagged with the slider's id *and* its track
+geometry, plus a `dragging: Option<SliderId>` in `SettingsState` that
+`MouseEventKind::Move` consults while a button is held. The value is then
+`(mx - track_x) / SLIDER_WIDTH` clamped to 0..1, mapped back through whatever
+range that slider covers — which means a `SliderId` enum carrying the range, in
+the same shape as `ToggleId`/`toggle_mut`, so the mapping is written once. The
+band and the track must come from one place, exactly as `pill_rect` now does for
+pills; a slider whose visible track and draggable range differ is the same class
+of defect this file was restructured to eliminate.

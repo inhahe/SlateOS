@@ -42181,6 +42181,28 @@ requires them to agree. A hit-test checked against its own arithmetic checks
 nothing — that is exactly the bug netscan had, where hit-test and renderer each
 computed the first row and got different answers.
 
+### A seventeenth instance, found later
+
+`apps/remotedesktop`'s `content_scroll` (fixed in `ffd9d7b25`, while converting
+that app's wheel handler for `C-SCROLL-DELTA-UNITS-ARE-DOCUMENTED-WRONG`). It
+had the standard four grep hits — declared, initialised, written by the wheel,
+never read — so the file-transfer and history lists drew every row and let the
+clip cut the tail off, and everything past the bottom edge was unreachable.
+
+Two things about it are worth adding to the sweep's record:
+
+- **The same app had a second, differently-shaped instance the grep signature
+  does not catch.** Its session list ignored `sidebar_scroll` — an offset that
+  *is* live, and correctly read by the neighbouring profiles list in the same
+  sidebar. A per-field grep cannot see that, because the field's hits are all
+  present and correct; what is missing is a hit in one particular renderer.
+  **The check that finds it is per-*list*, not per-field:** for every list that
+  clips, does the loop that draws it consult an offset at all?
+- **This one was reachable.** remotedesktop has a real `handle_event`, so
+  unlike most of the sweep's instances this was a live user-visible bug rather
+  than a latent one waiting on `C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`. That is
+  the second app in that position, after kanban.
+
 ### Left over
 
 `gui/desktop`'s touchpad-gesture, Bluetooth and window-rules panels are now
@@ -42254,28 +42276,134 @@ proof that the doc comment is the defect.
 
 **The proper fix**, in this order:
 
-1. Correct the declaration in `event.rs` to say notches, and say it loudly —
-   something like `/// Scroll wheel, in wheel notches (1.0 per detent,
-   fractional for high-resolution devices); *not* pixels.` The producer is
-   already right, so nothing in the compositor changes.
-2. Give the toolkit one shared helper that turns a notch count into a row
-   count, so no app has to pick a constant. `scroll_window` is the natural
-   home; it already owns `shift`, which every one of these consumers ends up
-   calling. Rows-per-notch of 3 is what the majority already do and matches
-   the platform default.
-3. Convert the twelve consumers above to it. The four `* 20.0` sites and the
-   two raw-`dy` sites are the ones that change behaviour most visibly; the
-   sign-only ones are already correct in effect and just stop open-coding it.
-4. The fractional case is the one to be careful of: a high-resolution wheel
-   sends e.g. `0.25`, and a helper that truncates to whole rows would make
-   such a device scroll in jumps or not at all — which is the exact bug the
-   editor has today. Accumulate the fraction across events rather than
-   truncating each one.
+1. ~~Correct the declaration in `event.rs` to say notches~~ — **done**
+   (`c41dac699`). The producer was already right, so nothing in the
+   compositor changed.
+2. ~~Give the toolkit one shared converter~~ — **done**: `gui/toolkit/src/wheel.rs`,
+   `wheel::Accumulator::rows()` for row-based views and `wheel::pixels()` for
+   continuous ones, at `ROWS_PER_NOTCH = 3.0`.
+
+   It went in its own module rather than into `scroll_window` as planned
+   above, because it is **stateful and `scroll_window` is deliberately not**.
+   Point 4 forces that: a converter that rounds each event on its own throws
+   a trackpad's `0.1`s away and the view never moves — the editor's bug in a
+   different disguise — so it has to bank the remainder in a `residue` field.
+   `scroll_window`'s whole contract is that it is a pure function callable
+   from `render(&self)`; giving it state would have broken that for every
+   existing caller.
+3. Convert the twelve consumers. **In progress:**
+
+   | Consumer | Status |
+   |---|---|
+   | editor | done, `453bc70b4` — the dead wheel now moves 3 lines a notch |
+   | emojipicker | done, `6912e8f38` |
+   | remotedesktop | done, `ffd9d7b25` |
+   | benchmark, devicemanager, diskimager, sysinfo (`* 20.0`) | to do |
+   | spreadsheet (`* 40.0`) | to do |
+   | filediff (`* SCROLL_SPEED`) | to do |
+   | procexplorer, sysmonitor, terminal, settings, netscan (sign only) | to do — correct in effect, but they should stop open-coding it and pick up trackpad support |
+   | musicplayer, partmanager, credmanager | not yet examined |
+
+4. ~~Accumulate the fraction across events rather than truncating each one~~ —
+   done, and pinned by `a_trackpads_fractions_add_up_instead_of_vanishing`
+   (ten `-0.1` events must total three rows) and by a 500-event drift test.
+
+**A note for the remaining conversions, learned from the three done so far:**
+every one of these apps already had a passing scroll test, and not one of them
+could have failed. They were written in the units of the bug — a `dy` of
+`-30.0` or `-10.0`, a pixel distance sized so the broken arithmetic would
+produce a visible number — and then asserted something like `offset >= 0.0` or
+`> 0.0`, which is equally true of an offset that never moved. Two further
+traps, both of which bit:
+
+- **Check the fixture can actually scroll.** emojipicker's grid cannot
+  overflow its panel in *any* category tab (82 emoji over eight categories,
+  the largest filling 160px of a 320px panel), and remotedesktop's sample
+  history is seven rows against a pane that fits eleven. A scroll test on
+  either asserts nothing. Both now assert `max_scroll() > 0` in the fixture
+  itself, so it cannot silently degrade.
+- **Assert a row, not a non-zero number.** `> 0.0` passes under a
+  one-pixel-per-notch defect. The assertion has to be `>= row_height`.
 
 **Until it is fixed:** two code comments (`apps/netscan/src/main.rs:2541` and
 `apps/settings/src/main.rs:3228`) already point here to explain why they use
-only the sign of `dy`. New scroll handlers should do the same rather than
-inventing another pixel constant.
+only the sign of `dy`. New scroll handlers should use `guitk::wheel` rather
+than inventing another pixel constant.
+
+---
+
+## `C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`
+
+**In short:** in an app where the list on screen is not a plain run of
+equal-height rows — say it has group headings in it, or the order it is drawn
+in is not the order it is stored in — the code that *draws* the list and the
+code that works out *what you clicked on* are usually two separate pieces of
+arithmetic that were written to agree and do not. You click one row and a
+different row lights up. Found and fixed in remotedesktop; not yet looked for
+anywhere else, and there is no reason to think it is confined to one app.
+
+**The instance found (`apps/remotedesktop`, fixed in `ffd9d7b25`):** the
+connections sidebar draws a 22px heading for each group followed by the 52px
+profile rows in that group, with the groups sorted alphabetically. The
+hit-test was
+
+```rust
+let idx = (y / SIDEBAR_ITEM_HEIGHT) as usize;   // 52.0
+if idx < self.profiles.len() { self.selected_profile = Some(idx); }
+```
+
+which is wrong in two independent ways at once, and both matter:
+
+1. **It does not know the headings are there.** They occupy 22px each, so
+   every row below the first heading is offset by a multiple of 22 that the
+   division never accounts for.
+2. **It indexes the wrong sequence.** The sidebar is ordered by sorted group;
+   `profiles` is in insertion order. Even with uniform row heights those are
+   different lists.
+
+On the shipped sample data — `[Dev/Development, Prod/Production,
+Build/Development, Staging/Staging]` — a click on "Build Machine" selected
+"Production DB", a different profile in a different group.
+
+**The fix that generalises:** make the layout a *value* that both sides read,
+rather than a calculation each side performs. remotedesktop now has
+
+```rust
+pub enum SidebarRow { Header(String), Profile(usize) }
+pub fn sidebar_rows(&self) -> Vec<SidebarRow>   // the layout, in draw order
+```
+
+and the renderer and the hit-test both walk it. They cannot disagree, because
+there is nothing left for them to disagree about. The same shape handles
+scrolling for free: `scroll_window::visible_variable` takes the row heights,
+so the hit-test walks the rows *starting at the scroll offset* and is
+automatically right for a scrolled list too — which the old code also got
+wrong.
+
+Two behaviours fall out of the change and are worth keeping deliberately:
+a click on a heading now selects **nothing** rather than sliding to whichever
+row is adjacent, and a click below the last row selects nothing rather than
+being clamped onto the last row.
+
+**Where to look for more of it.** The signature is a divide-by-a-row-height in
+a click handler:
+
+```bash
+grep -rn "as usize" --include=main.rs apps/ | grep -i "y /\|_y /"
+```
+
+Any hit that lands in a list which (a) interleaves headings or separators,
+(b) is drawn in a different order from the collection it indexes, (c) has
+variable-height rows, or (d) can be scrolled while the hit-test ignores the
+offset, is the same bug. Case (d) is the easiest to check and probably the
+most common, since the dead-scroll-offset sweep found so many lists whose
+offset nothing read.
+
+**A note on why this survived:** remotedesktop had 100 passing tests and none
+of them clicked a profile. Render tests assert the *picture* is right and
+event tests assert the *state machine* is right; nothing asserted the two
+agree about geometry. The regression test that now covers it pins the exact
+pixel layout in a doc comment and then clicks four y-coordinates.
 
 ---
 

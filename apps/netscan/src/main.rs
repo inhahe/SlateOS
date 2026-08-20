@@ -24,10 +24,13 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng};
+use guitk::scroll_window;
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -78,6 +81,35 @@ const SMALL_RADIUS: f32 = 4.0;
 
 const MAX_HISTORY_ENTRIES: usize = 50;
 const MAX_HOSTS_DISPLAY: usize = 256;
+/// Vertical space a truncated list keeps for its "N more" line.
+///
+/// Reserved whether or not the line is drawn, so that how many rows fit does
+/// not depend on how many rows fit.
+const LIST_MORE_HEIGHT: f32 = 16.0;
+/// Height of one row of the sidebar's port mini-table.
+const PORT_ROW_HEIGHT: f32 = 16.0;
+/// Vertical space the results view keeps for the one-line scan summary above
+/// the table header. Reserved whether or not a scan has run, so the table does
+/// not jump down the moment one does.
+const SUMMARY_BAR_HEIGHT: f32 = 26.0;
+/// Y of the results table's first host row.
+///
+/// Named once because the renderer and the click hit-test both need it, and
+/// when each worked it out for itself they disagreed by the summary bar's
+/// height -- so a click selected the host one row above the one under the
+/// pointer.
+const RESULTS_ROWS_TOP: f32 = TITLE_BAR_HEIGHT
+    + CONFIG_PANEL_HEIGHT
+    + PADDING
+    + TAB_HEIGHT
+    + PADDING
+    + SUMMARY_BAR_HEIGHT
+    + TABLE_HEADER_HEIGHT;
+/// How many rows one notch of the scroll wheel moves a list.
+const WHEEL_ROWS: isize = 3;
+/// How many host nodes the topology view draws before it gives up and says how
+/// many it left out. A radial diagram of 256 nodes is not a diagram.
+const MAX_TOPOLOGY_NODES: usize = 24;
 
 /// Font size of a view tab, a profile button and the topology legend.
 const CHIP_TEXT: f32 = 12.0;
@@ -2087,8 +2119,14 @@ pub struct NetScanApp {
     pub selected_host_idx: Option<usize>,
     pub scan_progress: Option<ScanProgress>,
     pub is_scanning: bool,
-    pub scroll_offset: f32,
-    pub sidebar_scroll: f32,
+    /// Index of the first host row drawn in the results table.
+    ///
+    /// A request rather than an index: an offset left over from a longer scan
+    /// shows the last page instead of a blank table, because
+    /// [`scroll_window::visible`] clamps the *result* and leaves this alone.
+    /// It was a pixel offset, which is what let the table be scrolled off the
+    /// top of its own panel with no way back down.
+    pub results_scroll: usize,
     pub traceroute_target: String,
     pub traceroute_result: Option<Vec<TracerouteHop>>,
     pub whois_target: String,
@@ -2099,8 +2137,13 @@ pub struct NetScanApp {
     pub history_selected_idx: Option<usize>,
     pub history_compare_idx: Option<usize>,
     pub scan_id_counter: u64,
-    pub topology_zoom: f32,
-    pub detail_port_scroll: f32,
+    /// Index of the first port row drawn in the sidebar's port mini-table.
+    ///
+    /// Also a row index, and for a sharper reason than the table's: as a pixel
+    /// offset this field made the whole port list vanish the moment it passed
+    /// one row's height, because the loop compared each row against a `dy` it
+    /// was itself advancing.
+    pub detail_port_scroll: usize,
     pub config_field_focus: usize,
 }
 
@@ -2115,8 +2158,7 @@ impl Default for NetScanApp {
             selected_host_idx: None,
             scan_progress: None,
             is_scanning: false,
-            scroll_offset: 0.0,
-            sidebar_scroll: 0.0,
+            results_scroll: 0,
             traceroute_target: String::from("8.8.8.8"),
             traceroute_result: None,
             whois_target: String::from("8.8.8.8"),
@@ -2127,8 +2169,7 @@ impl Default for NetScanApp {
             history_selected_idx: None,
             history_compare_idx: None,
             scan_id_counter: 1,
-            topology_zoom: 1.0,
-            detail_port_scroll: 0.0,
+            detail_port_scroll: 0,
             config_field_focus: 0,
         }
     }
@@ -2210,7 +2251,8 @@ impl NetScanApp {
         self.history.push_front(result.clone());
         self.results = Some(result);
         self.selected_host_idx = None;
-        self.scroll_offset = 0.0;
+        self.results_scroll = 0;
+        self.detail_port_scroll = 0;
         self.is_scanning = false;
     }
 
@@ -2242,6 +2284,56 @@ impl NetScanApp {
         let idx = self.selected_host_idx?;
         let result = self.results.as_ref()?;
         result.hosts.get(idx)
+    }
+
+    /// Which host rows the results table is currently showing.
+    ///
+    /// One function, called by both the renderer and the click hit-test, so
+    /// the two cannot disagree about which host is under the pointer. They
+    /// used to work it out separately and get two different answers: the
+    /// hit-test placed the first row 26px too high and ignored the scroll
+    /// offset outright, so any click on a scrolled table opened the wrong
+    /// host's detail panel.
+    #[must_use]
+    pub fn results_visible_rows(&self) -> scroll_window::Rows {
+        let total = self.results.as_ref().map_or(0, |r| r.hosts.len());
+        scroll_window::visible(
+            total,
+            TABLE_ROW_HEIGHT,
+            WINDOW_HEIGHT - RESULTS_ROWS_TOP - LIST_MORE_HEIGHT,
+            self.results_scroll,
+        )
+    }
+
+    /// Which port rows the sidebar's port mini-table is currently showing.
+    #[must_use]
+    pub fn detail_port_visible_rows(&self, rows_top: f32) -> scroll_window::Rows {
+        let total = self.selected_host().map_or(0, |h| h.ports.len());
+        scroll_window::visible(
+            total,
+            PORT_ROW_HEIGHT,
+            WINDOW_HEIGHT - rows_top - PADDING - LIST_MORE_HEIGHT,
+            self.detail_port_scroll,
+        )
+    }
+
+    /// Scroll the results table by `delta` rows, stopping at the top.
+    ///
+    /// The bottom is not clamped here: how far the table can go depends on how
+    /// tall it is drawn, and an offset run past the end is a request for the
+    /// last page rather than an error.
+    pub fn scroll_results_by(&mut self, delta: isize) {
+        self.results_scroll = scroll_window::shift(self.results_scroll, delta);
+    }
+
+    /// Scroll the results table back to the first host.
+    pub fn scroll_results_to_top(&mut self) {
+        self.results_scroll = 0;
+    }
+
+    /// Scroll the sidebar's port list by `delta` rows, stopping at the top.
+    pub fn scroll_detail_ports_by(&mut self, delta: isize) {
+        self.detail_port_scroll = scroll_window::shift(self.detail_port_scroll, delta);
     }
 
     /// Handle keyboard events.
@@ -2354,20 +2446,29 @@ impl NetScanApp {
 
                 // Check host row clicks in results
                 if self.active_tab == ViewTab::Results {
-                    let table_y = TITLE_BAR_HEIGHT
-                        + CONFIG_PANEL_HEIGHT
-                        + PADDING
-                        + TAB_HEIGHT
-                        + PADDING
-                        + TABLE_HEADER_HEIGHT;
-                    if my >= table_y && mx < WINDOW_WIDTH - SIDEBAR_WIDTH {
-                        let row_idx = ((my - table_y) / TABLE_ROW_HEIGHT) as usize;
-                        if let Some(ref result) = self.results
-                            && row_idx < result.hosts.len()
-                        {
-                            self.selected_host_idx = Some(row_idx);
-                            self.detail_port_scroll = 0.0;
-                            return EventResult::Consumed;
+                    // `RESULTS_ROWS_TOP`, not a second copy of the same sum:
+                    // the copy that used to live here omitted the summary bar,
+                    // so it placed the first row 26px above where the renderer
+                    // drew it and every click landed one row too far down.
+                    if my >= RESULTS_ROWS_TOP && mx < WINDOW_WIDTH - SIDEBAR_WIDTH {
+                        // The click names a row on screen; the selection is an
+                        // index into the whole host list. Without the scroll
+                        // offset the two agree only while the table is at the
+                        // top, so clicking a scrolled row selected some
+                        // earlier host and opened the wrong detail panel.
+                        let window = self.results_visible_rows();
+                        let on_screen = ((my - RESULTS_ROWS_TOP) / TABLE_ROW_HEIGHT) as usize;
+                        // A click below the last drawn row is a click on the
+                        // "N more" line, which names no host.
+                        if on_screen < window.count {
+                            let row_idx = window.start.saturating_add(on_screen);
+                            if let Some(ref result) = self.results
+                                && row_idx < result.hosts.len()
+                            {
+                                self.selected_host_idx = Some(row_idx);
+                                self.detail_port_scroll = 0;
+                                return EventResult::Consumed;
+                            }
                         }
                     }
                 }
@@ -2436,10 +2537,23 @@ impl NetScanApp {
             }
             MouseEventKind::Scroll { dy, .. } => {
                 if self.active_tab == ViewTab::Results {
-                    if mx < WINDOW_WIDTH - SIDEBAR_WIDTH {
-                        self.scroll_offset = (self.scroll_offset - dy * 20.0).max(0.0);
+                    // Only the sign of `dy` is used, not its magnitude.
+                    // `MouseEventKind::Scroll` documents `dy` as pixels but
+                    // every caller in this tree sets it to a notch count, so a
+                    // magnitude would mean three rows per notch on one path
+                    // and sixty on another. See known-issues.md.
+                    let rows = if *dy > 0.0 {
+                        WHEEL_ROWS.saturating_neg()
+                    } else if *dy < 0.0 {
+                        WHEEL_ROWS
                     } else {
-                        self.detail_port_scroll = (self.detail_port_scroll - dy * 20.0).max(0.0);
+                        0
+                    };
+                    if mx < WINDOW_WIDTH - SIDEBAR_WIDTH {
+                        self.results_scroll = scroll_window::shift(self.results_scroll, rows);
+                    } else {
+                        self.detail_port_scroll =
+                            scroll_window::shift(self.detail_port_scroll, rows);
                     }
                     EventResult::Consumed
                 } else {
@@ -2862,35 +2976,56 @@ impl NetScanApp {
             self.render_summary_bar(tree, content_y, result);
         }
 
-        let table_top = content_y + 26.0;
+        let table_top = content_y + SUMMARY_BAR_HEIGHT;
 
         // Table header
         self.render_table_header(tree, 0.0, table_top, table_width);
 
-        // Table rows
+        // Table rows.
+        //
+        // The rows are windowed by index rather than shifted by a pixel
+        // offset. The pixel version drew every row and leaned on the clip to
+        // hide the ones off the bottom -- so the last row was drawn sliced in
+        // half at the window edge, and because nothing clamped the offset the
+        // whole table could be scrolled up out of its own panel and left
+        // blank, with no way to bring it back.
         let rows_y = table_top + TABLE_HEADER_HEIGHT;
+        debug_assert!(
+            (rows_y - RESULTS_ROWS_TOP).abs() < 0.01,
+            "the hit-test's row origin must be the one the rows are drawn at"
+        );
         if let Some(ref result) = self.results {
-            tree.push(RenderCommand::PushClip {
-                x: 0.0,
-                y: rows_y,
-                width: table_width,
-                height: WINDOW_HEIGHT - rows_y,
-            });
-
-            for (i, host) in result.hosts.iter().enumerate() {
-                let row_y = rows_y + (i as f32) * TABLE_ROW_HEIGHT - self.scroll_offset;
-                if row_y + TABLE_ROW_HEIGHT < rows_y {
-                    continue;
-                }
-                if row_y > WINDOW_HEIGHT {
-                    break;
-                }
-
+            let window = self.results_visible_rows();
+            for (drawn, host) in result
+                .hosts
+                .get(window.start..window.end())
+                .unwrap_or_default()
+                .iter()
+                .enumerate()
+            {
+                // The selection is an index into the whole list, so compare
+                // against the absolute row, not the position on screen.
+                let i = window.start.saturating_add(drawn);
+                let row_y = rows_y + (drawn as f32) * TABLE_ROW_HEIGHT;
                 let is_selected = self.selected_host_idx == Some(i);
                 self.render_host_row(tree, 0.0, row_y, table_width, host, is_selected, i);
             }
 
-            tree.push(RenderCommand::PopClip);
+            // A table that is hiding hosts says so; otherwise it is
+            // indistinguishable from one showing every host there is.
+            let hidden = result.hosts.len().saturating_sub(window.count);
+            if hidden > 0 {
+                tree.push(RenderCommand::Text {
+                    x: PADDING,
+                    y: rows_y + (window.count as f32) * TABLE_ROW_HEIGHT,
+                    text: format!("{hidden} more"),
+                    color: OVERLAY0,
+                    font_size: SMALL_TEXT,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                });
+            }
         } else {
             // Empty state
             let headline = "No scan results yet";
@@ -3396,23 +3531,24 @@ impl NetScanApp {
         });
         dy += 16.0;
 
-        // Clipped port list
-        let clip_height = WINDOW_HEIGHT - dy - 20.0;
-        tree.push(RenderCommand::PushClip {
-            x,
-            y: dy,
-            width: w,
-            height: clip_height.max(0.0),
-        });
-
-        for port in &host.ports {
-            let port_y = dy - self.detail_port_scroll;
-            if port_y + 16.0 < dy {
-                continue;
-            }
-            if port_y > dy + clip_height {
-                break;
-            }
+        // Port list.
+        //
+        // The old loop compared each row's y against `dy` while advancing `dy`
+        // inside the same loop, which made both of its guards nonsense: the
+        // `break` could never fire, so the list ran off the bottom of the
+        // window with only the clip hiding it, and the `continue` skipped the
+        // advance, so any scroll past one row's height made every single port
+        // fail the same test and the list disappeared entirely.
+        let rows_top = dy;
+        let window = self.detail_port_visible_rows(rows_top);
+        for (drawn, port) in host
+            .ports
+            .get(window.start..window.end())
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let port_y = rows_top + (drawn as f32) * PORT_ROW_HEIGHT;
 
             tree.push(RenderCommand::Text {
                 x,
@@ -3470,11 +3606,21 @@ impl NetScanApp {
                 // We skip rendering banner inline to keep it simple; it appears in tooltip concept
                 let _ = banner_line;
             }
-
-            dy += 16.0;
         }
 
-        tree.push(RenderCommand::PopClip);
+        let hidden = host.ports.len().saturating_sub(window.count);
+        if hidden > 0 {
+            tree.push(RenderCommand::Text {
+                x,
+                y: rows_top + (window.count as f32) * PORT_ROW_HEIGHT,
+                text: format!("{hidden} more"),
+                color: OVERLAY0,
+                font_size: 10.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+        }
     }
 
     fn render_topology_view(&self, tree: &mut RenderTree) {
@@ -3544,7 +3690,7 @@ impl NetScanApp {
             });
 
             // Host nodes arranged in arcs below the gateway
-            let host_count = result.hosts.len().min(24); // Cap display
+            let host_count = result.hosts.len().min(MAX_TOPOLOGY_NODES);
             let start_y = center_y + 70.0;
             let cols = 8usize;
             let spacing_x = (area_w - 80.0) / cols as f32;
@@ -3595,6 +3741,24 @@ impl NetScanApp {
                     text: short_ip,
                     color: SUBTEXT0,
                     font_size: 9.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                    overflow: TextOverflow::Clip,
+                });
+            }
+
+            // The node cap is a legibility limit, not a scroll, so there is
+            // nothing to scroll *to* -- which makes saying how many hosts were
+            // left out the only thing standing between a 200-host scan and a
+            // diagram that looks like a complete one.
+            let hidden = result.hosts.len().saturating_sub(host_count);
+            if hidden > 0 {
+                tree.push(RenderCommand::Text {
+                    x: PADDING + 12.0,
+                    y: content_y + 30.0,
+                    text: format!("{hidden} more hosts not shown"),
+                    color: OVERLAY0,
+                    font_size: LEGEND_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -5682,5 +5846,403 @@ mod tests {
         assert!(texts.iter().any(|t| t == "10.0.0.7"), "{texts:?}");
         assert!(texts.iter().any(|t| t == "nas"), "{texts:?}");
         assert!(texts.iter().any(|t| t == "12.5ms"), "{texts:?}");
+    }
+    // --- Scrolling: results table, port list, topology ---
+
+    /// A host whose reverse-DNS name is recognisable by *shape* -- `H000` --
+    /// so a rendered row can be found by what it says rather than by where on
+    /// screen it landed. An x-coordinate filter is what makes a test helper
+    /// silently report that nothing was drawn.
+    fn shaped_host(i: usize, ports: usize) -> HostResult {
+        let last = u8::try_from(i % 250).unwrap_or(0);
+        let mut h = host([10, 0, 0, last], Some(&format!("H{i:03}")));
+        h.ports = (0..ports)
+            .map(|p| PortResult {
+                port: u16::try_from(1000_usize.saturating_add(p)).unwrap_or(u16::MAX),
+                state: PortState::Open,
+                service: Some("svc".to_string()),
+                banner: None,
+                response_ms: 1.0,
+            })
+            .collect();
+        h
+    }
+
+    /// An app holding one scan result of `n` hosts, each with `ports` ports.
+    fn app_with_hosts(n: usize, ports: usize) -> NetScanApp {
+        let mut app = NetScanApp::new();
+        app.active_tab = ViewTab::Results;
+        app.results = Some(ScanResult {
+            id: 1,
+            timestamp: "2026-05-18 12:00:00".to_string(),
+            target_description: "10.0.0.0/24".to_string(),
+            profile: ScanProfile::Quick,
+            hosts: (0..n).map(|i| shaped_host(i, ports)).collect(),
+            total_ips_scanned: u32::try_from(n).unwrap_or(u32::MAX),
+            total_ports_scanned: 10,
+            duration_secs: 1.0,
+        });
+        app.selected_host_idx = None;
+        app.results_scroll = 0;
+        app.detail_port_scroll = 0;
+        app
+    }
+
+    /// The hostnames the results table actually drew, in order.
+    fn drawn_hosts(app: &NetScanApp) -> Vec<String> {
+        let mut tree = RenderTree::new();
+        app.render_results_view(&mut tree);
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } if is_shaped(text, 'H') => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `H000` / `P000`: one letter and exactly three digits.
+    fn is_shaped(text: &str, prefix: char) -> bool {
+        text.len() == 4
+            && text.starts_with(prefix)
+            && text
+                .get(1..)
+                .is_some_and(|d| d.chars().all(|c| c.is_ascii_digit()))
+    }
+
+    /// The port numbers the sidebar's port mini-table actually drew, in order.
+    ///
+    /// Scoped to `render_host_detail`'s own commands: a filter over a whole
+    /// frame would also catch the summary bar's numbers and the config panel's.
+    fn drawn_ports(app: &NetScanApp) -> Vec<u16> {
+        let Some(host) = app.selected_host() else {
+            return Vec::new();
+        };
+        let mut tree = RenderTree::new();
+        app.render_host_detail(&mut tree, 0.0, 0.0, host);
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, x, .. } if *x == 0.0 => text.parse::<u16>().ok(),
+                _ => None,
+            })
+            .filter(|p| *p >= 1000)
+            .collect()
+    }
+
+    /// The "N more" line a truncated list draws, if it drew one.
+    fn more_note(cmds: &[RenderCommand]) -> Option<String> {
+        cmds.iter().find_map(|c| match c {
+            RenderCommand::Text { text, .. } if text.ends_with(" more") => Some(text.clone()),
+            _ => None,
+        })
+    }
+
+    /// The bug the row window exists to fix. The pixel-offset version drew
+    /// every row and leaned on the clip rectangle to hide the overflow, which
+    /// meant the bottom row was drawn sliced in half at the window edge.
+    #[test]
+    fn no_host_row_is_drawn_past_the_bottom_of_the_table() {
+        for n in [0_usize, 1, 20, 21, 22, 60, 300] {
+            for offset in [0_usize, 5, 400, 100_000] {
+                let mut app = app_with_hosts(n, 0);
+                app.results_scroll = offset;
+                let mut tree = RenderTree::new();
+                app.render_results_view(&mut tree);
+                for cmd in &tree.commands {
+                    if let RenderCommand::FillRect { y, height, .. } = cmd
+                        && (*height - TABLE_ROW_HEIGHT).abs() < 0.01
+                    {
+                        assert!(
+                            y + height <= WINDOW_HEIGHT + 0.01,
+                            "a row bottomed at {} runs past the window (n={n}, offset={offset})",
+                            y + height
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A table that fits everything shows everything and claims nothing is
+    /// hidden -- the case that must not regress when the window is added.
+    #[test]
+    fn a_results_table_that_fits_shows_every_host() {
+        let app = app_with_hosts(4, 0);
+        assert_eq!(drawn_hosts(&app), ["H000", "H001", "H002", "H003"]);
+        let mut tree = RenderTree::new();
+        app.render_results_view(&mut tree);
+        assert_eq!(more_note(&tree.commands), None);
+    }
+
+    /// Every host is reachable by scrolling. A table that stops at its own
+    /// bottom edge but has no offset is a table whose tail cannot be seen at
+    /// all -- the half of the bug that a clamp alone leaves in place.
+    #[test]
+    fn every_host_is_reachable_by_scrolling() {
+        let n = 80;
+        let mut seen: Vec<String> = Vec::new();
+        for offset in 0..n {
+            let mut app = app_with_hosts(n, 0);
+            app.results_scroll = offset;
+            for name in drawn_hosts(&app) {
+                if !seen.contains(&name) {
+                    seen.push(name);
+                }
+            }
+        }
+        assert_eq!(seen.len(), n, "only {} of {n} hosts were ever drawn", seen.len());
+    }
+
+    /// Scrolling by one row moves the window by exactly one row.
+    #[test]
+    fn scrolling_the_results_table_moves_it_by_exactly_one_host() {
+        let mut app = app_with_hosts(80, 0);
+        let first = drawn_hosts(&app);
+        assert!(first.len() >= 2, "test needs a table that holds rows");
+        app.scroll_results_by(1);
+        let second = drawn_hosts(&app);
+        assert_eq!(second.first().map(String::as_str), Some("H001"));
+        assert_eq!(second.len(), first.len(), "a full page stays full");
+    }
+
+    /// An offset outliving the list it was taken against shows the last page,
+    /// not a blank table scrolled off the top of its own panel -- which is
+    /// exactly what the unclamped pixel offset did.
+    #[test]
+    fn a_results_table_under_a_stale_offset_shows_its_last_page() {
+        let mut app = app_with_hosts(80, 0);
+        app.results_scroll = 5_000;
+        let page = drawn_hosts(&app);
+        assert!(!page.is_empty(), "a deep offset must still show a page");
+        assert_eq!(
+            page.last().map(String::as_str),
+            Some("H079"),
+            "the last page ends at the end of the list"
+        );
+    }
+
+    /// Scrolling up from the top stays at the top rather than wrapping to the
+    /// far end, which is what an unsigned subtraction would do.
+    #[test]
+    fn scrolling_the_results_table_up_from_the_top_stays_at_the_top() {
+        let mut app = app_with_hosts(80, 0);
+        app.scroll_results_by(-1);
+        assert_eq!(app.results_scroll, 0);
+        app.scroll_results_by(isize::MIN);
+        assert_eq!(app.results_scroll, 0);
+        app.scroll_results_by(9);
+        app.scroll_results_to_top();
+        assert_eq!(app.results_scroll, 0);
+    }
+
+    /// A table hiding hosts says how many, and the count is the truth.
+    #[test]
+    fn a_results_table_that_is_hiding_hosts_says_so() {
+        let app = app_with_hosts(80, 0);
+        let shown = drawn_hosts(&app).len();
+        assert!(shown < 80, "80 rows should not fit a 780px window");
+        let mut tree = RenderTree::new();
+        app.render_results_view(&mut tree);
+        assert_eq!(more_note(&tree.commands), Some(format!("{} more", 80 - shown)));
+    }
+
+    /// The hit-test and the renderer must agree about which host is under the
+    /// pointer. They did not: the hit-test placed the first row 26px above
+    /// where it was drawn and ignored the scroll offset outright, so on a
+    /// scrolled table a click opened some earlier host's detail panel.
+    #[test]
+    fn clicking_a_row_selects_the_host_that_was_drawn_there() {
+        for offset in [0_usize, 1, 7, 40] {
+            let mut app = app_with_hosts(80, 0);
+            app.results_scroll = offset;
+            let names = drawn_hosts(&app);
+            let window = app.results_visible_rows();
+            for row in 0..names.len().min(4) {
+                let mut a = app_with_hosts(80, 0);
+                a.results_scroll = offset;
+                a.handle_mouse(&MouseEvent {
+                    x: 10.0,
+                    y: RESULTS_ROWS_TOP + (row as f32) * TABLE_ROW_HEIGHT + 2.0,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                });
+                let picked = a.selected_host_idx.expect("a click on a row selects it");
+                assert_eq!(
+                    picked,
+                    window.start + row,
+                    "offset {offset}, screen row {row}"
+                );
+                let picked_name = a
+                    .selected_host()
+                    .and_then(|h| h.hostname.clone())
+                    .unwrap_or_default();
+                assert_eq!(
+                    Some(picked_name.as_str()),
+                    names.get(row).map(String::as_str),
+                    "the selected host is not the one drawn at that row"
+                );
+            }
+        }
+    }
+
+    /// The sharpest of netscan's scroll bugs: the port loop compared each row
+    /// against a `dy` it was itself advancing, and `continue` skipped the
+    /// advance -- so one scroll notch past a row's height made every port fail
+    /// the same test and the whole list vanished.
+    #[test]
+    fn the_port_list_does_not_vanish_when_it_is_scrolled() {
+        let mut app = app_with_hosts(3, 40);
+        app.selected_host_idx = Some(0);
+        let at_top = drawn_ports(&app);
+        assert!(!at_top.is_empty(), "the port list must draw at rest");
+        for offset in [1_usize, 2, 5, 20] {
+            app.detail_port_scroll = offset;
+            let ports = drawn_ports(&app);
+            assert!(
+                !ports.is_empty(),
+                "the port list disappeared at offset {offset}"
+            );
+        }
+    }
+
+    /// Every port is reachable, and the list is cut at the last whole row
+    /// rather than running off the bottom of the window.
+    #[test]
+    fn every_port_is_reachable_and_none_is_drawn_past_the_window() {
+        let mut app = app_with_hosts(3, 60);
+        app.selected_host_idx = Some(0);
+        let mut seen: Vec<u16> = Vec::new();
+        for offset in 0..60 {
+            app.detail_port_scroll = offset;
+            for p in drawn_ports(&app) {
+                if !seen.contains(&p) {
+                    seen.push(p);
+                }
+            }
+        }
+        assert_eq!(seen.len(), 60, "only {} of 60 ports were ever drawn", seen.len());
+
+        // Drawn at the real sidebar origin, the rows must stay inside the window.
+        app.detail_port_scroll = 0;
+        let host = app.selected_host().expect("selected").clone();
+        let mut tree = RenderTree::new();
+        let top_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
+        app.render_host_detail(
+            &mut tree,
+            WINDOW_WIDTH - SIDEBAR_WIDTH + PADDING,
+            top_y + PADDING,
+            &host,
+        );
+        for cmd in &tree.commands {
+            if let RenderCommand::Text { y, .. } = cmd {
+                assert!(
+                    y + PORT_ROW_HEIGHT <= WINDOW_HEIGHT + 0.01,
+                    "a port row at y={y} runs past the window bottom"
+                );
+            }
+        }
+    }
+
+    /// A port list hiding ports says how many.
+    #[test]
+    fn a_port_list_that_is_hiding_ports_says_so() {
+        let mut app = app_with_hosts(3, 60);
+        app.selected_host_idx = Some(0);
+        let shown = drawn_ports(&app).len();
+        assert!(shown < 60, "60 ports should not fit the sidebar");
+        let host = app.selected_host().expect("selected").clone();
+        let mut tree = RenderTree::new();
+        app.render_host_detail(&mut tree, 0.0, 0.0, &host);
+        assert_eq!(more_note(&tree.commands), Some(format!("{} more", 60 - shown)));
+    }
+
+    /// The topology view caps its nodes for legibility and cannot scroll, so
+    /// saying how many it left out is the only thing standing between a
+    /// 200-host scan and a diagram that looks complete.
+    #[test]
+    fn a_topology_that_is_hiding_hosts_says_so() {
+        let mut app = app_with_hosts(200, 0);
+        app.active_tab = ViewTab::Topology;
+        let mut tree = RenderTree::new();
+        app.render_topology_view(&mut tree);
+        let note = more_note(&tree.commands);
+        assert!(note.is_none(), "the topology note has its own wording");
+        assert!(
+            tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. }
+                    if text == &format!("{} more hosts not shown", 200 - MAX_TOPOLOGY_NODES)
+            )),
+            "a capped topology must say how many hosts it left out"
+        );
+
+        let small = app_with_hosts(6, 0);
+        let mut tree = RenderTree::new();
+        small.render_topology_view(&mut tree);
+        assert!(
+            !tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text.contains("not shown")
+            )),
+            "nothing is hidden, so nothing should claim to be"
+        );
+    }
+
+    /// The wheel moves the list by whole rows and stops at the top. Only the
+    /// sign of `dy` is used, because the event documents it as pixels while
+    /// every producer in this tree sets it to a notch count.
+    #[test]
+    fn the_wheel_scrolls_the_results_table_by_rows() {
+        let mut app = app_with_hosts(80, 0);
+        app.handle_mouse(&MouseEvent {
+            x: 10.0,
+            y: 400.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        assert_eq!(
+            app.results_scroll,
+            WHEEL_ROWS.unsigned_abs(),
+            "one notch down is WHEEL_ROWS rows"
+        );
+        app.handle_mouse(&MouseEvent {
+            x: 10.0,
+            y: 400.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        });
+        assert_eq!(app.results_scroll, 0);
+        // And up from the top stays at the top rather than wrapping.
+        app.handle_mouse(&MouseEvent {
+            x: 10.0,
+            y: 400.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        });
+        assert_eq!(app.results_scroll, 0);
+    }
+
+    /// The wheel over the sidebar moves the port list, not the table.
+    #[test]
+    fn the_wheel_over_the_sidebar_scrolls_the_port_list() {
+        let mut app = app_with_hosts(80, 60);
+        app.selected_host_idx = Some(0);
+        app.handle_mouse(&MouseEvent {
+            x: WINDOW_WIDTH - 20.0,
+            y: 400.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        assert_eq!(app.detail_port_scroll, WHEEL_ROWS.unsigned_abs());
+        assert_eq!(app.results_scroll, 0, "the table must not have moved");
+    }
+
+    /// A new scan resets both offsets: an offset kept from the previous scan
+    /// would show the new one already scrolled, for no reason the user could
+    /// see.
+    #[test]
+    fn a_new_scan_starts_both_lists_at_the_top() {
+        let mut app = app_with_hosts(80, 60);
+        app.results_scroll = 30;
+        app.detail_port_scroll = 12;
+        app.start_scan();
+        assert_eq!(app.results_scroll, 0);
+        assert_eq!(app.detail_port_scroll, 0);
     }
 }

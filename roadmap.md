@@ -532,6 +532,20 @@ Roadmap:
   `$LogFile`. Btrfs **read** and F2FS **read** have since landed the same way
   (§215, §216); ZFS and all three write sides remain open (line ~1041, §5.4).
 - `[A]` Port AMDGPU / Intel i915-xe drivers (lines ~4569–4571) — kernel-side DRM
+- ~~`[A]` KASAN page-granularity use-after-free detection~~ — **done 2026-08-19.**
+  `kasan::on_frame_free` poisons a frame as `KASAN_FREE` when the allocator
+  reclaims it from its last owner, so a stale pointer into memory owned a frame
+  at a time (page tables, address-space backing, kernel stacks) is now reported
+  instead of reading clean — previously only heap *slots* were poisoned. Gated
+  on a shared `block_is_sole_owned` predicate (CoW frames with refcount > 1 stay
+  untouched), hoisted out of the `is_zero_on_free()` gate so the detector is not
+  switched off by an unrelated hardening knob. Uses a new `IfUnmapped::SkipLossy`
+  that discards the poison rather than allocate shadow from inside the free path;
+  poison fails **open**, unpoison fails **closed**, and that asymmetry is the
+  whole argument. design-decisions.md §244. Unblocked by the first clean
+  whole-boot instrumented run (`BOOT_OK` after 1251 s, 27582 lines, three
+  `CRITICAL` lines all from deliberate self-tests, `map_lock_giveups=0`), which
+  was the trigger `known-issues.md` had set for it.
 
 Known-issues (open, kernel-owned):
 

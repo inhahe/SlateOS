@@ -39304,6 +39304,45 @@ metadata and freelist links through the HHDM alias of frames it has just
 freed). Land the unpoison side, get a clean whole-boot instrumented run, and
 consider poisoning-on-free as a separate change with its own boot evidence.
 
+> **ANNOTATION 2026-08-19 (lane A): done — the trigger above was met, and
+> poison-on-free has landed.**
+>
+> Both halves of the condition were satisfied on their own terms:
+>
+> - **The clean whole-boot instrumented run exists.** `./scripts/kasan-build.sh
+>   --boot` reached `BOOT_OK after 1251s` across 27582 serial lines, `build:
+>   kasan-instrumented on QEMU TCG`, with `violations=7, shadow_frames=2625,
+>   poisoned=1496682224B, unpoisoned=4294422947B, map_lock_giveups=0`. There
+>   were exactly **three** `CRITICAL` lines in the entire boot (serial lines
+>   25627, 25636, 27123) and all three trace to deliberate self-tests — the
+>   `[kasan-rt]` report-path test and the `[heap]` buffer-overflow/redzone
+>   test. **Zero spurious reports.** Compare the pre-fix run, which exhausted
+>   its 64-report budget by line 2092.
+> - **The false-positive risk the paragraph feared was already defused, not
+>   merely tolerated.** `kernel/src/mm/frame.rs` carries a module-scope
+>   `#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]` (line 61), so
+>   the buddy allocator's intrusive `FreeNode` freelist writes through the HHDM
+>   alias, and its zero-on-free memset, are not checked at all. The metadata
+>   the paragraph worried about cannot report against itself.
+>
+> What landed: `kasan::on_frame_free`, called from `free_frame`'s per-CPU fast
+> path and from `free_order_inner`, gated on a new shared `block_is_sole_owned`
+> predicate (CoW frames with refcount > 1 must not be poisoned — the same
+> predicate zero-on-free applies, now hoisted out of the `is_zero_on_free()`
+> gate so the two are independently switchable). It writes `KASAN_FREE` with a
+> new `IfUnmapped::SkipLossy`, which skips ranges whose shadow is unbacked
+> rather than allocating shadow from inside the free path. See
+> design-decisions.md §244 for why dropping a poison is acceptable where
+> dropping an unpoison was not: poison fails **open** (a missed report on a
+> frame that was never watched anyway), unpoison fails **closed** (stale `0xFA`
+> on live memory, reported forever).
+>
+> Covered by self-test 6 in `kasan::self_test`, which forces the frame's shadow
+> to be backed (otherwise `SkipLossy` would drop the poison and the assertion
+> would fail for a reason unrelated to the hook), then asserts the frame reads
+> `KASAN_FREE` at both ends after `free_frame` and reads addressable again if
+> the allocator hands the same frame back.
+
 #### Why this matters more than the report count suggests
 
 The 64-report budget is exhausted at line 2092 of a ~27700-line boot. Everything

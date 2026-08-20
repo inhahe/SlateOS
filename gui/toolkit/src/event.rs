@@ -72,7 +72,24 @@ pub enum MouseEventKind {
     Enter,
     /// Mouse left widget bounds.
     Leave,
-    /// Scroll wheel (dx, dy in pixels).
+    /// Scroll wheel, in **notches** — *not* pixels.
+    ///
+    /// `1.0` per detent of an ordinary wheel, positive away from the user, and
+    /// a fraction of one for a high-resolution wheel or a precision trackpad.
+    /// This is what the compositor's `wheel_delta()` produces (`raw / 120`),
+    /// and it is the only thing in the tree that produces one.
+    ///
+    /// **Do not multiply this by a pixel constant.** It said "pixels" here
+    /// once, and twelve consumers each picked a different constant to convert
+    /// the imaginary pixels into something useful — 1, 20 and 40 px per notch
+    /// all appeared, and the one handler that divided by a line height scrolled
+    /// nothing at all, ever, because a notch over a line height truncates to
+    /// zero. Use [`wheel::Accumulator`] to turn these into rows (it keeps the
+    /// fractions a trackpad sends, which rounding each event would discard), or
+    /// [`wheel::pixels`] for a genuinely continuous view.
+    ///
+    /// [`wheel::Accumulator`]: crate::wheel::Accumulator
+    /// [`wheel::pixels`]: crate::wheel::pixels
     Scroll { dx: f32, dy: f32 },
     /// Double-click.
     DoubleClick(MouseButton),

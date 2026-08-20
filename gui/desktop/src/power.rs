@@ -871,8 +871,8 @@ const COLUMN_WIDTH_PX: u32 = 14;
 const GLYPH_HEIGHT_PX: f32 = 16.0;
 
 /// The shortest and longest a column of rain may be, in glyphs.
-const MIN_COLUMN_GLYPHS: u64 = 5;
-const MAX_COLUMN_GLYPHS: u64 = 24;
+const MIN_COLUMN_GLYPHS: i64 = 5;
+const MAX_COLUMN_GLYPHS: i64 = 24;
 
 /// The printable ASCII range the rain is drawn from: `!` through `~`.
 const FIRST_GLYPH: u8 = b'!';
@@ -946,10 +946,10 @@ impl ScreenSaver {
     fn init_starfield(&mut self) {
         self.stars.clear();
         for _ in 0..200 {
-            let x = self.rng.f32_in_range(-1.0, 1.0);
-            let y = self.rng.f32_in_range(-1.0, 1.0);
-            let z = self.rng.f32_in_range(0.01, 1.0);
-            let speed = self.rng.f32_in_range(0.002, 0.012);
+            let x = self.rng.between_f32(-1.0, 1.0);
+            let y = self.rng.between_f32(-1.0, 1.0);
+            let z = self.rng.between_f32(0.01, 1.0);
+            let speed = self.rng.between_f32(0.002, 0.012);
             self.stars.push(Star { x, y, z, speed });
         }
     }
@@ -958,14 +958,14 @@ impl ScreenSaver {
         self.columns.clear();
         let col_count = self.width / COLUMN_WIDTH_PX;
         for i in 0..col_count {
-            let len = self.rng.in_range(MIN_COLUMN_GLYPHS, MAX_COLUMN_GLYPHS);
+            let len = self.rng.between(MIN_COLUMN_GLYPHS, MAX_COLUMN_GLYPHS);
             let glyphs = usize::try_from(len).unwrap_or(0);
             let mut chars = Vec::with_capacity(glyphs);
             for _ in 0..glyphs {
                 chars.push(self.random_glyph());
             }
-            let col_y = -self.rng.f32_in_range(0.0, self.height as f32);
-            let col_speed = self.rng.f32_in_range(1.0, 4.0);
+            let col_y = -self.rng.between_f32(0.0, self.height as f32);
+            let col_speed = self.rng.between_f32(1.0, 4.0);
             self.columns.push(MatrixColumn {
                 // `col_count` is `width / COLUMN_WIDTH_PX`, so this cannot
                 // reach the screen edge, let alone overflow — but saying so in
@@ -983,7 +983,7 @@ impl ScreenSaver {
     fn random_glyph(&mut self) -> u8 {
         let code = self
             .rng
-            .in_range(u64::from(FIRST_GLYPH), u64::from(LAST_GLYPH));
+            .between(i64::from(FIRST_GLYPH), i64::from(LAST_GLYPH));
         u8::try_from(code).unwrap_or(FIRST_GLYPH)
     }
 
@@ -1081,8 +1081,8 @@ impl ScreenSaver {
             star.z -= star.speed;
             if star.z <= 0.01 {
                 // Recycle the star to a fresh position at the far plane.
-                star.x = rng.f32_in_range(-1.0, 1.0);
-                star.y = rng.f32_in_range(-1.0, 1.0);
+                star.x = rng.between_f32(-1.0, 1.0);
+                star.y = rng.between_f32(-1.0, 1.0);
                 star.z = 1.0;
             }
 
@@ -1132,7 +1132,7 @@ impl ScreenSaver {
                 // time, so the "randomised" rain repeated a fixed cycle of
                 // ninety-four frames and every column showed the same one.
                 for c in &mut col.chars {
-                    let code = rng.in_range(u64::from(FIRST_GLYPH), u64::from(LAST_GLYPH));
+                    let code = rng.between(i64::from(FIRST_GLYPH), i64::from(LAST_GLYPH));
                     *c = u8::try_from(code).unwrap_or(FIRST_GLYPH);
                 }
             }
@@ -1578,6 +1578,11 @@ mod tests {
         clippy::indexing_slicing,
         clippy::arithmetic_side_effects
     )]
+    // Two screen savers built from the same seed run the same arithmetic in the
+    // same order, so their star fields agree bit for bit. Exactness is the
+    // assertion here, not an accident of it — an approximate comparison would
+    // pass even if the generator had gone non-deterministic.
+    #![allow(clippy::float_cmp)]
 
     use super::*;
 
@@ -2018,7 +2023,7 @@ mod tests {
                     col.x
                 );
                 assert!(
-                    (MIN_COLUMN_GLYPHS..=MAX_COLUMN_GLYPHS).contains(&u64::from(col.length)),
+                    (MIN_COLUMN_GLYPHS..=MAX_COLUMN_GLYPHS).contains(&i64::from(col.length)),
                     "column of {} glyphs",
                     col.length
                 );

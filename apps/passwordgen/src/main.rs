@@ -22,7 +22,7 @@
 
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{RandomSource, SeededRng, SystemRandom};
+use guitk::rng::{RandomSource, SecretSource, SeededRng, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -417,14 +417,17 @@ impl AppRandom {
         Self::Seeded(SeededRng::new(seed))
     }
 
-    /// Whether output from this source may be presented as a secret.
-    ///
+}
+
+/// Both sides of the draw are checked by [`SecretSource::secret`], which is
+/// where the rule now lives — this crate, `apps/credmanager` and
+/// `gui/credentials` each used to carry their own copy of it.
+impl SecretSource for AppRandom {
     /// False for [`Self::Unavailable`], and false for a [`Self::System`]
     /// source whose refill has failed at any point — including part-way
-    /// through the secret currently being built, which is why callers check
+    /// through the secret currently being built, which is why `secret` checks
     /// this *after* generating as well as before.
-    #[must_use]
-    pub const fn is_trustworthy(&self) -> bool {
+    fn is_trustworthy(&self) -> bool {
         match self {
             Self::System(source) => source.is_healthy(),
             // A seeded generator always produces what it promises; it is just
@@ -433,19 +436,6 @@ impl AppRandom {
             Self::Seeded(_) => true,
             Self::Unavailable => false,
         }
-    }
-
-    /// Produce a secret with `make`, or `None` if this source is not fit to.
-    ///
-    /// The check happens on both sides of the draw so that a source which
-    /// fails half-way through a password discards the whole thing rather than
-    /// handing back a partly-predictable one.
-    pub fn secret<T>(&mut self, make: impl FnOnce(&mut Self) -> T) -> Option<T> {
-        if !self.is_trustworthy() {
-            return None;
-        }
-        let value = make(self);
-        self.is_trustworthy().then_some(value)
     }
 }
 
@@ -463,7 +453,7 @@ impl RandomSource for AppRandom {
 
 /// One of `chars`, or `'?'` if there are none.
 fn pick_char<R: RandomSource>(rng: &mut R, chars: &[char]) -> char {
-    rng.pick(chars).copied().unwrap_or('?')
+    rng.choose(chars).copied().unwrap_or('?')
 }
 
 // ============================================================================
@@ -526,7 +516,7 @@ pub fn generate_password<R: RandomSource>(opts: &PasswordOptions, rng: &mut R) -
     // Shuffle the password (Fisher-Yates)
     let len = password.len();
     for i in (1..len).rev() {
-        let j = rng.below_usize(i.saturating_add(1));
+        let j = rng.below(i.saturating_add(1));
         password.swap(i, j);
     }
 
@@ -538,7 +528,7 @@ pub fn generate_passphrase<R: RandomSource>(opts: &PassphraseOptions, rng: &mut 
     let mut words: Vec<String> = Vec::with_capacity(opts.word_count);
 
     for _ in 0..opts.word_count {
-        let word = rng.pick(WORD_LIST).copied().unwrap_or("unknown").to_owned();
+        let word = rng.choose(WORD_LIST).copied().unwrap_or("unknown").to_owned();
         if opts.capitalize {
             let mut chars = word.chars();
             let capitalized = match chars.next() {
@@ -558,7 +548,7 @@ pub fn generate_passphrase<R: RandomSource>(opts: &PassphraseOptions, rng: &mut 
     let mut result = words.join(&opts.separator);
 
     if opts.add_number {
-        let digit = rng.below_usize(10);
+        let digit = rng.below(10);
         result.push_str(&digit.to_string());
     }
     if opts.add_symbol {

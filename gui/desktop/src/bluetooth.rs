@@ -10,6 +10,7 @@
 //! - Auto-connect for known devices
 //! - System tray indicator
 
+use crate::scroll_window;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -541,6 +542,27 @@ impl Default for BluetoothManager {
 // Settings UI
 // ============================================================================
 
+/// One line of the flattened device list: either a section heading or a device.
+///
+/// Flattening the three sections into a single sequence is what lets one
+/// `scroll_offset` and one height budget govern all of them; kept private
+/// because it is a rendering detail, not part of the panel's interface.
+enum DeviceListRow<'a> {
+    Heading(String),
+    Device(&'a BluetoothDevice),
+}
+
+impl DeviceListRow<'_> {
+    /// Vertical space this row occupies, including the gap beneath it.
+    fn height(&self) -> f32 {
+        match self {
+            // 8px of lead-in above the label plus the label's own 22px.
+            Self::Heading(_) => 30.0,
+            Self::Device(_) => 48.0,
+        }
+    }
+}
+
 /// Bluetooth settings panel.
 pub struct BluetoothSettingsUI {
     pub selected_device_idx: Option<usize>,
@@ -549,6 +571,9 @@ pub struct BluetoothSettingsUI {
 }
 
 impl BluetoothSettingsUI {
+    /// Height reserved below the device list for the "n more" line.
+    const LIST_FOOTER_H: f32 = 16.0;
+
     pub fn new() -> Self {
         Self {
             selected_device_idx: None,
@@ -686,28 +711,11 @@ impl BluetoothSettingsUI {
         });
         cy += 40.0;
 
-        // Connected devices section.
+        // The three sections become one flat list before anything is drawn, so
+        // that the panel height bounds the whole thing rather than each section
+        // separately. Headings are entries in their own right: a list scrolled
+        // to start mid-section would otherwise show devices under no label.
         let connected = mgr.connected_devices();
-        if !connected.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: cy,
-                text: format!("Connected ({})", connected.len()),
-                font_size: 13.0,
-                color: MOCHA_TEXT,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cy += 22.0;
-
-            for dev in &connected {
-                self.render_device_row(&mut cmds, dev, x + 16.0, cy, w - 32.0);
-                cy += 48.0;
-            }
-        }
-
-        // Paired devices.
         let paired_not_connected: Vec<&BluetoothDevice> = mgr
             .devices
             .iter()
@@ -718,48 +726,71 @@ impl BluetoothSettingsUI {
                 )
             })
             .collect();
-        if !paired_not_connected.is_empty() {
-            cy += 8.0;
+        let nearby = if self.show_nearby {
+            mgr.nearby_devices()
+        } else {
+            Vec::new()
+        };
+
+        let mut rows: Vec<DeviceListRow<'_>> = Vec::new();
+        for (label, devices) in [
+            ("Connected", &connected),
+            ("Paired", &paired_not_connected),
+            ("Nearby", &nearby),
+        ] {
+            if devices.is_empty() {
+                continue;
+            }
+            rows.push(DeviceListRow::Heading(format!(
+                "{label} ({})",
+                devices.len()
+            )));
+            rows.extend(devices.iter().map(|d| DeviceListRow::Device(d)));
+        }
+
+        let heights: Vec<f32> = rows.iter().map(DeviceListRow::height).collect();
+        // Leave room for the "n more" line that goes underneath.
+        let window = scroll_window::visible_variable(
+            &heights,
+            y + h - cy - Self::LIST_FOOTER_H,
+            self.scroll_offset,
+        );
+
+        for row in rows.get(window.start..window.end()).unwrap_or_default() {
+            match row {
+                DeviceListRow::Heading(text) => {
+                    cmds.push(RenderCommand::Text {
+                        x: x + 16.0,
+                        y: cy + 8.0,
+                        text: text.clone(),
+                        font_size: 13.0,
+                        color: MOCHA_TEXT,
+                        font_weight: FontWeightHint::Bold,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
+                }
+                DeviceListRow::Device(dev) => {
+                    self.render_device_row(&mut cmds, dev, x + 16.0, cy, w - 32.0);
+                }
+            }
+            cy += row.height();
+        }
+
+        // Only say something when there is something the user cannot see; an
+        // unscrolled list that fits needs no commentary.
+        if window.count < rows.len() {
+            let hidden = rows.len().saturating_sub(window.count);
             cmds.push(RenderCommand::Text {
                 x: x + 16.0,
-                y: cy,
-                text: format!("Paired ({})", paired_not_connected.len()),
-                font_size: 13.0,
-                color: MOCHA_TEXT,
-                font_weight: FontWeightHint::Bold,
+                y: cy + 2.0,
+                text: format!("{hidden} more - scroll to see the rest"),
+                font_size: 10.0,
+                color: MOCHA_OVERLAY0,
+                font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            cy += 22.0;
-
-            for dev in &paired_not_connected {
-                self.render_device_row(&mut cmds, dev, x + 16.0, cy, w - 32.0);
-                cy += 48.0;
-            }
-        }
-
-        // Nearby devices.
-        if self.show_nearby {
-            let nearby = mgr.nearby_devices();
-            if !nearby.is_empty() {
-                cy += 8.0;
-                cmds.push(RenderCommand::Text {
-                    x: x + 16.0,
-                    y: cy,
-                    text: format!("Nearby ({})", nearby.len()),
-                    font_size: 13.0,
-                    color: MOCHA_TEXT,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                cy += 22.0;
-
-                for dev in &nearby {
-                    self.render_device_row(&mut cmds, dev, x + 16.0, cy, w - 32.0);
-                    cy += 48.0;
-                }
-            }
         }
 
         cmds
@@ -903,6 +934,164 @@ mod tests {
             auto_connect: false,
             trusted: false,
             last_seen: 1000,
+        }
+    }
+
+    // --- Device list bounding -----------------------------------------------
+    //
+    // Same defect as `touchpad.rs` had, in the same shape: `render` took the
+    // panel height, spent it on the background rectangle, and then looped over
+    // three device lists without ever consulting it, while `scroll_offset` sat
+    // public and unread. A machine that has seen a lot of nearby devices drew
+    // them over whatever was beneath the panel, unscrollably. See
+    // `scroll_window.rs` for the shared primitive both now use.
+
+    /// A powered manager holding `n` paired devices, each with a unique name.
+    fn mgr_with_paired(n: usize) -> BluetoothManager {
+        let mut mgr = BluetoothManager::new();
+        mgr.adapter.powered = true;
+        mgr.devices = (0..n)
+            .map(|i| {
+                let mut d = sample_device(&format!("00:00:00:00:00:{i:02X}"), &format!("dev{i}"));
+                d.state = ConnectionState::PairedNotConnected;
+                d
+            })
+            .collect();
+        mgr
+    }
+
+    /// The device names actually drawn, in order.
+    fn drawn_device_names(cmds: &[RenderCommand]) -> Vec<String> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } if text.starts_with("dev") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn lowest_pixel(cmds: &[RenderCommand]) -> Option<f32> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { y, height, .. } => Some(y + height),
+                RenderCommand::Text { y, font_size, .. } => Some(y + font_size),
+                RenderCommand::Line { y1, y2, .. } => Some(y1.max(*y2)),
+                _ => None,
+            })
+            .fold(None, |acc: Option<f32>, v| Some(acc.map_or(v, |a| a.max(v))))
+    }
+
+    #[test]
+    fn a_device_list_longer_than_the_panel_is_not_drawn_past_its_bottom_edge() {
+        let ui = BluetoothSettingsUI::new();
+        for count in [0_usize, 1, 4, 30, 300] {
+            let mgr = mgr_with_paired(count);
+            for h in [300.0_f32, 420.0, 517.0, 800.0] {
+                let cmds = ui.render(&mgr, 10.0, 20.0, 600.0, h);
+                let bottom = 20.0 + h;
+                let low = lowest_pixel(&cmds).unwrap_or(bottom);
+                assert!(
+                    low <= bottom,
+                    "{count} devices in a {h}px panel drew down to {low}, \
+                     past the bottom edge at {bottom}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scrolling_the_device_list_moves_it_by_one_entry() {
+        // Entry, not device: the section heading is an entry too, so the first
+        // scroll step retires the heading and the next retires a device. That is
+        // the intended behaviour — scrolling past a heading should be possible —
+        // and asserting it here is what stops a later "skip headings" change
+        // from silently making the last device unreachable again.
+        let mgr = mgr_with_paired(40);
+        let mut ui = BluetoothSettingsUI::new();
+
+        ui.scroll_offset = 0;
+        let unscrolled = drawn_device_names(&ui.render(&mgr, 10.0, 20.0, 600.0, 500.0));
+        assert!(!unscrolled.is_empty(), "a 500px panel should show devices");
+        assert_eq!(unscrolled[0], "dev0", "an unscrolled list starts at the top");
+
+        ui.scroll_offset = 1;
+        let past_heading = drawn_device_names(&ui.render(&mgr, 10.0, 20.0, 600.0, 500.0));
+        assert_eq!(
+            past_heading[0], "dev0",
+            "the first step scrolls the heading away, not a device"
+        );
+
+        for step in 2..=6_usize {
+            ui.scroll_offset = step;
+            let rows = drawn_device_names(&ui.render(&mgr, 10.0, 20.0, 600.0, 500.0));
+            assert_eq!(
+                rows[0],
+                format!("dev{}", step - 1),
+                "offset {step} should start at device {}",
+                step - 1
+            );
+        }
+    }
+
+    #[test]
+    fn a_device_scroll_offset_past_the_end_shows_the_last_page() {
+        let mgr = mgr_with_paired(12);
+        let mut ui = BluetoothSettingsUI::new();
+
+        ui.scroll_offset = 0;
+        let page = drawn_device_names(&ui.render(&mgr, 10.0, 20.0, 600.0, 500.0));
+        assert!(
+            page.len() < 12,
+            "the panel must truncate the list for this test to mean anything"
+        );
+
+        for offset in [13_usize, 50, usize::MAX] {
+            ui.scroll_offset = offset;
+            let rows = drawn_device_names(&ui.render(&mgr, 10.0, 20.0, 600.0, 500.0));
+            assert_eq!(
+                rows.last().map(String::as_str),
+                Some("dev11"),
+                "offset {offset} should be pinned to the end of the list"
+            );
+        }
+    }
+
+    #[test]
+    fn a_truncated_device_list_says_how_many_are_hidden() {
+        let ui = BluetoothSettingsUI::new();
+        let cmds = ui.render(&mgr_with_paired(60), 10.0, 20.0, 600.0, 500.0);
+        let shown = drawn_device_names(&cmds).len();
+        // 60 devices plus one heading, minus what fits.
+        let hidden = 61 - shown - 1;
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == &format!("{hidden} more - scroll to see the rest")
+            )),
+            "a truncated list should say how much is hidden (expected {hidden})"
+        );
+
+        let short = ui.render(&mgr_with_paired(2), 10.0, 20.0, 600.0, 500.0);
+        assert!(
+            !short.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text.ends_with("scroll to see the rest")
+            )),
+            "a list that fits should not claim anything is hidden"
+        );
+    }
+
+    #[test]
+    fn a_device_panel_with_no_room_draws_no_devices_and_does_not_panic() {
+        let ui = BluetoothSettingsUI::new();
+        for h in [0.0_f32, 1.0, 100.0, -30.0, f32::NAN] {
+            let cmds = ui.render(&mgr_with_paired(40), 10.0, 20.0, 600.0, h);
+            assert!(
+                drawn_device_names(&cmds).is_empty(),
+                "a {h}px panel has no room for device rows, but drew some"
+            );
         }
     }
 

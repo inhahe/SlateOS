@@ -22,6 +22,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -67,30 +68,19 @@ const DEFAULT_GRID_SIZE: usize = 4;
 const MIN_GRID_SIZE: usize = 3;
 const MAX_GRID_SIZE: usize = 5;
 
-// ── LCG random number generator ────────────────────────────────────
-/// Simple linear congruential generator for AI move randomization.
-struct Lcg {
-    state: u64,
-}
+// ── Randomness ─────────────────────────────────────────────────────
+//
+// This file used to carry its own copy of the LCG that `guitk::rng` exists to
+// replace, reduced with `val % bound` and seeded with a literal `42`. The AI
+// picks a safe line at random when several are equally good, so every match
+// against the computer played out the same way from the same position.
 
-impl Lcg {
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
-}
+/// The seed a session falls back to when the kernel has no entropy to give.
+///
+/// The AI's tie-breaking may be predictable -- the worst outcome is that the
+/// computer plays the same game twice. Refusing to start would be the worse
+/// failure; see [`guitk::rng::seeded_from_system`]. "DOTSBOX!" in ASCII.
+const FALLBACK_SEED: u64 = 0x444F_5453_424F_5821;
 
 // ── Line orientation ────────────────────────────────────────────────
 /// A line can be horizontal (connecting dots in the same row) or vertical
@@ -490,7 +480,7 @@ impl Board {
 /// 2. Avoid lines that would give the opponent a box (lines that leave a box with 3 sides).
 /// 3. Otherwise, pick a random safe line.
 /// 4. If forced, pick a line that gives away the fewest boxes.
-fn ai_choose_line(board: &Board, rng: &mut Lcg) -> Option<LineId> {
+fn ai_choose_line(board: &Board, rng: &mut SeededRng) -> Option<LineId> {
     let available = board.available_lines();
     if available.is_empty() {
         return None;
@@ -544,7 +534,7 @@ fn ai_choose_line(board: &Board, rng: &mut Lcg) -> Option<LineId> {
         }
     }
     if !safe.is_empty() {
-        let idx = rng.next_bounded(safe.len());
+        let idx = rng.below(safe.len());
         return Some(safe[idx]);
     }
 
@@ -577,7 +567,7 @@ struct DotsAndBoxes {
     score_p1: usize,
     score_p2: usize,
     total_moves: usize,
-    rng: Lcg,
+    rng: SeededRng,
     /// Accumulated time for AI delay.
     ai_delay_ms: u64,
     /// Whether the AI is "thinking" (short delay before move).
@@ -589,7 +579,11 @@ const AI_DELAY: u64 = 400;
 
 impl DotsAndBoxes {
     fn new() -> Self {
-        Self::with_config(DEFAULT_GRID_SIZE, GameMode::VsAi, 42)
+        Self::with_config(
+            DEFAULT_GRID_SIZE,
+            GameMode::VsAi,
+            seed_from_system(FALLBACK_SEED),
+        )
     }
 
     fn with_config(grid_size: usize, mode: GameMode, seed: u64) -> Self {
@@ -607,7 +601,7 @@ impl DotsAndBoxes {
             score_p1: 0,
             score_p2: 0,
             total_moves: 0,
-            rng: Lcg::new(seed),
+            rng: SeededRng::new(seed),
             ai_delay_ms: 0,
             ai_pending: false,
         }
@@ -1443,6 +1437,18 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ── Helper functions ───────────────────────────────────────────
@@ -2267,7 +2273,7 @@ mod tests {
         board.draw_line(LineId::horizontal(0, 0), Player::One);
         board.draw_line(LineId::horizontal(1, 0), Player::One);
         board.draw_line(LineId::vertical(0, 0), Player::One);
-        let mut rng = Lcg::new(42);
+        let mut rng = SeededRng::new(42);
         let line = ai_choose_line(&board, &mut rng);
         // AI should pick the completing line.
         assert_eq!(line, Some(LineId::vertical(0, 1)));
@@ -2279,7 +2285,7 @@ mod tests {
         // Set up box (0,0) with 2 sides. AI should avoid the third side.
         board.draw_line(LineId::horizontal(0, 0), Player::One);
         board.draw_line(LineId::horizontal(1, 0), Player::One);
-        let mut rng = Lcg::new(42);
+        let mut rng = SeededRng::new(42);
         let line = ai_choose_line(&board, &mut rng);
         // AI should not pick v(0,0) or v(0,1) because both would leave box (0,0) with 3 sides.
         if let Some(chosen) = line {
@@ -2296,7 +2302,7 @@ mod tests {
     #[test]
     fn test_ai_returns_none_empty_board_is_some() {
         let board = Board::new(4);
-        let mut rng = Lcg::new(42);
+        let mut rng = SeededRng::new(42);
         assert!(ai_choose_line(&board, &mut rng).is_some());
     }
 
@@ -2314,7 +2320,7 @@ mod tests {
                 board.draw_line(LineId::vertical(row, col), Player::One);
             }
         }
-        let mut rng = Lcg::new(42);
+        let mut rng = SeededRng::new(42);
         assert!(ai_choose_line(&board, &mut rng).is_none());
     }
 
@@ -2329,7 +2335,7 @@ mod tests {
         board.draw_line(LineId::horizontal(1, 1), Player::One);
         board.draw_line(LineId::vertical(0, 2), Player::One);
         // Both boxes (0,0) and (0,1) need v(0,1).
-        let mut rng = Lcg::new(42);
+        let mut rng = SeededRng::new(42);
         let line = ai_choose_line(&board, &mut rng);
         assert_eq!(line, Some(LineId::vertical(0, 1)));
     }
@@ -2594,31 +2600,59 @@ mod tests {
         assert_eq!(v.col, 4);
     }
 
-    // ── LCG ────────────────────────────────────────────────────────
+    // ── Randomness, as the game uses it ────────────────────────────
+    //
+    // The three tests that were here checked that the private generator was
+    // deterministic, differed by seed, and stayed inside its bound. That is
+    // `randrange`'s contract now, tested there against the real hazards. These
+    // test what *this game* needs.
 
+    /// `new()` must take its seed from the system rather than a literal.
+    ///
+    /// Checked by *which* seed, not by variety: the host test toolchain has no
+    /// SlateOS kernel, so `seed_from_system` correctly returns the fallback and
+    /// two fresh games agree there -- exactly as they did under the old
+    /// hardcoded `42`. On real hardware the same line reaches the kernel.
     #[test]
-    fn test_lcg_deterministic() {
-        let mut rng1 = Lcg::new(42);
-        let mut rng2 = Lcg::new(42);
-        for _ in 0..10 {
-            assert_eq!(rng1.next_u64(), rng2.next_u64());
-        }
+    #[cfg(not(unix))]
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        let mut fresh = DotsAndBoxes::new();
+        assert_eq!(fresh.rng.next_u64(), SeededRng::new(FALLBACK_SEED).next_u64());
+        assert_ne!(
+            DotsAndBoxes::new().rng.next_u64(),
+            SeededRng::new(42).next_u64(),
+            "back on a hardcoded seed"
+        );
     }
 
+    /// The AI's tie-breaking must actually vary with the generator, which is
+    /// the property the fixed seed made unobservable.
     #[test]
-    fn test_lcg_different_seeds() {
-        let mut rng1 = Lcg::new(42);
-        let mut rng2 = Lcg::new(123);
-        assert_ne!(rng1.next_u64(), rng2.next_u64());
+    fn the_ai_breaks_ties_differently_under_different_seeds() {
+        let board = Board::new(DEFAULT_GRID_SIZE);
+        let mut seen: Vec<LineId> = Vec::new();
+        for seed in 0..30 {
+            let mut rng = SeededRng::new(seed);
+            if let Some(line) = ai_choose_line(&board, &mut rng)
+                && !seen.contains(&line)
+            {
+                seen.push(line);
+            }
+        }
+        assert!(
+            seen.len() > 1,
+            "the AI opened with one line under all 30 seeds"
+        );
     }
 
+    /// A new game must not replay the one before it. `new_game` reseeds from
+    /// the live generator, so consecutive games differ by construction.
     #[test]
-    fn test_lcg_bounded() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..100 {
-            let val = rng.next_bounded(10);
-            assert!(val < 10);
-        }
+    fn a_new_game_does_not_replay_the_last_one() {
+        let mut game = DotsAndBoxes::with_config(DEFAULT_GRID_SIZE, GameMode::VsAi, 7);
+        let first = game.rng.next_u64();
+        game.new_game();
+        assert_ne!(first, game.rng.next_u64());
     }
 
     // ── Full game simulation ───────────────────────────────────────

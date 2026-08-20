@@ -16,13 +16,14 @@
 //! the sequence from memory. Each successful round adds one more step.
 //! Three speed modes (Slow, Medium, Fast) control playback tempo.
 //! Arrow keys or number keys 1-4 select colors. High score tracking
-//! persists across restarts. Uses an LCG pseudo-random number generator
-//! (no external rand crate). Visual pulse indicators substitute for sound.
+//! persists across restarts. The colour sequence is drawn from `randrange`,
+//! seeded from the kernel. Visual pulse indicators substitute for sound.
 
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seed_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -90,50 +91,29 @@ const ERROR_FLASH_MS: u64 = 800;
 /// Duration of the success flash between rounds.
 const SUCCESS_FLASH_MS: u64 = 600;
 
-// ── LCG random number generator ────────────────────────────────────
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Lcg {
-    state: u64,
-}
+// ── Randomness ──────────────────────────────────────────────────────
+// This crate used to carry its own LCG, and its `next_bounded` used to be
+// `val % bound`. That was the worst instance of the shared reduction bug in
+// the tree: this generator's modulus is 2^64, and in any power-of-two-modulus
+// LCG bit *k* of the state has period 2^(k+1) — the low bits are not merely
+// weak, they are a counter. `val % 4` read the low *two* bits, whose period is
+// exactly 4, and this game draws from four colours, so the sequence it
+// produced was Green, Red, Yellow, Blue repeating for ever, identical in every
+// game and at every seed. The memory game had nothing to memorise.
+//
+// It was fixed here first, in place, with a widening multiply. It is now fixed
+// for everyone: `randrange`'s `below` is that same widening multiply plus
+// Lemire's rejection step, so the draw is *exactly* uniform rather than very
+// nearly so. Deleting the local copy is the point — the bug got into sixteen
+// crates by being copied, and it can only leave them the same way.
 
-impl Lcg {
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Returns a value in `0..bound` (exclusive upper bound), or `0` when
-    /// `bound` is zero.
-    ///
-    /// Uses the **high** bits, via a widening multiply, and deliberately not
-    /// `val % bound`.
-    ///
-    /// This generator's modulus is 2^64, and in any power-of-two-modulus LCG bit
-    /// *k* of the state has period 2^(k+1) — the low bits are not merely weak,
-    /// they are a counter. `val % 4` therefore read the low *two* bits, whose
-    /// period is exactly 4, and this game draws from four colours: the sequence
-    /// it produced was Green, Red, Yellow, Blue repeating for ever, identical in
-    /// every game and at every seed, which is to say the memory game had nothing
-    /// to memorise. Any bound that is a power of two hits this; an odd bound
-    /// escapes it only because the remainder then depends on all 64 bits.
-    ///
-    /// Multiplying by the bound and keeping the top half of the 128-bit product
-    /// takes the high bits instead, and is very nearly unbiased into the bargain
-    /// (Lemire, *Fast Random Integer Generation in an Interval*, 2019). The
-    /// `wrapping_mul` cannot actually wrap — two 64-bit values multiply into 128
-    /// bits exactly — it is there to say so rather than to rely on it.
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        let product = u128::from(self.next_u64()).wrapping_mul(bound as u128);
-        (product >> 64) as usize
-    }
-}
+/// Seed used when the kernel's entropy source cannot be reached.
+///
+/// A per-crate constant rather than a shared one, so that two programs which
+/// lose entropy on the same boot do not then produce correlated streams. The
+/// bytes spell `SIMON!!!` — a value with no meaning is a value nobody can
+/// mistake for a meaningful one.
+const FALLBACK_SEED: u64 = 0x5349_4D4F_4E21_2121;
 
 // ── Simon color ─────────────────────────────────────────────────────
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,7 +299,7 @@ struct SimonApp {
     /// Pre-sequence delay timer.
     pre_delay_timer: u64,
     /// Pseudo-random number generator.
-    rng: Lcg,
+    rng: SeededRng,
     /// Pulse animation counter for sound indicators.
     pulse_counter: u32,
     /// Currently selected button (for keyboard highlight).
@@ -330,7 +310,12 @@ struct SimonApp {
 
 impl SimonApp {
     fn new() -> Self {
-        Self::with_seed(0xDEAD_BEEF_CAFE)
+        // Was `with_seed(0xDEAD_BEEF_CAFE)`: every player, on every machine,
+        // got the same sequence of colours in the same order. Predicting a
+        // Simon sequence costs the user nothing but the game, so this asks the
+        // kernel and falls back rather than refusing — see
+        // `randrange::seeded_from_system`.
+        Self::with_seed(seed_from_system(FALLBACK_SEED))
     }
 
     fn with_seed(seed: u64) -> Self {
@@ -349,7 +334,7 @@ impl SimonApp {
             state_timer: 0,
             playback: PlaybackState::new(),
             pre_delay_timer: 0,
-            rng: Lcg::new(seed),
+            rng: SeededRng::new(seed),
             pulse_counter: 0,
             selected_button: 0,
             show_selection: false,
@@ -375,10 +360,10 @@ impl SimonApp {
     fn start_next_round(&mut self) {
         self.round = self.round.saturating_add(1);
         // The bound and the lookup come from the same array. Written as
-        // `next_bounded(4)` plus `from_index`, the count of colours was stated
-        // twice, and a fifth colour would have left the generator drawing from
-        // four while every other part of the game knew about five.
-        let idx = self.rng.next_bounded(SimonColor::ALL.len());
+        // `below(4)` plus `from_index`, the count of colours was stated twice,
+        // and a fifth colour would have left the generator drawing from four
+        // while every other part of the game knew about five.
+        let idx = self.rng.below(SimonColor::ALL.len());
         if let Some(&color) = SimonColor::ALL.get(idx) {
             self.sequence.push(color);
         }
@@ -1164,7 +1149,7 @@ mod tests {
 
     /// The sequence must not be a fixed short cycle.
     ///
-    /// It was one: `next_bounded` reduced the generator's output with
+    /// It was one: the reduction to a colour index was `val % 4`, which
     /// `val % 4`, which on a power-of-two-modulus LCG reads the low two bits,
     /// and those have period exactly 4. Every game, at every seed, dealt out
     /// Green, Red, Yellow, Blue for ever -- the step from each colour to the
@@ -1213,9 +1198,9 @@ mod tests {
     /// All four colours must turn up, and roughly evenly.
     ///
     /// Weaker than the cycle test above and kept anyway: it is the check that
-    /// fails if a future edit to `next_bounded` gets the *range* wrong rather
-    /// than the *order*, e.g. by taking too few high bits and never reaching
-    /// the last colour.
+    /// fails if a future edit to the draw gets the *range* wrong rather than
+    /// the *order*, e.g. by taking too few high bits and never reaching the
+    /// last colour.
     #[test]
     fn every_colour_is_dealt_and_no_colour_dominates() {
         let seq = sequence_of(0x1234_5678, 400);
@@ -1231,28 +1216,12 @@ mod tests {
         }
     }
 
-    /// `next_bounded` must stay inside its bound and survive a zero one.
-    ///
-    /// Zero is not reachable from this game -- the only caller passes
-    /// `SimonColor::ALL.len()` -- but the previous body was `val % bound`,
-    /// which divides by zero and takes the process with it. A generator that
-    /// answers "a value in `0..0`" with a panic is a trap left for the next
-    /// caller.
-    #[test]
-    fn next_bounded_respects_its_bound() {
-        let mut rng = Lcg::new(7);
-        for bound in [1usize, 2, 3, 4, 7, 8, 100] {
-            for _ in 0..200 {
-                let v = rng.next_bounded(bound);
-                assert!(v < bound, "{v} is not below {bound}");
-            }
-        }
-        assert_eq!(
-            rng.next_bounded(0),
-            0,
-            "a zero bound must not divide by zero"
-        );
-    }
+    // The generator's own contract -- stays inside its bound, survives a zero
+    // bound rather than dividing by zero -- used to be tested here against the
+    // local `Lcg`. It is now tested once, against the shared implementation, in
+    // `randrange`'s `below_stays_inside_its_bound_and_survives_zero`. Sixteen
+    // crates each testing their own copy is sixteen chances to test a copy that
+    // has quietly drifted from the one being shipped.
 
     // ── Construction & initialization ───────────────────────────────
 
@@ -1316,49 +1285,35 @@ mod tests {
         assert!(SimonColor::ALL.contains(&app.sequence[0]));
     }
 
-    // ── LCG RNG ─────────────────────────────────────────────────────
+    // ── Seeding ─────────────────────────────────────────────────────
 
+    /// A fresh game must take its seed from the kernel, not from a literal.
+    ///
+    /// Phrased as "which seed", not as "two fresh games differ", because on a
+    /// host test build there *is* no SlateOS kernel: `seed_from_system`
+    /// correctly takes its fallback, and two fresh games are then identical --
+    /// exactly as they were under the old hardcoded `0xDEAD_BEEF_CAFE`. A
+    /// variety check would therefore pass on the broken code and fail on the
+    /// fixed code, which is precisely backwards. So the test names the seed the
+    /// no-kernel path must use, and names the one it must no longer use.
+    #[cfg(not(unix))]
     #[test]
-    fn test_lcg_deterministic() {
-        let mut rng1 = Lcg::new(42);
-        let mut rng2 = Lcg::new(42);
-        for _ in 0..10 {
-            assert_eq!(rng1.next_u64(), rng2.next_u64());
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        let mut app = SimonApp::new();
+        while app.sequence.len() < 24 {
+            app.start_next_round();
         }
-    }
-
-    #[test]
-    fn test_lcg_different_seeds_differ() {
-        let mut rng1 = Lcg::new(1);
-        let mut rng2 = Lcg::new(2);
-        assert_ne!(rng1.next_u64(), rng2.next_u64());
-    }
-
-    #[test]
-    fn test_lcg_bounded() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..100 {
-            let val = rng.next_bounded(4);
-            assert!(val < 4);
-        }
-    }
-
-    #[test]
-    fn test_lcg_bounded_single() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..50 {
-            assert_eq!(rng.next_bounded(1), 0);
-        }
-    }
-
-    #[test]
-    fn test_lcg_produces_all_values_in_range() {
-        let mut rng = Lcg::new(42);
-        let mut seen = [false; 4];
-        for _ in 0..100 {
-            seen[rng.next_bounded(4)] = true;
-        }
-        assert!(seen.iter().all(|&s| s));
+        let fresh: Vec<usize> = app.sequence.iter().map(|c| c.to_index()).collect();
+        assert_eq!(
+            fresh,
+            sequence_of(FALLBACK_SEED, 24),
+            "a fresh game did not use the crate's fallback seed"
+        );
+        assert_ne!(
+            fresh,
+            sequence_of(0xDEAD_BEEF_CAFE, 24),
+            "a fresh game is still seeded by the old hardcoded literal"
+        );
     }
 
     // ── SimonColor ──────────────────────────────────────────────────

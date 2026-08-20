@@ -1,0 +1,20 @@
+[package]
+name = "pwkdf"
+version = "0.1.0"
+edition = "2024"
+description = "Turning a password into a key: one salted, stretched derivation, shared by everything that checks a password."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The hash the derivation iterates. `sha2` is deliberately `alloc`-free and is
+# linked by the kernel and the coreutils; this crate is where the things that
+# need `alloc` and entropy live, so that `sha2` does not grow either.
+sha2 = { path = "../sha2" }
+# `SystemRandom` for fresh salts. This dependency is exactly why the derivation
+# cannot live in `sha2`: `userspace/sha256sum` has no business linking an RNG.
+randrange = { path = "../randrange" }
+
+[lints]
+workspace = true

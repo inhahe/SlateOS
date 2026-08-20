@@ -19,6 +19,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -47,27 +48,28 @@ const SYMBOL_COLORS: [Color; 18] = [
     TEAL, LAVENDER, RED, BLUE,
 ];
 
-struct Rng {
-    state: u64,
-}
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-    fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 {
-            return 0;
-        }
-        (self.next() % max as u64) as usize
-    }
-}
+// ── Randomness ──
+//
+// This file used to carry its own copy of the LCG that `guitk::rng` exists to
+// replace, seeded with a literal `42` -- so every launch dealt the identical
+// board, which for a *memory* game is the one defect that matters most: a
+// player who had seen the layout once had seen it for ever.
+//
+// Its `next_range` reduced with `% max`, and that was worse here than in most
+// of the games that copied it. The deal is a Fisher-Yates shuffle, whose bound
+// counts down 16, 15, 14, ... 2, so a third of the swaps draw against a
+// power-of-two bound -- and `x % 2^k` is precisely the low k bits of a
+// power-of-two-modulus LCG, which are a counter, not a draw. Those swaps were
+// not random at all; they were a fixed function of their position in the loop.
+// `randrange::shuffle` uses `below`, which takes the high bits through a
+// widening multiply with a rejection step.
+
+/// The seed a board falls back to when the kernel has no entropy to give.
+///
+/// A layout may be predictable: the worst outcome is a repeated board.
+/// Refusing to start would be the worse failure; the rule is written out at
+/// [`guitk::rng::seeded_from_system`]. "MEMORY!!" in ASCII.
+const FALLBACK_SEED: u64 = 0x4D45_4D4F_5259_2121;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CardState {
@@ -103,7 +105,7 @@ struct MemoryGame {
     total_pairs: u32,
     state: GameState,
     best_moves: [Option<u32>; 3], // 4x4, 4x6, 6x6
-    rng: Rng,
+    rng: SeededRng,
     show_help: bool,
 }
 
@@ -111,7 +113,7 @@ impl MemoryGame {
     fn new() -> Self {
         let rows = 4;
         let cols = 4;
-        let mut rng = Rng::new(42);
+        let mut rng = seeded_from_system(FALLBACK_SEED);
         let cards = Self::generate_cards(rows, cols, &mut rng);
         let total = rows * cols;
         Self {
@@ -133,7 +135,7 @@ impl MemoryGame {
         }
     }
 
-    fn generate_cards(rows: usize, cols: usize, rng: &mut Rng) -> Vec<u8> {
+    fn generate_cards(rows: usize, cols: usize, rng: &mut SeededRng) -> Vec<u8> {
         let total = rows * cols;
         let pairs = total / 2;
         let mut cards: Vec<u8> = Vec::with_capacity(total);
@@ -142,11 +144,7 @@ impl MemoryGame {
             cards.push(sym);
             cards.push(sym);
         }
-        // Fisher-Yates shuffle
-        for i in (1..cards.len()).rev() {
-            let j = rng.next_range(i + 1);
-            cards.swap(i, j);
-        }
+        rng.shuffle(&mut cards);
         cards
     }
 
@@ -548,6 +546,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     #[test]
@@ -817,11 +827,81 @@ mod tests {
 
     #[test]
     fn test_generate_deterministic() {
-        let mut r1 = Rng::new(42);
+        let mut r1 = SeededRng::new(42);
         let c1 = MemoryGame::generate_cards(4, 4, &mut r1);
-        let mut r2 = Rng::new(42);
+        let mut r2 = SeededRng::new(42);
         let c2 = MemoryGame::generate_cards(4, 4, &mut r2);
         assert_eq!(c1, c2);
+    }
+
+    // ── Randomness, as the game uses it ──
+
+    /// A deal must be a permutation of the intended multiset: every symbol
+    /// still present, still exactly twice. A shuffle is the easiest thing in a
+    /// game to break without noticing, because a broken one still looks
+    /// shuffled.
+    #[test]
+    fn every_deal_still_holds_each_symbol_exactly_twice() {
+        for seed in 0..30 {
+            let mut rng = SeededRng::new(seed);
+            for (rows, cols) in [(4, 4), (4, 5), (6, 6)] {
+                let cards = MemoryGame::generate_cards(rows, cols, &mut rng);
+                assert_eq!(cards.len(), rows * cols);
+                let mut counts = [0u32; 32];
+                for &sym in &cards {
+                    counts[sym as usize] += 1;
+                }
+                assert!(
+                    counts.iter().all(|&c| c == 0 || c == 2),
+                    "a symbol appeared an odd number of times, so a pair is unmatchable"
+                );
+            }
+        }
+    }
+
+    /// The defect the old `% max` reduction caused, at game level.
+    ///
+    /// The deal shuffles 16 cards, so the Fisher-Yates bound counts down
+    /// through 16, 8, 4 and 2 -- powers of two, where `x % bound` is exactly
+    /// the low bits of the old LCG and therefore a counter. Card 0 was then
+    /// sent to a position that was a fixed function of the loop, not of the
+    /// seed. This asks that the first card lands in many different places
+    /// across seeds, which a counter cannot do.
+    #[test]
+    fn the_deal_is_not_a_fixed_function_of_position() {
+        let mut landings = Vec::new();
+        for seed in 0..60 {
+            let mut rng = SeededRng::new(seed);
+            let cards = MemoryGame::generate_cards(4, 4, &mut rng);
+            let first = cards.iter().position(|&c| c == 0).unwrap();
+            if !landings.contains(&first) {
+                landings.push(first);
+            }
+        }
+        assert!(
+            landings.len() >= 8,
+            "symbol 0 reached only {} of 16 positions over 60 seeds",
+            landings.len()
+        );
+    }
+
+    /// `new()` must take its generator from the system rather than a literal.
+    ///
+    /// Checked by *which* seed, not by variety: the host test toolchain has no
+    /// SlateOS kernel, so `seeded_from_system` correctly falls back and two
+    /// fresh games agree there -- as they did under the old `42`.
+    #[test]
+    #[cfg(not(unix))]
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        let dealt = MemoryGame::new().cards;
+        let mut fallback = seeded_from_system(FALLBACK_SEED);
+        assert_eq!(dealt, MemoryGame::generate_cards(4, 4, &mut fallback));
+        let mut old_defect = SeededRng::new(42);
+        assert_ne!(
+            dealt,
+            MemoryGame::generate_cards(4, 4, &mut old_defect),
+            "back on a hardcoded seed"
+        );
     }
 
     #[test]

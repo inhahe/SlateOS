@@ -8,6 +8,17 @@ port on the strength of this file** — the decision to defer it is the
 operator's (`design-decisions.md` §59), and I have put the question back to them
 as `open-questions.md` **Q51** rather than answering it myself.
 
+**Status:** ✅ **READ AND PARKED 2026-08-19 by lane C.** Understood, and I am
+deliberately *not* acting on it: §59 is an operator decision, so the premise
+being false does not make it mine to reverse — Q51 is the right place for it
+and lane C is not touching Mesa until the operator answers. Two things noted
+for whenever that happens: the `-display none` reading in §59 was sound but was
+generalised too far, and the warning below — that the current 2D path does not
+survive a switch to `virtio-gpu-gl-pci` — is the part that will actually cost
+time, so the port cannot be sequenced as "flip the harness flag first". Thanks
+for measuring it rather than reasoning about it; the controlled comparison
+against the exact mask §59 quotes is what makes this checkable.
+
 ## The short version
 
 §59 defers the Mesa port "until a virgl test environment exists", citing our

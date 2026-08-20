@@ -128,13 +128,13 @@ fn normalize_angle(a: f32) -> f32 {
 // The float path was already sound: it took the top 24 bits via `>> 40`, which
 // is why the asteroids' shapes and headings looked fine while their entry point
 // did not. See `known-issues.md` and `design-decisions.md` §447.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 /// Returns a random heading in `[0, TAU)`.
 ///
 /// A free function rather than a method: the generator lives in another crate
 /// now, and "a full turn" is this game's unit, not the generator's.
-fn random_angle(rng: &mut Rng) -> f32 {
+fn random_angle(rng: &mut SeededRng) -> f32 {
     rng.unit_f32() * TAU
 }
 
@@ -302,7 +302,7 @@ struct Asteroid {
 }
 
 impl Asteroid {
-    fn new(pos: Vec2, vel: Vec2, size: AsteroidSize, rng: &mut Rng) -> Self {
+    fn new(pos: Vec2, vel: Vec2, size: AsteroidSize, rng: &mut SeededRng) -> Self {
         let n = size.vertex_count();
         let base_r = size.radius();
         let mut vertex_radii = Vec::with_capacity(n);
@@ -530,7 +530,7 @@ struct AsteroidsApp {
     respawn_timer: f32,
     invulnerable_timer: f32,
     ship_alive: bool,
-    rng: Rng,
+    rng: SeededRng,
     frame_counter: u64,
 }
 
@@ -555,7 +555,7 @@ impl AsteroidsApp {
             respawn_timer: 0.0,
             invulnerable_timer: INVULNERABLE_TIME,
             ship_alive: true,
-            rng: Rng::new(seed),
+            rng: SeededRng::new(seed),
             frame_counter: 0,
         };
         app.spawn_wave(INITIAL_ASTEROIDS);
@@ -1077,7 +1077,7 @@ impl AsteroidsApp {
 
     fn render_stars(&self, cmds: &mut Vec<RenderCommand>, fx: f32, fy: f32) {
         // Draw a static starfield using deterministic positions from a fixed seed.
-        let mut star_rng = Rng::new(999);
+        let mut star_rng = SeededRng::new(999);
         let star_color = Color::rgba(100, 100, 140, 60);
         let star_bright = Color::rgba(150, 150, 200, 100);
         for i in 0..40 {
@@ -1669,7 +1669,7 @@ mod tests {
     /// it keeps its own test.
     #[test]
     fn random_angle_stays_within_one_turn() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         for _ in 0..1000 {
             let a = random_angle(&mut rng);
             assert!((0.0..TAU).contains(&a), "angle {a} is outside [0, TAU)");
@@ -1886,7 +1886,7 @@ mod tests {
 
     #[test]
     fn test_asteroid_creation() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let a = Asteroid::new(
             Vec2::new(100.0, 100.0),
             Vec2::new(50.0, 0.0),
@@ -1899,7 +1899,7 @@ mod tests {
 
     #[test]
     fn test_asteroid_moves() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let mut a = Asteroid::new(
             Vec2::new(100.0, 100.0),
             Vec2::new(50.0, 0.0),
@@ -1913,7 +1913,7 @@ mod tests {
 
     #[test]
     fn test_asteroid_wraps() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let mut a = Asteroid::new(
             Vec2::new(FIELD_WIDTH - 1.0, 100.0),
             Vec2::new(500.0, 0.0),
@@ -1926,7 +1926,7 @@ mod tests {
 
     #[test]
     fn test_asteroid_rotates() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let mut a = Asteroid::new(
             Vec2::new(100.0, 100.0),
             Vec2::ZERO,
@@ -1943,7 +1943,7 @@ mod tests {
 
     #[test]
     fn test_asteroid_vertices_count() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let a = Asteroid::new(
             Vec2::new(100.0, 100.0),
             Vec2::ZERO,

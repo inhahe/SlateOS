@@ -15,6 +15,22 @@
 //! - CSV export and serialized backup for migration
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha theme.
+//!
+//! # Master password
+//!
+//! The vault's master password is checked against a [`pwkdf::PasswordVerifier`]
+//! — a salted, stretched derivation shared with `apps/lockscreen` and
+//! `gui/credentials`, so that the three cannot drift into three incompatible
+//! formats (`design-decisions.md` §466). Until 2026-08-18 it was checked
+//! against a 64-bit djb2 hash, which is not a password derivation: no salt, no
+//! cost, and a width at which collisions are constructible rather than
+//! theoretical. See [`Vault::create`].
+//!
+//! The vault *contents* are not yet encrypted at rest — this crate has no
+//! persistence layer at all, and `main` is empty. When one is written, the key
+//! comes from `pwkdf::derive_key` under the same params, and the verifier
+//! stored beside it must be written with its salt and round count or the vault
+//! is unopenable.
 
 #![allow(dead_code)]
 
@@ -23,8 +39,12 @@ use std::collections::{HashMap, HashSet};
 use guitk::color::Color;
 use guitk::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+#[cfg(test)]
+use guitk::rng::SeededRng;
+use guitk::rng::{RandomSource, SecretSource, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
+use pwkdf::{KdfError, KdfParams, PasswordVerifier};
 
 // =============================================================================
 // Catppuccin Mocha palette
@@ -423,6 +443,29 @@ impl Folder {
 // Vault
 // =============================================================================
 
+/// Domain label mixed into this crate's stored verifier.
+///
+/// It is what stops a verifier from meaning anything anywhere else: the lock
+/// screen (`slateos-lockscreen-verifier`) and the credential service
+/// (`slateos-credential-verifier`) derive theirs from the same key material
+/// under different labels, so a value lifted from one store cannot be replayed
+/// against another. Changing this string invalidates every existing vault, and
+/// nothing local would fail — hence the format-pinning test.
+const VERIFIER_DOMAIN: &[u8] = b"slateos-credmanager-vault";
+
+/// Iteration count for vaults built by tests.
+///
+/// The properties under test — that the right password is accepted, that a
+/// wrong one is not, that the salt is honoured — do not depend on the number
+/// of rounds, and [`pwkdf::DEFAULT_ROUNDS`] is chosen to take ~130 ms, which
+/// a suite that builds a vault per test would turn into several minutes.
+#[cfg(test)]
+const TEST_ROUNDS: u32 = 16;
+
+/// The master password of the vault built by [`AppState::for_test`].
+#[cfg(test)]
+const TEST_MASTER_PASSWORD: &str = "master123";
+
 /// Lock state of the vault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VaultState {
@@ -435,7 +478,14 @@ enum VaultState {
 struct Vault {
     name: String,
     state: VaultState,
-    master_password_hash: u64,
+    /// What the master password is checked against.
+    ///
+    /// A [`PasswordVerifier`], not a hash: it carries the salt and the
+    /// iteration count *with* the stored value, because all three have to
+    /// agree and a persistence layer that writes down only the last one has
+    /// destroyed the vault. This field used to be a `u64` from a djb2 hash —
+    /// see [`Vault::create`] for why that was worse than it looks.
+    master: PasswordVerifier,
     entries: Vec<Entry>,
     folders: Vec<Folder>,
     last_access: u64,
@@ -444,11 +494,61 @@ struct Vault {
 }
 
 impl Vault {
-    fn new(name: &str, master_password: &str) -> Self {
+    /// Create a vault, enrolling `master_password` against a fresh salt.
+    ///
+    /// # Errors
+    ///
+    /// [`KdfError::EntropyUnavailable`] if the kernel CSPRNG cannot be
+    /// reached. Propagated rather than papered over with a fixed salt: this is
+    /// the *secret* tier of `design-decisions.md` §465, and a predictable salt
+    /// chosen once outlives every later chance to notice it. Refusing to
+    /// create the vault is recoverable; creating it against a guessable salt
+    /// is not.
+    ///
+    /// # What this replaced
+    ///
+    /// Until 2026-08-18 the master password was stored as
+    /// `simple_hash(password): u64` — djb2, one multiply-add per byte, no
+    /// salt, no iteration. Three separate failures, of which only the first is
+    /// the obvious one:
+    ///
+    /// - **No cost.** Testing a guess took two arithmetic operations per
+    ///   character, so an attacker with the stored value ran through the
+    ///   entire plausible-password space at memory speed.
+    /// - **No salt.** The same password produced the same 64 bits in every
+    ///   vault on every machine, so one precomputed table opened all of them.
+    /// - **64 bits, non-cryptographic.** Collisions are not a theoretical
+    ///   concern for djb2 — they are constructible — and [`Vault::unlock`]
+    ///   accepted *any* colliding string, not just the owner's password.
+    fn create(name: &str, master_password: &str) -> Result<Self, KdfError> {
+        let params = KdfParams::fresh(pwkdf::DEFAULT_ROUNDS)?;
+        Ok(Self::with_verifier(
+            name,
+            PasswordVerifier::create(master_password.as_bytes(), params, VERIFIER_DOMAIN),
+        ))
+    }
+
+    /// Reopen a vault whose verifier was read back from storage.
+    ///
+    /// `params` must be the salt and cost the verifier was created under; a
+    /// store that keeps the verifier and loses the salt has locked the owner
+    /// out permanently, and the symptom ("correct password refused") does not
+    /// point at the cause.
+    fn from_stored(name: &str, params: KdfParams, verifier: [u8; 32]) -> Self {
+        Self::with_verifier(
+            name,
+            PasswordVerifier::from_parts(params, VERIFIER_DOMAIN, verifier),
+        )
+    }
+
+    /// The empty vault around an already-built verifier — the one place the
+    /// non-password fields are initialised, so the three constructors cannot
+    /// drift apart in what a fresh vault contains.
+    fn with_verifier(name: &str, master: PasswordVerifier) -> Self {
         Self {
             name: name.to_string(),
             state: VaultState::Locked,
-            master_password_hash: simple_hash(master_password),
+            master,
             entries: Vec::new(),
             folders: Vec::new(),
             last_access: 0,
@@ -457,14 +557,34 @@ impl Vault {
         }
     }
 
+    /// A vault with a known master password, a named salt and a cheap cost.
+    ///
+    /// `#[cfg(test)]` so that neither shortcut can reach production. Both are
+    /// deliberate and neither is safe outside a test: the fixed salt makes
+    /// assertions reproducible, and [`TEST_ROUNDS`] keeps a suite that builds
+    /// a vault in almost every test from spending ~130 ms on each one.
+    #[cfg(test)]
+    fn for_test(name: &str, master_password: &str) -> Self {
+        let params = KdfParams::new([0x5Au8; pwkdf::SALT_LEN], TEST_ROUNDS);
+        Self::with_verifier(
+            name,
+            PasswordVerifier::create(master_password.as_bytes(), params, VERIFIER_DOMAIN),
+        )
+    }
+
     fn next_id(&mut self) -> u64 {
         let id = self.id_gen;
         self.id_gen = self.id_gen.saturating_add(1);
         id
     }
 
+    /// Try to unlock the vault with `password`.
+    ///
+    /// Costs a full derivation — deliberately ~130 ms at
+    /// [`pwkdf::DEFAULT_ROUNDS`]. That is the point, and it is why this is
+    /// called on submit rather than per keystroke.
     fn unlock(&mut self, password: &str, now: u64) -> bool {
-        if simple_hash(password) == self.master_password_hash {
+        if self.master.check(password.as_bytes()) {
             self.state = VaultState::Unlocked;
             self.last_access = now;
             true
@@ -665,15 +785,6 @@ impl Vault {
     }
 }
 
-/// Simple hash for demonstration (not cryptographically secure).
-fn simple_hash(input: &str) -> u64 {
-    let mut hash: u64 = 5381;
-    for byte in input.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(u64::from(byte));
-    }
-    hash
-}
-
 // =============================================================================
 // Password generator
 // =============================================================================
@@ -711,29 +822,42 @@ impl CharsetOptions {
             chars.extend('0'..='9');
         }
         if self.symbols {
-            chars.extend("!@#$%^&*()-_=+[]{}|;:',.<>?/~`".chars());
+            chars.extend(SYMBOL_ALPHABET.chars());
         }
         chars
     }
 
     /// Count of distinct characters in the pool.
+    ///
+    /// Derived from [`Self::build_charset`] rather than re-summed from the
+    /// class sizes. The two used to be written out separately — a hand-added
+    /// `26 + 26 + 10 + 30` here, against the ranges above — which agreed only
+    /// by coincidence and would have disagreed silently the moment a character
+    /// was added to [`SYMBOL_ALPHABET`]. The symptom of a disagreement is an
+    /// entropy figure wrong in the reassuring direction, which nothing catches.
     fn pool_size(&self) -> usize {
-        let mut count = 0;
-        if self.uppercase {
-            count += 26;
-        }
-        if self.lowercase {
-            count += 26;
-        }
-        if self.digits {
-            count += 10;
-        }
-        if self.symbols {
-            count += 30;
-        }
-        count
+        self.build_charset().len()
     }
 }
+
+/// The punctuation the generator draws from, and the size the strength meter
+/// scores an unrecognised character against.
+///
+/// One definition because two would drift: [`estimate_symbol_pool`] has to
+/// agree with what the generator can actually produce, or a generated password
+/// is scored against the wrong alphabet.
+const SYMBOL_ALPHABET: &str = "!@#$%^&*()-_=+[]{}|;:',.<>?/~`";
+
+/// Number of distinct characters in [`SYMBOL_ALPHABET`].
+fn estimate_symbol_pool() -> usize {
+    SYMBOL_ALPHABET.chars().count()
+}
+
+/// Letters in one ASCII case.
+const ASCII_LETTER_COUNT: usize = 26;
+
+/// ASCII decimal digits.
+const ASCII_DIGIT_COUNT: usize = 10;
 
 /// Password generation mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -759,25 +883,117 @@ impl Default for PassphraseOptions {
     }
 }
 
+/// Where a generated credential's randomness comes from.
+///
+/// Two live variants and no fallback between them, deliberately. See
+/// [`PasswordGenerator`] for what this replaced and why a fallback would have
+/// preserved the defect rather than fixed it.
+#[derive(Debug)]
+enum CredRandom {
+    /// The kernel CSPRNG — the only source a stored credential may come from.
+    /// Boxed because its refill buffer dwarfs the other variants, and this is
+    /// constructed once per app rather than anywhere in a loop.
+    System(Box<SystemRandom>),
+    /// A named sequence, so a test can name the password it asserts on. Never
+    /// reachable from the running app.
+    #[cfg(test)]
+    Seeded(SeededRng),
+    /// The kernel had no entropy to give. Generating is refused outright.
+    Unavailable,
+}
+
+impl CredRandom {
+    fn from_system() -> Self {
+        match SystemRandom::open() {
+            Ok(source) => Self::System(Box::new(source)),
+            Err(_) => Self::Unavailable,
+        }
+    }
+
+}
+
+/// The both-sides-of-the-draw rule lives in [`SecretSource::secret`]. This
+/// crate, `apps/passwordgen` and `gui/credentials` each carried their own copy
+/// of it before that; a rule about secrets restated once per crate is one that
+/// will eventually be restated slightly wrong.
+impl SecretSource for CredRandom {
+    /// Whether a secret drawn from this source may be handed to the user.
+    fn is_trustworthy(&self) -> bool {
+        match self {
+            Self::System(source) => source.is_healthy(),
+            #[cfg(test)]
+            Self::Seeded(_) => true,
+            Self::Unavailable => false,
+        }
+    }
+}
+
+impl RandomSource for CredRandom {
+    fn next_u64(&mut self) -> u64 {
+        match self {
+            Self::System(source) => source.next_u64(),
+            #[cfg(test)]
+            Self::Seeded(source) => source.next_u64(),
+            // Visibly not random. `secret` refuses before this is ever read,
+            // so it is the belt to that braces rather than a fallback.
+            Self::Unavailable => 0,
+        }
+    }
+}
+
+/// What the generator panel shows when it cannot generate.
+const NO_ENTROPY_MESSAGE: &str =
+    "Cannot generate: the system random number generator is unavailable";
+
 /// The password generator with all settings.
-#[derive(Clone, Debug)]
+///
+/// The randomness here used to be a `seed: u64` initialised to the literal
+/// `12345` and bumped by one per generation, fed through a stateless integer
+/// hash. Every install therefore produced the same passwords in the same
+/// order: the first password this manager ever generated for you was the
+/// first it generated for everyone, and the *n*th was a published function of
+/// `12345 + n`. The strength meter beside it reported the entropy of the
+/// character pool — a true statement about a password drawn at random, and a
+/// false one about this password, whose real entropy was zero.
+///
+/// It now draws from the kernel CSPRNG and refuses to generate at all when it
+/// cannot reach one. There is deliberately no weaker source to fall back to:
+/// a fallback is how the original defect would survive the fix, and nobody can
+/// tell a predictable password from an unpredictable one by looking at it.
+/// See `design-decisions.md` §462.
+#[derive(Debug)]
 struct PasswordGenerator {
     length: usize,
     mode: GeneratorMode,
     charset: CharsetOptions,
     passphrase: PassphraseOptions,
-    /// Seed for deterministic generation (incremented each use).
-    seed: u64,
+    rng: CredRandom,
 }
 
 impl PasswordGenerator {
     fn new() -> Self {
+        Self::with_rng(CredRandom::from_system())
+    }
+
+    /// A generator drawing from a named sequence, for tests only.
+    #[cfg(test)]
+    fn with_seed(seed: u64) -> Self {
+        Self::with_rng(CredRandom::Seeded(SeededRng::new(seed)))
+    }
+
+    /// A generator whose source has already failed, for tests only.
+    #[cfg(test)]
+    fn without_entropy() -> Self {
+        Self::with_rng(CredRandom::Unavailable)
+    }
+
+    fn with_rng(rng: CredRandom) -> Self {
         Self {
             length: 20,
             mode: GeneratorMode::Random,
             charset: CharsetOptions::default(),
             passphrase: PassphraseOptions::default(),
-            seed: 12345,
+            rng,
         }
     }
 
@@ -785,79 +1001,48 @@ impl PasswordGenerator {
         self.length = len.clamp(8, 128);
     }
 
-    /// Generate a password based on current settings.
-    fn generate(&mut self) -> String {
-        match self.mode {
-            GeneratorMode::Random => self.generate_random(),
-            GeneratorMode::Pronounceable => self.generate_pronounceable(),
-            GeneratorMode::Passphrase => self.generate_passphrase(),
-        }
-    }
-
-    fn generate_random(&mut self) -> String {
+    /// Generate a password from the current settings, or `None` if the system
+    /// has no randomness to draw it from.
+    fn generate(&mut self) -> Option<String> {
+        let mode = self.mode;
+        let length = self.length;
         let charset = self.charset.build_charset();
-        if charset.is_empty() {
-            return String::new();
-        }
-        let mut result = String::with_capacity(self.length);
-        for i in 0..self.length {
-            let idx = self.pseudo_random(charset.len(), i as u64);
-            if let Some(&ch) = charset.get(idx) {
-                result.push(ch);
-            }
-        }
-        self.seed = self.seed.wrapping_add(1);
-        result
+        let words = self.passphrase.word_count.max(2);
+        let separator = self.passphrase.separator.clone();
+        self.rng.secret(|rng| match mode {
+            GeneratorMode::Random => Self::draw_random(rng, &charset, length),
+            GeneratorMode::Pronounceable => Self::draw_pronounceable(rng, length),
+            GeneratorMode::Passphrase => Self::draw_passphrase(rng, words, &separator),
+        })
     }
 
-    fn generate_pronounceable(&mut self) -> String {
-        let consonants = b"bcdfghjklmnpqrstvwxyz";
-        let vowels = b"aeiou";
-        let mut result = String::with_capacity(self.length);
-        let mut use_consonant = true;
-        for i in 0..self.length {
-            let ch = if use_consonant {
-                let idx = self.pseudo_random(consonants.len(), i as u64);
-                consonants.get(idx).copied().unwrap_or(b'b')
-            } else {
-                let idx = self.pseudo_random(vowels.len(), i as u64);
-                vowels.get(idx).copied().unwrap_or(b'a')
-            };
-            result.push(ch as char);
-            use_consonant = !use_consonant;
-        }
-        self.seed = self.seed.wrapping_add(1);
-        result
+    /// `length` characters drawn from `charset`, or the empty string if the
+    /// user has switched every character class off.
+    fn draw_random(rng: &mut CredRandom, charset: &[char], length: usize) -> String {
+        (0..length)
+            .filter_map(|_| rng.choose(charset).copied())
+            .collect()
     }
 
-    fn generate_passphrase(&mut self) -> String {
-        let words = WORDLIST;
-        let count = self.passphrase.word_count.max(2);
-        let mut parts = Vec::with_capacity(count);
-        for i in 0..count {
-            let idx = self.pseudo_random(words.len(), i as u64);
-            if let Some(&word) = words.get(idx) {
-                parts.push(word.to_string());
-            }
-        }
-        self.seed = self.seed.wrapping_add(1);
-        parts.join(&self.passphrase.separator)
+    /// `length` characters alternating consonant and vowel.
+    fn draw_pronounceable(rng: &mut CredRandom, length: usize) -> String {
+        const CONSONANTS: &[u8] = b"bcdfghjklmnpqrstvwxyz";
+        const VOWELS: &[u8] = b"aeiou";
+        (0..length)
+            .map(|i| {
+                let pool = if i % 2 == 0 { CONSONANTS } else { VOWELS };
+                // Both pools are non-empty constants, so `pick` always answers.
+                char::from(rng.choose(pool).copied().unwrap_or(b'?'))
+            })
+            .collect()
     }
 
-    /// Simple deterministic pseudo-random for index selection.
-    fn pseudo_random(&self, bound: usize, offset: u64) -> usize {
-        if bound == 0 {
-            return 0;
-        }
-        let mut x = self
-            .seed
-            .wrapping_add(offset)
-            .wrapping_mul(6364136223846793005);
-        x = x.wrapping_add(1442695040888963407);
-        x ^= x >> 16;
-        x = x.wrapping_mul(0x45d9f3b);
-        x ^= x >> 16;
-        (x as usize) % bound
+    /// `words` words from the list, joined by `separator`.
+    fn draw_passphrase(rng: &mut CredRandom, words: usize, separator: &str) -> String {
+        (0..words)
+            .filter_map(|_| rng.choose(WORDLIST).copied())
+            .collect::<Vec<_>>()
+            .join(separator)
     }
 
     /// Calculate entropy in bits for the current settings.
@@ -884,6 +1069,27 @@ impl PasswordGenerator {
                 }
                 self.passphrase.word_count as f64 * (dict_size as f64).log2()
             }
+        }
+    }
+}
+
+/// Draw a new password into `state`, or record the refusal.
+///
+/// Every path that generates goes through here so that the refusal is recorded
+/// in exactly one place; three call sites each assigning the result themselves
+/// is three chances for one of them to show a stale password beside a message
+/// saying the generator is unavailable.
+fn regenerate_password(state: &mut AppState) {
+    match state.password_generator.generate() {
+        Some(password) => {
+            state.generated_password = password;
+            state.generator_error = None;
+        }
+        None => {
+            // Clear the old password too: leaving the previous one on screen
+            // beside the refusal invites the user to go on using it.
+            state.generated_password.clear();
+            state.generator_error = Some(NO_ENTROPY_MESSAGE.to_owned());
         }
     }
 }
@@ -1779,8 +1985,11 @@ fn evaluate_password_strength(password: &str) -> (PasswordStrength, f64) {
         return (PasswordStrength::VeryWeak, 0.0);
     }
 
-    let len = password.len();
-    let mut pool_size: usize = 0;
+    // Characters, not bytes. `password.len()` counted a three-byte character
+    // as three, so a four-character password of non-ASCII text scored as if it
+    // were twelve — an overstatement, which is the direction a strength meter
+    // must never err in.
+    let len = password.chars().count();
     let mut has_lower = false;
     let mut has_upper = false;
     let mut has_digit = false;
@@ -1798,21 +2007,27 @@ fn evaluate_password_strength(password: &str) -> (PasswordStrength, f64) {
         }
     }
 
-    if has_lower {
-        pool_size += 26;
-    }
-    if has_upper {
-        pool_size += 26;
-    }
-    if has_digit {
-        pool_size += 10;
-    }
-    if has_symbol {
-        pool_size += 30;
-    }
+    let pool_size = [
+        (has_lower, ASCII_LETTER_COUNT),
+        (has_upper, ASCII_LETTER_COUNT),
+        (has_digit, ASCII_DIGIT_COUNT),
+        (has_symbol, estimate_symbol_pool()),
+    ]
+    .into_iter()
+    .filter(|&(present, _)| present)
+    .fold(0usize, |acc, (_, size)| acc.saturating_add(size));
 
     let entropy = if pool_size > 0 {
-        len as f64 * (pool_size as f64).log2()
+        // `log2` of a pool of 10..=92 is 3.3..=6.5, and the length is bounded
+        // by what fits in a password field, so the product cannot approach
+        // `f64`'s range. The lint cannot see either bound.
+        #[allow(
+            clippy::arithmetic_side_effects,
+            reason = "bounded above by a small pool size and a field-length password; \
+                      floats have no checked multiply to use instead"
+        )]
+        let bits = len as f64 * (pool_size as f64).log2();
+        bits
     } else {
         0.0
     };
@@ -2038,6 +2253,11 @@ fn serialize_backup(vault: &Vault) -> String {
     ));
     out.push_str(&format!("  \"entry_count\": {},\n", vault.entries.len()));
     out.push_str("  \"entries\": [\n");
+    // Index of the last element, so the "is this the final one?" test inside
+    // the loop is a comparison rather than an `i + 1` that has to be argued
+    // safe. `saturating_sub` covers the empty case, where the loop body never
+    // runs and the value is unused.
+    let last_entry = vault.entries.len().saturating_sub(1);
     for (i, entry) in vault.entries.iter().enumerate() {
         out.push_str("    {\n");
         out.push_str(&format!("      \"id\": {},\n", entry.id));
@@ -2059,7 +2279,7 @@ fn serialize_backup(vault: &Vault) -> String {
             .map(|t| format!("\"{}\"", guitk::escape::json_string(t)))
             .collect();
         out.push_str(&format!("      \"tags\": [{}]\n", tags_str.join(", ")));
-        if i + 1 < vault.entries.len() {
+        if i < last_entry {
             out.push_str("    },\n");
         } else {
             out.push_str("    }\n");
@@ -2067,13 +2287,14 @@ fn serialize_backup(vault: &Vault) -> String {
     }
     out.push_str("  ],\n");
     out.push_str("  \"folders\": [\n");
+    let last_folder = vault.folders.len().saturating_sub(1);
     for (i, folder) in vault.folders.iter().enumerate() {
         out.push_str(&format!(
             "    {{ \"id\": {}, \"name\": \"{}\" }}",
             folder.id,
             guitk::escape::json_string(&folder.name)
         ));
-        if i + 1 < vault.folders.len() {
+        if i < last_folder {
             out.push_str(",\n");
         } else {
             out.push('\n');
@@ -2135,7 +2356,7 @@ fn sort_entries(entries: &mut [&Entry], order: SortOrder) {
         SortOrder::DateNewest => entries.sort_by_key(|e| std::cmp::Reverse(e.modified_at)),
         SortOrder::DateOldest => entries.sort_by_key(|a| a.modified_at),
         SortOrder::TypeAsc => {
-            entries.sort_by(|a, b| a.entry_type().label().cmp(b.entry_type().label()))
+            entries.sort_by(|a, b| a.entry_type().label().cmp(b.entry_type().label()));
         }
     }
 }
@@ -2226,6 +2447,10 @@ struct AppState {
     sort_order: SortOrder,
     password_generator: PasswordGenerator,
     generated_password: String,
+    /// Set when the generator refused to generate, cleared when it succeeds.
+    /// Shown in place of the password so the refusal cannot be mistaken for
+    /// a generator the user simply has not pressed yet.
+    generator_error: Option<String>,
     clipboard: ClipboardState,
     show_password: bool,
     now: u64,
@@ -2246,8 +2471,17 @@ struct AppState {
 }
 
 impl AppState {
-    fn new() -> Self {
-        let vault = Vault::new("My Vault", "master123");
+    /// Build the app around an already-opened vault.
+    ///
+    /// The vault is a parameter rather than something this constructor makes,
+    /// because making one means choosing a master password, and this function
+    /// used to choose `"master123"` — in non-test code, in a credential
+    /// manager. Nothing called it outside tests, so nothing shipped; but the
+    /// only reason it was harmless is that `main` is still empty, which is not
+    /// a property to rely on. A real caller loads the verifier from storage
+    /// ([`Vault::from_stored`]) or asks the user for a new one
+    /// ([`Vault::create`]).
+    fn new(vault: Vault) -> Self {
         let mut state = Self {
             vault,
             sidebar_selection: SidebarSelection::AllItems,
@@ -2257,6 +2491,7 @@ impl AppState {
             sort_order: SortOrder::NameAsc,
             password_generator: PasswordGenerator::new(),
             generated_password: String::new(),
+            generator_error: None,
             clipboard: ClipboardState::new(),
             show_password: false,
             now: 1000000,
@@ -2270,6 +2505,13 @@ impl AppState {
         };
         state.refresh_filter();
         state
+    }
+
+    /// App state around a locked test vault whose master password is
+    /// [`TEST_MASTER_PASSWORD`].
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self::new(Vault::for_test("My Vault", TEST_MASTER_PASSWORD))
     }
 
     /// Rebuild the filtered entry list from current sidebar + search + sort.
@@ -3703,15 +3945,14 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
         SURFACE0,
         CORNER_RADIUS,
     );
-    let display_pw = if state.generated_password.is_empty() {
-        "Click Generate to create a password"
-    } else {
-        &state.generated_password
-    };
-    let pw_color = if state.generated_password.is_empty() {
-        OVERLAY0
-    } else {
-        GREEN
+    // A refusal takes the password's own place, in red. Left in the prompt
+    // state it would read as "you have not pressed the button yet", which is
+    // exactly the wrong thing to tell someone whose generator cannot generate.
+    let (display_pw, pw_color) = match (&state.generator_error, state.generated_password.is_empty())
+    {
+        (Some(message), _) => (message.as_str(), RED),
+        (None, true) => ("Click Generate to create a password", OVERLAY0),
+        (None, false) => (state.generated_password.as_str(), GREEN),
     };
     draw_text(
         rt,
@@ -4584,8 +4825,7 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) {
         }
         Key::G if key.modifiers.ctrl => {
             state.detail_view = DetailView::PasswordGenerator;
-            state.password_generator.seed = state.password_generator.seed.wrapping_add(1);
-            state.generated_password = state.password_generator.generate();
+            regenerate_password(state);
         }
         Key::Escape => {
             state.search_query.clear();
@@ -4600,7 +4840,7 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) {
         }
         Key::Enter => {
             if state.detail_view == DetailView::PasswordGenerator {
-                state.generated_password = state.password_generator.generate();
+                regenerate_password(state);
             }
         }
         _ => {
@@ -4630,11 +4870,15 @@ fn navigate_entry_list(state: &mut AppState, direction: i32) {
         .selected_entry_id
         .and_then(|id| state.filtered_ids.iter().position(|&fid| fid == id));
 
+    // Walked in `usize` rather than through `i32`: the list is indexed by
+    // `usize`, and the round trip out to a signed type and back is where the
+    // clamp's `len() as i32 - 1` used to sit — correct only because the empty
+    // case returns above, and silently wrong on a list longer than `i32::MAX`.
+    let last = state.filtered_ids.len().saturating_sub(1);
+    let step = direction.unsigned_abs() as usize;
     let new_idx = match current_idx {
-        Some(idx) => {
-            let new = idx as i32 + direction;
-            new.clamp(0, state.filtered_ids.len() as i32 - 1) as usize
-        }
+        Some(idx) if direction < 0 => idx.saturating_sub(step),
+        Some(idx) => idx.saturating_add(step).min(last),
         None => 0,
     };
 
@@ -4699,7 +4943,7 @@ fn handle_toolbar_click(state: &mut AppState, mx: f32) {
     if mx >= base_x + 376.0 && mx < base_x + 476.0 {
         state.detail_view = DetailView::PasswordGenerator;
         if state.generated_password.is_empty() {
-            state.generated_password = state.password_generator.generate();
+            regenerate_password(state);
         }
         return;
     }
@@ -4786,6 +5030,18 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     // == IdGen tests ===========================================================
@@ -5041,29 +5297,105 @@ mod tests {
         assert!(f.parent_id.is_none());
     }
 
-    // == simple_hash tests =====================================================
+    // == Master password ======================================================
+    //
+    // These replace three tests of the djb2 `simple_hash` this crate used to
+    // check the master password with. All three passed — the function *was*
+    // deterministic, *did* map two distinct short inputs apart, and *did*
+    // start from 5381 — and not one of them could have failed for the reason
+    // the code was wrong. That is the shape to watch for: a green suite
+    // asserting the properties an implementation happens to have, rather than
+    // the ones its caller depends on.
 
+    /// The property djb2 could not have had: a salt. Without one the same
+    /// password yields the same stored value in every vault on every machine,
+    /// so a single precomputed table opens all of them — and equal stored
+    /// values advertise which vaults to try it against.
+    ///
+    /// Asserted against `Vault::create`, the real path, so it fails if the
+    /// salt ever silently becomes a constant again. On a host build there is
+    /// no kernel entropy source, so `create` refuses — and *that* is asserted
+    /// instead, because what must never happen is a salt appearing anyway.
     #[test]
-    fn test_simple_hash_deterministic() {
-        assert_eq!(simple_hash("test"), simple_hash("test"));
+    fn two_vaults_with_the_same_password_do_not_store_the_same_verifier() {
+        match (
+            Vault::create("A", "correct horse"),
+            Vault::create("B", "correct horse"),
+        ) {
+            (Ok(a), Ok(b)) => {
+                assert_ne!(
+                    a.master.params().salt(),
+                    b.master.params().salt(),
+                    "two vaults drew the same salt -- it is a constant again"
+                );
+                assert_ne!(
+                    a.master.verifier(),
+                    b.master.verifier(),
+                    "the salt did not reach the stored value"
+                );
+                // And both still open with the password they were made from.
+                assert!(a.master.check(b"correct horse"));
+                assert!(b.master.check(b"correct horse"));
+            }
+            (Err(a), Err(b)) => {
+                assert_eq!(a, KdfError::EntropyUnavailable);
+                assert_eq!(b, KdfError::EntropyUnavailable);
+            }
+            _ => panic!("an entropy source that works only sometimes is the worst case of all"),
+        }
+    }
+
+    /// The salt has to reach the stored value for any of this to mean
+    /// anything. Guards against it being kept, round-tripped and then ignored,
+    /// which would leave every vault behaving exactly as it did with djb2.
+    #[test]
+    fn the_salt_changes_the_stored_verifier() {
+        let one = KdfParams::new(*b"salt number one!", TEST_ROUNDS);
+        let two = KdfParams::new(*b"salt number two!", TEST_ROUNDS);
+        assert_ne!(
+            PasswordVerifier::create(b"identical password", one, VERIFIER_DOMAIN).verifier(),
+            PasswordVerifier::create(b"identical password", two, VERIFIER_DOMAIN).verifier()
+        );
     }
 
     #[test]
-    fn test_simple_hash_different_inputs() {
-        assert_ne!(simple_hash("abc"), simple_hash("def"));
+    fn a_verifier_is_worthless_without_the_salt_it_was_made_under() {
+        // Why `master` holds a `PasswordVerifier` rather than a bare hash: a
+        // persistence layer that writes the stored value and drops the salt
+        // has locked the owner out, and the symptom — "correct password
+        // refused" — does not point at the cause.
+        let v = Vault::for_test("V", "correct horse");
+        let wrong_salt = KdfParams::new([0xA5u8; pwkdf::SALT_LEN], TEST_ROUNDS);
+        let reopened = Vault::from_stored("V", wrong_salt, v.master.verifier());
+        assert!(v.master.check(b"correct horse"));
+        assert!(!reopened.master.check(b"correct horse"));
     }
 
     #[test]
-    fn test_simple_hash_empty() {
-        let h = simple_hash("");
-        assert_eq!(h, 5381);
+    fn a_vault_verifier_cannot_be_replayed_against_the_lock_screen() {
+        // The domain label is the whole of this property, and changing it is a
+        // one-word edit with no local symptom, so it is pinned here.
+        let params = KdfParams::new([0x5Au8; pwkdf::SALT_LEN], TEST_ROUNDS);
+        let vault = PasswordVerifier::create(b"correct horse", params, VERIFIER_DOMAIN);
+        let lockscreen =
+            PasswordVerifier::create(b"correct horse", params, b"slateos-lockscreen-verifier");
+        assert_ne!(vault.verifier(), lockscreen.verifier());
+    }
+
+    #[test]
+    fn a_stored_vault_reopens_with_the_password_it_was_created_from() {
+        let original = Vault::for_test("V", "correct horse");
+        let mut reopened =
+            Vault::from_stored("V", original.master.params(), original.master.verifier());
+        assert!(!reopened.unlock("wrong", 100));
+        assert!(reopened.unlock("correct horse", 100));
     }
 
     // == Vault tests ===========================================================
 
     #[test]
     fn test_vault_new() {
-        let v = Vault::new("Test", "password");
+        let v = Vault::for_test("Test", "password");
         assert_eq!(v.name, "Test");
         assert_eq!(v.state, VaultState::Locked);
         assert_eq!(v.auto_lock_minutes, DEFAULT_AUTO_LOCK_MINUTES);
@@ -5071,21 +5403,21 @@ mod tests {
 
     #[test]
     fn test_vault_unlock_correct() {
-        let mut v = Vault::new("Test", "secret");
+        let mut v = Vault::for_test("Test", "secret");
         assert!(v.unlock("secret", 100));
         assert!(v.is_unlocked());
     }
 
     #[test]
     fn test_vault_unlock_incorrect() {
-        let mut v = Vault::new("Test", "secret");
+        let mut v = Vault::for_test("Test", "secret");
         assert!(!v.unlock("wrong", 100));
         assert!(!v.is_unlocked());
     }
 
     #[test]
     fn test_vault_lock() {
-        let mut v = Vault::new("Test", "pw");
+        let mut v = Vault::for_test("Test", "pw");
         v.unlock("pw", 100);
         assert!(v.is_unlocked());
         v.lock();
@@ -5094,7 +5426,7 @@ mod tests {
 
     #[test]
     fn test_vault_auto_lock() {
-        let mut v = Vault::new("Test", "pw");
+        let mut v = Vault::for_test("Test", "pw");
         v.auto_lock_minutes = 5;
         v.unlock("pw", 100);
         assert!(!v.should_auto_lock(100));
@@ -5104,13 +5436,13 @@ mod tests {
 
     #[test]
     fn test_vault_auto_lock_when_locked() {
-        let v = Vault::new("Test", "pw");
+        let v = Vault::for_test("Test", "pw");
         assert!(!v.should_auto_lock(99999));
     }
 
     #[test]
     fn test_vault_add_entry() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let id = v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
         assert!(id > 0);
         assert_eq!(v.entries.len(), 1);
@@ -5119,7 +5451,7 @@ mod tests {
 
     #[test]
     fn test_vault_remove_entry() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let id = v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
         assert!(v.remove_entry(id));
         assert_eq!(v.entries.len(), 0);
@@ -5128,7 +5460,7 @@ mod tests {
 
     #[test]
     fn test_vault_update_entry() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let id = v.add_entry(EntryData::Login(LoginData::new("old", "u", "p")), 100);
         let new_data = EntryData::Login(LoginData::new("new", "u2", "p2"));
         assert!(v.update_entry(id, new_data, 200));
@@ -5138,7 +5470,7 @@ mod tests {
 
     #[test]
     fn test_vault_toggle_star() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let id = v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
         assert!(!v.get_entry(id).is_some_and(|e| e.starred));
         v.toggle_star(id);
@@ -5149,7 +5481,7 @@ mod tests {
 
     #[test]
     fn test_vault_compromised() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let id = v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
         v.set_compromised(id, true);
         assert!(v.get_entry(id).is_some_and(|e| e.compromised));
@@ -5159,7 +5491,7 @@ mod tests {
 
     #[test]
     fn test_vault_tags() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let id = v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
         v.add_tag(id, "work");
         v.add_tag(id, "important");
@@ -5175,7 +5507,7 @@ mod tests {
 
     #[test]
     fn test_vault_set_folder() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let fid = v.add_folder("Work");
         let eid = v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
         v.set_folder(eid, Some(fid));
@@ -5184,7 +5516,7 @@ mod tests {
 
     #[test]
     fn test_vault_add_folder() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let id = v.add_folder("Personal");
         assert!(v.get_folder(id).is_some());
         assert_eq!(v.get_folder(id).map(|f| f.name.as_str()), Some("Personal"));
@@ -5192,7 +5524,7 @@ mod tests {
 
     #[test]
     fn test_vault_remove_folder_clears_entries() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let fid = v.add_folder("Work");
         let eid = v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
         v.set_folder(eid, Some(fid));
@@ -5202,7 +5534,7 @@ mod tests {
 
     #[test]
     fn test_vault_rename_folder() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let fid = v.add_folder("Old");
         assert!(v.rename_folder(fid, "New"));
         assert_eq!(v.get_folder(fid).map(|f| f.name.as_str()), Some("New"));
@@ -5210,7 +5542,7 @@ mod tests {
 
     #[test]
     fn test_vault_entries_in_folder() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let fid = v.add_folder("Work");
         let id1 = v.add_entry(EntryData::Login(LoginData::new("s1", "u", "p")), 100);
         let _id2 = v.add_entry(EntryData::Login(LoginData::new("s2", "u", "p")), 100);
@@ -5221,7 +5553,7 @@ mod tests {
 
     #[test]
     fn test_vault_starred_entries() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let id1 = v.add_entry(EntryData::Login(LoginData::new("s1", "u", "p")), 100);
         let _id2 = v.add_entry(EntryData::Login(LoginData::new("s2", "u", "p")), 100);
         v.toggle_star(id1);
@@ -5230,7 +5562,7 @@ mod tests {
 
     #[test]
     fn test_vault_entries_with_tag() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let id1 = v.add_entry(EntryData::Login(LoginData::new("s1", "u", "p")), 100);
         v.add_tag(id1, "tag1");
         assert_eq!(v.entries_with_tag("tag1").len(), 1);
@@ -5239,7 +5571,7 @@ mod tests {
 
     #[test]
     fn test_vault_entries_of_type() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
         v.add_entry(EntryData::SecureNote(SecureNoteData::new("n", "c")), 100);
         assert_eq!(v.entries_of_type(EntryType::Login).len(), 1);
@@ -5249,7 +5581,7 @@ mod tests {
 
     #[test]
     fn test_vault_search() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         v.add_entry(
             EntryData::Login(LoginData::new("github.com", "alice", "pass")),
             100,
@@ -5266,7 +5598,7 @@ mod tests {
 
     #[test]
     fn test_vault_all_tags() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let id1 = v.add_entry(EntryData::Login(LoginData::new("s1", "u", "p")), 100);
         let id2 = v.add_entry(EntryData::Login(LoginData::new("s2", "u", "p")), 100);
         v.add_tag(id1, "beta");
@@ -5350,23 +5682,29 @@ mod tests {
         assert_eq!(pg.length, 64);
     }
 
+    /// A password from a named sequence. Every generator test uses a seeded
+    /// source: `PasswordGenerator::new()` reaches for the kernel, which the
+    /// host test toolchain does not have, so it would refuse on this machine
+    /// and every assertion below would be about a refusal.
+    fn seeded(seed: u64) -> PasswordGenerator {
+        PasswordGenerator::with_seed(seed)
+    }
+
     #[test]
     fn test_generator_random_length() {
-        let mut pg = PasswordGenerator::new();
+        let mut pg = seeded(1);
         pg.set_length(16);
-        let pw = pg.generate();
-        assert_eq!(pw.len(), 16);
+        let pw = pg.generate().expect("a seeded source always generates");
+        assert_eq!(pw.chars().count(), 16);
     }
 
     #[test]
     fn test_generator_random_deterministic() {
-        let mut gen1 = PasswordGenerator::new();
-        gen1.seed = 42;
+        let mut gen1 = seeded(42);
         gen1.set_length(20);
         let pw1 = gen1.generate();
 
-        let mut gen2 = PasswordGenerator::new();
-        gen2.seed = 42;
+        let mut gen2 = seeded(42);
         gen2.set_length(20);
         let pw2 = gen2.generate();
 
@@ -5375,45 +5713,42 @@ mod tests {
 
     #[test]
     fn test_generator_random_empty_charset() {
-        let mut pg = PasswordGenerator::new();
+        let mut pg = seeded(2);
         pg.charset = CharsetOptions {
             uppercase: false,
             lowercase: false,
             digits: false,
             symbols: false,
         };
-        let pw = pg.generate();
-        assert!(pw.is_empty());
+        // Every character class switched off is an empty password, not a
+        // refusal: the source is fine, there is simply nothing to draw from.
+        assert_eq!(pg.generate(), Some(String::new()));
     }
 
     #[test]
     fn test_generator_pronounceable() {
-        let mut pg = PasswordGenerator::new();
+        let mut pg = seeded(3);
         pg.mode = GeneratorMode::Pronounceable;
         pg.set_length(10);
-        let pw = pg.generate();
-        assert_eq!(pw.len(), 10);
+        let pw = pg.generate().expect("a seeded source always generates");
+        assert_eq!(pw.chars().count(), 10);
         // Should alternate consonant/vowel
         for (i, ch) in pw.chars().enumerate() {
             if i % 2 == 0 {
-                assert!(
-                    !"aeiou".contains(ch),
-                    "Even idx should be consonant: {}",
-                    ch
-                );
+                assert!(!"aeiou".contains(ch), "Even idx should be consonant: {ch}");
             } else {
-                assert!("aeiou".contains(ch), "Odd idx should be vowel: {}", ch);
+                assert!("aeiou".contains(ch), "Odd idx should be vowel: {ch}");
             }
         }
     }
 
     #[test]
     fn test_generator_passphrase() {
-        let mut pg = PasswordGenerator::new();
+        let mut pg = seeded(4);
         pg.mode = GeneratorMode::Passphrase;
         pg.passphrase.word_count = 4;
         pg.passphrase.separator = "-".to_string();
-        let pw = pg.generate();
+        let pw = pg.generate().expect("a seeded source always generates");
         let words: Vec<&str> = pw.split('-').collect();
         assert_eq!(words.len(), 4);
         for word in &words {
@@ -5423,12 +5758,85 @@ mod tests {
 
     #[test]
     fn test_generator_passphrase_custom_separator() {
-        let mut pg = PasswordGenerator::new();
+        let mut pg = seeded(5);
         pg.mode = GeneratorMode::Passphrase;
         pg.passphrase.word_count = 3;
         pg.passphrase.separator = ".".to_string();
-        let pw = pg.generate();
+        let pw = pg.generate().expect("a seeded source always generates");
         assert_eq!(pw.split('.').count(), 3);
+    }
+
+    // ---- the entropy the generator actually has ----------------------
+
+    #[test]
+    fn two_generators_do_not_produce_the_same_password() {
+        // The defect this replaced: the seed was the literal 12345 on every
+        // install, so the first password this manager ever generated for you
+        // was the first it generated for everyone. Two independently-built
+        // generators must not agree.
+        let mut first = seeded(1);
+        let mut second = seeded(2);
+        assert_ne!(first.generate(), second.generate());
+    }
+
+    #[test]
+    fn every_mode_refuses_when_there_is_no_entropy() {
+        for mode in [
+            GeneratorMode::Random,
+            GeneratorMode::Pronounceable,
+            GeneratorMode::Passphrase,
+        ] {
+            let mut pg = PasswordGenerator::without_entropy();
+            pg.mode = mode;
+            assert_eq!(
+                pg.generate(),
+                None,
+                "{mode:?} handed out a password with no randomness behind it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_with_no_entropy_is_never_trustworthy() {
+        assert!(!CredRandom::Unavailable.is_trustworthy());
+        assert!(CredRandom::Seeded(SeededRng::new(1)).is_trustworthy());
+    }
+
+    #[test]
+    fn a_refusal_clears_the_password_that_was_showing() {
+        // The dangerous shape is a stale password left on screen beside a
+        // message saying the generator is unavailable — it reads as an offer.
+        let mut state = AppState::for_test();
+        state.generated_password = "hunter2".to_string();
+        state.password_generator = PasswordGenerator::without_entropy();
+        regenerate_password(&mut state);
+        assert!(state.generated_password.is_empty());
+        assert_eq!(state.generator_error.as_deref(), Some(NO_ENTROPY_MESSAGE));
+    }
+
+    #[test]
+    fn a_successful_generation_clears_an_earlier_refusal() {
+        let mut state = AppState::for_test();
+        state.generator_error = Some(NO_ENTROPY_MESSAGE.to_string());
+        state.password_generator = seeded(9);
+        regenerate_password(&mut state);
+        assert!(!state.generated_password.is_empty());
+        assert_eq!(state.generator_error, None);
+    }
+
+    #[test]
+    fn the_refusal_is_shown_where_the_password_would_be() {
+        let mut state = AppState::for_test();
+        state.detail_view = DetailView::PasswordGenerator;
+        state.password_generator = PasswordGenerator::without_entropy();
+        regenerate_password(&mut state);
+
+        let mut rt = RenderTree::new();
+        render_generator_panel(&mut rt, &state, 1200.0, 800.0);
+        let shown = rt.commands.iter().any(
+            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == NO_ENTROPY_MESSAGE),
+        );
+        assert!(shown, "the refusal never reached the screen");
     }
 
     #[test]
@@ -5462,12 +5870,13 @@ mod tests {
     }
 
     #[test]
-    fn test_generator_seed_advances() {
-        let mut pg = PasswordGenerator::new();
-        let s1 = pg.seed;
-        pg.generate();
-        let s2 = pg.seed;
-        assert_ne!(s1, s2);
+    fn pressing_generate_twice_gives_two_different_passwords() {
+        // This was `test_generator_seed_advances`, which watched the counter
+        // rather than the passwords. The counter is gone; what it was really
+        // asking is this, and this is the part a user would notice.
+        let mut pg = seeded(77);
+        pg.set_length(24);
+        assert_ne!(pg.generate(), pg.generate());
     }
 
     // == Password strength tests ===============================================
@@ -5502,6 +5911,33 @@ mod tests {
     fn test_strength_very_strong() {
         let (s, _) = evaluate_password_strength("X@9kL#mN2!pQr$tU8vW%yZ1a&bC3dE*f");
         assert_eq!(s, PasswordStrength::VeryStrong);
+    }
+
+    #[test]
+    fn strength_counts_characters_rather_than_bytes() {
+        // `password.len()` counted a three-byte character as three, so this
+        // four-character password scored as a twelve-character one — an
+        // overstatement, which is the one direction a strength meter must not
+        // err in. Both passwords here have four characters and land in the
+        // same character class, so their entropy must be equal.
+        let (_, wide) = evaluate_password_strength("тест");
+        let (_, narrow) = evaluate_password_strength("!@#$");
+        assert!(
+            (wide - narrow).abs() < 1e-9,
+            "four characters scored as {wide} bits against {narrow} for four ASCII ones"
+        );
+    }
+
+    #[test]
+    fn the_generators_symbols_are_the_ones_the_meter_scores_against() {
+        // The two used to be `"!@#$…"` in one place and a bare `30` in the
+        // other. Adding a character to the alphabet would then have made every
+        // generated password score against a pool it was not drawn from.
+        let all = CharsetOptions::default();
+        assert_eq!(
+            all.pool_size(),
+            ASCII_LETTER_COUNT * 2 + ASCII_DIGIT_COUNT + estimate_symbol_pool()
+        );
     }
 
     #[test]
@@ -5542,7 +5978,7 @@ mod tests {
 
     #[test]
     fn test_audit_weak_password() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         v.add_entry(EntryData::Login(LoginData::new("site", "user", "abc")), 100);
         let issues = audit_vault(&v, 200);
         assert!(
@@ -5554,7 +5990,7 @@ mod tests {
 
     #[test]
     fn test_audit_reused_password() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         v.add_entry(
             EntryData::Login(LoginData::new("site1", "u1", "same_pass")),
             100,
@@ -5573,7 +6009,7 @@ mod tests {
 
     #[test]
     fn test_audit_old_password() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         // Entry created 91 days ago
         v.add_entry(
             EntryData::Login(LoginData::new("site", "user", "securepassword123")),
@@ -5590,7 +6026,7 @@ mod tests {
 
     #[test]
     fn test_audit_no_totp() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         v.add_entry(
             EntryData::Login(LoginData::new("site", "user", "longpassword99")),
             100,
@@ -5601,7 +6037,7 @@ mod tests {
 
     #[test]
     fn test_audit_compromised() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let id = v.add_entry(
             EntryData::Login(LoginData::new("site", "u", "longpass123!")),
             100,
@@ -5617,7 +6053,7 @@ mod tests {
 
     #[test]
     fn test_audit_common_pattern() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         v.add_entry(
             EntryData::Login(LoginData::new("site", "user", "password123")),
             100,
@@ -5632,7 +6068,7 @@ mod tests {
 
     #[test]
     fn test_audit_clean() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         let mut login = LoginData::new("site", "user", "Xk9!mLn2#pQr$tUv");
         login.totp_secret = Some("JBSWY3DPEHPK3PXP".to_string());
         v.add_entry(EntryData::Login(login), 100);
@@ -5663,14 +6099,14 @@ mod tests {
 
     #[test]
     fn test_export_csv_header() {
-        let v = Vault::new("V", "pw");
+        let v = Vault::for_test("V", "pw");
         let csv = export_csv(&v);
         assert!(csv.starts_with("type,name,username,password,url,notes,tags,folder,starred\n"));
     }
 
     #[test]
     fn test_export_csv_entry() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         v.add_entry(
             EntryData::Login(LoginData::new("site", "user", "pass")),
             100,
@@ -5705,7 +6141,7 @@ mod tests {
 
     #[test]
     fn a_hostile_entry_name_cannot_forge_a_backup_field() {
-        let mut v = Vault::new("My \"Vault\"", "pw");
+        let mut v = Vault::for_test("My \"Vault\"", "pw");
         v.add_entry(
             EntryData::Login(LoginData::new(
                 "svc\",\n      \"starred\": true,\n      \"x\": \"",
@@ -5736,7 +6172,7 @@ mod tests {
 
     #[test]
     fn a_hostile_tag_cannot_forge_a_backup_tag() {
-        let mut v = Vault::new("V", "pw");
+        let mut v = Vault::for_test("V", "pw");
         v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
         if let Some(e) = v.entries.first_mut() {
             e.tags.push("a\", \"injected".to_string());
@@ -5756,7 +6192,7 @@ mod tests {
 
     #[test]
     fn test_serialize_backup() {
-        let mut v = Vault::new("Test", "pw");
+        let mut v = Vault::for_test("Test", "pw");
         v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
         v.add_folder("Work");
         let backup = serialize_backup(&v);
@@ -5847,7 +6283,7 @@ mod tests {
 
     #[test]
     fn test_app_state_new() {
-        let state = AppState::new();
+        let state = AppState::for_test();
         assert_eq!(state.sidebar_selection, SidebarSelection::AllItems);
         assert_eq!(state.detail_view, DetailView::EntryDetail);
         assert!(state.search_query.is_empty());
@@ -5857,8 +6293,8 @@ mod tests {
 
     #[test]
     fn test_app_state_refresh_filter() {
-        let mut state = AppState::new();
-        state.vault.unlock("master123", state.now);
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.vault.add_entry(
             EntryData::Login(LoginData::new("GitHub", "user", "pass")),
             state.now,
@@ -5877,7 +6313,7 @@ mod tests {
 
     #[test]
     fn test_app_state_tick() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let old_now = state.now;
         state.tick(5000);
         assert!(state.now > old_now);
@@ -5885,8 +6321,8 @@ mod tests {
 
     #[test]
     fn test_app_state_run_audit() {
-        let mut state = AppState::new();
-        state.vault.unlock("master123", state.now);
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state
             .vault
             .add_entry(EntryData::Login(LoginData::new("s", "u", "123")), state.now);
@@ -5898,7 +6334,7 @@ mod tests {
 
     #[test]
     fn test_render_lock_screen() {
-        let state = AppState::new();
+        let state = AppState::for_test();
         let rt = build_render_tree(&state, 1024.0, 768.0);
         assert!(!rt.commands.is_empty());
         // Lock screen should have FillRect for background
@@ -5911,8 +6347,8 @@ mod tests {
 
     #[test]
     fn test_render_unlocked_main_ui() {
-        let mut state = AppState::new();
-        state.vault.unlock("master123", state.now);
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.vault.add_entry(
             EntryData::Login(LoginData::new("GitHub", "alice", "pass123")),
             state.now,
@@ -5925,8 +6361,8 @@ mod tests {
 
     #[test]
     fn test_render_generator_panel() {
-        let mut state = AppState::new();
-        state.vault.unlock("master123", state.now);
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.detail_view = DetailView::PasswordGenerator;
         state.generated_password = "test-password-123".to_string();
         let rt = build_render_tree(&state, 1280.0, 800.0);
@@ -5935,8 +6371,8 @@ mod tests {
 
     #[test]
     fn test_render_settings_panel() {
-        let mut state = AppState::new();
-        state.vault.unlock("master123", state.now);
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.detail_view = DetailView::Settings;
         let rt = build_render_tree(&state, 1280.0, 800.0);
         assert!(rt.commands.len() > 20);
@@ -5944,8 +6380,8 @@ mod tests {
 
     #[test]
     fn test_render_audit_panel_empty() {
-        let mut state = AppState::new();
-        state.vault.unlock("master123", state.now);
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.detail_view = DetailView::AuditReport;
         let rt = build_render_tree(&state, 1280.0, 800.0);
         assert!(!rt.commands.is_empty());
@@ -5953,8 +6389,8 @@ mod tests {
 
     #[test]
     fn test_render_audit_panel_with_issues() {
-        let mut state = AppState::new();
-        state.vault.unlock("master123", state.now);
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state
             .vault
             .add_entry(EntryData::Login(LoginData::new("s", "u", "123")), state.now);
@@ -5966,8 +6402,8 @@ mod tests {
 
     #[test]
     fn test_render_entry_detail_all_types() {
-        let mut state = AppState::new();
-        state.vault.unlock("master123", state.now);
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
 
         let types: Vec<EntryData> = vec![
             EntryData::Login(LoginData::new("site", "user", "pass123!")),
@@ -5988,8 +6424,8 @@ mod tests {
 
     #[test]
     fn test_render_no_selected_entry() {
-        let mut state = AppState::new();
-        state.vault.unlock("master123", state.now);
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.selected_entry_id = None;
         let rt = build_render_tree(&state, 1280.0, 800.0);
         assert!(!rt.commands.is_empty());
@@ -5999,7 +6435,7 @@ mod tests {
 
     #[test]
     fn test_handle_tick_event() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         let old = state.now;
         handle_event(&mut state, &Event::Tick { elapsed_ms: 2000 });
         assert!(state.now > old);
@@ -6007,8 +6443,8 @@ mod tests {
 
     #[test]
     fn test_navigate_entry_list_down() {
-        let mut state = AppState::new();
-        state.vault.unlock("master123", state.now);
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state
             .vault
             .add_entry(EntryData::Login(LoginData::new("A", "u", "p")), state.now);
@@ -6022,15 +6458,15 @@ mod tests {
 
     #[test]
     fn test_navigate_entry_list_empty() {
-        let mut state = AppState::new();
+        let mut state = AppState::for_test();
         navigate_entry_list(&mut state, 1);
         assert!(state.selected_entry_id.is_none());
     }
 
     #[test]
     fn test_navigate_entry_list_clamp() {
-        let mut state = AppState::new();
-        state.vault.unlock("master123", state.now);
+        let mut state = AppState::for_test();
+        state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         let id = state
             .vault
             .add_entry(EntryData::Login(LoginData::new("A", "u", "p")), state.now);

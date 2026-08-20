@@ -27,6 +27,7 @@ use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
@@ -1552,40 +1553,32 @@ impl ScanResult {
 // Scan Simulation Engine
 // ============================================================================
 
-/// Deterministic pseudo-random generator for reproducible simulation.
-struct SimRng {
-    state: u64,
+/// The simulation's generator.
+///
+/// Seeded from the thing being simulated so that scanning the same subnet
+/// twice tells the same story — a simulated result that changed every time it
+/// was looked at would be worse than useless for reading the UI against.
+///
+/// This used to be a xorshift written out here, with three defects the shared
+/// generator does not have: seeding it with zero — which a traceroute to
+/// `0.0.0.0` did, since the seed was the destination address — left it in the
+/// state a xorshift can never leave, so every draw came back zero and every
+/// hop of that route timed out; its `next_f32` had only ten thousand distinct
+/// values, so a probability finer than 0.0001 was silently rounded; and its
+/// range reduction was a plain remainder over the weak low half of the state,
+/// which favours the low end of every range.
+type SimRng = SeededRng;
+
+/// A whole number in `min..=max`, for the simulation's discrete choices.
+fn sim_range(rng: &mut SimRng, min: u32, max: u32) -> u32 {
+    let drawn = rng.between(i64::from(min), i64::from(max));
+    u32::try_from(drawn).unwrap_or(min)
 }
 
-impl SimRng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        // xorshift64
-        self.state ^= self.state << 13;
-        self.state ^= self.state >> 7;
-        self.state ^= self.state << 17;
-        self.state
-    }
-
-    fn next_f32(&mut self) -> f32 {
-        (self.next_u64() % 10000) as f32 / 10000.0
-    }
-
-    fn next_range(&mut self, min: u32, max: u32) -> u32 {
-        let range = max.saturating_sub(min).saturating_add(1);
-        if range == 0 {
-            return min;
-        }
-        let val = self.next_u64() as u32;
-        min.saturating_add(val % range)
-    }
-
-    fn next_bool(&mut self, probability: f32) -> bool {
-        self.next_f32() < probability
-    }
+/// One address octet in `min..=max`.
+fn sim_octet(rng: &mut SimRng, min: u8, max: u8) -> u8 {
+    let drawn = rng.between(i64::from(min), i64::from(max));
+    u8::try_from(drawn).unwrap_or(min)
 }
 
 /// Generate a simulated hostname for an IP.
@@ -1594,9 +1587,8 @@ fn simulated_hostname(ip: Ipv4Addr, rng: &mut SimRng) -> Option<String> {
         "desktop", "laptop", "server", "printer", "nas", "router", "switch", "camera", "phone",
         "tablet", "tv", "iot",
     ];
-    if rng.next_bool(0.7) {
-        let idx = (rng.next_u64() as usize) % prefixes.len();
-        let prefix = prefixes.get(idx).copied().unwrap_or("host");
+    if rng.chance(0.7) {
+        let prefix = rng.choose(&prefixes).copied().unwrap_or("host");
         Some(format!("{}-{}", prefix, ip.octets[3]))
     } else {
         None
@@ -1654,15 +1646,15 @@ fn guess_vendor(mac: &MacAddr) -> Option<String> {
 /// Simulate scanning a single host.
 fn simulate_host_scan(ip: Ipv4Addr, scan_ports: &[u16], rng: &mut SimRng) -> Option<HostResult> {
     // Determine if host is "up" — give ~60% probability for simulated network
-    let is_up = rng.next_bool(0.6);
+    let is_up = rng.chance(0.6);
     if !is_up {
         return None;
     }
 
-    let latency = 0.5 + rng.next_f32() * 50.0;
+    let latency = 0.5 + rng.unit_f32() * 50.0;
     let mac = MacAddr::from_ip_simulated(ip);
     let hostname = simulated_hostname(ip, rng);
-    let ttl_val = if rng.next_bool(0.5) { 64u8 } else { 128u8 };
+    let ttl_val = if rng.chance(0.5) { 64u8 } else { 128u8 };
     let vendor = guess_vendor(&mac);
 
     let mut ports = Vec::new();
@@ -1678,9 +1670,9 @@ fn simulate_host_scan(ip: Ipv4Addr, scan_ports: &[u16], rng: &mut SimRng) -> Opt
             _ => 0.05,
         };
 
-        let state = if rng.next_bool(open_prob) {
+        let state = if rng.chance(open_prob) {
             PortState::Open
-        } else if rng.next_bool(0.1) {
+        } else if rng.chance(0.1) {
             PortState::Filtered
         } else {
             PortState::Closed
@@ -1688,12 +1680,12 @@ fn simulate_host_scan(ip: Ipv4Addr, scan_ports: &[u16], rng: &mut SimRng) -> Opt
 
         if state == PortState::Open || state == PortState::Filtered {
             let service = lookup_service(port_val).map(|s| s.to_string());
-            let banner = if state == PortState::Open && rng.next_bool(0.4) {
+            let banner = if state == PortState::Open && rng.chance(0.4) {
                 Some(simulated_banner(port_val))
             } else {
                 None
             };
-            let response = latency + rng.next_f32() * 10.0;
+            let response = latency + rng.unit_f32() * 10.0;
             ports.push(PortResult {
                 port: port_val,
                 state,
@@ -1739,13 +1731,17 @@ fn simulated_banner(port: u16) -> String {
 
 /// Simulate a traceroute to a destination IP.
 fn simulate_traceroute(dest: Ipv4Addr) -> Vec<TracerouteHop> {
-    let mut rng = SimRng::new(dest.to_u32() as u64);
-    let hop_count = rng.next_range(4, 12) as u8;
+    // The address seeds the route, so the same destination always traces the
+    // same way. `0.0.0.0` is a legal thing to type and seeds this with zero —
+    // which the generator this replaced could not recover from, returning zero
+    // forever and timing out every hop of the route.
+    let mut rng = SimRng::new(u64::from(dest.to_u32()));
+    let hop_count = sim_octet(&mut rng, 4, 12);
     let mut hops = Vec::new();
 
     let mut hop_num: u8 = 1;
     while hop_num <= hop_count {
-        let timed_out = rng.next_bool(0.1);
+        let timed_out = rng.chance(0.1);
         if timed_out {
             hops.push(TracerouteHop {
                 hop_number: hop_num,
@@ -1756,13 +1752,13 @@ fn simulate_traceroute(dest: Ipv4Addr) -> Vec<TracerouteHop> {
             });
         } else {
             let hop_ip = Ipv4Addr::new(
-                10u8.saturating_add((rng.next_range(0, 245)) as u8),
-                (rng.next_range(0, 255)) as u8,
-                (rng.next_range(0, 255)) as u8,
-                (rng.next_range(1, 254)) as u8,
+                10u8.saturating_add(sim_octet(&mut rng, 0, 245)),
+                sim_octet(&mut rng, 0, 255),
+                sim_octet(&mut rng, 0, 255),
+                sim_octet(&mut rng, 1, 254),
             );
-            let rtt = (hop_num as f32) * 2.5 + rng.next_f32() * 15.0;
-            let hostname = if rng.next_bool(0.5) {
+            let rtt = f32::from(hop_num) * 2.5 + rng.unit_f32() * 15.0;
+            let hostname = if rng.chance(0.5) {
                 Some(format!("hop-{}.isp.net", hop_num))
             } else {
                 None
@@ -1786,7 +1782,7 @@ fn simulate_traceroute(dest: Ipv4Addr) -> Vec<TracerouteHop> {
         hop_number: hop_num,
         ip: Some(dest),
         hostname: None,
-        rtt_ms: (hop_count as f32) * 3.0 + rng.next_f32() * 20.0,
+        rtt_ms: f32::from(hop_count) * 3.0 + rng.unit_f32() * 20.0,
         timed_out: false,
     });
 
@@ -5277,8 +5273,85 @@ mod tests {
     fn test_sim_rng_range() {
         let mut rng = SimRng::new(123);
         for _ in 0..100 {
-            let val = rng.next_range(10, 20);
+            let val = sim_range(&mut rng, 10, 20);
             assert!((10..=20).contains(&val));
+        }
+    }
+
+    #[test]
+    fn a_degenerate_range_is_the_single_value_it_asks_for() {
+        let mut rng = SimRng::new(9);
+        for _ in 0..50 {
+            assert_eq!(sim_range(&mut rng, 7, 7), 7);
+            assert_eq!(sim_octet(&mut rng, 200, 200), 200);
+        }
+        // Reversed bounds are a caller's mistake; answering with the low bound
+        // keeps the value inside whichever range was meant.
+        assert_eq!(sim_range(&mut rng, 20, 10), 20);
+    }
+
+    #[test]
+    fn tracing_the_all_zero_address_still_finds_a_route() {
+        // The seed is the destination address, and `0.0.0.0` is a legal thing
+        // to type into the box. The generator this replaced could not leave
+        // the all-zero state, so every draw came back zero: the hop count was
+        // its minimum, every hop's 0.1 timeout chance fired, and the route was
+        // a wall of asterisks with no addresses in it at all.
+        let hops = simulate_traceroute(Ipv4Addr::new(0, 0, 0, 0));
+        assert!(
+            hops.len() >= 2,
+            "a route is at least a hop and a destination"
+        );
+        // The last hop is the destination and is pushed unconditionally, so it
+        // proves nothing about the generator; the route *through* the network
+        // is what went blank.
+        let Some((_, route)) = hops.split_last() else {
+            panic!("a route is at least a hop and a destination");
+        };
+        assert!(
+            route.iter().any(|hop| !hop.timed_out),
+            "all {} intermediate hops timed out — the generator is stuck at zero",
+            route.len()
+        );
+    }
+
+    #[test]
+    fn the_same_destination_always_traces_the_same_route() {
+        // Seeding from the address is what makes the simulated view stable
+        // while the user reads it; if it ever picked up ambient state, the
+        // panel would rewrite itself on every repaint.
+        let dest = Ipv4Addr::new(203, 0, 113, 7);
+        let first = simulate_traceroute(dest);
+        let second = simulate_traceroute(dest);
+        assert_eq!(first.len(), second.len());
+        for (a, b) in first.iter().zip(&second) {
+            assert_eq!(
+                (a.hop_number, a.ip, a.timed_out),
+                (b.hop_number, b.ip, b.timed_out)
+            );
+        }
+        // And a different destination is a different route.
+        let other = simulate_traceroute(Ipv4Addr::new(198, 51, 100, 22));
+        assert_ne!(
+            first.iter().map(|h| h.ip).collect::<Vec<_>>(),
+            other.iter().map(|h| h.ip).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn every_traced_hop_is_numbered_in_order_and_ends_at_the_destination() {
+        for octet in 0..32u8 {
+            let dest = Ipv4Addr::new(192, 168, 1, octet);
+            let hops = simulate_traceroute(dest);
+            for (i, hop) in hops.iter().enumerate() {
+                let expected = u8::try_from(i.saturating_add(1)).unwrap_or(u8::MAX);
+                assert_eq!(hop.hop_number, expected, "hop {i} of the route to {dest:?}");
+            }
+            assert_eq!(
+                hops.last().and_then(|hop| hop.ip),
+                Some(dest),
+                "a route must arrive"
+            );
         }
     }
 

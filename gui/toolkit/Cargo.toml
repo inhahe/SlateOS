@@ -17,5 +17,13 @@ textfind = { path = "../../textfind" }
 # nothing. See tzrules/src/lib.rs's "Why this is a crate and not a module".
 tzrules = { path = "../../tzrules" }
 
+# The shared random-number source, re-exported as `guitk::rng`. It used to be a
+# module here, but the entropy source it carries is needed by headless
+# components too — the credential service, which cannot reasonably depend on a
+# GUI toolkit — so it moved into the `no_std`, dependency-free crate the games
+# were already using. See randrange/src/lib.rs's "This crate was itself
+# duplicated".
+randrange = { path = "../../randrange" }
+
 [lints]
 workspace = true

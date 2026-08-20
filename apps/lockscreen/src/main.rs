@@ -25,6 +25,7 @@ use guitk::event::{
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use pwkdf::{KdfError, KdfParams, PasswordVerifier};
 use guitk::text;
 
 // ============================================================================
@@ -230,52 +231,127 @@ fn compute_initials(name: &str) -> String {
 // Password validator
 // ============================================================================
 
-/// Simple password validator that compares against a stored SHA-256 hash.
+/// Separates this screen's stored verifier from every other caller's.
 ///
-/// In a real system this would call into the OS credential store via IPC.
-/// Here we use a basic SHA-256 comparison for demonstration.
+/// Without it, a user who reuses one password would produce the same stored
+/// value here and in the credential vault, and either could be replayed
+/// against the other.
+const VERIFIER_DOMAIN: &[u8] = b"slateos-lockscreen-verifier";
+
+/// Checks a typed password against a stored, salted, stretched verifier.
+///
+/// # What this used to be, and why it mattered
+///
+/// It stored a bare `SHA-256(password)`: no salt, one pass. Both halves were
+/// wrong, and each was wrong on its own.
+///
+/// *No salt* means the stored value depends only on the password, so one
+/// precomputed table of hashed common passwords opens this screen on every
+/// SlateOS machine ever installed — the attacker pays once, for everyone.
+/// `gui/credentials` had the weaker version of this bug (a salt, but a
+/// compile-time constant shared by every install) and it was fixed in
+/// design-decisions §464; this screen never got a salt at all.
+///
+/// *One pass* means testing a guess costs one SHA-256, so commodity GPU
+/// hardware runs through billions of candidates per second. A password's own
+/// entropy — 30–40 bits at best — cannot survive that; the only defence is to
+/// make each guess expensive, which is what [`pwkdf::DEFAULT_ROUNDS`] does.
+///
+/// # Why it is `pwkdf` rather than a local fix
+///
+/// The stored value here has to be one the credential store can produce: the
+/// comment this type used to carry said "in a real system this would call into
+/// the OS credential store via IPC", and that is still the plan. Two
+/// independently-correct derivations would still be *incompatible*, and on the
+/// day someone wires the two together the cheap way to reconcile them is to
+/// weaken the store to match the screen. Sharing the derivation now settles
+/// the format while nothing depends on it.
 #[derive(Clone, Debug)]
 pub struct PasswordValidator {
-    /// Stored SHA-256 hash of the password (32 bytes).
-    stored_hash: [u8; 32],
+    /// The stored verifier, with the salt and cost it was derived under.
+    ///
+    /// Not a bare hash: `PasswordVerifier` keeps the three values that must
+    /// agree together, because a mismatch in any of them rejects the correct
+    /// password with no indication why.
+    verifier: PasswordVerifier,
 }
 
 impl PasswordValidator {
-    /// Create a validator with a pre-computed hash.
-    pub fn new(stored_hash: [u8; 32]) -> Self {
-        Self { stored_hash }
-    }
-
-    /// Create a validator from a known password (hashes it immediately).
-    /// Used for testing; in production the hash comes from the credential store.
-    pub fn from_password(password: &str) -> Self {
+    /// Rebuild a validator from what a credential store holds.
+    ///
+    /// `params` must be the salt and cost the verifier was created under. A
+    /// persistence layer that stores the verifier and loses the salt has
+    /// destroyed the account: every subsequent login fails, and the symptom
+    /// ("correct password rejected") does not point at the cause.
+    #[must_use]
+    pub const fn from_stored(params: KdfParams, verifier: [u8; 32]) -> Self {
         Self {
-            stored_hash: sha256_hash(password.as_bytes()),
+            verifier: PasswordVerifier::from_parts(params, VERIFIER_DOMAIN, verifier),
         }
     }
 
-    /// Validate a candidate password against the stored hash.
+    /// Enrol a new password, drawing a fresh salt from the kernel.
+    ///
+    /// # Errors
+    ///
+    /// [`KdfError::EntropyUnavailable`] if the kernel CSPRNG cannot be
+    /// reached. Propagated rather than papered over with a fallback salt: this
+    /// is the *secret* tier of design-decisions §465, and a predictable salt
+    /// chosen once outlives every later chance to notice it. Refusing to
+    /// enrol is recoverable; enrolling against a guessable salt is not.
+    pub fn enrol(password: &str) -> Result<Self, KdfError> {
+        let params = KdfParams::fresh(pwkdf::DEFAULT_ROUNDS)?;
+        Ok(Self {
+            verifier: PasswordVerifier::create(password.as_bytes(), params, VERIFIER_DOMAIN),
+        })
+    }
+
+    /// Whether `candidate` is the password this validator was built from.
+    ///
+    /// Costs a full derivation — deliberately ~130 ms at
+    /// [`pwkdf::DEFAULT_ROUNDS`]. That is the point, and it is why this is
+    /// called on submit rather than per keystroke.
+    #[must_use]
     pub fn validate(&self, candidate: &str) -> bool {
-        let candidate_hash = sha256_hash(candidate.as_bytes());
-        constant_time_eq(&self.stored_hash, &candidate_hash)
+        self.verifier.check(candidate.as_bytes())
+    }
+
+    /// The salt and cost, for a persistence layer to write down beside
+    /// [`Self::verifier`]. Both are required to check a password later.
+    #[must_use]
+    pub const fn params(&self) -> KdfParams {
+        self.verifier.params()
+    }
+
+    /// The stored verifier, for a persistence layer to write down.
+    #[must_use]
+    pub const fn verifier(&self) -> [u8; 32] {
+        self.verifier.verifier()
+    }
+
+    /// A validator for a known password, with a named salt and a cheap cost.
+    ///
+    /// `#[cfg(test)]` so that neither shortcut can reach production. Both are
+    /// deliberate and neither is safe outside a test: the fixed salt makes
+    /// assertions reproducible, and [`TEST_ROUNDS`] keeps a suite that builds
+    /// validators in helper functions from spending ~130 ms on each one.
+    #[cfg(test)]
+    fn for_test(password: &str) -> Self {
+        let params = KdfParams::new([0x5Au8; pwkdf::SALT_LEN], TEST_ROUNDS);
+        Self {
+            verifier: PasswordVerifier::create(password.as_bytes(), params, VERIFIER_DOMAIN),
+        }
     }
 }
 
-/// SHA-256 of `data`.
+/// Iteration count for validators built by tests.
 ///
-/// This file used to carry its own transcription of FIPS 180-4 -- one of
-/// twenty-six copies in the tree. The algorithm and its published vectors now
-/// live in `sha2`, once; the audit that counted the copies found two that
-/// were not SHA-256 at all, which is what a shared implementation with
-/// known-answer tests prevents.
-fn sha256_hash(data: &[u8]) -> [u8; 32] {
-    sha2::sha256(data)
-}
-
-/// Constant-time comparison to avoid timing side-channels on password hashes.
-fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    sha2::eq_constant_time(a, b)
-}
+/// The properties under test — that the right password is accepted, that a
+/// wrong one is not, that the salt is honoured — do not depend on the number
+/// of rounds, and [`pwkdf::DEFAULT_ROUNDS`] is chosen to take ~130 ms, which
+/// several helper functions per test would turn into a slow suite.
+#[cfg(test)]
+const TEST_ROUNDS: u32 = 16;
 
 // ============================================================================
 // Lock screen configuration
@@ -476,13 +552,15 @@ impl LockoutTimer {
         if !self.active {
             return false;
         }
-        self.ms_accumulator = self.ms_accumulator.saturating_add(dt_ms);
-        while self.ms_accumulator >= 1000 {
-            self.ms_accumulator -= 1000;
-            if self.remaining_secs > 0 {
-                self.remaining_secs -= 1;
-            }
-        }
+        // Divide rather than loop. The `while` this replaces subtracted 1000
+        // per iteration, so a single large `dt_ms` -- the frame after a
+        // suspend, or a debugger pause -- spun it once per elapsed
+        // millisecond/1000 while doing nothing a division does not. It also
+        // needed two guards to keep its two subtractions from underflowing,
+        // both of which the compiler had to take on trust.
+        let total_ms = self.ms_accumulator.saturating_add(dt_ms);
+        self.ms_accumulator = total_ms % 1000;
+        self.remaining_secs = self.remaining_secs.saturating_sub(total_ms / 1000);
         if self.remaining_secs == 0 {
             self.active = false;
             self.ms_accumulator = 0;
@@ -576,6 +654,85 @@ fn build_accessibility_text(lock_screen: &LockScreen) -> String {
 // Main lock screen struct
 // ============================================================================
 
+/// A list of users with at least one entry, guaranteed by construction.
+///
+/// `LockScreen::new` already substituted a placeholder when handed an empty
+/// vector, so "there is always a user to log in as" was true — but true by
+/// *convention*, established in one constructor and depended on by
+/// [`LockScreen::active_user`] and its nine callers. The compiler knew none of
+/// it, so `active_user` carried a fallback that read `&self.users[0]` under a
+/// comment saying it should never happen. That fallback panics in exactly the
+/// situation it was written to survive: if the list were ever empty, `get`
+/// returns `None` and the "defensive" branch then indexes the empty vector.
+///
+/// Splitting the first user out of the vector makes the invariant structural.
+/// There is no empty state to defend against, so there is no fallback to get
+/// wrong.
+#[derive(Clone, Debug)]
+pub struct UserList {
+    /// The user that always exists.
+    first: UserInfo,
+    /// Any others, in order after `first`.
+    rest: Vec<UserInfo>,
+}
+
+impl UserList {
+    /// Build a list, substituting a placeholder user if `users` is empty.
+    ///
+    /// The substitution is the behaviour `LockScreen::new` already had; it
+    /// moves here so that it happens at the point the invariant is
+    /// established rather than one layer above it.
+    #[must_use]
+    pub fn new(users: Vec<UserInfo>) -> Self {
+        let mut it = users.into_iter();
+        let first = it
+            .next()
+            .unwrap_or_else(|| UserInfo::new("user", "User", true));
+        Self {
+            first,
+            rest: it.collect(),
+        }
+    }
+
+    /// How many users there are. Never zero.
+    #[must_use]
+    #[allow(
+        clippy::len_without_is_empty,
+        reason = "an `is_empty` here would be a function that returns `false`, \
+                  and its only effect would be to invite callers to write a \
+                  branch that can never be taken -- which is the habit this \
+                  type exists to remove"
+    )]
+    pub fn len(&self) -> usize {
+        self.rest.len().saturating_add(1)
+    }
+
+    /// The user at `index`, or `None` if there is no such user.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&UserInfo> {
+        match index {
+            0 => Some(&self.first),
+            // `checked_sub` rather than `index - 1`: the match arm above means
+            // `index >= 1` here, but that is a fact about the match, not about
+            // the type, and expressing it as a subtraction that cannot
+            // underflow costs nothing.
+            n => n.checked_sub(1).and_then(|i| self.rest.get(i)),
+        }
+    }
+
+    /// The first user. Total, because the list cannot be empty — this is what
+    /// replaces `&self.users[0]`.
+    #[must_use]
+    pub const fn first(&self) -> &UserInfo {
+        &self.first
+    }
+
+    /// Iterate every user in order.
+    pub fn iter(&self) -> impl Iterator<Item = &UserInfo> {
+        core::iter::once(&self.first).chain(self.rest.iter())
+    }
+}
+
 /// The lock screen application state.
 #[derive(Clone, Debug)]
 pub struct LockScreen {
@@ -590,8 +747,8 @@ pub struct LockScreen {
     pub date: Option<DateInfo>,
     /// Configuration.
     pub config: LockScreenConfig,
-    /// List of users that can log in.
-    pub users: Vec<UserInfo>,
+    /// Users that can log in. Never empty — see [`UserList`].
+    pub users: UserList,
     /// Index of the currently selected user.
     pub selected_user_index: usize,
     /// Password input buffer (plaintext, never displayed).
@@ -625,11 +782,7 @@ impl LockScreen {
         config: LockScreenConfig,
         validator: Option<PasswordValidator>,
     ) -> Self {
-        let users = if users.is_empty() {
-            vec![UserInfo::new("user", "User", true)]
-        } else {
-            users
-        };
+        let users = UserList::new(users);
         Self {
             state: LockScreenState::Clock,
             screen_width: SCREEN_WIDTH,
@@ -654,21 +807,35 @@ impl LockScreen {
         }
     }
 
-    /// Create a lock screen with sensible defaults for testing.
-    pub fn default_single_user() -> Self {
+    /// A lock screen with a known password, for tests.
+    ///
+    /// `#[cfg(test)]` rather than `pub`, which is what it used to be. It has
+    /// never had a caller outside this file, and a public constructor that
+    /// silently installs the password `password123` on the screen guarding a
+    /// user's session is the kind of thing that acquires one by accident.
+    ///
+    /// It names its salt and uses [`TEST_ROUNDS`] instead of drawing a fresh
+    /// salt at full cost: a test must be reproducible and must not spend
+    /// ~130 ms per construction. Production enrolment is
+    /// [`PasswordValidator::enrol`], which does neither of those things.
+    #[cfg(test)]
+    fn default_single_user() -> Self {
         let user = UserInfo::new("admin", "Administrator", true)
             .with_hint("It's the name of your first pet");
-        let validator = PasswordValidator::from_password("password123");
+        let validator = PasswordValidator::for_test("password123");
         Self::new(vec![user], LockScreenConfig::default(), Some(validator))
     }
 
     /// Get the currently active/selected user.
+    ///
+    /// Falls back to the first user when the selection is out of range. That
+    /// fallback is total now: [`UserList::first`] cannot fail, where the
+    /// `&self.users[0]` it replaces would have panicked precisely when the
+    /// list it was defending against was empty.
     pub fn active_user(&self) -> &UserInfo {
-        self.users.get(self.selected_user_index).unwrap_or_else(|| {
-            // This should never happen if the constructor ensures non-empty,
-            // but we handle it defensively.
-            &self.users[0]
-        })
+        self.users
+            .get(self.selected_user_index)
+            .unwrap_or_else(|| self.users.first())
     }
 
     /// Whether there are multiple users to choose from.
@@ -1479,13 +1646,25 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // -- Helper factories --
 
     fn single_user_lockscreen() -> LockScreen {
         let user = UserInfo::new("alice", "Alice Johnson", true).with_hint("Name of your cat");
-        let validator = PasswordValidator::from_password("correcthorse");
+        let validator = PasswordValidator::for_test("correcthorse");
         LockScreen::new(vec![user], LockScreenConfig::default(), Some(validator))
     }
 
@@ -1495,7 +1674,7 @@ mod tests {
             UserInfo::new("bob", "Bob Smith", true),
             UserInfo::new("charlie", "Charlie Brown", false),
         ];
-        let validator = PasswordValidator::from_password("correcthorse");
+        let validator = PasswordValidator::for_test("correcthorse");
         LockScreen::new(users, LockScreenConfig::default(), Some(validator))
     }
 
@@ -1569,73 +1748,81 @@ mod tests {
 
     #[test]
     fn test_validator_correct_password() {
-        let v = PasswordValidator::from_password("hello");
+        let v = PasswordValidator::for_test("hello");
         assert!(v.validate("hello"));
     }
 
     #[test]
     fn test_validator_wrong_password() {
-        let v = PasswordValidator::from_password("hello");
+        let v = PasswordValidator::for_test("hello");
         assert!(!v.validate("world"));
     }
 
     #[test]
     fn test_validator_empty_password() {
-        let v = PasswordValidator::from_password("");
+        let v = PasswordValidator::for_test("");
         assert!(v.validate(""));
         assert!(!v.validate("x"));
     }
 
     #[test]
     fn test_validator_unicode_password() {
-        let v = PasswordValidator::from_password("\u{1F600}password\u{1F600}");
+        let v = PasswordValidator::for_test("\u{1F600}password\u{1F600}");
         assert!(v.validate("\u{1F600}password\u{1F600}"));
         assert!(!v.validate("password"));
     }
 
-    // -- SHA-256 --
+    // -- What the stored verifier is --
+    //
+    // The five tests that used to sit here checked SHA-256 against its
+    // published vectors and checked `eq_constant_time` -- from a consumer, for
+    // a `sha2` that already owns both (`sha2/src/lib.rs` has the same two FIPS
+    // vectors and the same comparison test). They were deleted rather than
+    // ported: a duplicated known-answer test does not make the answer more
+    // known, and it made this file look like it had cryptographic test
+    // coverage when what it actually lacked -- any check that the stored value
+    // was salted or stretched at all -- had none. These replace them.
 
     #[test]
-    fn test_sha256_empty() {
-        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-        let hash = sha256_hash(b"");
-        assert_eq!(hash[0], 0xe3);
-        assert_eq!(hash[1], 0xb0);
-        assert_eq!(hash[31], 0x55);
+    fn the_stored_value_is_not_a_bare_hash_of_the_password() {
+        // The defect directly. A bare `sha256(password)` is what this file
+        // stored, and it is why one precomputed table opened every SlateOS
+        // machine: the stored value depended on nothing but the password.
+        let v = PasswordValidator::for_test("password123");
+        assert_ne!(v.verifier(), sha2::sha256(b"password123"));
     }
 
     #[test]
-    fn test_sha256_abc() {
-        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-        let hash = sha256_hash(b"abc");
-        assert_eq!(hash[0], 0xba);
-        assert_eq!(hash[1], 0x78);
-        assert_eq!(hash[31], 0xad);
+    fn two_installs_store_different_values_for_one_password() {
+        // What a salt is *for*. Without one these are equal, and an attacker
+        // who cracks a verifier from any machine has cracked it on all of them.
+        let a = PasswordValidator::for_test("password123");
+        let params_b = KdfParams::new([0x11u8; pwkdf::SALT_LEN], TEST_ROUNDS);
+        let b = PasswordValidator {
+            verifier: PasswordVerifier::create(b"password123", params_b, VERIFIER_DOMAIN),
+        };
+        assert_ne!(a.verifier(), b.verifier());
+        // Both still accept the password they were built from -- differing
+        // stored values must not mean one of them is broken.
+        assert!(a.validate("password123"));
+        assert!(b.validate("password123"));
     }
 
     #[test]
-    fn test_sha256_known_vector() {
-        // SHA-256("password123")
-        // = ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f
-        let hash = sha256_hash(b"password123");
-        assert_eq!(hash[0], 0xef);
-        assert_eq!(hash[1], 0x92);
-        assert_eq!(hash[31], 0x4f);
-    }
+    fn a_stored_validator_round_trips_through_its_salt_and_verifier() {
+        // The path a credential store will take: write down `params` and
+        // `verifier`, read them back, check a password. Losing the salt
+        // rejects the correct password, which is why `params()` exists.
+        let original = PasswordValidator::for_test("correcthorse");
+        let reloaded = PasswordValidator::from_stored(original.params(), original.verifier());
+        assert!(reloaded.validate("correcthorse"));
+        assert!(!reloaded.validate("correcthorsf"));
 
-    #[test]
-    fn test_constant_time_eq_equal() {
-        let a = [0xAAu8; 32];
-        let b = [0xAAu8; 32];
-        assert!(constant_time_eq(&a, &b));
-    }
-
-    #[test]
-    fn test_constant_time_eq_different() {
-        let a = [0xAAu8; 32];
-        let mut b = [0xAAu8; 32];
-        b[15] = 0xBB;
-        assert!(!constant_time_eq(&a, &b));
+        let wrong_salt = PasswordValidator::from_stored(
+            KdfParams::new([0xFFu8; pwkdf::SALT_LEN], TEST_ROUNDS),
+            original.verifier(),
+        );
+        assert!(!wrong_salt.validate("correcthorse"));
     }
 
     // -- Password input --
@@ -1906,6 +2093,44 @@ mod tests {
         let mut ls = multi_user_lockscreen();
         ls.select_user(999); // Should be a no-op.
         assert_eq!(ls.selected_user_index, 0);
+    }
+
+    // -- UserList: the non-empty invariant --
+
+    #[test]
+    fn a_lock_screen_built_from_no_users_still_has_someone_to_log_in_as() {
+        let ls = LockScreen::new(Vec::new(), LockScreenConfig::default(), None);
+        assert_eq!(ls.users.len(), 1);
+        assert_eq!(ls.active_user().username, "user");
+    }
+
+    #[test]
+    fn an_out_of_range_selection_falls_back_to_the_first_user() {
+        // The fallback path `active_user` used to take by indexing `[0]`. The
+        // selection is set directly rather than through `select_user`, which
+        // rejects out-of-range indices -- the point is that `active_user` is
+        // total even if some future caller does not go through that check.
+        let mut ls = multi_user_lockscreen();
+        ls.selected_user_index = 999;
+        assert_eq!(
+            ls.active_user().username,
+            ls.users.first().username,
+            "an out-of-range selection did not resolve to the first user"
+        );
+    }
+
+    #[test]
+    fn a_user_list_iterates_and_indexes_in_the_order_it_was_given() {
+        let list = UserList::new(vec![
+            UserInfo::new("a", "A", true),
+            UserInfo::new("b", "B", true),
+            UserInfo::new("c", "C", true),
+        ]);
+        let names: Vec<&str> = list.iter().map(|u| u.username.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c"]);
+        assert_eq!(list.len(), 3);
+        assert_eq!(list.get(2).map(|u| u.username.as_str()), Some("c"));
+        assert!(list.get(3).is_none());
     }
 
     // -- TimeOfDay --

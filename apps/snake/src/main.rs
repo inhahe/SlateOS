@@ -15,7 +15,8 @@
 //! food and bonus food spawning, collision detection (walls/self),
 //! scoring with streak bonuses, three difficulty levels, wrap mode,
 //! pause/resume, direction queue for fast input, and a stats panel.
-//! Uses an LCG pseudo-random number generator (no external rand crate).
+//! Randomness comes from the shared `randrange` crate, seeded from the
+//! system so that two players do not get the same game.
 
 use guitk::color::Color;
 use guitk::event::{Event, Key};
@@ -101,7 +102,7 @@ const BONUS_SPAWN_CHANCE: u64 = 5;
 //   * so the food could reach exactly **50 of the 400 cells** -- an eighth of
 //     the board, in a fixed diagonal lattice. The other 350 never held food in
 //     any game at any seed.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 // ── Direction ───────────────────────────────────────────────────────
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,7 +275,7 @@ struct SnakeApp {
     /// Accumulated time in ms (for tick scheduling).
     accumulated_ms: u64,
     /// RNG state.
-    rng: Rng,
+    rng: SeededRng,
     /// Pulsing animation counter (for food rendering).
     pulse_counter: u32,
 }
@@ -308,7 +309,7 @@ impl SnakeApp {
             ticks_since_food: 0,
             total_ticks: 0,
             accumulated_ms: 0,
-            rng: Rng::new(seed),
+            rng: SeededRng::new(seed),
             pulse_counter: 0,
         };
         app.init_snake();
@@ -562,7 +563,7 @@ impl SnakeApp {
         // Maybe spawn bonus food.
         // `chance` was `next_u64() % 5` -- an odd bound, so it was never
         // degenerate, but it reads better as what it means.
-        if self.rng.chance(1, BONUS_SPAWN_CHANCE) && self.bonus_food.is_none() {
+        if self.rng.chance_in(1, BONUS_SPAWN_CHANCE) && self.bonus_food.is_none() {
             self.spawn_bonus_food();
         }
     }

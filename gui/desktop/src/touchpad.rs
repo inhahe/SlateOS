@@ -12,6 +12,7 @@
 //! - Disable while typing
 //! - Custom gesture → action bindings
 
+use crate::scroll_window;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -764,7 +765,10 @@ impl TouchpadSettingsUI {
                 self.render_taps(&mut cmds, mgr, x + 16.0, content_y, w - 32.0);
             }
             TouchpadSettingsSection::Gestures => {
-                self.render_gestures(&mut cmds, mgr, x + 16.0, content_y, w - 32.0);
+                // The gesture list is the one section that grows without bound
+                // (`TouchpadConfig::set_gesture` appends), so it is the one that
+                // needs to know where the panel ends.
+                self.render_gestures(&mut cmds, mgr, x + 16.0, content_y, w - 32.0, y + h);
             }
             TouchpadSettingsSection::Advanced => {
                 self.render_advanced(&mut cmds, mgr, x + 16.0, content_y, w - 32.0);
@@ -910,6 +914,13 @@ impl TouchpadSettingsUI {
         self.render_toggle(cmds, x, cy, "Drag lock", mgr.config.tap.drag_lock);
     }
 
+    /// Height of one gesture row, including the space beneath it.
+    const GESTURE_ROW_H: f32 = 26.0;
+    /// Height of the "showing a–b of n" line drawn under the list.
+    const GESTURE_COUNTER_H: f32 = 16.0;
+    /// Space the pinch control below the list needs: an 8px gap plus a 22px row.
+    const GESTURE_TRAILER_H: f32 = 30.0;
+
     fn render_gestures(
         &self,
         cmds: &mut Vec<RenderCommand>,
@@ -917,6 +928,7 @@ impl TouchpadSettingsUI {
         x: f32,
         y: f32,
         _w: f32,
+        bottom: f32,
     ) {
         let mut cy = y;
 
@@ -975,7 +987,26 @@ impl TouchpadSettingsUI {
         });
         cy += 4.0;
 
-        for (i, g) in mgr.config.gestures.iter().enumerate() {
+        // The list gets whatever vertical room is left once the counter line and
+        // the pinch control below it have taken their fixed share, so both stay
+        // on screen however many gestures are bound. Reserving unconditionally
+        // (rather than only when the list overflows) keeps this arithmetic from
+        // depending on its own result.
+        let total = mgr.config.gestures.len();
+        let rows = scroll_window::visible(
+            total,
+            Self::GESTURE_ROW_H,
+            bottom - cy - Self::GESTURE_COUNTER_H - Self::GESTURE_TRAILER_H,
+            self.scroll_offset,
+        );
+        let shown = mgr
+            .config
+            .gestures
+            .get(rows.start..rows.end())
+            .unwrap_or_default();
+
+        for (row, g) in shown.iter().enumerate() {
+            let i = rows.start.saturating_add(row);
             let selected = i == self.selected_gesture_idx;
             if selected {
                 cmds.push(RenderCommand::FillRect {
@@ -1027,8 +1058,35 @@ impl TouchpadSettingsUI {
                 overflow: TextOverflow::Clip,
             });
 
-            cy += 26.0;
+            cy += Self::GESTURE_ROW_H;
         }
+
+        // Say how much of the list is on screen. Always drawn, not only when the
+        // list overflows: a truncated list that looks complete is worse than a
+        // long one, and a line that comes and goes would move the pinch control
+        // under the pointer.
+        let counter = if total == 0 {
+            "No gestures bound".to_string()
+        } else if rows.count == total {
+            format!("{total} gesture{}", if total == 1 { "" } else { "s" })
+        } else {
+            format!(
+                "Showing {}-{} of {total} - scroll for more",
+                rows.start.saturating_add(1),
+                rows.end()
+            )
+        };
+        cmds.push(RenderCommand::Text {
+            x,
+            y: cy,
+            text: counter,
+            font_size: 10.0,
+            color: MOCHA_SUBTEXT0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+        cy += Self::GESTURE_COUNTER_H;
 
         // Pinch action.
         cy += 8.0;
@@ -1295,6 +1353,211 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+
+    // --- Gesture list bounding ---------------------------------------------
+    //
+    // The gesture list is the only part of this panel that grows without bound,
+    // and until 2026-08-19 it was drawn with no reference to the panel height at
+    // all: `render` took `h`, used it for the background rectangle, and passed
+    // nothing down. A user with more gestures bound than the panel was tall got
+    // rows drawn straight through the bottom edge and over whatever was beneath,
+    // with no way to scroll them back — `scroll_offset` was a public field that
+    // nothing read. These tests pin the three properties that fix requires.
+
+    /// A manager with `n` gesture rows, each identifiable by its finger count.
+    ///
+    /// Finger counts are unique per row so that reading the fingers column tells
+    /// you exactly which slice of the list was drawn. Direction is held constant
+    /// for the same reason.
+    fn mgr_with_gestures(n: usize) -> TouchpadManager {
+        let mut mgr = TouchpadManager::new();
+        mgr.config.gestures.clear();
+        for i in 0..n {
+            mgr.config.gestures.push(GestureBinding {
+                fingers: u8::try_from(i).unwrap_or(u8::MAX),
+                direction: SwipeDirection::Up,
+                action: GestureAction::ShowOverview,
+            });
+        }
+        mgr
+    }
+
+    fn gestures_ui() -> TouchpadSettingsUI {
+        let mut ui = TouchpadSettingsUI::new();
+        ui.section = TouchpadSettingsSection::Gestures;
+        ui
+    }
+
+    /// The finger counts actually drawn, in order.
+    ///
+    /// Picked out by the text being a bare integer, which no other string in
+    /// this panel is — matching on position would also catch the pinch control's
+    /// label, which shares the fingers column's x and font size.
+    fn drawn_finger_counts(cmds: &[RenderCommand]) -> Vec<u8> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => text.parse::<u8>().ok(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The lowest pixel any command touches, or `None` if nothing was drawn.
+    fn lowest_pixel(cmds: &[RenderCommand]) -> Option<f32> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { y, height, .. } => Some(y + height),
+                // A text's box is not reported, so charge it its font size,
+                // which over- rather than under-states the space it takes.
+                RenderCommand::Text { y, font_size, .. } => Some(y + font_size),
+                RenderCommand::Line { y1, y2, .. } => Some(y1.max(*y2)),
+                _ => None,
+            })
+            .fold(None, |acc: Option<f32>, v| Some(acc.map_or(v, |a| a.max(v))))
+    }
+
+    #[test]
+    fn a_gesture_list_longer_than_the_panel_is_not_drawn_past_its_bottom_edge() {
+        let ui = gestures_ui();
+        // 400 gestures is far more than anyone would bind; the point is that the
+        // count cannot affect where the drawing stops.
+        for count in [0_usize, 1, 5, 20, 400] {
+            let mgr = mgr_with_gestures(count);
+            for h in [200.0_f32, 240.0, 317.0, 500.0, 900.0] {
+                let cmds = ui.render(&mgr, 10.0, 20.0, 700.0, h);
+                let bottom = 20.0 + h;
+                let low = lowest_pixel(&cmds).unwrap_or(bottom);
+                assert!(
+                    low <= bottom,
+                    "{count} gestures in a {h}px panel drew down to {low}, \
+                     past the bottom edge at {bottom}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_pinch_control_stays_on_screen_however_long_the_gesture_list_is() {
+        // The list is bounded by a budget that reserves room for what follows
+        // it, so the trailing control cannot be pushed off by a long list.
+        let ui = gestures_ui();
+        for count in [1_usize, 3, 40, 400] {
+            let cmds = ui.render(&mgr_with_gestures(count), 10.0, 20.0, 700.0, 400.0);
+            let bottom = 20.0 + 400.0;
+            // Being *emitted* is not the same as being *visible* — an earlier
+            // version of this test only checked the former, and so passed with
+            // the height budget removed entirely. Check where it landed.
+            let label = cmds.iter().find_map(|c| match c {
+                RenderCommand::Text { text, y, font_size, .. } if text == "Pinch gesture" => {
+                    Some(y + font_size)
+                }
+                _ => None,
+            });
+            let label_bottom =
+                label.unwrap_or_else(|| panic!("{count} gestures: no pinch control drawn at all"));
+            assert!(
+                label_bottom <= bottom,
+                "{count} gestures pushed the pinch control down to {label_bottom}, \
+                 past the panel's bottom edge at {bottom}"
+            );
+        }
+    }
+
+    #[test]
+    fn scrolling_the_gesture_list_by_one_moves_the_first_row_by_one() {
+        // The property that fails if `scroll_offset` is read but ignored — which
+        // is exactly how it was possible for the field to be dead for so long
+        // without any test noticing.
+        let mgr = mgr_with_gestures(60);
+        let mut ui = gestures_ui();
+
+        ui.scroll_offset = 0;
+        let first_page = drawn_finger_counts(&ui.render(&mgr, 10.0, 20.0, 700.0, 400.0));
+        assert!(
+            !first_page.is_empty(),
+            "a 400px panel should show at least one gesture row"
+        );
+        let page_len = first_page.len();
+        assert_eq!(first_page[0], 0, "an unscrolled list starts at the first row");
+
+        for offset in 1..=8_u8 {
+            ui.scroll_offset = usize::from(offset);
+            let rows = drawn_finger_counts(&ui.render(&mgr, 10.0, 20.0, 700.0, 400.0));
+            assert_eq!(
+                rows.first().copied(),
+                Some(offset),
+                "scrolling to {offset} should start the list at row {offset}"
+            );
+            assert_eq!(rows.len(), page_len, "a full page stays full while scrolling");
+        }
+    }
+
+    #[test]
+    fn a_gesture_scroll_offset_past_the_end_shows_the_last_page_not_an_empty_one() {
+        // A stale offset — the list shrank since it was set — must not blank the
+        // panel. Nothing clamps the public field, so `render` clamps its effect.
+        let mgr = mgr_with_gestures(9);
+        let mut ui = gestures_ui();
+
+        ui.scroll_offset = 0;
+        let page_len = drawn_finger_counts(&ui.render(&mgr, 10.0, 20.0, 700.0, 400.0)).len();
+        assert!(page_len > 0 && page_len < 9, "the panel must show a partial list for this test to mean anything");
+
+        for offset in [9_usize, 10, 500, usize::MAX] {
+            ui.scroll_offset = offset;
+            let rows = drawn_finger_counts(&ui.render(&mgr, 10.0, 20.0, 700.0, 400.0));
+            assert_eq!(rows.len(), page_len, "offset {offset} should still show a full page");
+            assert_eq!(
+                rows.last().copied(),
+                Some(8),
+                "offset {offset} should be pinned to the end of the list"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gesture_list_says_when_it_is_hiding_rows() {
+        // A truncated list that looks complete is worse than a long one: the
+        // user has no reason to try scrolling.
+        let ui = gestures_ui();
+        let short = ui.render(&mgr_with_gestures(3), 10.0, 20.0, 700.0, 400.0);
+        assert!(
+            short.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "3 gestures"
+            )),
+            "a list that fits should report its size plainly"
+        );
+
+        let long = ui.render(&mgr_with_gestures(80), 10.0, 20.0, 700.0, 400.0);
+        assert!(
+            long.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text.starts_with("Showing ") && text.ends_with("of 80 - scroll for more")
+            )),
+            "a truncated list should say so; drew {:?}",
+            long.iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_gesture_panel_with_no_room_at_all_draws_no_rows_and_does_not_panic() {
+        // Degenerate sizes reach this code through a window resize, so they must
+        // be survivable even though nothing useful can be shown.
+        let ui = gestures_ui();
+        for h in [0.0_f32, 1.0, 50.0, -20.0, f32::NAN] {
+            let cmds = ui.render(&mgr_with_gestures(50), 10.0, 20.0, 700.0, h);
+            assert!(
+                drawn_finger_counts(&cmds).is_empty(),
+                "a {h}px panel has no room for gesture rows, but drew some"
+            );
+        }
+    }
 
     // --- ScrollDirection ---
     #[test]

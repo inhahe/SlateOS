@@ -17,7 +17,8 @@
 //! arrow-key movement, 4 ghosts with chase/scatter AI, power pellets
 //! that make ghosts vulnerable, wrap-around tunnel, 3 lives, score
 //! tracking, level progression, and menu/pause/game-over states.
-//! Uses an LCG pseudo-random number generator (no external rand crate).
+//! Randomness comes from the shared `randrange` crate, seeded from the
+//! system so that two players do not get the same game.
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -93,11 +94,11 @@ const TUNNEL_ROW: usize = 14;
 // is a frightened ghost's flee target, two draws back to back with bounds 31
 // and 28.  31 is odd and behaved; 28 = 4 x 7 is not, and cost the ghosts most
 // of the maze -- see `random_maze_cell` below.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 /// A uniformly random maze cell, used as a frightened ghost's flee target.
 ///
-/// A free function rather than an `Rng` method because a maze cell is this
+/// A free function rather than an `SeededRng` method because a maze cell is this
 /// game's unit, not the generator's.
 ///
 /// Under the old reduction the column was `state % 28`.  An even bound
@@ -108,7 +109,7 @@ use randrange::Rng;
 /// mod 4 -- and so to 217 of the maze's 868 cells.  All four together
 /// reached 14, and the seed chose only *which* 14, so the frightened
 /// scatter was a pair of fixed vertical combs.
-fn random_maze_cell(rng: &mut Rng) -> Pos {
+fn random_maze_cell(rng: &mut SeededRng) -> Pos {
     Pos::new(
         i32::try_from(rng.below(MAZE_ROWS)).unwrap_or(0),
         i32::try_from(rng.below(MAZE_COLS)).unwrap_or(0),
@@ -441,7 +442,7 @@ struct PacmanApp {
     /// Mouth animation angle (for pac-man rendering).
     mouth_open: bool,
     /// RNG.
-    rng: Rng,
+    rng: SeededRng,
     /// Total elapsed game time in ms.
     elapsed_total_ms: u64,
 }
@@ -475,7 +476,7 @@ impl PacmanApp {
             ghost_move_accum_ms: 0,
             pulse_counter: 0,
             mouth_open: true,
-            rng: Rng::new(seed),
+            rng: SeededRng::new(seed),
             elapsed_total_ms: 0,
         };
         app.init_ghosts();
@@ -1582,7 +1583,7 @@ mod tests {
 
     #[test]
     fn test_random_maze_cell_in_bounds() {
-        let mut rng = Rng::new(99);
+        let mut rng = SeededRng::new(99);
         for _ in 0..2000 {
             let cell = random_maze_cell(&mut rng);
             assert!(cell.in_bounds(), "flee target outside the maze: {cell:?}");
@@ -1608,7 +1609,7 @@ mod tests {
         let ghosts = PacmanApp::new().ghosts.len();
 
         for seed in [42_u64, 7, 12_345, 999] {
-            let mut rng = Rng::new(seed);
+            let mut rng = SeededRng::new(seed);
             let mut cells: Vec<BTreeSet<(i32, i32)>> = vec![BTreeSet::new(); ghosts];
             for _ in 0..TICKS {
                 for seen in &mut cells {

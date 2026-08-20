@@ -15,6 +15,7 @@
 //! - Station search
 
 use guitk::color::Color;
+use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
@@ -370,7 +371,9 @@ struct RadioApp {
 
     // Spectrum visualization (simulated)
     spectrum_bars: [u8; 32],
-    spectrum_seed: u32,
+    /// Drives the simulated spectrum animation. See `tick` for what this
+    /// replaced and why the old version made the right-hand bars go still.
+    spectrum_rng: SeededRng,
 
     // Search
     search_query: String,
@@ -384,6 +387,16 @@ struct RadioApp {
     width: f32,
     height: f32,
 }
+
+/// Seed used when the kernel's entropy source cannot be reached.
+///
+/// A per-crate constant rather than a shared one, so that two programs which
+/// lose entropy on the same boot do not then produce correlated streams. The
+/// bytes spell `RADIO!!!`.
+const FALLBACK_SEED: u64 = 0x5241_4449_4F21_2121;
+
+/// The tallest a spectrum bar may draw.
+const SPECTRUM_CEILING: u8 = 100;
 
 impl RadioApp {
     fn new() -> Self {
@@ -411,7 +424,7 @@ impl RadioApp {
             recording: false,
             record_duration_secs: 0,
             spectrum_bars,
-            spectrum_seed: 42,
+            spectrum_rng: seeded_from_system(FALLBACK_SEED),
             search_query: String::new(),
             search_results: Vec::new(),
             search_selected: 0,
@@ -549,12 +562,41 @@ impl RadioApp {
         if self.play_state == PlayState::Playing {
             self.listen_time_secs = self.listen_time_secs.saturating_add(1);
 
-            // Update spectrum (simulated)
-            self.spectrum_seed = self.spectrum_seed.wrapping_mul(1103515245).wrapping_add(12345);
+            // Update spectrum (simulated).
+            //
+            // This used to advance one glibc LCG per frame
+            // (`* 1103515245 + 12345`) and then read bar `i`'s height out of
+            // bits `i..i+6` of that single state. Two things went wrong with
+            // that, both visible on screen:
+            //
+            // - **The right-hand bars went still.** Bar 31 has only one bit of
+            //   the state left above it, so it alternated between exactly two
+            //   heights forever; bar 30 had four, bar 29 eight, bar 28 sixteen.
+            //   Measured over 64 frames the distinct-height counts across the
+            //   32 bars ran ... 45, 30, 16, 8, 4, 2. A spectrum analyser whose
+            //   right quarter is frozen is the one thing it must not be.
+            // - **The left-hand bars pinned at the ceiling.** `base` is 60 at
+            //   the left and the noise reached 63, so `min(100)` clipped
+            //   roughly a third of frames flat against the top.
+            //
+            // Now each bar draws its own value, sized so the jitter fills the
+            // space between its base and the ceiling exactly, with nothing
+            // clipped and no bar sharing bits with its neighbour.
             for (i, bar) in self.spectrum_bars.iter_mut().enumerate() {
-                let noise = ((self.spectrum_seed.wrapping_shr(i as u32)) & 0x3F) as u8;
-                let base = if i < 8 { 60u8 } else if i < 16 { 45 } else { 30 };
-                *bar = base.saturating_add(noise).min(100);
+                let base = if i < 8 {
+                    60u8
+                } else if i < 16 {
+                    45
+                } else {
+                    30
+                };
+                // Saturating rather than `-`/`+`: every base is below the
+                // ceiling today, but an edit that raised one above it should
+                // quietly draw a flat bar, not underflow to a headroom of 256.
+                let headroom =
+                    usize::from(SPECTRUM_CEILING.saturating_sub(base)).saturating_add(1);
+                let noise = u8::try_from(self.spectrum_rng.below(headroom)).unwrap_or(0);
+                *bar = base.saturating_add(noise).min(SPECTRUM_CEILING);
             }
 
             // Recording timer
@@ -940,10 +982,15 @@ impl RadioApp {
             return;
         }
 
-        for (vi, &station_idx) in filtered.iter().enumerate().skip(self.station_scroll).take(visible) {
+        // Enumerate *after* the skip so `row` is the position on screen and needs
+        // no subtraction to become a y-coordinate; the absolute index the
+        // selection is compared against is reconstructed by adding the scroll
+        // back on. Enumerating first and subtracting is the same number by a
+        // route that underflows if the two ever disagree.
+        for (row, &station_idx) in filtered.iter().skip(self.station_scroll).take(visible).enumerate() {
             if let Some(station) = self.stations.get(station_idx) {
-                let ry = start_y + ((vi - self.station_scroll) as f32) * row_h;
-                let is_sel = vi == self.selected_station;
+                let ry = start_y + (row as f32) * row_h;
+                let is_sel = self.station_scroll.saturating_add(row) == self.selected_station;
                 let is_playing = self.current_station == Some(station_idx)
                     && self.play_state == PlayState::Playing;
 
@@ -1193,6 +1240,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     #[test]
@@ -1411,7 +1470,7 @@ mod tests {
     #[test]
     fn test_search_empty() {
         let mut app = RadioApp::new();
-        app.search_query = "".into();
+        app.search_query = String::new();
         app.perform_search();
         assert!(app.search_results.is_empty());
     }
@@ -1537,5 +1596,86 @@ mod tests {
         app.tick();
         // Spectrum should change
         assert_ne!(app.spectrum_bars, before);
+    }
+
+    /// Every bar's height, for each of `frames` consecutive ticks of one
+    /// playing app -- so, one generator's stream, not one frame each off
+    /// `frames` fresh apps. The defect this catches is a *within-stream* one:
+    /// re-seeding between samples would hide it completely.
+    fn spectrum_frames(frames: usize) -> Vec<[u8; 32]> {
+        let mut app = RadioApp::new();
+        app.play_station(0);
+        (0..frames)
+            .map(|_| {
+                app.tick();
+                app.spectrum_bars
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_bar_of_the_spectrum_actually_moves() {
+        // The old animation read bar `i` from bits `i..i+6` of a single LCG
+        // state, so the bars at the right ran out of state to read: measured
+        // over 64 frames, the distinct-height counts across the 32 bars ended
+        // ... 16, 8, 4, 2. Bar 31 had two heights and nothing else, for the
+        // whole life of the program.
+        let frames = spectrum_frames(64);
+        for i in 0..32 {
+            let mut heights: Vec<u8> = Vec::new();
+            for f in &frames {
+                if !heights.contains(&f[i]) {
+                    heights.push(f[i]);
+                }
+            }
+            assert!(
+                heights.len() >= 12,
+                "bar {i} took only {} distinct heights over 64 frames: {heights:?}",
+                heights.len()
+            );
+        }
+    }
+
+    #[test]
+    fn no_bar_is_pinned_against_the_ceiling() {
+        // `base + noise` used to be clipped by `min(100)`, and with a base of
+        // 60 and noise up to 63 the left-hand bars sat flat against the top
+        // for roughly a third of frames. The jitter is now sized to the
+        // headroom, so the ceiling is reachable but not a resting place.
+        let frames = spectrum_frames(64);
+        for i in 0..32 {
+            let at_ceiling = frames.iter().filter(|f| f[i] == SPECTRUM_CEILING).count();
+            assert!(
+                at_ceiling <= 12,
+                "bar {i} was flat against the ceiling in {at_ceiling} of 64 frames"
+            );
+            assert!(
+                frames.iter().all(|f| f[i] <= SPECTRUM_CEILING),
+                "bar {i} drew above the ceiling"
+            );
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_fresh_app_is_seeded_by_the_system_and_not_by_a_literal() {
+        // A host `cargo test` has no SlateOS kernel to ask, so
+        // `seeded_from_system` takes the fallback -- which is what makes this
+        // checkable. Asserting *which* seed, not that two apps differ: a
+        // variety check would pass on the old hardcoded 42 and fail on the fix.
+        let draws = |mut rng: SeededRng| -> Vec<usize> {
+            (0..12).map(|_| rng.below(1000)).collect()
+        };
+        let from_system = draws(RadioApp::new().spectrum_rng);
+        assert_eq!(
+            from_system,
+            draws(SeededRng::new(FALLBACK_SEED)),
+            "a fresh app did not ask the system for its seed"
+        );
+        assert_ne!(
+            from_system,
+            draws(SeededRng::new(42)),
+            "a fresh app still animates from a literal"
+        );
     }
 }

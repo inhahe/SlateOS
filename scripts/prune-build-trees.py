@@ -40,8 +40,21 @@ Run from a lane worktree root::
     python scripts/prune-build-trees.py --prune    # delete the unsanctioned ones
     python scripts/prune-build-trees.py --lane C   # override lane detection
 
+    # also reclaim sanctioned trees nothing has built into for a week
+    python scripts/prune-build-trees.py --prune --prune-stale
+
 Exit status: 0 when only sanctioned trees remain (or `--prune` made it so),
 1 when unsanctioned trees are present and were only reported.
+
+A **stale** sanctioned tree is reported but does not fail the check, because
+being on the sanctioned list is permission to exist rather than a promise to
+be useful: a lane that spent a week on a single crate has a warm tree it still
+wants. It is worth reporting anyway -- the tree that actually filled the volume
+here was not one of the eleven strays but the sanctioned `target`, 121.8 GB
+that nothing had built into for five days, sitting in plain sight in a report
+that only listed sizes. Staleness is measured from the profile subdirectories,
+not from the top level, because cargo rewrites `.rustc_info.json` when it
+merely probes the compiler; see `last_build_time`.
 
 Safety
 ------
@@ -65,6 +78,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -142,6 +156,61 @@ def holds_tracked_files(root: Path, path: Path) -> bool:
     return bool(listed.stdout.strip())
 
 
+def last_build_time(path: Path) -> float | None:
+    """When cargo last *built* into `path`, as a Unix timestamp.
+
+    Read from the profile/target subdirectories rather than from the tree as a
+    whole, for two separate reasons.
+
+    The cheap one: walking several hundred thousand files to find a single
+    maximum costs about as much as `tree_size_bytes`, and the answer is
+    already visible one level down.
+
+    The one that matters: the top level of a target directory holds
+    `.rustc_info.json`, which cargo rewrites whenever it merely *probes* the
+    compiler. A `cargo metadata` or a `cargo fmt` run in a directory that
+    forgot to set `CARGO_TARGET_DIR` touches that file without building
+    anything. Reading it would report a tree as fresh that has not been built
+    into for days -- which is exactly what the stale 121.8 GB `target` here did
+    on 2026-08-20, five days after its last build, and is the whole reason this
+    function exists.
+
+    Returns None when the directory cannot be listed or holds no subdirectory
+    at all, which callers must not read as "old".
+    """
+    newest: float | None = None
+    try:
+        children = list(path.iterdir())
+    except OSError:
+        return None
+    for child in children:
+        try:
+            if not child.is_dir():
+                continue
+            mtime = child.stat().st_mtime
+        except OSError:
+            # Vanished or unreadable. Skipping it can only make the tree look
+            # older, which errs towards reporting rather than towards silence.
+            continue
+        if newest is None or mtime > newest:
+            newest = mtime
+    return newest
+
+
+def age_days(mtime: float | None, now: float) -> float | None:
+    if mtime is None:
+        return None
+    return max(0.0, (now - mtime) / 86400.0)
+
+
+def age_label(age: float | None) -> str:
+    if age is None:
+        return "  never built"
+    if age < 1.0:
+        return "     today"
+    return f"{age:6.1f} d ago"
+
+
 def tree_size_bytes(path: Path) -> int:
     """Total size of `path`, ignoring anything that cannot be read.
 
@@ -201,6 +270,22 @@ def main() -> int:
         choices=sorted(SANCTIONED),
         help="override lane detection (default: from CLAUDE_CONFIG_DIR)",
     )
+    parser.add_argument(
+        "--stale-days",
+        type=float,
+        default=7.0,
+        metavar="N",
+        help="warn about a sanctioned tree not built into for N days (default: 7)",
+    )
+    parser.add_argument(
+        "--prune-stale",
+        action="store_true",
+        help=(
+            "with --prune, also delete sanctioned trees that are stale. Off by "
+            "default: being on the list is permission to exist, and a lane that "
+            "spent a week on one crate would lose a warm tree it still wants."
+        ),
+    )
     args = parser.parse_args()
 
     root = worktree_root()
@@ -230,21 +315,51 @@ def main() -> int:
         print("no cargo build trees found")
         return 0
 
+    now = time.time()
     stray: list[tuple[Path, int]] = []
+    stale: list[tuple[Path, int, float]] = []
     kept_total = 0
     for path in candidates:
         size = tree_size_bytes(path)
+        age = age_days(last_build_time(path), now)
+        stamp = age_label(age)
         if path.name in keep:
             kept_total += size
-            print(f"  keep    {path.name:<20} {human(size):>10}")
+            if age is not None and age >= args.stale_days:
+                stale.append((path, size, age))
+                print(f"  STALE   {path.name:<20} {human(size):>10}  {stamp}")
+            else:
+                print(f"  keep    {path.name:<20} {human(size):>10}  {stamp}")
         elif holds_tracked_files(root, path):
-            print(f"  SKIP    {path.name:<20} {human(size):>10}  (holds tracked files)")
+            print(
+                f"  SKIP    {path.name:<20} {human(size):>10}  {stamp}"
+                "  (holds tracked files)"
+            )
         else:
             stray.append((path, size))
-            print(f"  stray   {path.name:<20} {human(size):>10}")
+            print(f"  stray   {path.name:<20} {human(size):>10}  {stamp}")
 
     print()
     print(f"sanctioned trees: {human(kept_total)}")
+
+    if stale:
+        stale_total = sum(size for _p, size, _a in stale)
+        print(
+            f"stale trees:      {human(stale_total)} in {len(stale)} directories "
+            f"not built into for {args.stale_days:g}+ days"
+        )
+        if args.prune and args.prune_stale:
+            # Fall through: they are appended to `stray` below and deleted with
+            # the rest.
+            stray.extend((path, size) for path, size, _a in stale)
+        else:
+            print(
+                "  a sanctioned tree is allowed to exist, not guaranteed to be\n"
+                "  wanted -- this one is on the list but nothing has built into\n"
+                "  it. Re-run with --prune --prune-stale to reclaim it, or leave\n"
+                "  it if you are about to build there again."
+            )
+
     if not stray:
         print("no stray build trees")
         return 0

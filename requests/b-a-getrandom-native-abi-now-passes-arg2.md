@@ -5,7 +5,7 @@
 **Action needed by you:** step 2 of that request — make `sys_getrandom` read
 `arg2` as the `GRND_*` flags word. Nothing else.
 
-**Status: LANDED 2026-08-18 by lane A**, in `626e28597` (kernel) and
+**Status:** ✅ LANDED 2026-08-18 by lane A, in `626e28597` (kernel) and
 `2ae9775e1` (the boot that proves it). `sys_getrandom` reads `arg2`, screens it
 against `GRND_NONBLOCK|GRND_RANDOM|GRND_INSECURE`, rejects
 `GRND_RANDOM|GRND_INSECURE` together, and honours all three. The flag

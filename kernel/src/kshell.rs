@@ -84760,6 +84760,7 @@ fn cmd_mount(args: &str) {
         "ntfs" => crate::fs::ntfs::mount(device, &mount_path_resolved),
         "btrfs" => crate::fs::btrfs::mount(device, &mount_path_resolved),
         "f2fs" => crate::fs::f2fs::mount(device, &mount_path_resolved),
+        "zfs" => crate::fs::zfs::mount(device, &mount_path_resolved),
         "auto" => {
             // Try to probe the device for known filesystem types.
             //
@@ -84770,6 +84771,14 @@ fn cmd_mount(args: &str) {
             // bytes of its superblock, not an offset inside one), so no two can
             // match the same volume. The sequence is therefore for readability,
             // not for disambiguation — but keep the cheapest reads first.
+            //
+            // ZFS is last on cost, not on precedence: it has no superblock at a
+            // fixed offset, so its probe sweeps label 0's whole 128 KiB
+            // uberblock array looking for the magic. It cannot false-match any
+            // of the above — a ZFS vdev label's first 8 KiB is blank, which is
+            // where ext4, NTFS and F2FS all keep their magic — so running it
+            // last costs nothing but a wasted read on the volumes that hit
+            // earlier.
             if crate::fs::ext4::probe(device) {
                 crate::fs::ext4::mount(device, &mount_path_resolved)
             } else if crate::fs::iso9660::probe(device) {
@@ -84780,6 +84789,8 @@ fn cmd_mount(args: &str) {
                 crate::fs::btrfs::mount(device, &mount_path_resolved)
             } else if crate::fs::f2fs::probe(device) {
                 crate::fs::f2fs::mount(device, &mount_path_resolved)
+            } else if crate::fs::zfs::probe(device) {
+                crate::fs::zfs::mount(device, &mount_path_resolved)
             } else {
                 crate::console_println!(
                     "mount: could not detect filesystem on '{}' (try -t to specify type)",

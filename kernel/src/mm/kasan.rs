@@ -1325,6 +1325,30 @@ enum IfUnmapped {
     /// (see [`with_map_lock`]). Skipping removes the allocation, and with it
     /// the recursion, the lock, and the hole. See [`on_frame_alloc`].
     Skip,
+    /// Leave it alone and skip the range, *knowingly discarding a non-zero
+    /// value*.
+    ///
+    /// This is [`Skip`](Self::Skip) without the exact-equivalence argument, and
+    /// it is therefore only ever correct for a caller whose write is a
+    /// **detection claim it is willing to lose**: dropping the write costs a
+    /// report that would have fired, and can never manufacture one that should
+    /// not have. Poisoning on frame free is the case it exists for — a freed
+    /// frame whose shadow was never backed simply goes unwatched, exactly as it
+    /// was before the hook existed.
+    ///
+    /// It must **not** be used for anything that removes poison or that some
+    /// later access assumes it can trust, because those fail the other way: a
+    /// dropped *unpoison* leaves stale `0xFA` on live memory and reports every
+    /// subsequent legitimate access forever. That asymmetry, not the value
+    /// written, is what decides between this and [`Map`](Self::Map).
+    ///
+    /// The gain over `Map` is the same one [`Skip`](Self::Skip) documents, and
+    /// it is the whole reason this variant exists rather than the caller just
+    /// mapping: mapping allocates a frame, so a poisoner that maps is a
+    /// poisoner re-entered through the frame allocator that is calling it —
+    /// from inside the *free* path, which is a strictly worse place to recurse
+    /// than the alloc path. See [`on_frame_free`].
+    SkipLossy,
 }
 
 /// Write `val` to the `count` shadow bytes covering `count` consecutive granules
@@ -1340,9 +1364,17 @@ fn fill_shadow(first: u64, count: u64, val: u8) {
 /// and then filled in a single pass. Ranges that fall outside the backed shadow
 /// window, and frames that cannot be mapped, are skipped — never faulted on.
 fn fill_shadow_with(first: u64, count: u64, val: u8, if_unmapped: IfUnmapped) {
+    // `Skip` is only an *exact equivalence* for `KASAN_ADDRESSABLE`, because an
+    // unbacked shadow frame already reads zero. Dropping any other value is a
+    // real loss, and only a caller that has explicitly accepted it — by asking
+    // for `SkipLossy` — may do so. The distinction is fail-open vs fail-closed:
+    // a dropped poison costs a report that would have fired; a dropped unpoison
+    // leaves stale poison on live memory and reports forever.
     debug_assert!(
-        if_unmapped == IfUnmapped::Map || val == KASAN_ADDRESSABLE,
-        "IfUnmapped::Skip silently drops a non-zero shadow value"
+        matches!(if_unmapped, IfUnmapped::Map | IfUnmapped::SkipLossy)
+            || val == KASAN_ADDRESSABLE,
+        "IfUnmapped::Skip silently drops a non-zero shadow value; \
+         use SkipLossy if the loss is intended"
     );
     if count == 0 {
         return;
@@ -1361,7 +1393,7 @@ fn fill_shadow_with(first: u64, count: u64, val: u8, if_unmapped: IfUnmapped) {
         }
         let backed = match if_unmapped {
             IfUnmapped::Map => ensure_shadow_mapped(sv),
-            IfUnmapped::Skip => shadow_frame_is_backed(sv),
+            IfUnmapped::Skip | IfUnmapped::SkipLossy => shadow_frame_is_backed(sv),
         };
         if backed {
             // SAFETY: both arms establish that the whole 16 KiB frame containing
@@ -1434,7 +1466,7 @@ pub fn on_free(ptr: *mut u8, slot: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// Frame-allocator hook
+// Frame-allocator hooks
 // ---------------------------------------------------------------------------
 
 /// Clear any stale poison from `frames` physical frames starting at `phys`.
@@ -1452,11 +1484,8 @@ pub fn on_free(ptr: *mut u8, slot: usize) {
 /// finished bringing up its subsystems. See `B-KASAN-POISON-SURVIVES-FRAME-REUSE`
 /// in `known-issues.md`.
 ///
-/// This mirrors Linux's `kasan_unpoison_pages()` on the page-alloc path. The
-/// symmetric `kasan_poison_pages()` on free is deliberately *not* implemented
-/// yet: poisoning freed frames is a new detection claim rather than the removal
-/// of a false one, and the frame allocator writes its own freelist metadata
-/// through the same HHDM alias, so it needs its own boot evidence first.
+/// This mirrors Linux's `kasan_unpoison_pages()` on the page-alloc path; the
+/// symmetric [`on_frame_free`] mirrors `kasan_poison_pages()`.
 ///
 /// # Why this maps nothing, takes no lock, and disables no interrupts
 ///
@@ -1508,6 +1537,85 @@ pub fn on_frame_alloc(phys: u64, frames: u64) {
         IfUnmapped::Skip,
     );
     BYTES_UNPOISONED.fetch_add(bytes, Ordering::Relaxed);
+}
+
+/// Poison `frames` physical frames starting at `phys` as freed, so that a later
+/// KASAN-checked access through the HHDM alias is reported as a use-after-free.
+///
+/// Called by the frame allocator on every release of a *sole-owned* frame,
+/// after the last legitimate use and before the frame joins a free list.
+///
+/// **What this buys.** Until now the only poison KASAN laid down was on heap
+/// slots, so a use-after-free was detectable only for objects that came from the
+/// kernel heap and only until the enclosing frames were recycled. Everything
+/// that owns memory a frame at a time — page tables, per-process address-space
+/// backing, DMA buffers, the stacks — was released into an *addressable* shadow
+/// state, and a stale pointer into it read clean. This closes that: a frame that
+/// has been handed back reads `0xFA` until the allocator hands it out again and
+/// [`on_frame_alloc`] clears it.
+///
+/// # Why only sole-owned frames
+///
+/// A frame with refcount > 1 is still live for its other owners — copy-on-write
+/// mappings share frames by design — so releasing *one* reference must not
+/// poison it. The predicate is exactly the one `zero_on_free` already uses, and
+/// for exactly the same reason: both would corrupt a still-live frame. The two
+/// are deliberately not coupled beyond sharing the predicate, because
+/// `zero_on_free` is a configurable hardening policy and this is a debug-build
+/// detection claim; they must be able to be on independently.
+///
+/// # Why this maps nothing either
+///
+/// [`on_frame_alloc`] does not map because its write is a no-op on an unbacked
+/// shadow frame. That argument does *not* apply here — `0xFA` on an unbacked
+/// frame is a real value being discarded. The reason is the second half of that
+/// hook's rationale, which does carry over and is if anything stronger: mapping
+/// calls `frame::alloc_frame`, so a poisoner that maps re-enters the frame
+/// allocator from inside its own *free* path — while the caller is midway
+/// through returning a frame, with its per-CPU cache and free lists in flux.
+/// That is a worse place to recurse than the alloc path, and the alloc path was
+/// already bad enough to force this design once.
+///
+/// What makes it *acceptable* to skip rather than map is the direction the
+/// failure points. A dropped poison costs a report that would have fired, on a
+/// frame whose shadow was never backed — which is to say, the exact behaviour
+/// this code had before the hook existed. A dropped unpoison, by contrast,
+/// leaves stale poison on live memory and reports every legitimate access to it
+/// forever. Poison fails **open**; unpoison fails **closed**. Hence
+/// [`IfUnmapped::SkipLossy`] here and [`IfUnmapped::Skip`] there — the two look
+/// alike but rest on different arguments, and only one of them is an
+/// equivalence.
+///
+/// In practice the loss is small and self-limiting: shadow frames are backed by
+/// the heap's own poison-on-free path and by the self-tests, so the ranges that
+/// matter most — those that have ever held a checked object — are precisely the
+/// ones already backed.
+///
+/// `phys` is a physical address; the shadow covers the HHDM alias of it.
+#[inline]
+pub fn on_frame_free(phys: u64, frames: u64) {
+    if !is_enabled() || frames == 0 {
+        return;
+    }
+    let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
+    if hhdm == 0 {
+        return;
+    }
+    let Some(bytes) = frames.checked_mul(FRAME_SIZE as u64) else {
+        return;
+    };
+    let Some(base) = phys.checked_add(hhdm) else {
+        return;
+    };
+    // Frame-aligned, so `bytes` is a whole number of granules and there is no
+    // trailing partial granule to encode.
+    fill_shadow_with(
+        base,
+        bytes >> KASAN_GRANULE_SHIFT,
+        KASAN_FREE,
+        IfUnmapped::SkipLossy,
+    );
+    BYTES_POISONED.fetch_add(bytes, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -1938,6 +2046,107 @@ pub fn self_test() {
     }
     serial_println!("[kasan]   mapping matches -asan-mapping-offset: OK");
 
+    // -- Test 6: frame free poisons, frame alloc unpoisons -------------------
+    //
+    // The heap tests above only prove the *slot*-granularity hooks. This one
+    // covers the pair that operates a whole frame at a time — the only thing
+    // watching memory that is owned frame-wise rather than through the heap
+    // (page tables, address-space backing, stacks), and the pair whose failure
+    // mode is a use-after-free that reads perfectly clean.
+    //
+    // It must first force the frame's shadow to be *backed*, because
+    // [`on_frame_free`] uses [`IfUnmapped::SkipLossy`] and would otherwise
+    // silently drop the poison — the test would then assert against a shadow
+    // byte that reads `0x00` from the shared zero page and fail for a reason
+    // that has nothing to do with the hook being correct. `poison_granules`
+    // maps (it is the `Map` path) and writes the value a live frame should
+    // already have, so the forcing is also a no-op on the frame's state.
+    {
+        let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
+        match (hhdm, crate::mm::frame::alloc_frame()) {
+            (0, _) => serial_println!("[kasan]   frame poison-on-free SKIPPED: no HHDM"),
+            (_, Err(e)) => {
+                serial_println!("[kasan]   frame poison-on-free SKIPPED: alloc failed ({e:?})");
+            }
+            (hhdm, Ok(f)) => {
+                let va = f.addr().wrapping_add(hhdm);
+                let fsz = FRAME_SIZE as u64;
+                if shadow_of(va).is_none() || shadow_of(va.wrapping_add(fsz - 1)).is_none() {
+                    serial_println!(
+                        "[kasan]   frame poison-on-free SKIPPED: frame {:#x} outside the \
+                         covered window",
+                        f.addr()
+                    );
+                    // SAFETY: `f` came from `alloc_frame` above, is freed once,
+                    // and nothing holds a reference to its memory.
+                    let _ = unsafe { crate::mm::frame::free_frame(f) };
+                } else {
+                    poison_granules(va, fsz, KASAN_ADDRESSABLE);
+                    assert_eq!(
+                        get_shadow(va),
+                        KASAN_ADDRESSABLE,
+                        "kasan: freshly-allocated frame is not addressable"
+                    );
+                    // SAFETY: as above — `f` is freed exactly once here and its
+                    // memory is never touched again, only its address is used
+                    // for shadow lookups.
+                    let freed = unsafe { crate::mm::frame::free_frame(f) };
+                    assert!(freed.is_ok(), "kasan self-test: free_frame failed");
+                    assert_eq!(
+                        get_shadow(va),
+                        KASAN_FREE,
+                        "kasan: free_frame left the frame addressable — a stale pointer \
+                         into a recycled frame would read clean"
+                    );
+                    // The far end of the frame too: a poison that covered only
+                    // the first shadow bytes would miss most of a 16 KiB frame.
+                    assert_eq!(
+                        get_shadow(va.wrapping_add(fsz - 8)),
+                        KASAN_FREE,
+                        "kasan: free_frame poisoned only part of the frame"
+                    );
+                    assert!(
+                        check(va, 8, false).is_err(),
+                        "kasan: use-after-free on a freed frame not caught"
+                    );
+                    serial_println!("[kasan]   frame poison-on-free (16 KiB): OK");
+
+                    // And the other half of the pair: reclaiming the frame must
+                    // clear the poison, or the next owner's first write is a
+                    // false positive. The per-CPU cache is LIFO, so the very
+                    // next allocation on this CPU is normally the same frame —
+                    // but that is an optimisation, not a guarantee, so only
+                    // assert when it actually came back.
+                    match crate::mm::frame::alloc_frame() {
+                        Ok(f2) if f2.addr() == f.addr() => {
+                            assert_eq!(
+                                get_shadow(va),
+                                KASAN_ADDRESSABLE,
+                                "kasan: reallocated frame still poisoned — every \
+                                 legitimate access to it would be reported"
+                            );
+                            serial_println!("[kasan]   frame unpoison-on-alloc: OK");
+                            // SAFETY: `f2` came from `alloc_frame`, is freed
+                            // once, and its memory was never used.
+                            let _ = unsafe { crate::mm::frame::free_frame(f2) };
+                        }
+                        Ok(f2) => {
+                            serial_println!(
+                                "[kasan]   frame unpoison-on-alloc SKIPPED: allocator \
+                                 returned a different frame"
+                            );
+                            // SAFETY: as above.
+                            let _ = unsafe { crate::mm::frame::free_frame(f2) };
+                        }
+                        Err(e) => serial_println!(
+                            "[kasan]   frame unpoison-on-alloc SKIPPED: realloc failed ({e:?})"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
     let st = stats();
     serial_println!(
         "[kasan]   stats: violations={}, shadow_frames={}, poisoned={}B, unpoisoned={}B, \
@@ -1960,7 +2169,7 @@ pub fn self_test() {
         );
     }
 
-    // -- Test 6: disabling must not leave poison on a reusable slot ----------
+    // -- Test 7: disabling must not leave poison on a reusable slot ----------
     //
     // The regression test for the defect described at `disable()`. Its shape is
     // the exact sequence that produced 62 spurious use-after-free reports on one
@@ -1993,7 +2202,7 @@ pub fn self_test() {
         assert_eq!(
             get_shadow(a4),
             KASAN_FREE,
-            "kasan: on_free did not poison the slot — test 6 cannot prove anything"
+            "kasan: on_free did not poison the slot — test 7 cannot prove anything"
         );
         disable();
         assert_eq!(

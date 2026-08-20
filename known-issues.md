@@ -39341,6 +39341,113 @@ metadata and freelist links through the HHDM alias of frames it has just
 freed). Land the unpoison side, get a clean whole-boot instrumented run, and
 consider poisoning-on-free as a separate change with its own boot evidence.
 
+> **ANNOTATION 2026-08-19 (lane A): done — the trigger above was met, and
+> poison-on-free has landed.**
+>
+> Both halves of the condition were satisfied on their own terms:
+>
+> - **The clean whole-boot instrumented run exists.** `./scripts/kasan-build.sh
+>   --boot` reached `BOOT_OK after 1251s` across 27582 serial lines, `build:
+>   kasan-instrumented on QEMU TCG`, with `violations=7, shadow_frames=2625,
+>   poisoned=1496682224B, unpoisoned=4294422947B, map_lock_giveups=0`. There
+>   were exactly **three** `CRITICAL` lines in the entire boot (serial lines
+>   25627, 25636, 27123) and all three trace to deliberate self-tests — the
+>   `[kasan-rt]` report-path test and the `[heap]` buffer-overflow/redzone
+>   test. **Zero spurious reports.** Compare the pre-fix run, which exhausted
+>   its 64-report budget by line 2092.
+> - **The false-positive risk the paragraph feared was already defused, not
+>   merely tolerated.** `kernel/src/mm/frame.rs` carries a module-scope
+>   `#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]` (line 61), so
+>   the buddy allocator's intrusive `FreeNode` freelist writes through the HHDM
+>   alias, and its zero-on-free memset, are not checked at all. The metadata
+>   the paragraph worried about cannot report against itself.
+>
+> What landed: `kasan::on_frame_free`, called from `free_frame`'s per-CPU fast
+> path and from `free_order_inner`, gated on a new shared `block_is_sole_owned`
+> predicate (CoW frames with refcount > 1 must not be poisoned — the same
+> predicate zero-on-free applies, now hoisted out of the `is_zero_on_free()`
+> gate so the two are independently switchable). It writes `KASAN_FREE` with a
+> new `IfUnmapped::SkipLossy`, which skips ranges whose shadow is unbacked
+> rather than allocating shadow from inside the free path. See
+> design-decisions.md §244 for why dropping a poison is acceptable where
+> dropping an unpoison was not: poison fails **open** (a missed report on a
+> frame that was never watched anyway), unpoison fails **closed** (stale `0xFA`
+> on live memory, reported forever).
+>
+> Covered by self-test 6 in `kasan::self_test`, which forces the frame's shadow
+> to be backed (otherwise `SkipLossy` would drop the poison and the assertion
+> would fail for a reason unrelated to the hook), then asserts the frame reads
+> `KASAN_FREE` at both ends after `free_frame` and reads addressable again if
+> the allocator hands the same frame back.
+>
+> **Post-change instrumented evidence.** A second full `kasan-build.sh --boot`,
+> *with* the hook, also passed: `BOOT_OK after 1464s`, 27588 serial lines,
+> `build: kasan-instrumented on QEMU TCG`, clean streak 12. Exactly the **same
+> three** `CRITICAL` lines as the pre-change baseline, all deliberate
+> self-tests — the two `[kasan-rt]` report-path writes at 25638/25647 and the
+> `[heap]` redzone overflow at 27135 — and `map_lock_giveups=0`. **The new hook
+> introduced zero false positives.** That the hook is doing real work rather
+> than silently no-opping is visible in the stats line: `poisoned` went from
+> 1496682224B to **3964078784B**, i.e. ~2.47 GB of additional poison, ~151k
+> frames poisoned on free. `unpoisoned` is essentially unchanged
+> (4294422947B → 4294639048B), as it must be — the alloc side was not touched.
+>
+> The delta is the right shape for a *sanity* check on the numbers, not just an
+> assertion that they went up: if `SkipLossy` were dropping most poisons the
+> figure would have barely moved, and if the sole-owner predicate were wrong in
+> the permissive direction it would have exceeded the unpoisoned total.
+>
+> **Benchmark evidence, and a trap worth writing down.** `frame.rs` is
+> performance-critical, so the harness required `--bench`. The first run looked
+> alarming — 18 benchmarks "REGRESSED, UNCONFIRMED", including
+> `page_alloc_zeroed_pool` +65% and `heap_alloc_free_64` +74%. None of it
+> survived contact with the data.
+>
+> *First trap: two accelerator populations.* The script passes no `-accel`, so
+> QEMU takes WHPX when the host offers it and silently falls back to TCG when it
+> does not — the accelerator flips on host state, not on anything in the
+> command. All 13 "fast" historical runs are Hyper-V/WHPX; mine are TCG. The
+> tell is `page_alloc_zeroed_free`: 457–542 ns across every WHPX run and
+> **3734 ns** on `26c139a81`, which is a *pre-change* run and the only other TCG
+> one. My runs sit at 3738/3621/3583 — identical to that TCG baseline. The
+> harness does pick an accel-matched baseline for the per-benchmark comparison
+> (it chose `26c139a81`), so this is not a harness defect; the problem is that
+> the matched population had exactly **one** member, so no spread was known.
+>
+> *Second trap: the TCG noise floor is wider than the effect being chased.*
+> Three A/A runs on the byte-identical image (`sha:2e6316daa443fc8e`) settled
+> it, and the two benchmarks that had looked persistent moved on their own:
+>
+> | benchmark | TCG baseline (pre-change) | run 1 | run 2 | run 3 |
+> |---|---|---|---|---|
+> | `page_alloc_free` | 461 | 508 | 370 | 540 |
+> | `page_alloc_zeroed_free` | 3734 | 3738 | 3621 | 3583 |
+> | `page_alloc_zeroed_pool` | 348 | 611 | 742 | **349** |
+> | `firewall_check` | 66 | 96 | 76 | **65** |
+> | `heap_alloc_free_64` | 186 | 345 | 378 | 497 |
+>
+> `page_alloc_zeroed_pool` and `firewall_check` returned to within 1 ns of the
+> pre-change baseline, and the harness's own A/A verdict names
+> `page_alloc_free: 370 → 540 (+45%)` and `heap_alloc_free_64: 378 → 497 (+31%)`
+> as *measured host noise, by construction* — the same two benchmarks the first
+> run had flagged. `firewall_check` was the giveaway throughout: nothing in this
+> change can reach a firewall rule match, so its +45% in run 1 could only ever
+> have been a whole-run factor.
+>
+> Conclusion: no regression. `page_alloc_free` PASSed its 1000 ns target on all
+> three runs, `page_alloc_zeroed_free` is flat, and the code-level cost is
+> bounded by inspection at one `#[inline]` call whose first act is a relaxed
+> atomic load that is `false` in production, plus two more relaxed loads
+> short-circuiting a volatile read in `free_order_inner`.
+>
+> **The reusable lesson:** under TCG on this host the per-benchmark noise floor
+> exceeds ±45%, so a TCG-only comparison against a single baseline grades
+> nothing. Before believing a `--bench` regression, check `accel` in
+> `bench/history.jsonl` and confirm the baseline population is both
+> accel-matched *and* larger than one. A benchmark the change provably cannot
+> reach (`firewall_check` here) is the cheapest available control — if it moved
+> too, the run moved, not the code.
+
 #### Why this matters more than the report count suggests
 
 The 64-report budget is exhausted at line 2092 of a ~27700-line boot. Everything
@@ -42819,3 +42926,308 @@ whenever the grid matches the pane — the state this issue is about restoring �
 and while they do not, a pane drawn *shorter* than its grid stops that many
 lines short of the very top of its scrollback. Fixing the resize fixes that
 clamp for free.
+## TD-SPLIT-GNU-HEX-SUFFIX-START-READS-OUT-OF-BOUNDS (lane B, 2026-08-18) — **upstream bug; ours diverges on purpose**
+
+**In short:** `split --hex-suffixes=FROM` is supposed to start naming its output
+files at the hexadecimal number `FROM` — so `--hex-suffixes=ff` should produce
+`xff`, `x100`, `x101`. In GNU coreutils 9.4 it does not, whenever `FROM`
+contains a *letter* (`a`–`f`): the files come out with names that are not
+consecutive and not hexadecimal at all. Ours produces the correct names. This
+entry exists so nobody "fixes" ours to match GNU, and so
+`scripts/split-diff.sh` can carry the three affected cases as declared
+expected-failures rather than quietly omitting them.
+
+**Where upstream goes wrong.** `split.c` validates the start value against the
+suffix alphabet with `strspn`, which accepts `a`–`f` for hex. It then converts
+it to a per-position index with, in effect:
+
+```c
+sufindex[i] = numeric_suffix_start[i] - '0';
+```
+
+That subtraction is right for `'0'`–`'9'` and wrong for letters: `'a' - '0'` is
+49, and `'f' - '0'` is 54. Those indices are then used to read from a 16-character
+alphabet, so every letter in the start value indexes 33–38 elements past the end
+of the array. The name that comes out is whatever bytes follow it in memory,
+carried forward by the ordinary increment.
+
+**Measured**, GNU coreutils 9.4, glibc, `LC_ALL=C`, three chunks:
+
+| Command | GNU 9.4 leaves | ours |
+|---|---|---|
+| `split -l 5 --hex-suffixes=ff` (4 pieces) | `xf3 xf4 xf5 xff` | `xff`, then `output file suffixes exhausted` |
+| `split -l 5 --hex-suffixes=a` (4 pieces) | `x0a x0e x10 x11` | `x0a x0b x0c x0d` |
+| `split -n 3 --hex-suffixes=1f` | `x13 x14 x1f` | `x1f x20 x21` |
+| `split -n 3 --hex-suffixes=bb` | **`xbb` alone**, plus `split: output file suffixes exhausted` — two thirds of the input is dropped | `xbb xbc xbd` |
+
+Two things to notice. In every row the names are out of order — `xff` is
+*followed* by `xf3` — and sort order is the one property the whole suffix
+mechanism exists to guarantee. (It is also why upstream refuses to widen the
+suffix field when a start value is given: an arbitrary start "would break sort
+order for files generated from multiple split runs". The letter case breaks it
+far more thoroughly than widening ever could.) And in the `=bb` row GNU does not
+merely misname the files, it **loses data**: it writes one piece of three and
+stops.
+
+Only a letter in the *incrementing* position misbehaves, which is why
+`--hex-suffixes=e0` looks fine (`xe0 xe1 xe2`) and `=0f` does not. That is the
+shape of an out-of-bounds read, not of a rule.
+
+Ours errors in the first row for a reason that is not a bug: `ff` is the largest
+two-digit hex suffix, an explicit start turns widening off, and a fifth piece
+therefore has nowhere to go. GNU should report the same thing there and instead
+invents four names.
+
+**Our behaviour:** the start value is converted by counting in base 16, so the
+names are the consecutive hexadecimal numbers from `FROM` upward, and
+`--hex-suffixes=ff -a 2` is the length error it should be rather than three
+garbage names. This is deliberate: reproducing an out-of-bounds read to match
+byte-for-byte would mean reproducing *this machine's* heap layout, which is not
+a specification.
+
+**Action:** none for us. Worth reporting upstream. If it is ever fixed there,
+the three `xfail_case` lines in `scripts/split-diff.sh` become ordinary
+`names_case` lines and this entry can be closed.
+
+---
+
+## TD-SH-C-IS-SPELLED-FOUR-MORE-TIMES-OUTSIDE-THE-COREUTILS-CRATE (lane B, 2026-08-18)
+
+**In short:** Four programs still build their own "hand this string to a shell"
+command instead of calling the one shared helper. Today they happen to agree;
+nothing makes them keep agreeing, and the decision they each re-make — what to
+run on a host with no `/bin/sh` — is invisible until it is wrong.
+
+`userspace/coreutils/src/shell.rs` exists (see design-decisions.md §336) because
+`awk`'s `system()` and its two pipe forms, `split --filter`, and `sh`'s `$(…)`
+substitution all take a shell *command* rather than an argv, so none of them may
+tokenise it themselves. All three now go through it. These four do not, because
+they live outside the `coreutils` crate and cannot depend on it as things stand:
+
+| Program | Line | What it writes |
+|---|---|---|
+| `userspace/crond` | `src/main.rs:494` | `Command::new("/bin/sh").arg("-c")` |
+| `userspace/make` | `src/main.rs:990` | same, for a recipe line |
+| `userspace/nc` | `src/main.rs:1351` | same, for `-e` |
+| `userspace/watch` | `src/main.rs:383` | same, via a private `const SHELL` |
+
+**Two call sites that look like this and are not.** `userspace/crond2`
+(`src/main.rs:1173`) and `userspace/sudo` (`src/main.rs:2808`, `:2817`) also
+spell `.arg("-c")`, but the program they run is the one the *user* chose — the
+crontab's `SHELL=` and the target account's login shell respectively. Running
+some other shell there would be the bug. They must keep their own
+`Command::new`, and should not be folded in when this entry is actioned.
+
+**Why it matters.** The trap the shared module was written for is that the
+obvious host fallback — `cmd /c` — does not fail on a machine without a POSIX
+shell; it *succeeds*, under completely different quoting rules than the script
+was written against. A copy that reaches for it is a copy that silently
+mis-executes rather than reporting that it cannot execute.
+
+**Proper fix:** move `shell.rs` somewhere all five can depend on — a small
+`userspace/shellcmd` crate that `coreutils` re-exports — and delete the four
+copies. Not done now because it touches four crates outside the change that
+raised it.
+
+---
+
+## [B] FIXED — `split` implemented three of its fourteen options, and corrupted the file while doing it (2026-08-18)
+
+**In short:** `split` cuts a file into numbered pieces. Ours understood `-l`,
+`-b` and `-a` and nothing else — no `-n`, no `-C`, no long options at all, not
+even `--help` — and the three it did understand it got wrong for any input that
+was not plain ASCII text: it read the input as *lines of UTF-8* and wrote them
+back with `writeln!`, so a file with CRLF endings came back with LF, a file
+whose last line had no newline gained one, and a file containing a byte that is
+not valid UTF-8 — that is, any binary file, the main thing people split —
+failed outright with `read error`. It is rewritten against GNU coreutils 9.4,
+and `scripts/split-diff.sh` now agrees with GNU on **207 of 207** behavioural
+cases, with five declared divergences.
+
+### What was missing
+
+| | |
+|---|---|
+| absent entirely | `-n`/`--number` in all four forms (`N`, `K/N`, `l/N`, `l/K/N`, `r/N`, `r/K/N`), `-C`/`--line-bytes`, `-d`/`--numeric-suffixes`, `-x`/`--hex-suffixes`, `-t`/`--separator`, `--filter`, `--additional-suffix`, `-e`/`--elide-empty-files`, `-u`/`--unbuffered`, `--verbose`, `--help`, `--version` |
+| long options | **none** — `--lines=5` was parsed as a file name |
+| suffix widening | none. Where GNU grows `x` `y` `z` into `zaaa`…, ours exited `output file suffixes exhausted` |
+| `-b`'s number grammar | `k`/`m`/`g` only, and `n * multiplier` unchecked, so a large count with a suffix panicked in a debug build. GNU reads the full `xstrtoumax` grammar — `K`/`KB`/`KiB` through `Q`, `b` = 512, and `NxM` products |
+| non-UTF-8 argv | `env::args()`, which **panics** on an argument that is not valid Unicode. A file name is bytes; see the repo rule on OS-boundary data |
+
+### The four faults in what it did implement
+
+| | what it did | what GNU does |
+|---|---|---|
+| line endings | `BufRead::lines()` (drops `\n` *and* a preceding `\r`) then `writeln!` | copies bytes; CRLF stays CRLF, and a file whose last line has no newline comes back without one |
+| binary input | `lines()` yields `Err(InvalidData)` → `split: read error` and exit 1 | splits it; `split -l` on a binary file is ordinary usage |
+| `-a 0` | rejected — `invalid suffix length: 0`, exit 1 | accepted: upstream tests the width for *truth*, so `0` reads as "not given" and the default 2 applies. Measured: `split -a 0 -l 2` writes `xaa xab xac` |
+| diagnostics | `unknown option: --lines`, `invalid line count: 0` | `unrecognized option '--lines'`, `invalid number of lines: '0'` — quoted, and worded by `getopt_long` |
+
+### How the rewrite was verified
+
+`scripts/split-diff.sh`, 210 cases, on the `csplit-diff.sh` pattern: it compares
+a **manifest of the files left behind** (`od -An -c` per file, in name order),
+not stdout, because `split`'s stdout is empty in almost every mode — a `split`
+that wrote the wrong bytes into the right names would pass a stdout-only
+comparison, and that is most of what there is to get wrong here.
+
+**Five cases are declared expected-failures**, so the harness reports `207
+passed, 0 differed, 5 differ on purpose` rather than quietly covering 205:
+
+| | why |
+|---|---|
+| `--help`, `--version` | text we do not promise to reproduce verbatim |
+| three `--hex-suffixes=` cases | GNU 9.4 reads out of bounds there; see `TD-SPLIT-GNU-HEX-SUFFIX-START-READS-OUT-OF-BOUNDS` above and design-decisions.md §336 §3 |
+
+### The part that could not be settled by probing
+
+`-n l/N` — "split into N files without splitting a record" — was implemented
+four different ways against 45 measured GNU invocations, and each formula fit
+some values of N and failed others. The behaviour is genuinely not inferable
+from the outside, because the rule is not "fill each piece up to `size/N`": the
+file is cut into the *same* partitions as `-n N`, a record belongs to the
+partition its **first byte** lands in, and a record that overruns a partition
+leaves that partition **an empty file in its place in the sequence** — not
+skipped, and not moved to the end. Three records into `-n l/5` gives record,
+record, *empty*, record, *empty*.
+
+That was settled by reading `coreutils-9.4/src/split.c` rather than by more
+probing, and reading it also corrected three *other* rules that were wrong or
+underspecified: when the suffix field is widened for `-n` (only when the start
+value parses as decimal **and** is smaller than the chunk count), how a start
+value is validated (`strspn` against the alphabet, with leading zeros stripped
+*before* the width is checked, and two different message wordings for `-d` and
+`-x`), and that `-n`'s argument skips whitespace *before* the `l/`/`r/` prefix
+is looked for, so `-n ' l/3'` is `l/3`. The lesson generalises: a differential
+harness proves agreement on the cases you thought of, and cannot tell you the
+*shape* of a rule you have not guessed.
+
+### Also in this change
+
+`sh -c` moved into `userspace/coreutils/src/shell.rs`, shared by `split
+--filter`, `awk`'s `system()` and two pipe forms, and `sh`'s `$(…)`
+substitution. Four copies remain outside the crate — see
+`TD-SH-C-IS-SPELLED-FOUR-MORE-TIMES-OUTSIDE-THE-COREUTILS-CRATE` above.
+
+## [B] FIXED — `test` could not say "that is not an expression", so `[ "$x" -eq 0 ]` on garbage took the *true* branch (2026-08-19)
+
+**In short:** `test` (and its other name, `[`) is the program a shell script
+calls to decide an `if`. It answers with an exit status, and there are three of
+them: 0 true, 1 false, and **2 "what you gave me is not an expression"**. Ours
+had no way to produce the third — its whole evaluator returned a `bool` — so
+every malformed expression came back as a plain yes or no. `test abc -eq 0`
+answered **true**, because both sides were parsed with `unwrap_or(0)` and
+`0 -eq 0` is true. A script guarding on `if [ "$count" -eq 0 ]` therefore ran
+its zero branch whenever `$count` held anything that was not a number, silently
+and with no message. It is rewritten against GNU coreutils 9.4;
+`scripts/test-diff.sh` now agrees with GNU on **194 of 194** cases, with no
+declared divergences.
+
+### Why this one was worse than a wrong answer
+
+Every other coreutils bug in this tree produces visible wrong output. This one
+produced a *branch*. The failure is invisible at the point it happens and shows
+up later as the wrong file deleted, the wrong service started, the wrong
+default applied — with nothing on stderr tying it back. It is also the
+most-executed program in the system: nearly every line of every shell script
+reaches it or the builtin copy of it.
+
+The old implementation was 337 lines with the signature
+`fn evaluate(args: &[String]) -> bool`. The signature *is* the bug: a type with
+two inhabitants cannot express a three-valued answer, so no amount of care
+inside the function could have produced status 2.
+
+### What was missing
+
+| | |
+|---|---|
+| status 2 | **the entire concept**. No diagnostic was ever printed, for any input |
+| the argument-count rules | absent. POSIX defines `test` by argument *count* first and only runs a parser past four; ours scanned for `-a`/`-o` at any depth |
+| parentheses | absent. `test '(' a = a ')'` was false |
+| `-l STRING` | absent |
+| `-ef` `-nt` `-ot` | absent |
+| `-b -c -p -S -g -u -k -O -G -N -t` | absent |
+| non-UTF-8 argv | `env::args()`, which **panics**. A file name is bytes |
+| integer width | `parse::<i64>()`, where `test` compares decimal *text* at arbitrary precision |
+
+### The rules that only reading the source could have supplied
+
+Four of these decide answers, and none of them is recoverable by probing an
+implementation you already believe is nearly right, because each one changes
+what the cases *around* it mean:
+
+1. **Argument count is checked before operators are, and the order inside each
+   count is load-bearing.** At three arguments the binary operator is looked
+   for *first*, so `test ! = x` compares the string `!` with `x` rather than
+   negating anything, and `test ( = )` compares `(` with `)`. Checking `!`
+   first — which is what reads naturally — silently changes the answer for
+   every expression whose left operand happens to be `!` or `(`.
+2. **Neither `-a` nor `-o` short-circuits.** GNU accumulates with
+   `value |= and()` and `value &= term()`, so the far side is evaluated even
+   once the answer is settled, and a syntax error over there is still reported:
+   `test x = x -o abc -eq 1` is status 2, not true. A short-circuiting
+   implementation passes every case whose far side is well-formed, which is
+   every case anyone writes deliberately.
+3. **Integers are compared as decimal text, so `test` is arbitrary-precision.**
+   `test 99999999999999999999999999 -eq 99999999999999999999999999` is true.
+   Any `i64` implementation reports an error or, worse, wraps.
+4. **`-l STRING` is an integer** equal to that string's length, accepted
+   wherever an integer is (`test -l abc -eq 3`, and on either side, and on
+   both), recognised only when enough arguments remain, and refused *by name*
+   on the three file comparisons (`-ef does not accept -l`). It is documented
+   only in the last line of `--help`.
+
+### How the rewrite was verified
+
+`scripts/test-diff.sh`, 194 cases, run against `/usr/bin/test` under WSL —
+the real binary, not bash's builtin, which is a different implementation.
+Unlike the other harnesses in this directory it is **batched**: `test` writes no
+files and no stdout, so every case is encoded into one file (arguments joined
+by `\x1f`, prefixed by an explicit argument count) and the whole sweep runs in a
+single WSL launch instead of one per case.
+
+The count prefix is not redundant. Joining arguments alone encodes `test` and
+`test ''` identically, and those are different expressions with different
+answers — zero arguments is false, one empty argument is also false, but
+`test '' = ''` is true and the count is what keeps the three apart.
+
+Baseline, before the rewrite: **19 of 157 cases differed**, every one of them a
+malformed expression answered 0 or 1 with nothing on stderr.
+
+### Two bugs the harness found in the rewrite itself
+
+Worth recording because both are the same failure mode the rewrite exists to
+remove, surviving *inside* it:
+
+- **`test -t x` answered false where GNU says `invalid integer 'x'`.** `-t`
+  routes its descriptor number through `find_int`, the same routine the numeric
+  comparisons use, so a malformed one is an error. Only a *well-formed* number
+  too large to be a descriptor is quietly false, because upstream learns that
+  from `strtol`'s `ERANGE` rather than from the syntax check. I had written the
+  opposite in a comment and been confident about it.
+- **Two harness cases were declared expected-to-differ on a false premise.** I
+  had marked `test --help` and `test --version` as divergences on the
+  assumption that they are options. They are not: POSIX requires `test --help`
+  to be the one-argument form applied to the non-empty string `--help` — status
+  0, not a byte of output — and GNU obeys (measured). The long options exist
+  only under the name `[`, only as the sole argument, and only without the
+  closing `]`. The harness reported them as XPASS, which is the only reason
+  they were re-examined; an `xfail` that is never checked for having started
+  passing is a permanent blind spot.
+
+### Also in this change
+
+The harness's comparison loop ran `awk 'NR==n'` over both result files once per
+case and forked three subshells per case — about 470 process creations, which
+took thirteen minutes on MSYS for work that is one linear pass. It is now a
+single `paste` + `awk`. The sweep went from ~30 minutes to a few, and the cost
+that remains is Windows process creation for the 194 invocations of our own
+binary, which nothing here can avoid.
+
+Diagnostics now name the *invoked* program: a failing `[ … ]` says `[:`, a
+failing `test …` says `test:`. GNU echoes `argv[0]` verbatim (so an absolute
+invocation reads `/usr/bin/test:`); we print the bare name to match every other
+utility in this crate, and the harness normalises the prefix on both sides so
+that choice cannot masquerade as a behavioural difference. On the first run it
+did exactly that — 37 "failures", all of them the prefix and none of them the
+message.

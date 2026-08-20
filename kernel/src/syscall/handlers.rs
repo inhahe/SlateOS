@@ -8248,6 +8248,7 @@ pub fn sys_fs_mount(args: &SyscallArgs) -> SyscallResult {
         "ntfs" | "ntfs3" => crate::fs::ntfs::mount(source, target),
         "btrfs" => crate::fs::btrfs::mount(source, target),
         "f2fs" => crate::fs::f2fs::mount(source, target),
+        "zfs" => crate::fs::zfs::mount(source, target),
         "devfs" | "dev" => crate::fs::devfs::mount(target),
         "proc" | "procfs" => crate::fs::procfs::mount(target),
         "sysfs" | "sys" => crate::fs::sysfs::mount(target),

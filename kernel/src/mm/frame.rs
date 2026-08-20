@@ -330,6 +330,68 @@ fn tag_alloc_owner(frame_addr: u64, count: u64) {
     }
 }
 
+/// Poison `count` frames starting at `frame_addr` as freed, for KASAN.
+///
+/// The symmetric counterpart of the [`kasan::on_frame_alloc`] call in
+/// [`on_frames_allocated`]: allocation clears poison so the new owner's writes
+/// read clean, and this lays it down again so a stale pointer into a frame that
+/// has been handed back is reported instead of reading silently-valid memory.
+///
+/// **This is not called on every free**, unlike [`untag_free_owner`]. It must
+/// only run once the caller has established that the release is of the frame's
+/// *last* reference — a copy-on-write frame whose refcount is still above one
+/// remains live for its other mappings, and poisoning it would report their
+/// entirely legitimate accesses. That is the same predicate `zero_on_free` uses
+/// and for the same reason; see [`block_is_sole_owned`].
+///
+/// Ordering mirrors the alloc hook's: the poison must come *after* the last
+/// legitimate HHDM write, which in practice means after zero-on-free's memset.
+///
+/// [`kasan::on_frame_alloc`]: super::kasan::on_frame_alloc
+#[inline]
+fn poison_freed_frames(frame_addr: u64, count: u64) {
+    super::kasan::on_frame_free(frame_addr, count);
+}
+
+/// Is the block of 2^`order` frames at `frame` released by its *last* owner?
+///
+/// Answers the question both zero-on-free and KASAN's poison-on-free have to
+/// ask before writing to a frame that is being returned: writing to a frame that
+/// another mapping still holds would corrupt it (zeroing) or slander it
+/// (poisoning).
+///
+/// - Blocks of order > 0 are never copy-on-write shared — only single frames
+///   participate in CoW — so they are always solely owned.
+/// - Order 0 uses the lockless refcount read, the same mechanism
+///   [`free_frame`] uses on its fast path.
+///
+/// Answers `false` whenever the refcount cannot be consulted (out of range, or
+/// before `REFCOUNT_PTR` is published in early boot). That is the conservative
+/// direction for both callers: no write happens, so nothing can be corrupted
+/// and nothing can be falsely reported.
+#[inline]
+fn block_is_sole_owned(frame: PhysFrame, order: usize) -> bool {
+    if order > 0 {
+        return true;
+    }
+    let rc_ptr = REFCOUNT_PTR.load(Ordering::Acquire);
+    let rc_len = REFCOUNT_LEN.load(Ordering::Relaxed);
+    if rc_ptr == 0 {
+        return false; // REFCOUNT_PTR not set (early boot).
+    }
+    #[allow(clippy::arithmetic_side_effects)]
+    let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
+    if (idx as u64) >= rc_len {
+        return false; // Can't verify refcount.
+    }
+    // SAFETY: idx < rc_len; rc_ptr is a valid HHDM pointer to the refcount
+    // array, set during init() and never moved. read_volatile ensures we see
+    // the latest write (ref_inc is done under the global lock, which fences
+    // on the writing side).
+    let rc = unsafe { (rc_ptr as *const u16).add(idx).read_volatile() };
+    rc <= 1
+}
+
 /// Mark `count` frames as unowned again (called on every free).
 #[inline]
 fn untag_free_owner(frame_addr: u64, count: u64) {
@@ -2414,6 +2476,13 @@ pub unsafe fn free_frame(frame: PhysFrame) -> KernelResult<()> {
             }
         }
 
+        // KASAN: the frame is confirmed sole-owned above and zero-on-free has
+        // made its last write, so this is the point past which no legitimate
+        // access to it exists. Poison it so a stale pointer is reported.
+        // Deliberately before the cli: like the memset, it must not extend the
+        // interrupts-off window, and it takes no locks (see `on_frame_free`).
+        poison_freed_frames(frame.addr(), 1);
+
         // SAFETY: We're in ring 0; pushfq+cli is always valid.
         let flags = unsafe { disable_interrupts() };
         let cpu = crate::smp::fast_cpu_index();
@@ -2473,43 +2542,35 @@ pub unsafe fn free_order(frame: PhysFrame, order: usize) -> KernelResult<()> {
 /// so uncharging would be wrong).
 #[allow(clippy::indexing_slicing)]
 unsafe fn free_order_inner(frame: PhysFrame, order: usize) -> KernelResult<()> {
+    // Is this the last reference? Both zero-on-free and KASAN's poison-on-free
+    // need the answer, and neither may write to a frame another mapping still
+    // holds. Computed once, outside the `is_zero_on_free()` gate, because the
+    // two are independently configurable — poisoning must not be silently
+    // switched off by a hardening knob that has nothing to do with it.
+    //
+    // Order 0 reaches here from free_frame() in two cases the predicate
+    // distinguishes: a shared frame (rc > 1, must not be touched) and the
+    // PCPU-disabled fall-through (sole owner).
+    //
+    // Short-circuited when neither consumer is on, so a production build with
+    // zero-on-free off does not pay a volatile refcount read on every free for
+    // an answer nobody reads.
+    let sole_owned = (is_zero_on_free() || super::kasan::is_enabled())
+        && block_is_sole_owned(frame, order);
+
     // Zero-on-free: zero the block BEFORE taking the global lock to
     // avoid holding the lock during the expensive zeroing operation.
-    //
-    // For order > 0: multi-frame blocks are never CoW-shared (only
-    // single frames participate in CoW), so they're always solely owned.
-    //
-    // For order == 0: this path is reached from free_frame() in two cases:
-    //   (a) Shared frame (rc > 1) — must NOT zero (other mappings live).
-    //   (b) PCPU disabled fallthrough — sole owner, should zero.
-    // Use the lockless refcount check to distinguish these cases.
-    if is_zero_on_free() {
-        let should_zero = if order > 0 {
-            true // Multi-frame blocks are always solely owned.
-        } else {
-            // Lockless refcount check (same mechanism as free_frame).
-            let rc_ptr = REFCOUNT_PTR.load(Ordering::Acquire);
-            let rc_len = REFCOUNT_LEN.load(Ordering::Relaxed);
-            if rc_ptr != 0 {
-                #[allow(clippy::arithmetic_side_effects)]
-                let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
-                if (idx as u64) < rc_len {
-                    // SAFETY: idx < rc_len; rc_ptr is a valid refcount array base.
-                    let rc = unsafe { (rc_ptr as *const u16).add(idx).read_volatile() };
-                    rc <= 1
-                } else {
-                    false // Can't verify refcount — skip zeroing.
-                }
-            } else {
-                false // REFCOUNT_PTR not set (early boot) — skip zeroing.
-            }
-        };
-        if should_zero && zero_on_free_block(frame.addr(), order) {
-            let frames_in_block = 1u64 << order;
-            for _ in 0..frames_in_block {
-                mark_zeroed_on_free();
-            }
+    if is_zero_on_free() && sole_owned && zero_on_free_block(frame.addr(), order) {
+        let frames_in_block = 1u64 << order;
+        for _ in 0..frames_in_block {
+            mark_zeroed_on_free();
         }
+    }
+
+    // KASAN: after the last legitimate write (the memset above), before the
+    // block reaches a free list.
+    if sole_owned {
+        poison_freed_frames(frame.addr(), 1u64 << order);
     }
 
     crate::ktrace::record(

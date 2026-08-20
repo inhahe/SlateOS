@@ -737,8 +737,12 @@ fn expand_variables(s: &str, state: &ShellState) -> String {
                 if i < bytes.len() {
                     i += 1;
                 }
-                // Execute and capture output
-                if let Ok(output) = Command::new("sh").arg("-c").arg(cmd).output() {
+                // Execute and capture output. Which shell that is, and what to
+                // do on a host with no `/bin/sh`, is `coreutils::shell`'s
+                // decision rather than one made here — the wrong answer
+                // (`cmd /c`) does not fail, it succeeds under different quoting
+                // rules than the substituted text was written against.
+                if let Ok(output) = coreutils::shell::shell(cmd).output() {
                     let out = String::from_utf8_lossy(&output.stdout);
                     result.push_str(out.trim_end_matches('\n'));
                 }

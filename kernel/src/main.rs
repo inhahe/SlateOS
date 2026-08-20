@@ -1527,6 +1527,16 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::f2fs::self_test() {
                 serial_println!("WARNING: F2FS self-test failed: {:?}", e);
             }
+            // ZFS read self-test, in RAM. ZFS has no fixed offsets to check
+            // against: a file's attributes live wherever the pool's own SA
+            // registry says they do, a ZAP entry's bucket is defined by a
+            // hash, and a dnode's spill pointer is found from the end of its
+            // slots rather than after its block pointers. Each of those is a
+            // place where a wrong answer is a *plausible* answer, so they are
+            // exercised on every boot rather than only when a pool is present.
+            if let Err(e) = fs::zfs::self_test() {
+                serial_println!("WARNING: ZFS self-test failed: {:?}", e);
+            }
             // devfs self-test (validates device file operations).
             if let Err(e) = fs::devfs::self_test() {
                 serial_println!("WARNING: DevFs self-test failed: {:?}", e);

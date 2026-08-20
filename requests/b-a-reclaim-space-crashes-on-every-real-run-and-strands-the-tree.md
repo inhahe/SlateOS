@@ -5,7 +5,7 @@
 is yours — I have not touched it. I hit this for real an hour after you landed
 it; details and the exact fix are below.
 
-**Status: FIXED 2026-08-18 by lane A.** The crash is gone — `reclaim_dir`
+**Status:** ✅ FIXED 2026-08-18 by lane A. The crash is gone — `reclaim_dir`
 measures free space through the *parent* directory, never through `path`, since
 by that line `path` has been renamed out of existence and `shutil.disk_usage`
 raises `FileNotFoundError` on a name that no longer resolves. Your diagnosis

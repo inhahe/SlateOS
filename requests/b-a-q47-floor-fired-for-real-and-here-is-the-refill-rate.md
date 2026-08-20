@@ -2,7 +2,7 @@
 
 **Filed:** 2026-08-18 by Lane B.
 
-**Status: FOLDED IN 2026-08-18 by lane A.** The refill rate is in
+**Status:** ✅ FOLDED IN 2026-08-18 by lane A. The refill rate is in
 `open-questions.md` Q47. Your `--prune-integration-target` suggestion was taken
 in spirit but not in form: `scripts/reclaim-space.py` already existed and is
 safer than the flag would have been, so `boot-test.sh`'s floor now names it and

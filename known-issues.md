@@ -41665,6 +41665,48 @@ screen-relative right bound was still indistinguishable from a correct one).
 
 ---
 
+## C-TOUCHPAD-GESTURE-LIST-DRAWS-PAST-THE-PANEL (lane C, 2026-08-19) — OPEN
+
+**Where:** `gui/desktop/src/touchpad.rs` — `TouchpadSettingsUI::scroll_offset`
+(declared line ~649) and the gesture loop in `render` (line ~977).
+
+The Gestures section of the touchpad settings panel draws **every** binding in
+`mgr.config.gestures`, advancing `cy` by ~22px each, and never compares `cy`
+against `h` — the panel height it is handed as a parameter and uses only to
+fill the background. `TouchpadConfig::set_gesture` pushes new bindings without a
+bound, so the list is user-growable, and past roughly `h / 22` entries the rows
+are emitted below the panel, drawn over whatever is underneath.
+
+**`scroll_offset` is the field that exists to prevent exactly this, and it is
+dead.** It is `pub`, it is initialised to 0, and it is never read anywhere in
+the crate — grep finds only the declaration and the initialiser. So a caller
+that wires a scroll wheel to it sees nothing happen, which is worse than the
+field not existing: the API advertises a scrollable list and silently ignores
+the request.
+
+This is the same shape as
+`C-TWO-SNAP-IMPLEMENTATIONS-WITH-DIFFERENT-GAP-POLICIES` below — state written
+into a struct as though the feature were finished, with nothing calling it —
+and it was found the same way, by asking what *reads* a public field rather
+than what writes one.
+
+**What the proper fix looks like.** Have the gesture loop start at
+`self.scroll_offset` clamped to the list length, as `window_rules.rs::render`
+already does at line ~940 (that one was fixed and has a regression test at
+~2251), and stop emitting once `cy` would exceed `y + h`. Both halves are
+needed: clamping alone still overdraws a long list, and the height check alone
+leaves the tail unreachable. Tests should assert (a) a list longer than the
+panel emits no command below `y + h`, (b) a `scroll_offset` past the end
+renders the last page rather than nothing or a panic, and (c) scrolling by one
+moves the first visible row by one — the last being the one that fails if the
+offset is read but ignored.
+
+**Not fixed in the commit that found it** only because that commit's workspace
+gate was already running and editing the crate would have invalidated it. It is
+the next thing lane C picks up.
+
+---
+
 ## C-TWO-SNAP-IMPLEMENTATIONS-WITH-DIFFERENT-GAP-POLICIES (lane C, 2026-08-18) — FIXED 2026-08-19
 
 **Where:** `gui/desktop/src/snap.rs` and `gui/desktop/src/main.rs::snap_window`

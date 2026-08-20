@@ -925,7 +925,6 @@ impl CredRandom {
             Err(_) => Self::Unavailable,
         }
     }
-
 }
 
 /// The both-sides-of-the-draw rule lives in [`SecretSource::secret`]. This
@@ -2555,15 +2554,60 @@ impl AppState {
         (self.height - TOOLBAR_HEIGHT).max(0.0)
     }
 
+    /// The y of the entry list's first row -- the header strip's bottom edge.
+    ///
+    /// `TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT` was written once in the renderer
+    /// and once in `handle_list_click`, which is the arrangement that let the
+    /// two disagree about which pixels are rows in the first place.
+    const fn rows_top() -> f32 {
+        TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT
+    }
+
+    /// The height of the entry list's scrolling row area.
+    ///
+    /// The header strip does *not* scroll, so it is not part of this. It used
+    /// to be inside the renderer's clip, which meant a scrolled row was
+    /// painted over the "N entries" caption rather than stopping under it.
+    fn rows_height(&self) -> f32 {
+        (self.height - Self::rows_top()).max(0.0)
+    }
+
+    /// The index into `filtered_ids` under `my`, or `None` if the pointer is
+    /// not over a row.
+    ///
+    /// The bound the click path never had. Without it, a click in the 32px
+    /// header strip produced a *negative* offset, and a negative `f32` cast to
+    /// `usize` saturates to zero in Rust rather than wrapping -- so clicking
+    /// the caption selected, decrypted and displayed the first entry in the
+    /// vault. Scrolled, it selected some other entry instead, because the
+    /// scroll offset was added before the cast could saturate.
+    fn row_at(&self, my: f32) -> Option<usize> {
+        let offset = my - Self::rows_top();
+        if !offset.is_finite() || offset < 0.0 || offset >= self.rows_height() {
+            return None;
+        }
+        let from_top = offset + self.list_scroll;
+        if !from_top.is_finite() || from_top < 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let idx = (from_top / ROW_HEIGHT) as usize;
+        if idx < self.filtered_ids.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
     /// How far the entry list may be scrolled before its last row sits on the
     /// bottom edge of the pane.
     ///
     /// Derived rather than measured because the list's content really is
-    /// uniform -- the header strip plus one `ROW_HEIGHT` per filtered entry,
-    /// which is exactly what `render_entry_list` draws.
+    /// uniform -- one `ROW_HEIGHT` per filtered entry, which is exactly what
+    /// `render_entry_list` draws into `rows_height`.
     fn max_list_scroll(&self) -> f32 {
-        let content = LIST_HEADER_HEIGHT + self.filtered_ids.len() as f32 * ROW_HEIGHT;
-        (content - self.pane_height()).max(0.0)
+        let content = self.filtered_ids.len() as f32 * ROW_HEIGHT;
+        (content - self.rows_height()).max(0.0)
     }
 
     /// How far the detail panel may be scrolled, from the height the renderer
@@ -3161,13 +3205,21 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
         None,
     );
 
-    let mut y = y_start + LIST_HEADER_HEIGHT;
+    // Clip to the row area, not to the whole pane. Read from the same two
+    // helpers the hit test uses, so the clip below *is* the region a click is
+    // accepted in rather than a second opinion about it. The old clip started
+    // at the toolbar, which included the non-scrolling header strip -- so a
+    // scrolled row was painted straight over the "N entries" caption instead
+    // of disappearing under it.
+    let rows_y = AppState::rows_top();
+    let rows_h = state.rows_height();
+    let mut y = rows_y;
 
     rt.push(RenderCommand::PushClip {
         x: x_start,
-        y: y_start,
+        y: rows_y,
         width: ENTRY_LIST_WIDTH,
-        height: h,
+        height: rows_h,
     });
 
     let effective_y = y - state.list_scroll;
@@ -3176,7 +3228,7 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
         let row_y = effective_y + i as f32 * ROW_HEIGHT;
 
         // Skip rows outside visible area
-        if row_y + ROW_HEIGHT < y_start || row_y > y_start + h {
+        if row_y + ROW_HEIGHT < rows_y || row_y > rows_y + rows_h {
             continue;
         }
 
@@ -5128,8 +5180,9 @@ fn handle_sidebar_click(state: &mut AppState, my: f32) {
 }
 
 fn handle_list_click(state: &mut AppState, my: f32) {
-    let y_start = TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT;
-    let row_idx = ((my - y_start + state.list_scroll) / ROW_HEIGHT) as usize;
+    let Some(row_idx) = state.row_at(my) else {
+        return;
+    };
 
     if let Some(&entry_id) = state.filtered_ids.get(row_idx) {
         state.selected_entry_id = Some(entry_id);
@@ -6523,9 +6576,13 @@ mod tests {
         for _ in 0..200 {
             wheel_at(&mut state, LIST_X, -1.0);
         }
-        let content = LIST_HEADER_HEIGHT + 60.0 * ROW_HEIGHT;
-        assert_eq!(state.list_scroll, content - (state.height - TOOLBAR_HEIGHT));
+        let content = 60.0 * ROW_HEIGHT;
+        assert_eq!(state.list_scroll, content - state.rows_height());
         assert!(state.list_scroll > 0.0, "the fixture must be scrollable");
+        // The last row's bottom edge lands on the pane's bottom edge, which is
+        // what "scrolled to the end" is supposed to mean.
+        let last_row_bottom = AppState::rows_top() + content - state.list_scroll;
+        assert_eq!(last_row_bottom, AppState::rows_top() + state.rows_height());
     }
 
     #[test]
@@ -6653,6 +6710,162 @@ mod tests {
         state.list_scroll = ROW_HEIGHT;
         handle_list_click(&mut state, TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT + 1.0);
         assert_eq!(state.selected_entry_id, state.filtered_ids.get(1).copied());
+    }
+
+    // == The entry list's edges ================================================
+
+    /// The rectangle the renderer actually clipped the entry rows to.
+    ///
+    /// Read out of the emitted commands rather than recomputed from the
+    /// constants. Recomputing is what makes a layout test worthless: it
+    /// re-derives the renderer's arithmetic and then checks the hit test
+    /// against *that*, so the two can drift together and the test still
+    /// passes. This asks the renderer what it drew.
+    fn rows_clip(state: &mut AppState) -> (f32, f32) {
+        build_render_tree(state)
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if *x == SIDEBAR_WIDTH && *width == ENTRY_LIST_WIDTH => Some((*y, *height)),
+                _ => None,
+            })
+            .expect("the entry rows are drawn under a clip")
+    }
+
+    /// A left click in the entry-list column at `my`, through the same
+    /// `handle_event` a real pointer would arrive by.
+    fn click_list(state: &mut AppState, my: f32) {
+        state.selected_entry_id = None;
+        handle_event(
+            state,
+            &Event::Mouse(MouseEvent {
+                x: LIST_X,
+                y: my,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+    }
+
+    #[test]
+    // Exact equality is the assertion, not an approximation of it: the
+    // renderer passes these two helpers' return values straight into the
+    // clip, so anything short of bit-for-bit identity means a third copy of
+    // the arithmetic has appeared -- which is the bug being pinned.
+    #[allow(clippy::float_cmp)]
+    fn the_lists_clip_is_the_region_the_hit_test_accepts() {
+        let mut state = unlocked_with_entries(60);
+        let (clip_y, clip_h) = rows_clip(&mut state);
+        assert_eq!(clip_y, AppState::rows_top());
+        assert_eq!(clip_h, state.rows_height());
+
+        click_list(&mut state, clip_y);
+        assert!(
+            state.selected_entry_id.is_some(),
+            "the clip's top edge is dead"
+        );
+        click_list(&mut state, clip_y + clip_h - 0.5);
+        assert!(
+            state.selected_entry_id.is_some(),
+            "the clip's bottom edge is dead"
+        );
+        click_list(&mut state, clip_y + clip_h);
+        assert_eq!(
+            state.selected_entry_id, None,
+            "the hit test runs past the clip the rows are painted in"
+        );
+    }
+
+    #[test]
+    fn the_entry_count_caption_does_not_open_the_first_credential() {
+        // The bug: `handle_list_click` had no guard, so a click in the 32px
+        // header strip produced a negative offset -- and a negative `f32` cast
+        // to `usize` saturates to zero rather than wrapping. Clicking the
+        // caption therefore selected, decrypted and displayed entry zero.
+        let mut state = unlocked_with_entries(60);
+        for my in [
+            TOOLBAR_HEIGHT,
+            TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT / 2.0,
+            AppState::rows_top() - 0.5,
+        ] {
+            click_list(&mut state, my);
+            assert_eq!(
+                state.selected_entry_id, None,
+                "the caption selected at {my}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scrolled_caption_click_does_not_open_some_other_credential() {
+        // Worse than selecting entry zero: with the list scrolled, the offset
+        // was added *before* the cast could saturate, so a caption click
+        // resolved to a real -- and arbitrary -- entry.
+        let mut state = unlocked_with_entries(60);
+        state.list_scroll = 10.0 * ROW_HEIGHT;
+        click_list(&mut state, TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT / 2.0);
+        assert_eq!(state.selected_entry_id, None);
+    }
+
+    #[test]
+    fn every_row_edge_selects_the_row_the_renderer_drew_there() {
+        let mut state = unlocked_with_entries(60);
+        let (clip_y, clip_h) = rows_clip(&mut state);
+        let mut slot = 0usize;
+        loop {
+            let top = clip_y + slot as f32 * ROW_HEIGHT;
+            if top >= clip_y + clip_h {
+                break;
+            }
+            let bottom = (top + ROW_HEIGHT - 0.5).min(clip_y + clip_h - 0.5);
+            for probe in [top, bottom] {
+                click_list(&mut state, probe);
+                assert_eq!(
+                    state.selected_entry_id,
+                    state.filtered_ids.get(slot).copied(),
+                    "slot {slot} at y={probe}"
+                );
+            }
+            slot += 1;
+        }
+        assert!(slot > 1, "the pane must fit more than one row");
+    }
+
+    #[test]
+    fn empty_space_below_a_short_list_selects_nothing() {
+        // Inside the row area but past the end of the list -- a different
+        // rejection from the caption one.
+        let mut state = unlocked_with_entries(2);
+        let (clip_y, clip_h) = rows_clip(&mut state);
+        let below_last = clip_y + 2.0 * ROW_HEIGHT + 1.0;
+        assert!(below_last < clip_y + clip_h, "the pane must fit >2 rows");
+        click_list(&mut state, below_last);
+        assert_eq!(state.selected_entry_id, None);
+    }
+
+    #[test]
+    // `max(0.0)` returns a literal zero, so the comparison is exact.
+    #[allow(clippy::float_cmp)]
+    fn a_window_shorter_than_its_own_chrome_has_no_rows() {
+        let mut state = unlocked_with_entries(60);
+        state.height = 10.0;
+        assert_eq!(state.rows_height(), 0.0);
+        click_list(&mut state, 5.0);
+        assert_eq!(state.selected_entry_id, None);
+    }
+
+    #[test]
+    fn a_nonfinite_coordinate_selects_nothing() {
+        let mut state = unlocked_with_entries(60);
+        for y in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            click_list(&mut state, y);
+            assert_eq!(state.selected_entry_id, None, "selected on {y}");
+        }
     }
 
     // == Render tests ==========================================================

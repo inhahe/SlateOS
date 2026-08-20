@@ -8,7 +8,7 @@
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
 use guitk::layout::FlexDirection;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -915,6 +915,16 @@ struct KanbanApp {
     /// count — see design-decisions.md §471. A value past the end of a column
     /// is not an error; that column shows its last page.
     scroll_offset: usize,
+    /// Pixels the card-detail modal's body is scrolled down by.
+    ///
+    /// Pixels here and cards in `scroll_offset` is deliberate — see
+    /// [`DETAIL_LINE_STEP`]. Like `scroll_offset`, this is *not* clamped where
+    /// it is written: how far the body can scroll depends on the window size
+    /// and on how much prose the card holds, neither of which the key handler
+    /// knows. The renderer clamps against what it is actually drawing.
+    ///
+    /// It used to be written by nobody and read by nobody, so the modal drew
+    /// its comments straight over the desktop with no way to reach them.
     detail_scroll: f32,
     show_filter_bar: bool,
     input_buffer: String,
@@ -957,12 +967,23 @@ impl KanbanApp {
         }
     }
 
+    // `expect` rather than a fallback, because the invariant it asserts is
+    // enforced at every site that could break it and there are only three:
+    // `new()` seeds exactly one board with the index at 0, `switch_board`
+    // assigns only an index it has already bounds-checked, and `add_board`
+    // assigns `len() - 1` immediately after a push. Nothing removes a board, so
+    // `boards` is never empty. Returning `Option<&Board>` instead would push
+    // that unreachable `None` into all 40-odd call sites, where each would
+    // invent its own way of ignoring it — which is strictly worse than one
+    // documented assertion here.
+    #[allow(clippy::expect_used)]
     fn active_board(&self) -> &Board {
         self.boards
             .get(self.active_board_idx)
             .expect("active_board_idx must be valid")
     }
 
+    #[allow(clippy::expect_used)]
     fn active_board_mut(&mut self) -> &mut Board {
         self.boards
             .get_mut(self.active_board_idx)
@@ -1856,6 +1877,95 @@ const COMMENT_MIN_HEIGHT: f32 = 36.0;
 /// Vertical gap between consecutive comment cards.
 const COMMENT_GAP: f32 = 6.0;
 
+/// Padding between the modal's edge and its content, on all four sides.
+const DETAIL_PAD: f32 = 16.0;
+/// Height of the modal's fixed title row, which does not scroll with the body.
+const DETAIL_TITLE_ROW: f32 = 30.0;
+/// Pixels one Up/Down moves the card-detail body.
+///
+/// A line, not a card: the body has no rows to count. Its sections are a
+/// wrapped description, a checklist, and comment cards whose heights depend on
+/// how much prose is in them, so there is no index that could name a position
+/// part way down one — which is why [`KanbanApp::detail_scroll`] is in pixels
+/// while [`KanbanApp::scroll_offset`] is in cards.
+const DETAIL_LINE_STEP: f32 = 18.0;
+/// Pixels one PageUp/PageDown moves the card-detail body.
+const DETAIL_PAGE_STEP: f32 = 300.0;
+
+/// Where the card-detail modal sits, and where its scrolling body sits inside
+/// it, for a window of a given size.
+///
+/// This existed as four `let`s inside the renderer, which was fine while the
+/// renderer was the only thing that needed to know. Bounding the scroll offset
+/// needs the body's height as well, and a second copy of `600.0.min(width -
+/// 40.0)` is the layout-divergence bug in `known-issues.md` waiting to happen.
+#[derive(Clone, Copy, Debug)]
+struct DetailModal {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+impl DetailModal {
+    fn for_window(width: f32, height: f32) -> Self {
+        // `.max(0.0)`: a window smaller than the padding would otherwise give a
+        // negative size, and a negative height would make `max_detail_scroll`
+        // claim the body scrolls further than its content is long.
+        let w = 600.0_f32.min(width - 40.0).max(0.0);
+        let h = 500.0_f32.min(height - 60.0).max(0.0);
+        Self {
+            x: (width - w) / 2.0,
+            y: (height - h) / 2.0,
+            w,
+            h,
+        }
+    }
+
+    fn content_x(&self) -> f32 {
+        self.x + 20.0
+    }
+
+    fn content_w(&self) -> f32 {
+        (self.w - 40.0).max(0.0)
+    }
+
+    /// Top edge of the scrolling body: below the fixed title row.
+    fn body_top(&self) -> f32 {
+        self.y + DETAIL_PAD + DETAIL_TITLE_ROW
+    }
+
+    /// Height of the scrolling body: what is left of the modal below the title
+    /// row, less the bottom padding.
+    fn body_height(&self) -> f32 {
+        (self.h - DETAIL_PAD - DETAIL_TITLE_ROW - DETAIL_PAD).max(0.0)
+    }
+}
+
+/// How far the card-detail body can scroll before its last line reaches the
+/// bottom of the modal.
+///
+/// Measured by drawing the body into a list that is thrown away — see
+/// [`guitk::render::content_bottom`]. A `measure_card_detail` written beside
+/// `render_card_detail_body` would be a second derivation of the same layout,
+/// which is the class of bug tracked as
+/// `C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`; measuring the
+/// renderer's own output cannot drift from it.
+fn max_detail_scroll(app: &KanbanApp, width: f32, height: f32) -> f32 {
+    let Some(card_id) = app.selected_card else {
+        return 0.0;
+    };
+    let board = app.active_board();
+    let Some(card) = board.cards.get(&card_id) else {
+        return 0.0;
+    };
+    let modal = DetailModal::for_window(width, height);
+    let mut scratch = RenderTree::new();
+    render_card_detail_body(&mut scratch, board, card, 0.0, 0.0, modal.content_w());
+    let content = content_bottom(&scratch.commands).unwrap_or(0.0).max(0.0);
+    (content - modal.body_height()).max(0.0)
+}
+
 /// Render card detail view.
 fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height: f32) {
     let card_id = match app.selected_card {
@@ -1879,10 +1989,8 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
     });
 
     // Modal panel
-    let modal_w: f32 = 600.0_f32.min(width - 40.0);
-    let modal_h: f32 = 500.0_f32.min(height - 60.0);
-    let modal_x = (width - modal_w) / 2.0;
-    let modal_y = (height - modal_h) / 2.0;
+    let modal = DetailModal::for_window(width, height);
+    let (modal_x, modal_y, modal_w, modal_h) = (modal.x, modal.y, modal.w, modal.h);
 
     // Shadow
     tree.push(RenderCommand::BoxShadow {
@@ -1919,14 +2027,14 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         corner_radii: CornerRadii::all(8.0),
     });
 
-    let content_x = modal_x + 20.0;
-    let content_w = modal_w - 40.0;
-    let mut cy = modal_y + 16.0;
+    let content_x = modal.content_x();
+    let content_w = modal.content_w();
 
-    // Title
+    // Title and close button do not scroll: a modal whose heading slid away
+    // would leave the user with no way to tell which card they were reading.
     tree.push(RenderCommand::Text {
         x: content_x,
-        y: cy,
+        y: modal_y + DETAIL_PAD,
         text: card.title.clone(),
         color: palette::TEXT,
         font_size: 18.0,
@@ -1939,7 +2047,7 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
     render_toolbar_button(
         tree,
         modal_x + modal_w - 40.0,
-        cy,
+        modal_y + DETAIL_PAD,
         28.0,
         24.0,
         "X",
@@ -1948,7 +2056,47 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         CornerRadii::all(4.0),
     );
 
-    cy += 30.0;
+    // The body is clipped to the modal, so what overflows is hidden rather than
+    // drawn across the rest of the desktop. That is also why it has to be
+    // scrollable: before this, a card with a long description and a few
+    // comments drew its comments over the window and there was no key that
+    // could reach them.
+    let scroll = app
+        .detail_scroll
+        .clamp(0.0, max_detail_scroll(app, width, height));
+    tree.push(RenderCommand::PushClip {
+        x: modal_x,
+        y: modal.body_top(),
+        width: modal_w,
+        height: modal.body_height(),
+    });
+    render_card_detail_body(
+        tree,
+        board,
+        card,
+        content_x,
+        modal.body_top() - scroll,
+        content_w,
+    );
+    tree.push(RenderCommand::PopClip);
+}
+
+/// Draw everything below the card-detail modal's title row, with the top of the
+/// first item at `y`.
+///
+/// Split out from [`render_card_detail`] so [`max_detail_scroll`] can measure it
+/// by drawing it into a list it throws away. Takes the board and card rather
+/// than the app because the measuring caller has already resolved them, and
+/// resolving them twice is one more thing that could resolve differently.
+fn render_card_detail_body(
+    tree: &mut RenderTree,
+    board: &Board,
+    card: &Card,
+    content_x: f32,
+    y: f32,
+    content_w: f32,
+) {
+    let mut cy = y;
 
     // Priority badge
     tree.push(RenderCommand::FillRect {
@@ -2741,11 +2889,31 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                 _ => 1,
             };
             let delta = if matches!(key.key, Key::Up | Key::PageUp) {
-                -step
+                step.saturating_neg()
             } else {
                 step
             };
             app.scroll_offset = scroll_window::shift(app.scroll_offset, delta);
+            true
+        }
+
+        // The same four keys scroll the card-detail modal's body. Unclamped at
+        // the top end for the same reason as the board's: only the renderer
+        // knows how tall this card's content came out. Clamped at zero here
+        // because that bound needs nothing but the offset itself, and letting
+        // it go negative would mean scrolling back down did nothing until the
+        // debt was repaid — the failure this whole sweep keeps finding.
+        Key::Up | Key::Down | Key::PageUp | Key::PageDown if app.view == View::CardDetail => {
+            let step = match key.key {
+                Key::PageUp | Key::PageDown => DETAIL_PAGE_STEP,
+                _ => DETAIL_LINE_STEP,
+            };
+            let delta = if matches!(key.key, Key::Up | Key::PageUp) {
+                -step
+            } else {
+                step
+            };
+            app.detail_scroll = (app.detail_scroll + delta).max(0.0);
             true
         }
 
@@ -2755,6 +2923,11 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                 && app.view == View::Board
             {
                 app.view = View::CardDetail;
+                // Open at the top. Carrying the previous card's offset over
+                // would open a short card scrolled past its own content, which
+                // the renderer then clamps back — so the modal would appear to
+                // ignore the first few keypresses.
+                app.detail_scroll = 0.0;
                 return true;
             }
             false
@@ -4028,6 +4201,242 @@ mod tests {
                 "comment card at {:?} overlaps the one at {:?}",
                 pair[1],
                 pair[0]
+            );
+        }
+    }
+
+    // -- Scrolling the card-detail modal --
+    //
+    // Every assertion below is stated in pixels the body actually moved, and
+    // sized from `DETAIL_LINE_STEP`/`DETAIL_PAGE_STEP` rather than from a
+    // literal. A test that asserted `detail_scroll > 0.0` would pass against a
+    // renderer that ignored the field entirely — which is precisely what this
+    // app shipped, and what 143 passing tests failed to notice.
+
+    /// A window small enough that a chatty card overflows the modal.
+    ///
+    /// The modal is capped at 500 px tall regardless, so what makes the fixture
+    /// scrollable is the card's content, not the window. Asserts it *is*
+    /// scrollable: a fixture that cannot overflow cannot fail these tests.
+    fn app_with_scrollable_detail() -> KanbanApp {
+        let comments: Vec<String> = (0..12).map(|i| format!("comment number {i}")).collect();
+        let refs: Vec<&str> = comments.iter().map(String::as_str).collect();
+        let app = app_with_card_prose(&"wrap ".repeat(60), &refs);
+        assert!(
+            max_detail_scroll(&app, 1200.0, 800.0) > DETAIL_LINE_STEP,
+            "fixture must overflow the modal by more than one step, or these \
+             tests cannot fail"
+        );
+        app
+    }
+
+    /// The `y` of every `Text` command drawn between the body's clip commands.
+    ///
+    /// Taken from the clip rather than filtered by coordinate: the title above
+    /// the clip does *not* scroll, so a coordinate filter that let it through
+    /// would compare the title against itself and report no movement at all,
+    /// however broken the body was.
+    fn clipped_text_tops(tree: &RenderTree) -> Vec<f32> {
+        let mut inside = false;
+        let mut tops = Vec::new();
+        for cmd in &tree.commands {
+            match cmd {
+                RenderCommand::PushClip { .. } => inside = true,
+                RenderCommand::PopClip => inside = false,
+                RenderCommand::Text { y, .. } if inside => tops.push(*y),
+                _ => {}
+            }
+        }
+        tops
+    }
+
+    fn press(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        }
+    }
+
+    #[test]
+    fn the_detail_body_is_clipped_to_the_modal() {
+        // Without this the comments of a chatty card were drawn straight over
+        // the desktop, below the modal they were supposed to be inside.
+        let app = app_with_scrollable_detail();
+        let mut tree = RenderTree::new();
+        render_card_detail(&mut tree, &app, 1200.0, 800.0);
+
+        let modal = DetailModal::for_window(1200.0, 800.0);
+        let clip = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::PushClip { y, height, .. } => Some((*y, *height)),
+                _ => None,
+            })
+            .expect("the body is clipped");
+        assert!(
+            (clip.0 - modal.body_top()).abs() < 0.5 && (clip.1 - modal.body_height()).abs() < 0.5,
+            "the clip {clip:?} must be the body rectangle ({}, {})",
+            modal.body_top(),
+            modal.body_height()
+        );
+    }
+
+    #[test]
+    fn one_down_moves_the_detail_body_up_by_a_line() {
+        let mut app = app_with_scrollable_detail();
+        let before = {
+            let mut tree = RenderTree::new();
+            render_card_detail(&mut tree, &app, 1200.0, 800.0);
+            clipped_text_tops(&tree)
+        };
+        assert!(handle_key_event(&mut app, &press(Key::Down)));
+        let after = {
+            let mut tree = RenderTree::new();
+            render_card_detail(&mut tree, &app, 1200.0, 800.0);
+            clipped_text_tops(&tree)
+        };
+
+        let (Some(b), Some(a)) = (before.first(), after.first()) else {
+            panic!("the body draws text in both renders");
+        };
+        assert!(
+            (b - a - DETAIL_LINE_STEP).abs() < 0.5,
+            "one Down should raise the body by {DETAIL_LINE_STEP} px, moved {}",
+            b - a
+        );
+    }
+
+    #[test]
+    fn a_page_moves_the_detail_body_further_than_a_line() {
+        let mut line = app_with_scrollable_detail();
+        let mut page = app_with_scrollable_detail();
+        assert!(handle_key_event(&mut line, &press(Key::Down)));
+        assert!(handle_key_event(&mut page, &press(Key::PageDown)));
+        assert!(
+            page.detail_scroll > line.detail_scroll,
+            "PageDown ({}) must move further than Down ({})",
+            page.detail_scroll,
+            line.detail_scroll
+        );
+    }
+
+    #[test]
+    fn the_detail_body_cannot_scroll_into_empty_space() {
+        // The offset itself is allowed past the end -- only the renderer knows
+        // how tall this card came out -- but what is *drawn* must not be.
+        let mut app = app_with_scrollable_detail();
+        for _ in 0..500 {
+            handle_key_event(&mut app, &press(Key::PageDown));
+        }
+        let mut tree = RenderTree::new();
+        render_card_detail(&mut tree, &app, 1200.0, 800.0);
+
+        let modal = DetailModal::for_window(1200.0, 800.0);
+        let max = max_detail_scroll(&app, 1200.0, 800.0);
+        let mut scratch = RenderTree::new();
+        let board = app.active_board();
+        let card = board
+            .cards
+            .get(&app.selected_card.expect("a card is open"))
+            .expect("the open card exists");
+        render_card_detail_body(&mut scratch, board, card, 0.0, 0.0, modal.content_w());
+        let content = content_bottom(&scratch.commands).expect("the body draws something");
+
+        // Scrolled to the end, the last thing drawn sits exactly on the body's
+        // bottom edge -- never above it, which would be blank space below the
+        // content with more content still hidden above.
+        let drawn_bottom = modal.body_top() - max + content;
+        assert!(
+            (drawn_bottom - (modal.body_top() + modal.body_height())).abs() < 0.5,
+            "at the end of the scroll the content should finish at the body's \
+             bottom ({}), got {drawn_bottom}",
+            modal.body_top() + modal.body_height()
+        );
+    }
+
+    #[test]
+    fn the_detail_body_cannot_scroll_above_its_top() {
+        let mut app = app_with_scrollable_detail();
+        for _ in 0..50 {
+            handle_key_event(&mut app, &press(Key::PageUp));
+        }
+        assert!(
+            app.detail_scroll.abs() < f32::EPSILON,
+            "scrolling up from the top must not bank a debt that later Downs \
+             have to repay first, got {}",
+            app.detail_scroll
+        );
+
+        // And one Down from there must move the body immediately.
+        assert!(handle_key_event(&mut app, &press(Key::Down)));
+        assert!(
+            (app.detail_scroll - DETAIL_LINE_STEP).abs() < 0.5,
+            "got {}",
+            app.detail_scroll
+        );
+    }
+
+    #[test]
+    fn a_card_that_fits_cannot_be_scrolled() {
+        let app = app_with_card_prose("short", &[]);
+        assert!(
+            max_detail_scroll(&app, 1200.0, 800.0).abs() < f32::EPSILON,
+            "a card whose content fits the modal has nowhere to scroll to"
+        );
+    }
+
+    #[test]
+    fn opening_a_card_returns_the_detail_body_to_the_top() {
+        let mut app = app_with_scrollable_detail();
+        handle_key_event(&mut app, &press(Key::PageDown));
+        assert!(app.detail_scroll > 0.0);
+
+        // Escape back to the board and open the card again.
+        assert!(handle_key_event(&mut app, &press(Key::Escape)));
+        let card_id = app
+            .active_board()
+            .columns
+            .first()
+            .and_then(|c| c.card_ids.first().copied())
+            .expect("sample data has a card");
+        app.selected_card = Some(card_id);
+        assert!(handle_key_event(&mut app, &press(Key::Enter)));
+        assert!(
+            app.detail_scroll.abs() < f32::EPSILON,
+            "a freshly opened card must start at the top, got {}",
+            app.detail_scroll
+        );
+    }
+
+    #[test]
+    fn the_detail_keys_do_not_scroll_the_board_behind_the_modal() {
+        // Both views bind the same four keys; the guards must not overlap, or
+        // closing the modal would reveal a board that had scrolled itself.
+        let mut app = app_with_scrollable_detail();
+        let board_before = app.scroll_offset;
+        for _ in 0..5 {
+            handle_key_event(&mut app, &press(Key::Down));
+        }
+        assert_eq!(app.scroll_offset, board_before);
+        assert!(app.detail_scroll > 0.0);
+    }
+
+    #[test]
+    fn an_impossibly_small_window_still_bounds_the_detail_scroll() {
+        // `600.0.min(width - 40.0)` goes negative for a tiny window, and a
+        // negative body height would make the bound claim the body scrolls
+        // further than its content is long.
+        let app = app_with_scrollable_detail();
+        for (w, h) in [(0.0, 0.0), (10.0, 10.0), (39.0, 59.0)] {
+            let modal = DetailModal::for_window(w, h);
+            assert!(modal.w >= 0.0 && modal.h >= 0.0, "{w}x{h} gave {modal:?}");
+            assert!(modal.body_height() >= 0.0, "{w}x{h} gave {modal:?}");
+            assert!(
+                max_detail_scroll(&app, w, h).is_finite(),
+                "{w}x{h} gave a non-finite bound"
             );
         }
     }

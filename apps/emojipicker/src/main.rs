@@ -178,6 +178,91 @@ pub enum SkinToneModifier {
     Dark,
 }
 
+/// Codepoint ranges carrying the Unicode `Emoji_Modifier_Base` property,
+/// sorted and non-overlapping so membership is a binary search.
+///
+/// This is the property that decides whether an emoji *has skin*. A raised hand
+/// or a dancer does; a slice of pizza, a flag, and -- the surprising one -- a
+/// smiley face do not. Appending a Fitzpatrick modifier to something absent
+/// from this list does not tint it: it produces the emoji followed by a bare
+/// coloured square. Of the entries in this picker's database, seven are on this
+/// list and the rest are not.
+///
+/// Transcribed from Unicode 15.1 `emoji-data.txt`.
+const EMOJI_MODIFIER_BASE: &[(u32, u32)] = &[
+    (0x261D, 0x261D),
+    (0x26F9, 0x26F9),
+    (0x270A, 0x270D),
+    (0x1F385, 0x1F385),
+    (0x1F3C2, 0x1F3C4),
+    (0x1F3C7, 0x1F3C7),
+    (0x1F3CA, 0x1F3CC),
+    (0x1F442, 0x1F443),
+    (0x1F446, 0x1F450),
+    (0x1F466, 0x1F478),
+    (0x1F47C, 0x1F47C),
+    (0x1F481, 0x1F483),
+    (0x1F485, 0x1F487),
+    (0x1F48F, 0x1F48F),
+    (0x1F491, 0x1F491),
+    (0x1F4AA, 0x1F4AA),
+    (0x1F574, 0x1F575),
+    (0x1F57A, 0x1F57A),
+    (0x1F590, 0x1F590),
+    (0x1F595, 0x1F596),
+    (0x1F645, 0x1F647),
+    (0x1F64B, 0x1F64F),
+    (0x1F6A3, 0x1F6A3),
+    (0x1F6B4, 0x1F6B6),
+    (0x1F6C0, 0x1F6C0),
+    (0x1F6CC, 0x1F6CC),
+    (0x1F90C, 0x1F90C),
+    (0x1F90F, 0x1F90F),
+    (0x1F918, 0x1F91F),
+    (0x1F926, 0x1F926),
+    (0x1F930, 0x1F939),
+    (0x1F93C, 0x1F93E),
+    (0x1F977, 0x1F977),
+    (0x1F9B5, 0x1F9B6),
+    (0x1F9B8, 0x1F9B9),
+    (0x1F9BB, 0x1F9BB),
+    (0x1F9CD, 0x1F9DD),
+    (0x1FAC3, 0x1FAC5),
+    (0x1FAF0, 0x1FAF8),
+];
+
+/// Whether a skin-tone modifier may follow `c`.
+fn is_emoji_modifier_base(c: char) -> bool {
+    let cp = c as u32;
+    EMOJI_MODIFIER_BASE
+        .binary_search_by(|&(lo, hi)| {
+            if cp < lo {
+                core::cmp::Ordering::Greater
+            } else if cp > hi {
+                core::cmp::Ordering::Less
+            } else {
+                core::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+/// Whether `emoji` accepts a Fitzpatrick skin-tone modifier at all.
+///
+/// Decided by the first scalar, because a modifier tints the character it
+/// directly follows -- an emoji that does not *start* with a modifier base has
+/// nowhere to put one.
+///
+/// Known limit: a ZWJ sequence can carry a base in a later segment (man
+/// technologist is a man joined to a laptop), and toning those means toning
+/// each base segment rather than just the first. Every ZWJ entry in this
+/// database is flag-shaped and takes no tone at all, so the distinction does
+/// not bite yet; adding a person-shaped ZWJ sequence is what should trigger
+/// generalising this.
+pub fn takes_skin_tone(emoji: &str) -> bool {
+    emoji.chars().next().is_some_and(is_emoji_modifier_base)
+}
+
 impl SkinToneModifier {
     /// All variants in order, including None.
     pub const ALL: &[SkinToneModifier] = &[
@@ -201,22 +286,37 @@ impl SkinToneModifier {
         }
     }
 
-    /// Append the Fitzpatrick modifier to `base_emoji`.
+    /// Tint `base_emoji` with this Fitzpatrick modifier.
     ///
-    /// If the modifier is `None`, returns the original emoji unchanged.
-    /// Otherwise appends the corresponding Unicode skin-tone codepoint.
+    /// Returns the emoji unchanged when the modifier is `None`, and *also*
+    /// when the emoji is not something a skin tone can apply to -- see
+    /// [`takes_skin_tone`]. That second case is the majority of any emoji set:
+    /// tinting a pizza yields "\u{1F355}\u{1F3FE}", which draws as a pizza
+    /// followed by a bare brown square rather than as a darker pizza.
     pub fn apply(self, base_emoji: &str) -> String {
-        match self.modifier_char() {
-            Some(ch) => {
-                // 4 is the UTF-8 length of every skin-tone modifier, so this
-                // is the exact final size rather than a guess.
-                let mut result = String::with_capacity(base_emoji.len().saturating_add(4));
-                result.push_str(base_emoji);
-                result.push(ch);
-                result
-            }
-            Option::None => base_emoji.to_string(),
+        let Some(modifier) = self.modifier_char() else {
+            return base_emoji.to_string();
+        };
+        let mut chars = base_emoji.chars();
+        let Some(base) = chars.next() else {
+            return String::new();
+        };
+        if !is_emoji_modifier_base(base) {
+            return base_emoji.to_string();
         }
+        // The modifier goes directly after the base it tints, not at the end of
+        // the whole sequence. A variation selector in between is dropped: a
+        // modifier already forces emoji presentation, so `base FE0F modifier`
+        // is not a well-formed emoji_modifier_sequence (UTS #51).
+        let rest = chars.as_str();
+        let rest = rest.strip_prefix('\u{FE0F}').unwrap_or(rest);
+        // 4 is the UTF-8 length of every skin-tone modifier, so this is the
+        // final size or a little over when a selector was dropped.
+        let mut result = String::with_capacity(base_emoji.len().saturating_add(4));
+        result.push(base);
+        result.push(modifier);
+        result.push_str(rest);
+        result
     }
 
     /// Display color for the skin-tone indicator circle.
@@ -1137,13 +1237,15 @@ fn render_grid(state: &EmojiPickerState, tree: &mut RenderTree) {
             );
         }
 
-        // Emoji glyph.
+        // Emoji glyph, wearing the chosen skin tone if it can. Showing the
+        // untinted emoji here and the tinted one only in the preview would
+        // make the grid disagree with what a click actually yields.
         let text_x = x + CELL_PADDING;
         let text_y = y + CELL_PADDING;
         tree.push(guitk::render::RenderCommand::Text {
             x: text_x,
             y: text_y,
-            text: entry.emoji.clone(),
+            text: state.skin_tone.apply(&entry.emoji),
             color: mocha::TEXT,
             font_size: EMOJI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -1775,6 +1877,251 @@ mod tests {
             let color = tone.swatch_color();
             assert_eq!(color.a, 255, "swatch color should be fully opaque");
         }
+    }
+
+    // --- Skin tone applies only to emoji that have skin ----------------------
+    //
+    // The tests above this block all tint "\u{1F44D}", which is one of the
+    // seven entries in the shipped database that a Fitzpatrick modifier may
+    // legally follow. The other seventy-five were being tinted too, and no
+    // test noticed, because none of them was ever passed to `apply`.
+
+    /// Everything in the database, split by whether Unicode says it has skin.
+    fn entries_by_skin(state: &EmojiPickerState) -> (Vec<String>, Vec<String>) {
+        let mut with = Vec::new();
+        let mut without = Vec::new();
+        for entry in state.database.search("") {
+            if takes_skin_tone(&entry.emoji) {
+                with.push(entry.emoji.clone());
+            } else {
+                without.push(entry.emoji.clone());
+            }
+        }
+        assert!(
+            !with.is_empty() && !without.is_empty(),
+            "the database must hold some of each kind, or these tests are vacuous"
+        );
+        (with, without)
+    }
+
+    /// Every Fitzpatrick modifier, as characters.
+    fn modifier_chars() -> Vec<char> {
+        SkinToneModifier::ALL
+            .iter()
+            .filter_map(|t| t.modifier_char())
+            .collect()
+    }
+
+    /// The bug, stated directly: choosing a skin tone must not staple a
+    /// coloured square onto a slice of pizza.
+    #[test]
+    fn a_tone_is_not_stuck_onto_emoji_that_have_no_skin() {
+        let state = EmojiPickerState::new();
+        let (_, without) = entries_by_skin(&state);
+        for emoji in &without {
+            for &tone in SkinToneModifier::ALL {
+                assert_eq!(
+                    &tone.apply(emoji),
+                    emoji,
+                    "{tone:?} changed {emoji}, which takes no skin tone"
+                );
+            }
+        }
+    }
+
+    /// ...and must still tint the ones that do, exactly once.
+    #[test]
+    fn an_emoji_that_has_skin_gets_exactly_one_modifier() {
+        let state = EmojiPickerState::new();
+        let (with, _) = entries_by_skin(&state);
+        let modifiers = modifier_chars();
+        for emoji in &with {
+            for &tone in SkinToneModifier::ALL {
+                let toned = tone.apply(emoji);
+                let count = toned.chars().filter(|c| modifiers.contains(c)).count();
+                match tone.modifier_char() {
+                    Some(ch) => {
+                        assert_eq!(count, 1, "{emoji} + {tone:?} = {toned}");
+                        assert!(toned.contains(ch), "{emoji} + {tone:?} = {toned}");
+                        assert!(toned.starts_with(emoji.chars().next().unwrap_or(' ')));
+                    }
+                    Option::None => assert_eq!(&toned, emoji),
+                }
+            }
+        }
+    }
+
+    /// A handful of codepoints checked against Unicode by hand, so the table
+    /// is answerable to something other than itself. The two faces are the
+    /// interesting cases: they look like people and are not modifier bases.
+    #[test]
+    fn the_modifier_base_table_agrees_with_unicode() {
+        for (c, expected) in [
+            ('\u{1F44D}', true),  // thumbs up
+            ('\u{270B}', true),   // raised hand
+            ('\u{1F4AA}', true),  // flexed biceps
+            ('\u{1F9D1}', true),  // person -- inside 1F9CD..1F9DD
+            ('\u{1FAF6}', true),  // heart hands -- inside 1FAF0..1FAF8
+            ('\u{1F600}', false), // grinning face
+            ('\u{1F602}', false), // face with tears of joy
+            ('\u{1F355}', false), // pizza
+            ('\u{1F436}', false), // dog face
+            ('\u{1F3F3}', false), // white flag
+            ('\u{1F3FB}', false), // a modifier is not itself a base
+            ('a', false),
+        ] {
+            assert_eq!(is_emoji_modifier_base(c), expected, "U+{:04X}", c as u32);
+        }
+    }
+
+    /// The binary search in `is_emoji_modifier_base` is only correct if the
+    /// table is sorted and its ranges do not touch or overlap.
+    #[test]
+    fn the_modifier_base_table_is_sorted_and_disjoint() {
+        for pair in EMOJI_MODIFIER_BASE.windows(2) {
+            let (lo, hi) = pair[0];
+            let (next_lo, _) = pair[1];
+            assert!(lo <= hi, "range U+{lo:04X}..U+{hi:04X} runs backwards");
+            assert!(
+                hi < next_lo,
+                "U+{hi:04X} and U+{next_lo:04X} overlap or should be one range"
+            );
+        }
+    }
+
+    /// The modifier tints the character it *follows*, so it goes directly
+    /// after the base and not at the end of the whole sequence. Every
+    /// tone-taking entry in the shipped database is a single character, which
+    /// makes the two placements indistinguishable there -- so this uses a ZWJ
+    /// sequence, where they differ.
+    ///
+    /// It also pins the known limit in `takes_skin_tone`'s doc comment: the
+    /// leading man is tinted and the laptop he is joined to is not, which is
+    /// correct here and would not be for two joined people.
+    #[test]
+    fn the_modifier_goes_after_the_base_it_tints_not_at_the_end() {
+        assert_eq!(
+            SkinToneModifier::Dark.apply("\u{1F468}\u{200D}\u{1F4BB}"),
+            "\u{1F468}\u{1F3FF}\u{200D}\u{1F4BB}"
+        );
+    }
+
+    /// A variation selector asks for emoji presentation; so does a skin-tone
+    /// modifier. Leaving the selector between the two makes the sequence
+    /// ill-formed, so it is dropped rather than carried along.
+    #[test]
+    fn a_variation_selector_does_not_come_between_a_base_and_its_tone() {
+        assert_eq!(
+            SkinToneModifier::Light.apply("\u{261D}\u{FE0F}"),
+            "\u{261D}\u{1F3FB}"
+        );
+    }
+
+    /// A picker showing every emoji at once, so a cell can be looked up
+    /// without first working out which tab its entry lives under.
+    fn every_emoji() -> EmojiPickerState {
+        let mut state = EmojiPickerState::new();
+        state.active_tab = Tab::Search;
+        state.search_query = String::new();
+        state
+    }
+
+    /// Where the grid painted the cell for `base`, taken from the render tree
+    /// rather than recomputed, so a click driven from it lands where the
+    /// emoji actually is.
+    ///
+    /// Matched on `base` as a *prefix*: the painted text carries whatever skin
+    /// tone is currently chosen, and asking for the exact tinted string would
+    /// mean asking the code under test where to click.
+    fn painted_cell(state: &EmojiPickerState, base: &str) -> (f32, f32) {
+        let tree = render(state);
+        let found = tree.commands.iter().find_map(|cmd| match cmd {
+            guitk::render::RenderCommand::Text {
+                x,
+                y,
+                text,
+                font_size,
+                ..
+            } if text.starts_with(base) && (*font_size - EMOJI_FONT_SIZE).abs() < 0.01 => {
+                Some((*x, *y))
+            }
+            _ => Option::None,
+        });
+        match found {
+            Some(xy) => xy,
+            Option::None => panic!("the grid never painted {base}"),
+        }
+    }
+
+    /// Click the grid cell that `emoji` was painted in.
+    fn click_painted_cell(state: &mut EmojiPickerState, emoji: &str) {
+        let (x, y) = painted_cell(state, emoji);
+        handle_event(
+            state,
+            &Event::Mouse(MouseEvent {
+                x: x + 1.0,
+                y: y + 1.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+    }
+
+    /// End to end, which is how a user would have met this: choose a dark
+    /// skin tone, click a dog, and the picker used to hand over a dog
+    /// followed by a brown square.
+    #[test]
+    fn picking_a_toneless_emoji_yields_it_unchanged() {
+        let mut state = every_emoji();
+        state.skin_tone = SkinToneModifier::Dark;
+        click_painted_cell(&mut state, "\u{1F436}");
+        assert_eq!(state.last_selected.as_deref(), Some("\u{1F436}"));
+    }
+
+    /// ...while an emoji that does have skin still comes back tinted.
+    #[test]
+    fn picking_an_emoji_with_skin_yields_it_tinted() {
+        let mut state = every_emoji();
+        state.skin_tone = SkinToneModifier::Dark;
+        click_painted_cell(&mut state, "\u{1F44D}");
+        assert_eq!(state.last_selected.as_deref(), Some("\u{1F44D}\u{1F3FF}"));
+    }
+
+    /// What the grid shows and what a click yields are the same string. The
+    /// grid used to draw every emoji untinted whatever the tone was set to,
+    /// so the choice was invisible until after it had been made.
+    #[test]
+    fn the_grid_draws_the_emoji_the_chosen_tone_would_produce() {
+        let mut state = every_emoji();
+        state.skin_tone = SkinToneModifier::MediumDark;
+        // Painted at all -- `painted_cell` panics otherwise.
+        let _ = painted_cell(&state, "\u{1F44D}\u{1F3FE}");
+        let _ = painted_cell(&state, "\u{1F436}");
+
+        let tree = render(&state);
+        let untinted = tree.commands.iter().any(|cmd| {
+            matches!(
+                cmd,
+                guitk::render::RenderCommand::Text { text, font_size, .. }
+                    if text == "\u{1F44D}" && (*font_size - EMOJI_FONT_SIZE).abs() < 0.01
+            )
+        });
+        assert!(
+            !untinted,
+            "the grid drew the plain thumbs-up while a skin tone was chosen"
+        );
+    }
+
+    /// Recently-used tracks the emoji itself, not the tinted copy, so that
+    /// changing the tone later re-tints the recent list instead of leaving a
+    /// row frozen at whatever tone was active when it was picked.
+    #[test]
+    fn recently_used_records_the_untinted_emoji() {
+        let mut state = every_emoji();
+        state.skin_tone = SkinToneModifier::Light;
+        click_painted_cell(&mut state, "\u{1F44D}");
+        state.skin_tone = SkinToneModifier::Dark;
+        state.active_tab = Tab::Recent;
+        let _ = painted_cell(&state, "\u{1F44D}\u{1F3FF}");
     }
 
     // --- Category enumeration ---

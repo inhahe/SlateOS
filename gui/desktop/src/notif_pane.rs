@@ -118,6 +118,23 @@ const HEADER_HEIGHT: f32 = 44.0;
 /// Height of a time-group header ("Today", "Yesterday", etc.).
 const GROUP_HEADER_HEIGHT: f32 = 28.0;
 
+/// Height of the "Per-App Settings" caption above the first app card.
+const APP_HEADING_HEIGHT: f32 = 24.0;
+
+/// Height of the card the per-app settings list paints for one app.
+const APP_CARD_HEIGHT: f32 = 100.0;
+
+/// Distance from one app card's top to the next.
+///
+/// Eight pixels more than [`APP_CARD_HEIGHT`]: the difference is the gutter
+/// between two cards, which the renderer paints nothing in. A hit test that
+/// divides by the pitch and stops there hands that gutter to the card above
+/// it, which is what `handle_app_settings_click` used to do.
+const APP_CARD_PITCH: f32 = 108.0;
+
+/// Where the enabled pill sits below its app card's top.
+const APP_TOGGLE_TOP: f32 = 10.0;
+
 /// How far one arrow-key press scrolls the list.
 const ARROW_KEY_STEP: f32 = 40.0;
 
@@ -820,6 +837,63 @@ impl NotificationPane {
         (self.screen_height - Self::list_start_y()).max(0.0)
     }
 
+    /// Width of an app card in the per-app settings list, and of a
+    /// notification card: both are the pane inset by its padding on each side.
+    fn card_width() -> f32 {
+        PANE_WIDTH - 2.0 * PANE_PADDING
+    }
+
+    /// Top of the `idx`-th app card, relative to the list's own top.
+    #[allow(clippy::cast_precision_loss)]
+    fn app_card_top(idx: usize) -> f32 {
+        APP_HEADING_HEIGHT + (idx as f32) * APP_CARD_PITCH
+    }
+
+    /// The app card painted at `local_y`, measured from the list's own top.
+    ///
+    /// `None` for the caption above the first card, for the eight-pixel gutter
+    /// between two cards, for anything past the last app, and for anything
+    /// below the clip the renderer draws inside — each of which the old walk
+    /// answered with a card, because it divided by [`APP_CARD_PITCH`] and
+    /// asked only whether the quotient was in range. A click in the gutter
+    /// toggled the card above it; a click below the pane's bottom edge toggled
+    /// an app that is not on screen.
+    fn app_card_at(&self, local_y: f32) -> Option<usize> {
+        // The `is_finite` test is belt-and-braces: a NaN is not less than zero
+        // and not past the viewport, so it clears both bounds below by failing
+        // them -- but it also fails the two comparisons in the walk, so the
+        // walk refuses it anyway. What the guard actually protects against is
+        // someone rewriting the walk back into `(local_y / PITCH) as usize`,
+        // which is what the old code did and which turns a NaN into card 0.
+        if !local_y.is_finite() || local_y < 0.0 || local_y >= self.list_height() {
+            return None;
+        }
+        // A walk rather than a division, so the gutter between two cards can
+        // answer honestly: it is inside no card's painted height, and
+        // `position`-style search says so by finding nothing.
+        (0..self.app_settings.len()).find(|&idx| {
+            let top = Self::app_card_top(idx);
+            local_y >= top && local_y < top + APP_CARD_HEIGHT
+        })
+    }
+
+    /// The enabled pill on the app card whose top is at `card_top`, as
+    /// `(x, y, width, height)` in the same coordinates as `card_top`.
+    ///
+    /// The renderer paints this rectangle and the hit test accepts exactly it.
+    /// It used to accept `rx >= x` with no right edge at all and a 35-pixel
+    /// band starting at the card's top rather than the pill's, so the app
+    /// name beside the pill, and a strip running off the side of the pane,
+    /// both switched the app's notifications off.
+    fn app_toggle_rect(card_top: f32) -> (f32, f32, f32, f32) {
+        (
+            Self::card_width() - TOGGLE_WIDTH,
+            card_top + APP_TOGGLE_TOP,
+            TOGGLE_WIDTH,
+            TOGGLE_HEIGHT,
+        )
+    }
+
     /// The top of each notification card, relative to the start of the list
     /// and before scrolling, in the order the cards are drawn.
     ///
@@ -1317,7 +1391,7 @@ impl NotificationPane {
         x: f32,
         y: f32,
     ) {
-        let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
+        let card_width = Self::card_width();
         let is_hovered = self.hovered_notif == Some(idx);
         let bg = if is_hovered {
             theme::HOVER_BG
@@ -1442,12 +1516,10 @@ impl NotificationPane {
             height: available_height,
         });
 
-        let mut y = start_y;
-
         // "Manage notifications" heading.
         cmds.push(RenderCommand::Text {
             x: PANE_PADDING,
-            y,
+            y: start_y,
             text: "Per-App Settings".to_string(),
             color: theme::SUBTEXT0,
             font_size: 11.0,
@@ -1455,20 +1527,24 @@ impl NotificationPane {
             max_width: Some(150.0),
             overflow: TextOverflow::Ellipsis,
         });
-        y += 24.0;
 
-        for app in &self.app_settings {
+        let card_width = Self::card_width();
+
+        for (idx, app) in self.app_settings.iter().enumerate() {
+            // The card tops come from `app_card_top`, which is what
+            // `app_card_at` inverts -- walking a running total here instead is
+            // how the click ended up eight pixels out of step per card.
+            let y = start_y + Self::app_card_top(idx);
             if y > start_y + available_height {
                 break;
             }
 
             // App card.
-            let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
             cmds.push(RenderCommand::FillRect {
                 x: PANE_PADDING,
                 y,
                 width: card_width,
-                height: 100.0,
+                height: APP_CARD_HEIGHT,
                 color: theme::CARD_BG,
                 corner_radii: CornerRadii::all(CARD_RADIUS),
             });
@@ -1507,19 +1583,19 @@ impl NotificationPane {
             });
 
             // Enabled toggle.
-            let enabled_x = card_width - TOGGLE_WIDTH;
+            let (pill_x, pill_y, pill_w, pill_h) = Self::app_toggle_rect(y);
             let pill_bg = if app.enabled {
                 theme::GREEN
             } else {
                 theme::SURFACE2
             };
             cmds.push(RenderCommand::FillRect {
-                x: enabled_x,
-                y: y + 10.0,
-                width: TOGGLE_WIDTH,
-                height: TOGGLE_HEIGHT,
+                x: pill_x,
+                y: pill_y,
+                width: pill_w,
+                height: pill_h,
                 color: pill_bg,
-                corner_radii: CornerRadii::all(TOGGLE_HEIGHT / 2.0),
+                corner_radii: CornerRadii::all(pill_h / 2.0),
             });
 
             // Status text row.
@@ -1543,16 +1619,14 @@ impl NotificationPane {
                 max_width: Some(card_width - 30.0),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            y += 108.0;
         }
 
-        // "Manage notifications" link at bottom.
+        // "Manage notifications" link at bottom -- below where the card after
+        // the last one would have started, from the same walk the cards use.
         if !self.app_settings.is_empty() {
-            y += 12.0;
             cmds.push(RenderCommand::Text {
                 x: PANE_PADDING,
-                y,
+                y: start_y + Self::app_card_top(self.app_settings.len()) + 12.0,
                 text: "Open full notification settings...".to_string(),
                 color: theme::BLUE,
                 font_size: 12.0,
@@ -1570,10 +1644,8 @@ impl NotificationPane {
     // ========================================================================
 
     fn handle_click(&mut self, rx: f32, ry: f32, screen_height: f32) {
-        let mut y = PANE_PADDING;
-
         // Header area.
-        if ry < y + HEADER_HEIGHT {
+        if ry < PANE_PADDING + HEADER_HEIGHT {
             if !self.show_settings {
                 // "Clear all" button region.
                 let clear_x = PANE_WIDTH - PANE_PADDING - 60.0;
@@ -1606,7 +1678,6 @@ impl NotificationPane {
         let list_top = Self::list_start_y();
 
         if self.show_settings {
-            // App settings: each card is 108px tall.
             self.handle_app_settings_click(rx, ry - list_top);
         } else {
             // Notifications area.
@@ -1664,7 +1735,7 @@ impl NotificationPane {
         };
 
         // Check if dismiss button was clicked.
-        let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
+        let card_width = Self::card_width();
         let btn_x = PANE_PADDING + card_width - DISMISS_BTN_SIZE - 8.0;
         if rx >= btn_x
             && rx <= btn_x + DISMISS_BTN_SIZE
@@ -1680,32 +1751,24 @@ impl NotificationPane {
     }
 
     fn handle_app_settings_click(&mut self, rx: f32, local_y: f32) {
-        // Skip heading (24px).
-        let content_y = local_y - 24.0;
-        if content_y < 0.0 {
+        let Some(idx) = self.app_card_at(local_y) else {
+            return;
+        };
+        let (pill_x, pill_y, pill_w, pill_h) = Self::app_toggle_rect(Self::app_card_top(idx));
+        if rx < pill_x || rx >= pill_x + pill_w || local_y < pill_y || local_y >= pill_y + pill_h {
+            // On the card but not on its one control. The name, the priority
+            // badge and the status line are labels, not buttons.
             return;
         }
-
-        let card_height = 108.0_f32;
-        let idx = (content_y / card_height) as usize;
-        if idx >= self.app_settings.len() {
+        let Some(app) = self.app_settings.get_mut(idx) else {
             return;
-        }
-
-        let card_local_y = content_y - (idx as f32 * card_height);
-        let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
-
-        // Toggle area (top-right of card).
-        let enabled_x = card_width - TOGGLE_WIDTH;
-        if rx >= enabled_x && card_local_y < 35.0 {
-            let app = &mut self.app_settings[idx];
-            app.enabled = !app.enabled;
-            self.events.push(NotifPaneEvent::SettingChanged {
-                app: app.app_name.clone(),
-                setting: AppSettingKind::Enabled,
-                value: SettingValue::Bool(app.enabled),
-            });
-        }
+        };
+        app.enabled = !app.enabled;
+        self.events.push(NotifPaneEvent::SettingChanged {
+            app: app.app_name.clone(),
+            setting: AppSettingKind::Enabled,
+            value: SettingValue::Bool(app.enabled),
+        });
     }
 
     fn update_hover(&mut self, _rx: f32, ry: f32, _screen_height: f32) {
@@ -2161,8 +2224,7 @@ mod tests {
             );
             assert!(
                 pane.events
-                    .iter()
-                    .any(|e| *e == NotifPaneEvent::QuickSettingToggled(qs)),
+                    .contains(&NotifPaneEvent::QuickSettingToggled(qs)),
                 "flipping {qs:?} must announce itself"
             );
         }
@@ -2193,6 +2255,294 @@ mod tests {
         let tops = pane.card_tops();
         let gap = tops[0] + NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING / 2.0;
         assert_eq!(pane.card_at(gap), None);
+    }
+
+    // ========================================================================
+    // Layout: the per-app settings list
+    // ========================================================================
+
+    /// A pane on the settings page, with `n` distinct apps in the list.
+    fn settings_pane(n: usize) -> NotificationPane {
+        let mut pane = NotificationPane::new();
+        pane.show();
+        pane.state = PaneState::Visible;
+        for i in 0..n {
+            pane.push_notification(make_notif(&format!("App{i}"), "body", 1000));
+        }
+        pane.current_time = 1000;
+        pane.set_screen_height(TEST_SCREEN_H);
+        pane.show_settings = true;
+        pane
+    }
+
+    /// Where the renderer actually painted each app card's background, and each
+    /// card's enabled pill, read back out of the render commands.
+    ///
+    /// Deliberately not `app_card_top` / `app_toggle_rect`: a test that asks
+    /// the layout helper where the cards are cannot catch the renderer drawing
+    /// somewhere else, because both sides would move together. Only the drawn
+    /// output is independent evidence. The cards are picked out by their width
+    /// and height, which are spelled here from the pane's own dimensions.
+    /// Everything the pane drew from the "Per-App Settings" caption onwards.
+    ///
+    /// The quick-settings block above the list paints its own pills at the
+    /// same size *and the same x* as an app card's, so filtering the whole
+    /// command list by shape alone picks up nine rectangles for four cards.
+    /// The caption is the boundary between the two.
+    fn app_settings_commands(pane: &NotificationPane) -> Vec<RenderCommand> {
+        let cmds = pane.render(SCREEN_W, TEST_SCREEN_H);
+        let start = cmds
+            .iter()
+            .position(
+                |c| matches!(c, RenderCommand::Text { text, .. } if text == "Per-App Settings"),
+            )
+            .expect("the settings page draws its caption");
+        cmds.get(start..).unwrap_or_default().to_vec()
+    }
+
+    fn painted_app_cards(pane: &NotificationPane) -> Vec<f32> {
+        let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
+        app_settings_commands(pane)
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if *x == PANE_PADDING && *width == card_width && *height == APP_CARD_HEIGHT => {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The pills, as `(x, y, width, height)`, in paint order.
+    fn painted_app_pills(pane: &NotificationPane) -> Vec<(f32, f32, f32, f32)> {
+        app_settings_commands(pane)
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if *width == TOGGLE_WIDTH && *height == TOGGLE_HEIGHT => {
+                    Some((*x, *y, *width, *height))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Click at a pane-local point and report which app, if any, was toggled.
+    fn settings_click(pane: &mut NotificationPane, local_x: f32, local_y: f32) -> Option<String> {
+        pane.events.clear();
+        let event = MouseEvent {
+            x: SCREEN_W - PANE_WIDTH + local_x,
+            y: local_y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+        pane.handle_mouse_event(&event, SCREEN_W, TEST_SCREEN_H);
+        pane.events.iter().find_map(|e| match e {
+            NotifPaneEvent::SettingChanged {
+                app,
+                setting: AppSettingKind::Enabled,
+                ..
+            } => Some(app.clone()),
+            _ => None,
+        })
+    }
+
+    /// Every pixel of every painted pill toggles the app that pill belongs to.
+    ///
+    /// Swept rather than probed at the centre: the click used to accept a
+    /// 35-pixel band measured from the *card's* top while the pill is painted
+    /// ten pixels lower and is twenty-two tall, and a centre probe cannot see
+    /// either end of that.
+    #[test]
+    fn every_pixel_of_a_painted_pill_toggles_its_own_app() {
+        let mut pane = settings_pane(5);
+        let names: Vec<String> = pane
+            .app_settings
+            .iter()
+            .map(|a| a.app_name.clone())
+            .collect();
+        let pills = painted_app_pills(&pane);
+        assert!(pills.len() >= 3, "only {} pills drawn", pills.len());
+
+        for (idx, &(px, py, pw, ph)) in pills.iter().enumerate() {
+            for sx in 0_u8..4 {
+                for sy in 0_u8..4 {
+                    let x = px + f32::from(sx) * pw / 4.0;
+                    let y = py + f32::from(sy) * ph / 4.0;
+                    assert_eq!(
+                        settings_click(&mut pane, x, y).as_deref(),
+                        Some(names[idx].as_str()),
+                        "({x}, {y}) is inside the pill painted for {} at \
+                         ({px}, {py}, {pw}, {ph})",
+                        names[idx]
+                    );
+                }
+            }
+            // The pill owns its top and left edges and not its bottom or right.
+            assert_eq!(
+                settings_click(&mut pane, px + pw - 0.01, py + ph - 0.01).as_deref(),
+                Some(names[idx].as_str())
+            );
+        }
+    }
+
+    /// Nothing outside a painted pill toggles anything.
+    ///
+    /// The four places the old hit test answered and the renderer had drawn no
+    /// control: right of the pill (the test was `rx >= enabled_x` with no
+    /// right edge, so the strip ran off the side of the pane), above it (the
+    /// band started at the card's top, where the app's *name* is drawn), below
+    /// it (the band was 35 px and the pill ends at 32), and the eight-pixel
+    /// gutter between one card and the next.
+    #[test]
+    fn nothing_outside_a_painted_pill_toggles_anything() {
+        let mut pane = settings_pane(4);
+        let pills = painted_app_pills(&pane);
+        let &(px, py, pw, ph) = pills.first().expect("a pill is drawn");
+
+        for (label, x, y) in [
+            ("right of the pill", px + pw + 1.0, py + ph / 2.0),
+            ("the pane's right edge", PANE_WIDTH - 1.0, py + ph / 2.0),
+            ("above the pill, on the app name", px + pw / 2.0, py - 1.0),
+            ("below the pill", px + pw / 2.0, py + ph + 1.0),
+            ("left of the pill", px - 1.0, py + ph / 2.0),
+        ] {
+            assert_eq!(
+                settings_click(&mut pane, x, y),
+                None,
+                "{label}: ({x}, {y}) is outside the pill painted at \
+                 ({px}, {py}, {pw}, {ph})"
+            );
+        }
+
+        // The gutter between the first and second cards: the renderer paints
+        // nothing there, at any x.
+        let cards = painted_app_cards(&pane);
+        let gutter = cards[0] + APP_CARD_HEIGHT + (APP_CARD_PITCH - APP_CARD_HEIGHT) / 2.0;
+        assert!(
+            gutter < cards[1],
+            "the gutter must be above the next card's top"
+        );
+        for x in [px - 1.0, px + pw / 2.0, px + pw + 1.0] {
+            assert_eq!(
+                settings_click(&mut pane, x, gutter),
+                None,
+                "the gutter at y={gutter} is not part of any card"
+            );
+        }
+    }
+
+    /// The eight pixels between one app card and the next belong to neither.
+    ///
+    /// Asked of `app_card_at` directly rather than through a click, because a
+    /// click in the gutter is refused twice over -- once for being on no card
+    /// and again for being nowhere near the pill -- so the second refusal
+    /// hides the first. Which card the gutter names is what any future control
+    /// lower down a card would inherit.
+    #[test]
+    fn the_gutter_between_two_app_cards_names_no_card() {
+        let pane = settings_pane(4);
+        let first = NotificationPane::app_card_top(0);
+        assert_eq!(pane.app_card_at(first + APP_CARD_HEIGHT - 0.01), Some(0));
+        for offset in 0_u8..8 {
+            let y = first + APP_CARD_HEIGHT + f32::from(offset);
+            assert_eq!(
+                pane.app_card_at(y),
+                None,
+                "y={y} is in the gutter below card 0"
+            );
+        }
+        assert_eq!(pane.app_card_at(first + APP_CARD_PITCH), Some(1));
+    }
+
+    /// The pills are painted exactly where `app_toggle_rect` says they are.
+    ///
+    /// This is what stops the two sweeps above from passing while renderer and
+    /// hit test have drifted *together*: they read the painted rectangles, so
+    /// a shared shift moves the probes with the paint and is invisible to
+    /// them. Here the painted rectangle is checked against the pane's own
+    /// constants, spelled out.
+    #[test]
+    fn the_pills_are_painted_on_the_cards_the_walk_places() {
+        let pane = settings_pane(4);
+        let cards = painted_app_cards(&pane);
+        let pills = painted_app_pills(&pane);
+        assert_eq!(cards.len(), pills.len(), "one pill per painted card");
+
+        let list_top = NotificationPane::list_start_y();
+        for (idx, (&card_y, &(px, py, pw, ph))) in cards.iter().zip(&pills).enumerate() {
+            let expected_card = list_top + APP_HEADING_HEIGHT + idx as f32 * APP_CARD_PITCH;
+            assert_eq!(card_y, expected_card, "card {idx}");
+            assert_eq!(px, PANE_WIDTH - 2.0 * PANE_PADDING - TOGGLE_WIDTH);
+            assert_eq!(py, card_y + APP_TOGGLE_TOP);
+            assert_eq!(pw, TOGGLE_WIDTH);
+            assert_eq!(ph, TOGGLE_HEIGHT);
+        }
+    }
+
+    /// A card the renderer clipped away is not clickable.
+    ///
+    /// The old hit test had no bottom bound at all: it divided by the pitch and
+    /// checked only that the quotient was a valid index, so a click below the
+    /// pane -- on the desktop behind it, or on another window -- switched off
+    /// an app that was never on screen.
+    #[test]
+    fn a_card_below_the_panes_bottom_edge_is_not_clickable() {
+        let mut pane = settings_pane(20);
+        let painted = painted_app_cards(&pane);
+        assert!(
+            painted.len() < pane.app_settings.len(),
+            "the fixture must overflow the pane: {} of {} drawn",
+            painted.len(),
+            pane.app_settings.len()
+        );
+
+        let list_top = NotificationPane::list_start_y();
+        for idx in painted.len()..pane.app_settings.len() {
+            let card_y = list_top + NotificationPane::app_card_top(idx);
+            let (px, py, pw, ph) = NotificationPane::app_toggle_rect(card_y);
+            assert_eq!(
+                settings_click(&mut pane, px + pw / 2.0, py + ph / 2.0),
+                None,
+                "app {idx} is below the pane's bottom edge and was not drawn"
+            );
+        }
+        assert!(
+            pane.app_settings.iter().all(|a| a.enabled),
+            "no app should have been toggled"
+        );
+    }
+
+    /// A coordinate that is not a number selects no app card.
+    ///
+    /// `content_y < 0.0` is false for a NaN, so the old guard passed it
+    /// through, and `NaN as usize` is 0 rather than a trap: a pointer position
+    /// that is nowhere at all named the first app in the list.
+    #[test]
+    fn an_app_settings_coordinate_that_is_not_a_number_names_no_card() {
+        let pane = settings_pane(4);
+        for y in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0] {
+            assert_eq!(pane.app_card_at(y), None, "y={y}");
+        }
+    }
+
+    /// The caption above the first card is not the first card.
+    #[test]
+    fn the_per_app_heading_is_not_part_of_the_first_card() {
+        let pane = settings_pane(3);
+        assert_eq!(pane.app_card_at(0.0), None);
+        assert_eq!(pane.app_card_at(APP_HEADING_HEIGHT - 0.01), None);
+        assert_eq!(pane.app_card_at(APP_HEADING_HEIGHT), Some(0));
     }
 
     // ========================================================================

@@ -32,6 +32,7 @@ use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
+use guitk::{scroll_window, wheel};
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -78,6 +79,36 @@ const BUTTON_HEIGHT: f32 = 32.0;
 const ROW_HEIGHT: f32 = 28.0;
 const PROGRESS_BAR_HEIGHT: f32 = 20.0;
 const MAX_RECENT_IMAGES: usize = 20;
+
+// Geometry of the two scrollable lists. Every one of these numbers used to be
+// written out at each place that needed it -- the drive row's height appeared
+// as a bare `64.0` in the renderer and again in the hit-test, and the browse
+// panel's furniture appeared only in the renderer because there was no
+// hit-test at all. Two copies of a layout are two layouts, and they agree only
+// until someone edits one of them.
+/// Height of one drive entry in the sidebar list.
+const DRIVE_ROW_HEIGHT: f32 = 64.0;
+/// Room above the drive list: the sidebar's padding plus its "Drives" heading.
+const DRIVE_LIST_HEADER: f32 = PANEL_PADDING + 24.0;
+/// Height of one row in the ISO 9660 file tree.
+const ISO_ROW_HEIGHT: f32 = 20.0;
+/// Horizontal step per level of tree depth.
+const ISO_INDENT: f32 = 20.0;
+/// Width of the expand/collapse arrow column at the head of a directory row.
+const ISO_ARROW_WIDTH: f32 = 14.0;
+/// The browse panel's "ISO 9660 Browser" title and the gap under it.
+const BROWSE_TITLE_BLOCK: f32 = 28.0;
+/// The volume-information block, drawn only when a volume descriptor parsed.
+const BROWSE_VOLUME_BLOCK: f32 = 90.0;
+/// The "File Tree" sub-heading.
+const BROWSE_TREE_HEADING: f32 = 22.0;
+/// The "N files, N directories, N total" line under the sub-heading.
+const BROWSE_STATS_BLOCK: f32 = 20.0;
+/// Bytes an ISO 9660 date/time field occupies.
+const ISO_DATETIME_LEN: usize = 17;
+/// Leading digits of that field that carry the date and time; the remaining
+/// bytes are centiseconds and a timezone offset, which this view does not show.
+const ISO_DATETIME_DIGITS: usize = 14;
 
 // Destructive-confirmation dialog. Its two prose fields wrap, so the dialog
 // grows to hold them; these bound and floor that growth.
@@ -538,6 +569,57 @@ impl IsoEntry {
         result
     }
 
+    /// How many rows [`flatten_visible`] would produce, without building them.
+    ///
+    /// The scroll clamp and the renderer both need this on every frame, and a
+    /// tree of a few thousand entries would otherwise clone every name twice
+    /// per frame to learn a number.
+    ///
+    /// [`flatten_visible`]: IsoEntry::flatten_visible
+    pub fn visible_count(&self) -> usize {
+        let mut count: usize = 1;
+        if self.expanded {
+            for child in &self.children {
+                count = count.saturating_add(child.visible_count());
+            }
+        }
+        count
+    }
+
+    /// Open or close the directory at `index` in [`flatten_visible`] order.
+    ///
+    /// Returns whether a row at that index existed. A row that is not a
+    /// directory, or a directory with no children, is reached but left alone —
+    /// there is nothing to open — and still reports `true`, because the
+    /// caller's question is "did the click land on a row", not "did something
+    /// move".
+    ///
+    /// [`flatten_visible`]: IsoEntry::flatten_visible
+    pub fn toggle_expanded_at(&mut self, index: usize) -> bool {
+        let mut counter: usize = 0;
+        self.toggle_walk(index, &mut counter)
+    }
+
+    fn toggle_walk(&mut self, target: usize, counter: &mut usize) -> bool {
+        if *counter == target {
+            if self.is_directory && !self.children.is_empty() {
+                self.expanded = !self.expanded;
+            }
+            return true;
+        }
+        *counter = counter.saturating_add(1);
+        // Descend only into open directories, so the walk visits exactly the
+        // rows `flatten_into` emits and in the same order.
+        if self.expanded {
+            for child in &mut self.children {
+                if child.toggle_walk(target, counter) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn flatten_into(&self, out: &mut Vec<FlatEntry>) {
         out.push(FlatEntry {
             name: self.name.clone(),
@@ -597,11 +679,12 @@ pub fn parse_iso_directory(data: &[u8], depth: u32) -> Vec<IsoEntry> {
         // Extract name
         let name_start = offset.saturating_add(33);
         let name_end = name_start.saturating_add(name_len);
-        let raw_name = if name_end <= data.len() {
-            &data[name_start..name_end]
-        } else {
-            b""
-        };
+        // `name_len` comes out of the image, so the range it describes may run
+        // past the end of the data. `get` returns the miss instead of panicking
+        // on it, which a bounds test written alongside the slice only appears
+        // to do -- it has to be re-checked by hand every time either bound is
+        // touched.
+        let raw_name = data.get(name_start..name_end).unwrap_or(b"");
 
         // Skip "." and ".." entries
         let skip = matches!(raw_name, [0x00] | [0x01]);
@@ -1012,8 +1095,28 @@ pub struct DiskImagerApp {
     pub active_tab: MainTab,
     pub window_width: f32,
     pub window_height: f32,
-    pub scroll_offset: f32,
-    pub sidebar_scroll: f32,
+
+    // --- Scroll state ---
+    //
+    // Row indices, not pixels. As pixels these were wrong in three ways at
+    // once. The wheel subtracted `dy * 20.0`, but `dy` is a count of wheel
+    // notches rather than a distance, so a 64px drive row took better than
+    // three turns of the wheel to clear. Nothing clamped the far end, so
+    // scrolling past the last drive ran the offset up without moving the view
+    // and the user then had to wind all of it back before anything happened.
+    // And the content pane's offset was written by the wheel and read by
+    // nobody, while the ISO file tree it should have driven was read by the
+    // renderer and written by nobody -- two halves of one feature that were
+    // never joined, leaving that list unscrollable however far it ran.
+    /// First drive row drawn in the sidebar.
+    pub sidebar_scroll: usize,
+    /// First row drawn in the ISO 9660 file tree.
+    pub iso_scroll: usize,
+    /// Sub-row remainders of a high-resolution wheel or trackpad -- one per
+    /// scrollable region, so a fraction earned over the sidebar cannot deliver
+    /// a row in the file tree.
+    sidebar_wheel: wheel::Accumulator,
+    iso_wheel: wheel::Accumulator,
 
     // Drive management
     pub drives: Vec<DriveInfo>,
@@ -1023,7 +1126,6 @@ pub struct DiskImagerApp {
     pub loaded_image: Option<ImageInfo>,
     pub iso_volume: Option<IsoVolumeDescriptor>,
     pub iso_root: Option<IsoEntry>,
-    pub iso_scroll_offset: f32,
     pub selected_iso_entry: Option<usize>,
 
     // Operation state
@@ -1071,14 +1173,15 @@ impl DiskImagerApp {
             active_tab: MainTab::Write,
             window_width: 960.0,
             window_height: 680.0,
-            scroll_offset: 0.0,
-            sidebar_scroll: 0.0,
+            sidebar_scroll: 0,
+            iso_scroll: 0,
+            sidebar_wheel: wheel::Accumulator::default(),
+            iso_wheel: wheel::Accumulator::default(),
             drives,
             selected_drive_index: None,
             loaded_image: None,
             iso_volume: None,
             iso_root: None,
-            iso_scroll_offset: 0.0,
             selected_iso_entry: None,
             operation: Operation::Idle,
             progress: OperationProgress::new(0),
@@ -1096,6 +1199,126 @@ impl DiskImagerApp {
             status_is_error: false,
             tick_count: 0,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Layout
+    //
+    // The renderer and the hit-test read these, never their own copy of the
+    // arithmetic. The drive list's old hit-test and renderer each carried
+    // their own `64.0`, which is the shape of a bug that has already been
+    // found elsewhere in this tree: two derivations of one layout, written to
+    // agree, that stop agreeing the moment either is edited.
+    // ------------------------------------------------------------------
+
+    /// Top of the content area, below the toolbar and the tab bar.
+    pub fn content_top(&self) -> f32 {
+        TOOLBAR_HEIGHT + ROW_HEIGHT + 8.0
+    }
+
+    /// Height of the content area, above the status bar.
+    pub fn content_height(&self) -> f32 {
+        self.window_height - self.content_top() - STATUS_BAR_HEIGHT
+    }
+
+    /// Height available to drive rows, below the sidebar's heading.
+    fn drive_list_height(&self) -> f32 {
+        self.content_height() - DRIVE_LIST_HEADER
+    }
+
+    /// The drive rows the sidebar shows at its current size and offset.
+    fn drive_rows(&self) -> scroll_window::Rows {
+        scroll_window::visible(
+            self.drives.len(),
+            DRIVE_ROW_HEIGHT,
+            self.drive_list_height(),
+            self.sidebar_scroll,
+        )
+    }
+
+    /// The furthest the drive list can usefully scroll: the offset that puts
+    /// the last drive on the bottom row. Scrolling is clamped to it so the
+    /// offset cannot run away past a view that has stopped moving.
+    pub fn max_sidebar_scroll(&self) -> usize {
+        scroll_window::visible(
+            self.drives.len(),
+            DRIVE_ROW_HEIGHT,
+            self.drive_list_height(),
+            usize::MAX,
+        )
+        .start
+    }
+
+    /// Horizontal offset of a file-tree row at `depth`, from the left edge of
+    /// the list. Read by the renderer to place the row and by the hit-test to
+    /// find the arrow column, so the two cannot disagree about where the arrow
+    /// is.
+    ///
+    /// A tree deeper than `u16::MAX` is not representable in the ISO 9660
+    /// directory hierarchy and would be far off the right edge anyway; the
+    /// saturation keeps the conversion exact for every depth that can occur.
+    fn iso_indent(depth: u32) -> f32 {
+        f32::from(u16::try_from(depth).unwrap_or(u16::MAX)) * ISO_INDENT
+    }
+
+    /// Where the `slot`-th visible row of a list sits, relative to the top of
+    /// that list.
+    ///
+    /// Slots count from the first *drawn* row, not the first row of the list,
+    /// so this takes no scroll offset: `scroll_window` has already resolved
+    /// the offset into a window, and reintroducing it here is how a renderer
+    /// ends up applying it twice.
+    fn slot_offset(slot: usize, row_h: f32) -> f32 {
+        f32::from(u16::try_from(slot).unwrap_or(u16::MAX)) * row_h
+    }
+
+    /// Distance from the top of the browse panel down to its first file row.
+    fn iso_list_offset(&self) -> f32 {
+        let volume = if self.iso_volume.is_some() {
+            BROWSE_VOLUME_BLOCK
+        } else {
+            0.0
+        };
+        PANEL_PADDING + BROWSE_TITLE_BLOCK + volume + BROWSE_TREE_HEADING + BROWSE_STATS_BLOCK
+    }
+
+    /// Height available to file rows in the browse panel.
+    fn iso_list_height(&self) -> f32 {
+        self.content_height() - self.iso_list_offset() - PANEL_PADDING
+    }
+
+    /// The flattened file tree exactly as the browser draws it.
+    pub fn iso_entries(&self) -> Vec<FlatEntry> {
+        self.iso_root
+            .as_ref()
+            .map(IsoEntry::flatten_visible)
+            .unwrap_or_default()
+    }
+
+    /// How many rows that tree has, without building them.
+    fn iso_entry_count(&self) -> usize {
+        self.iso_root.as_ref().map_or(0, IsoEntry::visible_count)
+    }
+
+    /// The file rows the browse panel shows at its current size and offset.
+    fn iso_rows(&self) -> scroll_window::Rows {
+        scroll_window::visible(
+            self.iso_entry_count(),
+            ISO_ROW_HEIGHT,
+            self.iso_list_height(),
+            self.iso_scroll,
+        )
+    }
+
+    /// The furthest the file tree can usefully scroll.
+    pub fn max_iso_scroll(&self) -> usize {
+        scroll_window::visible(
+            self.iso_entry_count(),
+            ISO_ROW_HEIGHT,
+            self.iso_list_height(),
+            usize::MAX,
+        )
+        .start
     }
 
     /// Detect available drives on the system.
@@ -1204,8 +1427,7 @@ impl DiskImagerApp {
                     root_lba.saturating_mul(if block_size > 0 { block_size } else { 2048 });
                 let root_end = root_offset.saturating_add(root_size);
 
-                if root_end <= data.len() {
-                    let dir_data = &data[root_offset..root_end];
+                if let Some(dir_data) = data.get(root_offset..root_end) {
                     let children = parse_iso_directory(dir_data, 1);
                     self.iso_root = Some(IsoEntry {
                         name: "/".to_string(),
@@ -1542,13 +1764,29 @@ impl DiskImagerApp {
                     return self.handle_drive_click(mx, my);
                 }
 
+                // File tree clicks (browse panel)
+                if self.active_tab == MainTab::Browse {
+                    return self.handle_iso_click(mx, my);
+                }
+
                 EventResult::Consumed
             }
             MouseEventKind::Scroll { dy, .. } => {
+                // `dy` is a count of wheel notches, not a pixel distance.
+                // Multiplying it by 20 moved these lists 20px per notch, which
+                // took better than three turns of the wheel to clear one 64px
+                // drive row; and the pane's offset went to a field nothing
+                // read, so the file tree never moved at all. Notches become
+                // whole rows through an accumulator, which banks the fractions
+                // a trackpad sends instead of rounding each one away to zero.
                 if mx < SIDEBAR_WIDTH {
-                    self.sidebar_scroll = (self.sidebar_scroll - dy * 20.0).max(0.0);
-                } else {
-                    self.scroll_offset = (self.scroll_offset - dy * 20.0).max(0.0);
+                    let rows = self.sidebar_wheel.rows(*dy);
+                    self.sidebar_scroll = scroll_window::shift(self.sidebar_scroll, rows)
+                        .min(self.max_sidebar_scroll());
+                } else if self.active_tab == MainTab::Browse {
+                    let rows = self.iso_wheel.rows(*dy);
+                    self.iso_scroll =
+                        scroll_window::shift(self.iso_scroll, rows).min(self.max_iso_scroll());
                 }
                 EventResult::Consumed
             }
@@ -1569,18 +1807,84 @@ impl DiskImagerApp {
     }
 
     fn handle_drive_click(&mut self, _mx: f32, my: f32) -> EventResult {
-        let list_y_start = TOOLBAR_HEIGHT + ROW_HEIGHT + 8.0 + PANEL_PADDING + 24.0;
+        let list_y_start = self.content_top() + DRIVE_LIST_HEADER;
         if my < list_y_start {
             return EventResult::Ignored;
         }
-        let relative_y = my - list_y_start + self.sidebar_scroll;
-        let drive_row_height = 64.0_f32;
-        let clicked_idx = (relative_y / drive_row_height) as usize;
-        if clicked_idx < self.drives.len() {
-            self.select_drive(clicked_idx);
+        // The row under the pointer counts from the top of the *visible* list,
+        // so the scroll offset is added to it rather than to the distance:
+        // rows are whole, and adding pixels to pixels before dividing let a
+        // half-scrolled list select the drive above or below the one drawn
+        // there.
+        let Some(idx) = self
+            .sidebar_scroll
+            .checked_add(Self::row_under(my - list_y_start, DRIVE_ROW_HEIGHT))
+        else {
+            return EventResult::Ignored;
+        };
+        if idx < self.drives.len() {
+            self.select_drive(idx);
             return EventResult::Consumed;
         }
         EventResult::Ignored
+    }
+
+    /// Which row of a list of `row_h`-tall rows sits `offset` pixels below its
+    /// top.
+    ///
+    /// A float-to-integer cast saturates rather than wrapping, so a pointer
+    /// far below the list -- or a bogus coordinate off the wire -- yields a
+    /// row near `usize::MAX` instead of a negative one. Callers guard the
+    /// result with `checked_add` and a length test, which turns that into a
+    /// miss rather than an overflow panic.
+    fn row_under(offset: f32, row_h: f32) -> usize {
+        if !offset.is_finite() || offset < 0.0 || row_h <= 0.0 {
+            return usize::MAX;
+        }
+        (offset / row_h) as usize
+    }
+
+    /// Clicking the ISO file tree.
+    ///
+    /// The arrow column at the head of a directory row opens or closes it;
+    /// anywhere else on the row selects it. Both walk the same flattened tree
+    /// the renderer draws, offset by the same `iso_scroll`, so a click lands
+    /// on the row the user is looking at whatever the list is scrolled to.
+    fn handle_iso_click(&mut self, mx: f32, my: f32) -> EventResult {
+        let list_top = self.content_top() + self.iso_list_offset();
+        if my < list_top || my >= list_top + self.iso_list_height() {
+            return EventResult::Ignored;
+        }
+        let Some(idx) = self
+            .iso_scroll
+            .checked_add(Self::row_under(my - list_top, ISO_ROW_HEIGHT))
+        else {
+            return EventResult::Ignored;
+        };
+
+        let entries = self.iso_entries();
+        let Some(entry) = entries.get(idx) else {
+            return EventResult::Ignored;
+        };
+
+        let indent = SIDEBAR_WIDTH + PANEL_PADDING + Self::iso_indent(entry.depth);
+        let on_arrow = entry.is_directory
+            && entry.has_children
+            && mx >= indent
+            && mx < indent + ISO_ARROW_WIDTH;
+
+        if on_arrow {
+            if let Some(root) = self.iso_root.as_mut() {
+                root.toggle_expanded_at(idx);
+            }
+            // Closing a directory shortens the list, which can leave the view
+            // parked past its new end -- staring at blank space it would then
+            // have to be scrolled back out of.
+            self.iso_scroll = self.iso_scroll.min(self.max_iso_scroll());
+        } else {
+            self.selected_iso_entry = Some(idx);
+        }
+        EventResult::Consumed
     }
 
     fn handle_dialog_click(&mut self, mx: f32, my: f32) -> EventResult {
@@ -1636,8 +1940,8 @@ impl DiskImagerApp {
         self.render_tab_bar(rt, tab_y);
 
         // Content area
-        let content_y = tab_y + ROW_HEIGHT + 8.0;
-        let content_h = self.window_height - content_y - STATUS_BAR_HEIGHT;
+        let content_y = self.content_top();
+        let content_h = self.content_height();
 
         // Left sidebar: drive list
         self.render_drive_list(rt, 0.0, content_y, SIDEBAR_WIDTH, content_h);
@@ -1796,23 +2100,30 @@ impl DiskImagerApp {
         });
 
         // Drive entries
-        let entry_y_start = y + PANEL_PADDING + 24.0;
-        let entry_height = 64.0_f32;
+        let entry_y_start = y + DRIVE_LIST_HEADER;
+        let entry_height = DRIVE_ROW_HEIGHT;
 
         rt.push(RenderCommand::PushClip {
             x,
             y: entry_y_start,
             width,
-            height: height - PANEL_PADDING - 24.0,
+            height: self.drive_list_height(),
         });
 
-        for (idx, drive) in self.drives.iter().enumerate() {
-            let ey = entry_y_start + (idx as f32) * entry_height - self.sidebar_scroll;
-
-            // Skip if scrolled out of view
-            if ey + entry_height < entry_y_start || ey > y + height {
-                continue;
-            }
+        // Draw only the window of rows the offset selects, at slot positions
+        // counted from the top of that window. The old form walked all drives
+        // and subtracted a pixel offset, which drew every row twice over -- as
+        // geometry here and again as a divisor in the hit-test.
+        let rows = self.drive_rows();
+        for (slot, (idx, drive)) in self
+            .drives
+            .iter()
+            .enumerate()
+            .skip(rows.start)
+            .take(rows.count)
+            .enumerate()
+        {
+            let ey = entry_y_start + Self::slot_offset(slot, entry_height);
 
             let is_selected = self.selected_drive_index == Some(idx);
             let is_locked = self.is_drive_locked(&drive.id);
@@ -2325,6 +2636,15 @@ impl DiskImagerApp {
     }
 
     fn render_browse_tab(&self, rt: &mut RenderTree, x: f32, y: f32, width: f32, height: f32) {
+        // This tab's file list is the only one with a hit-test, and the
+        // hit-test cannot see the rectangle the caller passed -- so the list's
+        // geometry is taken from `content_height` instead. They are the same
+        // rectangle; the assertion is here so that they stay so.
+        debug_assert!(
+            (height - self.content_height()).abs() < 0.5,
+            "browse tab drawn at height {height}, but its hit-test measures {}",
+            self.content_height(),
+        );
         let px = x + PANEL_PADDING;
         let mut cy = y + PANEL_PADDING;
 
@@ -2338,12 +2658,12 @@ impl DiskImagerApp {
             max_width: Some(width - PANEL_PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cy += 28.0;
+        cy += BROWSE_TITLE_BLOCK;
 
         // Volume info if available
         if let Some(ref vol) = self.iso_volume {
             self.render_volume_info(rt, px, cy, width - PANEL_PADDING * 2.0, vol);
-            cy += 90.0;
+            cy += BROWSE_VOLUME_BLOCK;
         }
 
         // File tree
@@ -2358,7 +2678,7 @@ impl DiskImagerApp {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            cy += 22.0;
+            cy += BROWSE_TREE_HEADING;
 
             // Statistics bar
             let files = root.count_files();
@@ -2379,27 +2699,37 @@ impl DiskImagerApp {
                 max_width: Some(width - PANEL_PADDING * 2.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cy += 20.0;
-
-            // File list
-            let visible = root.flatten_visible();
-            let list_height = height - (cy - y) - PANEL_PADDING;
+            // File list.
+            //
+            // Its top and height come from the shared measure -- which adds
+            // BROWSE_STATS_BLOCK for the line just drawn -- rather than from
+            // the running `cy`, because the hit-test has no running `cy` to
+            // consult and would otherwise have to re-derive the same stack of
+            // heights. `the_file_lists_clip_matches_what_the_hit_test_uses`
+            // pins the two together.
+            let list_top = y + self.iso_list_offset();
+            let list_height = self.iso_list_height();
 
             rt.push(RenderCommand::PushClip {
                 x: px,
-                y: cy,
+                y: list_top,
                 width: width - PANEL_PADDING * 2.0,
                 height: list_height,
             });
 
-            let row_h = 20.0_f32;
-            for (idx, entry) in visible.iter().enumerate() {
-                let ey = cy + (idx as f32) * row_h - self.iso_scroll_offset;
-                if ey + row_h < cy || ey > cy + list_height {
-                    continue;
-                }
+            let row_h = ISO_ROW_HEIGHT;
+            let visible = root.flatten_visible();
+            let rows = self.iso_rows();
+            for (slot, (idx, entry)) in visible
+                .iter()
+                .enumerate()
+                .skip(rows.start)
+                .take(rows.count)
+                .enumerate()
+            {
+                let ey = list_top + Self::slot_offset(slot, row_h);
 
-                let indent = entry.depth as f32 * 20.0;
+                let indent = Self::iso_indent(entry.depth);
                 let is_selected = self.selected_iso_entry == Some(idx);
 
                 if is_selected {
@@ -3397,35 +3727,50 @@ pub fn truncate_path(path: &str, max_width: f32, size: f32) -> String {
 /// Extract a trimmed ASCII string from ISO data at a given offset and length.
 fn extract_iso_string(data: &[u8], offset: usize, max_len: usize) -> String {
     let end = offset.saturating_add(max_len).min(data.len());
-    if offset >= data.len() {
+    let Some(slice) = data.get(offset..end) else {
         return String::new();
-    }
-    let slice = &data[offset..end];
+    };
     String::from_utf8_lossy(slice).trim().to_string()
 }
 
-/// Extract ISO 9660 datetime (17 bytes, ASCII digits).
+/// Extract ISO 9660 datetime (17 bytes, ASCII digits) at `offset`.
+///
+/// Returns an empty string for a field that is absent, short, or not the ASCII
+/// digits the format specifies -- including the all-zero field ISO 9660 uses to
+/// mean "unrecorded", which would otherwise render as `0000-00-00 00:00:00`.
+///
+/// The digit check is what makes the slicing below safe, and it replaces a
+/// genuine abort: the previous version ran the raw bytes through
+/// `String::from_utf8_lossy` and then sliced the *string* at `0..4`, `4..6` and
+/// so on. Lossy conversion turns each bad byte into U+FFFD, which is three
+/// bytes wide, so those byte indices landed inside a character and panicked --
+/// on data read straight out of an image file, which is exactly the input a
+/// disk tool must assume is malformed.
 fn extract_iso_datetime(data: &[u8], offset: usize) -> String {
-    let end = offset.saturating_add(17);
-    if end > data.len() {
+    let end = offset.saturating_add(ISO_DATETIME_LEN);
+    let Some(raw) = data.get(offset..end) else {
+        return String::new();
+    };
+    // Format: YYYYMMDDHHMMSSCC (year, month, day, hour, min, sec, centiseconds, tz)
+    let Some(digits) = raw.get(..ISO_DATETIME_DIGITS) else {
+        return String::new();
+    };
+    if !digits.iter().all(u8::is_ascii_digit) || digits.iter().all(|&b| b == b'0') {
         return String::new();
     }
-    let raw = &data[offset..end];
-    // Format: YYYYMMDDHHMMSSCC (year, month, day, hour, min, sec, centiseconds, tz)
-    let s = String::from_utf8_lossy(raw);
-    if s.len() >= 14 {
-        format!(
-            "{}-{}-{} {}:{}:{}",
-            &s[0..4],
-            &s[4..6],
-            &s[6..8],
-            &s[8..10],
-            &s[10..12],
-            &s[12..14],
-        )
-    } else {
-        s.to_string()
-    }
+    // Every byte is an ASCII digit, so the string is one byte per character and
+    // each index below is a character boundary.
+    let s = String::from_utf8_lossy(digits);
+    let field = |a: usize, b: usize| s.get(a..b).unwrap_or_default();
+    format!(
+        "{}-{}-{} {}:{}:{}",
+        field(0, 4),
+        field(4, 6),
+        field(6, 8),
+        field(8, 10),
+        field(10, 12),
+        field(12, 14),
+    )
 }
 
 /// Read a little-endian u32 from data at the given offset.
@@ -3481,6 +3826,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it -- that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ----------------------------------------------------------------
@@ -4094,6 +4450,9 @@ mod tests {
     // ----------------------------------------------------------------
 
     #[test]
+    // A zero total is the one input for which `fraction` returns a literal
+    // rather than a quotient, so the comparison is exact by construction.
+    #[allow(clippy::float_cmp)]
     fn test_progress_fraction_zero_total() {
         let p = OperationProgress::new(0);
         assert_eq!(p.fraction(), 0.0);
@@ -4470,6 +4829,10 @@ mod tests {
     // ----------------------------------------------------------------
 
     #[test]
+    // The handler converts two small integers straight to `f32`, which is
+    // exact for these values, so an exact comparison is the right one: a
+    // tolerance here would hide a handler that rounded or scaled.
+    #[allow(clippy::float_cmp)]
     fn test_handle_resize() {
         let mut app = DiskImagerApp::new();
         let ev = Event::Resize {
@@ -4800,11 +5163,11 @@ mod tests {
 
     #[test]
     fn test_extract_iso_datetime_valid() {
+        // Asserted whole rather than by `contains`: "01" and "15" are each a
+        // substring of any number of wrong answers, transposed fields
+        // included.
         let dt_str = b"20240115143000000";
-        let s = extract_iso_datetime(dt_str, 0);
-        assert!(s.contains("2024"));
-        assert!(s.contains("01"));
-        assert!(s.contains("15"));
+        assert_eq!(extract_iso_datetime(dt_str, 0), "2024-01-15 14:30:00");
     }
 
     // ----------------------------------------------------------------
@@ -4821,5 +5184,585 @@ mod tests {
         for tab in &MainTab::ALL {
             assert!(!tab.label().is_empty());
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Scrolling and hit-testing
+    //
+    // Every test here is written in wheel *notches*, because that is what the
+    // event carries (see `guitk::wheel`). The distinction is the whole bug:
+    // a test that sends a plausible-looking pixel distance and then asserts
+    // the offset is non-zero passes just as happily when one notch moves the
+    // view a single pixel, which is a wheel the user would call broken. So
+    // these assert whole rows, and the fixtures assert up front that they can
+    // overflow at all -- a list that fits its pane proves nothing about
+    // scrolling however carefully it is scrolled.
+    // ----------------------------------------------------------------
+
+    /// A wheel event `x` pixels from the left, carrying `dy` **notches**.
+    ///
+    /// Positive is away from the user, which scrolls towards row 0.
+    fn wheel_at(x: f32, dy: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y: 300.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    /// A left click at a point in window coordinates.
+    fn click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn rows_per_notch() -> usize {
+        wheel::ROWS_PER_NOTCH as usize
+    }
+
+    /// An app whose drive list is longer than the sidebar can show.
+    fn app_with_many_drives() -> DiskImagerApp {
+        let mut app = DiskImagerApp::new();
+        let template = app.drives[0].clone();
+        for n in 0..12 {
+            let mut drive = template.clone();
+            drive.id = format!("extra{n}");
+            drive.name = format!("Extra Drive {n}");
+            app.drives.push(drive);
+        }
+        assert!(
+            app.max_sidebar_scroll() > 0,
+            "the fixture must overflow the sidebar, or these tests prove nothing",
+        );
+        app
+    }
+
+    /// A directory of `count` plain files, all at depth 1.
+    fn iso_files(count: usize) -> Vec<IsoEntry> {
+        (0..count)
+            .map(|n| IsoEntry {
+                name: format!("FILE{n}.TXT"),
+                is_directory: false,
+                size_bytes: 1024,
+                lba: 100 + n as u32,
+                recording_date: String::new(),
+                children: Vec::new(),
+                depth: 1,
+                expanded: false,
+            })
+            .collect()
+    }
+
+    fn iso_root_with(children: Vec<IsoEntry>) -> IsoEntry {
+        IsoEntry {
+            name: "/".to_string(),
+            is_directory: true,
+            size_bytes: 0,
+            lba: 20,
+            recording_date: String::new(),
+            children,
+            depth: 0,
+            expanded: true,
+        }
+    }
+
+    /// An app on the Browse tab whose file tree is longer than the pane.
+    fn app_with_long_iso() -> DiskImagerApp {
+        let mut app = DiskImagerApp::new();
+        app.active_tab = MainTab::Browse;
+        app.iso_root = Some(iso_root_with(iso_files(60)));
+        assert!(
+            app.max_iso_scroll() > 0,
+            "the fixture must overflow the browse pane, or these tests prove nothing",
+        );
+        app
+    }
+
+    /// The window y of the middle of visible file row `slot`.
+    fn iso_row_y(app: &DiskImagerApp, slot: usize) -> f32 {
+        app.content_top() + app.iso_list_offset() + (slot as f32 + 0.5) * ISO_ROW_HEIGHT
+    }
+
+    /// The window y of the middle of visible drive row `slot`.
+    fn drive_row_y(app: &DiskImagerApp, slot: usize) -> f32 {
+        app.content_top() + DRIVE_LIST_HEADER + (slot as f32 + 0.5) * DRIVE_ROW_HEIGHT
+    }
+
+    #[test]
+    fn one_notch_scrolls_the_drive_list_by_whole_rows() {
+        let mut app = app_with_many_drives();
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, -1.0));
+        assert_eq!(
+            app.sidebar_scroll,
+            rows_per_notch(),
+            "one notch down should advance the list by a whole number of rows",
+        );
+    }
+
+    #[test]
+    fn the_drive_wheel_scrolls_both_ways() {
+        let mut app = app_with_many_drives();
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, -1.0));
+        let down = app.sidebar_scroll;
+        assert!(down >= 1, "scrolling down must move at least one row");
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, 1.0));
+        assert_eq!(app.sidebar_scroll, 0, "one notch back returns to the top");
+    }
+
+    #[test]
+    fn the_drive_wheel_cannot_scroll_into_empty_space() {
+        let mut app = app_with_many_drives();
+        for _ in 0..50 {
+            app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, -1.0));
+        }
+        assert_eq!(
+            app.sidebar_scroll,
+            app.max_sidebar_scroll(),
+            "the offset must stop where the view stops",
+        );
+        // Not merely clamped on the way out: the *stored* offset is clamped,
+        // so one notch back moves immediately instead of first working off a
+        // debt the user cannot see.
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, 1.0));
+        assert!(
+            app.sidebar_scroll < app.max_sidebar_scroll(),
+            "one notch back must move the view, not repay an invisible overshoot",
+        );
+    }
+
+    #[test]
+    fn a_drive_list_that_fits_cannot_be_scrolled() {
+        // The stock three drives fit the sidebar with room to spare.
+        let mut app = DiskImagerApp::new();
+        assert_eq!(app.max_sidebar_scroll(), 0);
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, -5.0));
+        assert_eq!(app.sidebar_scroll, 0);
+    }
+
+    #[test]
+    fn one_notch_scrolls_the_file_tree_by_whole_rows() {
+        let mut app = app_with_long_iso();
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -1.0));
+        assert_eq!(app.iso_scroll, rows_per_notch());
+    }
+
+    #[test]
+    fn the_file_tree_wheel_scrolls_both_ways() {
+        let mut app = app_with_long_iso();
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -2.0));
+        assert!(app.iso_scroll >= 1);
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, 2.0));
+        assert_eq!(app.iso_scroll, 0);
+    }
+
+    #[test]
+    fn the_file_tree_wheel_cannot_scroll_into_empty_space() {
+        let mut app = app_with_long_iso();
+        for _ in 0..100 {
+            app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -1.0));
+        }
+        assert_eq!(app.iso_scroll, app.max_iso_scroll());
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, 1.0));
+        assert!(app.iso_scroll < app.max_iso_scroll());
+    }
+
+    #[test]
+    fn the_file_tree_only_scrolls_on_its_own_tab() {
+        // The pane shows the Write tab's form, which has no list. A wheel
+        // there must not silently wind an offset the user will meet later.
+        let mut app = app_with_long_iso();
+        app.active_tab = MainTab::Write;
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -5.0));
+        assert_eq!(app.iso_scroll, 0);
+    }
+
+    #[test]
+    fn a_trackpads_fractions_of_a_notch_eventually_scroll() {
+        // A precision device sends a stream of small fractions. Rounding each
+        // one on its own would return zero every time and the list would never
+        // move -- the failure this whole conversion exists to prevent.
+        let mut app = app_with_long_iso();
+        for _ in 0..10 {
+            app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -0.1));
+        }
+        assert_eq!(
+            app.iso_scroll,
+            rows_per_notch(),
+            "ten tenths of a notch is one notch",
+        );
+    }
+
+    #[test]
+    fn the_sidebar_and_file_tree_keep_separate_remainders() {
+        // A fraction earned over the sidebar must not deliver a row in the
+        // file tree, which one shared accumulator would let it do.
+        let mut app = app_with_long_iso();
+        app.drives = app_with_many_drives().drives;
+        for _ in 0..5 {
+            app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, -0.1));
+        }
+        for _ in 0..5 {
+            app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -0.1));
+        }
+        assert_eq!(app.sidebar_scroll, 1, "0.5 notches is 1.5 rows");
+        assert_eq!(app.iso_scroll, 1);
+    }
+
+    #[test]
+    fn clicking_a_drive_selects_the_one_that_was_drawn_there() {
+        let mut app = app_with_many_drives();
+        for slot in 0..3 {
+            app.handle_event(&click_at(40.0, drive_row_y(&app, slot)));
+            assert_eq!(
+                app.selected_drive_index,
+                Some(slot),
+                "slot {slot} should select drive {slot}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_scrolled_drive_list_selects_by_what_is_visible() {
+        let mut app = app_with_many_drives();
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, -1.0));
+        let scrolled = app.sidebar_scroll;
+        assert!(scrolled > 0);
+        app.handle_event(&click_at(40.0, drive_row_y(&app, 0)));
+        assert_eq!(
+            app.selected_drive_index,
+            Some(scrolled),
+            "the top visible row is the drive the offset put there",
+        );
+    }
+
+    #[test]
+    fn clicking_above_the_drive_list_selects_nothing() {
+        let mut app = app_with_many_drives();
+        let above = app.content_top() + DRIVE_LIST_HEADER - 4.0;
+        assert_eq!(
+            app.handle_event(&click_at(40.0, above)),
+            EventResult::Ignored,
+        );
+        assert_eq!(app.selected_drive_index, None);
+    }
+
+    #[test]
+    fn a_click_far_below_the_lists_misses_instead_of_overflowing() {
+        // A float-to-integer cast saturates rather than wrapping, so an
+        // absurd coordinate yields a row near `usize::MAX`; adding a scroll
+        // offset to that overflows and panics in a debug build.
+        let mut app = app_with_long_iso();
+        app.drives = app_with_many_drives().drives;
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, -1.0));
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -1.0));
+        for y in [1.0e9_f32, 1.0e30, f32::MAX, f32::INFINITY] {
+            app.handle_event(&click_at(40.0, y));
+            app.handle_event(&click_at(SIDEBAR_WIDTH + 100.0, y));
+        }
+        // Selection is unchanged from what the earlier scrolls left, which is
+        // nothing; the point is that none of the above panicked.
+        assert_eq!(app.selected_drive_index, None);
+        assert_eq!(app.selected_iso_entry, None);
+    }
+
+    #[test]
+    fn clicking_a_file_row_selects_it() {
+        let mut app = app_with_long_iso();
+        // Well right of the arrow column, so this is a selection and not a
+        // fold.
+        app.handle_event(&click_at(SIDEBAR_WIDTH + 200.0, iso_row_y(&app, 4)));
+        assert_eq!(app.selected_iso_entry, Some(4));
+    }
+
+    #[test]
+    fn a_scrolled_file_tree_selects_by_what_is_visible() {
+        let mut app = app_with_long_iso();
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -2.0));
+        let scrolled = app.iso_scroll;
+        assert!(scrolled > 0);
+        app.handle_event(&click_at(SIDEBAR_WIDTH + 200.0, iso_row_y(&app, 2)));
+        assert_eq!(app.selected_iso_entry, Some(scrolled + 2));
+    }
+
+    #[test]
+    fn clicking_the_arrow_opens_and_closes_a_directory() {
+        let mut app = DiskImagerApp::new();
+        app.active_tab = MainTab::Browse;
+        let mut dir = IsoEntry {
+            name: "BOOT".to_string(),
+            is_directory: true,
+            size_bytes: 0,
+            lba: 30,
+            recording_date: String::new(),
+            children: iso_files(3),
+            depth: 1,
+            expanded: false,
+        };
+        for child in &mut dir.children {
+            child.depth = 2;
+        }
+        app.iso_root = Some(iso_root_with(vec![dir]));
+        assert_eq!(app.iso_entries().len(), 2, "root plus one closed directory");
+
+        // Row 1 is the directory; its arrow sits at the row's own indent.
+        let arrow_x = SIDEBAR_WIDTH + PANEL_PADDING + DiskImagerApp::iso_indent(1) + 2.0;
+        app.handle_event(&click_at(arrow_x, iso_row_y(&app, 1)));
+        assert_eq!(app.iso_entries().len(), 5, "the directory's files appeared");
+        assert_eq!(
+            app.selected_iso_entry, None,
+            "the arrow folds; it does not select",
+        );
+
+        app.handle_event(&click_at(arrow_x, iso_row_y(&app, 1)));
+        assert_eq!(app.iso_entries().len(), 2, "and disappeared again");
+    }
+
+    #[test]
+    fn closing_a_directory_pulls_the_view_back_into_the_list() {
+        // Otherwise the list shortens under a view parked past its new end and
+        // the user is left staring at blank space they must scroll back out
+        // of. The tree is twenty files followed by an open directory of sixty,
+        // so the directory's own row can be scrolled to the top of the pane
+        // with its contents still filling everything below it -- which is
+        // exactly the position a user folds one shut from.
+        let mut app = DiskImagerApp::new();
+        app.active_tab = MainTab::Browse;
+        let mut dir = IsoEntry {
+            name: "BIG".to_string(),
+            is_directory: true,
+            size_bytes: 0,
+            lba: 30,
+            recording_date: String::new(),
+            children: iso_files(60),
+            depth: 1,
+            expanded: true,
+        };
+        for child in &mut dir.children {
+            child.depth = 2;
+        }
+        let mut children = iso_files(20);
+        children.push(dir);
+        app.iso_root = Some(iso_root_with(children));
+        assert_eq!(app.iso_entries().len(), 1 + 20 + 1 + 60);
+
+        // Seven notches of three rows puts row 21 -- the directory -- at the
+        // top of the pane.
+        for _ in 0..7 {
+            app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -1.0));
+        }
+        assert_eq!(app.iso_scroll, 21);
+        assert_eq!(app.iso_entries()[app.iso_scroll].name, "BIG");
+
+        let arrow_x = SIDEBAR_WIDTH + PANEL_PADDING + DiskImagerApp::iso_indent(1) + 2.0;
+        app.handle_event(&click_at(arrow_x, iso_row_y(&app, 0)));
+        assert_eq!(app.iso_entries().len(), 22, "the directory folded shut");
+        assert_eq!(
+            app.max_iso_scroll(),
+            0,
+            "twenty-two rows fit the pane with room to spare",
+        );
+        assert_eq!(
+            app.iso_scroll, 0,
+            "the view must come back to the list it is now looking at",
+        );
+    }
+
+    #[test]
+    fn toggle_expanded_at_walks_the_same_order_as_flatten() {
+        let mut child_dir = IsoEntry {
+            name: "SUB".to_string(),
+            is_directory: true,
+            size_bytes: 0,
+            lba: 40,
+            recording_date: String::new(),
+            children: iso_files(2),
+            depth: 2,
+            expanded: false,
+        };
+        for grandchild in &mut child_dir.children {
+            grandchild.depth = 3;
+        }
+        let dir = IsoEntry {
+            name: "DIR".to_string(),
+            is_directory: true,
+            size_bytes: 0,
+            lba: 30,
+            recording_date: String::new(),
+            children: vec![child_dir],
+            depth: 1,
+            expanded: true,
+        };
+        let mut root = iso_root_with(vec![dir, iso_files(1).remove(0)]);
+
+        // /, DIR, SUB, FILE0.TXT
+        let names: Vec<String> = root.flatten_visible().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, ["/", "DIR", "SUB", "FILE0.TXT"]);
+        assert_eq!(root.visible_count(), names.len());
+
+        // Index 2 is SUB. Opening it must insert its files after it, not
+        // somewhere else -- which is what a walk that descended into closed
+        // directories, or skipped them differently from `flatten_into`, would
+        // do.
+        assert!(root.toggle_expanded_at(2));
+        let names: Vec<String> = root.flatten_visible().into_iter().map(|e| e.name).collect();
+        assert_eq!(
+            names,
+            ["/", "DIR", "SUB", "FILE0.TXT", "FILE1.TXT", "FILE0.TXT"]
+        );
+        assert_eq!(root.visible_count(), names.len());
+    }
+
+    #[test]
+    fn toggle_expanded_at_reports_a_row_past_the_end() {
+        let mut root = iso_root_with(iso_files(2));
+        assert!(root.toggle_expanded_at(2), "the last row exists");
+        assert!(!root.toggle_expanded_at(3), "one past it does not");
+        assert!(!root.toggle_expanded_at(usize::MAX));
+    }
+
+    #[test]
+    fn the_file_lists_clip_matches_what_the_hit_test_uses() {
+        // The renderer draws the list somewhere; the hit-test decides what was
+        // clicked from `iso_list_offset`/`iso_list_height`. If those two ever
+        // describe different rectangles, clicks land on the wrong row and
+        // nothing says so. This compares them directly.
+        let app = app_with_long_iso();
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+
+        let want_y = app.content_top() + app.iso_list_offset();
+        let want_h = app.iso_list_height();
+        let found = rt.commands.iter().any(|cmd| match cmd {
+            RenderCommand::PushClip { y, height, .. } => {
+                (y - want_y).abs() < 0.5 && (height - want_h).abs() < 0.5
+            }
+            _ => false,
+        });
+        assert!(
+            found,
+            "no clip rect at y={want_y} height={want_h}; the renderer and the \
+             hit-test have drifted apart",
+        );
+    }
+
+    #[test]
+    fn the_drive_lists_clip_matches_what_the_hit_test_uses() {
+        let app = app_with_many_drives();
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+
+        let want_y = app.content_top() + DRIVE_LIST_HEADER;
+        let want_h = app.drive_list_height();
+        let found = rt.commands.iter().any(|cmd| match cmd {
+            RenderCommand::PushClip { y, height, .. } => {
+                (y - want_y).abs() < 0.5 && (height - want_h).abs() < 0.5
+            }
+            _ => false,
+        });
+        assert!(found, "no clip rect at y={want_y} height={want_h}");
+    }
+
+    #[test]
+    fn a_scrolled_drive_list_draws_the_rows_the_offset_selects() {
+        // The renderer used to walk every drive and subtract a pixel offset,
+        // so "which rows are drawn" was a third derivation of the layout,
+        // independent of both the clamp and the hit-test. Now there is one.
+        let mut app = app_with_many_drives();
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, -1.0));
+        let rows = app.drive_rows();
+        assert_eq!(rows.start, app.sidebar_scroll);
+
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        let drawn: Vec<&str> = rt
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } if text.starts_with("Extra Drive ") => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !drawn.is_empty(),
+            "a scrolled list must still draw its visible drives",
+        );
+        // The first drive drawn is the one at the offset, not drive 0.
+        let first = app.drives[rows.start].name.clone();
+        assert_eq!(drawn[0], first);
+    }
+
+    #[test]
+    fn a_scrolled_file_tree_draws_the_rows_the_offset_selects() {
+        // The companion to the drive-list test above, and the one that matters
+        // most here: a per-field search for a scroll offset cannot tell a live
+        // offset from one a renderer simply never consults, and that is the
+        // exact shape this list had -- read by nobody's draw loop while the
+        // pane's wheel wound a different field entirely. The check has to be
+        // per-list: does the draw loop consult an offset at all?
+        let mut app = app_with_long_iso();
+        app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -2.0));
+        let rows = app.iso_rows();
+        assert_eq!(rows.start, app.iso_scroll);
+        assert!(rows.start > 0);
+
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        let drawn: Vec<&str> = rt
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } if text.starts_with("FILE") => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(!drawn.is_empty(), "a scrolled tree must still draw rows");
+
+        let entries = app.iso_entries();
+        assert_eq!(
+            drawn[0], entries[rows.start].name,
+            "the first row drawn is the one at the offset, not row 0",
+        );
+        assert_eq!(
+            drawn.len(),
+            rows.count,
+            "and the draw loop stops at the bottom of the pane rather than              running the whole list through a clip",
+        );
+    }
+
+    #[test]
+    fn extract_iso_datetime_survives_bytes_that_are_not_digits() {
+        // Read straight out of an image, so it may be anything. Going through
+        // `String::from_utf8_lossy` and slicing the result at byte 4 used to
+        // land inside a U+FFFD and abort.
+        for bad in [
+            &[0xFFu8; 17][..],
+            &[0x80; 17][..],
+            b"2024\xF0\x9F\x92\xA90115143000\x00"[..].get(..17).unwrap(),
+        ] {
+            assert!(
+                extract_iso_datetime(bad, 0).is_empty(),
+                "a field that is not ASCII digits is not a date",
+            );
+        }
+    }
+
+    #[test]
+    fn extract_iso_datetime_reads_a_well_formed_field() {
+        assert_eq!(
+            extract_iso_datetime(b"20240115143000000", 0),
+            "2024-01-15 14:30:00",
+        );
+    }
+
+    #[test]
+    fn extract_iso_datetime_treats_an_all_zero_field_as_unrecorded() {
+        // ISO 9660 writes all-zero digits for "not specified"; formatting them
+        // gives the reader a confident "0000-00-00 00:00:00".
+        assert!(extract_iso_datetime(b"00000000000000000", 0).is_empty());
     }
 }

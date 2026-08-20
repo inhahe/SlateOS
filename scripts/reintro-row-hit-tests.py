@@ -24,6 +24,11 @@ so a click on the status bar selects a row that was never drawn there.
                   file, and clicking the data inspector -- painted *over* the
                   dump's right-hand side -- moved the cursor in the file behind
                   the panel
+    settings      the sidebar's category list had no live fault, but its top
+                  edge was written out longhand four times and the fourth copy
+                  was in the test, which recomputed the constant and probed row
+                  *centres* -- so the renderer and the hit test could drift
+                  three pixels apart with the suite still green
 
 The fix in every case is the same collapse: a `rows_top()`, a `rows_height()`
 and a `row_at()` that every pointer path *and* the renderer's clip go through,
@@ -48,6 +53,7 @@ PROCEXPLORER = Path("apps/procexplorer/src/main.rs")
 CREDMANAGER = Path("apps/credmanager/src/main.rs")
 MUSICPLAYER = Path("apps/musicplayer/src/main.rs")
 HEXEDITOR = Path("apps/hexeditor/src/main.rs")
+SETTINGS = Path("apps/settings/src/main.rs")
 
 # (crate, path, name, old, new) -- `old` must occur exactly once in `path`.
 DEFECTS = [
@@ -196,6 +202,40 @@ DEFECTS = [
         "            doc.view.scroll_offset =\n"
         "                doc.view.scroll_offset.saturating_add(down).min(max_scroll);\n"
         "        }\n",
+    ),
+    # -------------------------------------------------------------- settings
+    (
+        "settings",
+        SETTINGS,
+        "the sidebar rows are drawn three pixels below where they answer",
+        "            let item_y = Self::category_row_top(idx);",
+        "            let item_y = Self::category_row_top(idx) + 3.0;",
+    ),
+    (
+        "settings",
+        SETTINGS,
+        "the gap between two sidebar rows answers for the row above it",
+        "        if my >= Self::category_row_top(idx) + Self::CATEGORY_ROW_PAINTED_HEIGHT {\n"
+        "            return None;\n"
+        "        }\n",
+        "",
+    ),
+    (
+        "settings",
+        SETTINGS,
+        "the hover highlight keeps its own copy of the row arithmetic",
+        "            self.sidebar_hovered = Self::category_at(mx, my);\n",
+        "            let list_y = HEADER_HEIGHT + SEARCH_BAR_HEIGHT + 16.0;\n"
+        "            if my >= list_y {\n"
+        "                let idx = ((my - list_y) / CATEGORY_ITEM_HEIGHT) as usize;\n"
+        "                if idx < SettingsCategory::ALL.len() {\n"
+        "                    self.sidebar_hovered = Some(idx);\n"
+        "                } else {\n"
+        "                    self.sidebar_hovered = None;\n"
+        "                }\n"
+        "            } else {\n"
+        "                self.sidebar_hovered = None;\n"
+        "            }\n",
     ),
 ]
 

@@ -43913,7 +43913,7 @@ now been swept. Clear:
 
 Recorded so the next sweep does not re-derive them.
 
-**Debt, not a bug, in `settings`:** `list_y = HEADER_HEIGHT + SEARCH_BAR_HEIGHT + 16.0`
+**Debt, not a bug, in `settings` — FIXED, see below:** `list_y = HEADER_HEIGHT + SEARCH_BAR_HEIGHT + 16.0`
 is written out longhand four times — the renderer (`:1422`, as
 `search_y + SEARCH_BAR_HEIGHT + 16.0`), the click handler (`:3264`), the hover
 handler (`:3343`) and `test_sidebar_click` (`:4049`). All four agree today. The
@@ -43922,3 +43922,60 @@ emitted render command, and probes the row *centre* (`+ 10.0` into a 44-px
 row), so it would pass unchanged if the renderer and the hit test drifted
 apart. That is the same blind spot that let the speed test's mirrored history
 survive sixty-six tests.
+
+**Settings sidebar: fixed.** The four copies are now one. `SettingsState` grew a
+`search_top()`, a `category_list_top()`, a `category_row_top(idx)`, a
+`CATEGORY_ROW_PAINTED_HEIGHT` and a `category_at(mx, my)` that is
+`category_row_top` inverted; the renderer draws from the former and both hit
+tests — click and hover — answer from the latter.
+
+Collapsing it turned up one small live fault that the four-copy arrangement had
+been hiding in plain sight. The renderer paints each highlight
+`CATEGORY_ITEM_HEIGHT - 4.0` tall, so there are four blank pixels between one
+row and the next; both hit tests claimed the full 44-pixel slot. Hovering those
+four pixels therefore lit up the row *above* the pointer — a highlight sitting
+one to four pixels clear of the cursor that summoned it. `category_at` now
+returns `None` there, which is what the renderer's own output says, and matches
+the precedent `notif_pane`'s `card_at` set for the gaps between notification
+cards.
+
+`test_sidebar_click` is gone, replaced by five tests that read the rectangles
+`render()` actually emitted (signature: a `FillRect` at `x == 8.0` of width
+`SIDEBAR_WIDTH - 16.0`, which nothing else in the sidebar shares) and probe
+*those*:
+
+| test | pins |
+|---|---|
+| `every_category_is_clickable_exactly_where_it_was_painted` | eight probes across each painted row; click and hover must agree, and each starts from a different category so a hit test that does nothing cannot pass |
+| `the_gaps_between_category_rows_belong_to_no_row` | every whole pixel of every four-pixel gap |
+| `nothing_outside_the_category_list_selects_a_category` | above the list, past its last row to the window's bottom, right of the sidebar, and NaN/±inf on both axes |
+| `the_hover_highlight_lands_under_the_pointer` | hovers an *unselected* row and asserts the second rectangle that appears contains the pointer |
+| `the_whole_category_list_fits_the_window` | tripwire: the sidebar has no clip and no scroll, so a list taller than the window has rows that cannot be reached at all |
+
+Measured, not assumed: a three-pixel shift applied to the renderer alone fails
+`every_category_is_clickable_exactly_where_it_was_painted` and
+`the_hover_highlight_lands_under_the_pointer`. The test they replace passed that
+same shift, which is the whole point — it clicked ten pixels into a
+forty-four-pixel row and never looked at the renderer. Shifting the *shared*
+constant, by contrast, fails nothing, because after the collapse a drift is no
+longer expressible in one edit.
+
+Three settings defects were added to `scripts/reintro-row-hit-tests.py`
+(fourteen in total now): the renderer drifting three pixels, the gap check
+deleted, and the hover handler given back its own copy of the arithmetic.
+
+**Still open in `settings`:** the sidebar cannot scroll. Eight categories need
+464 px and the default window is 800 px tall, so it fits today; the tripwire
+above fires when it stops fitting. The fix at that point is a
+`guitk::scroll_window` plus a `wheel::Accumulator`, as `notif_pane` has — not a
+smaller `CATEGORY_ITEM_HEIGHT`.
+
+**Also noted, not yet fixed:** `gui/desktop/src/notif_pane.rs` duplicates the
+quick-settings layout numbers between `render_quick_settings` (`:1008`) and
+`handle_quick_settings_click` (`:1536`) — title, `+20.0`, N × `QS_ROW_HEIGHT`,
+`+4.0`, volume slider, `+QS_ROW_HEIGHT`, brightness slider, written out twice
+and inverted by hand the second time. They agree today, and the dispatcher
+bounds the area at both ends, so this is debt rather than a bug. The card list
+in the same file has already been collapsed (`card_tops` / `card_at` /
+`content_height` / `max_scroll`), so the quick-settings block is the last
+hand-inverted layout in that pane.

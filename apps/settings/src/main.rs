@@ -1380,6 +1380,83 @@ impl SettingsState {
         tree
     }
 
+    // ---------------------------------------------------------------- sidebar
+    //
+    // The category list's top edge used to be written out longhand in four
+    // places -- the renderer, the click handler, the hover handler and
+    // `test_sidebar_click` -- as `HEADER_HEIGHT + SEARCH_BAR_HEIGHT + 16.0`.
+    // Four copies of one number is four chances to change three of them, and
+    // the test was the worst copy of the lot: it recomputed the constant
+    // rather than reading the rectangle the renderer emitted, and probed the
+    // *centre* of a row, so it would have gone on passing while the painted
+    // list and the clickable list drifted apart.
+    //
+    // These four functions are the single spelling. The renderer draws from
+    // `category_row_top`, both hit tests answer from `category_at`, and
+    // `category_at` is `category_row_top` inverted -- so the rows drawn are
+    // exactly the rows clickable, down to the gap between them.
+
+    /// Y of the top of the search box, which sits directly under the title.
+    const fn search_top() -> f32 {
+        HEADER_HEIGHT
+    }
+
+    /// Y of the top of the first category row.
+    const fn category_list_top() -> f32 {
+        HEADER_HEIGHT + SEARCH_BAR_HEIGHT + 16.0
+    }
+
+    /// Y of the top of the `idx`-th category row's slot.
+    ///
+    /// The slot is [`CATEGORY_ITEM_HEIGHT`] tall; the *painted* row is
+    /// [`Self::CATEGORY_ROW_PAINTED_HEIGHT`] tall, the difference being the gap
+    /// the renderer leaves between one highlight and the next.
+    #[allow(clippy::cast_precision_loss)]
+    fn category_row_top(idx: usize) -> f32 {
+        Self::category_list_top() + (idx as f32) * CATEGORY_ITEM_HEIGHT
+    }
+
+    /// Height of the highlight actually drawn for a category row.
+    const CATEGORY_ROW_PAINTED_HEIGHT: f32 = CATEGORY_ITEM_HEIGHT - 4.0;
+
+    /// Y just past the last category row -- the bottom of the whole list.
+    fn category_list_bottom() -> f32 {
+        Self::category_row_top(SettingsCategory::ALL.len().saturating_sub(1))
+            + Self::CATEGORY_ROW_PAINTED_HEIGHT
+    }
+
+    /// The category under `(mx, my)`, as an index into
+    /// [`SettingsCategory::ALL`].
+    ///
+    /// `None` for a point outside the sidebar, above the list, past its last
+    /// row, or in one of the four-pixel gaps between rows. The gap is not an
+    /// oversight: the renderer paints nothing there, and a hit test that
+    /// answers for a pixel the renderer left blank is how a hover highlight
+    /// ends up sitting a few pixels above the pointer that summoned it.
+    fn category_at(mx: f32, my: f32) -> Option<usize> {
+        if !mx.is_finite() || mx < 0.0 || mx >= SIDEBAR_WIDTH {
+            return None;
+        }
+        let from_top = my - Self::category_list_top();
+        if !from_top.is_finite() || from_top < 0.0 || my >= Self::category_list_bottom() {
+            return None;
+        }
+        // Truncating rather than rounding: a point 43.9px below the first
+        // row's top is in the first row's slot, not adjacent to the second.
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let idx = (from_top / CATEGORY_ITEM_HEIGHT) as usize;
+        // `category_list_bottom` has already ruled this out. It stays because
+        // the cast above saturates rather than wrapping, and an index into
+        // `ALL` is not a thing to leave to a float's rounding.
+        if idx >= SettingsCategory::ALL.len() {
+            return None;
+        }
+        if my >= Self::category_row_top(idx) + Self::CATEGORY_ROW_PAINTED_HEIGHT {
+            return None;
+        }
+        Some(idx)
+    }
+
     /// Render the left sidebar with search bar and category list.
     fn render_sidebar(&self, tree: &mut RenderTree) {
         // Sidebar background
@@ -1389,7 +1466,7 @@ impl SettingsState {
         text_bold(tree, 20.0, 18.0, "Settings", COL_TEXT, 20.0);
 
         // Search bar
-        let search_y = HEADER_HEIGHT;
+        let search_y = Self::search_top();
         fill_rounded(
             tree,
             12.0,
@@ -1420,9 +1497,8 @@ impl SettingsState {
         }
 
         // Category list
-        let list_y = search_y + SEARCH_BAR_HEIGHT + 16.0;
         for (idx, category) in SettingsCategory::ALL.iter().enumerate() {
-            let item_y = list_y + (idx as f32) * CATEGORY_ITEM_HEIGHT;
+            let item_y = Self::category_row_top(idx);
             let is_selected = *category == self.current_category;
             let is_hovered = self.sidebar_hovered == Some(idx);
 
@@ -1433,7 +1509,7 @@ impl SettingsState {
                     8.0,
                     item_y,
                     SIDEBAR_WIDTH - 16.0,
-                    CATEGORY_ITEM_HEIGHT - 4.0,
+                    Self::CATEGORY_ROW_PAINTED_HEIGHT,
                     COL_SURFACE0,
                     8.0,
                 );
@@ -1453,7 +1529,7 @@ impl SettingsState {
                     8.0,
                     item_y,
                     SIDEBAR_WIDTH - 16.0,
-                    CATEGORY_ITEM_HEIGHT - 4.0,
+                    Self::CATEGORY_ROW_PAINTED_HEIGHT,
                     COL_SURFACE1,
                     8.0,
                 );
@@ -3261,11 +3337,8 @@ impl SettingsState {
 
         // Sidebar category clicks
         if mx < SIDEBAR_WIDTH {
-            let list_y = HEADER_HEIGHT + SEARCH_BAR_HEIGHT + 16.0;
-            if my >= list_y {
-                let idx = ((my - list_y) / CATEGORY_ITEM_HEIGHT) as usize;
-                if idx < SettingsCategory::ALL.len() {
-                    let new_cat = SettingsCategory::ALL[idx];
+            if let Some(idx) = Self::category_at(mx, my) {
+                if let Some(&new_cat) = SettingsCategory::ALL.get(idx) {
                     self.current_category = new_cat;
                     self.current_page = new_cat.default_page();
                     return EventResult::Consumed;
@@ -3273,7 +3346,7 @@ impl SettingsState {
             }
 
             // Search bar click
-            let search_y = HEADER_HEIGHT;
+            let search_y = Self::search_top();
             if my >= search_y && my < search_y + SEARCH_BAR_HEIGHT {
                 self.search_focused = true;
                 return EventResult::Consumed;
@@ -3339,17 +3412,7 @@ impl SettingsState {
     fn handle_hover(&mut self, mx: f32, my: f32) -> EventResult {
         // Sidebar hover
         if mx < SIDEBAR_WIDTH {
-            let list_y = HEADER_HEIGHT + SEARCH_BAR_HEIGHT + 16.0;
-            if my >= list_y {
-                let idx = ((my - list_y) / CATEGORY_ITEM_HEIGHT) as usize;
-                if idx < SettingsCategory::ALL.len() {
-                    self.sidebar_hovered = Some(idx);
-                } else {
-                    self.sidebar_hovered = None;
-                }
-            } else {
-                self.sidebar_hovered = None;
-            }
+            self.sidebar_hovered = Self::category_at(mx, my);
             return EventResult::Consumed;
         }
 
@@ -3861,6 +3924,23 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+// Panicking on bad data is what a test is *for*: an `unwrap` that fires names
+// the broken invariant far better than a silent `if let` that skips the
+// assertion would.
+//
+// `float_cmp` is here for a sharper reason. Several of these tests compare a
+// coordinate the renderer emitted against the helper that produced it, and
+// exact equality *is* the assertion -- an epsilon would let the renderer and
+// the hit test drift by half a pixel with the suite still green, which is the
+// exact failure the tests exist to catch.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp
+)]
 mod tests {
     use super::*;
     use appearance::AppearanceSettings;
@@ -4042,20 +4122,204 @@ mod tests {
         assert!(state.open_dropdown.is_none());
     }
 
-    #[test]
-    fn test_sidebar_click() {
-        let mut state = SettingsState::new();
-        // Click on the third category item (Personalization)
-        let list_y = HEADER_HEIGHT + SEARCH_BAR_HEIGHT + 16.0;
-        let click_y = list_y + 2.0 * CATEGORY_ITEM_HEIGHT + 10.0;
-        let click = Event::Mouse(MouseEvent {
+    // ---- Sidebar category list ----
+    //
+    // These read the rectangles the renderer emitted and probe *those*. The
+    // test they replace recomputed `HEADER_HEIGHT + SEARCH_BAR_HEIGHT + 16.0`
+    // itself and clicked the middle of a row, which is precisely the shape of
+    // test that cannot see a renderer and a hit test drifting apart: both
+    // sides of the comparison move together, and the middle of a row is the
+    // last place an off-by-a-few-pixels error shows up.
+
+    /// Every category highlight the renderer actually painted, as
+    /// `(top, height)`, in the order drawn.
+    ///
+    /// The signature is the highlight's left edge and width, which nothing
+    /// else in the sidebar shares -- the search box is inset differently and
+    /// the content area starts at `SIDEBAR_WIDTH`.
+    fn category_highlights(state: &SettingsState) -> Vec<(f32, f32)> {
+        state
+            .render()
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                    // Exact equality on purpose: these are the very floats
+                    // the renderer pushed, not a measurement of them.
+                } if *x == 8.0 && *width == SIDEBAR_WIDTH - 16.0 => Some((*y, *height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn click_sidebar(state: &mut SettingsState, y: f32) {
+        state.handle_event(&Event::Mouse(MouseEvent {
             x: 100.0,
-            y: click_y,
+            y,
             kind: MouseEventKind::Press(MouseButton::Left),
-        });
-        state.handle_event(&click);
-        assert_eq!(state.current_category, SettingsCategory::Personalization);
-        assert_eq!(state.current_page, SettingsPage::Themes);
+        }));
+    }
+
+    fn hover_sidebar(state: &mut SettingsState, y: f32) -> Option<usize> {
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: 100.0,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        state.sidebar_hovered
+    }
+
+    #[test]
+    fn every_category_is_clickable_exactly_where_it_was_painted() {
+        for (idx, category) in SettingsCategory::ALL.iter().enumerate() {
+            // Render with this category selected so its highlight -- and only
+            // its highlight -- is in the tree, then take the rectangle from
+            // there rather than recomputing it.
+            let mut state = SettingsState::new();
+            state.current_category = *category;
+            state.current_page = category.default_page();
+            let rects = category_highlights(&state);
+            assert_eq!(
+                rects.len(),
+                1,
+                "{category:?}: exactly one highlight is drawn when nothing is hovered"
+            );
+            let (top, height) = rects[0];
+
+            // Sweep the painted row rather than probing its centre: a
+            // divergence between the drawn rectangle and the accepted region
+            // lives at the edges, never in the middle.
+            for step in 0..8 {
+                let probe = top + (step as f32 + 0.5) * height / 8.0;
+                // Start from a category that is definitely not the answer, so
+                // a hit test that silently does nothing cannot pass.
+                let other = if idx == 0 { 1 } else { 0 };
+                let mut probe_state = SettingsState::new();
+                probe_state.current_category = SettingsCategory::ALL[other];
+                click_sidebar(&mut probe_state, probe);
+                assert_eq!(
+                    probe_state.current_category,
+                    *category,
+                    "the row painted at {top}..{} answers y={probe} as {:?}",
+                    top + height,
+                    probe_state.current_category
+                );
+                assert_eq!(
+                    probe_state.current_page,
+                    category.default_page(),
+                    "selecting {category:?} opens its default page"
+                );
+                assert_eq!(
+                    hover_sidebar(&mut probe_state, probe),
+                    Some(idx),
+                    "hover and click must agree at y={probe}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_gaps_between_category_rows_belong_to_no_row() {
+        // The renderer leaves four pixels blank between one highlight and the
+        // next. A hit test that claimed them would put the hover highlight a
+        // few pixels above the pointer that summoned it.
+        let mut state = SettingsState::new();
+        for idx in 0..SettingsCategory::ALL.len() {
+            let painted_bottom =
+                SettingsState::category_row_top(idx) + SettingsState::CATEGORY_ROW_PAINTED_HEIGHT;
+            let next_top = SettingsState::category_row_top(idx + 1);
+            assert!(next_top > painted_bottom, "there is a gap to test");
+            let mut probe = painted_bottom;
+            while probe < next_top {
+                assert_eq!(
+                    hover_sidebar(&mut state, probe),
+                    None,
+                    "y={probe} is in the gap below row {idx}, which is painted blank"
+                );
+                probe += 1.0;
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_outside_the_category_list_selects_a_category() {
+        let mut state = SettingsState::new();
+        let start = state.current_category;
+
+        // Above the list: the title and the search box.
+        for y in [0.0, 10.0, SettingsState::search_top(), 105.0] {
+            click_sidebar(&mut state, y);
+            assert_eq!(
+                state.current_category, start,
+                "y={y} is above the category list"
+            );
+            assert_eq!(hover_sidebar(&mut state, y), None);
+        }
+
+        // Below the last row, all the way to the bottom of the window.
+        let mut y = SettingsState::category_list_bottom();
+        while y < state.window_height {
+            click_sidebar(&mut state, y);
+            assert_eq!(
+                state.current_category, start,
+                "y={y} is past the last category row"
+            );
+            assert_eq!(hover_sidebar(&mut state, y), None, "y={y} is past the list");
+            y += 7.0;
+        }
+
+        // And to the right of the sidebar, level with a row that would
+        // otherwise answer.
+        let inside = SettingsState::category_row_top(3) + 4.0;
+        assert_eq!(SettingsState::category_at(SIDEBAR_WIDTH, inside), None);
+        assert_eq!(SettingsState::category_at(f32::NAN, inside), None);
+        assert_eq!(SettingsState::category_at(100.0, f32::NAN), None);
+        assert_eq!(SettingsState::category_at(100.0, f32::INFINITY), None);
+        assert_eq!(SettingsState::category_at(100.0, f32::NEG_INFINITY), None);
+    }
+
+    #[test]
+    fn the_hover_highlight_lands_under_the_pointer() {
+        // Selected and hovered rows are drawn with the same rectangle, so this
+        // hovers a row that is *not* selected and checks that the extra
+        // rectangle which appears contains the pointer.
+        let mut state = SettingsState::new();
+        state.current_category = SettingsCategory::ALL[0];
+        state.current_page = SettingsCategory::ALL[0].default_page();
+
+        let probe = SettingsState::category_row_top(5) + 1.0;
+        assert_eq!(hover_sidebar(&mut state, probe), Some(5));
+
+        let rects = category_highlights(&state);
+        assert_eq!(rects.len(), 2, "the selected row and the hovered row");
+        assert!(
+            rects
+                .iter()
+                .any(|&(top, h)| probe >= top && probe < top + h),
+            "the pointer at {probe} is inside one of {rects:?}"
+        );
+    }
+
+    #[test]
+    fn the_whole_category_list_fits_the_window() {
+        // There is no clip and no scroll on the sidebar: every category is
+        // drawn at a fixed offset, so a list taller than the window has rows
+        // that cannot be reached at all. When this fires, the fix is to give
+        // the sidebar a `guitk::scroll_window` and a wheel accumulator like
+        // the notification pane's, not to shrink the row height.
+        let state = SettingsState::new();
+        assert!(
+            SettingsState::category_list_bottom() <= state.window_height,
+            "{} categories need {}px but the window is {}px tall",
+            SettingsCategory::ALL.len(),
+            SettingsState::category_list_bottom(),
+            state.window_height
+        );
     }
 
     #[test]

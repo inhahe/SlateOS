@@ -62,7 +62,7 @@ const SIDEBAR_WIDTH: f32 = 260.0;
 /// Reserved unconditionally, so how many rows fit does not depend on whether
 /// any are being hidden — a budget that changed with its own result could fit
 /// one more podcast, discover the line was needed, and drop it again.
-const SIDEBAR_MORE_HEIGHT: f32 = 16.0;
+const LIST_MORE_HEIGHT: f32 = 16.0;
 const NOW_PLAYING_HEIGHT: f32 = 80.0;
 
 /// One row of the sidebar's scrolling list.
@@ -890,7 +890,9 @@ pub struct PodcastApp {
     /// so a pixel offset could only express positions the renderer then rounds
     /// away. A value past the end is not an error, and shows the last page.
     pub sidebar_scroll: usize,
-    pub episode_list_scroll: f32,
+    /// First episode row drawn in the content area. Counted in rows for the
+    /// same reason as `sidebar_scroll`, and likewise harmless past the end.
+    pub episode_list_scroll: usize,
 
     // Disk space tracking
     pub total_disk_bytes: u64,
@@ -924,7 +926,7 @@ impl PodcastApp {
             search_query: String::new(),
             search_results: Vec::new(),
             sidebar_scroll: 0,
-            episode_list_scroll: 0.0,
+            episode_list_scroll: 0,
             total_disk_bytes: 10_000_000_000,
             used_disk_bytes: 0,
             next_id: 1,
@@ -1009,9 +1011,23 @@ impl PodcastApp {
         self.sidebar_scroll = scroll_window::shift(self.sidebar_scroll, delta);
     }
 
-    /// Back to the first subscription.
+    /// Back to the first row.
     pub fn scroll_sidebar_to_top(&mut self) {
         self.sidebar_scroll = 0;
+    }
+
+    /// Move the episode list `delta` rows, negative for up.
+    ///
+    /// Clamped at the top only, for the same reason as the sidebar: the row
+    /// count depends on the content height and the active filter, neither of
+    /// which this method is given.
+    pub fn scroll_episode_list_by(&mut self, delta: isize) {
+        self.episode_list_scroll = scroll_window::shift(self.episode_list_scroll, delta);
+    }
+
+    /// Back to the first episode.
+    pub fn scroll_episode_list_to_top(&mut self) {
+        self.episode_list_scroll = 0;
     }
 
     /// Set auto-download for a podcast.
@@ -1999,7 +2015,7 @@ impl PodcastApp {
         let heights: Vec<f32> = rows.iter().map(SidebarRow::height).collect();
         let window = scroll_window::visible_variable(
             &heights,
-            bottom - list_y - SIDEBAR_MORE_HEIGHT,
+            bottom - list_y - LIST_MORE_HEIGHT,
             self.sidebar_scroll,
         );
 
@@ -2226,28 +2242,56 @@ impl PodcastApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Episodes.
+        // Episodes. The old loop broke on `ep_y > content_h`, which drew the
+        // straddling row whole and past the bottom, and had no offset at all:
+        // everything below the fold was cut by the window edge rather than by
+        // a scroll position, so it could not be reached.
         let start_y = count_y + 32.0;
-        let mut ep_y = start_y;
-        for (pod_id, ep_id) in &episodes {
-            if ep_y > content_h {
-                break;
-            }
+        let window = scroll_window::visible(
+            episodes.len(),
+            EPISODE_ROW_HEIGHT,
+            content_h - start_y - LIST_MORE_HEIGHT,
+            self.episode_list_scroll,
+        );
+        for (drawn, (pod_id, ep_id)) in episodes
+            .get(window.start..window.end())
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let ep_y = start_y + drawn as f32 * EPISODE_ROW_HEIGHT;
             if let Some(podcast) = self.find_podcast(*pod_id)
-                && let Some(ep) = podcast.find_episode(*ep_id) {
-                    let selected = self.selected_episode_id == Some(*ep_id);
-                    self.render_episode_row(
-                        cmds,
-                        content_x + 8.0,
-                        ep_y,
-                        content_w - 16.0,
-                        ep,
-                        &podcast.title,
-                        selected,
-                    );
-                }
-            ep_y += EPISODE_ROW_HEIGHT;
+                && let Some(ep) = podcast.find_episode(*ep_id)
+            {
+                let selected = self.selected_episode_id == Some(*ep_id);
+                self.render_episode_row(
+                    cmds,
+                    content_x + 8.0,
+                    ep_y,
+                    content_w - 16.0,
+                    ep,
+                    &podcast.title,
+                    selected,
+                );
+            }
         }
+
+        // A list hiding episodes says how many. The space is reserved above
+        // whether or not the line is drawn.
+        let hidden = episodes.len().saturating_sub(window.count);
+        if hidden > 0 {
+            cmds.push(RenderCommand::Text {
+                x: content_x + 16.0,
+                y: start_y + window.count as f32 * EPISODE_ROW_HEIGHT,
+                text: format!("{hidden} more"),
+                color: OVERLAY0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(content_w - 32.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
     }
 
     fn render_content_header(
@@ -5317,6 +5361,151 @@ mod tests {
         app.scroll_sidebar_to_top();
         assert_eq!(app.sidebar_scroll, 0);
     }
+
+    // --- episode list ---
+
+    /// One podcast with `n` episodes, selected, so the content area draws the
+    /// episode list rather than a placeholder view.
+    fn app_with_episodes(n: usize) -> PodcastApp {
+        let mut app = PodcastApp::new(1100.0, 600.0);
+        app.podcasts.clear();
+        let pod = app.subscribe("Show", "", "", "rss://x", "", vec![]);
+        for i in 0..n {
+            app.add_episode(pod, &format!("E{i:03}"), "", "2026-01-01", 60, "", 0);
+        }
+        app.sidebar_selection = SidebarSelection::Podcast(pod);
+        app.main_view = MainView::EpisodeList;
+        app
+    }
+
+    /// Episode titles are `E000`-shaped, so they are told from every other
+    /// string in the render without depending on a pixel position.
+    fn drawn_episodes(app: &PodcastApp) -> Vec<String> {
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. }
+                    if text.len() == 4
+                        && text.starts_with('E')
+                        && text.get(1..).is_some_and(|d| d.chars().all(|c| c.is_ascii_digit())) =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The bug: the list drew until a row started past the content height, so
+    /// it overran the bottom by up to a row and everything after that was
+    /// unreachable — there was no offset to reach it with.
+    #[test]
+    fn the_episode_list_stops_at_the_last_row_that_fits() {
+        let app = app_with_episodes(100);
+        let drawn = drawn_episodes(&app);
+        assert!(!drawn.is_empty(), "the content area drew no episodes at all");
+        assert!(
+            drawn.len() < 100,
+            "the list drew all 100 episodes into a 600px window"
+        );
+        assert_eq!(drawn.first().map(String::as_str), Some("E000"));
+    }
+
+    /// No row is drawn past the bottom of the content area, and with audio
+    /// playing the content area stops above the now-playing bar.
+    #[test]
+    fn no_episode_row_is_drawn_past_the_bottom_of_the_content_area() {
+        for playing in [false, true] {
+            for offset in [0, 7, 1_000] {
+                let mut app = app_with_episodes(100);
+                if playing {
+                    app.player_state = PlayerState::Playing;
+                }
+                app.scroll_episode_list_by(offset);
+                let bottom = if playing {
+                    app.height - NOW_PLAYING_HEIGHT
+                } else {
+                    app.height
+                };
+                for cmd in app.render() {
+                    if let RenderCommand::Text { x, y, text, .. } = cmd
+                        && x > SIDEBAR_WIDTH
+                        && text.len() == 4
+                        && text.starts_with('E')
+                    {
+                        assert!(
+                            y + EPISODE_ROW_HEIGHT <= bottom,
+                            "episode row {text:?} at y={y} overruns the content bottom \
+                             {bottom} (playing={playing}, offset={offset})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The rows past the fold are reachable, which is the fix.
+    #[test]
+    fn scrolling_the_episode_list_reaches_the_rows_that_did_not_fit() {
+        let mut app = app_with_episodes(100);
+        assert!(
+            !drawn_episodes(&app).contains(&String::from("E099")),
+            "the last episode should start out below the fold"
+        );
+        app.scroll_episode_list_by(100);
+        assert!(
+            drawn_episodes(&app).contains(&String::from("E099")),
+            "the last episode is still unreachable after scrolling to the end"
+        );
+    }
+
+    /// An offset past the end means the last page, not a blank content area.
+    #[test]
+    fn an_episode_list_that_shrinks_under_a_stale_offset_shows_its_last_page() {
+        let mut app = app_with_episodes(100);
+        app.scroll_episode_list_by(99);
+        app.episode_filter = EpisodeFilter::Downloaded;
+        assert!(
+            drawn_episodes(&app).is_empty(),
+            "no episode is downloaded, so the filtered list is genuinely empty"
+        );
+        app.episode_filter = EpisodeFilter::All;
+        let drawn = drawn_episodes(&app);
+        assert!(!drawn.is_empty(), "the list must not go blank");
+        assert_eq!(drawn.last().map(String::as_str), Some("E099"));
+    }
+
+    /// Scrolling up from the top stays at the top rather than wrapping.
+    #[test]
+    fn scrolling_the_episode_list_up_from_the_top_stays_at_the_top() {
+        let mut app = app_with_episodes(100);
+        app.scroll_episode_list_by(-10);
+        assert_eq!(app.episode_list_scroll, 0);
+        app.scroll_episode_list_by(5);
+        app.scroll_episode_list_to_top();
+        assert_eq!(app.episode_list_scroll, 0);
+    }
+
+    /// A list hiding episodes says how many.
+    #[test]
+    fn an_episode_list_that_is_hiding_rows_says_so() {
+        let app = app_with_episodes(100);
+        let shown = drawn_episodes(&app).len();
+        let labels: Vec<String> = app
+            .render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.contains(&format!("{} more", 100 - shown)),
+            "expected a \"{} more\" line",
+            100 - shown
+        );
+    }
+
 
     /// A sidebar hiding rows says how many.
     #[test]

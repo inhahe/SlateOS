@@ -40,27 +40,44 @@
 // and the array's element type.
 #![allow(clippy::unnecessary_wraps)]
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::blocksrc::MemorySource;
+use crate::fs::path::Path;
+use crate::fs::vfs::{EntryType, FileSystem};
 use crate::serial_println;
 
 use super::dmu::parse_dnode;
-use super::label::{front_label_offset, parse_uberblock};
-use super::nvlist::{DATA_TYPE_UINT64, NV_ENCODE_NATIVE, NV_ENCODE_XDR, NV_LITTLE_ENDIAN, NvList};
+use super::label::{SPA_VERSION_FEATURES, front_label_offset, parse_uberblock};
+use super::nvlist::{
+    DATA_TYPE_NVLIST, DATA_TYPE_STRING, DATA_TYPE_UINT64, NV_ENCODE_NATIVE, NV_ENCODE_XDR,
+    NV_LITTLE_ENDIAN, NvList,
+};
 use super::raw::{
-    DMU_OT_PLAIN_FILE_CONTENTS, DNODE_LEN, Dva, SPA_MINBLOCKSHIFT, VDEV_LABEL_START_SIZE,
-    ZIO_COMPRESS_OFF, ZIO_COMPRESS_ZSTD, bf64_get, bf64_get_sb,
+    BLKPTR_LEN, DMU_OST_META, DMU_OST_ZFS, DMU_OT_DIRECTORY_CONTENTS, DMU_OT_DNODE,
+    DMU_OT_DSL_DATASET, DMU_OT_DSL_DIR, DMU_OT_MASTER_NODE, DMU_OT_NONE, DMU_OT_OBJECT_DIRECTORY,
+    DMU_OT_OBJSET, DMU_OT_PLAIN_FILE_CONTENTS, DMU_OT_SA, DMU_OT_SA_ATTR_LAYOUTS,
+    DMU_OT_SA_ATTR_REGISTRATION, DMU_OT_SA_MASTER_NODE, DNODE_CORE_LEN, DNODE_LEN, Dva,
+    OBJSET_PHYS_SIZE, SPA_MINBLOCKSHIFT, UBERBLOCK_MAGIC, UBERBLOCK_MAGIC_SWAPPED,
+    VDEV_LABEL_NVLIST_OFFSET, VDEV_LABEL_SIZE, VDEV_LABEL_START_SIZE, VDEV_LABEL_UBERBLOCK_OFFSET,
+    VDEV_LABEL_UBERBLOCK_SIZE, ZIO_CHECKSUM_FLETCHER_4, ZIO_CHECKSUM_SHA256, ZIO_COMPRESS_OFF,
+    ZIO_COMPRESS_ZSTD, bf64_get, bf64_get_sb,
 };
 use super::sa::{SA_MAGIC, SaAttr, SaMap, SaRegistry, decimal_key, parse_header};
 use super::zap::{
     CHAIN_END, MZAP_ENT_LEN, ZAP_CHUNK_ARRAY, ZAP_CHUNK_ENTRY, ZAP_CHUNK_FREE, ZAP_HASHBITS,
-    ZAP_LEAF_ARRAY_BYTES, ZAP_LEAF_MAGIC, ZBT_LEAF, ZBT_MICRO, ZFS_CRC64_TABLE, leaf_chunk_off,
-    leaf_entries, leaf_lookup, leaf_lookup_array, leaf_numchunks, log2_exact, micro_entries,
-    micro_lookup, zap_hash,
+    ZAP_LEAF_ARRAY_BYTES, ZAP_LEAF_MAGIC, ZAP_MAGIC, ZBT_HEADER, ZBT_LEAF, ZBT_MICRO,
+    ZFS_CRC64_TABLE, leaf_chunk_off, leaf_entries, leaf_lookup, leaf_lookup_array, leaf_numchunks,
+    log2_exact, micro_entries, micro_lookup, zap_hash,
 };
-use super::zio::{compression_supported, decompress, fletcher_2, fletcher_4, zle_decompress};
+use super::zio::{
+    ZEC_LEN, ZEC_MAGIC, compression_supported, compute, decompress, fletcher_2, fletcher_4,
+    sha256_cksum, zle_decompress,
+};
+use super::{DD_HEAD_DATASET_OBJ, DS_BP_OFFSET, OBJSET_TYPE_OFFSET, ZfsFs};
 
 /// Running tally of the self-test.
 struct Checks {
@@ -299,13 +316,13 @@ fn test_zio(c: &mut Checks) -> KernelResult<()> {
 // XDR nvlists
 // ---------------------------------------------------------------------------
 
-/// Build one XDR nvpair holding a `u64`.
+/// Build one XDR nvpair.
 ///
 /// Written from the XDR encoding rather than by calling the parser: name as a
 /// big-endian length plus bytes padded to four, then the type, the element
-/// count, and the value — all big-endian, as XDR always is regardless of the
-/// host.
-fn nv_pair_u64(name: &[u8], value: u64) -> Vec<u8> {
+/// count, and the already-encoded value — all big-endian, as XDR always is
+/// regardless of the host.
+fn nv_pair(name: &[u8], dtype: u32, nelem: u32, value: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
     let Ok(nlen) = u32::try_from(name.len()) else {
         return Vec::new();
@@ -315,9 +332,9 @@ fn nv_pair_u64(name: &[u8], value: u64) -> Vec<u8> {
     while body.len() % 4 != 0 {
         body.push(0);
     }
-    body.extend_from_slice(&DATA_TYPE_UINT64.to_be_bytes());
-    body.extend_from_slice(&1u32.to_be_bytes());
-    body.extend_from_slice(&value.to_be_bytes());
+    body.extend_from_slice(&dtype.to_be_bytes());
+    body.extend_from_slice(&nelem.to_be_bytes());
+    body.extend_from_slice(value);
 
     let mut out = Vec::new();
     // The pair is preceded by its encoded and decoded sizes, both counting the
@@ -328,6 +345,26 @@ fn nv_pair_u64(name: &[u8], value: u64) -> Vec<u8> {
     out.extend_from_slice(&encoded.to_be_bytes());
     out.extend_from_slice(&encoded.to_be_bytes());
     out.extend_from_slice(&body);
+    out
+}
+
+/// [`nv_pair`], for the one type that needs no separate value encoder.
+fn nv_pair_u64(name: &[u8], value: u64) -> Vec<u8> {
+    nv_pair(name, DATA_TYPE_UINT64, 1, &value.to_be_bytes())
+}
+
+/// An XDR variable-length opaque: a big-endian length, the bytes, then padding
+/// up to a four-byte boundary.
+fn xdr_string(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let Ok(len) = u32::try_from(s.len()) else {
+        return out;
+    };
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(s);
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
     out
 }
 
@@ -969,6 +1006,1315 @@ fn test_sa(c: &mut Checks) -> KernelResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// A whole pool, built and mounted
+// ---------------------------------------------------------------------------
+//
+// The groups above check one structure at a time against bytes written by
+// hand. That is necessary but not sufficient: every one of them could pass
+// while the *chain* between them is wrong, because the chain is where ZFS
+// keeps its difficulty. An uberblock names a block pointer, which names an
+// objset, whose meta-dnode names a dnode array, an index into which names a
+// DSL directory, whose bonus names a dataset, whose bonus names another
+// objset, whose object 1 names a ZAP, one of whose entries names the root
+// directory. Nine dereferences, each with its own encoding, before a single
+// file name has been read.
+//
+// So this section builds a complete pool in RAM — real checksums, real block
+// pointers, a real fatzap, a real spill block — mounts it through
+// `MemorySource`, and reads files out of it. Three things it does on purpose,
+// because each is a place a plausible-but-wrong driver passes anyway:
+//
+//  * **The winning uberblock is not the first one.** Slot 3 holds an older
+//    txg with a valid checksum; the live pool is in slot 11. A reader that
+//    took the first valid slot rather than the highest txg mounts the decoy.
+//  * **The attribute numbers are not upstream's.** `ZPL_MODE` is 7 here, not
+//    5. A driver carrying the usual hardcoded table finds nothing.
+//  * **One file's layout is in a different order.** `/hello` uses a layout
+//    that puts `ZPL_SIZE` at byte 56 rather than byte 8, so a driver that
+//    assumed the default layout reports its creation time as its size — a
+//    wrong answer, not an error. That is exactly the failure
+//    `design-decisions.md` §245 chose to spend several hundred lines
+//    avoiding, and this is the check that proves the spending worked.
+
+/// Bytes of the image: the format's own 4 MiB label-and-boot reserve, which
+/// every DVA offset is measured from, plus room for the pool's blocks. Nothing
+/// smaller is possible — a DVA offset of 0 *means* byte 4 MiB.
+const IMG_LEN: usize = 4 * 1024 * 1024 + 128 * 1024;
+
+/// `log2` of the vdev's sector size. 9 gives 1024-byte uberblock slots and 128
+/// of them per label, which is what a pool on a 512-byte-sector disk looks
+/// like.
+const IMG_ASHIFT: u64 = 9;
+
+/// The transaction group the live pool is at.
+const IMG_TXG: u64 = 77;
+/// The decoy uberblock's transaction group. Lower, so it must lose.
+const IMG_OLD_TXG: u64 = 5;
+/// Slot the live uberblock is written to, deliberately not slot 0.
+const IMG_UB_SLOT: usize = 11;
+/// Slot the decoy is written to, deliberately *before* the live one.
+const IMG_OLD_UB_SLOT: usize = 3;
+
+const IMG_GUID: u64 = 0x5111_7E57_0000_0001;
+const IMG_TIMESTAMP: u64 = 1_700_000_000;
+const IMG_POOL_NAME: &[u8] = b"selftest";
+
+/// Size of the dnode array block in both objsets: 32 objects per block.
+const IMG_DN_BLK: usize = 16 * 1024;
+
+const HELLO_TEXT: &[u8] = b"Hello from a synthetic ZFS pool.\n";
+const NESTED_TEXT: &[u8] = b"one level down\n";
+
+/// Object numbers in the filesystem objset. Object 1 is fixed by the format;
+/// the rest are this image's choice.
+const OBJ_MASTER: u64 = 1;
+const OBJ_SA_MASTER: u64 = 2;
+const OBJ_REGISTRY: u64 = 3;
+const OBJ_LAYOUTS: u64 = 4;
+const OBJ_ROOT: u64 = 5;
+const OBJ_HELLO: u64 = 6;
+const OBJ_SUB: u64 = 7;
+const OBJ_LINK: u64 = 8;
+const OBJ_BIG: u64 = 9;
+const OBJ_NESTED: u64 = 10;
+const OBJ_DIRLINK: u64 = 11;
+
+/// `/big` spans this many blocks of `IMG_BIG_BLKSZ`, one of which is a hole.
+const IMG_BIG_BLOCKS: u64 = 6;
+const IMG_BIG_BLKSZ: usize = 512;
+/// The block id `/big` leaves unwritten, so a sparse read has to be right.
+const IMG_BIG_HOLE: u64 = 2;
+
+// The attribute numbers this pool registers. Upstream ZFS assigns ZPL_ATIME 0,
+// ZPL_MTIME 1, ... ZPL_MODE 5, ZPL_SIZE 6 and so on; these are deliberately
+// different, because the numbers are per-dataset and a driver that treats them
+// as constants is reading a table it was never given.
+const A_SYMLINK: u16 = 0;
+const A_LINKS: u16 = 1;
+const A_UID: u16 = 2;
+const A_SIZE: u16 = 3;
+const A_MTIME: u16 = 4;
+const A_PARENT: u16 = 5;
+const A_CRTIME: u16 = 6;
+const A_MODE: u16 = 7;
+const A_CTIME: u16 = 8;
+const A_GID: u16 = 9;
+const A_FLAGS: u16 = 10;
+const A_GEN: u16 = 11;
+const A_ATIME: u16 = 12;
+const A_RDEV: u16 = 13;
+
+/// `IFTODT(S_IFREG)`, which the ZPL stores in a directory entry's top bits.
+const IMG_DT_REG: u64 = 8;
+
+/// The registry rows the image writes: name, number, and on-disk width in
+/// bytes. A width of 0 marks a variable-length attribute whose real width is
+/// carried per-object in `sa_lengths[]`.
+fn img_registry() -> [(&'static [u8], u16, u16); 14] {
+    [
+        (b"ZPL_SYMLINK", A_SYMLINK, 0),
+        (b"ZPL_LINKS", A_LINKS, 8),
+        (b"ZPL_UID", A_UID, 8),
+        (b"ZPL_SIZE", A_SIZE, 8),
+        (b"ZPL_MTIME", A_MTIME, 16),
+        (b"ZPL_PARENT", A_PARENT, 8),
+        (b"ZPL_CRTIME", A_CRTIME, 16),
+        (b"ZPL_MODE", A_MODE, 8),
+        (b"ZPL_CTIME", A_CTIME, 16),
+        (b"ZPL_GID", A_GID, 8),
+        (b"ZPL_FLAGS", A_FLAGS, 8),
+        (b"ZPL_GEN", A_GEN, 8),
+        (b"ZPL_ATIME", A_ATIME, 16),
+        (b"ZPL_RDEV", A_RDEV, 8),
+    ]
+}
+
+/// Layout 1: the attribute order upstream uses for a freshly created object.
+const IMG_LAYOUT_1: [u16; 12] = [
+    A_MODE, A_SIZE, A_GEN, A_UID, A_GID, A_PARENT, A_FLAGS, A_ATIME, A_MTIME, A_CTIME, A_CRTIME,
+    A_LINKS,
+];
+
+/// Layout 2: the same twelve attributes in a different order, so that every
+/// one of them lands at a different byte offset than layout 1 puts it.
+const IMG_LAYOUT_2: [u16; 12] = [
+    A_LINKS, A_CRTIME, A_MODE, A_CTIME, A_UID, A_SIZE, A_MTIME, A_GID, A_FLAGS, A_GEN, A_ATIME,
+    A_PARENT,
+];
+
+/// Layout 3: the bonus half of an object whose attributes did not all fit.
+const IMG_LAYOUT_3: [u16; 5] = [A_MODE, A_SIZE, A_LINKS, A_UID, A_GID];
+
+/// Layout 4: the spill half — one variable-length attribute and nothing else.
+const IMG_LAYOUT_4: [u16; 1] = [A_SYMLINK];
+
+/// Layout 5: layout 3 plus an inline symlink target, for the link that does
+/// *not* spill.
+const IMG_LAYOUT_5: [u16; 6] = [A_MODE, A_SIZE, A_LINKS, A_UID, A_GID, A_SYMLINK];
+
+// ---------------------------------------------------------------------------
+// Little-endian scalar writers. Each ignores a write that would not fit rather
+// than panicking, which keeps the builders free of indexing and keeps a
+// mistake in one of them from taking the kernel down before the other groups
+// have printed.
+
+fn put_u8(buf: &mut [u8], off: usize, v: u8) {
+    if let Some(b) = buf.get_mut(off) {
+        *b = v;
+    }
+}
+
+fn put_u16(buf: &mut [u8], off: usize, v: u16) {
+    if let Some(w) = buf.get_mut(off..off.saturating_add(2)) {
+        w.copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+fn put_u32(buf: &mut [u8], off: usize, v: u32) {
+    if let Some(w) = buf.get_mut(off..off.saturating_add(4)) {
+        w.copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+fn put_u64(buf: &mut [u8], off: usize, v: u64) {
+    if let Some(w) = buf.get_mut(off..off.saturating_add(8)) {
+        w.copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+fn put_bytes(buf: &mut [u8], off: usize, v: &[u8]) {
+    if let Some(w) = buf.get_mut(off..off.saturating_add(v.len())) {
+        w.copy_from_slice(v);
+    }
+}
+
+/// Round `data` up to a whole number of 512-byte sectors, which is the only
+/// granularity a DVA can express.
+fn pad512(data: &[u8]) -> Vec<u8> {
+    let len = data.len().max(1).saturating_add(511) & !511usize;
+    let mut out = vec![0u8; len];
+    put_bytes(&mut out, 0, data);
+    out
+}
+
+/// Encode a 128-byte `blkptr_t` for an uncompressed block of `data` written at
+/// `dva_off`.
+///
+/// Written from the `blkptr_t` diagram rather than by inverting
+/// [`super::raw::parse_blkptr`]: if the two shared a bias-and-shift helper, an
+/// off-by-one in it would cancel out and every check below would pass against
+/// an image no real pool resembles.
+///
+/// The checksum is computed here because [`Reader::read_block`] verifies every
+/// block it reads. An image with placeholder checksums would fail at the first
+/// dereference with `IoError` and tell us nothing about anything else.
+fn make_blkptr(dva_off: u64, data: &[u8], obj_type: u8, level: u8, alg: u8) -> Vec<u8> {
+    let mut bp = vec![0u8; BLKPTR_LEN];
+    let sectors = u64::try_from(data.len()).unwrap_or(0) >> SPA_MINBLOCKSHIFT;
+
+    // DVA word 0: ASIZE in 512-byte units at bits 0..24, vdev at 32..64 (0).
+    put_u64(&mut bp, 0, sectors);
+    // DVA word 1: offset in 512-byte units at bits 0..63, the gang bit at 63.
+    put_u64(&mut bp, 8, dva_off >> SPA_MINBLOCKSHIFT);
+
+    // LSIZE and PSIZE are stored as `(bytes >> 9) - 1`, so one sector is 0.
+    let sz = sectors.saturating_sub(1);
+    let props = sz
+        | (sz << 16)
+        | (u64::from(ZIO_COMPRESS_OFF) << 32)
+        | (u64::from(alg) << 40)
+        | (u64::from(obj_type) << 48)
+        | (u64::from(level) << 56)
+        // The `B` bit: this pool was written little-endian. Without it
+        // `read_block` refuses the pool as foreign-endian, which is the
+        // correct behaviour and would fail every check below.
+        | (1u64 << 63);
+    put_u64(&mut bp, 48, props);
+
+    put_u64(&mut bp, 72, IMG_TXG); // blk_phys_birth
+    put_u64(&mut bp, 80, IMG_TXG); // blk_birth
+    put_u64(&mut bp, 88, 1); // blk_fill
+
+    let cksum = compute(alg, data).unwrap_or([0u64; 4]);
+    for (i, word) in cksum.iter().enumerate() {
+        put_u64(&mut bp, 96usize.saturating_add(i.saturating_mul(8)), *word);
+    }
+    bp
+}
+
+/// The image under construction: its bytes, and the next free DVA offset.
+struct PoolImage {
+    bytes: Vec<u8>,
+    next: u64,
+}
+
+impl PoolImage {
+    fn new() -> Self {
+        Self {
+            bytes: vec![0u8; IMG_LEN],
+            next: 0,
+        }
+    }
+
+    /// Place `data` in the allocatable area and return a block pointer to it.
+    ///
+    /// Allocation is a bump from the end of the 4 MiB reserve — a real pool
+    /// allocates from space maps, but nothing on the read path can tell the
+    /// difference, and a space-map allocator in a test would be testing
+    /// itself.
+    fn put(&mut self, data: &[u8], obj_type: u8, level: u8, alg: u8) -> Vec<u8> {
+        let dva_off = self.next;
+        self.next = self
+            .next
+            .saturating_add(u64::try_from(data.len()).unwrap_or(0));
+        let at = usize::try_from(VDEV_LABEL_START_SIZE.saturating_add(dva_off)).unwrap_or(0);
+        put_bytes(&mut self.bytes, at, data);
+        make_blkptr(dva_off, data, obj_type, level, alg)
+    }
+
+    /// Absolute byte offset of the block a [`Self::put`] at `dva_off` wrote.
+    fn abs(dva_off: u64) -> usize {
+        usize::try_from(VDEV_LABEL_START_SIZE.saturating_add(dva_off)).unwrap_or(0)
+    }
+}
+
+/// One object's dnode, in the terms the on-disk slot stores it.
+struct DnodeSpec<'a> {
+    obj_type: u8,
+    bonustype: u8,
+    /// `log2` of the indirect block size; unused when `nlevels` is 1.
+    indblkshift: u8,
+    nlevels: u8,
+    datablksz: usize,
+    maxblkid: u64,
+    /// Bytes the object occupies, which is what `stat` reports as `blocks`.
+    used: u64,
+    blkptrs: &'a [Vec<u8>],
+    bonus: &'a [u8],
+    spill: Option<&'a [u8]>,
+}
+
+impl DnodeSpec<'_> {
+    /// A dnode with nothing set: every builder below starts here and overrides
+    /// only the fields it cares about, so a new field added to the struct does
+    /// not silently default to garbage in a dozen places.
+    const fn blank() -> Self {
+        Self {
+            obj_type: DMU_OT_NONE,
+            bonustype: DMU_OT_NONE,
+            indblkshift: 14,
+            nlevels: 1,
+            datablksz: 512,
+            maxblkid: 0,
+            used: 512,
+            blkptrs: &[],
+            bonus: &[],
+            spill: None,
+        }
+    }
+}
+
+/// Write `spec` into the dnode array at object number `obj`.
+fn put_dnode(arr: &mut [u8], obj: u64, spec: &DnodeSpec<'_>) {
+    let base = usize::try_from(obj).unwrap_or(0).saturating_mul(DNODE_LEN);
+    put_u8(arr, base, spec.obj_type);
+    put_u8(arr, base.saturating_add(1), spec.indblkshift);
+    put_u8(arr, base.saturating_add(2), spec.nlevels);
+    put_u8(
+        arr,
+        base.saturating_add(3),
+        u8::try_from(spec.blkptrs.len()).unwrap_or(1).max(1),
+    );
+    put_u8(arr, base.saturating_add(4), spec.bonustype);
+    // `dn_flags`; `DNODE_FLAG_SPILL_BLKPTR` is bit 2.
+    put_u8(
+        arr,
+        base.saturating_add(7),
+        if spec.spill.is_some() { 0x04 } else { 0 },
+    );
+    put_u16(
+        arr,
+        base.saturating_add(8),
+        u16::try_from(spec.datablksz >> 9).unwrap_or(1),
+    );
+    put_u16(
+        arr,
+        base.saturating_add(10),
+        u16::try_from(spec.bonus.len()).unwrap_or(0),
+    );
+    put_u64(arr, base.saturating_add(16), spec.maxblkid);
+    put_u64(arr, base.saturating_add(24), spec.used);
+
+    for (i, bp) in spec.blkptrs.iter().enumerate() {
+        let at = base
+            .saturating_add(DNODE_CORE_LEN)
+            .saturating_add(i.saturating_mul(BLKPTR_LEN));
+        put_bytes(arr, at, bp);
+    }
+
+    // The bonus buffer begins after the inline block pointers — after *at
+    // least one*, because a dnode with none is unallocated.
+    let nblkptr = spec.blkptrs.len().max(1);
+    let bonus_at = base
+        .saturating_add(DNODE_CORE_LEN)
+        .saturating_add(nblkptr.saturating_mul(BLKPTR_LEN));
+    put_bytes(arr, bonus_at, spec.bonus);
+
+    if let Some(sp) = spec.spill {
+        // The spill pointer is the last block pointer's worth of the dnode's
+        // slots, which is why it is placed from the end and not from
+        // `nblkptr`. A single-slot dnode puts it at byte 384.
+        let at = base.saturating_add(DNODE_LEN).saturating_sub(BLKPTR_LEN);
+        put_bytes(arr, at, sp);
+    }
+}
+
+/// The attribute values one object carries, before a layout fixes where each
+/// one lands.
+struct Attrs {
+    mode: u64,
+    size: u64,
+    links: u64,
+    uid: u64,
+    gid: u64,
+    parent: u64,
+    /// `gen` is a reserved word in Rust 2024, so the field cannot use the
+    /// attribute's own name.
+    generation: u64,
+    flags: u64,
+    atime: u64,
+    mtime: u64,
+    ctime: u64,
+    crtime: u64,
+}
+
+impl Attrs {
+    /// A plausible set for object `obj`, differing per object so that reading
+    /// the wrong object's attributes shows up as a wrong value rather than as
+    /// the same value twice.
+    fn for_obj(obj: u64, mode: u64, size: u64, parent: u64) -> Self {
+        Self {
+            mode,
+            size,
+            links: 1,
+            uid: 1000,
+            gid: 1000,
+            parent,
+            generation: obj,
+            flags: 0,
+            atime: IMG_TIMESTAMP.saturating_add(obj),
+            mtime: IMG_TIMESTAMP.saturating_add(obj).saturating_add(100),
+            ctime: IMG_TIMESTAMP.saturating_add(obj).saturating_add(200),
+            crtime: IMG_TIMESTAMP.saturating_add(obj).saturating_add(300),
+        }
+    }
+}
+
+/// Serialise `at` in `layout` order, which is what fixes every attribute's
+/// byte offset within the value area.
+///
+/// A timestamp is two 64-bit values — seconds then nanoseconds — which is why
+/// its width is 16 and not 8, and why a reader that assumed 8 would find the
+/// next attribute inside the nanoseconds field.
+fn sa_values(layout: &[u16], at: &Attrs, symlink: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let time = |secs: u64, out: &mut Vec<u8>| {
+        out.extend_from_slice(&secs.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+    };
+    for &num in layout {
+        match num {
+            A_MODE => out.extend_from_slice(&at.mode.to_le_bytes()),
+            A_SIZE => out.extend_from_slice(&at.size.to_le_bytes()),
+            A_LINKS => out.extend_from_slice(&at.links.to_le_bytes()),
+            A_UID => out.extend_from_slice(&at.uid.to_le_bytes()),
+            A_GID => out.extend_from_slice(&at.gid.to_le_bytes()),
+            A_PARENT => out.extend_from_slice(&at.parent.to_le_bytes()),
+            A_GEN => out.extend_from_slice(&at.generation.to_le_bytes()),
+            A_FLAGS => out.extend_from_slice(&at.flags.to_le_bytes()),
+            A_RDEV => out.extend_from_slice(&0u64.to_le_bytes()),
+            A_ATIME => time(at.atime, &mut out),
+            A_MTIME => time(at.mtime, &mut out),
+            A_CTIME => time(at.ctime, &mut out),
+            A_CRTIME => time(at.crtime, &mut out),
+            A_SYMLINK => out.extend_from_slice(symlink),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Build one System Attribute buffer: an `sa_hdr_phys_t`, then the values.
+///
+/// `var_lens` are the widths of the variable-length attributes in the order
+/// the layout lists them. That ordering is the entire contract between
+/// `sa_lengths[]` and the layout, and it is what `SaMap::resolve` walks.
+fn sa_buffer(layout_num: u16, var_lens: &[u16], values: &[u8]) -> Vec<u8> {
+    // `sa_lengths[]` starts at byte 6, and the header is a whole number of
+    // eight-byte units because that is how `SA_HDR_SIZE` is encoded.
+    let hdrsize = 6usize
+        .saturating_add(var_lens.len().saturating_mul(2))
+        .saturating_add(7)
+        & !7usize;
+    let mut buf = vec![0u8; hdrsize];
+    put_u32(&mut buf, 0, SA_MAGIC);
+    // `sa_layout_info`: the header size in eight-byte units at bits 0..10, the
+    // layout number above it.
+    let info = u16::try_from(hdrsize >> 3).unwrap_or(1) | (layout_num << 10);
+    put_u16(&mut buf, 4, info);
+    for (i, len) in var_lens.iter().enumerate() {
+        put_u16(&mut buf, 6usize.saturating_add(i.saturating_mul(2)), *len);
+    }
+    buf.extend_from_slice(values);
+    buf
+}
+
+/// Build the two blocks of a fatzap that has never split: the header, whose
+/// second half is the embedded pointer table, and the single leaf.
+///
+/// `zt_shift` is 0, so the table has one entry and every hash lands in that
+/// leaf. That is what a four-key ZAP actually looks like — and it is the only
+/// shape this driver supports, since an *external* pointer table is refused by
+/// name.
+fn build_fatzap(blkshift: u32, salt: u64, ents: &[(&[u8], u8, &[u8])]) -> (Vec<u8>, Vec<u8>) {
+    let size = 1usize << blkshift;
+    let mut header = vec![0u8; size];
+    put_u64(&mut header, 0, ZBT_HEADER);
+    put_u64(&mut header, 8, ZAP_MAGIC);
+    // `zap_ptrtbl.zt_blk` and `zt_numblks` stay 0: the table is embedded.
+    put_u64(&mut header, 32, 0); // zt_shift
+    put_u64(&mut header, 72, salt);
+    // The embedded table occupies the second half of the block; its one entry
+    // is the block id of the leaf.
+    put_u64(&mut header, size >> 1, 1);
+    (header, build_leaf(blkshift, salt, ents))
+}
+
+/// A directory ZAP value: the object number in the low 48 bits, the `IFTODT`
+/// type in bits 60..64.
+const fn dirent(ty: u64, obj: u64) -> u64 {
+    (ty << 60) | obj
+}
+
+/// The pool configuration nvlist a vdev label carries.
+fn build_config(vdev_type: &[u8]) -> Vec<u8> {
+    let mut vdev = Vec::new();
+    // A nested list carries its own version and nvflag, but no encoding byte —
+    // it inherits the outer list's.
+    vdev.extend_from_slice(&0u32.to_be_bytes());
+    vdev.extend_from_slice(&1u32.to_be_bytes());
+    vdev.extend_from_slice(&nv_pair(
+        b"type",
+        DATA_TYPE_STRING,
+        1,
+        &xdr_string(vdev_type),
+    ));
+    vdev.extend_from_slice(&nv_pair_u64(b"ashift", IMG_ASHIFT));
+    vdev.extend_from_slice(&nv_pair_u64(b"asize", u64::try_from(IMG_LEN).unwrap_or(0)));
+    vdev.extend_from_slice(&0u32.to_be_bytes()); // terminator
+
+    let mut out = nv_header();
+    out.extend_from_slice(&nv_pair(
+        b"name",
+        DATA_TYPE_STRING,
+        1,
+        &xdr_string(IMG_POOL_NAME),
+    ));
+    out.extend_from_slice(&nv_pair_u64(b"pool_guid", IMG_GUID));
+    out.extend_from_slice(&nv_pair_u64(b"txg", IMG_TXG));
+    out.extend_from_slice(&nv_pair_u64(b"version", SPA_VERSION_FEATURES));
+    out.extend_from_slice(&nv_pair(b"vdev_tree", DATA_TYPE_NVLIST, 1, &vdev));
+    out.extend_from_slice(&0u32.to_be_bytes()); // terminator
+    out
+}
+
+/// Write one uberblock slot at absolute offset `at`.
+///
+/// An uberblock is self-checksummed: the SHA-256 is taken over the slot with
+/// its own checksum field replaced by the *byte offset it was written at*.
+/// That is what binds a copy to its slot — an uberblock memcpy'd elsewhere
+/// fails to verify, which is exactly what stops a stale label being mistaken
+/// for a live one.
+fn put_uberblock(bytes: &mut [u8], at: usize, txg: u64, rootbp: &[u8]) {
+    let mut slot = vec![0u8; 1024];
+    put_u64(&mut slot, 0, UBERBLOCK_MAGIC);
+    put_u64(&mut slot, 8, SPA_VERSION_FEATURES);
+    put_u64(&mut slot, 16, txg);
+    put_u64(&mut slot, 24, IMG_GUID);
+    put_u64(&mut slot, 32, IMG_TIMESTAMP);
+    put_bytes(&mut slot, 40, rootbp);
+
+    let eck = slot.len().saturating_sub(ZEC_LEN);
+    put_u64(&mut slot, eck, ZEC_MAGIC);
+    // The verifier: the block's own offset, then three zero words (already
+    // zero here, since the slot was allocated zeroed).
+    put_u64(
+        &mut slot,
+        eck.saturating_add(8),
+        u64::try_from(at).unwrap_or(0),
+    );
+    let cksum = sha256_cksum(&slot);
+    for (i, word) in cksum.iter().enumerate() {
+        let off = eck.saturating_add(8).saturating_add(i.saturating_mul(8));
+        put_u64(&mut slot, off, *word);
+    }
+    put_bytes(bytes, at, &slot);
+}
+
+/// A built image, plus the few absolute offsets a damage test needs.
+struct Pool {
+    bytes: Vec<u8>,
+    /// Where `/hello`'s only data block landed, for the corruption check.
+    hello_at: usize,
+    /// Where the vdev label nvlist starts in label 0.
+    nvlist_at: usize,
+    /// Where the uberblock array starts in label 0.
+    ub_array_at: usize,
+}
+
+/// Build a complete, mountable single-vdev pool.
+///
+/// Blocks are written leaves-first throughout, because a block pointer carries
+/// its target's checksum: nothing can be encoded before the bytes it addresses
+/// exist.
+#[allow(clippy::too_many_lines)]
+fn build_pool() -> Pool {
+    let mut img = PoolImage::new();
+
+    // --- File data -------------------------------------------------------
+
+    let hello_dva = img.next;
+    let hello_bp = img.put(
+        &pad512(HELLO_TEXT),
+        DMU_OT_PLAIN_FILE_CONTENTS,
+        0,
+        ZIO_CHECKSUM_FLETCHER_4,
+    );
+    let nested_bp = img.put(
+        &pad512(NESTED_TEXT),
+        DMU_OT_PLAIN_FILE_CONTENTS,
+        0,
+        ZIO_CHECKSUM_FLETCHER_4,
+    );
+
+    // `/big` is two levels deep with a hole in the middle: `indblkshift` 9
+    // means four pointers per indirect block, so six blocks need two indirect
+    // blocks and two inline pointers in the dnode.
+    let mut big_bps: Vec<Vec<u8>> = Vec::new();
+    for blkid in 0..IMG_BIG_BLOCKS {
+        if blkid == IMG_BIG_HOLE {
+            // A hole is an all-zero block pointer, not a pointer to zeroes.
+            big_bps.push(vec![0u8; BLKPTR_LEN]);
+            continue;
+        }
+        let fill = u8::try_from(0xA0u64.saturating_add(blkid)).unwrap_or(0xA0);
+        big_bps.push(img.put(
+            &vec![fill; IMG_BIG_BLKSZ],
+            DMU_OT_PLAIN_FILE_CONTENTS,
+            0,
+            ZIO_CHECKSUM_FLETCHER_4,
+        ));
+    }
+    let mut big_ind: Vec<Vec<u8>> = Vec::new();
+    for chunk in big_bps.chunks(4) {
+        let mut block = vec![0u8; 512];
+        for (i, bp) in chunk.iter().enumerate() {
+            put_bytes(&mut block, i.saturating_mul(BLKPTR_LEN), bp);
+        }
+        big_ind.push(img.put(
+            &block,
+            DMU_OT_PLAIN_FILE_CONTENTS,
+            1,
+            ZIO_CHECKSUM_FLETCHER_4,
+        ));
+    }
+    let big_size = u64::try_from(IMG_BIG_BLKSZ)
+        .unwrap_or(512)
+        .saturating_mul(IMG_BIG_BLOCKS);
+
+    // --- The spilled symlink target --------------------------------------
+    //
+    // `/dirlink`'s bonus holds its mode and size under layout 3; its target
+    // lives in a spill block under layout 4. The two are *independent*
+    // attribute sets, each with its own header — which is the thing a reader
+    // gets wrong by concatenating them.
+    let spill_len = u16::try_from(b"sub".len()).unwrap_or(0);
+    let spill_bp = img.put(
+        &pad512(&sa_buffer(4, &[spill_len], b"sub")),
+        DMU_OT_SA,
+        0,
+        ZIO_CHECKSUM_SHA256,
+    );
+
+    // --- ZAPs ------------------------------------------------------------
+
+    let root_zap = build_micro(
+        1024,
+        &[
+            (b"hello", dirent(IMG_DT_REG, OBJ_HELLO)),
+            (b"sub", dirent(4, OBJ_SUB)),
+            (b"link", dirent(10, OBJ_LINK)),
+            (b"big", dirent(IMG_DT_REG, OBJ_BIG)),
+            (b"dirlink", dirent(10, OBJ_DIRLINK)),
+        ],
+    );
+    let root_bp = img.put(&root_zap, DMU_OT_DIRECTORY_CONTENTS, 0, ZIO_CHECKSUM_SHA256);
+
+    let sub_zap = build_micro(512, &[(b"nested", dirent(IMG_DT_REG, OBJ_NESTED))]);
+    let sub_bp = img.put(&sub_zap, DMU_OT_DIRECTORY_CONTENTS, 0, ZIO_CHECKSUM_SHA256);
+
+    let master_zap = build_micro(
+        512,
+        &[
+            (b"ROOT", OBJ_ROOT),
+            (b"VERSION", 5),
+            (b"SA_ATTRS", OBJ_SA_MASTER),
+        ],
+    );
+    let master_bp = img.put(&master_zap, DMU_OT_MASTER_NODE, 0, ZIO_CHECKSUM_SHA256);
+
+    let sa_master_zap = build_micro(
+        512,
+        &[(b"REGISTRY", OBJ_REGISTRY), (b"LAYOUTS", OBJ_LAYOUTS)],
+    );
+    let sa_master_bp = img.put(
+        &sa_master_zap,
+        DMU_OT_SA_MASTER_NODE,
+        0,
+        ZIO_CHECKSUM_SHA256,
+    );
+
+    // The registry's value packs the byteswap class into bits 0..8, the width
+    // into 8..24 and the number into 24..40.
+    let reg_pairs: Vec<(&[u8], u64)> = img_registry()
+        .iter()
+        .map(|&(name, num, len)| (name, (u64::from(len) << 8) | (u64::from(num) << 24)))
+        .collect();
+    let registry_zap = build_micro(2048, &reg_pairs);
+    let registry_bp = img.put(
+        &registry_zap,
+        DMU_OT_SA_ATTR_REGISTRATION,
+        0,
+        ZIO_CHECKSUM_SHA256,
+    );
+
+    // The layout table must be a fatzap: its values are arrays of `u16`, and a
+    // microzap slot holds exactly one `u64`. This is the one place in the
+    // driver that needs an array-valued ZAP entry, so it is the one place a
+    // microzap cannot stand in.
+    let l1 = layout_bytes(&IMG_LAYOUT_1);
+    let l2 = layout_bytes(&IMG_LAYOUT_2);
+    let l3 = layout_bytes(&IMG_LAYOUT_3);
+    let l4 = layout_bytes(&IMG_LAYOUT_4);
+    let l5 = layout_bytes(&IMG_LAYOUT_5);
+    // 1024-byte blocks, not 512: five layouts need seventeen leaf chunks and a
+    // 512-byte leaf has eighteen. Overflowing would not fail — `build_leaf`
+    // would drop the entries it could not place — so the margin is deliberate
+    // rather than incidental.
+    let (lay_hdr, lay_leaf) = build_fatzap(
+        10,
+        0x1234_5678_9abc_def0,
+        &[
+            (b"1", 2, &l1),
+            (b"2", 2, &l2),
+            (b"3", 2, &l3),
+            (b"4", 2, &l4),
+            (b"5", 2, &l5),
+        ],
+    );
+    let lay_hdr_bp = img.put(&lay_hdr, DMU_OT_SA_ATTR_LAYOUTS, 0, ZIO_CHECKSUM_SHA256);
+    let lay_leaf_bp = img.put(&lay_leaf, DMU_OT_SA_ATTR_LAYOUTS, 0, ZIO_CHECKSUM_SHA256);
+
+    // --- The filesystem objset's dnode array -----------------------------
+
+    let mut fs_dn = vec![0u8; IMG_DN_BLK];
+
+    put_dnode(
+        &mut fs_dn,
+        OBJ_MASTER,
+        &DnodeSpec {
+            obj_type: DMU_OT_MASTER_NODE,
+            blkptrs: &[master_bp],
+            ..DnodeSpec::blank()
+        },
+    );
+    put_dnode(
+        &mut fs_dn,
+        OBJ_SA_MASTER,
+        &DnodeSpec {
+            obj_type: DMU_OT_SA_MASTER_NODE,
+            blkptrs: &[sa_master_bp],
+            ..DnodeSpec::blank()
+        },
+    );
+    put_dnode(
+        &mut fs_dn,
+        OBJ_REGISTRY,
+        &DnodeSpec {
+            obj_type: DMU_OT_SA_ATTR_REGISTRATION,
+            datablksz: 2048,
+            used: 2048,
+            blkptrs: &[registry_bp],
+            ..DnodeSpec::blank()
+        },
+    );
+    put_dnode(
+        &mut fs_dn,
+        OBJ_LAYOUTS,
+        &DnodeSpec {
+            obj_type: DMU_OT_SA_ATTR_LAYOUTS,
+            // Must match the shift `build_fatzap` was given: the leaf's chunk
+            // and hash-table geometry is derived from the object's block size,
+            // not stored in the block.
+            datablksz: 1024,
+            maxblkid: 1,
+            used: 2048,
+            blkptrs: &[lay_hdr_bp, lay_leaf_bp],
+            ..DnodeSpec::blank()
+        },
+    );
+
+    let root_attrs = Attrs::for_obj(OBJ_ROOT, 0o040_755, 0, OBJ_ROOT);
+    let root_bonus = sa_buffer(1, &[], &sa_values(&IMG_LAYOUT_1, &root_attrs, &[]));
+    put_dnode(
+        &mut fs_dn,
+        OBJ_ROOT,
+        &DnodeSpec {
+            obj_type: DMU_OT_DIRECTORY_CONTENTS,
+            bonustype: DMU_OT_SA,
+            datablksz: 1024,
+            used: 1024,
+            blkptrs: &[root_bp],
+            bonus: &root_bonus,
+            ..DnodeSpec::blank()
+        },
+    );
+
+    // `/hello` uses layout 2: the same attributes as everything else, in a
+    // different order. Its size therefore does *not* sit at byte 8.
+    let hello_attrs = Attrs::for_obj(
+        OBJ_HELLO,
+        0o100_644,
+        u64::try_from(HELLO_TEXT.len()).unwrap_or(0),
+        OBJ_ROOT,
+    );
+    let hello_bonus = sa_buffer(2, &[], &sa_values(&IMG_LAYOUT_2, &hello_attrs, &[]));
+    put_dnode(
+        &mut fs_dn,
+        OBJ_HELLO,
+        &DnodeSpec {
+            obj_type: DMU_OT_PLAIN_FILE_CONTENTS,
+            bonustype: DMU_OT_SA,
+            blkptrs: &[hello_bp],
+            bonus: &hello_bonus,
+            ..DnodeSpec::blank()
+        },
+    );
+
+    let sub_attrs = Attrs::for_obj(OBJ_SUB, 0o040_755, 0, OBJ_ROOT);
+    let sub_bonus = sa_buffer(1, &[], &sa_values(&IMG_LAYOUT_1, &sub_attrs, &[]));
+    put_dnode(
+        &mut fs_dn,
+        OBJ_SUB,
+        &DnodeSpec {
+            obj_type: DMU_OT_DIRECTORY_CONTENTS,
+            bonustype: DMU_OT_SA,
+            blkptrs: &[sub_bp],
+            bonus: &sub_bonus,
+            ..DnodeSpec::blank()
+        },
+    );
+
+    // `/link` keeps its target inline in the bonus (layout 5), the common case
+    // for a short target.
+    let link_attrs = Attrs::for_obj(
+        OBJ_LINK,
+        0o120_777,
+        u64::try_from(b"hello".len()).unwrap_or(0),
+        OBJ_ROOT,
+    );
+    let link_bonus = sa_buffer(
+        5,
+        &[u16::try_from(b"hello".len()).unwrap_or(0)],
+        &sa_values(&IMG_LAYOUT_5, &link_attrs, b"hello"),
+    );
+    put_dnode(
+        &mut fs_dn,
+        OBJ_LINK,
+        &DnodeSpec {
+            obj_type: DMU_OT_PLAIN_FILE_CONTENTS,
+            bonustype: DMU_OT_SA,
+            bonus: &link_bonus,
+            blkptrs: &[vec![0u8; BLKPTR_LEN]],
+            ..DnodeSpec::blank()
+        },
+    );
+
+    // `/dirlink` keeps its target in a spill block instead.
+    let dirlink_attrs = Attrs::for_obj(
+        OBJ_DIRLINK,
+        0o120_777,
+        u64::try_from(b"sub".len()).unwrap_or(0),
+        OBJ_ROOT,
+    );
+    let dirlink_bonus = sa_buffer(3, &[], &sa_values(&IMG_LAYOUT_3, &dirlink_attrs, &[]));
+    put_dnode(
+        &mut fs_dn,
+        OBJ_DIRLINK,
+        &DnodeSpec {
+            obj_type: DMU_OT_PLAIN_FILE_CONTENTS,
+            bonustype: DMU_OT_SA,
+            bonus: &dirlink_bonus,
+            blkptrs: &[vec![0u8; BLKPTR_LEN]],
+            spill: Some(&spill_bp),
+            ..DnodeSpec::blank()
+        },
+    );
+
+    let big_attrs = Attrs::for_obj(OBJ_BIG, 0o100_644, big_size, OBJ_ROOT);
+    let big_bonus = sa_buffer(1, &[], &sa_values(&IMG_LAYOUT_1, &big_attrs, &[]));
+    put_dnode(
+        &mut fs_dn,
+        OBJ_BIG,
+        &DnodeSpec {
+            obj_type: DMU_OT_PLAIN_FILE_CONTENTS,
+            bonustype: DMU_OT_SA,
+            indblkshift: 9,
+            nlevels: 2,
+            maxblkid: IMG_BIG_BLOCKS.saturating_sub(1),
+            used: big_size,
+            blkptrs: &big_ind,
+            bonus: &big_bonus,
+            ..DnodeSpec::blank()
+        },
+    );
+
+    let nested_attrs = Attrs::for_obj(
+        OBJ_NESTED,
+        0o100_644,
+        u64::try_from(NESTED_TEXT.len()).unwrap_or(0),
+        OBJ_SUB,
+    );
+    let nested_bonus = sa_buffer(1, &[], &sa_values(&IMG_LAYOUT_1, &nested_attrs, &[]));
+    put_dnode(
+        &mut fs_dn,
+        OBJ_NESTED,
+        &DnodeSpec {
+            obj_type: DMU_OT_PLAIN_FILE_CONTENTS,
+            bonustype: DMU_OT_SA,
+            blkptrs: &[nested_bp],
+            bonus: &nested_bonus,
+            ..DnodeSpec::blank()
+        },
+    );
+
+    let fs_dn_bp = img.put(&fs_dn, DMU_OT_DNODE, 0, ZIO_CHECKSUM_SHA256);
+
+    // --- The filesystem objset -------------------------------------------
+
+    let mut fs_objset = vec![0u8; OBJSET_PHYS_SIZE];
+    put_dnode(
+        &mut fs_objset,
+        0,
+        &DnodeSpec {
+            obj_type: DMU_OT_DNODE,
+            datablksz: IMG_DN_BLK,
+            used: u64::try_from(IMG_DN_BLK).unwrap_or(0),
+            blkptrs: &[fs_dn_bp],
+            ..DnodeSpec::blank()
+        },
+    );
+    // `os_type` sits after the meta dnode and the 192-byte ZIL header. A pool
+    // whose root dataset is a zvol has `DMU_OST_ZVOL` here, and mounting it as
+    // a directory tree would list garbage.
+    put_u64(&mut fs_objset, OBJSET_TYPE_OFFSET, DMU_OST_ZFS);
+    let ds_bp = img.put(&fs_objset, DMU_OT_OBJSET, 0, ZIO_CHECKSUM_SHA256);
+
+    // --- The MOS ---------------------------------------------------------
+
+    let objdir_zap = build_micro(512, &[(b"root_dataset", 2)]);
+    let objdir_bp = img.put(&objdir_zap, DMU_OT_OBJECT_DIRECTORY, 0, ZIO_CHECKSUM_SHA256);
+
+    let mut mos_dn = vec![0u8; IMG_DN_BLK];
+    put_dnode(
+        &mut mos_dn,
+        1,
+        &DnodeSpec {
+            obj_type: DMU_OT_OBJECT_DIRECTORY,
+            blkptrs: &[objdir_bp],
+            ..DnodeSpec::blank()
+        },
+    );
+
+    // A DSL directory's bonus is a `dsl_dir_phys_t`; the only field this
+    // driver reads is `dd_head_dataset_obj` at byte 8, the dataset holding the
+    // live filesystem as opposed to a snapshot.
+    let mut dsl_dir_bonus = vec![0u8; 256];
+    put_u64(&mut dsl_dir_bonus, DD_HEAD_DATASET_OBJ, 3);
+    put_dnode(
+        &mut mos_dn,
+        2,
+        &DnodeSpec {
+            obj_type: DMU_OT_DSL_DIR,
+            bonustype: DMU_OT_DSL_DIR,
+            bonus: &dsl_dir_bonus,
+            blkptrs: &[vec![0u8; BLKPTR_LEN]],
+            ..DnodeSpec::blank()
+        },
+    );
+
+    // A DSL dataset's bonus is a `dsl_dataset_phys_t`, whose `ds_bp` at byte
+    // 128 is the block pointer to the dataset's own objset. 320 bytes is the
+    // whole bonus a one-slot dnode with one block pointer has room for, which
+    // is exactly `sizeof(dsl_dataset_phys_t)` — not a coincidence.
+    let mut dsl_ds_bonus = vec![0u8; 320];
+    put_bytes(&mut dsl_ds_bonus, DS_BP_OFFSET, &ds_bp);
+    put_dnode(
+        &mut mos_dn,
+        3,
+        &DnodeSpec {
+            obj_type: DMU_OT_DSL_DATASET,
+            bonustype: DMU_OT_DSL_DATASET,
+            bonus: &dsl_ds_bonus,
+            blkptrs: &[vec![0u8; BLKPTR_LEN]],
+            ..DnodeSpec::blank()
+        },
+    );
+
+    let mos_dn_bp = img.put(&mos_dn, DMU_OT_DNODE, 0, ZIO_CHECKSUM_SHA256);
+
+    let mut mos_objset = vec![0u8; OBJSET_PHYS_SIZE];
+    put_dnode(
+        &mut mos_objset,
+        0,
+        &DnodeSpec {
+            obj_type: DMU_OT_DNODE,
+            datablksz: IMG_DN_BLK,
+            used: u64::try_from(IMG_DN_BLK).unwrap_or(0),
+            blkptrs: &[mos_dn_bp],
+            ..DnodeSpec::blank()
+        },
+    );
+    put_u64(&mut mos_objset, OBJSET_TYPE_OFFSET, DMU_OST_META);
+    let root_mos_bp = img.put(&mos_objset, DMU_OT_OBJSET, 0, ZIO_CHECKSUM_SHA256);
+
+    // --- Labels ----------------------------------------------------------
+
+    let config = build_config(b"disk");
+    let nvlist_at = usize::try_from(VDEV_LABEL_NVLIST_OFFSET).unwrap_or(0);
+    let ub_array_at = usize::try_from(VDEV_LABEL_UBERBLOCK_OFFSET).unwrap_or(0);
+    let label_stride = usize::try_from(VDEV_LABEL_SIZE).unwrap_or(0);
+
+    // The decoy: an older, perfectly valid uberblock in an *earlier* slot,
+    // whose rootbp addresses a block that is not an objset. Selecting it
+    // would fail the mount rather than silently misread, but it would fail
+    // for the wrong reason and hide the real bug.
+    let decoy_bp = make_blkptr(img.next, &[0u8; 512], DMU_OT_OBJSET, 0, ZIO_CHECKSUM_SHA256);
+
+    for label in 0..2usize {
+        let base = label.saturating_mul(label_stride);
+        put_bytes(&mut img.bytes, base.saturating_add(nvlist_at), &config);
+        let array = base.saturating_add(ub_array_at);
+        put_uberblock(
+            &mut img.bytes,
+            array.saturating_add(IMG_OLD_UB_SLOT.saturating_mul(1024)),
+            IMG_OLD_TXG,
+            &decoy_bp,
+        );
+        put_uberblock(
+            &mut img.bytes,
+            array.saturating_add(IMG_UB_SLOT.saturating_mul(1024)),
+            IMG_TXG,
+            &root_mos_bp,
+        );
+    }
+
+    Pool {
+        bytes: img.bytes,
+        hello_at: PoolImage::abs(hello_dva),
+        nvlist_at,
+        ub_array_at,
+    }
+}
+
+/// A layout's attribute numbers as the big-endian `u16` array a ZAP stores.
+///
+/// Big-endian is not a typo: ZAP array values are stored in network order
+/// whatever the pool's own byte order is, which is the one place in ZFS where
+/// the endianness does not follow the `B` bit.
+fn layout_bytes(layout: &[u16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(layout.len().saturating_mul(2));
+    for n in layout {
+        out.extend_from_slice(&n.to_be_bytes());
+    }
+    out
+}
+
+/// Mount an image through [`MemorySource`], with no device involved.
+fn mount(bytes: Vec<u8>) -> KernelResult<ZfsFs> {
+    ZfsFs::open_source(Box::new(MemorySource::new(bytes)))
+}
+
+fn test_pool_mount(c: &mut Checks) -> KernelResult<()> {
+    let pool = build_pool();
+    let mut fs = match mount(pool.bytes) {
+        Ok(fs) => fs,
+        Err(e) => {
+            c.check(false, "the synthetic pool mounts");
+            serial_println!("[zfs]   mount failed: {:?}", e);
+            return Ok(());
+        }
+    };
+    c.check(true, "the synthetic pool mounts");
+
+    // --- The pool, as the label described it -----------------------------
+    let cfg = fs.pool_config();
+    c.check_bytes(&cfg.name, IMG_POOL_NAME, "pool name from the label nvlist");
+    c.check_u64(cfg.guid, IMG_GUID, "pool guid");
+    c.check_u64(u64::from(cfg.ashift), IMG_ASHIFT, "ashift");
+    c.check_bytes(&cfg.vdev_type, b"disk", "vdev type");
+    c.check_u64(cfg.version, SPA_VERSION_FEATURES, "spa version");
+
+    // The decisive one: slot 3 holds a valid uberblock at txg 5 and slot 11
+    // holds the live one at txg 77. Reading 5 here would mean the driver took
+    // the first valid slot rather than the newest.
+    c.check_u64(
+        fs.uberblock().txg,
+        IMG_TXG,
+        "the highest-txg uberblock wins, not the first",
+    );
+
+    // --- The root directory ----------------------------------------------
+    let mut ents = fs.readdir(Path::new(b"/"))?;
+    ents.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    c.check(ents.len() == 5, "root has five entries");
+    let names: Vec<&[u8]> = ents.iter().map(|e| e.name.as_bytes()).collect();
+    c.check(
+        names == [b"big".as_slice(), b"dirlink", b"hello", b"link", b"sub"],
+        "root entry names",
+    );
+    let types: Vec<EntryType> = ents.iter().map(|e| e.entry_type).collect();
+    c.check(
+        types
+            == [
+                EntryType::File,
+                EntryType::Symlink,
+                EntryType::File,
+                EntryType::Symlink,
+                EntryType::Directory,
+            ],
+        "root entry types come from the dirent's top bits",
+    );
+
+    // --- A file, read through the whole chain ----------------------------
+    let hello = fs.read_file(Path::new(b"/hello"))?;
+    c.check_bytes(&hello, HELLO_TEXT, "/hello contents");
+
+    // This is the §245 check. `/hello`'s attributes are stored under a layout
+    // that puts `ZPL_SIZE` at byte 56; the default layout puts it at byte 8,
+    // where this object keeps the seconds half of its creation time. A driver
+    // reading the hardcoded offset would report 1700000606 here — a number
+    // that looks like nothing in particular, from a mount that succeeded.
+    let st = fs.stat(Path::new(b"/hello"))?;
+    c.check_u64(
+        st.size,
+        u64::try_from(HELLO_TEXT.len()).unwrap_or(0),
+        "/hello size, resolved through the dataset's own layout",
+    );
+    c.check(st.entry_type == EntryType::File, "/hello is a file");
+
+    let meta = fs.metadata(Path::new(b"/hello"))?;
+    c.check_u64(meta.ino, OBJ_HELLO, "/hello inode is its object number");
+    c.check(meta.permissions == 0o444, "/hello mode, write bits masked");
+    c.check(meta.nlinks == 1, "/hello link count");
+    c.check_u64(
+        meta.modified_ns,
+        IMG_TIMESTAMP
+            .saturating_add(OBJ_HELLO)
+            .saturating_add(100)
+            .saturating_mul(1_000_000_000),
+        "/hello mtime, from a 16-byte timestamp attribute",
+    );
+
+    // --- A subdirectory --------------------------------------------------
+    let nested = fs.read_file(Path::new(b"/sub/nested"))?;
+    c.check_bytes(&nested, NESTED_TEXT, "/sub/nested contents");
+
+    // --- Symlinks, both storage forms ------------------------------------
+    let inline = fs.readlink(Path::new(b"/link"))?;
+    c.check_bytes(inline.as_bytes(), b"hello", "inline symlink target");
+    let spilled = fs.readlink(Path::new(b"/dirlink"))?;
+    c.check_bytes(
+        spilled.as_bytes(),
+        b"sub",
+        "spilled symlink target, from a second SA buffer",
+    );
+    // Following the spilling link proves the spill block was not merely
+    // present but usable as a path component.
+    let through = fs.read_file(Path::new(b"/dirlink/nested"))?;
+    c.check_bytes(&through, NESTED_TEXT, "resolving through a spilled symlink");
+
+    // --- The sparse, two-level file --------------------------------------
+    let big = fs.read_file(Path::new(b"/big"))?;
+    c.check_u64(
+        u64::try_from(big.len()).unwrap_or(0),
+        u64::try_from(IMG_BIG_BLKSZ)
+            .unwrap_or(0)
+            .saturating_mul(IMG_BIG_BLOCKS),
+        "/big length",
+    );
+    let mut big_ok = true;
+    for blkid in 0..IMG_BIG_BLOCKS {
+        let want = if blkid == IMG_BIG_HOLE {
+            0u8
+        } else {
+            u8::try_from(0xA0u64.saturating_add(blkid)).unwrap_or(0)
+        };
+        let start = usize::try_from(blkid)
+            .unwrap_or(0)
+            .saturating_mul(IMG_BIG_BLKSZ);
+        let seg = big
+            .get(start..start.saturating_add(IMG_BIG_BLKSZ))
+            .unwrap_or(&[]);
+        if seg.len() != IMG_BIG_BLKSZ || seg.iter().any(|&b| b != want) {
+            big_ok = false;
+        }
+    }
+    c.check(
+        big_ok,
+        "/big reads back through two levels of indirection, hole included",
+    );
+
+    // A range that straddles the hole and both of its neighbours, starting and
+    // ending mid-block: the stitch across block boundaries is separate code
+    // from the whole-file read, and a partial first block is separate again
+    // from a whole one.
+    //
+    // Bytes 1000..1600 of a 512-byte-blocked file are the last 24 bytes of
+    // block 1, the whole of block 2 — the hole — and the first 64 bytes of
+    // block 3. Each of the three is checked, because a reader that dropped the
+    // hole entirely would still return the right *first* byte and a plausible
+    // length.
+    let straddle = fs.read_at(Path::new(b"/big"), 1000, 600)?;
+    c.check(straddle.len() == 600, "read_at length");
+    let tail_of_1 = straddle.get(..24).unwrap_or(&[]);
+    let hole = straddle.get(24..536).unwrap_or(&[]);
+    let head_of_3 = straddle.get(536..).unwrap_or(&[]);
+    c.check(
+        tail_of_1.len() == 24 && tail_of_1.iter().all(|&b| b == 0xA1),
+        "read_at starts mid-block, in the block the offset lands in",
+    );
+    c.check(
+        hole.len() == 512 && hole.iter().all(|&b| b == 0x00),
+        "read_at spans the hole without shifting the bytes after it",
+    );
+    c.check(
+        head_of_3.len() == 64 && head_of_3.iter().all(|&b| b == 0xA3),
+        "read_at ends mid-block, past the hole",
+    );
+
+    // --- Errors that must stay distinguishable ---------------------------
+    c.check_err(
+        fs.read_file(Path::new(b"/sub")),
+        KernelError::IsADirectory,
+        "reading a directory as a file",
+    );
+    c.check_err(
+        fs.readdir(Path::new(b"/hello")),
+        KernelError::NotADirectory,
+        "listing a file as a directory",
+    );
+    c.check_err(
+        fs.stat(Path::new(b"/absent")),
+        KernelError::NotFound,
+        "a name that is not in the directory ZAP",
+    );
+
+    let info = fs.statvfs()?;
+    c.check(info.read_only, "the mount is read-only");
+    c.check_u64(info.block_size, 1 << IMG_ASHIFT, "statvfs block size");
+
+    Ok(())
+}
+
+fn test_pool_damage(c: &mut Checks) -> KernelResult<()> {
+    // A flipped bit in a file's data block. The block pointer's checksum still
+    // describes the original bytes, so the read must fail rather than hand
+    // back corrupted data — this is the check that proves `read_block` really
+    // verifies rather than merely parsing a checksum field.
+    let pool = build_pool();
+    let mut bytes = pool.bytes.clone();
+    if let Some(b) = bytes.get_mut(pool.hello_at) {
+        *b ^= 0xFF;
+    }
+    match mount(bytes) {
+        Ok(mut fs) => c.check_err(
+            fs.read_file(Path::new(b"/hello")),
+            KernelError::IoError,
+            "a corrupt data block fails its checksum",
+        ),
+        Err(_) => c.check(false, "an image with one corrupt data block still mounts"),
+    }
+
+    // No uberblock at all: not a ZFS device, as opposed to a damaged one.
+    let mut bytes = pool.bytes.clone();
+    let ub_len = usize::try_from(VDEV_LABEL_UBERBLOCK_SIZE).unwrap_or(0);
+    let stride = usize::try_from(VDEV_LABEL_SIZE).unwrap_or(0);
+    for label in 0..2usize {
+        let at = label
+            .saturating_mul(stride)
+            .saturating_add(pool.ub_array_at);
+        if let Some(w) = bytes.get_mut(at..at.saturating_add(ub_len)) {
+            w.fill(0);
+        }
+    }
+    c.check_err(
+        mount(bytes).map(|_| ()),
+        KernelError::InvalidArgument,
+        "a zeroed uberblock array is not a pool",
+    );
+
+    // Every uberblock byte-swapped: a pool created on a big-endian host. This
+    // must be named as unsupported, because "not a ZFS pool" would send
+    // whoever reads it looking for an entirely different problem.
+    let mut bytes = pool.bytes.clone();
+    for label in 0..2usize {
+        let at = label
+            .saturating_mul(stride)
+            .saturating_add(pool.ub_array_at);
+        if let Some(w) = bytes.get_mut(at..at.saturating_add(ub_len)) {
+            w.fill(0);
+        }
+        put_u64(&mut bytes, at, UBERBLOCK_MAGIC_SWAPPED);
+        // A swapped uberblock still needs a plausible txg, or it would be
+        // rejected as an unwritten slot before the magic was ever considered.
+        put_u64(&mut bytes, at.saturating_add(16), IMG_TXG);
+    }
+    c.check_err(
+        mount(bytes).map(|_| ()),
+        KernelError::NotSupported,
+        "a big-endian pool is refused by name",
+    );
+
+    // A mirror or raidz top-level vdev. One `SectorSource` is one device, and
+    // a raidz child's DVAs are offset per-leg, so reading one leg as if it
+    // were the whole thing would return plausible-looking garbage.
+    let mut bytes = pool.bytes;
+    let mirror = build_config(b"mirror");
+    for label in 0..2usize {
+        let at = label.saturating_mul(stride).saturating_add(pool.nvlist_at);
+        put_bytes(&mut bytes, at, &mirror);
+    }
+    c.check_err(
+        mount(bytes).map(|_| ()),
+        KernelError::NotSupported,
+        "a mirror vdev is refused rather than half-read",
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 
 /// Run the ZFS self-tests.
 ///
@@ -985,7 +2331,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // Named so a hard error says *which* group stopped; without the name the
     // serial log shows an error with no indication of where it came from.
-    let groups: [(&str, TestGroup); 9] = [
+    let groups: [(&str, TestGroup); 11] = [
         ("primitives", test_primitives),
         ("zio", test_zio),
         ("nvlist", test_nvlist),
@@ -995,6 +2341,12 @@ pub fn self_test() -> KernelResult<()> {
         ("zap hash", test_zap_hash),
         ("zap leaf", test_zap_leaf),
         ("sa", test_sa),
+        // Last, and in this order: the two pool groups exercise everything
+        // above through the real mount path, so a failure here after the
+        // others passed localises the fault to the chain between structures
+        // rather than to any one of them.
+        ("pool mount", test_pool_mount),
+        ("pool damage", test_pool_damage),
     ];
 
     for (name, run) in groups {

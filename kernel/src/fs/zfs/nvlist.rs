@@ -54,8 +54,8 @@ const MAX_DEPTH: u32 = 16;
 // `data_type_t` — only the members this parser decodes are named; the rest are
 // skipped by encoded length and never need a constant.
 pub(super) const DATA_TYPE_UINT64: u32 = 8;
-const DATA_TYPE_STRING: u32 = 9;
-const DATA_TYPE_NVLIST: u32 = 19;
+pub(super) const DATA_TYPE_STRING: u32 = 9;
+pub(super) const DATA_TYPE_NVLIST: u32 = 19;
 const DATA_TYPE_NVLIST_ARRAY: u32 = 20;
 
 /// A decoded nvpair value, borrowing the buffer it was found in.

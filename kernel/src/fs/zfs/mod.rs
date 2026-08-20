@@ -108,12 +108,16 @@ const ZPL_ROOT_KEY: &[u8] = b"ROOT";
 const ZPL_VERSION_KEY: &[u8] = b"VERSION";
 
 /// `os_type` lives after the meta dnode and the ZIL header.
-const OBJSET_TYPE_OFFSET: usize = DNODE_LEN + 192;
+///
+/// `pub(super)` only so [`tests`] can build an objset the mount path accepts.
+/// A test that wrote `704` here instead would still pass if this moved, and
+/// would then be asserting against a layout the driver no longer uses.
+pub(super) const OBJSET_TYPE_OFFSET: usize = DNODE_LEN + 192;
 
 /// `dsl_dir_phys_t.dd_head_dataset_obj`.
-const DD_HEAD_DATASET_OBJ: usize = 8;
+pub(super) const DD_HEAD_DATASET_OBJ: usize = 8;
 /// `dsl_dataset_phys_t.ds_bp`.
-const DS_BP_OFFSET: usize = 128;
+pub(super) const DS_BP_OFFSET: usize = 128;
 
 /// `ZFS_DIRENT_TYPE` / `ZFS_DIRENT_OBJ`: a directory ZAP's value packs the
 /// entry's type into the top bits of the object number.

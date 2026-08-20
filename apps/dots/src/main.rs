@@ -278,16 +278,18 @@ impl Board {
         match line.orientation {
             Orientation::Horizontal => {
                 if line.row < self.h_lines.len()
-                    && let Some(&drawn) = self.h_lines[line.row].get(line.col) {
-                        return drawn;
-                    }
+                    && let Some(&drawn) = self.h_lines[line.row].get(line.col)
+                {
+                    return drawn;
+                }
                 false
             }
             Orientation::Vertical => {
                 if line.row < self.v_lines.len()
-                    && let Some(&drawn) = self.v_lines[line.row].get(line.col) {
-                        return drawn;
-                    }
+                    && let Some(&drawn) = self.v_lines[line.row].get(line.col)
+                {
+                    return drawn;
+                }
                 false
             }
         }
@@ -842,7 +844,10 @@ impl DotsAndBoxes {
     /// Window height for current grid size.
     fn window_height(&self) -> f32 {
         let gs = self.grid_size();
-        PADDING * 2.0 + HEADER_HEIGHT + FOOTER_HEIGHT + (gs as f32 - 1.0) * DOT_SPACING
+        PADDING * 2.0
+            + HEADER_HEIGHT
+            + FOOTER_HEIGHT
+            + (gs as f32 - 1.0) * DOT_SPACING
             + DOT_RADIUS * 2.0
     }
 
@@ -930,10 +935,9 @@ impl DotsAndBoxes {
 
     fn handle_event(&mut self, event: &Event) {
         match event {
-            Event::Key(ke)
-                if ke.pressed => {
-                    self.handle_key(ke.key);
-                }
+            Event::Key(ke) if ke.pressed => {
+                self.handle_key(ke.key);
+            }
             Event::Mouse(me) => {
                 self.handle_mouse(me);
             }
@@ -966,29 +970,30 @@ impl DotsAndBoxes {
                 self.new_game_with_size(5);
             }
             Key::Left | Key::Right | Key::Up | Key::Down
-                if self.phase == GamePhase::Playing && !self.ai_pending => {
-                    self.move_cursor(key);
-                }
-            Key::Tab
-                if self.phase == GamePhase::Playing && !self.ai_pending => {
-                    self.toggle_cursor_orientation();
-                }
-            Key::Enter | Key::Space
-                if self.phase == GamePhase::Playing && !self.ai_pending => {
-                    let line = self.cursor.to_line_id();
-                    self.try_place_line(line);
-                }
+                if self.phase == GamePhase::Playing && !self.ai_pending =>
+            {
+                self.move_cursor(key);
+            }
+            Key::Tab if self.phase == GamePhase::Playing && !self.ai_pending => {
+                self.toggle_cursor_orientation();
+            }
+            Key::Enter | Key::Space if self.phase == GamePhase::Playing && !self.ai_pending => {
+                let line = self.cursor.to_line_id();
+                self.try_place_line(line);
+            }
             _ => {}
         }
     }
 
     fn handle_mouse(&mut self, me: &MouseEvent) {
         if let MouseEventKind::Press(MouseButton::Left) = me.kind
-            && self.phase == GamePhase::Playing && !self.ai_pending
-                && let Some(line) = self.hit_test_line_precise(me.x, me.y)
-                    && !self.board.is_line_drawn(line) {
-                        self.try_place_line(line);
-                    }
+            && self.phase == GamePhase::Playing
+            && !self.ai_pending
+            && let Some(line) = self.hit_test_line_precise(me.x, me.y)
+            && !self.board.is_line_drawn(line)
+        {
+            self.try_place_line(line);
+        }
     }
 
     fn handle_tick(&mut self, elapsed_ms: u64) {
@@ -1068,7 +1073,12 @@ impl DotsAndBoxes {
         });
 
         // Mode label.
-        let mode_text = format!("{} | {}x{}", self.mode.label(), self.grid_size(), self.grid_size());
+        let mode_text = format!(
+            "{} | {}x{}",
+            self.mode.label(),
+            self.grid_size(),
+            self.grid_size()
+        );
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: 34.0,
@@ -1164,8 +1174,20 @@ impl DotsAndBoxes {
 
                     // Player initial in the box.
                     let label = match player {
-                        Player::One => if self.mode == GameMode::VsAi { "Y" } else { "1" },
-                        Player::Two => if self.mode == GameMode::VsAi { "A" } else { "2" },
+                        Player::One => {
+                            if self.mode == GameMode::VsAi {
+                                "Y"
+                            } else {
+                                "1"
+                            }
+                        }
+                        Player::Two => {
+                            if self.mode == GameMode::VsAi {
+                                "A"
+                            } else {
+                                "2"
+                            }
+                        }
                     };
                     let cx = (x1 + x2) / 2.0 - 5.0;
                     let cy = (y1 + y2) / 2.0 - 8.0;
@@ -1312,7 +1334,9 @@ impl DotsAndBoxes {
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: footer_y + 12.0,
-            text: String::from("Arrows: move | Tab: toggle H/V | Enter: draw | N: new | M: mode | 3/4/5: size"),
+            text: String::from(
+                "Arrows: move | Tab: toggle H/V | Enter: draw | N: new | M: mode | 3/4/5: size",
+            ),
             color: OVERLAY0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -2294,7 +2318,10 @@ mod tests {
                 // After drawing the chosen line, no adjacent box should have 3 sides
                 // (unless AI is forced to).
                 let current_sides = board.box_side_count(*br, *bc);
-                assert_ne!(current_sides, 2, "AI should avoid lines that give box 3 sides when possible");
+                assert_ne!(
+                    current_sides, 2,
+                    "AI should avoid lines that give box 3 sides when possible"
+                );
             }
         }
     }
@@ -2617,7 +2644,10 @@ mod tests {
     #[cfg(not(unix))]
     fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
         let mut fresh = DotsAndBoxes::new();
-        assert_eq!(fresh.rng.next_u64(), SeededRng::new(FALLBACK_SEED).next_u64());
+        assert_eq!(
+            fresh.rng.next_u64(),
+            SeededRng::new(FALLBACK_SEED).next_u64()
+        );
         assert_ne!(
             DotsAndBoxes::new().rng.next_u64(),
             SeededRng::new(42).next_u64(),

@@ -43749,10 +43749,110 @@ but the same root cause, and the constant it gets wrong (`LIST_HEADER_HEIGHT`)
 is one that was *already* extracted to stop exactly this. Extracting the
 constant fixed the two spellings and left the missing bound.
 
+### Fourth instance: the music player's list snaps when drawn and doesn't when clicked
+
+`apps/musicplayer/src/main.rs`. `scroll_offset` is a **continuous pixel**
+offset — `wheel::pixels(*dy, TRACK_ROW_HEIGHT)` writes it (`:2296`) and a test
+pins a fractional value deliberately (`a_fraction_of_a_notch_moves_now_rather_than_being_banked`,
+`:2553`, asserts `0.3 * TRACK_ROW_HEIGHT`). The two render paths then throw the
+fraction away:
+
+```rust
+let scroll_start = (state.scroll_offset / TRACK_ROW_HEIGHT) as usize;  // :1364, :1501
+...
+let row_y = TRACK_ROW_HEIGHT + i as f32 * TRACK_ROW_HEIGHT;            // snapped
+```
+
+while the two hit tests keep it:
+
+```rust
+let row_idx = ((rel_y - TRACK_ROW_HEIGHT + state.scroll_offset)
+    / TRACK_ROW_HEIGHT) as usize;                                      // :2239, :2311
+```
+
+So at any offset that is not a whole number of rows the list is drawn snapped
+and hit-tested continuously. At 0.3 rows of scroll the top 70% of every drawn
+row selects the right track and the **bottom 30% selects the one below it** —
+and because `MouseEventKind::DoubleClick` uses the same arithmetic (`:2311`),
+double-clicking near the bottom of a row *plays* the wrong track.
+
+Two defects, not one. The second is that the single click has no bounds check
+at all:
+
+```rust
+state.selected_index = Some(row_idx);   // :2241 — row_idx unbounded
+```
+
+The renderer clamps `display_count` to the list length, but the click handler
+does not, so clicking the empty strip below the last track selects a track
+index that does not exist. (The double-click path is safe here by luck — it
+goes through `filtered.get(row_idx)`.)
+
+Note the asymmetry worth keeping: the fraction is not merely dropped, it is
+*stored and tested*. A test asserts the app accepts a third of a notch, and the
+renderer cannot show it. Whichever way that is resolved — snap the offset on
+write, or let the renderer draw at the fractional position — both sides must be
+resolved the same way, which is the whole point of deriving them from one
+helper.
+
+`sysinfo`'s `tree_hit_test` already carries a doc comment describing exactly
+this bug in the past tense ("The old form added the scroll offset as **pixels
+before dividing**, so any list scrolled to a position that was not a whole
+multiple of `TREE_ROW_HEIGHT` selected the row above or below the one drawn
+under the pointer"). It was fixed there and never swept for elsewhere.
+
+### Fifth instance: the hex editor's status bar jumps the cursor to end-of-file
+
+`apps/hexeditor/src/main.rs` `handle_mouse_click` (`:2164`) bounds the click
+above and not below:
+
+```rust
+let content_y = y - TOOLBAR_HEIGHT - TAB_BAR_HEIGHT;
+if content_y < 0.0 { return; }
+let line = (content_y / LINE_HEIGHT) as usize;
+```
+
+`visible_line_count` (`:1645`) subtracts `STATUS_BAR_HEIGHT` and the click
+handler does not, so the status bar is live: a click on it produces a line past
+the last one drawn. The offset is then clamped — `doc.cursor = offset.min(max)`
+— which makes the symptom *quiet rather than absent*: clicking the status bar
+moves the cursor to the last byte of the file, discarding any selection through
+`update_selection`. Milder than the process lists (no destructive action) but
+the same missing bound, and the clamp is what stops it being noticed.
+
+Unlike musicplayer, the scroll offset here is a `usize` row index
+(`line.saturating_add(view.scroll_offset)`), so there is no fractional
+divergence — only the missing lower bound.
+
 ### Checked and clear
 
-`ebook` (library `list_top` is `TOOLBAR_HEIGHT`, matching the hit test's
-subtraction), `partmanager` (`y >= top && y < bottom` — bounded at both ends),
-`netscan` and `remotedesktop`'s profile sidebar (both already carry regression
-tests for an earlier mis-selection). Recorded so the next sweep does not
-re-derive them.
+All fifteen apps that both handle a mouse event and divide by a row height have
+now been swept. Clear:
+
+* `ebook` — library `list_top` is `TOOLBAR_HEIGHT`, matching the hit test's
+  subtraction.
+* `partmanager` — `y >= top && y < bottom`, bounded at both ends.
+* `netscan`, `remotedesktop` (profile sidebar) — both already carry regression
+  tests for an earlier mis-selection.
+* `benchmark` — `history_row_at` rejects outside `content_top()..content_bottom_edge()`,
+  guards non-finite input, and carries a doc comment recording a previous fix of
+  this exact family.
+* `devicemanager`, `sysinfo` — both route every caller through one
+  `tree_hit_test` that rejects `offset >= pane_height()`; both doc-comment why.
+* `filediff` — has `MouseEventKind::Scroll` handlers but no click-to-row
+  mapping at all, so there is nothing to diverge. Its `visible_range` helper
+  already centralises the render-side arithmetic.
+* `settings` — the sidebar category list is fixed-length and unscrolled, and
+  `idx < SettingsCategory::ALL.len()` bounds it correctly.
+
+Recorded so the next sweep does not re-derive them.
+
+**Debt, not a bug, in `settings`:** `list_y = HEADER_HEIGHT + SEARCH_BAR_HEIGHT + 16.0`
+is written out longhand four times — the renderer (`:1422`, as
+`search_y + SEARCH_BAR_HEIGHT + 16.0`), the click handler (`:3264`), the hover
+handler (`:3343`) and `test_sidebar_click` (`:4049`). All four agree today. The
+test is the notable part: it recomputes the constant rather than reading the
+emitted render command, and probes the row *centre* (`+ 10.0` into a 44-px
+row), so it would pass unchanged if the renderer and the hit test drifted
+apart. That is the same blind spot that let the speed test's mirrored history
+survive sixty-six tests.

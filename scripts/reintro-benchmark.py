@@ -1,11 +1,11 @@
-"""Reintroduction check for the sysinfo scroll fixes.
+"""Reintroduction check for the benchmark scroll fixes.
 
 Reverts each fixed defect one at a time and asserts that at least one test
 fails. A defect that can be put back with every test still green is a defect
 the suite does not actually pin -- which is what "N tests pass" hides.
 
 Run from the lane-c worktree root:
-    python scripts/reintro-sysinfo.py
+    python scripts/reintro-benchmark.py
 """
 
 from __future__ import annotations
@@ -14,70 +14,76 @@ import subprocess
 import sys
 from pathlib import Path
 
-SRC = Path("apps/sysinfo/src/main.rs")
+SRC = Path("apps/benchmark/src/main.rs")
 
 # (name, old, new) -- `old` must occur exactly once.
 DEFECTS = [
     (
-        "wheel notches rounded per event instead of accumulated",
-        "let rows = self.tree_wheel.rows(*dy);",
-        "#[allow(clippy::cast_possible_truncation)]\n"
-        "                    let rows = (-dy * wheel::ROWS_PER_NOTCH) as isize;",
+        "wheel notches multiplied by a pixel constant",
+        "self.scroll_by(wheel::pixels(dy, ROW_HEIGHT));",
+        "self.scroll_by(dy * 20.0);",
     ),
     (
-        "sidebar wheel unbounded at the far end",
-        "scroll_window::shift(self.tree_scroll, rows).min(self.max_tree_scroll());",
-        "scroll_window::shift(self.tree_scroll, rows);",
+        "scroll offset unbounded at the far end",
+        "self.scroll_y = (self.scroll_y + delta).clamp(0.0, self.max_scroll());",
+        "self.scroll_y = (self.scroll_y + delta).max(0.0);",
     ),
     (
-        "detail wheel unbounded at the far end",
-        "self.detail_scroll = scroll_window::shift(self.detail_scroll, rows)\n"
-        "                        .min(self.max_detail_scroll());",
-        "self.detail_scroll = scroll_window::shift(self.detail_scroll, rows);",
+        "content measured from wherever it is already scrolled to",
+        "self.render_active_tab(&mut scratch, 0.0);",
+        "self.render_active_tab(&mut scratch, self.scroll_y);",
     ),
     (
-        "one accumulator shared by both panes",
-        "let rows = self.detail_wheel.rows(*dy);",
-        "let rows = self.tree_wheel.rows(*dy);",
+        "no End key: the wheel is the only way past the fold",
+        "            Key::End => {\n"
+        "                self.scroll_y = self.max_scroll();\n"
+        "                EventResult::Consumed\n"
+        "            }\n",
+        "",
     ),
     (
-        "hit test forgets the scroll offset",
-        "let row = self.tree_scroll.checked_add(slot)?;",
-        "let row = slot;",
-    ),
-    (
-        "hit test not ranged to the pane",
-        "if !offset.is_finite() || offset < 0.0 || offset >= self.pane_height() {\n"
-        "            return None;\n"
-        "        }",
-        "if !offset.is_finite() || offset < 0.0 {\n            return None;\n        }",
+        "no Down key",
+        "            Key::Down => {\n"
+        "                self.scroll_by(ROW_HEIGHT);\n"
+        "                EventResult::Consumed\n"
+        "            }\n",
+        "",
     ),
     (
         "PageDown unbounded",
-        "self.detail_scroll = self\n"
-        "                    .detail_scroll\n"
-        "                    .saturating_add(page)\n"
-        "                    .min(self.max_detail_scroll());",
-        "self.detail_scroll = self.detail_scroll.saturating_add(page);",
+        "                self.scroll_by(self.page_step());",
+        "                self.scroll_y += self.page_step();",
     ),
     (
-        "selection not scrolled into view (down)",
-        "            self.detail_scroll = 0;\n"
-        "        }\n"
-        "        self.scroll_selection_into_view();\n"
-        "    }\n"
-        "\n"
-        "    /// Select the previous visible tree row.",
-        "            self.detail_scroll = 0;\n"
-        "        }\n"
-        "    }\n"
-        "\n"
-        "    /// Select the previous visible tree row.",
+        "a page is a constant instead of the pane that is showing",
+        "        (self.content_height() - ROW_HEIGHT).max(ROW_HEIGHT)",
+        "        100.0",
     ),
     (
-        "row stripes keyed on the screen slot",
-        "let row_bg = if idx % 2 == 0 {",
-        "let row_bg = if slot % 2 == 0 {",
+        "hit test skips only the title, not the summary and header",
+        "        let offset = y - self.history_rows_top();",
+        "        let offset = y\n"
+        "            - (self.content_top() + CONTENT_PADDING - self.scroll_y\n"
+        "                + HISTORY_TITLE_ROW);",
+    ),
+    (
+        "hit test forgets the scroll offset",
+        "        self.content_top() + CONTENT_PADDING - self.scroll_y\n"
+        "            + HISTORY_TITLE_ROW",
+        "        self.content_top() + CONTENT_PADDING + HISTORY_TITLE_ROW",
+    ),
+    (
+        "hit test not ranged to the pane",
+        "        if y < self.content_top() || y >= self.content_bottom_edge() {\n"
+        "            return None;\n"
+        "        }\n",
+        "",
+    ),
+    (
+        "switching tabs keeps the old tab's scroll offset",
+        "                self.active_tab = tab;\n"
+        "                self.scroll_y = 0.0;",
+        "                self.active_tab = tab;",
     ),
 ]
 
@@ -87,11 +93,11 @@ def run_tests() -> tuple[bool, str]:
         [
             sys.executable,
             "scripts/run-timeout.py",
-            "300",
+            "600",
             "cargo",
             "test",
             "-p",
-            "sysinfo-app",
+            "benchmark",
             "--target",
             "x86_64-pc-windows-gnu",
         ],

@@ -24,9 +24,10 @@ use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::fold;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::wheel;
 
 use std::collections::VecDeque;
 
@@ -70,6 +71,21 @@ const PROGRESS_BAR_HEIGHT: f32 = 20.0;
 const BUTTON_WIDTH: f32 = 120.0;
 const BUTTON_HEIGHT: f32 = 34.0;
 const MAX_HISTORY: usize = 10;
+
+// The History tab's furniture, above its first data row. Named because the
+// renderer stacks them and the click handler has to skip exactly the same
+// stack: it used to open-code `+ 30.0` and stop there, missing the summary
+// line and the column header, so every click landed two rows below the row
+// the user aimed at. See `BenchmarkApp::history_rows_top`.
+/// The "Benchmark History" title.
+const HISTORY_TITLE_ROW: f32 = 30.0;
+/// The best/average/worst summary line.
+const HISTORY_SUMMARY_ROW: f32 = 24.0;
+/// The column-header row and the gap under it.
+const HISTORY_HEADER_ROW: f32 = ROW_HEIGHT + 2.0;
+/// Breathing room below the last thing a tab draws, so the end of the content
+/// is not flush against the bottom edge of the pane.
+const CONTENT_BOTTOM_MARGIN: f32 = CONTENT_PADDING;
 
 // Score weights for overall composite.
 const CPU_WEIGHT: f64 = 0.35;
@@ -831,10 +847,17 @@ fn simulate_prime_sieve() -> f64 {
     {
         *slot = false;
     }
-    let mut p = 2;
-    while p * p < limit {
+    let mut p = 2usize;
+    // `checked_mul` rather than `p * p`: the loop bound is the square, so the
+    // square is computed before it is known to be small. Reaching a `p` whose
+    // square overflows would mean `limit` is near `usize::MAX`, in which case
+    // there is nothing left to sieve and stopping is the right answer anyway.
+    while let Some(square) = p.checked_mul(p) {
+        if square >= limit {
+            break;
+        }
         if sieve.get(p).copied().unwrap_or(false) {
-            let mut multiple = p * p;
+            let mut multiple = square;
             while multiple < limit {
                 if let Some(slot) = sieve.get_mut(multiple) {
                     *slot = false;
@@ -859,30 +882,29 @@ fn simulate_matrix_multiply() -> f64 {
     let mut a = vec![0.0f64; n * n];
     let mut b = vec![0.0f64; n * n];
     let mut c = vec![0.0f64; n * n];
-    for i in 0..n {
-        for j in 0..n {
-            if let Some(slot) = a.get_mut(i * n + j) {
-                *slot = (i as f64) * 0.1 + (j as f64) * 0.01;
-            }
-            if let Some(slot) = b.get_mut(i * n + j) {
-                *slot = (j as f64) * 0.1 + (i as f64) * 0.01;
-            }
+    // Walked as rows rather than as `i * n + j`: the row-major index arithmetic
+    // is the only integer arithmetic in this function, and `chunks_exact` both
+    // removes it and makes the row/column roles of `i` and `j` visible.
+    for (i, (a_row, b_row)) in a.chunks_exact_mut(n).zip(b.chunks_exact_mut(n)).enumerate() {
+        for (j, (a_cell, b_cell)) in a_row.iter_mut().zip(b_row.iter_mut()).enumerate() {
+            *a_cell = (i as f64) * 0.1 + (j as f64) * 0.01;
+            *b_cell = (j as f64) * 0.1 + (i as f64) * 0.01;
         }
     }
-    for i in 0..n {
-        for j in 0..n {
+    for (a_row, c_row) in a.chunks_exact(n).zip(c.chunks_exact_mut(n)) {
+        for (j, c_cell) in c_row.iter_mut().enumerate() {
             let mut sum = 0.0f64;
-            for k in 0..n {
-                let a_val = a.get(i * n + k).copied().unwrap_or(0.0);
-                let b_val = b.get(k * n + j).copied().unwrap_or(0.0);
-                sum += a_val * b_val;
+            for (a_val, b_row) in a_row.iter().zip(b.chunks_exact(n)) {
+                sum += a_val * b_row.get(j).copied().unwrap_or(0.0);
             }
-            if let Some(slot) = c.get_mut(i * n + j) {
-                *slot = sum;
-            }
+            *c_cell = sum;
         }
     }
-    let trace: f64 = (0..n).filter_map(|i| c.get(i * n + i).copied()).sum();
+    let trace: f64 = c
+        .chunks_exact(n)
+        .enumerate()
+        .filter_map(|(i, row)| row.get(i).copied())
+        .sum();
     let base = 2050.0;
     if trace > 0.0 { base + 15.0 } else { base }
 }
@@ -961,8 +983,13 @@ fn simulate_seq_read_throughput() -> f64 {
 
 fn simulate_random_access_latency() -> f64 {
     // Lower is better. Simulate pointer-chasing.
-    let size = 4096;
-    let data: Vec<u32> = (0..size).map(|i| ((i * 7 + 13) % size) as u32).collect();
+    let size: usize = 4096;
+    // Wrapping, not checked: the stride is a synthetic pointer-chase and the
+    // `% size` that follows makes any wrap land back inside the table, so a
+    // wrap would change which cells are visited but not the shape of the work.
+    let data: Vec<u32> = (0..size)
+        .map(|i| (i.wrapping_mul(7).wrapping_add(13) % size) as u32)
+        .collect();
     let mut idx: u32 = 0;
     for _ in 0..1000 {
         idx = data.get(idx as usize % size).copied().unwrap_or(0);
@@ -1116,9 +1143,9 @@ fn simulate_text_rendering() -> f64 {
     let glyph_count = 10_000;
     let mut total_area: u64 = 0;
     for i in 0..glyph_count {
-        let w: u64 = 8 + (i % 12);
-        let h: u64 = 12 + (i % 8);
-        total_area = total_area.wrapping_add(w * h);
+        let w: u64 = 8u64.wrapping_add(i % 12);
+        let h: u64 = 12u64.wrapping_add(i % 8);
+        total_area = total_area.wrapping_add(w.wrapping_mul(h));
     }
     let base = 520000.0;
     if total_area > 0 { base + 5000.0 } else { base }
@@ -1129,8 +1156,8 @@ fn simulate_composite_ops() -> f64 {
     let ops = 5000;
     let mut result: u32 = 0;
     for i in 0u32..ops {
-        let src_a = (i * 7) & 0xFF;
-        let dst = (i * 13) & 0xFF;
+        let src_a = i.wrapping_mul(7) & 0xFF;
+        let dst = i.wrapping_mul(13) & 0xFF;
         // Simple alpha blend: src_a * src + (255 - src_a) * dst / 255.
         let blended = (src_a.wrapping_mul(i & 0xFF))
             .wrapping_add((255u32.wrapping_sub(src_a)).wrapping_mul(dst))
@@ -1180,7 +1207,17 @@ pub struct BenchmarkApp {
     pub history: BenchmarkHistory,
     /// Current comparison (if previous result exists).
     pub comparison: Option<ComparisonResult>,
-    /// Scroll offset in the content area.
+    /// Scroll offset in the content area, in pixels from the top of the
+    /// content.
+    ///
+    /// Pixels rather than a row index — unlike a list of uniform rows, a tab
+    /// here is prose, cards, bar charts and a trend graph, and an item index
+    /// could not name a position part-way down a 100 px chart. The wheel used
+    /// to move this by `dy * 20.0`, misreading a count of wheel notches as a
+    /// pixel distance, and nothing bounded it at the far end: scrolling past
+    /// the last thing drawn kept the number climbing while the content stood
+    /// still, and the same distance had to be scrolled back before anything
+    /// moved again.
     pub scroll_y: f32,
     /// Hover state for the "Run" button.
     pub run_button_hover: bool,
@@ -1243,6 +1280,113 @@ impl BenchmarkApp {
         self.active_tab = Tab::Overview;
     }
 
+    // ========================================================================
+    // Layout and scrolling
+    //
+    // The content rectangle and the History tab's first data row each used to
+    // be recomputed independently by the renderer and the click handler, from
+    // the same constants — and they disagreed. That is the divergence class in
+    // `known-issues.md` (`C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-
+    // SEPARATELY`). They are derived once here.
+    // ========================================================================
+
+    /// Top edge of the scrollable content area.
+    pub fn content_top(&self) -> f32 {
+        TITLE_BAR_HEIGHT + TAB_BAR_HEIGHT
+    }
+
+    /// Height of the scrollable content area: what is left after the title
+    /// bar, the tab bar, the button strip and the status bar.
+    pub fn content_height(&self) -> f32 {
+        (self.height - self.content_top() - STATUS_BAR_HEIGHT - BUTTON_HEIGHT - 20.0).max(0.0)
+    }
+
+    /// Bottom edge of the scrollable content area.
+    pub fn content_bottom_edge(&self) -> f32 {
+        self.content_top() + self.content_height()
+    }
+
+    /// Screen `y` of the History tab's first data row, at the current scroll.
+    ///
+    /// The renderer stacks the title, the summary line and the column header
+    /// above it; the click handler skipped only the title, so a click landed
+    /// two rows below the row under the pointer. Both go through here now.
+    fn history_rows_top(&self) -> f32 {
+        self.content_top() + CONTENT_PADDING - self.scroll_y
+            + HISTORY_TITLE_ROW
+            + HISTORY_SUMMARY_ROW
+            + HISTORY_HEADER_ROW
+    }
+
+    /// Draw the active tab's content at a given scroll offset.
+    ///
+    /// Taking the offset as an argument rather than reading `self.scroll_y` is
+    /// what lets [`Self::max_scroll`] measure the content at rest: a renderer
+    /// that reads the field can only ever be asked "how tall is it *from
+    /// here*", which is the question whose answer we are trying to bound.
+    fn render_active_tab(&self, tree: &mut RenderTree, scroll: f32) {
+        let top = self.content_top();
+        match self.active_tab {
+            Tab::Overview => self.render_overview(tree, top, scroll),
+            Tab::Cpu => {
+                self.render_category_detail(
+                    tree,
+                    top,
+                    scroll,
+                    self.history.latest().map(|r| &r.cpu),
+                    "CPU",
+                );
+            }
+            Tab::Memory => self.render_category_detail(
+                tree,
+                top,
+                scroll,
+                self.history.latest().map(|r| &r.memory),
+                "Memory",
+            ),
+            Tab::Disk => self.render_category_detail(
+                tree,
+                top,
+                scroll,
+                self.history.latest().map(|r| &r.disk),
+                "Disk",
+            ),
+            Tab::Graphics => self.render_category_detail(
+                tree,
+                top,
+                scroll,
+                self.history.latest().map(|r| &r.graphics),
+                "Graphics",
+            ),
+            Tab::History => self.render_history_tab(tree, top, scroll),
+        }
+    }
+
+    /// How far the content can scroll before its last pixel is on screen.
+    ///
+    /// Measured by *rendering* the active tab and asking where the drawing
+    /// stopped, rather than by a second pass that adds up the same heights the
+    /// renderer does. A tab here is cards, bar charts, a variable number of
+    /// sub-test rows and an optional trend graph, and any tally kept beside
+    /// the renderer would be one edit away from disagreeing with it — which is
+    /// the whole class of bug this app already had.
+    pub fn max_scroll(&self) -> f32 {
+        let mut scratch = RenderTree::new();
+        self.render_active_tab(&mut scratch, 0.0);
+        let Some(bottom) = content_bottom(&scratch.commands) else {
+            return 0.0;
+        };
+        (bottom + CONTENT_BOTTOM_MARGIN - self.content_bottom_edge()).max(0.0)
+    }
+
+    /// Move the content by `delta` pixels, staying inside the scrollable range.
+    fn scroll_by(&mut self, delta: f32) {
+        if !delta.is_finite() {
+            return;
+        }
+        self.scroll_y = (self.scroll_y + delta).clamp(0.0, self.max_scroll());
+    }
+
     /// Handle a UI event.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
@@ -1253,8 +1397,19 @@ impl BenchmarkApp {
                 match mouse_event.kind {
                     MouseEventKind::Press(MouseButton::Left) => self.handle_click(x, y),
                     MouseEventKind::Move => self.handle_mouse_move(x, y),
+                    // `dy` counts wheel *notches*, not pixels — see
+                    // `MouseEventKind::Scroll`. This used to multiply it by
+                    // 20.0 on the assumption it was a distance, which moved
+                    // 20 px per detent and discarded a trackpad's fractions
+                    // entirely.
+                    //
+                    // `wheel::pixels` rather than `Accumulator::rows`, and no
+                    // accumulator: this pane genuinely is continuous — charts
+                    // and prose, not a run of rows — so a trackpad's 0.2 of a
+                    // notch is 14.4 px of real movement rather than a fraction
+                    // that has to be banked until it becomes a whole row.
                     MouseEventKind::Scroll { dy, .. } => {
-                        self.scroll_y = (self.scroll_y - dy * 20.0).max(0.0);
+                        self.scroll_by(wheel::pixels(dy, ROW_HEIGHT));
                         EventResult::Consumed
                     }
                     _ => EventResult::Ignored,
@@ -1331,24 +1486,63 @@ impl BenchmarkApp {
                 self.scroll_y = 0.0;
                 EventResult::Consumed
             }
+            // `Home` was the only scroll key, which made the wheel the only
+            // way to reach anything below the fold and left no way at all
+            // without a mouse.
+            Key::End => {
+                self.scroll_y = self.max_scroll();
+                EventResult::Consumed
+            }
+            Key::Up => {
+                self.scroll_by(-ROW_HEIGHT);
+                EventResult::Consumed
+            }
+            Key::Down => {
+                self.scroll_by(ROW_HEIGHT);
+                EventResult::Consumed
+            }
+            // A page is the pane that is showing, less one row of overlap so
+            // the reader keeps their place — not a fixed constant that stops
+            // matching the pane the moment the window is resized.
+            Key::PageUp => {
+                self.scroll_by(-self.page_step());
+                EventResult::Consumed
+            }
+            Key::PageDown => {
+                self.scroll_by(self.page_step());
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
 
+    /// How far one `PageUp`/`PageDown` moves the content.
+    fn page_step(&self) -> f32 {
+        (self.content_height() - ROW_HEIGHT).max(ROW_HEIGHT)
+    }
+
+    /// Move to the next tab, wrapping round to the first.
+    ///
+    /// The wrap is done by comparison rather than by `% tabs.len()` so that an
+    /// empty tab list -- which `%` would turn into a divide-by-zero panic --
+    /// simply leaves the selection where it is.
     fn cycle_tab_forward(&mut self) {
         let tabs = Tab::all();
         let current_idx = tabs.iter().position(|&t| t == self.active_tab).unwrap_or(0);
-        let next_idx = (current_idx + 1) % tabs.len();
+        let next_idx = match current_idx.checked_add(1) {
+            Some(next) if next < tabs.len() => next,
+            _ => 0,
+        };
         self.active_tab = tabs.get(next_idx).copied().unwrap_or(Tab::Overview);
     }
 
+    /// Move to the previous tab, wrapping round to the last.
     fn cycle_tab_backward(&mut self) {
         let tabs = Tab::all();
         let current_idx = tabs.iter().position(|&t| t == self.active_tab).unwrap_or(0);
-        let prev_idx = if current_idx == 0 {
-            tabs.len() - 1
-        } else {
-            current_idx - 1
+        let prev_idx = match current_idx.checked_sub(1) {
+            Some(prev) => prev,
+            None => tabs.len().saturating_sub(1),
         };
         self.active_tab = tabs.get(prev_idx).copied().unwrap_or(Tab::Overview);
     }
@@ -1404,19 +1598,45 @@ impl BenchmarkApp {
         }
 
         // History row click (on History tab).
-        if self.active_tab == Tab::History {
-            let content_y = TITLE_BAR_HEIGHT + TAB_BAR_HEIGHT + CONTENT_PADDING;
-            let header_y = content_y + 30.0; // Skip title.
-            if x >= CONTENT_PADDING && x <= self.width - CONTENT_PADDING && y >= header_y {
-                let row_idx = ((y - header_y + self.scroll_y) / ROW_HEIGHT) as usize;
-                if row_idx < self.history.len() {
-                    self.selected_history_idx = Some(row_idx);
-                    return EventResult::Consumed;
-                }
-            }
+        if self.active_tab == Tab::History
+            && let Some(row) = self.history_row_at(x, y)
+        {
+            self.selected_history_idx = Some(row);
+            return EventResult::Consumed;
         }
 
         EventResult::Ignored
+    }
+
+    /// Which History row, if any, is drawn under `(x, y)`.
+    ///
+    /// This used to skip only the tab's title before dividing by the row
+    /// height, missing the summary line and the column header the renderer
+    /// also draws — 50 px, or just over two rows, so clicking a row selected
+    /// the one two below it. It also never checked that the click was inside
+    /// the content area, so a click on the button strip below selected
+    /// whichever row the arithmetic happened to land on.
+    pub fn history_row_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        if x < CONTENT_PADDING || x > self.width - CONTENT_PADDING {
+            return None;
+        }
+        if y < self.content_top() || y >= self.content_bottom_edge() {
+            return None;
+        }
+        let offset = y - self.history_rows_top();
+        if offset < 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let row = (offset / ROW_HEIGHT) as usize;
+        if row < self.history.len() {
+            Some(row)
+        } else {
+            None
+        }
     }
 
     fn handle_mouse_move(&mut self, x: f32, y: f32) -> EventResult {
@@ -1582,52 +1802,24 @@ impl BenchmarkApp {
     }
 
     fn render_content(&self, tree: &mut RenderTree) {
-        let content_y = TITLE_BAR_HEIGHT + TAB_BAR_HEIGHT;
-        let content_h = self.height - content_y - STATUS_BAR_HEIGHT - BUTTON_HEIGHT - 20.0;
-
-        // Clip content area.
+        // The rectangle comes from the same two methods the click handler and
+        // the scroll bound use; it used to be recomputed here from the raw
+        // constants, which is how the two came to disagree.
         tree.push(RenderCommand::PushClip {
             x: 0.0,
-            y: content_y,
+            y: self.content_top(),
             width: self.width,
-            height: content_h,
+            height: self.content_height(),
         });
 
-        match self.active_tab {
-            Tab::Overview => self.render_overview(tree, content_y, content_h),
-            Tab::Cpu => self.render_category_detail(
-                tree,
-                content_y,
-                &self.history.latest().map(|r| &r.cpu),
-                "CPU",
-            ),
-            Tab::Memory => self.render_category_detail(
-                tree,
-                content_y,
-                &self.history.latest().map(|r| &r.memory),
-                "Memory",
-            ),
-            Tab::Disk => self.render_category_detail(
-                tree,
-                content_y,
-                &self.history.latest().map(|r| &r.disk),
-                "Disk",
-            ),
-            Tab::Graphics => self.render_category_detail(
-                tree,
-                content_y,
-                &self.history.latest().map(|r| &r.graphics),
-                "Graphics",
-            ),
-            Tab::History => self.render_history_tab(tree, content_y, content_h),
-        }
+        self.render_active_tab(tree, self.scroll_y);
 
         tree.push(RenderCommand::PopClip);
     }
 
-    fn render_overview(&self, tree: &mut RenderTree, base_y: f32, _content_h: f32) {
+    fn render_overview(&self, tree: &mut RenderTree, base_y: f32, scroll: f32) {
         let x = CONTENT_PADDING;
-        let mut y = base_y + CONTENT_PADDING - self.scroll_y;
+        let mut y = base_y + CONTENT_PADDING - scroll;
 
         // Progress bar (if running or just completed).
         if self.progress.phase.is_running() || self.progress.phase.is_complete() {
@@ -1901,11 +2093,12 @@ impl BenchmarkApp {
         &self,
         tree: &mut RenderTree,
         base_y: f32,
-        category: &Option<&CategoryResult>,
+        scroll: f32,
+        category: Option<&CategoryResult>,
         title: &str,
     ) {
         let x = CONTENT_PADDING;
-        let mut y = base_y + CONTENT_PADDING - self.scroll_y;
+        let mut y = base_y + CONTENT_PADDING - scroll;
 
         tree.push(RenderCommand::Text {
             x,
@@ -2081,9 +2274,9 @@ impl BenchmarkApp {
         }
     }
 
-    fn render_history_tab(&self, tree: &mut RenderTree, base_y: f32, _content_h: f32) {
+    fn render_history_tab(&self, tree: &mut RenderTree, base_y: f32, scroll: f32) {
         let x = CONTENT_PADDING;
-        let mut y = base_y + CONTENT_PADDING - self.scroll_y;
+        let mut y = base_y + CONTENT_PADDING - scroll;
 
         tree.push(RenderCommand::Text {
             x,
@@ -2095,7 +2288,7 @@ impl BenchmarkApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        y += 30.0;
+        y += HISTORY_TITLE_ROW;
 
         if self.history.is_empty() {
             tree.push(RenderCommand::Text {
@@ -2148,7 +2341,7 @@ impl BenchmarkApp {
                 overflow: TextOverflow::Clip,
             });
         }
-        y += 24.0;
+        y += HISTORY_SUMMARY_ROW;
 
         // Column headers.
         let row_width = self.width - 2.0 * CONTENT_PADDING;
@@ -2175,7 +2368,18 @@ impl BenchmarkApp {
                 overflow: TextOverflow::Clip,
             });
         }
-        y += ROW_HEIGHT + 2.0;
+        y += HISTORY_HEADER_ROW;
+
+        // The furniture this renderer has just stacked must be the same stack
+        // `history_rows_top` adds up, or a click lands on a different row than
+        // the one drawn under it — which is exactly what it did.
+        debug_assert!(
+            (scroll - self.scroll_y).abs() > f32::EPSILON
+                || (y - self.history_rows_top()).abs() < 0.01,
+            "the History tab's first row is at {y}, but the click handler \
+             looks for it at {}",
+            self.history_rows_top(),
+        );
 
         // History rows.
         for (i, run) in self.history.iter().enumerate() {
@@ -2279,26 +2483,32 @@ impl BenchmarkApp {
         let max_score = scores.iter().copied().reduce(f64::max).unwrap_or(1.0);
         let range = (max_score - min_score).max(1.0);
 
-        let n = scores.len();
-        let step_x = if n > 1 {
-            (chart_width - 20.0) / (n - 1) as f32
-        } else {
-            chart_width
+        // One fewer gap than there are points, and the early return above
+        // guarantees at least two points -- but the subtraction is written as
+        // `checked_sub` so that the guarantee lives in the code rather than in
+        // a reader's memory of a `return` forty lines up.
+        let step_x = match scores.len().checked_sub(1) {
+            Some(gaps) if gaps > 0 => (chart_width - 20.0) / gaps as f32,
+            _ => chart_width,
         };
         let padding_top = 10.0;
         let padding_bottom = 10.0;
         let usable_height = chart_height - padding_top - padding_bottom;
 
-        // Draw line segments between data points.
-        for i in 1..n {
-            let prev_score = scores.get(i - 1).copied().unwrap_or(0.0);
-            let curr_score = scores.get(i).copied().unwrap_or(0.0);
+        // Draw line segments between data points. `windows(2)` rather than
+        // `1..n` with an `i - 1`: the pair *is* the segment, so the index
+        // enumerated here is the left-hand end and the right-hand end is one
+        // step across -- no index arithmetic and no chance of the two ends
+        // being computed from different points.
+        for (i, pair) in scores.windows(2).enumerate() {
+            let prev_score = pair.first().copied().unwrap_or(0.0);
+            let curr_score = pair.get(1).copied().unwrap_or(0.0);
             let prev_frac = ((prev_score - min_score) / range) as f32;
             let curr_frac = ((curr_score - min_score) / range) as f32;
 
-            let x1 = x + 10.0 + (i - 1) as f32 * step_x;
+            let x1 = x + 10.0 + i as f32 * step_x;
             let y1 = chart_y + chart_height - padding_bottom - prev_frac * usable_height;
-            let x2 = x + 10.0 + i as f32 * step_x;
+            let x2 = x1 + step_x;
             let y2 = chart_y + chart_height - padding_bottom - curr_frac * usable_height;
 
             tree.push(RenderCommand::Line {
@@ -2564,6 +2774,22 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
+    // Panicking on bad data is what a test is for: an `expect` that fires here
+    // *is* the failure report, and rewriting it as a `match` would only bury
+    // the message. CLAUDE.md scopes the defensive panic lints to non-test code
+    // for exactly this reason. `float_cmp` is allowed on the same grounds: the
+    // values compared exactly are ones the code sets to a literal -- a freshly
+    // constructed score is `0.0`, not "about zero" -- while the measurements
+    // that really are computed are compared against `EPS` in the scroll tests
+    // at the bottom of this module.
+    #![allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     // --- SubTestResult tests ---
@@ -3527,5 +3753,457 @@ mod tests {
         // Override the computed overall to the exact desired value.
         result.overall_score = overall;
         result
+    }
+
+    // ========================================================================
+    // Scrolling, and the History tab's hit test
+    //
+    // Written in the units of the bug. The wheel handler used to move the
+    // content by `dy * 20.0` -- reading a count of wheel notches as a pixel
+    // distance -- so every assertion below names the distance the content
+    // should actually travel, rather than settling for "it moved", which is
+    // the assertion `dy * 20.0` would have passed too.
+    // ========================================================================
+
+    use guitk::event::MouseEvent;
+
+    /// What one wheel notch is worth, in pixels of content.
+    ///
+    /// Derived from the platform constant and this app's row height, but
+    /// deliberately *not* from `wheel::pixels`: taking it from the converter
+    /// under test would make every expectation below agree with it by
+    /// construction, and so still pass in an app that never called it.
+    const NOTCH_PX: f32 = wheel::ROWS_PER_NOTCH * ROW_HEIGHT;
+
+    /// An x inside the content area and clear of the button strip -- the same
+    /// column the History tab draws its run numbers in.
+    const CONTENT_X: f32 = CONTENT_PADDING + 8.0;
+
+    /// Floats compared to the pixel: anything coarser would let half a notch
+    /// through, which is the size of the error being tested for.
+    const EPS: f32 = 0.05;
+
+    /// An app whose `tab` overflows the content area with room for two notches.
+    ///
+    /// The `assert!` is the fixture checking that it is able to fail. A scroll
+    /// test run against content that already fits on screen passes whatever
+    /// the handler does, because zero is the right answer either way.
+    fn scrolling_app(tab: Tab) -> BenchmarkApp {
+        let mut app = BenchmarkApp::new();
+        for _ in 0..3 {
+            app.run_benchmark();
+        }
+        app.active_tab = tab;
+        app.scroll_y = 0.0;
+        // The tabs are not the same height -- a category tab with four
+        // sub-tests fits a 320 px window with room to spare -- so a single
+        // fixed window height would leave this fixture unable to fail on the
+        // short ones. Shrink the window by whatever the tab is short by
+        // instead: the content area's height moves one-for-one with the
+        // window's, so this lands every tab 20 px beyond the minimum travel.
+        app.height = 320.0;
+        app.height -= (NOTCH_PX * 2.0 - app.max_scroll()).max(0.0) + 20.0;
+        assert!(
+            app.max_scroll() > NOTCH_PX * 2.0,
+            "fixture's {tab:?} tab has only {} px of travel, too little to tell \
+             a correct scroll from a broken one",
+            app.max_scroll(),
+        );
+        app
+    }
+
+    fn scroll_event(dy: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x: CONTENT_X,
+            y: 200.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    fn click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn press(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        })
+    }
+
+    /// The `y` of every run-number cell the History tab actually draws.
+    ///
+    /// Rows are found by their run-number cell, not by their background fill.
+    /// The column header is a `SURFACE0` rectangle exactly one `ROW_HEIGHT`
+    /// high -- which is also what an odd-numbered row's background is -- so a
+    /// fill-based filter reports one row more than the table drew and then
+    /// blames the hit test for an off-by-one it invented itself. sysinfo's
+    /// conversion lost time to exactly that collision; see `known-issues.md`
+    /// under `C-SCROLL-DELTA-UNITS-ARE-DOCUMENTED-WRONG`.
+    ///
+    /// The cell's own `y` is returned rather than the row's top edge, so that
+    /// this helper does not have to restate the renderer's text inset -- the
+    /// whole point of the exercise being that only the renderer knows where a
+    /// row is.
+    fn drawn_history_number_cells(app: &BenchmarkApp) -> Vec<f32> {
+        let mut tree = RenderTree::new();
+        app.render_active_tab(&mut tree, app.scroll_y);
+        tree.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x, y, text, color, ..
+                } if *color == TEXT_COLOR
+                    && (*x - CONTENT_X).abs() < EPS
+                    && text.parse::<usize>().is_ok() =>
+                {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the active tab's drawing stops, at the current scroll offset.
+    fn drawn_bottom(app: &BenchmarkApp) -> f32 {
+        let mut tree = RenderTree::new();
+        app.render_active_tab(&mut tree, app.scroll_y);
+        content_bottom(&tree.commands).unwrap_or(0.0)
+    }
+
+    #[test]
+    fn one_wheel_notch_scrolls_three_rows_worth_of_pixels() {
+        let mut app = scrolling_app(Tab::History);
+        assert_eq!(app.handle_event(&scroll_event(-1.0)), EventResult::Consumed);
+        assert!(
+            (app.scroll_y - NOTCH_PX).abs() < EPS,
+            "one notch moved the content {} px, not {NOTCH_PX}",
+            app.scroll_y,
+        );
+    }
+
+    #[test]
+    fn a_trackpads_fraction_of_a_notch_moves_the_content_by_that_fraction() {
+        // A pixel offset is already continuous, so unlike a list of rows there
+        // is no fraction here to bank until it becomes a whole step: a fifth of
+        // a notch is a fifth of a notch's worth of pixels, immediately.
+        let mut app = scrolling_app(Tab::History);
+        app.handle_event(&scroll_event(-0.2));
+        assert!(
+            (app.scroll_y - NOTCH_PX / 5.0).abs() < EPS,
+            "a fifth of a notch moved the content {} px, not {}",
+            app.scroll_y,
+            NOTCH_PX / 5.0,
+        );
+        for _ in 0..4 {
+            app.handle_event(&scroll_event(-0.2));
+        }
+        assert!(
+            (app.scroll_y - NOTCH_PX).abs() < EPS,
+            "five fifths of a notch moved the content {} px, not {NOTCH_PX}",
+            app.scroll_y,
+        );
+    }
+
+    #[test]
+    fn the_wheel_stops_at_the_bottom_of_the_content() {
+        let mut app = scrolling_app(Tab::History);
+        let limit = app.max_scroll();
+        for _ in 0..200 {
+            app.handle_event(&scroll_event(-1.0));
+        }
+        assert!(
+            (app.scroll_y - limit).abs() < EPS,
+            "the wheel ran past the end of the content to {}, limit {limit}",
+            app.scroll_y,
+        );
+    }
+
+    #[test]
+    fn the_wheel_stops_at_the_top_of_the_content() {
+        let mut app = scrolling_app(Tab::History);
+        for _ in 0..5 {
+            app.handle_event(&scroll_event(1.0));
+        }
+        assert!(
+            app.scroll_y.abs() < EPS,
+            "the wheel ran above the top of the content to {}",
+            app.scroll_y,
+        );
+    }
+
+    #[test]
+    fn end_reaches_the_bottom_and_home_returns_to_the_top() {
+        let mut app = scrolling_app(Tab::History);
+        app.handle_event(&press(Key::End));
+        assert!((app.scroll_y - app.max_scroll()).abs() < EPS);
+        app.handle_event(&press(Key::Home));
+        assert!(app.scroll_y.abs() < EPS);
+    }
+
+    #[test]
+    fn at_the_bottom_the_last_pixel_of_content_is_on_screen() {
+        // The point of bounding the offset: one screenful past the end used to
+        // be reachable, and the same distance then had to be scrolled back
+        // before anything moved again.
+        let mut app = scrolling_app(Tab::History);
+        app.handle_event(&press(Key::End));
+        let want = app.content_bottom_edge() - CONTENT_BOTTOM_MARGIN;
+        assert!(
+            (drawn_bottom(&app) - want).abs() < EPS,
+            "at the far end the content stops at {}, wanted {want}",
+            drawn_bottom(&app),
+        );
+    }
+
+    #[test]
+    fn a_page_is_the_pane_that_was_showing_less_one_row() {
+        let app = scrolling_app(Tab::History);
+        assert!(
+            (app.page_step() - (app.content_height() - ROW_HEIGHT)).abs() < EPS,
+            "a page is {} px against a {} px pane",
+            app.page_step(),
+            app.content_height(),
+        );
+    }
+
+    #[test]
+    fn a_page_down_moves_by_that_page() {
+        let mut app = scrolling_app(Tab::History);
+        let want = app.page_step().min(app.max_scroll());
+        app.handle_event(&press(Key::PageDown));
+        assert!(
+            (app.scroll_y - want).abs() < EPS,
+            "PageDown moved {} px, wanted {want}",
+            app.scroll_y,
+        );
+    }
+
+    #[test]
+    fn paging_past_either_end_is_bounded() {
+        let mut app = scrolling_app(Tab::History);
+        let limit = app.max_scroll();
+        for _ in 0..50 {
+            app.handle_event(&press(Key::PageDown));
+        }
+        assert!(
+            (app.scroll_y - limit).abs() < EPS,
+            "PageDown ran to {}",
+            app.scroll_y,
+        );
+        for _ in 0..50 {
+            app.handle_event(&press(Key::PageUp));
+        }
+        assert!(app.scroll_y.abs() < EPS, "PageUp ran to {}", app.scroll_y);
+    }
+
+    #[test]
+    fn the_arrow_keys_move_one_row_and_stop_at_the_top() {
+        let mut app = scrolling_app(Tab::History);
+        app.handle_event(&press(Key::Down));
+        assert!(
+            (app.scroll_y - ROW_HEIGHT).abs() < EPS,
+            "Down moved {} px, wanted one {ROW_HEIGHT} px row",
+            app.scroll_y,
+        );
+        app.handle_event(&press(Key::Up));
+        app.handle_event(&press(Key::Up));
+        assert!(
+            app.scroll_y.abs() < EPS,
+            "Up ran above the top to {}",
+            app.scroll_y,
+        );
+    }
+
+    #[test]
+    fn every_tab_scrolls_to_the_end_of_its_own_content() {
+        // `max_scroll` measures the tab that is showing, so switching tabs has
+        // to change the limit. A single shared constant would leave the short
+        // tabs scrollable into blank space and clip the tall ones.
+        for tab in Tab::all() {
+            let mut app = scrolling_app(*tab);
+            app.handle_event(&press(Key::End));
+            let want = app.content_bottom_edge() - CONTENT_BOTTOM_MARGIN;
+            assert!(
+                (drawn_bottom(&app) - want).abs() < EPS,
+                "{tab:?} stops at {} at its far end, wanted {want}",
+                drawn_bottom(&app),
+            );
+        }
+    }
+
+    #[test]
+    fn switching_tabs_returns_the_content_to_the_top() {
+        let mut app = scrolling_app(Tab::History);
+        app.handle_event(&press(Key::End));
+        assert!(app.scroll_y > 0.0);
+        // Click the first tab in the tab bar.
+        app.handle_event(&click_at(10.0, TITLE_BAR_HEIGHT + TAB_BAR_HEIGHT / 2.0));
+        assert_eq!(app.active_tab, Tab::Overview);
+        assert!(
+            app.scroll_y.abs() < EPS,
+            "the new tab opened {} px down its own content",
+            app.scroll_y,
+        );
+    }
+
+    #[test]
+    fn the_history_rows_are_drawn_one_row_apart() {
+        // Backs the helper above: if the table's pitch were not `ROW_HEIGHT`,
+        // a hit test that divides by `ROW_HEIGHT` could not be right, and the
+        // agreement tests below would be checking the wrong thing.
+        let app = scrolling_app(Tab::History);
+        let cells = drawn_history_number_cells(&app);
+        assert_eq!(cells.len(), app.history.len(), "cells: {cells:?}");
+        for pair in cells.windows(2) {
+            let a = pair.first().copied().unwrap_or(0.0);
+            let b = pair.get(1).copied().unwrap_or(0.0);
+            assert!(
+                (b - a - ROW_HEIGHT).abs() < EPS,
+                "rows are {} px apart, not {ROW_HEIGHT}",
+                b - a,
+            );
+        }
+    }
+
+    /// A full-size window showing the whole History table, with clear space
+    /// below it.
+    ///
+    /// Separate from [`scrolling_app`] because the two want opposite things:
+    /// a scroll test needs content taller than the pane, while a hit test
+    /// needs the rows -- and the gap after the last one -- to be *on* the
+    /// pane. The renderer draws every row and lets the clip rectangle cut the
+    /// overflow, so against the short fixture most of the table is drawn off
+    /// screen, where `history_row_at` rightly refuses to find anything.
+    fn hit_test_app() -> BenchmarkApp {
+        let mut app = BenchmarkApp::new();
+        for _ in 0..3 {
+            app.run_benchmark();
+        }
+        app.active_tab = Tab::History;
+        app.scroll_y = 0.0;
+        let past_the_end = app.history_rows_top() + (app.history.len() as f32 + 1.0) * ROW_HEIGHT;
+        assert!(
+            past_the_end < app.content_bottom_edge(),
+            "fixture has no room below the table, so it cannot tell a click              past the last row from a click outside the pane",
+        );
+        app
+    }
+
+    #[test]
+    fn every_drawn_history_row_hit_tests_to_itself() {
+        let app = hit_test_app();
+        let cells = drawn_history_number_cells(&app);
+        assert_eq!(cells.len(), app.history.len(), "cells: {cells:?}");
+        for (i, cell_y) in cells.into_iter().enumerate() {
+            assert_eq!(
+                app.history_row_at(CONTENT_X, cell_y),
+                Some(i),
+                "the row drawn at y={cell_y} is row {i}, but the click handler disagrees",
+            );
+        }
+    }
+
+    #[test]
+    fn the_rows_still_hit_test_to_themselves_after_scrolling() {
+        // The hit test used to skip only the tab's title before dividing by the
+        // row height, missing the summary line and the column header -- 50 px,
+        // or just over two rows -- so a click selected the row two below the
+        // one under the pointer. Nothing about that error depends on the scroll
+        // offset, but an offset the hit test forgot to subtract would look
+        // exactly the same, so both are exercised.
+        let mut app = scrolling_app(Tab::History);
+        app.handle_event(&scroll_event(-1.0));
+        assert!(app.scroll_y > 0.0);
+        let mut checked = 0usize;
+        for (i, cell_y) in drawn_history_number_cells(&app).into_iter().enumerate() {
+            // Rows below the fold are drawn but clipped away, and the hit test
+            // is right to refuse them.
+            if cell_y < app.content_top() || cell_y >= app.content_bottom_edge() {
+                continue;
+            }
+            assert_eq!(
+                app.history_row_at(CONTENT_X, cell_y),
+                Some(i),
+                "after scrolling {} px, the row drawn at y={cell_y} is row {i}",
+                app.scroll_y,
+            );
+            checked = checked.saturating_add(1);
+        }
+        assert!(checked > 0, "no row was on screen to hit-test against");
+    }
+
+    #[test]
+    fn nothing_outside_the_drawn_rows_hit_tests_to_a_row() {
+        let app = hit_test_app();
+        let cells = drawn_history_number_cells(&app);
+        let first = cells.first().copied().unwrap_or(0.0);
+        let last = cells.last().copied().unwrap_or(0.0);
+        // Just above the first row is the column header, not a row.
+        assert_eq!(app.history_row_at(CONTENT_X, first - 4.5), None);
+        // Below the last row the table has ended -- and the fixture guarantees
+        // this point is still inside the pane, so `None` here is the table
+        // ending rather than the pane ending.
+        assert_eq!(app.history_row_at(CONTENT_X, last + ROW_HEIGHT), None);
+        // Outside the content rectangle nothing is a row, whatever the
+        // arithmetic would otherwise have produced -- the button strip below
+        // the pane used to select whichever row it landed on.
+        assert_eq!(
+            app.history_row_at(CONTENT_X, app.content_bottom_edge()),
+            None
+        );
+        assert_eq!(app.history_row_at(CONTENT_X, app.content_top() - 1.0), None);
+        assert_eq!(app.history_row_at(0.0, first), None);
+        assert_eq!(app.history_row_at(app.width, first), None);
+        assert_eq!(app.history_row_at(f32::NAN, first), None);
+        assert_eq!(app.history_row_at(CONTENT_X, f32::INFINITY), None);
+    }
+
+    #[test]
+    fn a_row_clipped_off_the_bottom_of_the_pane_cannot_be_clicked() {
+        // The pane-range check is only observable when the table is *longer*
+        // than the pane: with a table that fits, the arithmetic below the pane
+        // runs off the end of the history anyway and returns `None` for the
+        // wrong reason. Here the row genuinely is drawn at that `y` -- the clip
+        // rectangle is the only thing hiding it -- so a hit test that does not
+        // range itself to the pane hands back a row the user cannot see.
+        let app = scrolling_app(Tab::History);
+        let clipped: Vec<f32> = drawn_history_number_cells(&app)
+            .into_iter()
+            .filter(|y| *y >= app.content_bottom_edge())
+            .collect();
+        assert!(
+            !clipped.is_empty(),
+            "fixture draws no row past the bottom of the pane, so it cannot \
+             tell a ranged hit test from an unranged one",
+        );
+        for y in clipped {
+            assert_eq!(
+                app.history_row_at(CONTENT_X, y),
+                None,
+                "a row clipped off the pane at y={y} was still clickable",
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_a_row_selects_the_row_that_was_drawn_there() {
+        let mut app = hit_test_app();
+        for (i, cell_y) in drawn_history_number_cells(&app).into_iter().enumerate() {
+            app.selected_history_idx = None;
+            app.handle_event(&click_at(CONTENT_X, cell_y));
+            assert_eq!(
+                app.selected_history_idx,
+                Some(i),
+                "clicking the row drawn at y={cell_y} selected {:?}",
+                app.selected_history_idx,
+            );
+        }
     }
 }

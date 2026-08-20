@@ -824,6 +824,30 @@ pub struct Sheet {
     pub frozen_cols: usize,
     /// Number of frozen rows (scroll-locked).
     pub frozen_rows: usize,
+    /// What is selected on this sheet, and which cell is active.
+    ///
+    /// Per sheet for the same reason as `scroll`, and inseparably from it: a
+    /// selection held per-window fights a scroll offset held per-sheet, because
+    /// switching tabs would restore one sheet's view around another sheet's
+    /// active cell — so whichever of the two you reconciled to, the other would
+    /// jump. Kept together, a tab switch simply returns the sheet as you left
+    /// it, and the "reveal the active cell" rule has nothing to fight.
+    pub selection: Selection,
+    /// How far this sheet is scrolled, in pixels from its top-left.
+    ///
+    /// Per sheet, not per window, because the offset only means anything
+    /// against a particular sheet's column widths and row heights: 900 px
+    /// across is column J on one sheet and column D on another, and past the
+    /// end of a third. Held here — beside `frozen_cols`/`frozen_rows`, which
+    /// are per-sheet view state for the same reason — the offset shown is
+    /// always the one belonging to the sheet being shown, and switching tabs
+    /// returns you to where you were rather than to A1.
+    ///
+    /// The single-offset version it replaces had to be reset on every path
+    /// that changed the active sheet, and there are three of them (the tab
+    /// bar, adding a sheet, removing one) plus the undo of each. Only the tab
+    /// bar remembered.
+    pub scroll: ScrollPosition,
 }
 
 impl Sheet {
@@ -836,6 +860,8 @@ impl Sheet {
             row_heights: vec![DEFAULT_ROW_HEIGHT; MAX_ROWS],
             frozen_cols: 0,
             frozen_rows: 0,
+            selection: Selection::default(),
+            scroll: ScrollPosition::new(),
         }
     }
 
@@ -2243,7 +2269,12 @@ pub enum SortDirection {
 // ============================================================================
 
 /// Tracks the current scroll position of the grid.
-#[derive(Clone, Debug, Default)]
+///
+/// `Copy`: it is two floats, and every reader wants the pair by value. Making
+/// callers borrow a sheet to read an offset — and then hold that borrow across
+/// the call that adjusts it — is the sort of thing that gets "fixed" with a
+/// clone in one place and a stale copy in another.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ScrollPosition {
     pub x: f32,
     pub y: f32,
@@ -2427,16 +2458,12 @@ impl SheetBook {
 pub struct SpreadsheetApp {
     /// All worksheets, and which one is active.
     pub sheets: SheetBook,
-    /// Current cell selection.
-    pub selection: Selection,
     /// Current interaction mode.
     pub mode: InteractionMode,
     /// Clipboard contents.
     pub clipboard: Option<ClipboardData>,
     /// Undo/redo manager.
     pub undo_manager: UndoManager,
-    /// Scroll position.
-    pub scroll: ScrollPosition,
     /// Window width.
     pub window_width: f32,
     /// Window height.
@@ -2458,11 +2485,9 @@ impl SpreadsheetApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             sheets: SheetBook::new(Sheet::new("Sheet1")),
-            selection: Selection::default(),
             mode: InteractionMode::Normal,
             clipboard: None,
             undo_manager: UndoManager::new(),
-            scroll: ScrollPosition::new(),
             window_width: width,
             window_height: height,
             find_replace: FindReplace::new(),
@@ -2483,6 +2508,43 @@ impl SpreadsheetApp {
         self.sheets.active_mut()
     }
 
+    /// How far the visible sheet is scrolled.
+    ///
+    /// An accessor rather than a field on the app, because the offset belongs
+    /// to the sheet — see [`Sheet::scroll`]. Reading it through the active
+    /// sheet is what makes it impossible for a tab switch to show one sheet at
+    /// another's offset, however that switch came about.
+    /// What is selected on the visible sheet.
+    ///
+    /// An accessor rather than a field on the app — see [`Sheet::selection`].
+    pub fn selection(&self) -> &Selection {
+        &self.active_sheet().selection
+    }
+
+    /// The visible sheet's selection, mutably.
+    fn selection_mut(&mut self) -> &mut Selection {
+        &mut self.active_sheet_mut().selection
+    }
+
+    /// How far the visible sheet is scrolled.
+    ///
+    /// An accessor rather than a field on the app, because the offset belongs
+    /// to the sheet — see [`Sheet::scroll`]. Reading it through the active
+    /// sheet is what makes it impossible for a tab switch to show one sheet at
+    /// another's offset, however that switch came about.
+    pub fn scroll(&self) -> ScrollPosition {
+        self.active_sheet().scroll
+    }
+
+    /// The visible sheet's scroll offset, mutably.
+    ///
+    /// Prefer [`Self::scroll_by`] and [`Self::ensure_cell_visible`]: both end
+    /// in [`Self::clamp_scroll`], whereas an offset written through here can be
+    /// left outside its bounds.
+    fn scroll_mut(&mut self) -> &mut ScrollPosition {
+        &mut self.active_sheet_mut().scroll
+    }
+
     /// Set the active cell input, recording undo, and recalculate.
     pub fn set_cell_input(&mut self, addr: CellAddr, input: &str) {
         let sheet_idx = self.sheets.active_index();
@@ -2499,7 +2561,7 @@ impl SpreadsheetApp {
 
     /// Begin editing the active cell.
     pub fn begin_editing(&mut self) {
-        let cell = self.active_sheet().get_cell(self.selection.active);
+        let cell = self.active_sheet().get_cell(self.selection().active);
         let text = if cell.is_formula() {
             cell.raw_input.clone()
         } else {
@@ -2514,7 +2576,7 @@ impl SpreadsheetApp {
     pub fn confirm_edit(&mut self) {
         if let InteractionMode::Editing { buffer } = &self.mode {
             let text = buffer.text().to_owned();
-            let addr = self.selection.active;
+            let addr = self.selection().active;
             self.set_cell_input(addr, &text);
             self.mode = InteractionMode::Normal;
         }
@@ -2529,7 +2591,7 @@ impl SpreadsheetApp {
     pub fn delete_selection(&mut self) {
         let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
-        let ranges = self.selection.ranges.clone();
+        let ranges = self.selection().ranges.clone();
         for range in &ranges {
             for addr in range.iter() {
                 let old = self.active_sheet().get_cell(addr);
@@ -2551,7 +2613,7 @@ impl SpreadsheetApp {
 
     /// Copy selected cells to clipboard.
     pub fn copy_selection(&mut self) {
-        let range = self.selection.primary_range();
+        let range = self.selection().primary_range();
         let origin = range.start();
         let mut cells = HashMap::new();
         for addr in range.iter() {
@@ -2586,7 +2648,7 @@ impl SpreadsheetApp {
             Some(c) => c,
             None => return,
         };
-        let dest = self.selection.active;
+        let dest = self.selection().active;
         let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
 
@@ -2734,8 +2796,8 @@ impl SpreadsheetApp {
 
     /// Sort the active sheet by the selected column.
     pub fn sort_column(&mut self, direction: SortDirection) {
-        let col = self.selection.active.col;
-        let range = self.selection.primary_range();
+        let col = self.selection().active.col;
+        let range = self.selection().primary_range();
         let start_row = range.start().row;
         let end_row = range.end().row;
         let ascending = direction == SortDirection::Ascending;
@@ -2799,12 +2861,12 @@ impl SpreadsheetApp {
         let mut changes = Vec::new();
         let current_bold = self
             .active_sheet()
-            .get_cell(self.selection.active)
+            .get_cell(self.selection().active)
             .format
             .bold;
         let new_bold = !current_bold;
 
-        let ranges = self.selection.ranges.clone();
+        let ranges = self.selection().ranges.clone();
         for range in &ranges {
             for addr in range.iter() {
                 let old = self.active_sheet().get_cell(addr);
@@ -2827,12 +2889,12 @@ impl SpreadsheetApp {
         let mut changes = Vec::new();
         let current_italic = self
             .active_sheet()
-            .get_cell(self.selection.active)
+            .get_cell(self.selection().active)
             .format
             .italic;
         let new_italic = !current_italic;
 
-        let ranges = self.selection.ranges.clone();
+        let ranges = self.selection().ranges.clone();
         for range in &ranges {
             for addr in range.iter() {
                 let old = self.active_sheet().get_cell(addr);
@@ -2854,7 +2916,7 @@ impl SpreadsheetApp {
         let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
 
-        let ranges = self.selection.ranges.clone();
+        let ranges = self.selection().ranges.clone();
         for range in &ranges {
             for addr in range.iter() {
                 let old = self.active_sheet().get_cell(addr);
@@ -2876,7 +2938,7 @@ impl SpreadsheetApp {
         let sheet_idx = self.sheets.active_index();
         let mut changes = Vec::new();
 
-        let ranges = self.selection.ranges.clone();
+        let ranges = self.selection().ranges.clone();
         for range in &ranges {
             for addr in range.iter() {
                 let old = self.active_sheet().get_cell(addr);
@@ -2899,7 +2961,7 @@ impl SpreadsheetApp {
         let mut changes = Vec::new();
         let current_borders = self
             .active_sheet()
-            .get_cell(self.selection.active)
+            .get_cell(self.selection().active)
             .format
             .borders
             .has_any();
@@ -2909,7 +2971,7 @@ impl SpreadsheetApp {
             CellBorders::all()
         };
 
-        let ranges = self.selection.ranges.clone();
+        let ranges = self.selection().ranges.clone();
         for range in &ranges {
             for addr in range.iter() {
                 let old = self.active_sheet().get_cell(addr);
@@ -2928,8 +2990,8 @@ impl SpreadsheetApp {
 
     /// Freeze rows/columns at the current selection.
     pub fn toggle_freeze_panes(&mut self) {
-        let col = self.selection.active.col;
-        let row = self.selection.active.row;
+        let col = self.selection().active.col;
+        let row = self.selection().active.row;
         let sheet = self.active_sheet_mut();
         if sheet.frozen_cols > 0 || sheet.frozen_rows > 0 {
             sheet.frozen_cols = 0;
@@ -2944,15 +3006,15 @@ impl SpreadsheetApp {
         // invariant "`scroll` is always inside its range" true after every
         // mutation rather than only after most of them.
         self.clamp_scroll();
-        self.ensure_cell_visible(self.selection.active);
+        self.ensure_cell_visible(self.selection().active);
     }
 
     /// Navigate the active cell in a given direction.
     pub fn navigate(&mut self, d_col: i32, d_row: i32) {
-        let new_col = step_index(self.selection.active.col, d_col, MAX_COLS);
-        let new_row = step_index(self.selection.active.row, d_row, MAX_ROWS);
+        let new_col = step_index(self.selection().active.col, d_col, MAX_COLS);
+        let new_row = step_index(self.selection().active.row, d_row, MAX_ROWS);
         let new_addr = CellAddr::new(new_col, new_row);
-        self.selection = Selection::single(new_addr);
+        *self.selection_mut() = Selection::single(new_addr);
         self.ensure_cell_visible(new_addr);
     }
 
@@ -2980,18 +3042,18 @@ impl SpreadsheetApp {
         // not when it has left the grid. Both edges are measured in the grid's
         // own coordinates, with `ROW_HEADER_WIDTH` cancelling out of each side.
         if addr.col >= frozen_cols {
-            if cell_x - self.scroll.x < frozen_w {
-                self.scroll.x = cell_x - frozen_w;
-            } else if cell_x + cell_w - self.scroll.x > grid_w {
-                self.scroll.x = cell_x + cell_w - grid_w;
+            if cell_x - self.scroll().x < frozen_w {
+                self.scroll_mut().x = cell_x - frozen_w;
+            } else if cell_x + cell_w - self.scroll().x > grid_w {
+                self.scroll_mut().x = cell_x + cell_w - grid_w;
             }
         }
 
         if addr.row >= frozen_rows {
-            if cell_y - self.scroll.y < frozen_h {
-                self.scroll.y = cell_y - frozen_h;
-            } else if cell_y + cell_h - self.scroll.y > grid_h {
-                self.scroll.y = cell_y + cell_h - grid_h;
+            if cell_y - self.scroll().y < frozen_h {
+                self.scroll_mut().y = cell_y - frozen_h;
+            } else if cell_y + cell_h - self.scroll().y > grid_h {
+                self.scroll_mut().y = cell_y + cell_h - grid_h;
             }
         }
 
@@ -3075,7 +3137,7 @@ impl SpreadsheetApp {
         if col < sheet.frozen_cols {
             unscrolled
         } else {
-            unscrolled - self.scroll.x
+            unscrolled - self.scroll().x
         }
     }
 
@@ -3086,7 +3148,7 @@ impl SpreadsheetApp {
         if row < sheet.frozen_rows {
             unscrolled
         } else {
-            unscrolled - self.scroll.y
+            unscrolled - self.scroll().y
         }
     }
 
@@ -3116,10 +3178,10 @@ impl SpreadsheetApp {
     /// back short of restarting.
     pub fn scroll_by(&mut self, dx: f32, dy: f32) {
         if dx.is_finite() {
-            self.scroll.x += dx;
+            self.scroll_mut().x += dx;
         }
         if dy.is_finite() {
-            self.scroll.y += dy;
+            self.scroll_mut().y += dy;
         }
         self.clamp_scroll();
     }
@@ -3141,7 +3203,7 @@ impl SpreadsheetApp {
     pub fn page_rows(&self) -> i32 {
         let sheet = self.active_sheet();
         let pane = (self.grid_height() - sheet.row_y_offset(sheet.frozen_rows)).max(0.0);
-        let first = self.selection.active.row;
+        let first = self.selection().active.row;
         let last = sheet.row_at_y(sheet.row_y_offset(first) + pane);
         let span = last.saturating_sub(first).saturating_sub(1).max(1);
         i32::try_from(span).unwrap_or(i32::MAX)
@@ -3157,12 +3219,12 @@ impl SpreadsheetApp {
     /// against in the first place.
     pub fn clamp_scroll(&mut self) {
         let (max_x, max_y) = (self.max_scroll_x(), self.max_scroll_y());
-        self.scroll.clamp(max_x, max_y);
+        self.scroll_mut().clamp(max_x, max_y);
     }
 
     /// Get status bar text showing SUM/AVG/COUNT of selection.
     pub fn status_bar_text(&self) -> String {
-        let nums = self.selection.numeric_values(self.active_sheet());
+        let nums = self.selection().numeric_values(self.active_sheet());
         if nums.is_empty() {
             return String::new();
         }
@@ -3252,14 +3314,14 @@ impl SpreadsheetApp {
                 EventResult::Consumed
             }
             Key::Home => {
-                self.selection = Selection::single(CellAddr::new(0, self.selection.active.row));
-                self.ensure_cell_visible(self.selection.active);
+                *self.selection_mut() = Selection::single(CellAddr::new(0, self.selection().active.row));
+                self.ensure_cell_visible(self.selection().active);
                 EventResult::Consumed
             }
             Key::End => {
-                self.selection =
-                    Selection::single(CellAddr::new(MAX_COLS - 1, self.selection.active.row));
-                self.ensure_cell_visible(self.selection.active);
+                *self.selection_mut() =
+                    Selection::single(CellAddr::new(MAX_COLS - 1, self.selection().active.row));
+                self.ensure_cell_visible(self.selection().active);
                 EventResult::Consumed
             }
             Key::PageUp => {
@@ -3331,7 +3393,7 @@ impl SpreadsheetApp {
                 // `SheetBook` no longer permits.
                 self.find_replace.find_all(self.sheets.active());
                 if let Some(addr) = self.find_replace.next_result() {
-                    self.selection = Selection::single(addr);
+                    *self.selection_mut() = Selection::single(addr);
                     self.ensure_cell_visible(addr);
                 }
                 EventResult::Consumed
@@ -3384,7 +3446,7 @@ impl SpreadsheetApp {
                 let Some((col, row)) = self.cell_at_position(event.x, event.y) else {
                     return EventResult::Ignored;
                 };
-                self.selection = Selection::single(CellAddr::new(col, row));
+                *self.selection_mut() = Selection::single(CellAddr::new(col, row));
                 self.begin_editing();
                 EventResult::Consumed
             }
@@ -3400,14 +3462,12 @@ impl SpreadsheetApp {
             let tab_x = x;
             let tab_idx = (tab_x / SHEET_TAB_WIDTH) as usize;
             if tab_idx < self.sheets.len() {
+                // Nothing to reset afterwards: the selection and the offset
+                // both live on the sheet, so this returns it exactly as it was
+                // left. This used to clear both — carrying the *old* sheet's
+                // offset in and then snapping the selection to A1 to
+                // compensate, which lost your place on both sheets at once.
                 self.sheets.set_active(tab_idx);
-                self.selection = Selection::default();
-                // The viewport is the app's, not the sheet's, so switching
-                // sheets carried the old one's offset into the new one. Since
-                // the selection resets to A1, leaving the offset behind would
-                // put the selected cell off screen — and on a shorter sheet it
-                // could be past the end entirely, showing nothing but blank.
-                self.scroll = ScrollPosition::new();
             } else if tab_idx == self.sheets.len() {
                 // "+" button to add sheet
                 self.add_sheet();
@@ -3481,14 +3541,14 @@ impl SpreadsheetApp {
         // hand-rolled copy of it — the copy that was here subtracted the scroll
         // offset from a frozen cell, putting the handle a screenful away from
         // the outline that marks it.
-        let active = self.selection.active;
+        let active = self.selection().active;
         let handle_x = self.col_screen_x(active.col) + self.active_sheet().col_width(active.col);
         let handle_y = self.row_screen_y(active.row) + self.active_sheet().row_height(active.row);
         if (x - handle_x).abs() < AUTOFILL_HANDLE_SIZE
             && (y - handle_y).abs() < AUTOFILL_HANDLE_SIZE
         {
             self.mode = InteractionMode::AutoFill {
-                anchor_range: self.selection.primary_range(),
+                anchor_range: self.selection().primary_range(),
                 current_end: active,
             };
             return EventResult::Consumed;
@@ -3502,7 +3562,7 @@ impl SpreadsheetApp {
         };
         let addr = CellAddr::new(col, row);
 
-        self.selection = Selection::single(addr);
+        *self.selection_mut() = Selection::single(addr);
         self.mode = InteractionMode::RangeSelect { anchor: addr };
         self.ensure_cell_visible(addr);
         EventResult::Consumed
@@ -3580,8 +3640,8 @@ impl SpreadsheetApp {
                     return EventResult::Consumed;
                 };
                 let end = CellAddr::new(col, row);
-                self.selection.active = end;
-                self.selection.ranges = vec![CellRange::new(anchor, end)];
+                self.selection_mut().active = end;
+                self.selection_mut().ranges = vec![CellRange::new(anchor, end)];
                 EventResult::Consumed
             }
             InteractionMode::ColResize {
@@ -3661,12 +3721,12 @@ impl SpreadsheetApp {
         let content_x = if x < self.frozen_right() {
             x - ROW_HEADER_WIDTH
         } else {
-            x - ROW_HEADER_WIDTH + self.scroll.x
+            x - ROW_HEADER_WIDTH + self.scroll().x
         };
         let content_y = if y < self.frozen_bottom() {
             y - grid_top
         } else {
-            y - grid_top + self.scroll.y
+            y - grid_top + self.scroll().y
         };
 
         let sheet = self.active_sheet();
@@ -3830,7 +3890,7 @@ impl SpreadsheetApp {
         // Bold button
         let bold_active = self
             .active_sheet()
-            .get_cell(self.selection.active)
+            .get_cell(self.selection().active)
             .format
             .bold;
         self.render_toolbar_button(cmds, bx, btn_y, btn_w, btn_h, "B", bold_active, true);
@@ -3839,7 +3899,7 @@ impl SpreadsheetApp {
         // Italic button
         let italic_active = self
             .active_sheet()
-            .get_cell(self.selection.active)
+            .get_cell(self.selection().active)
             .format
             .italic;
         self.render_toolbar_button(cmds, bx, btn_y, btn_w, btn_h, "I", italic_active, false);
@@ -3861,7 +3921,7 @@ impl SpreadsheetApp {
         let alignments = [Alignment::Left, Alignment::Center, Alignment::Right];
         let current_align = self
             .active_sheet()
-            .get_cell(self.selection.active)
+            .get_cell(self.selection().active)
             .format
             .alignment;
         for (label, align) in alignment_labels.iter().zip(alignments.iter()) {
@@ -3902,7 +3962,7 @@ impl SpreadsheetApp {
         // Border toggle
         let has_borders = self
             .active_sheet()
-            .get_cell(self.selection.active)
+            .get_cell(self.selection().active)
             .format
             .borders
             .has_any();
@@ -3999,7 +4059,7 @@ impl SpreadsheetApp {
         });
 
         // Cell address label
-        let addr_text = self.selection.active.display();
+        let addr_text = self.selection().active.display();
         cmds.push(RenderCommand::FillRect {
             x: 4.0,
             y: y + 3.0,
@@ -4044,7 +4104,7 @@ impl SpreadsheetApp {
         let formula_text = if let InteractionMode::Editing { ref buffer } = self.mode {
             buffer.text().to_owned()
         } else {
-            let cell = self.active_sheet().get_cell(self.selection.active);
+            let cell = self.active_sheet().get_cell(self.selection().active);
             if cell.is_formula() {
                 cell.raw_input.clone()
             } else {
@@ -4173,7 +4233,7 @@ impl SpreadsheetApp {
         }
 
         let is_selected = self
-            .selection
+            .selection()
             .ranges
             .iter()
             .any(|r| col >= r.start().col && col <= r.end().col);
@@ -4286,7 +4346,7 @@ impl SpreadsheetApp {
         let row_y = self.row_screen_y(row);
 
         let is_row_selected = self
-            .selection
+            .selection()
             .ranges
             .iter()
             .any(|r| row >= r.start().row && row <= r.end().row);
@@ -4350,8 +4410,8 @@ impl SpreadsheetApp {
 
         let addr = CellAddr::new(col, row);
         let cell = sheet.get_cell(addr);
-        let is_selected = self.selection.contains(addr);
-        let is_active = addr == self.selection.active;
+        let is_selected = self.selection().contains(addr);
+        let is_active = addr == self.selection().active;
 
         // Cell background
         let bg_color = if let Some(bg) = cell.format.bg_color {
@@ -4537,10 +4597,10 @@ impl SpreadsheetApp {
         // The scrolling rows: from the first one not hidden under the frozen
         // band down to the last one the pane can show.
         let first_scrolling = sheet
-            .row_at_y(self.scroll.y + (frozen_bottom - y_start))
+            .row_at_y(self.scroll().y + (frozen_bottom - y_start))
             .max(frozen_rows);
         let last_scrolling = sheet
-            .row_at_y(self.scroll.y + grid_h)
+            .row_at_y(self.scroll().y + grid_h)
             .min(MAX_ROWS.saturating_sub(1));
         self.render_row_band(
             cmds,
@@ -4575,7 +4635,7 @@ impl SpreadsheetApp {
         };
 
         // Active cell outline
-        let active = self.selection.active;
+        let active = self.selection().active;
         let (active_x, active_y, active_w, active_h) = range_rect(CellRange::single(active));
 
         cmds.push(RenderCommand::StrokeRect {
@@ -4600,7 +4660,7 @@ impl SpreadsheetApp {
         });
 
         // Selection range highlight outline (for multi-cell selection)
-        for range in &self.selection.ranges {
+        for range in &self.selection().ranges {
             if range.cell_count() > 1 {
                 let (rx, ry, rw, rh) = range_rect(*range);
 
@@ -4798,7 +4858,7 @@ impl SpreadsheetApp {
         });
 
         // Selection range display
-        let range_text = self.selection.primary_range().display();
+        let range_text = self.selection().primary_range().display();
         cmds.push(RenderCommand::Text {
             x: 80.0,
             y: y + 5.0,
@@ -4834,7 +4894,7 @@ impl SpreadsheetApp {
         if total_content_h > grid_h {
             let thumb_ratio = grid_h / total_content_h;
             let thumb_h = (thumb_ratio * grid_h).max(20.0);
-            let scroll_ratio = self.scroll.y / (total_content_h - grid_h);
+            let scroll_ratio = self.scroll().y / (total_content_h - grid_h);
             let thumb_y = grid_top + scroll_ratio * (grid_h - thumb_h);
 
             cmds.push(RenderCommand::FillRect {
@@ -4863,7 +4923,7 @@ impl SpreadsheetApp {
         if total_content_w > hbar_w {
             let thumb_ratio = hbar_w / total_content_w;
             let thumb_w = (thumb_ratio * hbar_w).max(20.0);
-            let scroll_ratio = self.scroll.x / (total_content_w - hbar_w);
+            let scroll_ratio = self.scroll().x / (total_content_w - hbar_w);
             let thumb_x = ROW_HEADER_WIDTH + scroll_ratio * (hbar_w - thumb_w);
 
             cmds.push(RenderCommand::FillRect {
@@ -6388,9 +6448,9 @@ mod tests {
     fn test_app_copy_paste() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "source");
-        app.selection = Selection::single(CellAddr::new(0, 0));
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 0));
         app.copy_selection();
-        app.selection = Selection::single(CellAddr::new(1, 1));
+        *app.selection_mut() = Selection::single(CellAddr::new(1, 1));
         app.paste();
         assert_eq!(
             app.active_sheet().get_cell(CellAddr::new(1, 1)).value,
@@ -6402,7 +6462,7 @@ mod tests {
     fn test_app_cut_paste() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "moveme");
-        app.selection = Selection::single(CellAddr::new(0, 0));
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 0));
         app.cut_selection();
         assert!(
             app.active_sheet()
@@ -6410,7 +6470,7 @@ mod tests {
                 .value
                 .is_empty()
         );
-        app.selection = Selection::single(CellAddr::new(2, 2));
+        *app.selection_mut() = Selection::single(CellAddr::new(2, 2));
         app.paste();
         assert_eq!(
             app.active_sheet().get_cell(CellAddr::new(2, 2)).value,
@@ -6422,7 +6482,7 @@ mod tests {
     fn test_app_delete_selection() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "delete me");
-        app.selection = Selection::single(CellAddr::new(0, 0));
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 0));
         app.delete_selection();
         assert!(
             app.active_sheet()
@@ -6544,7 +6604,7 @@ mod tests {
     fn test_app_toggle_bold() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "text");
-        app.selection = Selection::single(CellAddr::new(0, 0));
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 0));
         assert!(!app.active_sheet().get_cell(CellAddr::new(0, 0)).format.bold);
         app.toggle_bold();
         assert!(app.active_sheet().get_cell(CellAddr::new(0, 0)).format.bold);
@@ -6556,7 +6616,7 @@ mod tests {
     fn test_app_toggle_italic() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "text");
-        app.selection = Selection::single(CellAddr::new(0, 0));
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 0));
         app.toggle_italic();
         assert!(
             app.active_sheet()
@@ -6570,7 +6630,7 @@ mod tests {
     fn test_app_set_alignment() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "text");
-        app.selection = Selection::single(CellAddr::new(0, 0));
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 0));
         app.set_alignment(Alignment::Center);
         assert_eq!(
             app.active_sheet()
@@ -6585,7 +6645,7 @@ mod tests {
     fn test_app_set_number_format() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "0.5");
-        app.selection = Selection::single(CellAddr::new(0, 0));
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 0));
         app.set_number_format(NumberFormat::Percentage(0));
         let cell = app.active_sheet().get_cell(CellAddr::new(0, 0));
         assert_eq!(cell.format.number_format, NumberFormat::Percentage(0));
@@ -6595,7 +6655,7 @@ mod tests {
     fn test_app_toggle_borders() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "text");
-        app.selection = Selection::single(CellAddr::new(0, 0));
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 0));
         app.toggle_borders();
         assert!(
             app.active_sheet()
@@ -6617,7 +6677,7 @@ mod tests {
     #[test]
     fn test_app_freeze_panes() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
-        app.selection = Selection::single(CellAddr::new(2, 3));
+        *app.selection_mut() = Selection::single(CellAddr::new(2, 3));
         app.toggle_freeze_panes();
         assert_eq!(app.active_sheet().frozen_cols, 2);
         assert_eq!(app.active_sheet().frozen_rows, 3);
@@ -6630,25 +6690,25 @@ mod tests {
     fn test_app_navigate() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.navigate(1, 0);
-        assert_eq!(app.selection.active, CellAddr::new(1, 0));
+        assert_eq!(app.selection().active, CellAddr::new(1, 0));
         app.navigate(0, 1);
-        assert_eq!(app.selection.active, CellAddr::new(1, 1));
+        assert_eq!(app.selection().active, CellAddr::new(1, 1));
         app.navigate(-1, -1);
-        assert_eq!(app.selection.active, CellAddr::new(0, 0));
+        assert_eq!(app.selection().active, CellAddr::new(0, 0));
     }
 
     #[test]
     fn test_app_navigate_clamp() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.navigate(-10, -10);
-        assert_eq!(app.selection.active, CellAddr::new(0, 0));
+        assert_eq!(app.selection().active, CellAddr::new(0, 0));
     }
 
     #[test]
     fn test_app_begin_editing() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "hello");
-        app.selection = Selection::single(CellAddr::new(0, 0));
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 0));
         app.begin_editing();
         assert!(matches!(app.mode, InteractionMode::Editing { .. }));
     }
@@ -6659,7 +6719,7 @@ mod tests {
         app.mode = InteractionMode::Editing {
             buffer: EditBuffer::at_end("99".to_string()),
         };
-        app.selection = Selection::single(CellAddr::new(0, 0));
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 0));
         app.confirm_edit();
         assert_eq!(
             app.active_sheet().get_cell(CellAddr::new(0, 0)).value,
@@ -6689,7 +6749,7 @@ mod tests {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);
         app.set_cell_input(CellAddr::new(0, 0), "10");
         app.set_cell_input(CellAddr::new(0, 1), "20");
-        app.selection = Selection {
+        *app.selection_mut() = Selection {
             active: CellAddr::new(0, 0),
             ranges: vec![CellRange::new(CellAddr::new(0, 0), CellAddr::new(0, 1))],
         };
@@ -7095,7 +7155,7 @@ mod tests {
         app.set_cell_input(CellAddr::new(0, 0), "3");
         app.set_cell_input(CellAddr::new(0, 1), "1");
         app.set_cell_input(CellAddr::new(0, 2), "2");
-        app.selection = Selection {
+        *app.selection_mut() = Selection {
             active: CellAddr::new(0, 0),
             ranges: vec![CellRange::new(CellAddr::new(0, 0), CellAddr::new(0, 2))],
         };
@@ -7204,17 +7264,17 @@ mod tests {
     #[test]
     fn test_ensure_cell_visible_scrolls_right() {
         let mut app = SpreadsheetApp::new(800.0, 600.0);
-        app.selection = Selection::single(CellAddr::new(20, 0));
+        *app.selection_mut() = Selection::single(CellAddr::new(20, 0));
         app.ensure_cell_visible(CellAddr::new(20, 0));
-        assert!(app.scroll.x > 0.0);
+        assert!(app.scroll().x > 0.0);
     }
 
     #[test]
     fn test_ensure_cell_visible_scrolls_down() {
         let mut app = SpreadsheetApp::new(800.0, 600.0);
-        app.selection = Selection::single(CellAddr::new(0, 100));
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 100));
         app.ensure_cell_visible(CellAddr::new(0, 100));
-        assert!(app.scroll.y > 0.0);
+        assert!(app.scroll().y > 0.0);
     }
 
     #[test]
@@ -7223,5 +7283,360 @@ mod tests {
         let grid_top = app.grid_top();
         let hit = app.cell_at_position(ROW_HEADER_WIDTH + 10.0, grid_top + 10.0);
         assert_eq!(hit, Some((0, 0)));
+    }
+
+    // -- the layout law, and the frozen panes it now serves --------------
+    //
+    // Frozen panes were settable and undriven before this suite existed: the
+    // renderer, the hit test and `ensure_cell_visible` each had their own idea
+    // of where a pinned cell was, and none of the three was tested. These
+    // assert the property that makes the four-quadrant grid correct — the
+    // renderer, the hit test and the scroller agree on where a cell is — rather
+    // than the pixel values, which are free to change.
+
+    /// A sheet with `cols`/`rows` pinned and the view scrolled well past them.
+    ///
+    /// The offset is deliberately *not* a whole number of cells. An aligned one
+    /// puts every band boundary on a cell edge, which is the one case where an
+    /// off-by-one in the first/last visible index does not show — and it makes
+    /// a scrolled column land on exactly the same x as a pinned one, so a test
+    /// asking "which was drawn here" cannot tell the two apart.
+    fn frozen_app(cols: usize, rows: usize) -> SpreadsheetApp {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        {
+            let sheet = app.active_sheet_mut();
+            sheet.frozen_cols = cols;
+            sheet.frozen_rows = rows;
+        }
+        app.scroll_by(530.0, 310.0);
+        app
+    }
+
+    #[test]
+    fn a_frozen_column_does_not_move_when_the_sheet_scrolls() {
+        let mut app = frozen_app(2, 0);
+        let pinned = app.col_screen_x(1);
+        let scrolled = app.col_screen_x(9);
+        app.scroll_by(120.0, 0.0);
+        assert_eq!(app.col_screen_x(1), pinned, "the pinned column moved");
+        assert!(
+            app.col_screen_x(9) < scrolled,
+            "the scrolling column did not move"
+        );
+    }
+
+    #[test]
+    fn a_frozen_row_does_not_move_when_the_sheet_scrolls() {
+        let mut app = frozen_app(0, 3);
+        let pinned = app.row_screen_y(2);
+        let scrolled = app.row_screen_y(40);
+        app.scroll_by(0.0, 96.0);
+        assert_eq!(app.row_screen_y(2), pinned, "the pinned row moved");
+        assert!(
+            app.row_screen_y(40) < scrolled,
+            "the scrolling row did not move"
+        );
+    }
+
+    /// The property the whole restructure exists for: whatever the renderer
+    /// drew at a point, the hit test finds at that point. Before it, the two
+    /// disagreed by exactly the scroll offset — so the error grew as you
+    /// scrolled, and clicking a cell selected a different one further left.
+    #[test]
+    fn clicking_where_a_cell_was_drawn_selects_that_cell() {
+        let app = frozen_app(2, 3);
+        for (col, row) in [(0, 0), (1, 2), (0, 40), (9, 1), (12, 45), (20, 60)] {
+            let x = app.col_screen_x(col) + 2.0;
+            let y = app.row_screen_y(row) + 2.0;
+            // Only assert about cells the pane can actually show; one scrolled
+            // off the top has a screen position, but nothing is drawn there.
+            if x < ROW_HEADER_WIDTH
+                || x >= app.grid_right()
+                || y < app.grid_top()
+                || y >= app.grid_bottom()
+            {
+                continue;
+            }
+            assert_eq!(
+                app.cell_at_position(x, y),
+                Some((col, row)),
+                "the hit test disagrees with the renderer about ({col}, {row})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hit_test_misses_outside_the_grid() {
+        let app = SpreadsheetApp::new(1280.0, 800.0);
+        let inside = (ROW_HEADER_WIDTH + 10.0, app.grid_top() + 10.0);
+        assert!(app.cell_at_position(inside.0, inside.1).is_some());
+        // Each of these used to saturate into cell (0, 0) — a click on the row
+        // header selected A1, and so did one below the last row.
+        assert_eq!(app.cell_at_position(ROW_HEADER_WIDTH - 1.0, inside.1), None);
+        assert_eq!(app.cell_at_position(inside.0, app.grid_top() - 1.0), None);
+        assert_eq!(app.cell_at_position(app.grid_right(), inside.1), None);
+        assert_eq!(app.cell_at_position(inside.0, app.grid_bottom()), None);
+        assert_eq!(app.cell_at_position(f32::NAN, inside.1), None);
+        assert_eq!(app.cell_at_position(inside.0, f32::INFINITY), None);
+    }
+
+    /// A drag is allowed to leave the grid, so it clamps instead of missing.
+    #[test]
+    fn a_drag_outside_the_grid_lands_on_the_nearest_cell() {
+        let app = SpreadsheetApp::new(1280.0, 800.0);
+        assert!(app.cell_nearest_position(-500.0, -500.0).is_some());
+        assert!(app.cell_nearest_position(9999.0, 9999.0).is_some());
+        assert_eq!(app.cell_nearest_position(f32::NAN, 0.0), None);
+    }
+
+    /// `f32::clamp` panics when its bounds are inverted, and a window narrower
+    /// than its own row header inverts them.
+    #[test]
+    fn a_window_smaller_than_its_headers_does_not_panic() {
+        let app = SpreadsheetApp::new(1.0, 1.0);
+        let _ = app.cell_nearest_position(10.0, 10.0);
+        let _ = app.cell_at_position(10.0, 10.0);
+        let _ = app.render();
+    }
+
+    /// The bug that made frozen panes unusable: selecting a pinned cell
+    /// "revealed" it by scrolling the whole sheet back to A1, so the arrow keys
+    /// could not walk along the pinned band without losing your place.
+    #[test]
+    fn selecting_a_frozen_cell_does_not_throw_away_the_scroll_position() {
+        let mut app = frozen_app(2, 3);
+        let (before_x, before_y) = (app.scroll().x, app.scroll().y);
+        assert!(before_x > 0.0 && before_y > 0.0, "test scrolled nowhere");
+        app.ensure_cell_visible(CellAddr::new(1, 2));
+        assert_eq!(app.scroll().x, before_x);
+        assert_eq!(app.scroll().y, before_y);
+    }
+
+    #[test]
+    fn revealing_a_scrolling_cell_clears_the_frozen_band_rather_than_the_edge() {
+        let mut app = frozen_app(2, 3);
+        let target = CellAddr::new(3, 4);
+        app.ensure_cell_visible(target);
+        // Not merely on screen: clear of the band pinned over the top of it,
+        // which is the part a frozen-pane-unaware version got wrong.
+        assert!(app.col_screen_x(target.col) >= app.frozen_right());
+        assert!(app.row_screen_y(target.row) >= app.frozen_bottom());
+    }
+
+    // -- scrolling -------------------------------------------------------
+
+    #[test]
+    fn the_wheel_scrolls_both_axes_in_the_directions_the_two_report() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.scroll_by(400.0, 400.0);
+        let (x, y) = (app.scroll().x, app.scroll().y);
+
+        // `dy` positive is away from the user: back towards row 1.
+        app.handle_event(&scroll_event(0.0, 1.0));
+        assert!(app.scroll().y < y, "wheel away from the user scrolled down");
+        // `dx` positive is to the right: on towards the last column. The
+        // opposite relation to the offset, from the same sign of delta.
+        app.handle_event(&scroll_event(1.0, 0.0));
+        assert!(app.scroll().x > x, "tilting right scrolled left");
+    }
+
+    fn scroll_event(dx: f32, dy: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x: 400.0,
+            y: 400.0,
+            kind: MouseEventKind::Scroll { dx, dy },
+        })
+    }
+
+    /// A trackpad's fractional notch moves a fraction of the distance. The
+    /// offset is continuous pixels, so there is nothing to bank — and nothing
+    /// that should round a small movement away to nothing.
+    #[test]
+    fn a_fraction_of_a_notch_scrolls_a_fraction_of_the_distance() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.scroll_by(0.0, 400.0);
+        let before = app.scroll().y;
+        app.handle_event(&scroll_event(0.0, 0.2));
+        let moved = before - app.scroll().y;
+        assert!(moved > 0.0, "a fifth of a notch moved nothing");
+        assert!(moved < wheel::pixels(-1.0, DEFAULT_ROW_HEIGHT));
+    }
+
+    /// Note the crossed signs: reaching the *end* of the sheet means tilting
+    /// right (`dx` positive) but wheeling towards the user (`dy` negative).
+    /// Writing this test with matching signs is how the first draft of it
+    /// failed, which is a fair demonstration of why the two axes need separate
+    /// converters rather than one applied twice.
+    #[test]
+    fn the_wheel_cannot_scroll_past_either_end() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        for _ in 0..2000 {
+            app.handle_event(&scroll_event(1.0, -1.0));
+        }
+        assert_eq!(app.scroll().x, app.max_scroll_x());
+        assert_eq!(app.scroll().y, app.max_scroll_y());
+        for _ in 0..4000 {
+            app.handle_event(&scroll_event(-1.0, 1.0));
+        }
+        assert_eq!(app.scroll().x, 0.0);
+        assert_eq!(app.scroll().y, 0.0);
+    }
+
+    /// Growing the window can leave the offset past the end of the sheet, which
+    /// used to strand the view on blank space with no way back but a scroll.
+    #[test]
+    fn growing_the_window_pulls_the_offset_back_inside_the_sheet() {
+        let mut app = SpreadsheetApp::new(400.0, 300.0);
+        app.scroll_by(1e6, 1e6);
+        assert!(app.scroll().y > 0.0);
+        app.handle_event(&Event::Resize {
+            width: 4000,
+            height: 3000,
+        });
+        assert!(app.scroll().x <= app.max_scroll_x());
+        assert!(app.scroll().y <= app.max_scroll_y());
+    }
+
+    #[test]
+    fn a_nonfinite_delta_cannot_poison_the_offset() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.scroll_by(200.0, 200.0);
+        app.handle_event(&scroll_event(f32::NAN, f32::INFINITY));
+        assert_eq!(app.scroll().x, 200.0);
+        assert_eq!(app.scroll().y, 200.0);
+    }
+
+    /// Page Up/Down step by what the pane can show, not by a guessed constant,
+    /// and the step excludes the frozen band — those rows never scroll, so
+    /// counting them would page past a bandful of rows every time.
+    #[test]
+    fn a_page_is_measured_from_the_pane_and_excludes_the_frozen_band() {
+        let tall = SpreadsheetApp::new(1280.0, 1600.0);
+        let short = SpreadsheetApp::new(1280.0, 400.0);
+        assert!(
+            tall.page_rows() > short.page_rows(),
+            "a taller window pages no further"
+        );
+        assert!(short.page_rows() >= 1, "a page must move at least one row");
+
+        let frozen = frozen_app(0, 8);
+        let plain = SpreadsheetApp::new(1280.0, 800.0);
+        assert!(
+            frozen.page_rows() < plain.page_rows(),
+            "the page step counted the pinned rows"
+        );
+    }
+
+    #[test]
+    fn page_down_then_page_up_returns_to_the_starting_row() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        *app.selection_mut() = Selection::single(CellAddr::new(0, 200));
+        app.handle_event(&key_event(Key::PageDown));
+        let moved = app.selection().active.row;
+        assert!(moved > 200, "page down did not move");
+        app.handle_event(&key_event(Key::PageUp));
+        assert_eq!(app.selection().active.row, 200);
+    }
+
+    fn key_event(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        })
+    }
+
+    // -- rendering -------------------------------------------------------
+
+    /// The four quadrants each get a clip, and the clip is what keeps a
+    /// scrolled column out of the frozen band. Without it the column
+    /// straddling the boundary draws into both, and no draw order fixes a half.
+    #[test]
+    fn a_frozen_grid_clips_every_band_it_draws() {
+        let app = frozen_app(2, 3);
+        let cmds = app.render();
+        let pushes = cmds
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::PushClip { .. }))
+            .count();
+        let pops = cmds
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::PopClip))
+            .count();
+        assert_eq!(pushes, pops, "a clip was pushed and never popped");
+        assert!(pushes >= 8, "fewer clips than the grid has bands: {pushes}");
+    }
+
+    /// No clip may have a negative extent: depending on the backend that is
+    /// either an empty clip or an unbounded one, and "unbounded" would silently
+    /// undo the clipping the bands depend on for correctness.
+    #[test]
+    fn no_clip_has_a_negative_extent() {
+        for app in [
+            SpreadsheetApp::new(1280.0, 800.0),
+            SpreadsheetApp::new(1.0, 1.0),
+            frozen_app(2, 3),
+        ] {
+            for cmd in app.render() {
+                if let RenderCommand::PushClip { width, height, .. } = cmd {
+                    assert!(width >= 0.0 && height >= 0.0, "{width} x {height}");
+                }
+            }
+        }
+    }
+
+    /// The pinned band is drawn *after* the band that scrolls under it. An
+    /// index-order loop draws frozen column A before scrolled column D — and D,
+    /// having slid underneath A, then paints over the very thing pinned to
+    /// outrank it.
+    #[test]
+    fn the_frozen_band_is_drawn_over_the_one_that_scrolls_under_it() {
+        let app = frozen_app(2, 3);
+        let cmds = app.render();
+        // Two cells in one row band: one in the pinned columns, one in the
+        // columns that scroll under them. Both must be on screen, so the
+        // scrolling one is chosen from what the 500 px offset actually shows —
+        // and the row is a scrolling row for the same reason.
+        let cell_at = |col: usize, row: usize| {
+            let (want_x, want_y) = (app.col_screen_x(col), app.row_screen_y(row));
+            cmds.iter().position(|c| {
+                matches!(c, RenderCommand::FillRect { x, y, .. }
+                         if (x - want_x).abs() < 0.5 && (y - want_y).abs() < 0.5)
+            })
+        };
+        let (Some(pinned), Some(scrolled)) = (cell_at(1, 15), cell_at(7, 15)) else {
+            panic!("expected both a pinned and a scrolled cell to be drawn");
+        };
+        assert!(
+            scrolled < pinned,
+            "the scrolling band was drawn over the pinned one"
+        );
+    }
+
+    /// The selection outline is positioned by the same law as the cell it
+    /// surrounds, so it cannot end up somewhere its own cell is not.
+    #[test]
+    fn the_active_cell_outline_sits_on_the_cell_it_outlines() {
+        let mut app = frozen_app(2, 3);
+        let addr = CellAddr::new(1, 2);
+        *app.selection_mut() = Selection::single(addr);
+        let (want_x, want_y) = (app.col_screen_x(addr.col), app.row_screen_y(addr.row));
+        let found = app.render().into_iter().any(|c| {
+            matches!(c, RenderCommand::StrokeRect { x, y, color, .. }
+                     if color == COLOR_BLUE
+                        && (x - want_x).abs() < 0.5
+                        && (y - want_y).abs() < 0.5)
+        });
+        assert!(found, "no outline at ({want_x}, {want_y})");
+    }
+
+    #[test]
+    fn switching_sheets_starts_the_new_one_at_its_own_top_left() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.scroll_by(500.0, 500.0);
+        app.add_sheet();
+        assert_eq!(app.scroll().x, 0.0);
+        assert_eq!(app.scroll().y, 0.0);
     }
 }

@@ -21,6 +21,7 @@ use guitk::event::{
 use guitk::render::{FontWeightHint, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::wheel;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -207,7 +208,9 @@ impl SkinToneModifier {
     pub fn apply(self, base_emoji: &str) -> String {
         match self.modifier_char() {
             Some(ch) => {
-                let mut result = String::with_capacity(base_emoji.len() + 4);
+                // 4 is the UTF-8 length of every skin-tone modifier, so this
+                // is the exact final size rather than a guess.
+                let mut result = String::with_capacity(base_emoji.len().saturating_add(4));
                 result.push_str(base_emoji);
                 result.push(ch);
                 result
@@ -322,7 +325,10 @@ impl EmojiDatabase {
     }
 
     fn build_entries() -> Vec<EmojiEntry> {
-        use EmojiCategory::*;
+        use EmojiCategory::{
+            Activities, AnimalsAndNature, Flags, FoodAndDrink, Objects, SmileysAndPeople, Symbols,
+            TravelAndPlaces,
+        };
         let e = Self::entry;
         vec![
             // -- Smileys & People (16) --
@@ -1185,16 +1191,18 @@ fn render_skin_tone_bar(state: &EmojiPickerState, tree: &mut RenderTree) {
             CornerRadii::all(SKIN_TONE_CIRCLE / 2.0),
         );
 
-        // Selection ring.
+        // Selection ring: the swatch outset by 2px on every side, with a
+        // corner radius of half its own width so it draws as a circle.
         if state.skin_tone == tone {
+            let ring = SKIN_TONE_CIRCLE + 4.0;
             tree.push(guitk::render::RenderCommand::StrokeRect {
                 x: cx - 2.0,
                 y: cy - 2.0,
-                width: SKIN_TONE_CIRCLE + 4.0,
-                height: SKIN_TONE_CIRCLE + 4.0,
+                width: ring,
+                height: ring,
                 color: mocha::BLUE,
                 line_width: 2.0,
-                corner_radii: CornerRadii::all((SKIN_TONE_CIRCLE + 4.0) / 2.0),
+                corner_radii: CornerRadii::all(ring / 2.0),
             });
         }
     }
@@ -1381,7 +1389,10 @@ fn handle_mouse(state: &mut EmojiPickerState, mouse: &MouseEvent) -> EventResult
             let grid_top = state.grid_top();
             let grid_bottom = WINDOW_HEIGHT - PREVIEW_HEIGHT - SKIN_TONE_HEIGHT;
             if y >= grid_top && y < grid_bottom {
-                state.scroll_offset -= dy;
+                // `dy` is a notch count, not a distance. Subtracting it
+                // raw moved the grid one pixel per notch — a 48px cell
+                // took 48 notches to clear, so the wheel looked broken.
+                state.scroll_offset += wheel::pixels(*dy, CELL_SIZE);
                 state.clamp_scroll();
                 return EventResult::Consumed;
             }
@@ -1452,7 +1463,14 @@ fn grid_hit_test(state: &EmojiPickerState, x: f32, y: f32) -> Option<usize> {
         return Option::None;
     }
 
-    let idx = row * GRID_COLUMNS + col;
+    // A float-to-integer cast saturates, so a pointer far below the grid —
+    // or a scroll offset that has grown large — gives a row near
+    // `usize::MAX`. Multiplying that out overflows and panics in a debug
+    // build, so a row that cannot be indexed is reported as a miss instead
+    // of being computed.
+    let idx = row
+        .checked_mul(GRID_COLUMNS)
+        .and_then(|i| i.checked_add(col))?;
     let count = state.visible_emoji().len();
     if idx < count { Some(idx) } else { Option::None }
 }
@@ -1882,20 +1900,131 @@ mod tests {
         assert_eq!(state.search_query, "a");
     }
 
-    #[test]
-    fn scroll_event_changes_offset() {
+    /// A picker whose grid is genuinely taller than the panel it draws into.
+    ///
+    /// It has to be the *search* tab: the shipped database holds 82 emoji
+    /// across eight categories, and the largest of them (16) fills 160px of a
+    /// 320px panel, so no category tab can scroll at all. Searching "a"
+    /// matches 73 of them, which overflows. A scroll test on a grid that fits
+    /// would assert nothing.
+    fn scrollable_picker() -> EmojiPickerState {
         let mut state = EmojiPickerState::new();
-        let grid_y = state.grid_top() + 10.0;
-        let event = Event::Mouse(MouseEvent {
+        state.active_tab = Tab::Search;
+        state.search_query = "a".to_string();
+        assert!(
+            state.max_scroll() > CELL_SIZE,
+            "the fixture must overflow the panel, or these tests prove nothing"
+        );
+        state
+    }
+
+    /// One turn of the wheel over the grid, as the compositor sends it: a
+    /// notch *count*, not a pixel distance.
+    fn wheel_over_grid(state: &EmojiPickerState, dy: f32) -> Event {
+        Event::Mouse(MouseEvent {
             x: WINDOW_WIDTH / 2.0,
-            y: grid_y,
-            kind: MouseEventKind::Scroll { dx: 0.0, dy: -30.0 },
-        });
+            y: state.grid_top() + 10.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    /// The regression test. `state.scroll_offset -= dy` moved the grid **one
+    /// pixel** per notch, so clearing a single 48px row of emoji took 48 turns
+    /// of the wheel.
+    ///
+    /// The test this replaces sent `dy: -30.0` — a pixel distance, picked so
+    /// that the raw subtraction would produce a visible number — and then
+    /// asserted only that the offset was `>= 0.0`, which is equally true of an
+    /// offset that never moved. It could not have failed.
+    #[test]
+    fn one_notch_scrolls_the_grid_a_visible_distance() {
+        let mut state = scrollable_picker();
+        let event = wheel_over_grid(&state, -1.0);
         handle_event(&mut state, &event);
         assert!(
-            state.scroll_offset >= 0.0,
-            "scroll offset should be non-negative"
+            state.scroll_offset >= CELL_SIZE,
+            "one notch must clear at least one {CELL_SIZE}px row, but moved {}px",
+            state.scroll_offset
         );
+    }
+
+    /// Away from the user scrolls down the grid; back towards the user returns.
+    ///
+    /// The down leg asserts a whole *row*, not merely a non-zero number:
+    /// `> 0.0` also holds under the one-pixel-per-notch defect this file was
+    /// fixed for, and a direction test that cannot tell 1px from 144px is
+    /// only half a test.
+    // The `0.0` is exact: a negative offset is clamped by assigning the
+    // literal, with no arithmetic left to round.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn the_wheel_scrolls_the_grid_both_ways() {
+        let mut state = scrollable_picker();
+
+        let down = wheel_over_grid(&state, -1.0);
+        handle_event(&mut state, &down);
+        assert!(state.scroll_offset >= CELL_SIZE);
+
+        let up = wheel_over_grid(&state, 1.0);
+        handle_event(&mut state, &up);
+        assert_eq!(
+            state.scroll_offset, 0.0,
+            "the same notch back returns to the top"
+        );
+    }
+
+    /// The wheel stays inside the content: the clamp still applies.
+    ///
+    /// Ten notches, not five hundred: at three rows a notch that is 1440px
+    /// against a 320px range, so it overruns several times over while still
+    /// being a count sized to the *converter* rather than one padded until it
+    /// happened to overrun at the old rate of a pixel a notch.
+    // Exact: the clamp assigns `max_scroll()` itself, so the two sides are
+    // the same expression rather than two roundings of one quantity.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn the_wheel_cannot_scroll_past_the_end_of_the_grid() {
+        let mut state = scrollable_picker();
+        for _ in 0..10 {
+            let event = wheel_over_grid(&state, -1.0);
+            handle_event(&mut state, &event);
+        }
+        assert_eq!(state.scroll_offset, state.max_scroll());
+    }
+
+    /// A scroll outside the grid area is not the grid's to consume.
+    // Exact: the point of the test is that nothing is written, so the offset
+    // is still the constructor's literal `0.0`.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn a_scroll_over_the_tab_bar_leaves_the_grid_alone() {
+        let mut state = scrollable_picker();
+        let event = Event::Mouse(MouseEvent {
+            x: WINDOW_WIDTH / 2.0,
+            y: 2.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        assert_eq!(handle_event(&mut state, &event), EventResult::Ignored);
+        assert_eq!(state.scroll_offset, 0.0);
+    }
+
+    /// A pointer far below the grid must miss, not overflow.
+    ///
+    /// `grid_hit_test` derives its row with `(adjusted_y / CELL_SIZE) as
+    /// usize`, and a float-to-integer cast *saturates* rather than wrapping —
+    /// so a large `y` produces a row near `usize::MAX`, and the row-major
+    /// `row * GRID_COLUMNS` that follows overflowed and panicked in a debug
+    /// build. Nothing bounds `y`: it arrives from the event.
+    #[test]
+    fn a_pointer_far_below_the_grid_misses_instead_of_overflowing() {
+        let state = scrollable_picker();
+        for y in [1.0e9_f32, 1.0e30, f32::MAX, f32::INFINITY] {
+            assert_eq!(
+                grid_hit_test(&state, WINDOW_WIDTH / 2.0, y),
+                Option::None,
+                "y={y} should miss the grid"
+            );
+        }
     }
 
     #[test]

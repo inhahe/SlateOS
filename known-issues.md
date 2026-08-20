@@ -39359,6 +39359,57 @@ consider poisoning-on-free as a separate change with its own boot evidence.
 > assertion that they went up: if `SkipLossy` were dropping most poisons the
 > figure would have barely moved, and if the sole-owner predicate were wrong in
 > the permissive direction it would have exceeded the unpoisoned total.
+>
+> **Benchmark evidence, and a trap worth writing down.** `frame.rs` is
+> performance-critical, so the harness required `--bench`. The first run looked
+> alarming — 18 benchmarks "REGRESSED, UNCONFIRMED", including
+> `page_alloc_zeroed_pool` +65% and `heap_alloc_free_64` +74%. None of it
+> survived contact with the data.
+>
+> *First trap: two accelerator populations.* The script passes no `-accel`, so
+> QEMU takes WHPX when the host offers it and silently falls back to TCG when it
+> does not — the accelerator flips on host state, not on anything in the
+> command. All 13 "fast" historical runs are Hyper-V/WHPX; mine are TCG. The
+> tell is `page_alloc_zeroed_free`: 457–542 ns across every WHPX run and
+> **3734 ns** on `26c139a81`, which is a *pre-change* run and the only other TCG
+> one. My runs sit at 3738/3621/3583 — identical to that TCG baseline. The
+> harness does pick an accel-matched baseline for the per-benchmark comparison
+> (it chose `26c139a81`), so this is not a harness defect; the problem is that
+> the matched population had exactly **one** member, so no spread was known.
+>
+> *Second trap: the TCG noise floor is wider than the effect being chased.*
+> Three A/A runs on the byte-identical image (`sha:2e6316daa443fc8e`) settled
+> it, and the two benchmarks that had looked persistent moved on their own:
+>
+> | benchmark | TCG baseline (pre-change) | run 1 | run 2 | run 3 |
+> |---|---|---|---|---|
+> | `page_alloc_free` | 461 | 508 | 370 | 540 |
+> | `page_alloc_zeroed_free` | 3734 | 3738 | 3621 | 3583 |
+> | `page_alloc_zeroed_pool` | 348 | 611 | 742 | **349** |
+> | `firewall_check` | 66 | 96 | 76 | **65** |
+> | `heap_alloc_free_64` | 186 | 345 | 378 | 497 |
+>
+> `page_alloc_zeroed_pool` and `firewall_check` returned to within 1 ns of the
+> pre-change baseline, and the harness's own A/A verdict names
+> `page_alloc_free: 370 → 540 (+45%)` and `heap_alloc_free_64: 378 → 497 (+31%)`
+> as *measured host noise, by construction* — the same two benchmarks the first
+> run had flagged. `firewall_check` was the giveaway throughout: nothing in this
+> change can reach a firewall rule match, so its +45% in run 1 could only ever
+> have been a whole-run factor.
+>
+> Conclusion: no regression. `page_alloc_free` PASSed its 1000 ns target on all
+> three runs, `page_alloc_zeroed_free` is flat, and the code-level cost is
+> bounded by inspection at one `#[inline]` call whose first act is a relaxed
+> atomic load that is `false` in production, plus two more relaxed loads
+> short-circuiting a volatile read in `free_order_inner`.
+>
+> **The reusable lesson:** under TCG on this host the per-benchmark noise floor
+> exceeds ±45%, so a TCG-only comparison against a single baseline grades
+> nothing. Before believing a `--bench` regression, check `accel` in
+> `bench/history.jsonl` and confirm the baseline population is both
+> accel-matched *and* larger than one. A benchmark the change provably cannot
+> reach (`firewall_check` here) is the cheapest available control — if it moved
+> too, the run moved, not the code.
 
 #### Why this matters more than the report count suggests
 

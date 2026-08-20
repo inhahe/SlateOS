@@ -9,6 +9,7 @@ use crate::color::Color;
 use crate::cycle;
 use crate::event::{Key, KeyEvent};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
+use crate::row_strip::RowStrip;
 use crate::style::CornerRadii;
 
 // ─── Catppuccin Mocha palette ───────────────────────────────────────────────
@@ -392,9 +393,14 @@ impl ContextMenu {
             corner_radii: radii,
         });
 
-        // Render each item.
-        let mut current_y = self.y + VERTICAL_PADDING;
+        // Render each item, from the same strip the hit test reads. Advancing
+        // a running `current_y` here is what let this walk drift away from the
+        // three others that used to exist.
+        let strip = self.strip();
         for (i, item) in self.items.iter().enumerate() {
+            let Some(current_y) = strip.top(i) else {
+                continue;
+            };
             match item {
                 MenuItem::Separator => {
                     let line_y = current_y + SEPARATOR_HEIGHT / 2.0;
@@ -406,7 +412,6 @@ impl ContextMenu {
                         color: SEPARATOR_COLOR,
                         width: 1.0,
                     });
-                    current_y += SEPARATOR_HEIGHT;
                 }
                 MenuItem::Action {
                     label,
@@ -471,8 +476,6 @@ impl ContextMenu {
                             overflow: TextOverflow::Clip,
                         });
                     }
-
-                    current_y += ITEM_HEIGHT;
                 }
                 MenuItem::Submenu { label, enabled, .. } => {
                     // Hover highlight.
@@ -513,8 +516,6 @@ impl ContextMenu {
                         max_width: None,
                         overflow: TextOverflow::Clip,
                     });
-
-                    current_y += ITEM_HEIGHT;
                 }
             }
         }
@@ -579,16 +580,35 @@ impl ContextMenu {
         crate::text::width(text, font_size)
     }
 
+    /// How tall one row is. The single spelling of the rule.
+    ///
+    /// This match used to appear four times in this file — once summing the
+    /// heights for [`Self::total_height`], once placing the rows in
+    /// [`Self::render`], once subtracting them back off in
+    /// [`Self::index_at_y`], and once adding them up again in
+    /// [`Self::y_offset_for_index`] to hang a submenu. Four walks of one list
+    /// is four chances for three of them to be right; when they disagree the
+    /// user clicks one row and gets the one above it.
+    const fn item_height(item: &MenuItem) -> f32 {
+        match item {
+            MenuItem::Separator => SEPARATOR_HEIGHT,
+            _ => ITEM_HEIGHT,
+        }
+    }
+
+    /// Where every row sits, in screen coordinates.
+    ///
+    /// The renderer draws from this and [`Self::index_at_y`] answers from it,
+    /// so the rows on screen are the rows that answer.
+    fn strip(&self) -> RowStrip {
+        RowStrip::new(
+            self.y + VERTICAL_PADDING,
+            self.items.iter().map(Self::item_height),
+        )
+    }
+
     fn total_height(&self) -> f32 {
-        let content: f32 = self
-            .items
-            .iter()
-            .map(|item| match item {
-                MenuItem::Separator => SEPARATOR_HEIGHT,
-                _ => ITEM_HEIGHT,
-            })
-            .sum();
-        content + VERTICAL_PADDING * 2.0
+        self.strip().total_height() + VERTICAL_PADDING * 2.0
     }
 
     fn point_in_bounds(&self, px: f32, py: f32) -> bool {
@@ -599,38 +619,25 @@ impl ContextMenu {
     }
 
     /// Find which item index the Y coordinate corresponds to.
+    ///
+    /// A separator has a position and a height like anything else, so the
+    /// strip names it; whether it is *selectable* is this menu's rule rather
+    /// than the layout's, and the answer is no.
     fn index_at_y(&self, py: f32) -> Option<usize> {
-        let mut current_y = self.y + VERTICAL_PADDING;
-        for (i, item) in self.items.iter().enumerate() {
-            let h = match item {
-                MenuItem::Separator => SEPARATOR_HEIGHT,
-                _ => ITEM_HEIGHT,
-            };
-            if py >= current_y && py < current_y + h {
-                // Don't select separators.
-                if matches!(item, MenuItem::Separator) {
-                    return None;
-                }
-                return Some(i);
-            }
-            current_y += h;
+        let idx = self.strip().index_at(py)?;
+        match self.items.get(idx) {
+            Some(MenuItem::Separator) | None => None,
+            Some(_) => Some(idx),
         }
-        None
     }
 
     /// Get the Y offset of the item at the given index relative to menu top.
+    ///
+    /// An index past the end reports the offset one past the last row, which
+    /// is what the hand-written walk this replaced fell through to.
     fn y_offset_for_index(&self, target: usize) -> f32 {
-        let mut offset = VERTICAL_PADDING;
-        for (i, item) in self.items.iter().enumerate() {
-            if i == target {
-                return offset;
-            }
-            offset += match item {
-                MenuItem::Separator => SEPARATOR_HEIGHT,
-                _ => ITEM_HEIGHT,
-            };
-        }
-        offset
+        let strip = self.strip();
+        strip.top(target).unwrap_or_else(|| strip.bottom()) - self.y
     }
 
     /// Move hover to the next selectable row, skipping separators and disabled
@@ -933,6 +940,208 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: None,
         }
+    }
+
+    // ─── Geometry: does a click land on the row that was drawn? ──────────────
+    //
+    // These read the rectangle `render()` actually emitted and probe *its*
+    // edges. A test that recomputes the renderer's arithmetic and checks the
+    // hit test against that is worthless: the two drift together, and the
+    // whole failure mode being guarded here is a renderer and a hit test that
+    // agree only by coincidence.
+
+    /// Items whose every action is enabled, so every row paints a hover
+    /// highlight and can therefore be measured. Mixed heights on purpose.
+    fn geometry_items() -> Vec<MenuItem> {
+        fn action(id: MenuItemId, label: &str) -> MenuItem {
+            MenuItem::Action {
+                id,
+                label: label.to_string(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            }
+        }
+        vec![
+            action(1, "New"),
+            action(2, "Open"),
+            MenuItem::Separator,
+            MenuItem::Submenu {
+                id: 3,
+                label: "Recent".to_string(),
+                icon: None,
+                enabled: true,
+                children: vec![action(31, "a.txt")],
+            },
+            action(4, "Save"),
+            MenuItem::Separator,
+            action(5, "Quit"),
+        ]
+    }
+
+    /// The `(top, height)` of the hover highlight the menu paints when the
+    /// pointer is over row `idx` — moved there through the real pointer path,
+    /// not by poking `hover_index`.
+    fn painted_row(menu: &mut ContextMenu, idx: usize) -> Option<(f32, f32)> {
+        // Park the pointer using the layout's own answer for where the row is.
+        // That is not circular: if the layout is wrong, the *highlight* it
+        // paints is what these tests then compare against the hit test, and a
+        // disagreement still shows up.
+        let probe = menu.y + menu.y_offset_for_index(idx) + 1.0;
+        menu.handle_mouse_move(menu.x + 10.0, probe);
+        let (x, w) = (menu.x + 4.0, menu.width - 8.0);
+        menu.render().into_iter().find_map(|cmd| match cmd {
+            // Exact equality on purpose: these are the very floats the
+            // renderer pushed, not a measurement of them.
+            RenderCommand::FillRect {
+                x: rx,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if rx == x && width == w && color == HOVER_COLOR => Some((y, height)),
+            _ => None,
+        })
+    }
+
+    /// The y of every separator line the menu paints, in order.
+    fn painted_separator_lines(menu: &ContextMenu) -> Vec<f32> {
+        menu.render()
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Line { y1, color, .. } if color == SEPARATOR_COLOR => Some(y1),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_item_is_selectable_exactly_where_it_was_painted() {
+        let mut menu = ContextMenu::new(geometry_items());
+        menu.show(300.0, 120.0);
+        for idx in 0..menu.items.len() {
+            if matches!(menu.items[idx], MenuItem::Separator) {
+                continue;
+            }
+            let (top, height) = painted_row(&mut menu, idx)
+                .unwrap_or_else(|| panic!("row {idx} painted no highlight to measure"));
+            // Sweep the painted row rather than probing its middle. A three
+            // pixel drift is invisible at the centre of a 28-px row and
+            // obvious at its edges — which is where the user aims.
+            for step in 0..8 {
+                let probe = top + (step as f32) * height / 8.0;
+                assert_eq!(
+                    menu.index_at_y(probe),
+                    Some(idx),
+                    "row {idx} was painted at {top}..{} but {probe} answers otherwise",
+                    top + height
+                );
+            }
+            // The row owns its top edge and not its bottom one, so the two
+            // sides of a boundary never both answer for it.
+            assert_ne!(menu.index_at_y(top - 0.001), Some(idx));
+            assert_ne!(menu.index_at_y(top + height), Some(idx));
+        }
+    }
+
+    #[test]
+    fn a_separator_is_drawn_inside_the_run_it_reserves_space_in() {
+        let mut menu = ContextMenu::new(geometry_items());
+        menu.show(300.0, 120.0);
+        let lines = painted_separator_lines(&menu);
+        let sep_indices: Vec<usize> = menu
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| matches!(it, MenuItem::Separator))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(lines.len(), sep_indices.len());
+        let strip = menu.strip();
+        for (&idx, &line_y) in sep_indices.iter().zip(&lines) {
+            let top = strip.top(idx).unwrap();
+            let height = strip.height(idx).unwrap();
+            assert!(
+                line_y >= top && line_y < top + height,
+                "separator {idx} reserves {top}..{} but its line is drawn at {line_y}",
+                top + height
+            );
+            // A separator has a place and a height like anything else; what it
+            // does not have is selectability. That is this menu's rule, not
+            // the strip's, and it is the one thing `index_at_y` adds.
+            assert_eq!(menu.index_at_y(line_y), None);
+            assert_eq!(menu.index_at_y(top), None);
+        }
+    }
+
+    #[test]
+    fn a_submenu_hangs_off_the_row_it_belongs_to() {
+        // `y_offset_for_index` is what positions an opening submenu. It used
+        // to be its own walk of the heights; if it disagrees with the
+        // renderer the submenu appears beside a different row than the one
+        // the user is pointing at.
+        let mut menu = ContextMenu::new(geometry_items());
+        menu.show(300.0, 120.0);
+        for idx in 0..menu.items.len() {
+            if matches!(menu.items[idx], MenuItem::Separator) {
+                continue;
+            }
+            let (top, _) = painted_row(&mut menu, idx).unwrap();
+            assert_eq!(
+                menu.y + menu.y_offset_for_index(idx),
+                top,
+                "row {idx} is painted at {top} but a submenu would hang at {}",
+                menu.y + menu.y_offset_for_index(idx)
+            );
+        }
+        // Past the end there is no row; the offset is one past the last, so a
+        // caller measuring downwards from it stays below the menu.
+        let past = menu.y_offset_for_index(menu.items.len());
+        assert_eq!(past, menu.total_height() - VERTICAL_PADDING);
+    }
+
+    #[test]
+    fn the_menu_is_exactly_as_tall_as_the_rows_it_holds() {
+        let mut menu = ContextMenu::new(geometry_items());
+        menu.show(300.0, 120.0);
+        let last = menu.items.len() - 1;
+        let (top, height) = painted_row(&mut menu, last).unwrap();
+        assert_eq!(
+            menu.y + menu.total_height(),
+            top + height + VERTICAL_PADDING,
+            "the popup's own height must reach exactly one padding past the \
+             last row it paints, or it clips a row or floats a gap"
+        );
+        assert!(menu.point_in_bounds(menu.x + 1.0, top + height));
+        assert!(!menu.point_in_bounds(menu.x + 1.0, menu.y + menu.total_height() + 0.001));
+    }
+
+    #[test]
+    fn nothing_outside_the_run_selects_an_item() {
+        let mut menu = ContextMenu::new(geometry_items());
+        menu.show(300.0, 120.0);
+        // The top padding is the popup's border, not row zero.
+        assert_eq!(menu.index_at_y(menu.y), None);
+        assert_eq!(menu.index_at_y(menu.y + VERTICAL_PADDING - 0.001), None);
+        // The bottom padding likewise.
+        assert_eq!(menu.index_at_y(menu.y + menu.total_height()), None);
+        assert_eq!(menu.index_at_y(menu.strip().bottom()), None);
+        assert_eq!(menu.index_at_y(f32::NAN), None);
+        assert_eq!(menu.index_at_y(f32::INFINITY), None);
+    }
+
+    #[test]
+    fn an_empty_menu_is_just_its_padding() {
+        let mut menu = ContextMenu::new(Vec::new());
+        menu.show(300.0, 120.0);
+        assert_eq!(menu.total_height(), VERTICAL_PADDING * 2.0);
+        assert_eq!(menu.index_at_y(120.0), None);
+        assert_eq!(menu.index_at_y(124.0), None);
+        // Nothing to hang a submenu off, so the offset is the empty run's own
+        // top rather than a coordinate invented for the occasion.
+        assert_eq!(menu.y_offset_for_index(0), VERTICAL_PADDING);
     }
 
     #[test]

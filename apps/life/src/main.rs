@@ -28,6 +28,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -49,28 +50,30 @@ const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
 const COL_TEAL: Color = Color::from_hex(0x94E2D5);
 const COL_MAUVE: Color = Color::from_hex(0xCBA6F7);
 
-// ── Deterministic RNG ───────────────────────────────────────────────
-struct Rng {
-    state: u64,
-}
+// ── Randomness ──────────────────────────────────────────────────────
+//
+// This file used to carry its own copy of the LCG that `guitk::rng` exists to
+// replace, seeded with a literal `42`. That was the bug a player could see:
+// the rng only drives Randomize, so every launch produced the same soup from
+// the same key press, for ever.
+//
+// Its `next_bool(pct)` was `self.next() % 100 < pct`. Worth being exact about
+// what that cost, because it is less than it looks: the low two bits of a
+// power-of-two-modulus LCG are a counter (here x mod 4 decrements every draw,
+// period exactly 4), and 100 = 4 x 25, so the four phases get unequal shares
+// -- 26/26/24/24 at 50% density instead of 25 each. On a 4800-cell grid that
+// is about 1.4 standard deviations, which is to say invisible, and no test
+// could reliably catch it. The same reduction at a *power-of-two* bound is
+// not invisible at all: see `apps/simon`, where drawing one of four colours
+// this way produced a fixed repeating cycle and left the memory game with
+// nothing to memorise. `randrange::below` avoids both by construction.
 
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_bool(&mut self, chance_pct: u64) -> bool {
-        self.next() % 100 < chance_pct
-    }
-}
+/// The seed a soup falls back to when the kernel has no entropy to give.
+///
+/// A Life board may be predictable: the worst outcome is that today's random
+/// soup evolves the way yesterday's did. Refusing to start would be the worse
+/// failure -- see [`guitk::rng::seeded_from_system`]. "LIFE!!!!" in ASCII.
+const FALLBACK_SEED: u64 = 0x4C49_4645_2121_2121;
 
 // ── Preset patterns ─────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,9 +302,9 @@ impl Grid {
         next
     }
 
-    fn randomize(&mut self, rng: &mut Rng, density: u64) {
+    fn randomize(&mut self, rng: &mut SeededRng, density: u64) {
         for cell in &mut self.cells {
-            *cell = rng.next_bool(density);
+            *cell = rng.chance_in(density, 100);
         }
     }
 
@@ -350,7 +353,7 @@ struct LifeApp {
     // Timing
     tick_accum: u64,
     // RNG
-    rng: Rng,
+    rng: SeededRng,
     // Show grid lines
     show_grid: bool,
     // Show help
@@ -372,7 +375,7 @@ impl LifeApp {
             view_col: 0,
             selected_pattern: 0,
             tick_accum: 0,
-            rng: Rng::new(42),
+            rng: seeded_from_system(FALLBACK_SEED),
             show_grid: true,
             show_help: false,
         };
@@ -875,6 +878,18 @@ fn main() {
 // ── Tests ──────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     #[test]
@@ -1065,7 +1080,7 @@ mod tests {
     #[test]
     fn test_randomize() {
         let mut grid = Grid::new(20, 20);
-        let mut rng = Rng::new(123);
+        let mut rng = SeededRng::new(123);
         grid.randomize(&mut rng, 50);
         let pop = grid.population();
         // With 50% density, expect roughly 200 cells out of 400
@@ -1114,35 +1129,58 @@ mod tests {
         }
     }
 
+    // The three tests that used to sit here checked that the private generator
+    // was deterministic, differed by seed, and that a 50% chance came up about
+    // half the time. All three are `randrange`'s contract now and are tested
+    // there. What follows tests what *Life* needs from randomness.
+
+    /// A random soup must honour the density it was asked for. This is the
+    /// same shape as the old test, but it also runs the densities where the
+    /// old `% 100` reduction was worst.
     #[test]
-    fn test_rng_deterministic() {
-        let mut r1 = Rng::new(42);
-        let mut r2 = Rng::new(42);
-        for _ in 0..100 {
-            assert_eq!(r1.next(), r2.next());
+    fn a_random_soup_honours_its_density() {
+        for density in [10_u64, 25, 50, 75, 90] {
+            let mut grid = Grid::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+            let mut rng = SeededRng::new(density);
+            grid.randomize(&mut rng, density);
+            let cells = DEFAULT_WIDTH * DEFAULT_HEIGHT;
+            let alive = grid.cells.iter().filter(|&&c| c).count();
+            let expected = cells * usize::try_from(density).unwrap() / 100;
+            let slack = cells / 10;
+            assert!(
+                alive.abs_diff(expected) < slack,
+                "density {density}: {alive} alive of {cells}, expected about {expected}"
+            );
         }
     }
 
+    /// `new()` must take its generator from the system, not from a literal.
+    ///
+    /// This cannot be tested by observing variety: the host test toolchain has
+    /// no SlateOS kernel, so `seeded_from_system` correctly falls back and two
+    /// fresh apps agree -- exactly as they did under the old hardcoded `42`.
+    /// What separates the two is *which* seed, so that is what is checked. On
+    /// real hardware the same line reaches the kernel instead.
     #[test]
-    fn test_rng_different_seeds() {
-        let mut r1 = Rng::new(1);
-        let mut r2 = Rng::new(2);
-        // Very unlikely to match
-        assert_ne!(r1.next(), r2.next());
+    #[cfg(not(unix))]
+    fn a_fresh_app_is_seeded_by_the_system_and_not_by_a_literal() {
+        let mut fresh = LifeApp::new();
+        let mut fallback = SeededRng::new(FALLBACK_SEED);
+        let mut old_defect = SeededRng::new(42);
+        let drawn = fresh.rng.next_u64();
+        assert_eq!(drawn, fallback.next_u64(), "not using seeded_from_system");
+        assert_ne!(drawn, old_defect.next_u64(), "back on a hardcoded seed");
     }
 
+    /// A soup must follow the generator it was given, which is what the fixed
+    /// literal `42` in `new()` used to make impossible to observe.
     #[test]
-    fn test_rng_next_bool() {
-        let mut rng = Rng::new(42);
-        let mut true_count = 0;
-        for _ in 0..1000 {
-            if rng.next_bool(50) {
-                true_count += 1;
-            }
-        }
-        // Should be roughly 50%
-        assert!(true_count > 350);
-        assert!(true_count < 650);
+    fn a_soup_follows_the_generator_it_was_given() {
+        let mut a = Grid::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        a.randomize(&mut SeededRng::new(1), 50);
+        let mut b = Grid::new(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        b.randomize(&mut SeededRng::new(2), 50);
+        assert_ne!(a.cells, b.cells);
     }
 
     #[test]
@@ -1612,7 +1650,7 @@ mod tests {
     #[test]
     fn test_multiple_steps_performance() {
         let mut grid = Grid::new(50, 50);
-        let mut rng = Rng::new(99);
+        let mut rng = SeededRng::new(99);
         grid.randomize(&mut rng, 30);
         // Run 100 generations — shouldn't panic or hang
         for _ in 0..100 {

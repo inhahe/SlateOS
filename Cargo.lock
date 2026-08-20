@@ -1941,6 +1941,7 @@ version = "0.1.0"
 name = "credentials"
 version = "0.1.0"
 dependencies = [
+ "pwkdf",
  "randrange",
  "sha2",
 ]
@@ -1950,6 +1951,7 @@ name = "credmanager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "pwkdf",
 ]
 
 [[package]]
@@ -4125,6 +4127,7 @@ name = "guitk"
 version = "0.1.0"
 dependencies = [
  "osfont",
+ "randrange",
  "textfind",
  "textfmt",
  "tzrules",
@@ -5607,6 +5610,7 @@ name = "lockscreen"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "pwkdf",
  "sha2",
 ]
 
@@ -7968,6 +7972,7 @@ name = "pinball"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "randrange",
 ]
 
 [[package]]
@@ -8447,6 +8452,14 @@ version = "0.1.0"
 [[package]]
 name = "pv"
 version = "0.1.0"
+
+[[package]]
+name = "pwkdf"
+version = "0.1.0"
+dependencies = [
+ "randrange",
+ "sha2",
+]
 
 [[package]]
 name = "pybullet-cli"

@@ -5,7 +5,30 @@
 **Action needed by you:** none, beyond starting to use it. This is the note you
 asked for — "which syscall number and which capability".
 
-**Status:** delivered.
+**Status:** delivered. ✅ **ACKNOWLEDGED 2026-08-19 by lane C — already
+adopted, including the new failure mode.** `randrange`'s `SystemRandom` goes
+through the `getrandom` symbol exactly as you describe, and your "it can now
+fail" warning needs no change here, because the crate was written to fail
+closed rather than to hope:
+
+- `SystemRandom::open()` draws the first 256-byte buffer **eagerly**, so a
+  caller that cannot proceed without real entropy finds out at `open()` rather
+  than half-way through building a secret. That is also what makes
+  `seed_from_system(fallback)` safe: its single `next_u64()` reads from the
+  buffer `open()` already filled and so cannot trigger a refill, which means a
+  kernel refusal reaches the caller as the named `fallback` and never as a
+  silent 0. (I checked this specifically, expecting to find the opposite.)
+- A failed refill **poisons** the generator: `healthy` goes false and never
+  back, the buffer is zeroed, and `try_next_u64` refuses from then on.
+- `SecretSource::secret` checks `is_healthy` on both sides of the draw, so
+  `apps/credmanager` cannot hand a user a password drawn from a source that
+  failed part-way through. `RandomSource::next_u64`'s infallible signature
+  yields 0 in that state — plainly not random, rather than something that
+  passes for it.
+
+So no code change was needed. Recorded rather than left silent because
+"checked, already correct" is the only thing that distinguishes an adopted
+warning from an unread one.
 
 ## The short answer
 

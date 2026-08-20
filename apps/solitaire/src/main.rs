@@ -93,7 +93,7 @@ const FOUNDATION_COUNT: usize = 4;
 //
 // The shuffle itself was already the correct downward Fisher-Yates. Only the
 // reduction was wrong.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 // ── Card types ──────────────────────────────────────────────────────
 
@@ -361,7 +361,7 @@ struct GameState {
     /// Whether the game has been won.
     won: bool,
     /// RNG for new games.
-    rng: Rng,
+    rng: SeededRng,
 }
 
 impl GameState {
@@ -385,7 +385,7 @@ impl GameState {
             undo_stack: Vec::new(),
             move_count: 0,
             won: false,
-            rng: Rng::new(seed),
+            rng: SeededRng::new(seed),
         };
         state.deal();
         state
@@ -430,7 +430,7 @@ impl GameState {
     /// Start a new game using the next RNG value as seed.
     fn new_game(&mut self) {
         let seed = self.rng.next_u64();
-        self.rng = Rng::new(seed);
+        self.rng = SeededRng::new(seed);
         self.deal();
     }
 

@@ -67,6 +67,17 @@ members = [
     # matters more here than for the others because the kernel,
     # `kernel/build.rs` and the bare-metal services are among the callers.
     "sha2",
+    # Password-to-key derivation: the salt, the stretching, and the stored
+    # verifier. Separate from `sha2` rather than inside it because it needs
+    # `alloc` and it needs `randrange` for fresh salts, while `sha2`'s callers
+    # include the kernel and `userspace/sha256sum`, which have no business
+    # linking an RNG. Extracted when `gui/credentials` (salted and stretched,
+    # design-decisions §464) and `apps/lockscreen` (a bare unsalted
+    # `SHA-256(password)`) turned out to have *incompatible* verifier formats
+    # while still being unwired to each other -- the only moment at which
+    # making them agree is free, rather than a temptation to weaken the store
+    # to match the screen.
+    "pwkdf",
     # SHA-1 and MD5, alongside `sha2` and for a different reason. Nothing in
     # this tree needs either for security — both are broken for that — but a
     # disk imager needs them to compare an image against the checksum its

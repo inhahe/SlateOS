@@ -33030,7 +33030,48 @@ userspace cannot obtain — see the next entry and
 `requests/c-a-userspace-entropy-syscall.md`. `apps/lockscreen` still derives
 its stored hash with a single SHA-256 pass and has not been touched.
 
-## C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE (lane C, 2026-08-17)
+### The salt half is fixed too, 2026-08-18 (`6771f575e`)
+
+`KEY_DERIVATION_SALT` is **gone**. Every vault now draws 16 bytes from the
+kernel CSPRNG and stores them beside the verifier. The paragraph above says
+the salt had to wait for entropy userspace could not obtain; that premise was
+false when it was written — see the next entry's correction.
+
+Salt and cost travel together in one `KdfParams { salt: [u8; 16], rounds:
+u32 }`, for the same reason the round count was stored in the first place:
+both are properties of the stored verifier, and a vault that loses either can
+never be opened again. `KdfParams` is what `CredentialStore` holds now
+(`with_kdf_params`, `kdf_params()`), what `derive_session_key` takes, and what
+`IdentityVerifier::verify` takes. **All of it must round-trip through any
+persistence layer** — the same warning the round count already carried, now
+covering the salt as well, and a vault whose salt is lost is unopenable rather
+than merely slow.
+
+`KdfParams::fresh` **refuses** (`CredentialError::EntropyUnavailable`) when
+the kernel cannot be reached, rather than falling back to a clock. A salt is
+chosen once and then lives as long as the vault does, so a predictable one is
+a permanent weakness that nothing later will notice or repair; refusing to
+create the vault is the recoverable outcome. Recorded as design-decisions
+§464.
+
+The salt is re-drawn on *every* `set_master_password`, including a change of
+an existing password — the old key is derived under the old parameters to
+check the old password and to re-encrypt, then both change together. A change
+that is rejected leaves the old salt in place
+(`a_rejected_password_change_leaves_the_salt_alone`).
+
+Six new tests pin it: two vaults do not share a salt, the salt changes the
+key, a vault reloaded with the wrong salt does not open, changing the password
+changes the salt, the rejected-change case, and the refusal on the
+`handle_request` IPC surface. Tests reach a `#[cfg(test)]`
+`set_master_password_keeping_salt` seam, because a host build has no kernel
+and would otherwise be unable to construct a store at all.
+
+**Still untouched:** `apps/lockscreen` still derives its stored hash with a
+single SHA-256 pass and a shared constant. It is a separate crate with the
+same defect and now has no excuse either.
+
+## C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE (lane C, 2026-08-17) — **FIXED 2026-08-18; and the "where the fix has to come from" paragraph below was wrong when it was written**
 
 **In short:** nothing in lane C can obtain an unpredictable number. The
 credential manager's password *generator* — the feature whose entire job is
@@ -33057,6 +33098,113 @@ Until then the honest thing is for `generate_password` to *say* it is not
 cryptographically strong rather than to look like it is, and for anything that
 needs a real nonce to use a persisted counter instead (see the keystream
 entry above).
+
+### The syscall already existed. Nobody grepped. (2026-08-18)
+
+The paragraph above — "the fix has to come from the kernel", "lane C has no
+interface to it" — was **false on the day it was written**. `SYS_GETRANDOM`
+(number 90) has been in `kernel/src/syscall/handlers.rs` all along, is *not*
+capability-gated, validates the user pointer before it generates, and is
+backed by `kernel/src/rng.rs`: ChaCha20 seeded from RDRAND/RDSEED and
+interrupt timing. Exactly the thing the entry says does not exist.
+
+Worse, **lane C was already calling it** from `userspace/ssh-keygen` while
+this entry and `requests/c-a-userspace-entropy-syscall.md` were being
+written. The request was filed against an assumption instead of a grep, and
+then this entry cited the request as evidence for the assumption. Two
+documents agreeing with each other is not corroboration when one is the
+other's source.
+
+The real blocker was smaller and entirely inside lane C: the `SystemRandom`
+wrapper lived in `guitk::rng`, and `gui/credentials` (a headless service) does
+not and should not depend on a GUI toolkit. Merging the two RNG crates into
+`randrange` — which `gui/credentials` already depended on — removed it. See
+`C-THE-SHARED-RNG-CRATE-WAS-ITSELF-DUPLICATED` and design-decisions §463.
+
+**What is actually fixed:**
+
+- `Xorshift64` and `generate_password(.., seed: u64)` are gone.
+  `generate_password` draws from the kernel and returns `Option<String>`,
+  refusing rather than falling back (`NO_ENTROPY_MESSAGE`). Design-decisions
+  §462 covers the fail-closed rule; §464 covers the salt.
+- Per-vault salts, above.
+- The fail-closed wrapper itself is no longer copied per crate: it is
+  `randrange::SecretSource`, which checks the source's health on *both* sides
+  of a draw, because `SystemRandom` refills from the kernel mid-draw and a
+  password whose tail is zeroes looks fine to the user.
+
+**The lesson, which is the same one as the LCG sweep:** grep before you file.
+A request that asks another lane for something that already exists costs that
+lane a context-switch and costs this one a day of believing itself blocked.
+
+~~**One genuine gap remains, and it is not a blocker.** `kernel/src/rng.rs`
+tracks `seeded: bool` internally, but `sys_getrandom` does not appear to
+surface it, so a caller that runs before the pool is seeded cannot tell.~~
+Noted at the end of `requests/c-a-userspace-entropy-syscall.md`; it matters
+only for very-early-boot callers, which lane C currently has none of.
+
+### Lane A answered, and closed that gap by making the call fallible (2026-08-18)
+
+`requests/a-c-getrandom-is-available.md`. The gap above is resolved in the
+strongest available way — **not** by surfacing a "seeded" flag for callers to
+check, but by making it impossible to read from an unseeded pool. Both halves
+of what lane C asked for now hold:
+
+| | |
+|---|---|
+| **Syscall** | `SYS_GETRANDOM` = 90, **no capability** — deliberately ungated |
+| Unpredictable to another process | ChaCha20, 256-bit key never leaving the kernel |
+| Different across two boots of one VM image | **now true; it was not before** |
+
+The second criterion is the one that needed work, and lane C's guess about
+*why* was right: the old pool was keyed from HPET reads, TSC jitter and APIC
+tick counts, every one of which correlates across two boots of an identical
+image. The kernel now separates **credited** entropy from merely *keyed* —
+only RDSEED/RDRAND and interrupt-arrival timing earn credit, clock reads earn
+none — and `getrandom` blocks until 256 bits are credited.
+
+There is no capability to hold. Lane C had offered to accept an ambient one;
+lane A declined on the grounds that a capability every process receives at
+spawn is ambient authority with extra bookkeeping, and that withholding
+randomness protects nothing — a process denied it does not stop needing
+unpredictable bytes, it just makes worse ones itself. Which is precisely what
+the sixteen hand-rolled LCGs in this lane were.
+
+**What this changes for lane C code: `getrandom` can now fail.** It waits at
+most 15 s, then returns an error surfacing as `EIO`. That is a new failure
+mode on a call that previously always succeeded.
+
+It should be unreachable here — credit accrues from the 100 Hz timer, and lane
+A measured the pool ready **330 ms after interrupts are enabled**, long before
+any GUI process exists. But the handling must still be right, and the two
+tiers in design-decisions §465 handle it in opposite directions **on purpose**:
+
+- **Secrets propagate the failure and never fall back.** Lane A asked for this
+  explicitly; `SecretSource::secret` already does it. A vault that refuses to
+  create a salt is recoverable; one created with a predictable salt is not,
+  and nothing later can detect it. Note the new failure is a *refusal*, not
+  weak bytes — the kernel never hands over material it cannot vouch for, so
+  there is no "check the strength afterwards" case to get wrong.
+- **Novelty falls back, and that stays correct.** `seeded_from_system` taking
+  its per-crate fallback on `EIO` is intended behaviour, not a hole. A game
+  that will not start is worse than a predictable one.
+
+**One caveat that would bite a call site that must not block.** On our native
+ABI the `GRND_*` flags are accepted by libc, validated, and then *discarded* —
+they never reach the kernel, because `posix/src/random.rs` reaches it through
+a two-argument stub. So `GRND_NONBLOCK` does not actually prevent blocking.
+Lane B is tracking the ABI fix
+(`requests/a-b-getrandom-now-waits-for-a-credited-pool.md`). Lane C has no
+such call site — every draw is at app startup or during a deliberate user
+action — so this is noted, not escalated. Lane A offered to prioritise the ABI
+change if one appears.
+
+**Nothing left to action.** The request asks lane C to drop the xorshift in
+`gui/credentials` and close this entry; both happened during the `randrange`
+merge, before the answer arrived. Only a historical comment at
+`gui/credentials/src/main.rs:43` still names it. C-Q5 ("do we write our own
+crypto, or port a vetted implementation") is untouched by this and still
+stands — an entropy source is not a crypto library.
 
 ## C-SHA-256-IS-IMPLEMENTED-ELEVEN-TIMES-IN-THIS-TREE (lane C, 2026-08-17)
 
@@ -34516,475 +34664,6 @@ with a controlled comparison.
     experiment is alternating runs of two commits, three each, comparing
     medians - not consecutive runs of successive commits.
 
-## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17)
-
-**In short:** the 1-pixel line the compositor draws around a window is drawn
-one pixel higher than the space the layout reserved for it. Nobody sees a
-problem, because the row it lands on is part of the window's drop shadow and
-is repainted anyway. But it means the code that *draws* the frame and the code
-that *measures* the frame disagree by one pixel, and the next person to trust
-the measurement will be wrong by one pixel too.
-
-`Window::frame_insets` returns `(top, side, bottom) = (TITLE_BAR_HEIGHT,
-BORDER_WIDTH, BORDER_WIDTH)`: a border down each side and along the bottom,
-and **no border above the title bar**. Every measurement derives from that —
-`frame_rect`, `outer_rect`, `title_bar_rect`, hit testing, damage tracking.
-
-`Compositor::render_border` (gui/compositor/src/lib.rs) does not. It strokes a
-box whose top edge is `BORDER_WIDTH` above `frame_rect`, so the frame is drawn
-one row taller than it is measured. That row falls inside `outer_rect` (which
-adds `SHADOW_SIZE` = 8 px of shadow beyond the frame) and inside
-`window_drawn_extent`, so it is repainted correctly and is inside the resize
-grab band — hence no visible symptom today.
-
-**Where:** `render_border` carries the discrepancy explicitly now, as a
-`Rect::new` that adds the row to `frame_rect` with a comment, rather than as
-open-coded constants that merely happened not to match. `frame_insets` is at
-`gui/compositor/src/lib.rs`; `nothing_a_window_draws_falls_outside_its_damage_extent`
-pins the containment that keeps it harmless.
-
-**Proper fix:** decide which is right and make both agree.
-- If the border above the title bar is wanted (it is what a real window frame
-  looks like), `frame_insets` should return `top = TITLE_BAR_HEIGHT +
-  BORDER_WIDTH` and `title_bar_rect` should start `BORDER_WIDTH` below the top
-  of the frame box. This shifts every framed window's title bar and the resize
-  grab bands by one pixel, and moves the boundary between "title bar" (drag to
-  move) and "top border" (drag to resize) — so it wants a look at the drag
-  tests, whose grab points are chosen relative to `TITLE_BAR_HEIGHT`.
-- If it is not wanted, `render_border` should stroke `frame_rect` unmodified
-  and the extra row disappears.
-
-Not urgent: nothing is visibly wrong and nothing is unsafe. Logged because a
-one-pixel disagreement between drawing and measurement is exactly the kind of
-thing that becomes a real bug the moment either side is touched.
-
-## C-THE-CREDENTIAL-STORE-ENCRYPTS-EVERY-SECRET-WITH-THE-SAME-KEYSTREAM (lane C, 2026-08-17)
-
-**In short:** the credential manager — the thing that holds the user's saved
-passwords — scrambles every secret in the vault with the *same* repeating
-pattern. Anyone who can read the vault file can recover its contents without
-ever learning the master password, by lining two entries up against each
-other and cancelling the pattern out. This is the single worst defect
-currently known in lane C's tree.
-
-**Where:** `gui/credentials/src/main.rs`, `encrypt` / `decrypt` /
-`generate_keystream`.
-
-`generate_keystream(key, len)` produces `SHA-256(key ‖ 0) ‖ SHA-256(key ‖ 1) ‖
-…`. It takes no nonce (a number used once, mixed in so that encrypting the
-same thing twice gives different output). So it is a pure function of the
-session key, and every credential in a vault is XORed with the identical
-keystream. XOR two ciphertexts together and the keystream cancels, leaving the
-two plaintexts XORed with each other — the classic "two-time pad", which is
-routinely solved by hand for text. No key recovery is needed and no master
-password is needed; read access to the stored ciphertexts is enough.
-
-The doc comment says "this is a demonstration cipher; production use would
-employ AES-256-GCM", which covers *weak* but not *broken*: a demonstration
-cipher is still expected to keep two records from decrypting each other.
-
-**Proper fix (does not need any new primitive):** give every encryption its own
-nonce and mix it into the keystream — `SHA-256(key ‖ nonce ‖ counter)` — then
-store the nonce beside the ciphertext. A per-record sequence number that is
-persisted and never reused under a given key is a sufficient nonce and needs
-no randomness, so this is fixable today with the SHA-256 already in the file.
-That turns the construction into SHA-256 used as a counter-mode PRF, which is
-a defensible stream cipher rather than a broken one.
-
-Still missing after that fix, and requiring things the tree does not yet have:
-authentication (the ciphertext can be flipped bit-for-bit undetected — wants an
-HMAC or a real AEAD) and a vetted AES-256-GCM. See
-`open-questions.md` → "Do we write our own cryptographic primitives?".
-
-**Resolved 2026-08-17, as described.** `encrypt` now takes a nonce and returns
-`nonce ‖ ciphertext`; `decrypt` reads the nonce back off the front and returns
-`Result`, because a blob shorter than the 8-byte nonce never came from
-`encrypt`. `generate_keystream(key, nonce, len)` is
-`SHA-256(key ‖ nonce ‖ counter)`. `CredentialStore` supplies nonces from
-`next_nonce`, a counter that only ever increases; `take_nonces(n)` hands out a
-contiguous base so a caller already holding `&mut credentials` (the re-encrypt
-loop in `set_master_password`) can still get fresh ones. Gaps are harmless —
-nonces must be unique, not contiguous.
-
-Regression test:
-`the_same_plaintext_twice_does_not_produce_the_same_ciphertext` asserts the
-*bodies* differ and not merely the nonce prefixes, plus
-`a_blob_too_short_to_hold_a_nonce_is_rejected_not_misread`.
-
-**One thing a persistence layer must not get wrong**, and there is no
-persistence layer yet: `next_nonce` has to round-trip to disk. A vault
-reloaded with the counter reset to zero re-issues nonces it has already used
-and reintroduces exactly this bug. The field carries a comment saying so.
-
-The authentication half is *not* fixed and remains open under C-Q5.
-
-## C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES (lane C, 2026-08-17)
-
-**In short:** the credential manager turns the user's master password into a
-key with a single pass of SHA-256, mixed with a fixed word that is compiled
-into the program and is therefore identical on every SlateOS machine. Both
-halves of that are wrong in the same direction: a single pass means an
-attacker can try billions of candidate passwords per second on a GPU, and a
-shared fixed word means one precomputed table cracks every user in the world
-rather than having to be rebuilt per user.
-
-**Where:** `gui/credentials/src/main.rs`, `derive_session_key` and the
-`KEY_DERIVATION_SALT` constant.
-
-```rust
-const KEY_DERIVATION_SALT: &str = "slateos_credential_salt";
-
-fn derive_session_key(master_password: &str) -> [u8; 32] {
-    let mut input = master_password.as_bytes().to_vec();
-    input.extend_from_slice(KEY_DERIVATION_SALT.as_bytes());
-    sha256(&input)
-}
-```
-
-A password-to-key function is supposed to be *deliberately slow* (key
-stretching) and *per-user distinct* (a random salt stored with the vault).
-This is neither. `apps/lockscreen` derives its stored hash the same way and
-has the same problem.
-
-**Proper fix:** iterate. Even a plain `for _ in 0..N { h = sha256(h ‖ pw) }`
-with N in the hundreds of thousands is an enormous improvement and needs
-nothing new — that is essentially PBKDF2's structure. The per-vault random
-salt needs a randomness source the crate does not have (see below), but a
-salt that merely varies per *installation* already defeats a shared table, so
-it should not wait for one. The end state wants a memory-hard KDF (scrypt or
-Argon2id), which is gated on the same open question as the cipher.
-
-**Half resolved 2026-08-17 — the stretching. The salt is still shared.**
-
-`derive_session_key(password, rounds)` now runs `rounds` iterations of
-`SHA-256(acc ‖ password ‖ salt)`. The password and salt are folded back in on
-*every* round rather than the accumulator merely being rehashed: a chain of
-the form `h = SHA-256(h)` is the same chain for every password, so an attacker
-could walk it once and test candidates against any point on it. Mixing the
-password in each round is what forces the full cost per guess.
-
-The count was picked by measurement, not by taste: one SHA-256 of a ~70-byte
-input on this machine is **1.278 µs release** (8.564 µs debug), so
-`DEFAULT_KDF_ROUNDS = 100_000` is ~130 ms per unlock.
-
-**A second defect had to be fixed for the first fix to be worth anything.**
-The store kept `master_password_hash = SHA-256(password)` to check unlock
-attempts against. An attacker holding the vault would have tested guesses
-against *that* — one SHA-256 each — and never called `derive_session_key` at
-all, so the stretching would have been decorative. The field is now
-`master_password_verifier`, `SHA-256(stretched key ‖ label)`, so a guess costs
-the full derivation. `IdentityVerifier::verify` had the identical bug on the
-re-verification path and is routed through the same value.
-Both comparisons use `constant_time_eq` rather than `==`, which returns early
-on the first differing byte and so leaks how many leading bytes matched.
-
-**Why the round count is stored rather than compiled in.** `kdf_rounds` is a
-field of `CredentialStore` (`with_kdf_rounds`, default `DEFAULT_KDF_ROUNDS`).
-The right number rises with hardware, and a vault written under the old number
-must keep opening after the default moves — it can only do that if it
-remembers what the old number was. Every real password-hashing format records
-its cost parameters beside the hash for this reason. **This too must
-round-trip through any persistence layer.** It also lets the test module run
-at 4 rounds instead of putting the suite in the minutes;
-`default_kdf_rounds_are_usable` exercises the shipped number once.
-
-**Still open:** the salt. `KEY_DERIVATION_SALT` is still a compile-time
-constant shared by every install, because a per-vault salt needs entropy that
-userspace cannot obtain — see the next entry and
-`requests/c-a-userspace-entropy-syscall.md`. `apps/lockscreen` still derives
-its stored hash with a single SHA-256 pass and has not been touched.
-
-## C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE (lane C, 2026-08-17)
-
-**In short:** nothing in lane C can obtain an unpredictable number. The
-credential manager's password *generator* — the feature whose entire job is
-producing something an attacker cannot guess — runs a 3-line xorshift
-generator seeded by a number its caller passes in, in practice a timestamp.
-An attacker who knows roughly when a password was generated can enumerate the
-possibilities.
-
-**Where:** `gui/credentials/src/main.rs`, `Xorshift64` and
-`generate_password(.., seed: u64)`.
-
-`Xorshift64` is a perfectly good *statistical* generator and a useless
-*cryptographic* one: its entire future output is determined by 64 bits of
-state, and recovering that state from output is trivial. Seeded from a
-second-resolution timestamp, the real entropy is closer to 20 bits.
-
-**Where the fix has to come from:** the kernel. A userspace CSPRNG needs a
-seed from an entropy pool the kernel maintains (RDRAND/RDSEED, interrupt
-timing, etc.), surfaced through a syscall. `kernel/src/crypto.rs` exists
-(lane A) but lane C has no interface to it. Filed as
-`requests/c-a-userspace-entropy-syscall.md`.
-
-Until then the honest thing is for `generate_password` to *say* it is not
-cryptographically strong rather than to look like it is, and for anything that
-needs a real nonce to use a persisted counter instead (see the keystream
-entry above).
-
-## C-SHA-256-IS-IMPLEMENTED-ELEVEN-TIMES-IN-THIS-TREE (lane C, 2026-08-17)
-
-**In short:** eleven separate copies of the same cryptographic hash function
-have been written by hand in this repository. Each one can be independently
-wrong, and each one has to be independently reviewed, tested and fixed. Some
-of them guard logging in and unlocking the screen.
-
-**Where** (found by `grep -rn "fn sha256" --include=*.rs`):
-
-| Copy | Lane | Shape |
-|---|---|---|
-| `kernel/src/crypto.rs` | A | one-shot |
-| `posix/src/sha2.rs` | B | one-shot, has the FIPS million-`a` vector |
-| `posix/src/crypt.rs` | B | via `sha2` |
-| `init/login/src/main.rs` | B | block compression + one-shot |
-| `userspace/coreutils/src/bin/sha256sum.rs` | B | one-shot |
-| `userspace/backup/src/main.rs` | B | streaming |
-| `kernel/src/oci.rs` | A | digest string |
-| `kernel/build.rs` | A | build-time |
-| `gui/credentials/src/main.rs` | **C** | one-shot |
-| `apps/lockscreen/src/main.rs` | **C** | one-shot |
-| `apps/backup/src/main.rs` | **C** | streaming `Sha256` struct |
-
-All three lane-C copies do carry the standard known-answer vectors (empty,
-`"abc"`, the 448-bit message), so none of them is presently *wrong*. That is
-luck holding, not a design.
-
-**Proper fix:** one implementation, one set of test vectors, shared. Lane C
-can extract its three into a small top-level crate alongside the existing
-`byteread` / `textfind` / `textfmt` utility crates and adopt it; lanes A and B
-have to opt in themselves, so the cross-lane half is a request rather than an
-edit. Note `kernel/` is `no_std`, so the shared crate must be `no_std` with an
-`alloc`-free one-shot API to be adoptable by all three lanes.
-
-### Correction and progress, 2026-08-17
-
-**It is twenty-six, not eleven.** The original count came from
-`grep "fn sha256"`, which misses every copy that names its entry point
-something else or exposes only a `Sha256` struct. Two greps are needed to see
-them all, and neither alone is sufficient:
-
-```
-grep -rln "0x6a09e667" --include=*.rs .   # the eight IV words
-grep -rln "fn sha256\|struct Sha256" --include=*.rs .
-```
-
-The union is 26 files. The original entry also missed one of lane C's own:
-**`apps/diskimager`** has a streaming copy, so lane C had four, not three.
-
-**Done.** `sha2/` now exists at the workspace root — `no_std`, no `alloc`, the
-four FIPS 180-4 vectors, a streaming form cross-checked against the one-shot
-one at every length up to three blocks and every split within each length, and
-a `benches/rate.rs` (commit `d8ad84f54`). `gui/credentials` is migrated
-(`eb6e77799`), which is also the first evidence for the claim that the copies
-cost something: it was **22% faster** afterwards (1.20 vs 1.54 µs/iter on a
-70-byte input, both measured in one process), because that copy allocated a
-`Vec` per call for the padded message. That matters concretely — the
-credential KDF runs 100 000 hashes per unlock.
-
-**Remaining, 25 copies.** Lane C's three: `apps/backup` (streaming +
-`sha256_bytes`/`sha256_hex`/`sha256_file`), `apps/diskimager` (streaming),
-`apps/lockscreen` (one-shot). Lanes A and B own the other 22 and must opt in
-themselves; requests are filed rather than edits made.
-
-**What consolidating does and does not buy.** It does not make the primitive
-vetted — a single unvetted SHA-256 is still unvetted, and whether this tree
-should be writing its own crypto at all is `open-questions.md` C-Q5. What it
-buys is that the answer has one place to land, that a mistake is caught once
-rather than needing to be caught 26 times, and — per the measurement above —
-that the duplication was costing performance as well as review budget.
-
-### Lane C is done, 2026-08-17
-
-All four of lane C's copies are gone. `gui/credentials` (`eb6e77799`),
-`apps/diskimager` (`65883cf92` — which was not a migration but a bug fix; see
-`C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256` below), and now
-`apps/backup` and `apps/lockscreen`. **22 copies remain, all in lanes A and B**
-— 20 in B, 3 in A, minus `posix/src/crypt.rs` which correctly delegates to
-`posix/src/sha2.rs` rather than carrying its own.
-
-The migrations were not neutral. Deleting the copies removed clippy warnings
-in bulk, because a hand-transcribed FIPS table is one long run of exactly the
-constructs the workspace lints forbid — `w[i - 15]`, `h[i] = h[i] + a`,
-`block_start + 64`:
-
-| Crate | warnings before | after |
-|---|---|---|
-| `apps/backup` | 368 | 266 |
-| `apps/lockscreen` | 85 | **11** |
-
-That is 176 warnings that were never going to be fixed in place, because
-fixing them means bounds-checking a loop whose bounds are the specification.
-It is worth stating as a general result: **an inlined copy of a published
-algorithm is a large, permanent lint-debt liability, and moving it into a
-crate that is written once against the vectors is the only way to discharge
-it.** The remaining `apps/**` lint debt is now dominated by ordinary
-application code, which is fixable.
-
-Two further findings from the audit, both recorded separately:
-
-- The mechanical check that found the disk-imager stub — extract every
-  8-hex-digit literal from a file and look for a contiguous run equal to the
-  64-word K table and the 8-word IV — also found the **same stub hashing
-  system passwords** in `userspace/login` and `userspace/chpasswd`. See
-  `C-THE-SAME-STUB-IS-THE-SYSTEM-PASSWORD-HASH` at the end of this file.
-- Five further lane-B copies have no known-answer vector at all
-  (`userspace/backup`, `pkg`, `rsync`, `ssh`, `useradm`), though all five do
-  carry the full constant tables. Listed in
-  `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
-
-
-## C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256 (lane C, 2026-08-17)
-
-**In short.** `apps/diskimager` offers to checksum an image with MD5, SHA-1 or
-SHA-256 and shows you a digest of exactly the right length. None of the three
-is the algorithm it claims. All three are the same made-up mixing function, so
-the "SHA-256" it prints for a downloaded `.iso` will never match the SHA-256
-the publisher printed — and its "verify after write" tick box is checking the
-disk against a number that means nothing outside this program.
-
-**Where.** `apps/diskimager/src/main.rs`, `HashState` (~lines 205-290).
-
-**What it actually computes.** `new()` seeds `state` with the genuine
-published initial values for whichever algorithm you picked — the real
-SHA-256 IV (`0x6a09e667, 0xbb67ae85, …`), the real MD5 and SHA-1 ones. That
-is the entire resemblance. `update()` then ignores all of it:
-
-```rust
-for (idx, &byte) in data.iter().enumerate() {
-    let slot = idx % 8;
-    if let Some(s) = self.state.get_mut(slot) {
-        *s = s.wrapping_mul(31).wrapping_add(byte as u64);
-    }
-}
-```
-
-That is eight interleaved `u64` polynomial accumulators — a Rabin-style
-rolling fingerprint with base 31 — and it is identical for all three
-algorithms. `finalize()` then stirs the eight words together and truncates the
-hex to 32, 40 or 64 characters depending on which name you asked for. The
-choice of algorithm affects **only the length of the output string** and the
-eight seed constants.
-
-**How it survived.** Two ways, both worth noting because they generalise.
-
-1. *The tests check shape, not value.* There are eight tests over `HashState`.
-   They assert the digest is 64 characters, that it is all hex digits, that
-   the same input twice gives the same output, and that two different inputs
-   give different outputs. Every one of those passes for `*s = s*31 + byte`.
-   Not one test compares against a known answer — and a known-answer vector is
-   the *only* test that can distinguish a hash from a plausible-looking
-   function, which is precisely why FIPS publishes them.
-
-2. *It has already been "fixed" once, at the wrong level.* There is a
-   nine-line comment in `finalize()` explaining that the previous version
-   emitted the raw state words and truncated, so that bytes landing in
-   discarded words produced identical digests — "a real collision" — and that
-   folding all eight words in fixes it. That diagnosis is correct and the fix
-   works. But it treats the stub as the thing to repair rather than the thing
-   to replace, which is the band-aid accumulation `CLAUDE.md` warns about: the
-   collision was a symptom, and the disease is that this is not a hash.
-
-**Impact.** Two distinct failures, one much worse than the other.
-
-- **Comparing against a published checksum is broken outright, and silently.**
-  This is the headline use of a disk imager: download an install image, paste
-  in the checksum from the download page, confirm it matches. It never will.
-  The user sees `Mismatch`, concludes their download is corrupt, and
-  re-downloads forever. Worse in the other direction: the Verify tab will
-  happily *display* a 64-character "SHA-256" that a user may copy and publish
-  as if it were one.
-- **Verify-after-write is weaker than it looks but not worthless.** It
-  compares the source against the written-back data using the same function on
-  both sides, so it is a self-consistency check, and a base-31 polynomial over
-  `u64` does catch random corruption with high probability. It will not catch
-  deliberate tampering, and it is not what the UI implies.
-
-**Severity.** High. It is a correctness bug in the feature the application
-exists for, it is invisible to the user (the output is well-formed and
-stable), and the tests are green.
-
-**Proper fix.** Not "write the missing rounds into `update()`" — delegate.
-`sha2/` already exists at the workspace root (`d8ad84f54`): `no_std`, no
-`alloc`, checked against all four FIPS 180-4 vectors. SHA-1 and MD5 need the
-same treatment — they are obsolete *for security* but a disk imager needs them
-precisely because publishers still post them, so they should be shared crates
-in the same shape, each with the known-answer vectors from FIPS 180-4 and RFC
-1321 respectively. Then `HashState` becomes a thin enum over three real
-implementations.
-
-**And add value-checking tests**, in `diskimager` as well as in the crates, so
-the next stub cannot pass. The minimum bar for any hash in this tree: the
-digest of the empty input, and the digest of `"abc"`. Both are published for
-all three algorithms.
-
-### FIXED, 2026-08-17 (`cf5ebb13f`, and the commit that follows it)
-
-Done as written above — delegated, not patched.
-
-`blockbuf`, `sha1` and `md5` now sit at the workspace root beside `sha2`.
-Three crates rather than two because SHA-1 and MD5 written standalone would
-have meant a third and fourth copy of Merkle–Damgård partial-block and padding
-logic, which is the half that actually hides bugs: a wrong compression
-function fails the first known-answer vector, whereas a wrong buffer only
-misbehaves in the seam between two `update` calls — so it passes every
-published vector, all of which arrive in a single call. `blockbuf` is that
-logic once, tested over every length up to three blocks at every possible
-split point. MD5's `T` table is generated from its definition
-`floor(2^32 · |sin(i+1)|)` rather than transcribed, which removes that error
-class rather than testing for it.
-
-`HashState` is now a three-variant enum over `md5::Md5` / `sha1::Sha1` /
-`sha2::Sha256`, and `diskimager` carries four new tests:
-
-| Test | What the stub would have failed |
-|---|---|
-| `hashes_match_their_published_vectors` | everything — six vectors, empty and `"abc"`, all three algorithms |
-| `each_algorithm_produces_its_own_length_and_value` | nothing; it guards the picker wiring, not the maths |
-| `splitting_the_input_does_not_change_the_digest` | nothing; it guards the *new* risk, that a file read in chunks hashes differently from a file read whole |
-| `finalize_is_repeatable` | nothing; the real hashers consume themselves on finalize, so `HashState` finalizes a clone |
-
-117 tests pass in `diskimager`; 26 tests and 5 doctests in the three crates.
-The crate's 29 remaining clippy warnings are pre-existing and unchanged —
-measured before and after, identical counts by lint — and are tracked
-separately under the `apps/**` half of the lint debt.
-
-**The generalisable lesson, restated because it is the only one that
-matters:** none of the eight original tests was wrong. They were all true of
-`state[i % 8] = state[i % 8] * 31 + byte`. Shape tests cannot fail on a stub,
-so a subsystem with only shape tests is untested no matter how many it has.
-
-## C-THE-SAME-STUB-IS-THE-SYSTEM-PASSWORD-HASH (found by lane C, owned by lane B, 2026-08-17)
-
-**In short.** The made-up mixing function that `apps/diskimager` was passing
-off as three checksums is also, byte for byte, the function `userspace/login`
-and `userspace/chpasswd` use to hash passwords into `/etc/shadow`. Two
-consequences, both reproduced: a password set with `passwd` cannot be used to
-log in at all, and the entries `chpasswd` writes are labelled `$5$` — the
-standard crypt(3) identifier for SHA-crypt — while containing something that
-is not SHA-crypt, not SHA-256, and not stretched by any number of rounds.
-
-**Not mine to fix.** `userspace/**` is lane B's. Filed in full, with the
-reproduction and the mechanical check that found it, as
-`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`. Logged here so
-it is not lost if that request is actioned and removed.
-
-**The short form of the fix**, which is lane B's call: `posix/src/crypt.rs` is
-already a correct and complete SHA-crypt — `$5$`/`$6$`/`$1$`, the `rounds=`
-field, the crypt base-64 alphabet, Drepper's published vectors, 29 tests —
-delegating its core to `posix/src/sha2.rs`. Three tools that read and write
-one file should be calling it instead of each hashing differently. The part
-with a genuine tradeoff is what to do with the entries already written in two
-wrong formats.
-
-**Why this is in lane C's tracker at all.** Because the two bugs are the same
-bug, and finding the second one cost nothing once the first was understood.
-The check is mechanical: extract every 8-hex-digit literal from a file that
-claims to implement a published algorithm, and look for a contiguous run
-matching the algorithm's published constant table. `chpasswd` and `login`
-carry the genuine SHA-256 IV and no K table at all — exactly the disk imager's
-shape. It is worth running over any transcribed algorithm in this tree,
-because it costs nothing and, unlike a test that checks the digest's shape, it
-cannot be satisfied by a plausible-looking function.
 ## A-ADHOC-QEMU-PROBES-LEAK-THE-EMULATOR-ABOUT-TWO-THIRDS-OF-THE-TIME (lane A, 2026-08-18) - **fixed by `scripts/qemu-probe.py`; read this before hand-rolling a probe**
 
 **In short:** the one-line trick everyone uses to ask QEMU "do you support this
@@ -35620,11 +35299,369 @@ nothing wrong with it.
 
 ### Still to do
 
-Five more hand-rolled generators remain in lane C and should move onto
-`guitk::rng` — none of them generate secrets, so this is tidying rather than
-security: `gui/desktop/src/power.rs` (three copies of the same xorshift in one
-file), `gui/desktop/src/wallpaper.rs` (an LCG), `apps/paint` (xorshift 13/17/5),
-`apps/netscan`, `apps/spades`.
+**Corrected 2026-08-18.** This section originally listed five generators and
+said "none of them generate secrets, so this is tidying rather than security."
+That was wrong on both counts. The survey behind it grepped for one xorshift
+constant and missed everything written differently — and one of the things it
+missed, `apps/credmanager`, generates credentials people store and use. See
+the entry below it.
+
+The lesson is worth keeping: a "have I found them all?" sweep that greps for
+the *implementation* finds only the copies that look like the one you started
+from. The sweep that found the rest looked for `wrapping_mul` with either LCG
+constant, for every shift triple, and for the word `seed` — and still turned
+up a generator in a *third* password generator that had been converted to a
+crate and so matched none of them.
+
+Converted since: `gui/desktop/src/power.rs`, `gui/desktop/src/wallpaper.rs`
+(the slideshow shuffle), `apps/paint`, `apps/netscan`, `apps/spades`,
+`apps/credmanager`.
+
+Still outstanding, none of which generate secrets:
+
+| Where | What |
+|---|---|
+| `gui/desktop/src/wallpaper.rs:758` | a second LCG, separate from the shuffle |
+| `gui/toolkit/src/listview.rs:427` | an LCG |
+| `apps/speedtest/src/main.rs:414,546` | an LCG, twice |
+| `apps/videoplayer/src/main.rs:1291` | an LCG |
+
+## [C] FIXED — the credential manager generated the same passwords for everyone (2026-08-18)
+
+**In short:** `apps/credmanager` — the app whose whole job is to make and keep
+strong passwords — built every password from a fixed starting number, `12345`,
+that was bumped by one each time you pressed Generate. The result was not
+random at all: the first password it ever made for you was the first it made
+for everyone who ever ran it, the second was the second, and so on. Anyone who
+had the program could work out the passwords it would produce. Meanwhile the
+meter beside the password said things like "94 bits of entropy", which is the
+strength of a password picked at random — a true statement about the *settings*
+and a false one about the password on screen, whose real strength was zero.
+
+This is the same defect as the `apps/passwordgen` entry above, found by the
+follow-up sweep that entry's "still to do" list should have done and didn't.
+It is worse in one respect: passwordgen makes a password you look at, while a
+credential manager makes one you *save and use*, so a bad password here is
+still protecting an account tomorrow.
+
+### What was wrong
+
+- `PasswordGenerator::new()` set `seed: 12345`. There was no other source of
+  randomness in the type.
+- `pseudo_random(bound, offset)` was not even a running generator — it was a
+  stateless integer hash of `seed + offset`. So the *n*th password was a pure
+  function of `n`, published in the source. No state to recover, nothing to
+  observe: you could compute the whole sequence from the repository.
+- It reduced with `% bound`, so characters early in each pool came up slightly
+  more often — the least of the problems here.
+- `entropy_bits()` reported `length x log2(pool_size)` regardless. That number
+  is a property of a password drawn uniformly at random; attached to this one
+  it was a false assurance shown in the UI.
+
+### The fix
+
+The same shape as `passwordgen`, which is the point — one pattern, so the next
+reviewer recognises it:
+
+- `CredRandom` with exactly two live variants, `System(Box<SystemRandom>)` and
+  `Unavailable`, plus a `#[cfg(test)]` `Seeded`. There is deliberately no
+  fallback between them: a fallback is how the original defect survives the
+  fix, and nobody can tell a predictable password from an unpredictable one by
+  looking at it.
+- `CredRandom::secret` checks health on both sides of a draw, so a kernel that
+  fails on a refill halfway through a password yields a refusal rather than a
+  password whose second half is zeroes.
+- `generate()` returns `Option<String>`. The three call sites now go through
+  one `regenerate_password` helper, which on refusal clears the password that
+  was showing and records the message — leaving the old one on screen beside
+  "cannot generate" reads as an offer to keep using it.
+- The refusal is rendered in red *where the password would be*. Left in the
+  "Click Generate to create a password" state it would read as "you have not
+  pressed the button yet", which is the wrong thing to tell someone whose
+  generator cannot generate.
+- The test module gained the house lint-allow block it never had, which is why
+  seven `expect_used` findings in it had been showing up as real ones.
+
+Nine tests: every mode refuses without entropy, two generators never agree,
+pressing Generate twice gives two different passwords, a refusal clears the
+displayed password, a success clears an earlier refusal, and the refusal
+reaches the screen.
+
+### Related, not yet fixed
+
+`gui/credentials/src/main.rs` has a *third* `generate_password`, taking the
+seed as a `u64` parameter. Nothing outside its own tests calls it yet, so no
+user has been given a password from it — but it is public API in a credentials
+crate, and the next caller to wire it up will pass it a clock or a counter.
+It should draw from the kernel and fail closed like the other two before it
+acquires a caller. Tracked as `C-GUI-CREDENTIALS-GENERATE-PASSWORD-TAKES-A-SEED`.
+**Fixed 2026-08-18 in `7b9a1bace`, still without a caller** — see the closing
+section of `C-THE-SHARED-RNG-CRATE-WAS-ITSELF-DUPLICATED`.
+
+`gui/credentials` also carries a comment saying "there is no source of
+unpredictable numbers in userspace yet", which is why
+`KEY_DERIVATION_SALT` is a constant every install shares. That statement is
+now out of date — `guitk::rng::SystemRandom` reaches the kernel CSPRNG through
+the posix `getrandom` symbol, which is the route this batch used. The
+per-vault salt in
+`C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES` is
+therefore unblocked. **Both comments are deleted and the salt is fixed as of
+`6771f575e`.**
+
+## C-THE-SHARED-RNG-CRATE-WAS-ITSELF-DUPLICATED (lane C, 2026-08-18) — FIXED
+
+Two crates existed to end hand-rolled random number generators, written at
+roughly the same time in different corners of lane C, neither aware of the
+other: `randrange` (14 consumers, all games, `no_std` and dependency-free, no
+entropy source) and `guitk::rng` (7 consumers, `RandomSource` + `SystemRandom`,
+inside the GUI toolkit). They used the same method name `below` for two
+different things — a `u64` bound in one, an index in the other.
+
+This was not a cosmetic overlap. `gui/credentials` is a headless service whose
+dependencies are `sha2` and `randrange`; the only wrapper for the kernel
+CSPRNG lived in a widget library it must not link. The entry above says its
+third `generate_password` "should draw from the kernel" — it could not, until
+the entropy source moved somewhere a program without a screen can reach it.
+
+Merged into `randrange` (see design-decisions.md §463): names follow the games,
+the trait and the entropy source follow the desktop, `guitk::rng` becomes
+`pub use randrange as rng;` so no call site changes meaning. The bounded
+reduction now uses Lemire's high-bit multiply *with* a rejection step, so the
+one code path is exactly uniform — it is what a password draws through now,
+not just a card shuffle. `SeededRng` drops `Copy`, because a generator that
+duplicates itself on a move-out gives two callers the same sequence silently.
+
+21 consumer crates converted; randrange 25 tests, all affected crates green.
+
+### The sweep missed an eighth generator, again
+
+`apps/pinball/src/main.rs` carried a private `struct Rng` — the literal
+copy-pasted LCG that `randrange`'s module docs dissect, reduced with
+`% bound` — and **two** earlier sweeps for hand-rolled generators did not find
+it. It surfaced only incidentally, while grepping for consumers during this
+merge.
+
+Two defects in it:
+
+- `Pinball::new()` seeded a fixed `42`, so every session's first table was
+  identical: the same multiball throw, every launch, forever. Nobody reported
+  it because a pinball table looks random the first time you see it.
+- `next_bounded` reduced with `%`, which on this LCG biases toward the low end
+  of the range. It was only ever called from tests, so the bias never reached
+  play — which is why it survived.
+
+Fixed: seeds from `SystemRandom`, falling back to a fixed seed rather than
+refusing to start (the spades precedent — a table may be predictable; a machine
+that will not start is the worse failure, and this is a loss of *variety*, not
+of confidentiality). `with_seed` became `with_rng` so a new table carries the
+old generator forward instead of reseeding one from the other's output. Its
+four generator tests were deleted and replaced with three that test what the
+*game* needs from randomness — chiefly that multiball throws its extra balls
+both ways across 40 seeds.
+
+**The lesson for the next sweep:** grepping for the *name* of a thing finds
+the copies that kept the name. Both misses here were crates that had renamed
+the struct or inlined the arithmetic. Grep for the constants instead — the
+multiplier `6364136223846793005` and its LCG siblings are far harder to
+disguise than the word `Rng`.
+
+### Both of those are now done (2026-08-18, `7b9a1bace` and `6771f575e`)
+
+`C-GUI-CREDENTIALS-GENERATE-PASSWORD-TAKES-A-SEED` and
+`C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES` were
+unblocked in the strongest sense — `gui/credentials` already depended on
+`randrange`, which now carries `SystemRandom` — and both are fixed:
+
+- **The seed parameter is gone.** `generate_password` draws from the kernel
+  and returns `Option<String>`, refusing rather than falling back. Fixed
+  before it ever acquired a caller, which was the point.
+- **`KEY_DERIVATION_SALT` is gone.** Every vault draws its own 16 bytes; see
+  the marked-up entry above and design-decisions §464.
+- Both stale "there is no source of unpredictable numbers in userspace yet"
+  comments are deleted, and `requests/c-a-userspace-entropy-syscall.md` is
+  marked **resolved** rather than deleted — it turns out the syscall it asked
+  for had existed the whole time, and that is worth keeping a record of. The
+  correction is written up under
+  `C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE`.
+
+**A third copy of the same wrapper appeared while fixing this**, which is the
+signal the top of this entry is about: `apps/passwordgen`, `apps/credmanager`
+and `gui/credentials` had each independently written the same fail-closed
+`secret()` guard. The *rule* moved into `randrange::SecretSource`; the
+`System`/`Seeded`/`Unavailable` enums stay in each consumer, because their
+`Seeded` variant is `#[cfg(test)]` and `cfg(test)` does not cross a crate
+boundary — a `Seeded` defined in `randrange` would be reachable from
+production code in every caller, which is the one thing those enums exist to
+prevent.
+
+### The constant grep, run immediately, found twenty more
+
+The list here originally read "four non-secret hand-rolled generators remain".
+That number came from the name-based sweeps. Running the constant-based grep
+this entry recommends — one command, thirty seconds — turned up **twenty**, in
+twenty-one files (one of which, `apps/breakout`, is a deliberate reproduction
+of the historical generator inside its own tests, and is not a defect).
+Tracked as `C-TWENTY-MORE-HAND-ROLLED-LCGS`.
+
+Fourteen carry a whole private `struct Lcg` / `struct Rng`, copy-pasted:
+`apps/{dots,game2048,hangman,life,lightsout,mahjong,match3,maze,memory,pipes,
+simon,sudoku,tetris,wordle}`. Four have the arithmetic inlined with no type at
+all — `apps/{flashcards,radio,speedtest,videoplayer}` — which is why a grep for
+`Rng` could never have found them. Two are in the toolkit and the desktop:
+`gui/toolkit/src/listview.rs:427` and `gui/desktop/src/wallpaper.rs:758` (a
+*second* LCG in that file, separate from the shuffle already fixed).
+
+Nearly all of them repeat pinball's *other* defect as well: `new()` seeds a
+literal `42` (or `123`, or `12345`), so every session of that game is the same
+session — the same maze, the same tetromino order, the same word. That is the
+more visible bug of the two, and it has been shipping in fourteen games.
+
+`% bound` appears in most of them and `(next() >> 33) as usize % max` in the
+rest — the same reduction `randrange`'s module docs exist to explain, in
+crates that were never told the crate exists.
+
+#### All fourteen struct-carrying crates are done (2026-08-18)
+
+Every crate that carried a private `struct Lcg` / `struct Rng` now uses
+`guitk::rng` (`= randrange`), seeds from the system with a per-crate fallback
+constant, and has tests for the hazard its own draw pattern was exposed to:
+`apps/{dots,game2048,hangman,life,lightsout,mahjong,match3,maze,memory,pipes,
+simon,sudoku,tetris,wordle}`. A constant grep across `apps/ gui/ net*/ pkg/`
+now returns only the inlined sites listed below plus `apps/breakout:2129`,
+which is the deliberate historical reproduction inside its own tests.
+
+**What the sweep actually found, measured rather than assumed.** Each rewrite
+was checked by putting the old reduction back into `randrange` and re-running
+the new tests against it, and the results were not uniform:
+
+| Crate | Draw pattern | Old reduction's effect |
+|---|---|---|
+| `apps/maze` | 4-element shuffle + 1 neighbour draw = 4 draws/step | **3 of 24** orderings, all ending on the same direction |
+| `apps/hangman` | 1–2 draws per round | free reveal ran a fixed 4-cycle at Medium |
+| `apps/tetris` | 7-element bag shuffle | 6 dead cells in the 7×7 piece/slot table |
+| `apps/sudoku` | 9-digit shuffle inside the solver | corner-digit histogram `[19,17,11,3,9,5,15,2,9]` where fair is 10 each |
+| `apps/mahjong` | 144-tile shuffle | **none measurable** — 143 draws at mostly odd bounds wash the counter out |
+| `apps/game2048`, `apps/pipes` | — | **none** — these copies shifted (`>> 33`) before reducing |
+
+The bottom two rows are the point of the whole entry rather than an
+embarrassment to it. Three of the sixteen copies were harmless, and there was
+no way to know *which* three without reading all sixteen and measuring each.
+The copy is the defect; a good copy is still a copy.
+
+Two lessons worth keeping, both learned by first writing a test that passed on
+broken code:
+
+1. **Sample along one generator's stream, never across fresh seeds.** A
+   low-bit defect is a counter *within* a stream; different seeds have
+   different low bits, so re-seeding between samples hides it completely. A
+   hangman test that sampled 200 freshly-seeded generators found zero missing
+   letters under the broken reduction.
+2. **Reproduce the caller's whole draw pattern, not just the shuffle.**
+   `apps/maze`'s shuffle in isolation reaches 12 of 24 orderings; add the one
+   extra neighbour draw the caller makes each step and it collapses to 3. A
+   test of the shuffle alone would have missed the bug entirely, which is how
+   it survived.
+
+Seeding is tested by asserting **which** seed, not that two games differ: a
+host `cargo test` has no SlateOS kernel, so `seed_from_system` takes the
+fallback and two fresh games *are* identical — exactly as they were under the
+old hardcoded `42`. A variety check therefore passes on the broken code and
+fails on the fix. Those tests are `#[cfg(not(unix))]` for that reason.
+
+~~**Still open**, all with the arithmetic inlined and no type at all — the ones
+a name-based grep could never find:~~
+
+- ~~`apps/flashcards:356` (`1_664_525` / `1_013_904_223`, so even the
+  constant grep recommended above misses it — a *third* set of constants)~~
+- ~~`apps/radio:553` (`1103515245` / `12345`)~~
+- ~~`apps/speedtest:414,546`~~
+- ~~`apps/videoplayer:1291,1295`~~
+- ~~`gui/toolkit/src/listview.rs:427`~~
+- ~~`gui/desktop/src/wallpaper.rs:758`~~
+
+#### CLOSED 2026-08-18 — and the inventory itself was the last defect
+
+All six inlined sites are converted (`5af5b1c9e`, `d9deeb3a4`, `55ef7b558`).
+A constant grep across `apps/ gui/ net*/ pkg/` now returns `apps/breakout:2129`
+— the deliberate historical reproduction inside its own tests — and two doc
+comments that name the old constants in order to explain what was removed.
+
+**The list above was wrong, and it was wrong for a structural reason.** It was
+assembled by grepping for `6364136223846793005`, exactly as the "lesson for the
+next sweep" three sections up recommends. That lesson was an improvement on
+grepping for the name `Rng`, and it is still what caught fourteen of the
+crates — but it inherits the same flaw one level down. **Keying an inventory on
+any token keys it on the copies that kept that token.** The entry even records
+its own counter-example without drawing the conclusion: flashcards is listed
+with a note that it uses a *third* set of constants and "even the constant grep
+recommended above misses it". It was in the list only because it had been found
+some other way.
+
+Two crates were missed entirely, and both were worse than any of the twenty
+counted:
+
+- **`apps/musicplayer`** — shuffle was `(idx * 7 + 3) % len`, which is not a
+  generator at all but an affine map, and its orbit is a fixed cycle. Measured
+  on a real album: **a 12-track album shuffled between exactly 2 of its
+  tracks**, and a 7-track list reached **1**. The visualiser was
+  `(t * 31 + i * 7) % 100` — a sliding staircase, not noise. The shuffle
+  branch also never consulted `repeat_mode`, so shuffle could never end.
+- **`apps/mixer`** — peak meters were `(id * 7 + tick * 13) % 100`: stream 1
+  read 20, 33, 46, 59, 72, 85, 98, 11, 24 — thirteen hundredths per tick,
+  period exactly 100, and every stream ran the same ramp offset by 7 per id.
+  Eight channels displayed eight copies of one climbing bar.
+
+Neither contains a single LCG constant, so no constant grep at any width would
+have found them. What found them was **grepping for the behaviour**: the
+comment phrases people write when they roll their own —
+`pseudo.rand|pseudo-rand|pseudorandom|simple random|fake random|deterministic
+shuffle|poor man's random|cheap random` — plus a broad `wrapping_mul` scan.
+Four lines of grep, and it found the two worst sites in the lane.
+
+**The lesson, superseding the one above:** an inventory keyed on a token
+measures how uniform the copying was, not how much of it there is. Grep for
+what the code *does* and for how a person *describes* doing it. Both misses
+here announced themselves in a comment.
+
+**And not all of it is even a generator.** Three distinct failure shapes turned
+up in this tail, none of them the low-bit LCG bias the entry was written about:
+
+| Shape | Example | What it actually is |
+|---|---|---|
+| Affine map | `(idx * 7 + 3) % len` | a fixed cycle; visits `len / gcd(7, len)` values |
+| Arithmetic ramp | `(t * 31 + i * 7) % 100` | a sawtooth with a known period |
+| Width mismatch | `(state >> 33) / u32::MAX` | 31 bits over a 32-bit maximum — a "fraction" that never reaches 0.5 |
+
+The third is the one to watch for, because it looks like arithmetic rather than
+randomness and reads as correct. It made **speedtest's simulated jitter
+one-sided**: `frac - 0.5` was always negative, so 0 of 20 latency probes landed
+above the base and 0 of 60 throughput steps above the target. A progress bar
+that only ever undershoots.
+
+**Also fixed while here**, each found by the same behaviour sweep rather than by
+any list: `apps/videoplayer`'s shuffle was a fixed permutation (1 distinct order
+over 10 rebuilds; only track 5 ever came first over 60 runs), and
+`gui/desktop`'s `populate_slideshow_paths` demanded its shuffle seed from a
+caller that did not exist yet — the same defect `random_wallpaper` in that file
+had already been fixed for, surviving because the two were read separately
+(`1003a4dae`).
+
+**Two tests in this tail passed on broken code and were caught only by the
+reintroduce-the-defect step**, which is the strongest argument for keeping that
+step mandatory:
+
+- `the_visualizer_is_not_an_arithmetic_ramp` first asked that bar-to-bar steps
+  "not all be equal" — but the ramp's modulo wrap supplies a second step value,
+  so it passed. Counting *distinct* steps bucketed to a hundredth fails it:
+  "bar heights take only 2 distinct steps -- a ramp, not a level".
+- `different_streams_have_independent_peak_levels` first asked for a spread of
+  differences between two meters — but the smoothing is asymmetric (attack 0.6,
+  decay 0.15), so a constant target-offset still yields a varying level-offset,
+  and it passed. Counting direction *disagreements* fails it: "the two meters
+  moved the same way on all but 18 of 120 ticks -- lockstep".
+
+Both near-misses are recorded in the comments above the tests that replaced
+them, so the next reader learns the shape rather than just the assertion.
 
 ---
 
@@ -41369,3 +41406,609 @@ comparable on wall time with a tracking run. Passing the device through
 `QEMU_EXTRA` cannot substitute: that *adds* a second GPU and the driver binds
 the first one it finds, so the GL device is never the one under test — which is
 how an earlier attempt to reproduce this silently measured the plain device.
+---
+
+## C-THE-LOCK-SCREEN-STORED-A-BARE-SHA-256-OF-THE-PASSWORD (lane C, 2026-08-18) — FIXED
+
+**In short:** the program that guards a locked session checked the typed
+password by hashing it once and comparing the result to a stored number. No
+salt, no repetition. That makes the stored value the *same* number on every
+machine for any given password, so one precomputed table cracks every
+SlateOS user at once, and a graphics card can try billions of guesses a
+second against it. It now uses a shared derivation (`pwkdf`) with a random
+per-install salt and 100,000 rounds, and the same crate is what
+`gui/credentials` will use, so there is exactly one answer to "how is a
+password stored here".
+
+### What the code did
+
+`apps/lockscreen/src/main.rs`'s `PasswordValidator` held a `[u8; 32]` that
+was `sha256(password.as_bytes())` and nothing else, compared with a
+constant-time equality. Two properties follow immediately:
+
+- **No salt.** `sha256("hunter2")` is a fixed 32-byte value known to anyone
+  who has ever computed it. A stolen store needs no cracking at all for any
+  password that appears in a wordlist — it needs a lookup. It also leaks
+  equality: two users with the same password have byte-identical entries, so
+  an administrator can see who shares a password with whom without breaking
+  either.
+- **No stretching.** One SHA-256 compression is the cheapest possible guess.
+  The cost of the defence should be tuned to be *inconvenient* — the point of
+  a work factor is that the attacker pays it billions of times and the user
+  pays it once, on a keystroke they already expected to wait for.
+
+### Why it survived review
+
+The crate had five tests of the hash: FIPS vectors for `sha256` and a
+constant-time-comparison test. They all passed, and they were all testing
+`sha2`, which is correct and already owns those exact vectors
+(`sha2/src/lib.rs:489,497,645`). Nothing tested the property that actually
+mattered — *that the stored value is not a bare hash of the password* — so a
+suite of 60-odd tests was fully green on a store with no salt in it. The five
+duplicated tests are now deleted and replaced by three that test what
+lockscreen is responsible for: `the_stored_value_is_not_a_bare_hash_of_the_password`,
+`two_installs_store_different_values_for_one_password`, and a round trip
+through the stored salt and verifier.
+
+### The fix
+
+A new crate, `pwkdf`, holds the derivation once: a 16-byte salt drawn from
+the kernel entropy source, 100,000 rounds folding password and salt in every
+round, and a domain-separated verifier so that the value stored on disk is
+not itself usable as a key. `PasswordValidator::enrol` returns
+`Result<_, KdfError>` and **refuses** when entropy is unavailable, per
+design-decisions §465 — a secret is the tier that refuses rather than falling
+back.
+
+The reason it is a crate rather than a function in `apps/lockscreen` is that
+`gui/credentials` had *independently* grown the same derivation. Two
+independently-correct derivations are still *incompatible*, and on the day
+someone wires the lock screen to the credential store, the cheap way to
+reconcile them is to weaken the store to match the screen. Extracting the
+crate while neither is wired to the other costs nothing; doing it afterwards
+costs an argument about a migration.
+
+`userspace/cryptsetup` deliberately keeps its own PBKDF2 and does **not**
+use `pwkdf`: LUKS specifies the derivation on disk, so that one is a format
+obligation, not a duplicate.
+
+### Still to do
+
+- ~~**`gui/credentials` is not yet on `pwkdf`.**~~ **Done the same day.** Its
+  `SALT_LEN`, `KdfParams`, `stretch` and the body of `DEFAULT_KDF_ROUNDS` are
+  gone; `derive_session_key` and `verifier_for` are now three-line adapters
+  over `pwkdf::derive_key` and `pwkdf::verifier_for` (net −150 lines). What
+  it keeps is `VERIFIER_DOMAIN` — the label that stops a vault verifier from
+  being replayable against a lock screen — and a `From<pwkdf::KdfError>`
+  written as an exhaustive match rather than a `map_err`, so that a second
+  `pwkdf` failure mode would stop compiling here instead of being silently
+  folded into "no entropy". Two new tests pin the migration: the stored
+  format is still `sha256(key ‖ "slateos-credential-verifier")`, and a vault
+  verifier differs from a lock-screen one derived from the same key. Both
+  verified by flipping the domain constant. 83 tests, clippy clean.
+- **`pwkdf::stretch` is PBKDF2's *shape*, not PBKDF2**, and the module doc
+  says so. Whether to keep a hand-written construction or port a vetted one
+  is open question **C-Q5**, which is the operator's call; the crate is
+  written so that swapping the interior is a change to one function.
+
+### Two unrelated production risks fixed in the same file
+
+- **`LockoutTimer::tick` looped instead of dividing.** `while ms >= 1000 { ms
+  -= 1000; secs -= 1 }` needed two guards to keep its subtractions from
+  underflowing, neither visible to the compiler, and it spun once per elapsed
+  second on a single large `dt_ms` — the frame after a suspend, or a debugger
+  pause. Replaced with `%` and `saturating_sub`.
+- **`active_user` had a "defensive" fallback that panicked in exactly the
+  case it defended against**: `self.users.get(i).unwrap_or_else(|| &self.users[0])`
+  indexes an empty vector precisely when `get` returned `None` because the
+  vector was empty. The invariant ("there is always a user") was real but
+  conventional, established in one constructor and relied on by nine callers.
+  It is now structural: `UserList` splits the first user out of the `Vec`, so
+  there is no empty state to defend against and `first()` is total.
+
+**Discovered:** 2026-08-18, while converting `apps/lockscreen` off its
+hand-rolled hashing.
+
+
+## C-THE-LOCK-SCREENS-PASSWORD-CHECK-IS-NOT-CONNECTED-TO-ANY-PASSWORD (lane C, 2026-08-18) — OPEN, cross-lane
+
+**In short:** The desktop lock screen can check a password correctly, and the
+system knows every user's real password, and there is no path between those two
+facts. Worse than unconnected: the two sides store *different* scrambles of the
+password, so they cannot be joined by plumbing. Filed to lane B as
+`requests/c-b-the-lock-screen-has-no-way-to-check-a-real-password.md`.
+
+### The two halves
+
+`apps/lockscreen`'s `PasswordValidator` (line 270) verifies against a
+`pwkdf::PasswordVerifier` — salt, rounds, 32-byte verifier — supplied by its
+caller through `from_stored`. That is the right shape: the screen deliberately
+does not own a store.
+
+The store, though, is in lane B and speaks crypt(3): `/etc/shadow` holds
+`$6$<salt>$<86 chars>` (SHA-512-crypt, `posix/src/crypt.rs`, §329), and
+`userdb::Record::check_password` verifies against exactly that. There is no
+lossless conversion from a `$6$` string to `(salt, rounds, verifier)`, and
+there should not be — a hash you can convert is a hash you did not need.
+
+So no production code constructs a `PasswordValidator` at all. The only
+constructor with a caller is `#[cfg(test)] for_test`.
+
+### Why it must not be fixed on this side
+
+Two cheap fixes are available and both are wrong:
+
+- **Teach the lock screen to read crypt strings.** That puts a second
+  password-checking implementation in a GUI app — the exact defect that
+  produced §329 (three tools, three disagreeing hashers) and §466 (two
+  disagreeing KDFs). It also requires handing a password hash to an
+  unprivileged process, which is what `/etc/shadow`'s permissions exist to
+  prevent.
+- **Give the lock screen its own password.** Then the screen unlocks with
+  something that is not the account password and does not change when `passwd`
+  runs — a machine that stays unlockable by an old password forever.
+
+The correct shape is a privileged verifier: the screen sends the password to a
+service that owns the store and gets back yes/no. Every other OS does this
+(PAM). It is lane B's to build, which is why this is a request rather than a
+patch.
+
+### The related gap in `logind`
+
+`userspace/logind/src/main.rs:882` — `unlock_session` sets `locked = false`
+with no password, no caller check and no capability. As session bookkeeping
+that is probably intended (systemd's `UnlockSession` is the same shape, with
+the authentication in PAM); it is listed here only because it completes the
+picture. Today the whole chain is: lock screen checks a password nobody
+supplied → asks logind to unlock → logind unlocks unconditionally. The
+authentication is decorative end to end.
+
+### Not a duplicate of `init/login`
+
+It looks like one and is not. A *login* screen authenticates someone who has no
+session; a *lock* screen re-checks someone who already has one. Real systems
+ship both. They should share the verification path and need not share anything
+else. `roadmap.md` carries them as separate `[x]` items (lines 2614 and 6129)
+with no cross-reference, which is what made this take a while to see.
+
+### Independent of B-Q4
+
+Which user store wins (`/etc/users.yaml` vs `/etc/passwd`+`/etc/shadow`) does
+not change anything here: under the privileged-verifier shape the service reads
+whichever store wins and this side is unchanged. That is a further argument for
+that shape — it is the only one that does not have to wait for B-Q4.
+
+**Discovered:** 2026-08-18, while auditing what actually calls the lock screen
+after converting it onto `pwkdf`.
+
+
+## C-THE-CREDENTIAL-MANAGER-CHECKED-ITS-MASTER-PASSWORD-WITH-DJB2 (lane C, 2026-08-18) — FIXED
+
+**In short:** `apps/credmanager` — the password manager — checked the password
+that opens the vault against a 64-bit djb2 hash. Not a weak password hash: not
+a password hash at all. No salt, no cost, and narrow enough that the vault
+opened for *any* string colliding with the owner's password, not just the
+password itself. It now uses the shared `pwkdf` derivation, like the lock
+screen and the credential service.
+
+### What the code did
+
+```rust
+fn simple_hash(input: &str) -> u64 {
+    let mut hash: u64 = 5381;
+    for byte in input.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(u64::from(byte));
+    }
+    hash
+}
+
+struct Vault { master_password_hash: u64, /* … */ }
+
+fn unlock(&mut self, password: &str, now: u64) -> bool {
+    if simple_hash(password) == self.master_password_hash { /* unlocked */ }
+}
+```
+
+Three independent failures, of which only the first is the obvious one:
+
+- **No cost.** Testing a guess took two arithmetic operations per character,
+  so an attacker holding the stored value ran the plausible-password space at
+  memory speed.
+- **No salt.** The same password produced the same 64 bits in every vault on
+  every machine, so one precomputed table opened all of them — and equal
+  stored values told the attacker which vaults to try it against.
+- **64 bits, non-cryptographic.** djb2 collisions are constructible, not
+  theoretical, and `unlock` accepted any colliding string.
+
+### Why it survived review
+
+Its three tests passed, and none of them could have failed for the reason the
+code was wrong: `simple_hash` *was* deterministic, *did* map `"abc"` and
+`"def"` apart, and *did* start from 5381. They asserted the properties the
+implementation happened to have rather than the ones its caller depended on.
+This is the same shape as `apps/lockscreen`'s five FIPS-vector tests over a
+store that had no salt in it.
+
+### The fix
+
+`master_password_hash: u64` is now `master: PasswordVerifier` — the salt, the
+round count and the stored value together, because all three must agree and a
+persistence layer that writes down only the last has locked the owner out.
+Three constructors replace one: `create` (fresh salt, fallible per §465's
+*secret* tier — it refuses rather than falling back to a predictable salt),
+`from_stored` (reopen), and `#[cfg(test)] for_test` (named salt, `TEST_ROUNDS
+= 16`, so a 139-test suite does not spend ~130 ms per vault). `unlock` is now
+`self.master.check(password.as_bytes())`.
+
+Five tests replace the three; each was verified by reintroducing the defect it
+guards against and confirming it, and only it, fails.
+
+### Also removed: a hardcoded master password in non-test code
+
+`AppState::new()` built its vault with `Vault::new("My Vault", "master123")` —
+in a credential manager, outside `#[cfg(test)]`. It never shipped only because
+`main` is still empty, which is not a property to rely on. `new` now takes an
+already-opened vault; the demo password lives in `#[cfg(test)] for_test`.
+
+### Four unrelated defects fixed in the same file
+
+- **The strength meter counted bytes, not characters.** `password.len()`
+  scored a four-character non-ASCII password as a twelve-character one —
+  an overstatement, the one direction a strength meter must not err in.
+- **The generator's alphabet was defined twice**: the punctuation string in
+  `build_charset`, and a hand-written `26 + 26 + 10 + 30` in `pool_size`. They
+  agreed by coincidence; adding one symbol would have made every generated
+  password score against a pool it was not drawn from, with no failing test.
+  `pool_size` is now `build_charset().len()`, and the symbol count has one
+  definition shared with the strength meter.
+- **`navigate_entry_list` walked the index through `i32`**, clamping with
+  `len() as i32 - 1` — correct only because the empty case returns early, and
+  silently wrong above `i32::MAX`. Now walked in `usize` with saturating ops.
+- **12 `arithmetic_side_effects` warnings** cleared, which is all of them; the
+  crate is clippy-clean at `--all-targets`.
+
+**Discovered:** 2026-08-18, while auditing the tree for the third copy of a
+password check after extracting `pwkdf` (§466).
+
+---
+
+## C-THE-SNAP-SUBSYSTEM-TILED-THE-SCREEN-INSTEAD-OF-THE-WORK-AREA (lane C, 2026-08-18) — FIXED
+
+**Where:** `gui/desktop/src/snap.rs`
+
+Three defects in the window-snap subsystem, all of which would have surfaced
+only on the day someone wired it up, and none of which the module's own 60-odd
+tests could have caught.
+
+**What the code did.**
+
+1. `SnapLayoutPreset::build(screen_w, screen_h)` anchored every zone at
+   `(0, 0)` and gave it the full screen height, though the module doc has
+   always said the zones cover "the work area". Every snapped window would
+   have extended underneath the taskbar and hidden its own bottom edge.
+2. `detect_edge` measured against the full screen, so the bottom edge and both
+   bottom corners lay *inside* the taskbar's strip — simultaneously unreachable
+   as snaps and stealing input from the bar.
+3. `edge_to_default_zone` sent the *vertical* edges to the *horizontal* halves:
+   `Top => (TwoEqualHalves, 0)` (commented `// maximize hint`, which it was
+   not) and `Bottom => (TwoEqualHalves, 1)`. Dragging a window to the top moved
+   it left; dragging it to the bottom moved it right.
+
+Found while fixing these, in the same file:
+
+4. `is_in_picker_trigger` was `cursor_y < top + THRESHOLD` with no lower bound,
+   so with the taskbar at the top of the screen the whole taskbar was inside
+   the picker's trigger band. `detect_edge` had the same shape on all four
+   sides.
+5. `update_picker_hover` and `render_picker` each computed the thumbnail grid
+   from their own copy of the same expression, 400 lines apart — an arrangement
+   in which editing one padding constant gives a picker that highlights one
+   thumbnail and selects another.
+6. The `SixGrid` arm looked its labels up by a computed index and carried an
+   `unwrap_or(&"Zone")` fallback for an out-of-range index the loop bounds
+   already made impossible: a branch that could never run and could never be
+   tested.
+
+**Why it survived review.** The suite was green and *could not have failed* for
+any of these. `six_grid_zones_do_not_overlap`, `two_halves_covers_full_width`
+and `four_quadrants_cover_full_area` all assert *relationships between zones* —
+and a layout translated bodily off the work area tiles just as perfectly as one
+on it. `all_edges_map_to_valid_zones` asserted only that each edge mapped to a
+zone that **exists**, which `Top => left half` satisfies completely. This is the
+same shape as `C-THE-CREDENTIAL-MANAGER-CHECKED-ITS-MASTER-PASSWORD-WITH-DJB2`
+and the lock screen's FIPS-vector tests over a store with no salt in it: a green
+suite asserting the properties the implementation happens to have rather than
+the ones its caller depends on.
+
+**The fix.** See `design-decisions.md` §467. `build` now takes a `WorkArea`
+`{x, y, width, height}` and applies the origin at one `.map()` after the match,
+so no arm can forget it; `detect_edge` and `is_in_picker_trigger` are bounded
+on both sides; `edge_to_default_snap` returns `Option<EdgeSnap>` with
+`Top => Maximize` and `Bottom => None`; the picker grid lives in one
+`thumb_origin` helper used by both the hit-test and the draw;
+`picker_items_per_row` returns `NonZeroUsize` so the two divisions are
+infallible by type; the `SixGrid` labels are a `[[&str; 3]; 2]` iterated
+directly, which deletes the dead fallback. Also cleared all seven of the file's
+pre-existing `arithmetic_side_effects` warnings.
+
+**Tests.** Eleven new tests, each verified to discriminate by reintroducing the
+exact defect it is meant to catch and confirming it, and only it, failed. Two
+fixture-design points came out of that exercise and are worth remembering:
+a fixture must offset `x` and `y` **separately** (with only a top-taskbar
+fixture, "`build` drops the `x` origin" failed *nothing*), and a fixture's
+`right()`/`bottom()` must not coincidentally equal the screen's (the first
+left-dock fixture was `x=64, width=1856`, so `right() == 1920` and a
+screen-relative right bound was still indistinguishable from a correct one).
+
+---
+
+## C-TOUCHPAD-GESTURE-LIST-DRAWS-PAST-THE-PANEL (lane C, 2026-08-19) — OPEN
+
+**Where:** `gui/desktop/src/touchpad.rs` — `TouchpadSettingsUI::scroll_offset`
+(declared line ~649) and the gesture loop in `render` (line ~977).
+
+The Gestures section of the touchpad settings panel draws **every** binding in
+`mgr.config.gestures`, advancing `cy` by ~22px each, and never compares `cy`
+against `h` — the panel height it is handed as a parameter and uses only to
+fill the background. `TouchpadConfig::set_gesture` pushes new bindings without a
+bound, so the list is user-growable, and past roughly `h / 22` entries the rows
+are emitted below the panel, drawn over whatever is underneath.
+
+**`scroll_offset` is the field that exists to prevent exactly this, and it is
+dead.** It is `pub`, it is initialised to 0, and it is never read anywhere in
+the crate — grep finds only the declaration and the initialiser. So a caller
+that wires a scroll wheel to it sees nothing happen, which is worse than the
+field not existing: the API advertises a scrollable list and silently ignores
+the request.
+
+This is the same shape as
+`C-TWO-SNAP-IMPLEMENTATIONS-WITH-DIFFERENT-GAP-POLICIES` below — state written
+into a struct as though the feature were finished, with nothing calling it —
+and it was found the same way, by asking what *reads* a public field rather
+than what writes one.
+
+**What the proper fix looks like.** Have the gesture loop start at
+`self.scroll_offset` clamped to the list length, as `window_rules.rs::render`
+already does at line ~940 (that one was fixed and has a regression test at
+~2251), and stop emitting once `cy` would exceed `y + h`. Both halves are
+needed: clamping alone still overdraws a long list, and the height check alone
+leaves the tail unreachable. Tests should assert (a) a list longer than the
+panel emits no command below `y + h`, (b) a `scroll_offset` past the end
+renders the last page rather than nothing or a panic, and (c) scrolling by one
+moves the first visible row by one — the last being the one that fails if the
+offset is read but ignored.
+
+**Not fixed in the commit that found it** only because that commit's workspace
+gate was already running and editing the crate would have invalidated it. It is
+the next thing lane C picks up.
+
+---
+
+## C-TWO-SNAP-IMPLEMENTATIONS-WITH-DIFFERENT-GAP-POLICIES (lane C, 2026-08-18) — FIXED 2026-08-19
+
+**Where:** `gui/desktop/src/snap.rs` and `gui/desktop/src/main.rs::snap_window`
+(around line 1700). Fixed as described under **What the proper fix looks like**
+below; the gap policy that had to be decided along with it is recorded as
+`design-decisions.md` §469.
+
+The desktop has **two** implementations of window snapping, and they disagree.
+
+| | `main.rs::snap_window` | `snap.rs` |
+|---|---|---|
+| Wired up? | **yes** — this is what runs | **no** — `mod snap;` is its only reference |
+| Geometry | integers | `f32` |
+| Gap between zones | **none** | `ZONE_GAP = 6.0` |
+| Layouts | halves and quarters | seven presets, plus a picker |
+| Work area | uses `work_area()` | uses `WorkArea` (as of §467) |
+
+Neither is wrong in isolation. The problem is that they are two answers to one
+question, only one of which a user can see, and the invisible one is the more
+capable. Whoever wires `snap.rs` up must also decide the gap policy for the
+whole shell — a 6 px gap and no gap are both defensible, but a desktop where
+some snaps have a gap and others do not is not.
+
+**What the proper fix looks like.** Delete `main.rs::snap_window`'s geometry
+and route it through a `SnapManager` owned by the shell, seeded from
+`work_area()` and updated whenever the taskbar moves or the screen resizes
+(`set_work_area`). The `SnapManager` already exposes everything needed:
+`hit_test`, `edge_snap_hit`, `snap_window`, `render_overlay`, and a
+`SnapHistory` for restore-on-unsnap, which `main.rs` currently has no
+equivalent of at all.
+
+**Why it was not done in §467's commit.** Wiring it is a user-visible behaviour
+change to the shell's drag handling (gaps appear, the top edge starts
+maximising, a zone overlay and layout picker appear during drags), which is a
+larger change than the correctness fix it would be riding on, and wanted to land
+as its own commit with its own tests. §467 fixed what `snap.rs` *does* on the
+grounds that the cheapest moment for two implementations to agree is before
+either is wired.
+
+### What the fix turned out to be
+
+`DesktopShell` now owns a `snap: snap::SnapManager`. `snap_window(id, left)` is
+a two-line wrapper over a new `snap_window_to_zone(id, preset, zone)`, which is
+the only place window geometry is set from a snap. `main.rs` computes no snap
+rectangles at all any more. Three further pieces came with it:
+
+| Piece | Why |
+|---|---|
+| `unsnap_window` / `is_snapped` | `SnapHistory` was there and unreachable; the shell had no restore-on-unsnap at all. |
+| `history.remove` in `move_window`, `resize_window`, `remove_window` | A moved or resized window is no longer in its zone, so unsnapping it would teleport a window the user had just placed. A closed window's entry would otherwise leak one per snapped-then-closed window forever. |
+| `sync_snap_area()` at the top of every snap | `work_area()` derives from `screen_width`, `taskbar_height` and `appearance`, all **public mutable fields**. A cached work area kept in sync by notification would be one forgotten call site away from tiling a screen that no longer exists, so it is re-read on use instead. |
+
+### Two defects the wiring exposed, both now fixed
+
+1. **`snap.rs` produced zones outside the work area on small screens.** Every
+   arm of the layout builder subtracts `ZONE_GAP` before dividing, so at a
+   three-pixel-wide work area `(3 - 6) / 2` is a **negative** half-width and the
+   second zone starts at x = 4.5 — outside the rectangle it is tiling. Not
+   hypothetical: `DesktopShell::new(1, 1080)` is legal and the window-manager
+   tests build one at widths down to zero. The existing in-bounds test could not
+   see it because it only ran on desktop-sized areas, where the subtraction is
+   free. `build` now tries the gap and keeps it only if every zone stays at
+   least `ZONE_GAP` in both dimensions, else rebuilds edge-to-edge — applied to
+   the built zones, so a preset added later inherits the rule without knowing it
+   exists.
+2. **Rounding the zone's origin and extent separately put a window off-screen.**
+   On a 1921-pixel screen the right half is `x = 963.5, width = 957.5`, which
+   rounds to 964 + 958 = an edge at **1922**. `round_rect` now rounds the
+   *edges*, giving `964..1921`. The same argument makes two adjacent zones meet
+   by construction rather than by arithmetic luck.
+
+### What the reintroduction checks found
+
+Nine defect variants were restored one at a time and the suite re-run. Eight
+were caught immediately. The ninth was a test that could not fail:
+
+| Defect restored | Result |
+|---|---|
+| A rejected zone id leaves the layout switched | **NOTHING FAILED.** `snapping_to_a_zone_that_does_not_exist_changes_nothing` asked for a bad zone of `TwoEqualHalves` — the preset already in force — so the un-done layout switch was invisible. Rewritten to ask for a zone of `SixGrid`, with the "these differ" precondition asserted. |
+| Gap kept when it does not fit | caught |
+| Gap always dropped | caught |
+| Origin and extent rounded separately | caught |
+| Move does not end the snap | caught |
+| Resize does not end the snap | caught |
+| Closing leaks the history entry | caught |
+| History recorded after the snap rather than before | caught |
+| Work area not re-read before snapping | caught |
+
+The last two are worth naming because both were written *because* of an earlier
+sweep habit, not discovered by one: `SnapManager::snap_window` inserts a
+zero-geometry placeholder for a window it has not seen, so recording history
+after the snap restores to a 0×0 window at the origin; and nothing in the suite
+changed the screen size after construction until
+`snapping_follows_the_screen_and_the_taskbar_after_they_change` was added.
+
+**Still not wired:** the drag-time affordances — `hit_test`, `edge_snap_hit`,
+`render_overlay` and the layout picker. Snapping is now single-implementation
+and keyboard-driven; making a *drag* to a screen edge snap is a separate,
+genuinely user-visible change and is tracked as its own work.
+
+---
+
+## C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC (lane C, 2026-08-18) — FIXED
+
+**Where:** `apps/calendar`, `apps/reminders`, `apps/habits`, `apps/contacts`,
+`apps/rssreader`, `apps/systray` — **all six fixed**, against
+`gui/toolkit/src/date.rs`. See `design-decisions.md` §468 for the pattern and
+the alternatives that were rejected.
+
+`guitk::date` is the shared civil-date module: `Date`, `Weekday`, `from_ymd`,
+`add_days`, `add_months`, `days_until`, `day_of_year`, `iso_week`,
+`is_leap_year`, `days_in_month`, `month_grid`. **Six apps computed the same
+things themselves instead, and none of the six referenced it.** These are not
+stylistic duplicates; they are six independently-written implementations of
+arithmetic that has exactly one right answer, so they can and do disagree —
+with the shared module and with each other.
+
+### The measured damage in `apps/calendar`
+
+Replicating all three of the calendar's own formulas over every day from
+1900-01-01 to 2100-01-01 (73 049 days) and comparing against the real
+definitions:
+
+| Calculation | Method it used | Mismatches |
+|---|---|---|
+| Weekday | hand-written Zeller's congruence | **0** of 73 049 |
+| Day difference | its own Julian day number, kept *separately* from Zeller | **0** of 73 049 |
+| ISO week number | `day_of_year / 7 + 1`, offset by 1 January's weekday, `.min(53)` | **28 144 of 73 049 — 38.5 %** |
+
+The weekday and difference formulas were correct over the tested range (both
+break below year 1, where `%`/`/` truncate toward zero rather than flooring,
+and nothing stopped a caller constructing such a date). The week number was
+wrong on well over a third of all days, typically by one week.
+
+It could not have been right. ISO week 1 is *the week containing the year's
+first Thursday*, which is frequently not the week containing 1 January — 2027
+begins in week 53 of 2026; 2024 ends in week 1 of 2025. A formula that starts
+counting at 1 January cannot express that, whatever constant is added to it.
+Its own comment said "simple approximation"; nothing said the approximation
+was visible to the user, which it was — the week and month views draw it.
+
+### Why the green suite could not see it
+
+The **only** test covering `week_number` was:
+
+```rust
+#[test]
+fn test_week_number() {
+    let d = Date { year: 2024, month: 1, day: 8 };
+    let wn = d.week_number();
+    assert!((1..=53).contains(&wn));
+}
+```
+
+The implementation ended in `week.min(53)`. It could not return a value
+outside `1..=53` whatever it computed, so the assertion restated the
+implementation's own clamp rather than any requirement a caller has. This is
+the same failure shape as `C-THE-SNAP-SUBSYSTEM-TILED-THE-SCREEN-INSTEAD-OF-THE-WORK-AREA`
+and as the `credmanager`/`lockscreen` hash entries: **a green suite that
+asserts the properties an implementation happens to have, rather than the ones
+its caller depends on.** A test whose assertion the code satisfies by
+construction cannot fail, and a test that cannot fail is not a test.
+
+### What was fixed
+
+`apps/calendar/src/main.rs` now keeps its `Date { year, month, day }` struct —
+75 field accesses and 69 struct literals depend on the shape — and routes every
+*calculation* through `guitk::date` via a private `civil()`/`from_civil()`
+bridge. Deleted: the Zeller congruence, the separate Julian day number
+(`to_day_number`, removed outright), the local leap rule, the month-stepping
+`while` loops in `add_days`, and the week-number approximation.
+
+Two behaviour changes came with it, both improvements, both deliberate:
+
+- `days_in_month`/`month_name`/`month_short` **clamp** an out-of-range month
+  instead of returning `0`/`"Unknown"`/`"???"`. A `0` from `days_in_month` was
+  a live loop-termination hazard.
+- `week_number` returns the real ISO week, and a new `iso_week() -> (i32, u32)`
+  exposes the week-numbering *year* beside it, because a week number without
+  its year is ambiguous at exactly the boundary where it is most likely to be
+  read wrong.
+
+The replacement tests are `week_numbers_match_the_iso_standards_worked_examples`
+(ten cases, every one chosen so week 1 is *not* the week containing 1 January)
+and `a_week_number_is_constant_across_its_own_monday_to_sunday` (an 800-day
+walk comparing each date against the Monday of its own week). Both were
+verified by reintroduction: ten defect variants were restored one at a time
+and each failed a test that named it. The constancy test initially caught
+*nothing* — it exercised only the new `iso_week()` and never `week_number()`,
+the accessor the views actually draw — so it now asserts over both and over
+their agreement.
+
+### The other five, each rewired the same way
+
+Each kept its own date struct — the field accesses are load-bearing — and
+routes every *calculation* through `guitk::date` via a private
+`civil()`/`from_civil()` bridge. Each was checked by reintroducing the defects
+it should catch, one at a time, rather than by "the tests still pass".
+
+| App | What it had | What the rewire did | Commit |
+|---|---|---|---|
+| `apps/reminders` | `day_of_week`, `day_of_week_name`, `day_of_week_short`, `is_leap_year`, `days_in_month`, `month_name` | all delegated; `to_day_number` deleted outright. Clippy arithmetic warnings 36 → 19 | `28b1703c9` |
+| `apps/habits` | `day_of_week`, `day_of_week_short`, `is_leap_year`, `days_in_month` on `i32`/`u32` | delegated; `to_day_number` kept (6 call sites) but reimplemented as `days_since_epoch`, so the day count and the weekday now come from the same place | `83b407436` |
+| `apps/contacts` | `is_leap_year(u16)`, `days_in_month(u16, u8) -> Option<u8>`, `day_of_year(u8, u8)` | `MONTH_LENGTHS` and `is_leap_year` deleted; `days_in_month` keeps its `None`; `day_of_year` clamps the month *range* before the lookup, since letting 14 through would make the clamp count December twice. Clippy: clean | `1afae95ee` |
+| `apps/rssreader` | `is_leap_year(u64)`, `days_in_month(month, leap)`, `days_from_civil`, `civil_from_days` | two Hinnant transcriptions and both twenty-line `#[expect]` blocks deleted; `days_in_month` re-signatured to take the **year** instead of a leap flag its caller supplied | `d0a7967e2` |
+| `apps/systray` | `days_in_month(&self) -> u8`, `first_weekday_of_month` (Sakamoto), a twelve-arm month-name match | all three delegated. Clippy 7 → 4 | this commit |
+
+### What the reintroduction checks found
+
+Across the six apps, ~46 defect variants were restored one at a time. **Six
+tests caught nothing** and were rewritten:
+
+| Test | Why it could not fail |
+|---|---|
+| `calendar::test_week_number` | asserted `(1..=53).contains(&wn)`; the implementation ended in `.min(53)` |
+| `calendar::a_week_number_is_constant_…` (my own replacement) | exercised only the new `iso_week()`, never `week_number()`, the accessor the views draw |
+| `reminders` / `habits` weekday coverage | asserted `day_of_week` twice over and never the label functions that turn it into text a user reads |
+| `habits::test_to_day_number_monotonic` | asserted only `d2 > d1` for dates a year apart — true of any monotone function, including one that returns the year |
+| `contacts::the_day_of_year_has_no_gaps_…` | accumulated the same `MONTH_LENGTHS` table `day_of_year` summed, so only the closing "sums to 365" check could fail |
+| `rssreader` (no test at all) | `days_to_ymd` saturating to `i32::MIN` instead of `i32::MAX` failed nothing — a documented, user-visible ordering guarantee with nothing behind it |
+
+`systray`'s two surviving date tests were single-case: one month for
+`first_weekday_of_month`, one month name for `date_str`. A weekday table wrong
+in eleven of twelve entries passed both. They are now
+`each_month_starts_where_the_previous_one_ran_out` — which pins the relation
+the calendar popup actually depends on, that month *n+1* begins exactly
+`days_in_month(n)` days after month *n* — and
+`every_month_renders_its_own_three_letter_name`.

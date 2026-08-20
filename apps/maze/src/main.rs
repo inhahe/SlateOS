@@ -26,6 +26,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -47,37 +48,39 @@ const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
 const COL_TEAL: Color = Color::from_hex(0x94E2D5);
 const COL_MAUVE: Color = Color::from_hex(0xCBA6F7);
 
-// ── Deterministic RNG ───────────────────────────────────────────────
-struct Rng {
-    state: u64,
-}
+// ── Randomness ──────────────────────────────────────────────────────
 
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
+/// Seed used when the kernel's entropy source cannot be reached.
+///
+/// A per-crate constant rather than a shared one, so that two programs which
+/// lose entropy on the same boot do not then produce correlated streams. The
+/// bytes spell `MAZE!!!!`.
+const FALLBACK_SEED: u64 = 0x4D41_5A45_2121_2121;
 
-    fn next(&mut self) -> u64 {
-        self.state = self.state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 { return 0; }
-        (self.next() % max as u64) as usize
-    }
-
-    /// Fisher-Yates shuffle
-    fn shuffle<T>(&mut self, slice: &mut [T]) {
-        let len = slice.len();
-        for i in (1..len).rev() {
-            let j = self.next_range(i + 1);
-            slice.swap(i, j);
-        }
-    }
-}
+// This crate used to carry its own copy of the LCG that got copied into
+// sixteen crates, reducing with `next() % max`. That is the broken reduction,
+// and of all sixteen this is where it did the most damage, because the thing
+// being shuffled has exactly four elements.
+//
+// The generator's modulus is 2^64, so bit *k* of its state has period 2^(k+1):
+// the low bits are a counter, not a draw, and a power-of-two bound reads only
+// those. `generate` shuffles `Dir::ALL` -- four directions -- at every step of
+// the recursive backtracker, which is three draws at bounds 4, 3, 2, and then
+// picks a neighbour, which is a fourth. Four draws per step, and 4 mod 4 = 0,
+// so the bound-4 draw returned *the same value at every step of every maze*.
+//
+// Measured on the old reduction, in exactly that four-draws-per-step pattern:
+// the shuffle produced **3 distinct orderings of the four directions out of a
+// possible 24**, and all three of them ended with the same direction -- so one
+// direction was systematically tried last, everywhere, in every maze. (Run
+// without the neighbour draw, so three draws per step, it manages 12 of 24;
+// the interaction with the fourth draw is what collapses it the rest of the
+// way. That is worth stating because it means the defect was invisible to any
+// test of the shuffle in isolation, which is how it survived.)
+//
+// `randrange::below` is Lemire's method -- it multiplies by the bound into 128
+// bits and keeps the *top* half -- and `SeededRng` puts SplitMix64's finaliser
+// over the LCG, so there are no weak low bits left to read even by accident.
 
 // ── Direction ───────────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,7 +190,7 @@ impl Maze {
     }
 
     /// Generate maze using recursive backtracker (iterative with explicit stack)
-    fn generate(&mut self, rng: &mut Rng) {
+    fn generate(&mut self, rng: &mut SeededRng) {
         // Reset all cells
         for cell in &mut self.cells {
             cell.walls = 0x0F;
@@ -222,7 +225,7 @@ impl Maze {
             if neighbors.is_empty() {
                 stack.pop();
             } else {
-                let choice = rng.next_range(neighbors.len());
+                let choice = rng.below(neighbors.len());
                 let (nr, nc, dir) = neighbors[choice];
                 self.cell_mut(r, c).remove_wall(dir);
                 self.cell_mut(nr, nc).remove_wall(dir.opposite());
@@ -356,7 +359,7 @@ struct MazeApp {
     goal_col: usize,
     moves: u32,
     elapsed_secs: u64,
-    rng: Rng,
+    rng: SeededRng,
     difficulty: Difficulty,
     // Trail of visited cells
     trail: Vec<bool>,
@@ -379,7 +382,11 @@ impl MazeApp {
             goal_col: 9,
             moves: 0,
             elapsed_secs: 0,
-            rng: Rng::new(42),
+            // Was `SeededRng::new(42)`: every player, on every machine, walked
+            // the same maze. Predicting a maze costs the user nothing but
+            // the puzzle, so this asks the kernel and falls back rather
+            // than refusing -- see `randrange::seeded_from_system`.
+            rng: seeded_from_system(FALLBACK_SEED),
             difficulty: Difficulty::Small,
             trail: vec![false; 100],
             solution: Vec::new(),
@@ -756,53 +763,126 @@ fn main() {
 // ── Tests ──────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
-    fn make_rng() -> Rng {
-        Rng::new(42)
+    fn make_rng() -> SeededRng {
+        SeededRng::new(42)
     }
 
-    // ── RNG tests ──
+    // ── Seeding and the direction shuffle ──
 
+    // The generator's own contract -- determinism under a seed, divergence
+    // under two, staying inside its bound, surviving a zero bound, shuffling
+    // something -- used to be tested here against the local `Rng`. It is now
+    // tested once, against the shared implementation, in `randrange`. Sixteen
+    // crates each testing their own copy is sixteen chances to test a copy that
+    // has quietly drifted from the one being shipped.
+
+    /// The direction shuffle must reach most of the 24 possible orderings.
+    ///
+    /// This is the test the old code needed and did not have, and its shape is
+    /// the point. Shuffling four directions repeatedly is what the maze
+    /// generator does at every step, and under the old reduction it produced
+    /// only **3 of the 24 orderings** -- all three ending with the same
+    /// direction, so one direction was systematically tried last, in every
+    /// maze. See the note by `FALLBACK_SEED`.
+    ///
+    /// Two things about this test are deliberate and were arrived at by
+    /// measuring rather than reasoning:
+    ///
+    /// It draws from **one** generator across the rounds. Sampling one shuffle
+    /// each from many freshly-seeded generators would hide the defect entirely,
+    /// because different seeds have different low bits; a counter in the low
+    /// bits is only visible along a single stream.
+    ///
+    /// It makes the **same number of draws per round as the real caller** --
+    /// three for the shuffle plus one for the neighbour pick. That matters more
+    /// than it looks: with only the shuffle's three draws the old code reaches
+    /// 12 of 24, which is bad but might pass a loose threshold, and it is the
+    /// interaction with the fourth draw (four draws per round, and 4 mod 4 = 0)
+    /// that collapses it to 3. A test of the shuffle in isolation would have
+    /// missed the bug, which is presumably how it survived.
     #[test]
-    fn test_rng_deterministic() {
-        let mut r1 = Rng::new(42);
-        let mut r2 = Rng::new(42);
-        for _ in 0..100 {
-            assert_eq!(r1.next(), r2.next());
+    fn the_direction_shuffle_reaches_most_orderings() {
+        let mut rng = SeededRng::new(42);
+        let mut seen: std::collections::BTreeSet<[usize; 4]> = std::collections::BTreeSet::new();
+        for _ in 0..400 {
+            let mut dirs = Dir::ALL;
+            rng.shuffle(&mut dirs);
+            // The generator also draws once per step to choose a neighbour;
+            // reproduce that, because the defect lived in the interaction.
+            let _ = rng.below(3);
+            seen.insert(dirs.map(|d| d as usize));
         }
+        assert!(
+            seen.len() >= 20,
+            "the four directions were shuffled into only {} of 24 orderings: {seen:?}",
+            seen.len()
+        );
     }
 
+    /// Every direction must be able to come last.
+    ///
+    /// The sharpest single consequence of the old defect, stated on its own:
+    /// all three orderings it could produce ended with the same direction.
     #[test]
-    fn test_rng_different_seeds() {
-        let mut r1 = Rng::new(1);
-        let mut r2 = Rng::new(2);
-        assert_ne!(r1.next(), r2.next());
-    }
-
-    #[test]
-    fn test_rng_range() {
-        let mut rng = make_rng();
-        for _ in 0..100 {
-            let v = rng.next_range(10);
-            assert!(v < 10);
+    fn every_direction_can_come_last() {
+        let mut rng = SeededRng::new(7);
+        let mut last_seen = [false; 4];
+        for _ in 0..400 {
+            let mut dirs = Dir::ALL;
+            rng.shuffle(&mut dirs);
+            let _ = rng.below(3);
+            if let Some(last) = dirs.last()
+                && let Some(slot) = last_seen.get_mut(*last as usize)
+            {
+                *slot = true;
+            }
         }
+        assert!(
+            last_seen.iter().all(|s| *s),
+            "some direction was never tried last: {last_seen:?}"
+        );
     }
 
+    /// A fresh app must take its seed from the kernel, not from a literal.
+    ///
+    /// Phrased as "which seed", not as "two fresh mazes differ", because a host
+    /// test build has no SlateOS kernel: `seeded_from_system` correctly takes
+    /// its fallback and two fresh mazes are then identical, exactly as they
+    /// were under the old hardcoded `42`. A variety check would therefore pass
+    /// on the broken code and fail on the fixed code, which is backwards.
+    #[cfg(not(unix))]
     #[test]
-    fn test_rng_range_zero() {
-        let mut rng = make_rng();
-        assert_eq!(rng.next_range(0), 0);
-    }
-
-    #[test]
-    fn test_rng_shuffle() {
-        let mut rng = make_rng();
-        let mut arr = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let original = arr;
-        rng.shuffle(&mut arr);
-        // Very unlikely to stay the same
-        assert_ne!(arr, original);
+    fn a_fresh_maze_is_seeded_by_the_system_and_not_by_a_literal() {
+        let walls = |mut rng: SeededRng| {
+            let mut maze = Maze::new(10, 10);
+            maze.generate(&mut rng);
+            maze.cells.iter().map(|c| c.walls).collect::<Vec<u8>>()
+        };
+        let fresh = walls(seeded_from_system(FALLBACK_SEED));
+        assert_eq!(
+            fresh,
+            walls(SeededRng::new(FALLBACK_SEED)),
+            "a fresh maze did not use the crate's fallback seed"
+        );
+        assert_ne!(
+            fresh,
+            walls(SeededRng::new(42)),
+            "a fresh maze is still seeded by the old hardcoded literal"
+        );
     }
 
     // ── Direction tests ──
@@ -961,8 +1041,8 @@ mod tests {
     fn test_maze_different_seeds() {
         let mut maze1 = Maze::new(10, 10);
         let mut maze2 = Maze::new(10, 10);
-        let mut rng1 = Rng::new(1);
-        let mut rng2 = Rng::new(2);
+        let mut rng1 = SeededRng::new(1);
+        let mut rng2 = SeededRng::new(2);
         maze1.generate(&mut rng1);
         maze2.generate(&mut rng2);
 
@@ -1280,7 +1360,7 @@ mod tests {
 
     #[test]
     fn test_maze_10x10_all_reachable() {
-        let mut rng = Rng::new(99);
+        let mut rng = SeededRng::new(99);
         let mut maze = Maze::new(10, 10);
         maze.generate(&mut rng);
 

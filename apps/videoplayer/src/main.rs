@@ -7,7 +7,15 @@
 
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
+
+/// Seed used when the system has no entropy to offer.
+///
+/// A shuffled playlist is novelty randomness, not a secret, so losing entropy
+/// must not stop playback. The constant is per-crate ("VIDEOPLR") so that two
+/// programs falling back on the same boot do not then agree with each other.
+const FALLBACK_SEED: u64 = 0x5649_4445_4F50_4C52;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -1065,10 +1073,28 @@ pub struct Playlist {
     shuffle: bool,
     shuffle_order: Vec<usize>,
     shuffle_position: usize,
+    /// The stream the shuffle order is drawn from.
+    ///
+    /// Seeded once when the playlist is created and never reset, so each
+    /// rebuild continues the sequence rather than restarting it. That is the
+    /// whole point: the previous version derived its seed from the entry IDs,
+    /// which do not change, so every rebuild of a given playlist produced the
+    /// identical order.
+    rng: SeededRng,
 }
 
 impl Playlist {
     pub fn new() -> Self {
+        Self::with_rng(seeded_from_system(FALLBACK_SEED))
+    }
+
+    /// A playlist whose shuffles come from a known seed.
+    #[cfg(test)]
+    fn with_seed(seed: u64) -> Self {
+        Self::with_rng(SeededRng::new(seed))
+    }
+
+    fn with_rng(rng: SeededRng) -> Self {
         Self {
             entries: Vec::new(),
             current_index: None,
@@ -1076,6 +1102,7 @@ impl Playlist {
             shuffle: false,
             shuffle_order: Vec::new(),
             shuffle_position: 0,
+            rng,
         }
     }
 
@@ -1280,23 +1307,19 @@ impl Playlist {
         total
     }
 
+    /// Draw a fresh order for shuffle playback.
+    ///
+    /// Called both when shuffle is switched on and when a shuffled pass runs
+    /// off the end under `RepeatMode::All`, and it has to give a *different*
+    /// answer each time or neither call means anything. It did not: the seed
+    /// was `12345` mixed with the entry IDs, and the entry IDs do not change,
+    /// so ten consecutive rebuilds of one ten-item playlist produced one
+    /// distinct order -- measured. Shuffle-with-repeat-all looped the same
+    /// permutation forever, which is the exact thing shuffle exists to avoid,
+    /// and switching shuffle off and on again replayed the order just heard.
     fn rebuild_shuffle_order(&mut self) {
         self.shuffle_order = (0..self.entries.len()).collect();
-        // Simple deterministic shuffle using entry IDs as seed
-        let len = self.shuffle_order.len();
-        if len > 1 {
-            let mut seed: u64 = 12345;
-            for entry in &self.entries {
-                seed = seed
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(entry.id);
-            }
-            for i in (1..len).rev() {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let j = (seed >> 33) as usize % (i + 1);
-                self.shuffle_order.swap(i, j);
-            }
-        }
+        self.rng.shuffle(&mut self.shuffle_order);
         self.shuffle_position = 0;
     }
 }
@@ -4077,6 +4100,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // Duration tests
@@ -4535,6 +4570,81 @@ mod tests {
             assert!(next.is_some());
             assert!(next.unwrap() < 10);
         }
+    }
+
+    /// Build a playlist of `len` items and take `rebuilds` shuffle orders from
+    /// it by switching shuffle off and on again.
+    fn repeated_shuffle_orders(seed: u64, len: usize, rebuilds: usize) -> Vec<Vec<usize>> {
+        let mut pl = Playlist::with_seed(seed);
+        for i in 0..len {
+            pl.add(format!("{i}.mp4"), format!("{i}.mp4"), None, None);
+        }
+        (0..rebuilds)
+            .map(|_| {
+                pl.toggle_shuffle();
+                if !pl.is_shuffle() {
+                    pl.toggle_shuffle();
+                }
+                let order = pl.shuffle_order.clone();
+                pl.toggle_shuffle();
+                order
+            })
+            .collect()
+    }
+
+    /// Reshuffling has to reshuffle.
+    ///
+    /// The regression test for the entry-ID seed: because the IDs of a
+    /// playlist do not change, `rebuild_shuffle_order` was a pure function of
+    /// the playlist and ten consecutive rebuilds gave one distinct order --
+    /// measured, on a ten-item list. Both callers depend on getting a new
+    /// answer: `toggle_shuffle` off-and-on, and the wrap under
+    /// `RepeatMode::All`, which otherwise loops one permutation forever.
+    #[test]
+    fn reshuffling_a_playlist_gives_a_different_order() {
+        const REBUILDS: usize = 10;
+        let orders = repeated_shuffle_orders(0x5EED_5EED_5EED_5EED, 10, REBUILDS);
+        let distinct: std::collections::HashSet<&Vec<usize>> = orders.iter().collect();
+        assert!(
+            distinct.len() >= REBUILDS - 1,
+            "{} distinct orders over {REBUILDS} rebuilds of the same playlist",
+            distinct.len()
+        );
+    }
+
+    /// Every item must be able to come first.
+    ///
+    /// A shuffle that is a fixed permutation always starts on the same track;
+    /// this asks for the opposite over a long enough run. Measured on the old
+    /// code it saw exactly one first-track (index 2) in any number of trials.
+    #[test]
+    fn shuffle_can_start_on_any_track() {
+        let orders = repeated_shuffle_orders(0xF1D0_1234_ABCD_5678, 6, 60);
+        let firsts: std::collections::HashSet<usize> =
+            orders.iter().filter_map(|o| o.first().copied()).collect();
+        assert_eq!(firsts.len(), 6, "only these tracks ever came first: {firsts:?}");
+    }
+
+    /// A fresh playlist is seeded by the system, not by a literal.
+    ///
+    /// Host `cargo test` has no SlateOS entropy source, so `seeded_from_system`
+    /// returns the fallback and two fresh playlists agree -- exactly as a
+    /// hardcoded seed would. The test therefore asserts *which* seed. Gated off
+    /// Unix, where the host does have entropy and a fresh playlist is genuinely
+    /// unpredictable.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_fresh_playlist_is_seeded_by_the_system_and_not_by_a_literal() {
+        fn first_order(mut pl: Playlist) -> Vec<usize> {
+            for i in 0..12 {
+                pl.add(format!("{i}.mp4"), format!("{i}.mp4"), None, None);
+            }
+            pl.toggle_shuffle();
+            pl.shuffle_order.clone()
+        }
+        let fresh = first_order(Playlist::new());
+        assert_eq!(fresh, first_order(Playlist::with_seed(FALLBACK_SEED)));
+        assert_ne!(fresh, first_order(Playlist::with_seed(12345)));
     }
 
     #[test]

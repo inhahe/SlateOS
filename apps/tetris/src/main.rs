@@ -21,6 +21,7 @@ use guitk::event::{Event, Key, KeyEvent};
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seed_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -299,46 +300,50 @@ impl ActivePiece {
     }
 }
 
-// ── LCG random number generator ────────────────────────────────────
+// ── Randomness ──────────────────────────────────────────────────────
 
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Lcg {
-    state: u64,
-}
+/// Seed used when the kernel's entropy source cannot be reached.
+///
+/// A per-crate constant rather than a shared one, so that two programs which
+/// lose entropy on the same boot do not then produce correlated streams. The
+/// bytes spell `TETRIS!!`.
+const FALLBACK_SEED: u64 = 0x5445_5452_4953_2121;
 
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Returns a value in `0..bound` (exclusive upper bound).
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
-}
+// This crate used to carry its own copy of the LCG that got copied into
+// sixteen crates, reducing with `val % bound`. That is the broken reduction,
+// and the 7-bag shuffle below is where it bit.
+//
+// The generator's modulus is 2^64, so bit *k* of its state has period 2^(k+1):
+// the low bits are not weak, they are a counter. `fill_bag` runs Fisher-Yates
+// over seven pieces, so its bounds count down 7, 6, 5, 4, 3, 2 -- and the
+// bounds 4 and 2 read the low two bits and the low one bit respectively.
+//
+// Measured, not reasoned: `fill_bag` makes exactly six draws, and 6 mod 2 = 0,
+// so the bound-2 draw at `i == 1` returned **0 in every bag, for ever** --
+// `self.bag.swap(1, 0)` was performed unconditionally rather than half the
+// time. And 6 mod 4 = 2, so the bound-4 draw at `i == 3` alternated 2, 0, 2, 0
+// across successive bags. Two of the six shuffle steps in every tetris bag
+// were not shuffle steps; they were a fixed function of how many bags had gone
+// before. The bag still held all seven pieces -- that is what made it survive
+// review -- but the order it dealt them in was substantially predetermined.
+//
+// `randrange::below` is Lemire's method: it multiplies by the bound into 128
+// bits and keeps the *top* half, so it reads the high bits and never the low
+// ones, with a rejection step that makes it exactly uniform.
 
 // ── 7-bag randomizer ────────────────────────────────────────────────
 
 /// Generates pieces using the 7-bag system: shuffle all 7 piece kinds,
 /// deal them in order, refill the bag when empty.
 struct BagRandomizer {
-    rng: Lcg,
+    rng: SeededRng,
     bag: Vec<PieceKind>,
 }
 
 impl BagRandomizer {
     fn new(seed: u64) -> Self {
         let mut this = Self {
-            rng: Lcg::new(seed),
+            rng: SeededRng::new(seed),
             bag: Vec::new(),
         };
         this.fill_bag();
@@ -347,12 +352,11 @@ impl BagRandomizer {
 
     fn fill_bag(&mut self) {
         self.bag = PieceKind::ALL.to_vec();
-        // Fisher-Yates shuffle
-        let len = self.bag.len();
-        for i in (1..len).rev() {
-            let j = self.rng.next_bounded(i + 1);
-            self.bag.swap(i, j);
-        }
+        // Was a hand-rolled Fisher-Yates over `next_bounded(i + 1)`. Same
+        // algorithm, but drawing through the shared generator: see the note by
+        // `FALLBACK_SEED` for what the old reduction did to two of these six
+        // steps.
+        self.rng.shuffle(&mut self.bag);
     }
 
     fn next_piece(&mut self) -> PieceKind {
@@ -517,7 +521,13 @@ struct TetrisApp {
 
 impl TetrisApp {
     fn new() -> Self {
-        Self::with_seed(42)
+        // Was `with_seed(42)`: every player, on every machine, got the same
+        // piece order from the first bag onwards. The `u64` form is used and
+        // not the generator form because this app *stores* its seed -- restart
+        // is `with_seed(self.seed + 1)`, and an app holding a generator instead
+        // would have to reseed one generator from another's output, which
+        // silently correlates the two.
+        Self::with_seed(seed_from_system(FALLBACK_SEED))
     }
 
     fn with_seed(seed: u64) -> Self {
@@ -1547,6 +1557,18 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // ── Helper functions ────────────────────────────────────────────
@@ -2667,38 +2689,93 @@ mod tests {
         assert_eq!(app.current_piece.as_ref().unwrap().row, row_before + 1);
     }
 
-    // ── LCG tests ───────────────────────────────────────────────────
+    // ── The 7-bag ───────────────────────────────────────────────────
 
-    #[test]
-    fn test_lcg_deterministic() {
-        let mut rng1 = Lcg::new(12345);
-        let mut rng2 = Lcg::new(12345);
-        for _ in 0..100 {
-            assert_eq!(rng1.next_u64(), rng2.next_u64());
-        }
+    // The generator's own contract -- determinism under a seed, divergence
+    // under two, staying inside its bound -- used to be tested here against the
+    // local `Lcg`. It is now tested once, against the shared implementation, in
+    // `randrange`. Sixteen crates each testing their own copy is sixteen
+    // chances to test a copy that has quietly drifted from the one being
+    // shipped. What replaces those tests is about the bag, which is what a
+    // player actually experiences.
+
+    /// Deal `bags` bags and return the piece each position of each bag held.
+    fn dealt_bags(seed: u64, bags: usize) -> Vec<Vec<usize>> {
+        let mut bag_gen = BagRandomizer::new(seed);
+        (0..bags)
+            .map(|_| {
+                (0..PieceKind::ALL.len())
+                    .map(|_| {
+                        let kind = bag_gen.next_piece();
+                        PieceKind::ALL.iter().position(|k| *k == kind).unwrap_or(0)
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
+    /// Every piece must be able to arrive at every position in the bag.
+    ///
+    /// This is the test that catches the reduction bug described by
+    /// `FALLBACK_SEED`, and it is the only cheap one that does. The obvious
+    /// check -- "the bags are not all the same" -- passes on the broken code:
+    /// 200 broken bags contain 177 distinct orders, which looks perfectly
+    /// healthy. The defect is not a lack of variety, it is a *hole* in the
+    /// variety. Filling the 7x7 table of (piece, position) counts over 7000
+    /// broken bags left six cells at exactly zero -- one piece could never be
+    /// dealt in three of the seven slots -- while that same piece took one
+    /// particular slot in 46% of bags instead of the expected 14%.
     #[test]
-    fn test_lcg_bounded_range() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..1000 {
-            let val = rng.next_bounded(7);
-            assert!(val < 7);
-        }
-    }
-
-    #[test]
-    fn test_lcg_different_seeds() {
-        let mut rng1 = Lcg::new(1);
-        let mut rng2 = Lcg::new(2);
-        // At least one of the first 10 values should differ
-        let mut all_same = true;
-        for _ in 0..10 {
-            if rng1.next_u64() != rng2.next_u64() {
-                all_same = false;
+    fn every_piece_reaches_every_position_in_the_bag() {
+        let kinds = PieceKind::ALL.len();
+        let bags = 700;
+        let mut counts = vec![vec![0usize; kinds]; kinds];
+        for bag in dealt_bags(0x1234_5678, bags) {
+            for (pos, piece) in bag.iter().enumerate() {
+                counts[*piece][pos] += 1;
             }
         }
-        assert!(!all_same);
+        for (piece, row) in counts.iter().enumerate() {
+            for (pos, count) in row.iter().enumerate() {
+                assert!(
+                    *count > 0,
+                    "piece {piece} was never dealt at position {pos} in {bags} bags;                      the table is {counts:?}"
+                );
+            }
+        }
+    }
+
+    /// Every bag must still hold each of the seven pieces exactly once.
+    ///
+    /// The whole point of a 7-bag is that it bounds the drought between two
+    /// copies of the same piece. A shuffle that lost or duplicated a piece
+    /// would break that guarantee without breaking the test above.
+    #[test]
+    fn every_bag_holds_each_piece_exactly_once() {
+        for (n, bag) in dealt_bags(99, 50).into_iter().enumerate() {
+            let mut sorted = bag.clone();
+            sorted.sort_unstable();
+            let expected: Vec<usize> = (0..PieceKind::ALL.len()).collect();
+            assert_eq!(sorted, expected, "bag {n} was not a permutation: {bag:?}");
+        }
+    }
+
+    /// A fresh game must take its seed from the kernel, not from a literal.
+    ///
+    /// Phrased as "which seed", not as "two fresh games differ", because a host
+    /// test build has no SlateOS kernel: `seed_from_system` correctly takes its
+    /// fallback and two fresh games are then identical, exactly as they were
+    /// under the old hardcoded `42`. A variety check would therefore pass on
+    /// the broken code and fail on the fixed code, which is backwards.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        let fresh = TetrisApp::new().seed;
+        assert_eq!(
+            fresh, FALLBACK_SEED,
+            "a fresh game did not use the crate's fallback seed"
+        );
+        assert_ne!(fresh, 42, "a fresh game is still seeded by the old literal");
     }
 
     // ── Integration tests ───────────────────────────────────────────

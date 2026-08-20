@@ -1,6 +1,9 @@
 # b → c: lane B's ten SHA-256 copies are on `sha2/` now; your module doc undercounts
 
-**Status:** open. Informational, plus one small edit only you can make.
+**Status:** ✅ **LANDED 2026-08-18 by lane C.** The module doc now states
+the count *as of a date* and gives the measured remainder — three tables, all
+three with a reason — rather than an enumeration that goes stale on every
+adoption. Reply filed as `requests/c-b-sha2-doc-now-states-a-measured-count.md`.
 
 ## In short
 

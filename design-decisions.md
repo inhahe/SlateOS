@@ -23634,3 +23634,749 @@ backend to `egl-headless` (QEMU refuses to host a GL device on `-display
 none`), and marks the run an experiment so its wall-clock cannot pollute the
 default-configuration population — the same treatment `QEMU_EXTRA` and the
 accelerator override already get.
+## §463 — Two shared RNG crates merge into the dependency-free one
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** Lane C had grown *two* shared "stop hand-rolling random number
+generators" libraries at the same time, in different corners of the tree,
+neither knowing about the other. One was used by the games, the other by the
+desktop and its apps. Only one of them could ask the kernel for real
+randomness — and it was the one that lives inside the GUI toolkit, so the
+credential service (which has no GUI and must not link one) could not reach
+it. They are now one library: the games' one, because it is the only one a
+program without a screen can use.
+
+### What was actually wrong
+
+The recurring rule on this project is that *a lint firing many times in
+well-factored code is reporting a broken abstraction*. Applied to the
+hand-rolled generators, it produced a shared crate. Applied again, one level
+up, it reports something worse: **the abstraction meant to fix the duplication
+had itself been duplicated.**
+
+| | `randrange` | `guitk::rng` |
+|---|---|---|
+| Consumers | 14 (the games) | 7 (desktop, paint, netscan, passwordgen, credmanager, spades) |
+| `no_std`, no deps | yes | no — inside a widget library |
+| Entropy from the kernel | **no** | yes (`SystemRandom`, §462) |
+| Trait for "a source of randomness" | no — one concrete struct | yes (`RandomSource`) |
+| Method named `below` | a `u64` bound | **an index** |
+
+That last row is the sharp edge: the same word meant two different things in
+two crates a single file could plausibly import together.
+
+The cost was not theoretical. `gui/credentials` is a headless service whose
+only dependencies are `sha2` and `randrange`. Its `generate_password` takes
+the seed as a `u64` *parameter* — the third such defect found in this
+sweep — and it could not be fixed in place, because the only wrapper for the
+kernel CSPRNG lived in a GUI toolkit. The merge was not tidying; it was the
+step that unblocks the fix.
+
+### The decision
+
+Merge into **`randrange`**, and make `guitk::rng` a re-export of it.
+
+- **Direction — into `randrange`.** It is `no_std` and dependency-free, which
+  is the property a headless component needs and the one that cannot be added
+  to a widget library. The reverse direction would have left the credential
+  service exactly where it was.
+- **Names follow the games.** `randrange` had twice the call sites, so
+  `below`/`between`/`choose` win and the clashing index-flavoured `below`
+  becomes the bound-flavoured one. `guitk`'s spellings (`next_f32`,
+  `f32_in_range`, `below_usize`, `pick`) were renamed at their seven call
+  sites.
+- **The trait and the entropy source follow the desktop.** `RandomSource`,
+  `SystemRandom` and `EntropyError` move across unchanged, because they are
+  the only implementation of either idea in the tree.
+- **`guitk::rng` stays as a name.** `pub use randrange as rng;` — seven crates
+  already say `guitk::rng::SeededRng`, and moving code is not a reason to
+  rewrite their import lines.
+
+### The reduction: Lemire *with* rejection
+
+The two crates had also disagreed about how to turn a `u64` into a bounded
+number, and each had been right about a different thing:
+
+- `randrange` used a **widening multiply and kept the high bits**, avoiding
+  the low bits of an LCG counter, which are its worst bits.
+- `guitk` used a **rejection loop**, making the result exactly uniform rather
+  than biased by roughly 2⁻⁶⁴.
+
+The merged version does both — Lemire's method with its rejection step, the
+threshold computed as `bound.wrapping_neg() % bound` so no 128-bit division is
+needed. The bias one of them accepted is invisible in a card shuffle and
+indefensible in the derivation of a password, and after this merge **the same
+code path serves both**. Paying for the loop once, in a branch that is not
+taken on the overwhelming majority of draws, is cheaper than maintaining an
+argument about which callers deserve uniformity.
+
+`SeededRng` also drops `Copy`. A generator that silently duplicates itself on
+a move-out hands the same "random" sequence to two callers who each believe
+they have their own — the failure is silent, and the value it corrupts looks
+fine.
+
+### Consequences
+
+- `gui/credentials` can now reach the kernel CSPRNG through a crate it already
+  depends on. `C-GUI-CREDENTIALS-GENERATE-PASSWORD-TAKES-A-SEED` and
+  `C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES` are
+  unblocked, as is withdrawing `requests/c-a-userspace-entropy-syscall.md`.
+- 21 consumer crates were converted in one change. There is now exactly one
+  place to fix a bug in a random number, and exactly one vocabulary for
+  describing what one wants from it.
+- The next person to reach for a generator has one crate to find, whether they
+  have a screen or not — which is the property whose absence caused this.
+
+## §464 — A vault's salt is drawn from the kernel at creation, and a vault cannot be created without one
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** the credential manager mixed a fixed word — the same word on
+every SlateOS machine on earth — into the master password before hashing it.
+That word is called a salt, and its whole job is to be *different per vault*,
+so that an attacker who precomputes a giant table of password→hash pairs has
+to redo the work for each victim instead of once for everybody. A shared salt
+does none of that. Each vault now draws sixteen random bytes from the kernel
+when it is created and stores them next to the password verifier. The cost of
+this: if the kernel's random number generator cannot be reached, creating a
+vault now **fails** instead of quietly using a predictable salt.
+
+### What changed
+
+`KEY_DERIVATION_SALT` (a `&str` constant) is deleted. In its place:
+
+```rust
+pub struct KdfParams { salt: [u8; 16], rounds: u32 }
+```
+
+- `KdfParams::fresh(rounds)` opens `SystemRandom` and draws the salt through
+  `SecretSource::secret`, so the generator's health is checked on both sides
+  of the draw (§462). It returns `Result<_, CredentialError::EntropyUnavailable>`.
+- `CredentialStore` holds a `KdfParams` where it held a bare `kdf_rounds: u32`.
+- `derive_session_key(password, &KdfParams)` and
+  `IdentityVerifier::verify(.., &KdfParams)` take the pair, not the count.
+- `set_master_password` re-draws the salt on every call, including a change of
+  an existing password. The old password is verified and the stored secrets
+  re-encrypted under the *old* parameters first; salt, rounds, verifier and
+  session key then move together. A rejected change touches none of them.
+
+### Why salt and cost travel together
+
+They were separable in principle and are not in practice. Both are properties
+of the *stored verifier* rather than of the program: a vault written under
+100 000 rounds must keep opening after the default moves, and a vault written
+under salt S can only ever be opened with salt S. Every real password-hashing
+format — PBKDF2, bcrypt, scrypt, Argon2 — writes both beside the hash for
+exactly this reason. Keeping them in one type makes it impossible to persist
+one and forget the other, which is a failure mode with no recovery: a vault
+that loses its salt is not slow to open, it is unopenable.
+
+### The actual decision: refuse, or fall back to a clock?
+
+This is the tradeoff, and it is a real one.
+
+**Falling back** (draw the salt from the system clock, or a counter, when the
+CSPRNG is unreachable) means a vault can always be created. The application
+never has an unexplainable failure, and a clock-derived salt still varies
+between machines, so it is *better than the shared constant* it replaces.
+
+**Refusing** means a machine whose entropy source is broken or not yet
+present cannot create a credential vault at all — a hard, visible failure in
+a place users will not expect one.
+
+Refusing wins, and the asymmetry is about *time*, not about strength:
+
+- A salt is chosen **once** and then lives as long as the vault does — years.
+  Nothing later re-examines it, and there is no natural moment at which a weak
+  one gets upgraded, because upgrading it means re-deriving the key and
+  rewriting every stored secret.
+- A predictable salt is therefore a **permanent, silent** weakness. The vault
+  works perfectly. Nothing ever reports it. The user learns about it when the
+  table that opens their vault also opens everyone else's.
+- A refusal is **loud and recoverable**: the user sees an error, the vault is
+  not created, and creating it again once entropy is available produces a
+  vault with no defect at all.
+
+The general rule this instantiates is §462's — a generator that cannot reach
+the kernel refuses rather than inventing — but the argument here is stronger
+than it is for a generated password. A bad password can be regenerated in a
+second by pressing the button again. A bad salt cannot be replaced without
+rewriting the entire vault, and nobody will ever know to try.
+
+### Why the games do not follow this rule
+
+`apps/pinball` and `apps/spades` seed from `SystemRandom` and **do** fall back
+to a fixed seed. That is not an inconsistency: what they lose when entropy is
+down is *variety*, not confidentiality, and a pinball machine that refuses to
+start because the entropy pool is empty is plainly the worse failure. The
+distinguishing question is whether an adversary who predicts the value gets
+anything. For a table layout, no. For a salt, the whole vault.
+
+### The test seam, and why it is not a hole
+
+A host build (`cargo test` on Windows) has no SlateOS kernel, so
+`KdfParams::fresh` correctly fails there — which would have made
+`CredentialStore` untestable. The tests reach a `#[cfg(test)]`
+`set_master_password_keeping_salt` that reuses the store's existing
+parameters, and construct stores with `with_kdf_params(uid, KdfParams::new(
+TEST_SALT, rounds))`.
+
+`KdfParams::new` is `pub`, which looks like a way to route around the refusal.
+It is not, and cannot be removed: a persistence layer *must* be able to
+reconstruct a `KdfParams` from bytes it read off disk, and that is the same
+operation. What matters is that the only path that *invents* a salt is
+`fresh`, and `fresh` has no fallback. Two tests pin the refusal itself — one
+on the direct API, one on the `handle_request` IPC surface — so a future
+change that adds a fallback fails the suite rather than passing it quietly.
+
+### Consequences left open
+
+- `apps/lockscreen` has the identical defect (single SHA-256 pass, shared
+  constant) and is untouched. Tracked in `known-issues.md`.
+- Nothing persists a `CredentialStore` yet. When something does, the salt is
+  now a second field whose loss is unrecoverable; the type exists partly to
+  make that hard to get wrong, but it cannot be enforced until there is a
+  persistence layer to enforce it against.
+
+## §465 — Randomness has two tiers: a secret refuses without entropy, novelty falls back
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** Programs want unpredictable numbers for two very different
+reasons — to make a password nobody can guess, and to make a maze that isn't
+the same maze every time. Both ask the kernel for entropy (unpredictable bits
+only the kernel can supply). The question is what to do when the kernel can't
+be reached. A password generator must refuse and say so. A maze generator must
+draw a maze anyway. The same answer for both is wrong in one direction or the
+other, so `randrange` gives the two tiers different functions and lets the
+choice of function *be* the decision.
+
+### The problem
+
+§462 settled the secret half: a generator that cannot reach the kernel CSPRNG
+refuses to generate. Applying that rule everywhere is what the sweep in
+`known-issues.md` (`C-TWENTY-MORE-HAND-ROLLED-LCGS`) actually had to do, across
+~25 crates — and it immediately produced a case where refusing is clearly
+worse. A pinball table that will not start is a broken program. A pinball table
+that is predictable is a slightly boring program. Refusing to run a game
+because the entropy pool was not ready is a self-inflicted denial of service in
+exchange for a property nobody wanted.
+
+But the converse is worse. If falling back is the default, one crate that
+should have refused — and there are three of them here (`apps/passwordgen`,
+`apps/credmanager`, `gui/credentials`) — silently ships a guessable secret,
+and it looks identical to a working one.
+
+### The decision
+
+Two named entry points, so the tier is chosen at the call site and is visible
+in a diff:
+
+| Tier | Entry point | On no entropy | Used by |
+|---|---|---|---|
+| **Secret** | `SystemRandom::open` + `SecretSource::secret` | **refuses** — returns `None` | password generation, vault salts |
+| **Novelty** | `seeded_from_system(fallback)` / `seed_from_system(fallback)` | falls back to `fallback` | mazes, shuffles, card deals, wallpapers, spectrum animations, simulated meters |
+
+**The fallback seed is a per-crate parameter, not a constant inside
+`randrange`.** This is the part that is a real decision rather than an obvious
+one. A single shared fallback constant would be simpler and would read fine —
+but on a boot where entropy is unavailable, *every* program that fell back
+would start from the same number. The solitaire deal and the maze and the
+wallpaper rotation would all be correlated, and worse, they would be correlated
+in a way that recurs identically on every such boot. Making it a parameter
+costs each crate one `const FALLBACK_SEED` line (spelled as ASCII in hex —
+`0x4D55_5349_4350_4C52` is "MUSICPLR" — so it is self-evidently per-crate) and
+buys independence between programs in the degraded case.
+
+**Two forms of the novelty entry point**, because some callers store the seed.
+`seeded_from_system` returns a generator; `seed_from_system` returns the `u64`.
+Games that keep their seed so "new board" can be `with_seed(self.seed + 1)`
+need the latter — mahjong, sudoku and simon do. A crate holding only a
+generator would have to reseed one generator from another's output, which
+correlates them silently.
+
+### Alternatives considered
+
+**One function with a `Result`, and let each caller decide.** This is what the
+code looked like before the rule was named: each of the three secret-drawing
+crates had independently written the same fail-closed guard, and each had
+written it slightly differently. Rejected because it makes the *safe* choice
+the one that requires remembering — and the failure mode of forgetting is
+invisible. Naming the tiers moves the decision to a place a reviewer can see.
+
+**Refuse everywhere, uniformly.** Simplest rule to state, and it is what §462
+says in isolation. Rejected on the pinball case above: it converts a cosmetic
+degradation into a program that will not run, in ~22 crates, to protect a
+property none of them have.
+
+**Fall back everywhere, uniformly.** Rejected outright — it is the original
+defect that §462 exists to prevent.
+
+**A single shared fallback constant.** Rejected for the boot-correlation
+argument above. The counter-argument is genuine: per-crate constants are 25
+places to get wrong, and a crate that copies another's constant re-creates the
+problem invisibly. That risk is accepted because the constants are written as
+readable ASCII, which makes a copied one look wrong on sight.
+
+### Consequences
+
+- The tier is now visible at every call site in lane C, and a crate that draws
+  a secret through `seeded_from_system` is a reviewable mistake rather than an
+  invisible one.
+- Seeding must be tested by asserting **which** seed, not that two runs differ.
+  A host `cargo test` has no SlateOS kernel, so `seeded_from_system` takes the
+  fallback and two fresh objects *are* identical — exactly as they were under
+  the hardcoded `42` this sweep removed. A variety check therefore passes on
+  the broken code. Those tests assert `fresh == with_seed(FALLBACK_SEED)` and
+  `fresh != with_seed(<the old literal>)`, and are `#[cfg(not(unix))]`.
+- `SecretSource` lives in `randrange` but the `System`/`Seeded`/`Unavailable`
+  enums stay in each consumer: their `Seeded` variant is `#[cfg(test)]`, and
+  `cfg(test)` does not cross a crate boundary, so a `Seeded` hoisted into
+  `randrange` would be reachable from production code everywhere.
+
+## §466 — One password derivation, in its own crate, extracted before the two callers were wired together
+
+**Date:** 2026-08-18
+**Decided by:** Claude (autonomous)
+
+**In short:** two different programs in this tree each turned a password into
+a stored value, and they did it *differently*. The credential vault salted and
+stretched (§464); the lock screen stored a plain one-pass `SHA-256` of the
+password — a value that is identical on every machine in the world for any
+given password, so one precomputed table opens every account. Fixing the lock
+screen meant writing the good derivation a second time, which is how the two
+came to disagree in the first place. Instead the derivation moved out into a
+small crate, `pwkdf`, that both now call. The timing is the decision: the two
+components do not talk to each other *yet*, and that is the only moment when
+making them agree costs nothing.
+
+### The situation
+
+`gui/credentials` had been fixed (§464) to draw a per-vault salt from the
+kernel and iterate 100 000 rounds. `apps/lockscreen` stored
+`sha256(password.as_bytes())` — no salt, no stretching — with a comment saying
+the hash "would come from the credential store via IPC". So the two were
+already destined to be connected, and were already incompatible: a verifier
+produced by one can never be checked by the other.
+
+That incompatibility, not the weakness, is what made this worth a crate. The
+weakness alone could have been fixed in place, in twenty lines. But on the day
+someone wires the lock screen to the vault they will find the formats
+disagree, and the *cheapest* way to make them agree is to weaken the vault to
+match the screen — a commit that reads like plumbing and undoes §464 without
+mentioning it. There is no point in that future where the strong option is the
+easy one.
+
+### The decision
+
+Extract `pwkdf`: `KdfParams` (salt + rounds, travelling together because they
+must be *stored* together), `stretch`, `derive_key`, `verifier_for(key,
+domain)`, and a `PasswordVerifier` bundle for callers that only need to check
+a password rather than hold a key. `gui/credentials` keeps `derive_session_key`
+and `verifier_for` as three-line adapters and loses ~150 lines;
+`apps/lockscreen` uses `PasswordVerifier` directly.
+
+The verifier is **domain-separated by a per-caller label**, so sharing a
+derivation does not mean sharing a value: a lock-screen verifier and a vault
+verifier for the same password under the same salt are different bytes, and
+neither can be replayed against the other. The label is stored *in*
+`PasswordVerifier` rather than passed to `check`, because a caller that passed
+one string at creation and another at check would reject every correct
+password with nothing to say why.
+
+### Alternatives considered
+
+- **Fix `apps/lockscreen` in place.** Smallest diff, and it is what the bug
+  report literally asks for. Rejected: it produces a *third* correct-looking
+  derivation, and correctness is not the property at issue — agreement is.
+  Two independently-correct derivations still cannot check each other's
+  verifiers.
+- **Put the KDF in `sha2`.** It is already the shared hash and both callers
+  depend on it. Rejected on the same grounds `randrange` was kept out of it:
+  `sha2` has 15 consumers including the kernel, `kernel/build.rs`, bare-metal
+  services and `userspace/sha256sum`, and is deliberately `alloc`-free. A KDF
+  needs `alloc` for the stretch buffer and an entropy source for fresh salts.
+  `sha256sum` has no business linking either.
+- **Make `gui/credentials` a library and have the lock screen depend on it.**
+  Avoids a new crate. Rejected: the lock screen would then link a vault, an
+  IPC surface, a stream cipher and an auto-lock timer to hash one password,
+  and the dependency runs the wrong way — a screen that must work before
+  anything is unlocked should not depend on the thing that unlocks.
+- **Wait until the two are actually wired together, then reconcile.**
+  Rejected explicitly: that is the moment the cheap fix is the wrong one. The
+  whole value of doing it now is that neither side has a stored format to
+  migrate, so agreement is free.
+
+### Consequences
+
+- **`pwkdf::stretch` is PBKDF2's *shape*, not PBKDF2** — iterated bare
+  SHA-256, not HMAC, and far weaker than a memory-hard function. That is
+  inherited from the code it was lifted out of, and the module doc says so.
+  Whether this tree writes its own primitives or ports vetted ones is
+  `open-questions.md` → **C-Q5**, the operator's call. Consolidating first is
+  what makes that answer cheap to act on: one function to replace instead of
+  one per caller.
+- **`userspace/cryptsetup` deliberately does not use `pwkdf`.** Its PBKDF2 is
+  real HMAC-based PBKDF2 because the LUKS on-disk format specifies exactly
+  that. Its duplication is a format obligation, not a copy, and folding it in
+  would be a bug.
+- **`KdfParams::fresh` refuses rather than falling back**, per §465: a salt is
+  chosen once and lives as long as the account, so a predictable one is a
+  permanent weakness nothing later repairs. Both callers propagate the error.
+- **Anything that persists a verifier must round-trip the salt *and* the round
+  count.** Losing either rejects the owner's own password with no diagnostic.
+  Nothing persists one yet; the type exists to make that hard to get wrong,
+  but it cannot be enforced until there is a persistence layer.
+
+---
+
+## §467 — Snap zones tile the work area, not the screen, and the edge a window is dragged to determines where it goes
+
+**Date:** 2026-08-18 · **Lane:** C · **Decided by:** Claude (autonomous)
+
+**In short:** The desktop has a Windows-11-style "snap" feature — drag a window
+to the edge of the screen and it fills half the screen, or a quarter, or one
+cell of a grid. Two things about it were wrong. First, it laid its zones out
+over the *whole screen* including the strip the taskbar occupies, so a snapped
+window would have run underneath the taskbar and hidden its own bottom edge.
+Second, dragging a window to the **top** of the screen moved it to the **left
+half**, and dragging it to the **bottom** moved it to the **right half** — the
+direction you dragged had nothing to do with where the window went. Neither
+could be seen by anyone, because nothing calls this code yet. It is now laid
+out over the *work area* (the screen minus the taskbar), and the top edge
+maximises while the bottom edge does nothing.
+
+### The two decisions
+
+**1. `build` takes a work area, not a screen size.**
+
+`SnapLayoutPreset::build(screen_w, screen_h)` became
+`build(area: WorkArea)`, where `WorkArea` is `{ x, y, width, height }`. The
+eleven layout arms still compute in area-local coordinates — they are textually
+unchanged — and the origin is added once, at a single `.map()` after the match:
+
+```rust
+let zones = zones.into_iter()
+    .map(|z| SnapZone { x: z.x + area.x, y: z.y + area.y, ..z })
+    .collect();
+```
+
+*Alternative considered:* thread `area.x` / `area.y` through each arm. Rejected:
+eleven arms is eleven chances to forget, and the forgetting is invisible — a
+zone at the wrong origin still tiles, still fails to overlap its neighbours,
+and still passes every test the module had.
+
+`WorkArea::whole_screen(w, h)` exists as a **named** constructor rather than
+letting callers write `WorkArea::new(0.0, 0.0, w, h)`, so that substituting a
+screen for a work area is a thing someone wrote down rather than a thing that
+happened.
+
+**2. The edge-to-snap mapping is `Option<EdgeSnap>`, and the vertical edges no
+longer map to horizontal halves.**
+
+| Edge | Was | Is |
+|---|---|---|
+| Left / Right | left half / right half | unchanged |
+| **Top** | **left half** (commented "maximize hint", which it was not) | **maximise** |
+| **Bottom** | **right half** | **nothing — an ordinary window move** |
+| Corners | four quadrants | unchanged |
+
+Top maximising is what every desktop this imitates does. Bottom doing *nothing*
+is the honest answer: there is no half-height bottom strip among the presets,
+and inventing one to fill the table is a worse outcome than leaving the drag
+alone. Expressing that required the return type to become `Option`, and
+maximise-is-not-a-zone required a new `EdgeSnap::Maximize` variant beside
+`EdgeSnap::Zone(preset, id)` — the manager synthesises a full-work-area zone
+for it at hit-test time.
+
+*Alternative considered:* keep returning a `(preset, zone_id)` pair and add a
+`Maximized` pseudo-preset whose single zone is the whole area. Rejected: it
+makes "maximise" a layout the picker would have to hide, and puts a
+special-case in every consumer that enumerates presets.
+
+### Why this is filed as a decision rather than a bug fix
+
+Because of what the tests taught. All three defects lived under a **green
+suite** that could not have failed for any of them:
+
+- `six_grid_zones_do_not_overlap` and `two_halves_covers_full_width` assert
+  *relationships between zones*. Those hold just as well over the wrong
+  rectangle. A layout translated bodily off the work area tiles perfectly.
+- `all_edges_map_to_valid_zones` asserted only that each edge mapped to a zone
+  that **exists**. Top → left half satisfies it completely.
+
+The replacement tests assert the property the *caller* depends on, not the one
+the implementation happens to have: every zone of every preset lies inside the
+work area; the zone an edge maps to has its centre on the side of the work area
+the user dragged toward.
+
+Two fixture-design points, both found by reintroducing defects rather than by
+reasoning:
+
+- The fixtures must offset **x and y separately**. With only a top-taskbar
+  fixture, "`build` drops the `x` origin" failed nothing.
+- A fixture's `right()` must not coincidentally equal the screen width. The
+  original left-dock fixture was `x=64, width=1856` → `right() == 1920`, and a
+  right edge measured against the screen was still indistinguishable from a
+  correct one. It is now inset on both sides.
+
+### What this does not settle
+
+`gui/desktop/src/main.rs::snap_window` is a **second, wired** implementation of
+this feature — integer geometry, no inter-zone gap, half/quarter only. `snap.rs`
+is `f32` with a 6 px gap and seven presets, and has no caller at all. Reconciling
+them is a follow-on task; see `known-issues.md`
+`C-TWO-SNAP-IMPLEMENTATIONS-WITH-DIFFERENT-GAP-POLICIES`. This entry decides
+only what `snap.rs` does, on the grounds that the moment agreement between two
+implementations is cheap is *before* the wiring exists.
+
+## §468 — Apps delegate date *arithmetic* to `guitk::date` but keep their own *validation*
+
+**Date:** 2026-08-18 · **Lane:** C · **Decided by:** Claude (autonomous)
+
+**In short:** Six of the desktop apps each worked out their own answers to
+"how many days are in this month", "what weekday is this", "what date is
+thirty days from here" — six separately-written copies of arithmetic that has
+exactly one right answer, none of them using the shared calendar module the
+toolkit already provides. One of the six (the calendar app, of all things) got
+the week number wrong on **38.5 %** of all days. All six now hand the
+*arithmetic* to the shared module. What they do **not** hand over is deciding
+whether a date is a real date at all: the shared module answers "31 February"
+by quietly moving it to the 28th, which is the right answer for a date picker
+and the wrong answer for a program parsing a date out of a file. Each app
+keeps its own "is this even a date?" check and delegates only the sums.
+
+### The situation
+
+`gui/toolkit/src/date.rs` has been the shared civil-date module for some time:
+`Date`, `Weekday`, `from_ymd`, `add_days`, `add_months`, `days_until`,
+`day_of_year`, `iso_week`, `is_leap_year`, `days_in_month`, `month_grid`. Six
+apps — `calendar`, `reminders`, `habits`, `contacts`, `rssreader`, `systray` —
+computed the same things locally and **none of the six referenced it**. The
+copies were in five mutually incompatible shapes: `i32` years and `u16` years
+and `u64` years; a `day_of_year` that took no year at all and therefore could
+not be leap-correct; a `days_in_month(month, leap)` that took the leap flag
+from its caller.
+
+Two of the six copies were *correct*. Four were not, or were correct only over
+a range nothing enforced. The measured damage is in `known-issues.md`
+`C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC`.
+
+### The decision
+
+**1. Keep each app's own date struct; delegate the calculations.**
+
+Every app keeps `Date { year, month, day }` (or `DateTime`, or `SimpleDate`)
+in whatever integer widths it already used, because the field accesses are
+load-bearing — the calendar app alone has 75 field reads and 69 struct
+literals — and adds a private two-function bridge:
+
+```rust
+fn civil(self) -> date::Date { date::Date::from_ymd(self.year, self.month, self.day) }
+fn from_civil(d: date::Date) -> Self { let (year, month, day) = d.ymd(); Self { year, month, day } }
+```
+
+Every calculation then goes through the bridge, converting integer widths at
+the boundary. Nothing else in any app changes.
+
+**2. Arithmetic is delegated; validation is not.**
+
+This is the load-bearing half of the decision. `guitk::date::Date::from_ymd`
+**clamps**: `month.clamp(1, 12)`, then `day.clamp(1, days_in_month(…))`. It is
+a total function with no `Option`, and that is correct for its own callers — a
+date picker moving between months must always have a date to show, and
+"31 January → add one month" has to land on 28 or 29 February rather than
+fail.
+
+It is exactly wrong for a caller whose *job* is to reject bad input.
+`rssreader::days_from_civil` parses a `<pubDate>` off the network; a feed that
+says `2026-02-31` must get `None`, not 28 February. So those functions keep
+their own range checks and delegate only the sum:
+
+```rust
+if !YEAR_RANGE.contains(&year) { return None; }
+if day < 1 || day > days_in_month(year, month)? { return None; }
+let date = date::Date::from_ymd(…);   // now known in range, so the clamp is a no-op
+```
+
+The clamp is a trap in the other direction too. `contacts::day_of_year` sums
+`days_in_month` over the months before a given one; passing month 14 straight
+through would have the shared function clamp it to 12 and count December
+twice. The month range is therefore clamped **before** the loop is built, not
+inside it.
+
+**3. Correct duplicates get removed as well as incorrect ones.**
+
+`contacts` and `rssreader` had *correct* local implementations —
+`rssreader`'s was a faithful transcription of Howard Hinnant's algorithm with
+a twenty-line `#[expect(arithmetic_side_effects)]` justifying every operand.
+They were deleted anyway.
+
+**4. Every rewire is checked by reintroducing the defect it should catch.**
+
+Not "the tests still pass" — the calendar's tests passed over a formula wrong
+on 38.5 % of days. After each rewire, ~6–10 plausible defects are restored one
+at a time and the suite re-run; a defect no test catches is a missing test.
+Across five apps this found **five** tests that could not fail, each of which
+was then rewritten rather than waved through.
+
+### Alternatives considered
+
+**Replace each app's struct with `guitk::date::Date` outright.** The honest
+end state, and it removes the bridge entirely. Rejected for now because it
+turns a contained change into a rewrite of hundreds of field accesses per app,
+in five apps at once, with no test coverage worth the name to catch a
+transcription slip — and because the bridge makes that migration *easier*
+later, not harder: once every calculation goes through `civil()`, the struct
+is a data holder and swapping it is mechanical.
+
+**Give `guitk::date` a checked constructor (`try_from_ymd -> Option<Date>`)
+and delegate validation too.** Genuinely attractive: it would put the one
+right answer to "is this a date?" in the same one place as the arithmetic, and
+`contacts`, `rssreader` and the future `systray` all reimplement the same
+`1..=12` check today. Not done here because it is a change to another crate's
+public API made in the middle of a five-app refactor, and because the *policy*
+question underneath it — does a clamping constructor and a rejecting
+constructor both belong, and which one gets the short name — deserves its own
+decision rather than being settled as a side effect. Worth revisiting; the
+duplicated range checks are the standing cost of not having done it.
+
+**Leave the correct copies (`contacts`, `rssreader`) alone.** Cheapest, and
+defensible: they were right, and touching right code to make it identically
+right risks introducing a fault where there was none. Rejected because
+"correct today" is not a property that survives — a *wrong* duplicate gets
+found, while a *right* one just waits for the day the two stop agreeing, and
+the copy nobody edits is the one that drifts. `rssreader`'s
+`days_in_month(month, leap)` is the concrete argument: it was correct only
+because both call sites happened to derive the leap flag from the right year,
+and no test or type stopped a third call site deriving it from the wrong one.
+Taking the year instead removes the possibility rather than relying on it.
+
+### Consequences
+
+- Out-of-range months now **clamp** rather than returning sentinel values.
+  Three apps previously answered an invalid month with `30`, `0` and `0` days
+  respectively, and `0` from a `days_in_month` is a live loop-termination
+  hazard. Where an app's caller genuinely needs rejection it still gets it,
+  from the app's own check.
+- ~17 `clippy::arithmetic_side_effects` warnings and two long `#[expect]`
+  blocks disappeared with the hand-rolled era arithmetic: the bounds argument
+  now has to be made once, in `guitk::date`, instead of once per copy.
+- The apps gain capability they did not have — `calendar` now has a real ISO
+  week number and an `iso_week() -> (i32, u32)` that carries the
+  week-numbering *year*, because a week number without its year is ambiguous
+  at exactly the boundary where it is most likely to be misread.
+- The bridge is a small standing cost: two private functions and a width
+  conversion per app. That is the price of not rewriting five apps' struct
+  literals in one change, and it is refundable.
+
+---
+
+## §469 — Snapped windows have a 6-pixel gap, given up when the screen cannot afford it
+
+**Date:** 2026-08-19 · **Lane:** C · **Decided by:** Claude (autonomous)
+
+**In short:** When you snap two windows side by side, they now sit six pixels
+apart instead of touching. The desktop had two separate pieces of code that
+knew how to snap a window — one that ran and left no gap, one that was never
+called and left six pixels — and wiring the better one up meant picking which
+look is the real one. Six pixels won, because it is the one the richer
+implementation and every desktop we are competing with already use. On a
+screen too narrow for the gap to fit, it is dropped rather than shrunk, since
+subtracting six pixels from a three-pixel screen produces a negative window.
+
+### The situation
+
+`gui/desktop/src/snap.rs` had seven layout presets, a zone picker, drag-time
+overlays, and per-window restore history. `mod snap;` was the only reference to
+it in the tree. What actually ran when the user pressed `Super+Left` was
+`main.rs::snap_window`, twenty lines of integer arithmetic that split the work
+area in half and knew nothing about any of that.
+
+They disagreed about one visible thing: `snap.rs` separates adjacent zones by
+`ZONE_GAP = 6.0`; `main.rs` made the halves touch. Two answers to one question,
+only one of which a user could see, and the invisible one was the more capable.
+`known-issues.md`
+`C-TWO-SNAP-IMPLEMENTATIONS-WITH-DIFFERENT-GAP-POLICIES` recorded that whoever
+wired the module up would also have to settle the gap, because a desktop where
+some snaps have a gap and others do not is worse than either policy.
+
+`design.txt` says nothing about window snapping at all, so there is no spec to
+defer to. That is what makes this a decision rather than a lookup.
+
+### The decision
+
+**A 6-pixel gap, and one implementation.** `main.rs::snap_window` is now a
+wrapper over `snap_window_to_zone`, which asks `SnapManager` for the rectangle.
+The shell computes no snap geometry.
+
+**The gap is an affordance, not an invariant.** Every preset subtracts the gap
+from the area before dividing it, which is only meaningful when the area is big
+enough to give it away. `build` tries the gap, keeps it only if every resulting
+zone is at least `ZONE_GAP` in both dimensions, and otherwise rebuilds the
+layout edge-to-edge. The rule is applied to the *built zones* rather than to
+each preset's arithmetic, so a preset added later inherits it without knowing it
+exists.
+
+**The threshold is stated as a property, not a number.** "Every zone is at
+least one gap wide" rather than "the screen is at least 18 pixels wide": the
+latter is right only for `TwoEqualHalves`, and the six other presets divide the
+area differently.
+
+### Alternatives considered
+
+**No gap — adopt `main.rs`'s policy into `snap.rs`.**
+*What changes:* snapped windows touch, as they do today.
+For: nothing about today's behaviour changes, so no user is surprised; touching
+halves tile the screen exactly, with no strip of wallpaper showing through. It
+is also the cheaper edit — one constant.
+Against: it throws away information. The gap was written deliberately into the
+implementation that has seven layouts and a picker, and it is what Windows 11,
+GNOME and KDE all do, because a visible seam is how a user tells two snapped
+windows apart from one window with an internal divider. Deleting it to match
+the simpler implementation is letting the code that happened to be wired up win
+on the grounds that it happened to be wired up.
+
+**A gap that shrinks proportionally on small screens.**
+*What changes:* on a 40-pixel-wide screen the halves would be one pixel apart
+instead of six.
+For: never loses the seam entirely; no threshold to get wrong.
+Against: it makes the gap a function of screen width, so a window's snapped
+position is no longer predictable from the layout alone, and the seam becomes a
+sub-pixel smear at exactly the sizes where it is hardest to see anyway. It also
+does not actually solve the bug: a proportional gap still has to decide what to
+do at width 0.
+
+**Clamp the width to zero instead of choosing a gap.**
+*What changes:* nothing visible; the negative-width zone becomes a zero-width
+zone.
+For: a one-line fix at the point of the defect.
+Against: it treats the symptom. The negative width is not the problem — the
+problem is that the layout is being asked to give away space it does not have,
+and a clamped zero-width zone is a zone the user can snap a window into and
+then not find it. Dropping the gap keeps every zone usable.
+
+### Consequences
+
+- **Two existing tests encoded the old policy and were rewritten**, not
+  patched: `the_two_snapped_halves_cover_the_work_area_with_no_gap` became
+  `..._span_the_work_area_with_one_gap_between_them`, and
+  `snapping_and_switching_desktops_are_different_shortcuts` stopped asserting a
+  literal x. The second is the more useful lesson: it exists to keep two key
+  chords apart and had no business pinning a coordinate that belongs to
+  `snap.rs`, and it failed for a reason unrelated to what it tests.
+- **`ZONE_GAP` is now `pub`.** The shell's tests assert the policy, and a
+  private constant would force them to re-state `6.0` — which is the shape of
+  the mistake that produced two snap implementations in the first place.
+- Anything that later wants a gapless desktop (a tiling mode, a "maximise all"
+  view) sets the gap in one place rather than reimplementing snapping. The gap
+  being a parameter of `zones_with_gap` rather than a constant read inside each
+  arm is what makes that a one-line change.
+- The drag-time half of `snap.rs` — `hit_test`, `edge_snap_hit`,
+  `render_overlay`, the picker — is still unwired. This decision does not
+  settle whether dragging to a screen edge should snap; it settles only what a
+  snap looks like once it happens.

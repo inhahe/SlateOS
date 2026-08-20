@@ -215,6 +215,7 @@ mod tests {
     )]
 
     use super::ListViewport;
+    use randrange::{RandomSource, SeededRng};
 
     /// Both invariants, checked after every operation in every test below.
     fn assert_consistent(view: &ListViewport, len: usize) {
@@ -418,15 +419,22 @@ mod tests {
         // Walks a deterministic pseudo-random mix of operations against lists
         // and window heights of every awkward size, checking both invariants
         // after each step.
+        //
+        // The mix used to come from an LCG inlined right here -- the same
+        // multiplier and increment that had been copy-pasted into sixteen app
+        // crates, written out a seventeenth time in the toolkit that could
+        // have offered them the shared one. It drew with `(seed >> 33) % 6`,
+        // which is not the broken reduction (the shift discards the counter
+        // bits first), so this walk was not actually biased. It is replaced
+        // anyway: a test that generates its own randomness by hand is a test
+        // whose coverage nobody has checked, and `randrange` is a direct
+        // dependency of this crate.
         for height in [0usize, 1, 2, 3, 7] {
             for len in [0usize, 1, 2, 3, 6, 7, 8, 50] {
                 let mut view = ListViewport::new(height);
-                let mut seed = 0x2545_F491_4F6C_DD1Du64;
+                let mut rng = SeededRng::new(0x2545_F491_4F6C_DD1D);
                 for step in 0..200u32 {
-                    seed = seed
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(1442695040888963407);
-                    match (seed >> 33) % 6 {
+                    match rng.below(6) {
                         0 => view.select_next(len),
                         1 => view.select_prev(len),
                         2 => view.page_down(len),

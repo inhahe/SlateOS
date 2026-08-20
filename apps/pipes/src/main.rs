@@ -18,6 +18,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seed_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 
 // ---------------------------------------------------------------------------
@@ -143,33 +144,30 @@ impl Pipe {
 }
 
 // ---------------------------------------------------------------------------
-// LCG
+// Randomness
 // ---------------------------------------------------------------------------
 
-struct Lcg {
-    state: u64,
-}
+/// Seed used when the kernel's entropy source cannot be reached.
+///
+/// A per-crate constant rather than a shared one, so that two programs which
+/// lose entropy on the same boot do not then produce correlated streams. The
+/// bytes spell `PIPES!!!`.
+const FALLBACK_SEED: u64 = 0x5049_5045_5321_2121;
 
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 {
-            return 0;
-        }
-        (self.next() >> 33) as usize % max
-    }
-}
+// This crate used to carry its own copy of the LCG that got copied into
+// sixteen crates. Its reduction was `(next() >> 33) % max`, which discards the
+// low 31 bits before taking the remainder -- so unlike most of the copies it
+// never read the counter-like low bits of a power-of-two-modulus LCG. That
+// mattered here, because two of the three call sites draw a *rotation* with
+// `next_range(4)`, and a bound of 4 is exactly where the broken reduction
+// collapses to a fixed 4-cycle: every tile would have been laid down rotated
+// one quarter turn further than the last, in lockstep, for ever. It escaped.
+//
+// It is replaced anyway. The copy is the defect: this one happened to be a
+// good copy, and the only way to know that was to read all sixteen and check.
+// `randrange::below` is Lemire's method, which reads the high bits and adds a
+// rejection step, so the draw is exactly uniform rather than merely unbiased
+// in its high bits.
 
 // ---------------------------------------------------------------------------
 // Difficulty
@@ -292,7 +290,7 @@ impl Board {
 
     /// Generate a solvable puzzle: lay a path from source to drain, place pipes,
     /// then randomize rotations.
-    fn generate(difficulty: Difficulty, rng: &mut Lcg) -> Self {
+    fn generate(difficulty: Difficulty, rng: &mut SeededRng) -> Self {
         let (rows, cols) = difficulty.grid_size();
         let mut board = Board::new(rows, cols);
 
@@ -324,14 +322,14 @@ impl Board {
         for r in 0..rows {
             for c in 0..cols {
                 if board.cells[r][c].kind == PipeKind::Empty {
-                    let kind = match rng.next_range(5) {
+                    let kind = match rng.below(5) {
                         0 => PipeKind::Straight,
                         1 => PipeKind::Corner,
                         2 => PipeKind::Tee,
                         3 => PipeKind::End,
                         _ => PipeKind::Straight,
                     };
-                    let rot = rng.next_range(4) as u8;
+                    let rot = rng.below(4) as u8;
                     board.cells[r][c] = Pipe::new(kind, rot);
                 }
             }
@@ -340,7 +338,7 @@ impl Board {
         // Scramble all rotations (except keep a solvable state possible)
         for r in 0..rows {
             for c in 0..cols {
-                let rotations = rng.next_range(4) as u8;
+                let rotations = rng.below(4) as u8;
                 for _ in 0..rotations {
                     board.cells[r][c].rotate_cw();
                 }
@@ -405,7 +403,7 @@ impl Board {
         cols: usize,
         start: (usize, usize),
         end: (usize, usize),
-        rng: &mut Lcg,
+        rng: &mut SeededRng,
     ) -> Vec<(usize, usize)> {
         let mut visited = vec![vec![false; cols]; rows];
         let mut path = vec![start];
@@ -453,8 +451,8 @@ impl Board {
             });
 
             // Pick with bias toward closer cells but some randomness
-            let idx = if rng.next_range(3) == 0 {
-                rng.next_range(neighbors.len())
+            let idx = if rng.below(3) == 0 {
+                rng.below(neighbors.len())
             } else {
                 0 // closest to target
             };
@@ -479,18 +477,22 @@ struct PipesApp {
     difficulty: Difficulty,
     moves: u32,
     solved: bool,
-    rng: Lcg,
+    rng: SeededRng,
     games_won: u32,
     show_flow: bool,
 }
 
 impl PipesApp {
     fn new() -> Self {
-        Self::with_seed(42)
+        // Was `with_seed(42)`: every player, on every machine, got the same
+        // pipe layout in the same rotations. Predicting a pipes board costs the
+        // user nothing but the puzzle, so this asks the kernel and falls back
+        // rather than refusing -- see `randrange::seeded_from_system`.
+        Self::with_seed(seed_from_system(FALLBACK_SEED))
     }
 
     fn with_seed(seed: u64) -> Self {
-        let mut rng = Lcg::new(seed);
+        let mut rng = SeededRng::new(seed);
         let difficulty = Difficulty::Easy;
         let board = Board::generate(difficulty, &mut rng);
         Self {
@@ -836,6 +838,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // --- Dir ---
@@ -1020,7 +1034,7 @@ mod tests {
 
     #[test]
     fn board_generate() {
-        let mut rng = Lcg::new(42);
+        let mut rng = SeededRng::new(42);
         let board = Board::generate(Difficulty::Easy, &mut rng);
         assert_eq!(board.rows, 5);
         assert_eq!(board.cols, 5);
@@ -1028,8 +1042,8 @@ mod tests {
 
     #[test]
     fn board_generate_different_seeds() {
-        let mut rng1 = Lcg::new(1);
-        let mut rng2 = Lcg::new(2);
+        let mut rng1 = SeededRng::new(1);
+        let mut rng2 = SeededRng::new(2);
         let b1 = Board::generate(Difficulty::Easy, &mut rng1);
         let b2 = Board::generate(Difficulty::Easy, &mut rng2);
         assert_ne!(b1, b2);
@@ -1050,23 +1064,63 @@ mod tests {
         assert_eq!(Difficulty::Hard.name(), "Hard");
     }
 
-    // --- LCG ---
+    // --- Seeding ---
 
+    // The generator's own contract -- determinism under a seed, staying inside
+    // its bound -- used to be tested here against the local `Lcg`. It is now
+    // tested once, against the shared implementation, in `randrange`. Sixteen
+    // crates each testing their own copy is sixteen chances to test a copy that
+    // has quietly drifted from the one being shipped.
+
+    /// A fresh game must take its seed from the kernel, not from a literal.
+    ///
+    /// Phrased as "which seed", not as "two fresh games differ", because a host
+    /// test build has no SlateOS kernel: `seed_from_system` correctly takes its
+    /// fallback and two fresh games are then identical, exactly as they were
+    /// under the old hardcoded `42`. A variety check would therefore pass on
+    /// the broken code and fail on the fixed code, which is backwards.
+    #[cfg(not(unix))]
     #[test]
-    fn lcg_deterministic() {
-        let mut r1 = Lcg::new(42);
-        let mut r2 = Lcg::new(42);
-        for _ in 0..10 {
-            assert_eq!(r1.next(), r2.next());
-        }
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        let fresh = PipesApp::new().board;
+        assert_eq!(
+            fresh,
+            PipesApp::with_seed(FALLBACK_SEED).board,
+            "a fresh game did not use the crate's fallback seed"
+        );
+        assert_ne!(
+            fresh,
+            PipesApp::with_seed(42).board,
+            "a fresh game is still seeded by the old hardcoded literal"
+        );
     }
 
+    /// Every rotation must be reachable.
+    ///
+    /// Two of the three draws in board generation pick a quarter-turn with a
+    /// bound of 4, and 4 is exactly the bound at which the reduction this crate
+    /// has just moved off collapses to a fixed cycle -- see the note by
+    /// `FALLBACK_SEED`. This crate's copy shifted the low bits away first and
+    /// so escaped, but the property is worth pinning down now that it is a
+    /// property of shared code: over a decent sample every one of the four
+    /// rotations must actually turn up.
     #[test]
-    fn lcg_range() {
-        let mut rng = Lcg::new(99);
-        for _ in 0..100 {
-            assert!(rng.next_range(5) < 5);
+    fn every_rotation_is_reachable() {
+        let mut seen = [false; 4];
+        for seed in 0..40u64 {
+            let board = Board::generate(Difficulty::Hard, &mut SeededRng::new(seed));
+            for row in &board.cells {
+                for pipe in row {
+                    if let Some(slot) = seen.get_mut(pipe.rotation as usize % 4) {
+                        *slot = true;
+                    }
+                }
+            }
         }
+        assert!(
+            seen.iter().all(|s| *s),
+            "not every quarter-turn was reachable: {seen:?}"
+        );
     }
 
     // --- App ---

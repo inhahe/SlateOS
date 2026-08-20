@@ -21,6 +21,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -198,46 +199,40 @@ fn standard_deck() -> Vec<Card> {
     deck
 }
 
-// ── Seeded LCG RNG ─────────────────────────────────────────────────
+// ── The shuffle ────────────────────────────────────────────────────
 
-struct Rng {
-    state: u64,
+/// The deck's generator.
+///
+/// The game used to carry a linear congruential generator here, and — worse
+/// than the generator itself — a fixed starting seed of `42`. Every fresh
+/// launch therefore dealt exactly the same first hand to exactly the same
+/// player, on every machine. The seed now comes from the kernel, so the first
+/// hand of a session is a new one.
+///
+/// Cards are not secrets, so unlike the password generator this does *not*
+/// refuse to work when the kernel has no entropy for it: a card game that will
+/// not deal is worse than one that deals predictably, and the three opponents
+/// are AI running in this same process, so there is nobody the deck could be
+/// hidden from. What is lost without entropy is variety across launches, not
+/// confidentiality, and the fallback says so at the point where it is chosen.
+type Rng = SeededRng;
+
+/// A generator for a whole session, seeded from the kernel where possible.
+///
+/// Without kernel entropy the deal falls back to a fixed sequence, so every
+/// launch on this machine plays the same first hand until entropy is
+/// available. Nothing here is confidential, so this degrades the game rather
+/// than compromising it; the reasoning is written out once, at
+/// [`guitk::rng::seeded_from_system`].
+fn session_rng() -> Rng {
+    seeded_from_system(FALLBACK_SEED)
 }
 
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
+/// The seed used when the kernel has no entropy to give. Arbitrary.
+const FALLBACK_SEED: u64 = 0x5350_4144_4553_2121;
 
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        self.state
-    }
-
-    fn next_u32(&mut self) -> u32 {
-        (self.next_u64() >> 32) as u32
-    }
-
-    /// Random number in [0, n).
-    fn next_range(&mut self, n: u32) -> u32 {
-        if n == 0 {
-            return 0;
-        }
-        self.next_u32() % n
-    }
-
-    /// Fisher-Yates shuffle.
-    fn shuffle<T>(&mut self, slice: &mut [T]) {
-        let len = slice.len();
-        for i in (1..len).rev() {
-            let j = self.next_range((i + 1) as u32) as usize;
-            slice.swap(i, j);
-        }
-    }
-}
+/// How many cards each of the four players is dealt.
+const HAND_SIZE: usize = 13;
 
 // ── Game phase ──────────────────────────────────────────────────────
 
@@ -438,9 +433,22 @@ struct SpadesGame {
 }
 
 impl SpadesGame {
+    /// A new game, dealt from a deck the kernel shuffled.
     fn new() -> Self {
+        Self::with_rng(session_rng())
+    }
+
+    /// A new game dealt from a named seed, so a test can name the hand it
+    /// wants to reason about. The game itself never takes this path — a fixed
+    /// seed is exactly the defect the kernel-seeded constructor exists to fix.
+    #[cfg(test)]
+    fn with_seed(seed: u64) -> Self {
+        Self::with_rng(Rng::new(seed))
+    }
+
+    fn with_rng(rng: Rng) -> Self {
         let mut game = Self {
-            rng: Rng::new(42),
+            rng,
             phase: Phase::Bidding,
             hands: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             teams: [TeamState::new(), TeamState::new()],
@@ -500,8 +508,11 @@ impl SpadesGame {
     fn deal(&mut self) {
         let mut deck = standard_deck();
         self.rng.shuffle(&mut deck);
-        for i in 0..4 {
-            self.hands[i] = deck[i * 13..(i + 1) * 13].to_vec();
+        // `chunks_exact` states the hand size once and cannot run off the end
+        // of a deck that is not the size this expects — the index arithmetic
+        // it replaces would have panicked on any other deck.
+        for (hand, cards) in self.hands.iter_mut().zip(deck.chunks_exact(HAND_SIZE)) {
+            *hand = cards.to_vec();
         }
         self.sort_hand(PlayerId::SOUTH);
         self.sort_hand(PlayerId::EAST);
@@ -816,11 +827,12 @@ impl SpadesGame {
             for &i in legal {
                 let card = hand[i];
                 if !card.beats(winner_card, led_suit)
-                    && (best_losing.is_none() || card.rank > best_losing_rank) {
-                        // Play highest losing card to conserve low cards
-                        best_losing = Some(i);
-                        best_losing_rank = card.rank;
-                    }
+                    && (best_losing.is_none() || card.rank > best_losing_rank)
+                {
+                    // Play highest losing card to conserve low cards
+                    best_losing = Some(i);
+                    best_losing_rank = card.rank;
+                }
             }
 
             if let Some(idx) = best_losing {
@@ -1068,14 +1080,12 @@ impl SpadesGame {
             return;
         }
         match event.key {
-            Key::Up
-                if self.bid_selection < 13 => {
-                    self.bid_selection += 1;
-                }
-            Key::Down
-                if self.bid_selection > 0 => {
-                    self.bid_selection -= 1;
-                }
+            Key::Up if self.bid_selection < 13 => {
+                self.bid_selection += 1;
+            }
+            Key::Down if self.bid_selection > 0 => {
+                self.bid_selection -= 1;
+            }
             Key::Enter | Key::Space => {
                 self.submit_human_bid();
             }
@@ -1091,10 +1101,9 @@ impl SpadesGame {
             return;
         }
         match event.key {
-            Key::Left
-                if self.selected_card > 0 => {
-                    self.selected_card -= 1;
-                }
+            Key::Left if self.selected_card > 0 => {
+                self.selected_card -= 1;
+            }
             Key::Right => {
                 let max = self.hands[0].len().saturating_sub(1);
                 if self.selected_card < max {
@@ -1916,56 +1925,83 @@ mod tests {
 
     // ── RNG tests ───────────────────────────────────────────────────
 
+    // The generator itself is `guitk::rng`'s to test; what belongs here is
+    // the deal — that the shuffle turns a deck into four honest hands, and
+    // that a session's cards are not the same cards every session.
+
     #[test]
-    fn test_rng_deterministic() {
-        let mut rng1 = Rng::new(42);
-        let mut rng2 = Rng::new(42);
-        for _ in 0..100 {
-            assert_eq!(rng1.next_u64(), rng2.next_u64());
+    fn a_deal_gives_every_player_a_full_hand_and_uses_the_whole_deck() {
+        for seed in 0..24u64 {
+            let game = SpadesGame::with_seed(seed);
+            let mut dealt: Vec<Card> = Vec::new();
+            for hand in &game.hands {
+                assert_eq!(hand.len(), HAND_SIZE, "seed {seed}");
+                dealt.extend(hand.iter().copied());
+            }
+            let mut deck = standard_deck();
+            dealt.sort_by_key(|c| (c.suit as u8, c.rank.0));
+            deck.sort_by_key(|c| (c.suit as u8, c.rank.0));
+            assert_eq!(dealt, deck, "seed {seed}: a hand is missing or doubled");
         }
     }
 
     #[test]
-    fn test_rng_different_seeds() {
-        let mut rng1 = Rng::new(1);
-        let mut rng2 = Rng::new(2);
-        // Should differ within first few values
-        let differ = (0..10).any(|_| rng1.next_u64() != rng2.next_u64());
-        assert!(differ);
+    fn the_same_seed_deals_the_same_hands() {
+        let first = SpadesGame::with_seed(2024);
+        let second = SpadesGame::with_seed(2024);
+        assert_eq!(first.hands, second.hands);
     }
 
     #[test]
-    fn test_rng_next_range() {
-        let mut rng = Rng::new(99);
-        for _ in 0..1000 {
-            let val = rng.next_range(10);
-            assert!(val < 10);
+    fn different_seeds_deal_different_hands() {
+        let first = SpadesGame::with_seed(1);
+        let second = SpadesGame::with_seed(2);
+        assert_ne!(first.hands, second.hands);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_launches_do_not_play_the_same_hand() {
+        // The whole point of the kernel seed. The game used to start from a
+        // literal 42, so every launch on every machine dealt the identical
+        // first hand — the same thirteen cards to South, every time.
+        //
+        // Host-only builds cannot run this: there is no kernel CSPRNG behind
+        // the test toolchain, so `session_rng` takes its documented fallback
+        // and both games really are identical there.
+        let first = SpadesGame::new();
+        let second = SpadesGame::new();
+        assert_ne!(first.hands, second.hands);
+    }
+
+    #[test]
+    fn starting_a_new_game_reshuffles() {
+        let mut game = SpadesGame::with_seed(5);
+        let opening = game.hands.clone();
+        game.new_game();
+        assert_ne!(game.hands, opening, "a new game is a new deal");
+        // …and is still a legal deal.
+        for hand in &game.hands {
+            assert_eq!(hand.len(), HAND_SIZE);
         }
     }
 
     #[test]
-    fn test_rng_next_range_zero() {
-        let mut rng = Rng::new(42);
-        assert_eq!(rng.next_range(0), 0);
-    }
-
-    #[test]
-    fn test_rng_shuffle_preserves_elements() {
-        let mut rng = Rng::new(42);
-        let mut arr = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        rng.shuffle(&mut arr);
-        arr.sort();
-        assert_eq!(arr, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    }
-
-    #[test]
-    fn test_rng_shuffle_actually_shuffles() {
-        let mut rng = Rng::new(42);
-        let original = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-        let mut arr = original;
-        rng.shuffle(&mut arr);
-        // Extremely unlikely to remain in order with 10 elements
-        assert_ne!(arr, original);
+    fn a_reseed_that_lands_on_zero_still_deals() {
+        // `new_game` reseeds from the current generator's own next draw, which
+        // can be any value including zero — the one state a xorshift can never
+        // leave. The generator substitutes a non-zero constant for it, so the
+        // deal that follows is a real one rather than fifty-two cards left in
+        // deck order.
+        let game = SpadesGame::with_seed(0);
+        assert_eq!(game.hands[0].len(), HAND_SIZE);
+        let deck_order = standard_deck();
+        let dealt_in_order = game
+            .hands
+            .iter()
+            .flat_map(|hand| hand.iter().copied())
+            .eq(deck_order.iter().copied());
+        assert!(!dealt_in_order, "a zero seed left the deck unshuffled");
     }
 
     // ── Card tests ──────────────────────────────────────────────────
@@ -2232,7 +2268,11 @@ mod tests {
         let game = SpadesGame::new();
         for pid_val in 1..4u8 {
             let bid = game.ai_bid(PlayerId(pid_val));
-            assert!((1..=6).contains(&bid), "AI bid {} out of expected range", bid);
+            assert!(
+                (1..=6).contains(&bid),
+                "AI bid {} out of expected range",
+                bid
+            );
         }
     }
 

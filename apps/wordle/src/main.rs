@@ -14,6 +14,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ──
@@ -107,31 +108,19 @@ impl Difficulty {
     }
 }
 
-// ── RNG ──
-struct Rng {
-    state: u64,
-}
+// ── Randomness ──
+//
+// This file used to carry its own copy of the LCG that `guitk::rng` exists to
+// replace, reduced with `% max` and seeded with a literal `42`. The seed picks
+// the target word, so every fresh launch of the game set the same puzzle --
+// and once a player had solved it, the next launch handed it back.
 
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 {
-            return 0;
-        }
-        (self.next() % max as u64) as usize
-    }
-}
+/// The seed a session falls back to when the kernel has no entropy to give.
+///
+/// A word may be predictable: the worst outcome is a repeated puzzle.
+/// Refusing to start would be the worse failure; the rule is written out at
+/// [`guitk::rng::seeded_from_system`]. "WORDLE!!" in ASCII.
+const FALLBACK_SEED: u64 = 0x574F_5244_4C45_2121;
 
 // ── Word lists ──
 const WORDS_4: &[&str] = &[
@@ -358,7 +347,7 @@ struct Wordle {
     current_input: Vec<char>,
     keyboard_state: [LetterState; 26], // A-Z
     phase: GamePhase,
-    rng: Rng,
+    rng: SeededRng,
     message: Option<&'static str>,
     games_played: u32,
     games_won: u32,
@@ -369,7 +358,7 @@ struct Wordle {
 
 impl Wordle {
     fn new() -> Self {
-        let mut rng = Rng::new(42);
+        let mut rng = seeded_from_system(FALLBACK_SEED);
         let difficulty = Difficulty::Normal;
         let (target, target_len) = Self::pick_word(difficulty, &mut rng);
         Self {
@@ -398,9 +387,9 @@ impl Wordle {
         }
     }
 
-    fn pick_word(difficulty: Difficulty, rng: &mut Rng) -> ([char; 6], usize) {
+    fn pick_word(difficulty: Difficulty, rng: &mut SeededRng) -> ([char; 6], usize) {
         let words = Self::word_list(difficulty);
-        let idx = rng.next_range(words.len());
+        let idx = rng.below(words.len());
         let word = words.get(idx).copied().unwrap_or("crane");
         let mut chars = [' '; 6];
         let len = word.len().min(6);
@@ -1167,29 +1156,87 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
+    // ── Randomness, as the game uses it ──
+    //
+    // Three tests here checked that the private generator was deterministic
+    // and stayed inside its bound. That is `randrange`'s contract now, tested
+    // there against the real hazards. These test what *Wordle* needs.
+
+    /// The target word must follow the generator it was given. Under the old
+    /// fixed `42` this was true but unobservable, because nothing ever handed
+    /// the game a different generator.
     #[test]
-    fn test_rng_deterministic() {
-        let mut r1 = Rng::new(42);
-        let mut r2 = Rng::new(42);
-        assert_eq!(r1.next(), r2.next());
-        assert_eq!(r1.next(), r2.next());
+    fn the_target_word_follows_the_generator() {
+        let mut seen = Vec::new();
+        for seed in 0..40 {
+            let mut rng = SeededRng::new(seed);
+            let (word, len) = Wordle::pick_word(Difficulty::Normal, &mut rng);
+            let word: String = word[..len].iter().collect();
+            if !seen.contains(&word) {
+                seen.push(word);
+            }
+        }
+        assert!(
+            seen.len() > 5,
+            "40 seeds produced only {} distinct words",
+            seen.len()
+        );
     }
 
+    /// Word choice must reach the whole list, not a band of it. A reduction
+    /// reading the low bits of an LCG would concentrate it near one end; this
+    /// is the game-level shape of the bug `randrange::below` avoids.
     #[test]
-    fn test_rng_range() {
-        let mut rng = Rng::new(123);
-        for _ in 0..100 {
-            let val = rng.next_range(10);
-            assert!(val < 10);
+    fn word_choice_reaches_both_ends_of_the_list() {
+        for difficulty in [Difficulty::Easy, Difficulty::Normal, Difficulty::Hard] {
+            let words = Wordle::word_list(difficulty);
+            let mut rng = SeededRng::new(11);
+            let mut lowest = usize::MAX;
+            let mut highest = 0;
+            for _ in 0..600 {
+                let idx = rng.below(words.len());
+                lowest = lowest.min(idx);
+                highest = highest.max(idx);
+            }
+            assert!(lowest < words.len() / 10, "never drew from the first tenth");
+            assert!(
+                highest > words.len() * 9 / 10,
+                "never drew from the last tenth"
+            );
         }
     }
 
+    /// `new()` must take its generator from the system rather than a literal.
+    ///
+    /// Checked by *which* seed, not by variety: the host test toolchain has no
+    /// SlateOS kernel, so `seeded_from_system` correctly falls back and two
+    /// fresh games agree there -- exactly as they did under the old `42`.
     #[test]
-    fn test_rng_range_zero() {
-        let mut rng = Rng::new(1);
-        assert_eq!(rng.next_range(0), 0);
+    #[cfg(not(unix))]
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        let mut fallback = seeded_from_system(FALLBACK_SEED);
+        let expected = Wordle::pick_word(Difficulty::Normal, &mut fallback);
+        assert_eq!((Wordle::new().target, Wordle::new().target_len), expected);
+        let mut old_defect = SeededRng::new(42);
+        assert_ne!(
+            (Wordle::new().target, Wordle::new().target_len),
+            Wordle::pick_word(Difficulty::Normal, &mut old_defect),
+            "back on a hardcoded seed"
+        );
     }
 
     #[test]
@@ -1254,7 +1301,7 @@ mod tests {
 
     #[test]
     fn test_pick_word() {
-        let mut rng = Rng::new(99);
+        let mut rng = SeededRng::new(99);
         let (word, len) = Wordle::pick_word(Difficulty::Normal, &mut rng);
         assert_eq!(len, 5);
         assert!(word[0].is_ascii_alphabetic());
@@ -1262,14 +1309,14 @@ mod tests {
 
     #[test]
     fn test_pick_word_easy() {
-        let mut rng = Rng::new(99);
+        let mut rng = SeededRng::new(99);
         let (_, len) = Wordle::pick_word(Difficulty::Easy, &mut rng);
         assert_eq!(len, 4);
     }
 
     #[test]
     fn test_pick_word_hard() {
-        let mut rng = Rng::new(99);
+        let mut rng = SeededRng::new(99);
         let (_, len) = Wordle::pick_word(Difficulty::Hard, &mut rng);
         assert_eq!(len, 6);
     }

@@ -90,13 +90,13 @@ const DIRECTIONS: [(i32, i32); 8] = [
 // `TWNQVUBONQHMRMH` -- odd, even, odd, even), and the Fisher-Yates over
 // the 30-word category list dealt BISON into 14% of puzzles against
 // ZEBRA's 41%.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 /// A random uppercase ASCII letter, `A..=Z`.
 ///
-/// A free function rather than a `Rng` method because an alphabet is this
+/// A free function rather than a `SeededRng` method because an alphabet is this
 /// game's unit, not the generator's.
-fn random_letter(rng: &mut Rng) -> u8 {
+fn random_letter(rng: &mut SeededRng) -> u8 {
     b'A'.saturating_add(u8::try_from(rng.below(26)).unwrap_or(0))
 }
 
@@ -313,7 +313,7 @@ struct WordSearchApp {
     /// Hints remaining.
     hints_remaining: usize,
     /// RNG instance.
-    rng: Rng,
+    rng: SeededRng,
     /// Cells that are part of found words (row, col) for highlighting.
     found_cells: Vec<(usize, usize)>,
     /// Active hint highlight.
@@ -337,7 +337,7 @@ impl WordSearchApp {
             status: GameStatus::Playing,
             elapsed_secs: 0,
             hints_remaining: MAX_HINTS,
-            rng: Rng::new(seed),
+            rng: SeededRng::new(seed),
             found_cells: Vec::new(),
             hint_highlight: None,
             seed,
@@ -359,7 +359,7 @@ impl WordSearchApp {
             status: GameStatus::Playing,
             elapsed_secs: 0,
             hints_remaining: MAX_HINTS,
-            rng: Rng::new(seed),
+            rng: SeededRng::new(seed),
             found_cells: Vec::new(),
             hint_highlight: None,
             seed,
@@ -382,7 +382,7 @@ impl WordSearchApp {
         self.hint_highlight = None;
         // Advance the seed for variety.
         self.seed = self.seed.wrapping_add(7);
-        self.rng = Rng::new(self.seed);
+        self.rng = SeededRng::new(self.seed);
         self.generate_puzzle();
     }
 
@@ -1196,7 +1196,7 @@ mod tests {
 
     #[test]
     fn test_random_letter_in_range() {
-        let mut rng = Rng::new(12345);
+        let mut rng = SeededRng::new(12345);
         for _ in 0..200 {
             let ch = random_letter(&mut rng);
             assert!(ch.is_ascii_uppercase(), "Letter out of range: {ch}");
@@ -1211,7 +1211,7 @@ mod tests {
     #[test]
     fn consecutive_filler_letters_are_not_locked_to_opposite_halves() {
         const DRAWS: usize = 2000;
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let letters: Vec<u8> = (0..DRAWS).map(|_| random_letter(&mut rng)).collect();
 
         let repeats = letters.windows(2).filter(|w| w.first() == w.last()).count();
@@ -1247,7 +1247,7 @@ mod tests {
         // `new_game` advances the seed by 7, so this is the stream a player
         // walking through puzzles actually sees.
         for k in 0..GAMES {
-            let mut rng = Rng::new(42u64.wrapping_add(7 * k as u64));
+            let mut rng = SeededRng::new(42u64.wrapping_add(7 * k as u64));
             let mut indices: Vec<usize> = (0..words.len()).collect();
             rng.shuffle(&mut indices);
             for &idx in indices.iter().take(Difficulty::Medium.word_count()) {

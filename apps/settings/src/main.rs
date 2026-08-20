@@ -1445,9 +1445,36 @@ fn button_width(label: &str) -> f32 {
 }
 
 /// Draw a filled push button with its top-left corner at (`x`, `y`).
+///
+/// Only for a button that has somewhere to send a click; one that does not is
+/// drawn by [`render_disabled_button`]. Which of the two runs is not a choice
+/// any caller makes — see [`PageSink::button_at`].
 fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) {
     fill_rounded(tree, x, y, button_width(label), BUTTON_HEIGHT, color, 6.0);
     tree.text(x + 12.0, y + 8.0, label, COL_CRUST, 13.0);
+}
+
+/// Draw a push button that has nothing behind it: dimmed fill, muted label.
+///
+/// Takes no colour, deliberately. The colour a live button carries says what
+/// *kind* of action it is — accent for the ordinary one, red for the
+/// destructive one — and a button that cannot act has no kind. A greyed-out
+/// "Remove Account" painted red would be an alarm about something that cannot
+/// happen.
+///
+/// Same width and height as the live button, from the same [`button_width`],
+/// so nothing on the page moves depending on whether a feature exists yet.
+fn render_disabled_button(tree: &mut RenderTree, x: f32, y: f32, label: &str) {
+    fill_rounded(
+        tree,
+        x,
+        y,
+        button_width(label),
+        BUTTON_HEIGHT,
+        COL_SURFACE0,
+        6.0,
+    );
+    tree.text(x + 12.0, y + 8.0, label, COL_OVERLAY0, 13.0);
 }
 
 /// Draw a read-only text field showing `value`, inset within a row at `y`.
@@ -1673,6 +1700,9 @@ const SECTION_HEADER_HEIGHT: f32 = 36.0;
 
 /// Height of a button drawn by [`render_button`].
 const BUTTON_HEIGHT: f32 = 32.0;
+
+/// How far below a row's top edge a button inside that row is drawn.
+const BUTTON_ROW_INSET_Y: f32 = 6.0;
 
 /// Which of a page's per-application permission lists a toggle belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2018,12 +2048,42 @@ trait PageSink {
     /// A button offset from the cursor by (`dx`, `dy`). Buttons sit inside
     /// blocks of bespoke content, so this does not move the cursor — the
     /// caller advances past the whole block.
+    ///
+    /// **A button looks live exactly when it is live.** `what` is the one
+    /// value that decides both: it registers the click band, and its
+    /// `Some`-ness picks which of [`render_button`] / [`render_disabled_button`]
+    /// paints it. There is deliberately no way to ask for the live colour
+    /// while passing `None`, because that combination is the bug this is
+    /// fixing — seven buttons that promised an action the app cannot perform.
+    ///
+    /// A `None` button still registers no band, which stays correct: a band
+    /// that swallowed the click would take the "nothing happened here"
+    /// feedback away and block anything drawn beneath it. Dimming is what
+    /// tells the user *why* nothing happened.
     fn button_at(&mut self, dx: f32, dy: f32, label: &str, color: Color, what: Option<RowHit>) {
-        if let Some(what) = what {
-            let (x, y) = (self.x(), self.y());
-            self.hit_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, what);
+        match what {
+            Some(what) => {
+                let (x, y) = (self.x(), self.y());
+                self.hit_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, what);
+                self.draw(|tree, x, y| render_button(tree, x + dx, y + dy, label, color));
+            }
+            None => self.draw(|tree, x, y| render_disabled_button(tree, x + dx, y + dy, label)),
         }
-        self.draw(|tree, x, y| render_button(tree, x + dx, y + dy, label, color));
+    }
+
+    /// A labelled row whose control is a push button.
+    ///
+    /// Routes through [`Self::button_at`] rather than painting the button in a
+    /// [`Self::row`] closure, so a button inside a row is subject to the same
+    /// one-value rule as a free-standing one. The row itself takes no click
+    /// band — the button is the target, not the whole row, because the rest of
+    /// the row is a label and pressing a label should do nothing.
+    fn button_row(&mut self, label: &str, button: &str, color: Color, what: Option<RowHit>) {
+        self.draw(|tree, x, y| {
+            render_setting_row(tree, x, y, label, 0.0);
+        });
+        self.button_at(CONTROL_COLUMN_DX, BUTTON_ROW_INSET_Y, button, color, what);
+        self.advance(ITEM_HEIGHT);
     }
 
     /// One row of a selectable list: a click anywhere in it selects `index`,
@@ -2925,9 +2985,7 @@ impl SettingsState {
             self.auto_login_enabled,
         );
 
-        s.row("Password", None, ITEM_HEIGHT, |tree, cx, y| {
-            render_button(tree, cx, y + 6.0, "Change Password", COL_ACCENT);
-        });
+        s.button_row("Password", "Change Password", COL_ACCENT, None);
         s.gap();
 
         s.section("Account Picture");
@@ -4987,6 +5045,209 @@ mod tests {
             .into_iter()
             .map(fully_expanded)
             .find(|s| center_of(s, what).is_some())
+    }
+
+    // --- Buttons that cannot act -------------------------------------------
+    //
+    // A button is drawn live exactly when it has somewhere to send a click.
+    // The checks below take the two halves of that claim from two independent
+    // places -- the paint comes out of the render tree, the clickability out of
+    // the page's click bands -- so neither can move the other with it.
+
+    /// Every push button the current page actually painted, as
+    /// `(label, x, y, fill colour, label colour)`.
+    ///
+    /// Recovered from the render tree rather than from the page walk. A button
+    /// is a fill exactly [`BUTTON_HEIGHT`] tall, as wide as [`button_width`]
+    /// makes its label, immediately followed by that label drawn at the
+    /// renderer's fixed offset inside it. Reading the pixels is the point: a
+    /// test that asked the page walk which buttons exist could not notice a
+    /// button drawn by some other path, which is exactly how "Change Password"
+    /// came to be painted with no click band and no way to find out.
+    fn painted_buttons(state: &SettingsState) -> Vec<(String, f32, f32, Color, Color)> {
+        const LABEL_DX: f32 = 12.0;
+        const LABEL_DY: f32 = 8.0;
+        const LABEL_SIZE: f32 = 13.0;
+
+        let tree = state.render();
+        let mut out = Vec::new();
+        for pair in tree.commands.windows(2) {
+            let (
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                },
+                RenderCommand::Text {
+                    x: tx,
+                    y: ty,
+                    text,
+                    color: ink,
+                    font_size,
+                    ..
+                },
+            ) = (&pair[0], &pair[1])
+            else {
+                continue;
+            };
+            let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+            if close(*height, BUTTON_HEIGHT)
+                && close(*font_size, LABEL_SIZE)
+                && close(*tx, x + LABEL_DX)
+                && close(*ty, y + LABEL_DY)
+                && close(button_width(text), *width)
+            {
+                out.push((text.clone(), *x, *y, *color, *ink));
+            }
+        }
+        out
+    }
+
+    /// Every state worth sweeping for painted buttons: each page with its
+    /// switches turned on, and one such state per user account.
+    ///
+    /// The per-account repetition is not padding. "Manage Family Settings" is
+    /// drawn only while a child account is selected, so a sweep that took the
+    /// default selection would report six inert buttons where there are seven
+    /// and would go on passing if the seventh were wired wrongly.
+    fn states_to_sweep() -> Vec<(SettingsPage, SettingsState)> {
+        let mut out = Vec::new();
+        for page in all_pages() {
+            let accounts = fully_expanded(page).user_accounts.len().max(1);
+            for index in 0..accounts {
+                let mut state = fully_expanded(page);
+                state.selected_account = index;
+                out.push((page, state));
+            }
+        }
+        out
+    }
+
+    /// Whether a `Press` band on this page covers (`cx`, `cy`).
+    fn press_band_covers(state: &SettingsState, cx: f32, cy: f32) -> bool {
+        hit_bands(state).into_iter().any(|(what, (x, y, w, h))| {
+            matches!(what, RowHit::Press(_)) && cx >= x && cx < x + w && cy >= y && cy < y + h
+        })
+    }
+
+    /// The claim, over every button on every page: a button that looks
+    /// pressable is pressable, and one that is not says so.
+    ///
+    /// Both directions matter and they fail differently. A live-looking button
+    /// with no band is the original complaint — the app promising an action it
+    /// cannot perform, leaving the user unable to tell "not implemented" from
+    /// "my click missed". A dimmed button that *is* clickable is the opposite
+    /// and worse: a working feature the user has been told not to try.
+    ///
+    /// The fill and the label are checked separately because they are two
+    /// commands and can disagree. A dimmed fill under a full-brightness label
+    /// is half a disabled button, and reads on screen as a live one — mutating
+    /// the label colour back was not caught until this assertion existed.
+    #[test]
+    fn a_button_looks_live_exactly_when_it_is_live() {
+        let mut seen = 0_usize;
+        for (page, state) in states_to_sweep() {
+            for (label, bx, by, fill, ink) in painted_buttons(&state) {
+                seen += 1;
+                let cx = bx + button_width(&label) / 2.0;
+                let cy = by + BUTTON_HEIGHT / 2.0;
+                let clickable = press_band_covers(&state, cx, cy);
+                let looks_live = fill != COL_SURFACE0;
+                assert_eq!(
+                    looks_live,
+                    clickable,
+                    "on {}, \"{label}\" is painted {} but is {}",
+                    page.label(),
+                    if looks_live { "live" } else { "dimmed" },
+                    if clickable { "clickable" } else { "inert" },
+                );
+                let want_ink = if looks_live { COL_CRUST } else { COL_OVERLAY0 };
+                assert_eq!(
+                    ink,
+                    want_ink,
+                    "on {}, \"{label}\" has a {} fill under a {} label",
+                    page.label(),
+                    if looks_live { "live" } else { "dimmed" },
+                    if ink == COL_CRUST { "live" } else { "dimmed" },
+                );
+            }
+        }
+        assert!(
+            seen >= 8,
+            "the scan found only {seen} buttons, so it is not finding them"
+        );
+    }
+
+    /// The census, pinned. These seven are the buttons whose features do not
+    /// exist yet -- an accounts service, a stored activity log, package
+    /// generation rollback, a reinstall path -- and they are on record in
+    /// `known-issues.md` under `C-SETTINGS-BUTTONS-WITH-NOTHING-BEHIND-THEM`.
+    ///
+    /// Written as an exact list rather than a count so it fails in both
+    /// directions: wiring one up without striking it off here fails, and — the
+    /// case actually worth catching — adding an eighth inert button fails too,
+    /// rather than quietly enlarging the set of things the app cannot do.
+    #[test]
+    fn the_buttons_with_nothing_behind_them_are_the_ones_on_record() {
+        let mut inert: Vec<String> = Vec::new();
+        for (_, state) in states_to_sweep() {
+            for (label, _, _, fill, _) in painted_buttons(&state) {
+                if fill == COL_SURFACE0 && !inert.contains(&label) {
+                    inert.push(label);
+                }
+            }
+        }
+        inert.sort();
+        let found: Vec<&str> = inert.iter().map(String::as_str).collect();
+        assert_eq!(
+            found,
+            [
+                "+ Add Account",
+                "- Remove Account",
+                "Change Password",
+                "Clear Activity History",
+                "Go Back",
+                "Manage Family Settings",
+                "Reset",
+            ]
+        );
+    }
+
+    /// A dimmed button must not swallow the click it cannot use.
+    ///
+    /// Registering a band and doing nothing would look identical on screen and
+    /// be worse underneath: the click would stop there instead of reaching
+    /// whatever is drawn beneath, and the user would lose even the "nothing
+    /// happened here" feedback. So the check is that pressing one changes
+    /// nothing about the app at all.
+    #[test]
+    fn pressing_a_dimmed_button_is_ignored_rather_than_swallowed() {
+        let mut checked = 0_usize;
+        for (page, state) in states_to_sweep() {
+            for (label, bx, by, fill, _) in painted_buttons(&state) {
+                if fill != COL_SURFACE0 {
+                    continue;
+                }
+                checked += 1;
+                let cx = bx + button_width(&label) / 2.0;
+                let cy = by + BUTTON_HEIGHT / 2.0;
+                let mut after = SettingsState::new();
+                after.current_page = page;
+                after.selected_account = state.selected_account;
+                let before = after.render().commands.len();
+                after.handle_click(cx, cy);
+                assert_eq!(
+                    after.render().commands.len(),
+                    before,
+                    "pressing the dimmed \"{label}\" on {} changed the page",
+                    page.label()
+                );
+            }
+        }
+        assert!(checked >= 7, "only {checked} dimmed buttons were pressed");
     }
 
     /// Press the left button at (`mx`, `my`), drag to `to_x`, and release.

@@ -63,11 +63,67 @@ const BOARD_OFFSET_X: f32 = 50.0;
 const BOARD_OFFSET_Y: f32 = 70.0;
 const STONE_RADIUS: f32 = 15.0;
 const STAR_POINT_RADIUS: f32 = 4.0;
-const PANEL_X: f32 = BOARD_OFFSET_X + CELL_SIZE * 14.0 + 40.0;
+const PANEL_X: f32 = BOARD_OFFSET_X + BOARD_PIXEL_SIZE + 40.0;
 const TITLE_FONT_SIZE: f32 = 22.0;
 const INFO_FONT_SIZE: f32 = 16.0;
 const LABEL_FONT_SIZE: f32 = 14.0;
 const SMALL_FONT_SIZE: f32 = 12.0;
+
+// ── Board geometry ──────────────────────────────────────────────────
+//
+// Stones in gomoku sit *on* the intersections rather than inside the cells, so
+// the board's painted extent is one cell short of `BOARD_SIZE` cells, and every
+// part of the board -- lines, stones, star points, labels, cursor -- is placed
+// relative to a point rather than to a rectangle. That mapping, and the inverse
+// a click needs, used to be spelled out at ten separate sites.
+
+/// Distance from the first intersection to the last, in pixels.
+const BOARD_PIXEL_SIZE: f32 = CELL_SIZE * (BOARD_SIZE - 1) as f32;
+
+/// Index of the last row and of the last column.
+const LAST_INDEX: i32 = BOARD_SIZE as i32 - 1;
+
+/// How far a click may land from an intersection and still count, squared.
+///
+/// A little wider than a stone, so the whole of a drawn stone is clickable and
+/// a near miss still lands. Unlike a board of squares this leaves real gaps --
+/// the middle of a cell belongs to no intersection at all -- and that is the
+/// intent: dropping a stone half a cell from where the player aimed is worse
+/// than a click that does nothing.
+const CLICK_RADIUS_SQ: f32 = STONE_RADIUS * STONE_RADIUS * 1.5;
+
+/// Screen coordinates of the intersection at `(row, col)`.
+///
+/// Row 0 is the top of the window. The board is symmetric, so unlike chess
+/// there is no flip here and nothing an inverse has to undo.
+fn intersection(row: i32, col: i32) -> (f32, f32) {
+    (
+        BOARD_OFFSET_X + col as f32 * CELL_SIZE,
+        BOARD_OFFSET_Y + row as f32 * CELL_SIZE,
+    )
+}
+
+/// The intersection a click at `(x, y)` lands on, or `None` if it is not near
+/// enough to any of them.
+///
+/// The nearest intersection is found by rounding and then *clamping* into
+/// range, rather than by computing an index and rejecting it when out of
+/// range. The difference is visible at the edges: a click a few pixels beyond
+/// the last line is still on the stone drawn there, so it has to resolve to
+/// that stone. Clamping and then measuring the distance gets both edges alike;
+/// the previous index-then-reject spelling accepted the overhang on the left
+/// and top and refused the identical click on the right and bottom.
+fn intersection_near(x: f32, y: f32) -> Option<(i32, i32)> {
+    let col = (((x - BOARD_OFFSET_X) / CELL_SIZE).round() as i32).clamp(0, LAST_INDEX);
+    let row = (((y - BOARD_OFFSET_Y) / CELL_SIZE).round() as i32).clamp(0, LAST_INDEX);
+    let (ix, iy) = intersection(row, col);
+    let (dx, dy) = (x - ix, y - iy);
+    if dx * dx + dy * dy <= CLICK_RADIUS_SQ {
+        Some((row, col))
+    } else {
+        None
+    }
+}
 
 // ── AI search depth ─────────────────────────────────────────────────
 const AI_DEPTH: i32 = 3;
@@ -761,28 +817,10 @@ impl GomokuApp {
         }
 
         if let MouseEventKind::Press(MouseButton::Left) = event.kind {
-            // Convert mouse coordinates to board intersection
-            let mx = event.x - BOARD_OFFSET_X;
-            let my = event.y - BOARD_OFFSET_Y;
-
-            // Find nearest intersection (snap to grid)
-            let col = (mx / CELL_SIZE + 0.5) as i32;
-            let row = (my / CELL_SIZE + 0.5) as i32;
-
-            // Check distance from nearest intersection (must be close enough)
-            if col >= 0 && col < BOARD_SIZE as i32 && row >= 0 && row < BOARD_SIZE as i32 {
-                let snap_x = col as f32 * CELL_SIZE;
-                let snap_y = row as f32 * CELL_SIZE;
-                let dx = mx - snap_x;
-                let dy = my - snap_y;
-                let dist_sq = dx * dx + dy * dy;
-
-                // Only place if click is within stone radius of the intersection
-                if dist_sq <= STONE_RADIUS * STONE_RADIUS * 1.5 {
-                    self.cursor_row = row;
-                    self.cursor_col = col;
-                    self.try_place_stone();
-                }
+            if let Some((row, col)) = intersection_near(event.x, event.y) {
+                self.cursor_row = row;
+                self.cursor_col = col;
+                self.try_place_stone();
             }
         }
     }
@@ -805,7 +843,7 @@ impl GomokuApp {
             x: 0.0,
             y: 0.0,
             width: PANEL_X + 220.0,
-            height: BOARD_OFFSET_Y + CELL_SIZE * 14.0 + 60.0,
+            height: BOARD_OFFSET_Y + BOARD_PIXEL_SIZE + 60.0,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -855,13 +893,12 @@ impl GomokuApp {
         });
 
         // ── Board background (wooden color) ─────────────────────────
-        let board_pixel_size = CELL_SIZE * (BOARD_SIZE - 1) as f32;
         let board_margin = CELL_SIZE * 0.6;
         cmds.push(RenderCommand::FillRect {
             x: BOARD_OFFSET_X - board_margin,
             y: BOARD_OFFSET_Y - board_margin,
-            width: board_pixel_size + board_margin * 2.0,
-            height: board_pixel_size + board_margin * 2.0,
+            width: BOARD_PIXEL_SIZE + board_margin * 2.0,
+            height: BOARD_PIXEL_SIZE + board_margin * 2.0,
             color: BOARD_BG,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -870,8 +907,8 @@ impl GomokuApp {
         cmds.push(RenderCommand::StrokeRect {
             x: BOARD_OFFSET_X - board_margin,
             y: BOARD_OFFSET_Y - board_margin,
-            width: board_pixel_size + board_margin * 2.0,
-            height: board_pixel_size + board_margin * 2.0,
+            width: BOARD_PIXEL_SIZE + board_margin * 2.0,
+            height: BOARD_PIXEL_SIZE + board_margin * 2.0,
             color: BOARD_BORDER,
             line_width: 2.0,
             corner_radii: CornerRadii::all(4.0),
@@ -880,11 +917,11 @@ impl GomokuApp {
         // ── Grid lines ──────────────────────────────────────────────
         // Horizontal lines
         for row in 0..BOARD_SIZE {
-            let y = BOARD_OFFSET_Y + row as f32 * CELL_SIZE;
+            let (_, y) = intersection(row as i32, 0);
             cmds.push(RenderCommand::Line {
                 x1: BOARD_OFFSET_X,
                 y1: y,
-                x2: BOARD_OFFSET_X + (BOARD_SIZE - 1) as f32 * CELL_SIZE,
+                x2: BOARD_OFFSET_X + BOARD_PIXEL_SIZE,
                 y2: y,
                 color: GRID_LINE_COLOR,
                 width: 1.0,
@@ -892,12 +929,12 @@ impl GomokuApp {
         }
         // Vertical lines
         for col in 0..BOARD_SIZE {
-            let x = BOARD_OFFSET_X + col as f32 * CELL_SIZE;
+            let (x, _) = intersection(0, col as i32);
             cmds.push(RenderCommand::Line {
                 x1: x,
                 y1: BOARD_OFFSET_Y,
                 x2: x,
-                y2: BOARD_OFFSET_Y + (BOARD_SIZE - 1) as f32 * CELL_SIZE,
+                y2: BOARD_OFFSET_Y + BOARD_PIXEL_SIZE,
                 color: GRID_LINE_COLOR,
                 width: 1.0,
             });
@@ -905,8 +942,9 @@ impl GomokuApp {
 
         // ── Star points ─────────────────────────────────────────────
         for &(sr, sc) in &STAR_POINTS {
-            let x = BOARD_OFFSET_X + sc as f32 * CELL_SIZE - STAR_POINT_RADIUS;
-            let y = BOARD_OFFSET_Y + sr as f32 * CELL_SIZE - STAR_POINT_RADIUS;
+            let (ix, iy) = intersection(sr as i32, sc as i32);
+            let x = ix - STAR_POINT_RADIUS;
+            let y = iy - STAR_POINT_RADIUS;
             cmds.push(RenderCommand::FillRect {
                 x,
                 y,
@@ -921,7 +959,7 @@ impl GomokuApp {
         // Column labels (A-O)
         for col in 0..BOARD_SIZE {
             let label = ((b'A' + col as u8) as char).to_string();
-            let x = BOARD_OFFSET_X + col as f32 * CELL_SIZE - 4.0;
+            let x = intersection(0, col as i32).0 - 4.0;
             cmds.push(RenderCommand::Text {
                 x,
                 y: BOARD_OFFSET_Y - board_margin + 4.0,
@@ -934,7 +972,7 @@ impl GomokuApp {
             });
             cmds.push(RenderCommand::Text {
                 x,
-                y: BOARD_OFFSET_Y + board_pixel_size + board_margin - 14.0,
+                y: BOARD_OFFSET_Y + BOARD_PIXEL_SIZE + board_margin - 14.0,
                 text: label,
                 color: OVERLAY0,
                 font_size: SMALL_FONT_SIZE,
@@ -947,7 +985,7 @@ impl GomokuApp {
         for row in 0..BOARD_SIZE {
             let label = format!("{}", BOARD_SIZE - row);
             let x = BOARD_OFFSET_X - board_margin + 2.0;
-            let y = BOARD_OFFSET_Y + row as f32 * CELL_SIZE - 6.0;
+            let y = intersection(row as i32, 0).1 - 6.0;
             cmds.push(RenderCommand::Text {
                 x,
                 y,
@@ -959,7 +997,7 @@ impl GomokuApp {
                 overflow: TextOverflow::Clip,
             });
             cmds.push(RenderCommand::Text {
-                x: BOARD_OFFSET_X + board_pixel_size + board_margin - 16.0,
+                x: BOARD_OFFSET_X + BOARD_PIXEL_SIZE + board_margin - 16.0,
                 y,
                 text: label,
                 color: OVERLAY0,
@@ -973,8 +1011,9 @@ impl GomokuApp {
         // ── Win line highlight ──────────────────────────────────────
         if let Some(ref wl) = self.win_line {
             for &(wr, wc) in &wl.positions {
-                let x = BOARD_OFFSET_X + wc as f32 * CELL_SIZE - STONE_RADIUS - 3.0;
-                let y = BOARD_OFFSET_Y + wr as f32 * CELL_SIZE - STONE_RADIUS - 3.0;
+                let (ix, iy) = intersection(wr as i32, wc as i32);
+                let x = ix - STONE_RADIUS - 3.0;
+                let y = iy - STONE_RADIUS - 3.0;
                 cmds.push(RenderCommand::FillRect {
                     x,
                     y,
@@ -994,8 +1033,7 @@ impl GomokuApp {
                     continue;
                 }
 
-                let cx = BOARD_OFFSET_X + col as f32 * CELL_SIZE;
-                let cy = BOARD_OFFSET_Y + row as f32 * CELL_SIZE;
+                let (cx, cy) = intersection(row as i32, col as i32);
 
                 // Stone border (slightly larger circle behind)
                 let border_color = match cell {
@@ -1049,8 +1087,7 @@ impl GomokuApp {
 
         // ── Cursor ──────────────────────────────────────────────────
         if self.phase == GamePhase::Playing && self.current_turn == Cell::Black {
-            let cx = BOARD_OFFSET_X + self.cursor_col as f32 * CELL_SIZE;
-            let cy = BOARD_OFFSET_Y + self.cursor_row as f32 * CELL_SIZE;
+            let (cx, cy) = intersection(self.cursor_row, self.cursor_col);
             let cursor_size = STONE_RADIUS + 4.0;
             cmds.push(RenderCommand::StrokeRect {
                 x: cx - cursor_size,
@@ -1248,7 +1285,7 @@ impl GomokuApp {
                 GamePhase::Draw => String::from("Draw! Board is full. Press N for new game."),
                 GamePhase::Playing => String::new(),
             };
-            let bar_y = BOARD_OFFSET_Y + CELL_SIZE * 14.0 + 20.0;
+            let bar_y = BOARD_OFFSET_Y + BOARD_PIXEL_SIZE + 20.0;
             cmds.push(RenderCommand::FillRect {
                 x: BOARD_OFFSET_X - 10.0,
                 y: bar_y,
@@ -1281,6 +1318,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes past the end, or unwraps a `None`, is a test that
+    // has already failed; panicking is the reporting mechanism, not a fault.
+    #![allow(
+        clippy::arithmetic_side_effects,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::unwrap_used
+    )]
+
     use super::*;
 
     // ── Helper functions ────────────────────────────────────────────
@@ -2481,6 +2527,436 @@ mod tests {
         assert!(!board.is_open_end(7, 13, 0, 1, Cell::Black));
     }
 
+    // ── Board geometry tests ───────────────────────────────
+    //
+    // `intersection` and `intersection_near` are each other's inverse, so a
+    // test that clicks where the code says it drew something agrees with any
+    // mapping, right or wrong. The checks that carry weight here are the ones
+    // whose expected value comes from somewhere else: the painted grid lines,
+    // the window, and the way a Go board is numbered.
+
+    /// The x of every vertical grid line and the y of every horizontal one,
+    /// read back off the paint and sorted. Nothing here consults
+    /// `intersection`, so these are the lines a player actually sees.
+    fn painted_grid(commands: &[RenderCommand]) -> (Vec<f32>, Vec<f32>) {
+        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+        for c in commands {
+            if let RenderCommand::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                color,
+                ..
+            } = c
+            {
+                // The side panel draws separator lines too; the board's are the
+                // ones in the grid colour.
+                if *color != GRID_LINE_COLOR {
+                    continue;
+                }
+                if (x1 - x2).abs() < 0.01 {
+                    xs.push(*x1);
+                } else if (y1 - y2).abs() < 0.01 {
+                    ys.push(*y1);
+                }
+            }
+        }
+        xs.sort_by(f32::total_cmp);
+        ys.sort_by(f32::total_cmp);
+        (xs, ys)
+    }
+
+    /// Centres of the stones the renderer painted. A stone is the fill whose
+    /// corner radius makes it a circle of exactly `STONE_RADIUS`.
+    fn painted_stone_centers(commands: &[RenderCommand]) -> Vec<(f32, f32)> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x, y, width, color, ..
+                } if (*width - STONE_RADIUS * 2.0).abs() < 0.01
+                    && (*color == BLACK_STONE || *color == WHITE_STONE) =>
+                {
+                    Some((*x + STONE_RADIUS, *y + STONE_RADIUS))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where a coordinate label was drawn.
+    ///
+    /// The side panel also draws short numbers at this size -- move numbers,
+    /// counts -- so the colour is part of the match; without it, looking up
+    /// row "8" finds whichever "8" the panel happened to print.
+    fn label_pos(commands: &[RenderCommand], want: &str) -> Option<(f32, f32)> {
+        commands.iter().find_map(|c| match c {
+            RenderCommand::Text {
+                x,
+                y,
+                text,
+                font_size,
+                color,
+                ..
+            } if (*font_size - SMALL_FONT_SIZE).abs() < 0.01
+                && *color == OVERLAY0
+                && text == want =>
+            {
+                Some((*x, *y))
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn the_painted_grid_is_fifteen_lines_each_way_evenly_spaced() {
+        // Measured against the window and against itself, never against
+        // `intersection`: fifteen lines in each direction, one cell apart,
+        // inside the window and clear of the side panel.
+        let app = fresh_app();
+        let (xs, ys) = painted_grid(&app.render());
+        assert_eq!(xs.len(), BOARD_SIZE, "one vertical line per column");
+        assert_eq!(ys.len(), BOARD_SIZE, "one horizontal line per row");
+
+        for pair in xs.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - CELL_SIZE).abs() < 0.01,
+                "columns should be one cell apart, got {}",
+                pair[1] - pair[0]
+            );
+        }
+        for pair in ys.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - CELL_SIZE).abs() < 0.01,
+                "rows should be one cell apart, got {}",
+                pair[1] - pair[0]
+            );
+        }
+        assert!(
+            xs[0] > 0.0 && ys[0] > 0.0,
+            "the board starts inside the window"
+        );
+        assert!(
+            xs[BOARD_SIZE - 1] < PANEL_X,
+            "the board should not run under the side panel"
+        );
+    }
+
+    #[test]
+    fn every_painted_intersection_is_clickable() {
+        // The round-trip half: every crossing a player can see resolves to a
+        // distinct point, and to the one at that position in reading order.
+        let app = fresh_app();
+        let (xs, ys) = painted_grid(&app.render());
+        // Probed around each crossing as well as on it. Clicking only the
+        // exact crossing cannot tell "nearest line" from "line at or before
+        // this point": both answer correctly when the click is dead on. The
+        // offsets are a stone's radius, which is both less than half a cell
+        // (so the nearest crossing is unambiguous) and within the slop (so the
+        // answer must be a hit), and is also exactly the ink a player aims at.
+        let r = STONE_RADIUS;
+        for (row, &y) in ys.iter().enumerate() {
+            for (col, &x) in xs.iter().enumerate() {
+                for (dx, dy) in [
+                    (0.0, 0.0),
+                    (r, 0.0),
+                    (-r, 0.0),
+                    (0.0, r),
+                    (0.0, -r),
+                    (r * 0.7, r * 0.7),
+                    (-r * 0.7, -r * 0.7),
+                ] {
+                    assert_eq!(
+                        intersection_near(x + dx, y + dy),
+                        Some((row as i32, col as i32)),
+                        "({}, {}) is on the stone at ({row}, {col}) and should hit it",
+                        x + dx,
+                        y + dy
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_grid_line_spans_the_whole_board() {
+        // `painted_grid` keeps only where each line sits, so a grid drawn with
+        // the right spacing but the wrong *length* slips past it. The lines
+        // have to reach each other: every horizontal line runs from the first
+        // vertical to the last, and the other way round.
+        let app = fresh_app();
+        let commands = app.render();
+        let (mut horizontals, mut verticals) = (Vec::new(), Vec::new());
+        for c in &commands {
+            if let RenderCommand::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                color,
+                ..
+            } = c
+            {
+                if *color != GRID_LINE_COLOR {
+                    continue;
+                }
+                if (y1 - y2).abs() < 0.01 {
+                    horizontals.push((*y1, x1.min(*x2), x1.max(*x2)));
+                } else {
+                    verticals.push((*x1, y1.min(*y2), y1.max(*y2)));
+                }
+            }
+        }
+        assert_eq!(horizontals.len(), BOARD_SIZE);
+        assert_eq!(verticals.len(), BOARD_SIZE);
+
+        let left = verticals.iter().map(|v| v.0).fold(f32::MAX, f32::min);
+        let right = verticals.iter().map(|v| v.0).fold(f32::MIN, f32::max);
+        let top = horizontals.iter().map(|h| h.0).fold(f32::MAX, f32::min);
+        let bottom = horizontals.iter().map(|h| h.0).fold(f32::MIN, f32::max);
+
+        for (y, x1, x2) in horizontals {
+            assert!(
+                (x1 - left).abs() < 0.01 && (x2 - right).abs() < 0.01,
+                "the line at y={y} runs {x1}..{x2}, but the board is {left}..{right}"
+            );
+        }
+        for (x, y1, y2) in verticals {
+            assert!(
+                (y1 - top).abs() < 0.01 && (y2 - bottom).abs() < 0.01,
+                "the line at x={x} runs {y1}..{y2}, but the board is {top}..{bottom}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wooden_board_sits_squarely_under_the_grid() {
+        // The margin round the grid is drawn from `BOARD_PIXEL_SIZE`, and the
+        // grid itself from `intersection`. If those two disagree about how big
+        // the board is, the wood is off-centre -- the only symptom of a board
+        // sized a line too wide, since everything else just shifts with it.
+        let app = fresh_app();
+        let commands = app.render();
+        let (xs, ys) = painted_grid(&commands);
+        let wood = commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *color == BOARD_BG => Some((*x, *y, *width, *height)),
+                _ => None,
+            })
+            .expect("the wooden board should be painted");
+
+        let (wx, wy, ww, wh) = wood;
+        let margins = [
+            ("left", xs[0] - wx),
+            ("right", wx + ww - xs[BOARD_SIZE - 1]),
+            ("top", ys[0] - wy),
+            ("bottom", wy + wh - ys[BOARD_SIZE - 1]),
+        ];
+        for &(name, m) in &margins {
+            assert!(
+                m > 0.0,
+                "the {name} margin is {m}; the grid escapes the wood"
+            );
+        }
+        for pair in margins.windows(2) {
+            assert!(
+                (pair[0].1 - pair[1].1).abs() < 0.01,
+                "the {} margin is {} but the {} margin is {}",
+                pair[0].0,
+                pair[0].1,
+                pair[1].0,
+                pair[1].1
+            );
+        }
+    }
+
+    #[test]
+    fn the_middle_of_a_cell_belongs_to_no_intersection() {
+        // This board deliberately has gaps -- a stone dropped half a cell from
+        // where the player aimed is worse than a click that does nothing -- so
+        // the gaps are asserted rather than left to chance.
+        let app = fresh_app();
+        let (xs, ys) = painted_grid(&app.render());
+        for pair_y in ys.windows(2) {
+            for pair_x in xs.windows(2) {
+                let (mx, my) = (
+                    f32::midpoint(pair_x[0], pair_x[1]),
+                    f32::midpoint(pair_y[0], pair_y[1]),
+                );
+                assert_eq!(
+                    intersection_near(mx, my),
+                    None,
+                    "the middle of a cell at ({mx}, {my}) should hit nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_click_slop_reaches_equally_far_past_every_edge() {
+        // The bug this pins: the hit test used to compute an index and reject
+        // it when out of range, which let the overhang work on the left and
+        // top but not on the right and bottom. A stone is drawn centred on the
+        // edge intersections, so half of each edge stone hangs off the board
+        // and has to stay clickable.
+        let app = fresh_app();
+        let (xs, ys) = painted_grid(&app.render());
+        let (first_x, last_x) = (xs[0], xs[BOARD_SIZE - 1]);
+        let (first_y, last_y) = (ys[0], ys[BOARD_SIZE - 1]);
+
+        // Swept rather than probed at one distance. How far the slop reaches is
+        // the hit test's business and this test does not claim to know it; what
+        // it claims is that the answer is the *same number* on all four sides.
+        // A single probe would have to land in the 0.4px window where the two
+        // spellings disagreed, which is knowledge of the bug rather than of the
+        // rule.
+        let mut d = 0.0f32;
+        while d < CELL_SIZE {
+            let left = intersection_near(first_x - d, first_y).is_some();
+            let right = intersection_near(last_x + d, first_y).is_some();
+            assert_eq!(
+                left, right,
+                "{d}px past the left edge is {left}, but {d}px past the right edge is {right}"
+            );
+
+            let top = intersection_near(first_x, first_y - d).is_some();
+            let bottom = intersection_near(first_x, last_y + d).is_some();
+            assert_eq!(
+                top, bottom,
+                "{d}px above the board is {top}, but {d}px below it is {bottom}"
+            );
+            d += 0.25;
+        }
+
+        // And it has to reach at least as far as the ink: a stone is drawn
+        // centred on its intersection, so the outer half of every edge stone
+        // hangs off the board and must still be clickable.
+        assert_eq!(
+            intersection_near(last_x + STONE_RADIUS, first_y),
+            Some((0, LAST_INDEX)),
+            "the outer half of the last stone in a row must be clickable"
+        );
+        assert_eq!(
+            intersection_near(first_x, last_y + STONE_RADIUS),
+            Some((LAST_INDEX, 0)),
+            "the outer half of the last stone in a column must be clickable"
+        );
+    }
+
+    #[test]
+    fn nothing_well_outside_the_board_lands_on_an_intersection() {
+        // Swept far past every edge, because the faults this is looking for --
+        // a saturating cast, a wrap, a clamp that silently rescues a bad index
+        // -- all live beyond the board rather than just outside it.
+        let far = BOARD_OFFSET_X + BOARD_PIXEL_SIZE + 300.0;
+        let mut x = -200.0;
+        while x < far {
+            let mut y = -200.0;
+            while y < far {
+                if let Some((row, col)) = intersection_near(x, y) {
+                    let (ix, iy) = intersection(row, col);
+                    let (dx, dy) = (x - ix, y - iy);
+                    assert!(
+                        dx * dx + dy * dy <= CLICK_RADIUS_SQ,
+                        "({x}, {y}) resolved to ({row}, {col}), which is not near it"
+                    );
+                    assert!(
+                        (0..BOARD_SIZE as i32).contains(&row)
+                            && (0..BOARD_SIZE as i32).contains(&col),
+                        "({x}, {y}) resolved to ({row}, {col}), which is off the board"
+                    );
+                }
+                y += 6.0;
+            }
+            x += 6.0;
+        }
+    }
+
+    #[test]
+    fn a_stone_is_painted_on_the_crossing_it_was_played_on() {
+        // Read back off the paint and measured against the painted grid, so a
+        // renderer that draws stones somewhere other than where clicks land is
+        // caught without either side supplying the other's expected value.
+        let mut app = fresh_app();
+        app.board.set(0, 0, Cell::Black);
+        app.board.set(7, 7, Cell::White);
+        app.board.set(14, 14, Cell::Black);
+        let commands = app.render();
+        let (xs, ys) = painted_grid(&commands);
+        let centers = painted_stone_centers(&commands);
+        assert_eq!(centers.len(), 3, "one stone painted per stone played");
+
+        for (row, col) in [(0usize, 0usize), (7, 7), (14, 14)] {
+            let (want_x, want_y) = (xs[col], ys[row]);
+            assert!(
+                centers
+                    .iter()
+                    .any(|&(x, y)| (x - want_x).abs() < 0.01 && (y - want_y).abs() < 0.01),
+                "no stone painted on the crossing at ({want_x}, {want_y}) for ({row}, {col})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rows_are_numbered_upwards_from_the_bottom() {
+        // A Go board counts rank 1 from the bottom, and gomoku is played on
+        // one. Painting and hit-testing agree with each other whichever way
+        // round this is, so the outside opinion is the window: the label "1"
+        // has to sit lower down it than the label "15". Likewise "A" is to the
+        // left of "O".
+        let app = fresh_app();
+        let commands = app.render();
+        let (_, y1) = label_pos(&commands, "1").expect("row 1 label");
+        let (_, y15) = label_pos(&commands, "15").expect("row 15 label");
+        assert!(
+            y1 > y15,
+            "row 1 should be drawn below row 15, got {y1} vs {y15}"
+        );
+
+        let (xa, _) = label_pos(&commands, "A").expect("column A label");
+        let (xo, _) = label_pos(&commands, "O").expect("column O label");
+        assert!(
+            xa < xo,
+            "column A should be drawn left of column O, got {xa} vs {xo}"
+        );
+    }
+
+    #[test]
+    fn the_labels_line_up_with_the_lines_they_name() {
+        // Pinned to the *painted* grid rather than recomputed, so labels that
+        // drift off their lines are caught.
+        let app = fresh_app();
+        let commands = app.render();
+        let (xs, ys) = painted_grid(&commands);
+        for (i, name) in ["A", "H", "O"].iter().enumerate() {
+            let col = [0, 7, BOARD_SIZE - 1][i];
+            let (x, _) = label_pos(&commands, name).expect("column label");
+            assert!(
+                (x - xs[col]).abs() < CELL_SIZE / 2.0,
+                "label {name} sits at {x}, but its line is at {}",
+                xs[col]
+            );
+        }
+        for (i, name) in ["15", "8", "1"].iter().enumerate() {
+            let row = [0, 7, BOARD_SIZE - 1][i];
+            let (_, y) = label_pos(&commands, name).expect("row label");
+            assert!(
+                (y - ys[row]).abs() < CELL_SIZE / 2.0,
+                "label {name} sits at {y}, but its line is at {}",
+                ys[row]
+            );
+        }
+    }
+
     // ── Mouse click tests ───────────────────────────────────────────
 
     #[test]
@@ -2492,9 +2968,12 @@ mod tests {
             x: BOARD_OFFSET_X + 0.5 * CELL_SIZE,
             y: BOARD_OFFSET_Y + 0.5 * CELL_SIZE,
         });
-        // The click should snap to the nearest intersection (0,0) or (1,1) etc.
-        // Since we're exactly between, it may or may not place. Just check no crash.
-        // The snap logic should handle this gracefully.
+        // Dead centre of a cell is 25.5px from each of the four intersections
+        // around it, well past the 18.4px the hit test reaches, so no stone is
+        // placed. This used to assert nothing whatsoever -- it ran the click
+        // and commented that "it may or may not place" -- which made it a test
+        // that could not fail.
+        assert_eq!(app.board.stone_count(), 0);
     }
 
     #[test]

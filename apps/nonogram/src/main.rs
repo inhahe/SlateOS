@@ -521,7 +521,10 @@ impl NonogramApp {
 
     /// Number of cells the player has filled (regardless of correctness).
     fn player_filled_count(&self) -> usize {
-        self.cells.iter().filter(|&&c| c == CellMark::Filled).count()
+        self.cells
+            .iter()
+            .filter(|&&c| c == CellMark::Filled)
+            .count()
     }
 
     /// Format elapsed time as M:SS.
@@ -569,14 +572,12 @@ impl NonogramApp {
 
     fn handle_key_select(&mut self, key_event: &KeyEvent) {
         match key_event.key {
-            Key::Up
-                if self.select_cursor > 0 => {
-                    self.select_cursor -= 1;
-                }
-            Key::Down
-                if self.select_cursor + 1 < self.puzzles.len() => {
-                    self.select_cursor += 1;
-                }
+            Key::Up if self.select_cursor > 0 => {
+                self.select_cursor -= 1;
+            }
+            Key::Down if self.select_cursor + 1 < self.puzzles.len() => {
+                self.select_cursor += 1;
+            }
             Key::Enter | Key::Space => {
                 self.start_puzzle(self.select_cursor);
             }
@@ -586,22 +587,18 @@ impl NonogramApp {
 
     fn handle_key_playing(&mut self, key_event: &KeyEvent) {
         match key_event.key {
-            Key::Up
-                if self.cursor_row > 0 => {
-                    self.cursor_row -= 1;
-                }
-            Key::Down
-                if self.cursor_row + 1 < self.grid_side => {
-                    self.cursor_row += 1;
-                }
-            Key::Left
-                if self.cursor_col > 0 => {
-                    self.cursor_col -= 1;
-                }
-            Key::Right
-                if self.cursor_col + 1 < self.grid_side => {
-                    self.cursor_col += 1;
-                }
+            Key::Up if self.cursor_row > 0 => {
+                self.cursor_row -= 1;
+            }
+            Key::Down if self.cursor_row + 1 < self.grid_side => {
+                self.cursor_row += 1;
+            }
+            Key::Left if self.cursor_col > 0 => {
+                self.cursor_col -= 1;
+            }
+            Key::Right if self.cursor_col + 1 < self.grid_side => {
+                self.cursor_col += 1;
+            }
             Key::Enter | Key::Space => {
                 self.toggle_fill(self.cursor_row, self.cursor_col);
                 if self.check_win() {
@@ -843,7 +840,12 @@ impl NonogramApp {
         self.render_header(&mut cmds, total_width);
 
         // Column clues
-        self.render_col_clues(&mut cmds, grid_origin_x, HEADER_HEIGHT + PADDING, col_clue_area_h);
+        self.render_col_clues(
+            &mut cmds,
+            grid_origin_x,
+            HEADER_HEIGHT + PADDING,
+            col_clue_area_h,
+        );
 
         // Row clues
         self.render_row_clues(&mut cmds, PADDING, grid_origin_y, row_clue_area_w);
@@ -986,12 +988,7 @@ impl NonogramApp {
         }
     }
 
-    fn render_grid(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        grid_origin_x: f32,
-        grid_origin_y: f32,
-    ) {
+    fn render_grid(&self, cmds: &mut Vec<RenderCommand>, grid_origin_x: f32, grid_origin_y: f32) {
         let cell_step = CELL_SIZE + CELL_GAP;
 
         for r in 0..self.grid_side {
@@ -1016,7 +1013,11 @@ impl NonogramApp {
                         }
                     }
                     CellMark::MarkedEmpty => {
-                        if error { Color::rgba(243, 139, 168, 60) } else { SURFACE0 }
+                        if error {
+                            Color::rgba(243, 139, 168, 60)
+                        } else {
+                            SURFACE0
+                        }
                     }
                     CellMark::Empty => SURFACE0,
                 };
@@ -1284,10 +1285,7 @@ mod tests {
         // ##### -> [5]
         // .###. -> [3]
         // ..#.. -> [1]
-        let heart = parse_picture(
-            ".#.#.\n#####\n#####\n.###.\n..#..",
-            5,
-        );
+        let heart = parse_picture(".#.#.\n#####\n#####\n.###.\n..#..", 5);
         let row_clues = compute_row_clues(&heart, 5);
         assert_eq!(row_clues.len(), 5);
         assert_eq!(row_clues[0], vec![1, 1]);
@@ -1299,10 +1297,7 @@ mod tests {
 
     #[test]
     fn test_compute_col_clues_heart() {
-        let heart = parse_picture(
-            ".#.#.\n#####\n#####\n.###.\n..#..",
-            5,
-        );
+        let heart = parse_picture(".#.#.\n#####\n#####\n.###.\n..#..", 5);
         let col_clues = compute_col_clues(&heart, 5);
         assert_eq!(col_clues.len(), 5);
         // col 0: .#.#. transposed columns:
@@ -1320,10 +1315,7 @@ mod tests {
 
     #[test]
     fn test_compute_row_clues_arrow() {
-        let arrow = parse_picture(
-            "..#..\n.##..\n#####\n.##..\n..#..",
-            5,
-        );
+        let arrow = parse_picture("..#..\n.##..\n#####\n.##..\n..#..", 5);
         let row_clues = compute_row_clues(&arrow, 5);
         assert_eq!(row_clues[0], vec![1]);
         assert_eq!(row_clues[1], vec![2]);
@@ -1334,10 +1326,7 @@ mod tests {
 
     #[test]
     fn test_compute_col_clues_arrow() {
-        let arrow = parse_picture(
-            "..#..\n.##..\n#####\n.##..\n..#..",
-            5,
-        );
+        let arrow = parse_picture("..#..\n.##..\n#####\n.##..\n..#..", 5);
         let col_clues = compute_col_clues(&arrow, 5);
         // col0: .,..,#,..,.. -> [1]
         assert_eq!(col_clues[0], vec![1]);
@@ -1369,10 +1358,7 @@ mod tests {
 
     #[test]
     fn test_parse_picture_heart_fill_count() {
-        let grid = parse_picture(
-            ".#.#.\n#####\n#####\n.###.\n..#..",
-            5,
-        );
+        let grid = parse_picture(".#.#.\n#####\n#####\n.###.\n..#..", 5);
         let filled = grid.iter().filter(|&&v| v).count();
         // Row 0: 2, Row 1: 5, Row 2: 5, Row 3: 3, Row 4: 1 = 16
         assert_eq!(filled, 16);
@@ -1414,7 +1400,10 @@ mod tests {
     #[test]
     fn test_builtin_puzzles_count() {
         let puzzles = builtin_puzzles();
-        assert!(puzzles.len() >= 8, "Should have at least 8 built-in puzzles");
+        assert!(
+            puzzles.len() >= 8,
+            "Should have at least 8 built-in puzzles"
+        );
     }
 
     #[test]
@@ -2173,7 +2162,10 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, RenderCommand::Text { .. }))
             .count();
-        assert!(text_count > 0, "Playing screen should contain text commands");
+        assert!(
+            text_count > 0,
+            "Playing screen should contain text commands"
+        );
     }
 
     #[test]
@@ -2227,7 +2219,12 @@ mod tests {
         assert_eq!(app.row_clues.len(), 10);
         assert_eq!(app.col_clues.len(), 10);
         // Sum of all row clue values should equal total filled cells
-        let row_sum: u32 = app.row_clues.iter().flat_map(|c| c.iter()).map(|&v| v as u32).sum();
+        let row_sum: u32 = app
+            .row_clues
+            .iter()
+            .flat_map(|c| c.iter())
+            .map(|&v| v as u32)
+            .sum();
         let filled = app.total_filled_in_solution() as u32;
         assert_eq!(row_sum, filled);
     }
@@ -2236,7 +2233,12 @@ mod tests {
     fn test_col_clue_sum_equals_filled() {
         let mut app = NonogramApp::new();
         app.start_puzzle(0);
-        let col_sum: u32 = app.col_clues.iter().flat_map(|c| c.iter()).map(|&v| v as u32).sum();
+        let col_sum: u32 = app
+            .col_clues
+            .iter()
+            .flat_map(|c| c.iter())
+            .map(|&v| v as u32)
+            .sum();
         let filled = app.total_filled_in_solution() as u32;
         assert_eq!(col_sum, filled);
     }
@@ -2285,6 +2287,9 @@ mod tests {
             .filter(|c| matches!(c, RenderCommand::Line { .. }))
             .count();
         // 10x10 grid should have group lines at position 5 (1 vertical + 1 horizontal)
-        assert!(line_count >= 2, "Medium grid should have group divider lines");
+        assert!(
+            line_count >= 2,
+            "Medium grid should have group divider lines"
+        );
     }
 }

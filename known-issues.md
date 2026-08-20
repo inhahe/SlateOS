@@ -44031,3 +44031,151 @@ clean, clippy unchanged at 82.
 That closes the last hand-inverted layout in `notif_pane` — the card list
 (`card_tops`/`card_at`) was collapsed earlier, in the fix that found the 76-px
 drift.
+
+### The toolkit menus: eight walks of one list become two — FIXED
+
+The same fault family, in its hardest form, and the only instance so far that
+sits in the toolkit rather than in one app: `gui/toolkit/src/menu.rs` (every
+right-click menu in the OS) and `gui/toolkit/src/menubar.rs` (the dropdowns
+under File/Edit/View in every windowed app).
+
+A list whose rows all share one height needs no help: `top + i * H` and
+`(y - top) / H` are visibly each other's inverse, and you cannot change one
+without changing the other. These lists *differ* — a separator is 9 px where
+an item is 28 — so there is no closed form, only a walk. Each file carried
+**four** of them, and each of the four spelled out
+
+```rust
+match item {
+    Separator => SEPARATOR_HEIGHT,
+    _ => ITEM_HEIGHT,
+}
+```
+
+for itself: one summing the heights for the popup's total (`total_height` /
+`dropdown_content_height`), one adding them up to place the rows on screen
+(the renderer's `let mut current_y` / `let mut cur_y`), one subtracting them
+back off to answer a click (`index_at_y` / `item_index_at_y`), and one adding
+them up again to decide where a submenu hangs (`y_offset_for_index`, in both).
+Eight copies between the two files. Four walks of one list is four chances for
+three of them to be right.
+
+**No live fault was found in either** — the eight copies did agree. What they
+did not have was any way to *stay* agreeing, and the existing tests could not
+have told anyone otherwise: they probed row centres, where a three-pixel drift
+is invisible.
+
+The fix is a new toolkit primitive, `gui/toolkit/src/row_strip.rs`. A
+`RowStrip` is that walk done once: given the top of the run and each row's
+height it reports where every row is (`top`, `height`, `bottom`,
+`total_height`) and which row owns a given `y` (`index_at`). A row owns its
+top edge and not its bottom one, so adjacent rows never both answer for the
+pixel between them; a non-finite height is taken as zero rather than poisoning
+every row after it with NaN. It deliberately does not decide whether a row is
+*selectable* — a separator has a position and a height like anything else, and
+whether clicking one means something is the caller's rule, which is the one
+thing `index_at_y` and `item_index_at_y` still add on top.
+
+Both files now build one strip and read it from all four places. Eleven new
+tests, all reading the hover rectangle `render()` actually emitted and
+sweeping eight points across it plus both its edges:
+
+| test | file | pins |
+|---|---|---|
+| `every_item_is_selectable_exactly_where_it_was_painted` | menu | eight probes across every painted row, plus its two edges |
+| `a_separator_is_drawn_inside_the_run_it_reserves_space_in` | menu | the line lands inside the space the row reserves, and the row is unselectable |
+| `a_submenu_hangs_off_the_row_it_belongs_to` | menu | `y_offset_for_index` equals the painted top, for every row |
+| `the_menu_is_exactly_as_tall_as_the_rows_it_holds` | menu | the popup reaches one padding past the last row, and `point_in_bounds` agrees |
+| `nothing_outside_the_run_selects_an_item` | menu | both paddings, past the bottom, NaN, ±inf |
+| `an_empty_menu_is_just_its_padding` | menu | the degenerate case |
+| `every_dropdown_row_is_selectable_exactly_where_it_was_painted` | menubar | as above, through the real open-and-hover pointer path |
+| `a_dropdown_separator_is_drawn_inside_the_run_it_reserves_space_in` | menubar | as above |
+| `a_submenu_hangs_off_the_dropdown_row_it_belongs_to` | menubar | as above |
+| `a_dropdown_is_exactly_as_tall_as_the_rows_it_holds` | menubar | the panel reaches one padding past the last row |
+| `nothing_outside_the_dropdown_run_selects_a_row` | menubar | padding, past the bottom, NaN, ±inf, and the empty dropdown |
+
+Verified by reintroduction, six defects, all now in
+`scripts/reintro-row-hit-tests.py` (21 pinned): drifting either renderer three
+pixels fails three tests; giving either hit test its own walk back fails four
+and five respectively — the menubar one also takes down the pre-existing
+`click_check_item_toggles`; and giving either `y_offset_for_index` its own
+walk back fails three. 982 guitk tests pass, rustfmt clean, clippy clean.
+
+Worth recording for the next person who writes such a test: the menu bar's own
+bottom border is drawn in the *separator colour*, so filtering emitted `Line`
+commands by colour alone finds three separators in a dropdown that has two.
+The test keys on the panel's left inset as well.
+
+Still open, and not this fix: neither menu scrolls. A dropdown taller than the
+screen is drawn past the bottom edge and the rows below it can be neither seen
+nor reached. `RowStrip` is the right shape to build that on — a scroll offset
+is just a different `origin` — but no caller needs it yet.
+
+### The tree widget selected its first node for a click above it — FIXED
+
+Found while migrating the menus, by asking which *other* toolkit widget
+inverts its own renderer. `gui/toolkit/src/tree.rs` did, twice:
+
+```rust
+// handle_click, and again verbatim in handle_context_menu
+let row_index = ((y + self.scroll_offset) / self.config.row_height) as usize;
+```
+
+`visible.get(row_index)` bounded it above. Nothing bounded it below. **A
+negative `f32` cast to `usize` saturates to zero in Rust** — it does not wrap
+and it does not trap — so a click a few pixels above the first row selected
+the first node, and a right-click there opened the context menu on it. NaN
+casts to zero as well, so any coordinate a caller failed to compute did the
+same. And `row_height` is a `pub` field on `TreeConfig`: a zero made the
+division infinite or NaN, and *both* ends of that cast land on a real row, so
+every click in the tree went to row 0.
+
+This is the credmanager fault word for word — the one that decrypted and
+displayed the first credential when you clicked the "60 entries" caption —
+except in the toolkit, where every tree widget in the OS inherits it rather
+than one app.
+
+Both paths now go through one `row_at(y)` that refuses non-finite
+coordinates, negative content offsets, non-positive row heights, and anything
+past the last row. It stays a plain division rather than a `RowStrip`: these
+rows are all one height, and the `row_strip` module doc says plainly that a
+uniform list needs no help, because `top + i * H` and `(y - top) / H` are
+visibly each other's inverse and you cannot change one without changing the
+other. A `RowStrip` here would allocate two `Vec`s per click to express
+something a division already expresses honestly.
+
+| test | pins |
+|---|---|
+| `every_row_answers_exactly_where_it_was_painted` | eight probes across each painted row background, plus both edges |
+| `a_point_above_the_first_row_selects_nothing_rather_than_the_first_node` | the saturating cast, through both pointer paths |
+| `a_coordinate_that_is_not_a_number_selects_nothing` | NaN and ±inf, through both pointer paths |
+| `a_row_height_of_zero_selects_nothing_rather_than_everything` | zero, NaN and negative row heights |
+| `nothing_past_the_last_row_answers` | the last row's own edge, past it, and the empty tree |
+| `scrolling_moves_the_rows_and_the_answers_together` | the hit test follows a scrolled row to where it is now drawn |
+
+Verified by reintroduction: restoring the unbounded cast fails three of them,
+drifting the renderer three pixels fails the other two. Both are now in
+`scripts/reintro-row-hit-tests.py` (23 pinned). 988 guitk tests pass, rustfmt
+clean, clippy clean.
+
+### `reintro-row-hit-tests.py` credited a compile error as evidence — FIXED
+
+Worth writing down because the script's whole purpose is to be believed.
+
+It decides a defect is pinned by watching the suite go from green to red. Run
+against a working tree with a half-finished edit in it, the suite was *already*
+red, so every defect "pinned" — including, in the run that exposed this, two
+guitk entries whose evidence was `error[E0599]: no method named selected_id`,
+a compile failure in an unrelated file. **It printed `all 21 defects pinned`
+and exited 0.**
+
+The existing fallback that prints the compiler's own words when no test is
+named is what made it visible at all — but that is something a reader has to
+notice, not something the script refuses to do. It now runs each crate's suite
+once before touching anything and exits 2 with `BASELINE NOT GREEN` if any of
+them is red, on the principle that a measurement taken against an unknown
+baseline is not a weaker measurement but no measurement.
+
+The general form, for anything else built this way: a test that proves a
+property by observing a *transition* must establish the starting state, or it
+is only observing the end state and calling it a transition.

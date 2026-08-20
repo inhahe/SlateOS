@@ -25,6 +25,7 @@ use guitk::fold;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::{scroll_window, wheel};
 
 // ============================================================================
 // Constants — layout dimensions
@@ -46,6 +47,22 @@ const TREE_INDENT: f32 = 20.0;
 const PROPERTY_ROW_HEIGHT: f32 = 22.0;
 /// Height of the property table header.
 const PROPERTY_HEADER_HEIGHT: f32 = 26.0;
+/// Gap between the top of the detail pane and its category heading.
+const DETAIL_HEADING_TOP: f32 = 8.0;
+/// Distance from the heading's top down to the separator below it.
+const DETAIL_HEADING_HEIGHT: f32 = 22.0;
+/// Gap between that separator and the top of the property table.
+const DETAIL_SEPARATOR_GAP: f32 = 8.0;
+
+/// Distance from the top of a scroll window down to the `slot`-th drawn row.
+///
+/// `slot` counts from the first row *on screen*, so it is bounded by the pane
+/// height divided by the row height — a few dozen. The saturating cast can
+/// therefore never reach a slot that is actually drawn, and exists only so this
+/// is total for a nonsense argument.
+fn slot_offset(slot: usize, row_h: f32) -> f32 {
+    f32::from(u16::try_from(slot).unwrap_or(u16::MAX)) * row_h
+}
 /// Default window width.
 const DEFAULT_WIDTH: f32 = 1100.0;
 /// Default window height.
@@ -534,10 +551,30 @@ pub struct SysInfoState {
     pub selected_category: SysInfoCategory,
     /// Which parent nodes are expanded.
     pub expanded: Vec<SysInfoCategory>,
-    /// Scroll offset in the detail pane.
-    pub detail_scroll: f32,
-    /// Scroll offset in the tree.
-    pub tree_scroll: f32,
+    /// First visible property row of the detail pane, as an index into
+    /// [`current_properties`](SysInfoState::current_properties).
+    ///
+    /// A row index rather than a pixel offset: the pane draws whole
+    /// `PROPERTY_ROW_HEIGHT` rows and nothing else, so a pixel offset could
+    /// only ever express positions the renderer rounds away. It used to be an
+    /// `f32` that the wheel moved by `dy * 20.0` — misreading a count of wheel
+    /// notches as a pixel distance — and that nothing bounded at the far end,
+    /// so scrolling past the last property kept climbing while the table stood
+    /// still and the same distance had to be scrolled back before anything
+    /// moved.
+    pub detail_scroll: usize,
+    /// First visible row of the sidebar tree, as an index into
+    /// [`visible_tree_rows`](SysInfoState::visible_tree_rows).
+    ///
+    /// Same units and the same history as [`Self::detail_scroll`].
+    pub tree_scroll: usize,
+    /// Wheel remainder for the sidebar; see [`wheel::Accumulator`].
+    ///
+    /// One per pane. Sharing a single accumulator would let a half-notch banked
+    /// over the tree come out later as a step in the property table.
+    tree_wheel: wheel::Accumulator,
+    /// Wheel remainder for the detail pane.
+    detail_wheel: wheel::Accumulator,
     /// Window width.
     pub window_width: f32,
     /// Window height.
@@ -587,8 +624,10 @@ impl SysInfoState {
                 SysInfoCategory::Components,
                 SysInfoCategory::SoftwareEnvironment,
             ],
-            detail_scroll: 0.0,
-            tree_scroll: 0.0,
+            detail_scroll: 0,
+            tree_scroll: 0,
+            tree_wheel: wheel::Accumulator::default(),
+            detail_wheel: wheel::Accumulator::default(),
             window_width: DEFAULT_WIDTH,
             window_height: DEFAULT_HEIGHT,
             hovered_tree_row: None,
@@ -1699,6 +1738,131 @@ impl SysInfoState {
         rows
     }
 
+    // ========================================================================
+    // Layout
+    //
+    // The sidebar rectangle and the property table's top edge each used to be
+    // recomputed from the same four constants at every site that needed them —
+    // the renderer, the click handler and the hover handler each carried their
+    // own copy. That is the divergence class in `known-issues.md`
+    // (`C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`): three
+    // copies that agree until one is edited. They are derived once here.
+    // ========================================================================
+
+    /// Top edge of both panes: below the title bar and toolbar.
+    pub fn pane_top(&self) -> f32 {
+        TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT
+    }
+
+    /// Bottom edge of both panes: above the status bar.
+    pub fn pane_bottom(&self) -> f32 {
+        self.window_height - STATUS_BAR_HEIGHT
+    }
+
+    /// Height of both panes.
+    pub fn pane_height(&self) -> f32 {
+        (self.pane_bottom() - self.pane_top()).max(0.0)
+    }
+
+    /// The window of tree rows the sidebar draws.
+    fn tree_window(&self) -> scroll_window::Rows {
+        scroll_window::visible(
+            self.visible_tree_rows().len(),
+            TREE_ROW_HEIGHT,
+            self.pane_height(),
+            self.tree_scroll,
+        )
+    }
+
+    /// The largest [`Self::tree_scroll`] that still shows a full pane of rows.
+    ///
+    /// `usize::MAX` asks `scroll_window` for the last page: it clamps, and the
+    /// start of the clamped window is by definition the furthest the list can
+    /// usefully go.
+    pub fn max_tree_scroll(&self) -> usize {
+        scroll_window::visible(
+            self.visible_tree_rows().len(),
+            TREE_ROW_HEIGHT,
+            self.pane_height(),
+            usize::MAX,
+        )
+        .start
+    }
+
+    /// Top edge of the detail pane's first property row.
+    ///
+    /// Below the category heading, its separator, and the table's column
+    /// header — the same stack of furniture `render_detail_pane` walks, stated
+    /// once so the two cannot part company.
+    pub fn property_rows_top(&self) -> f32 {
+        self.pane_top()
+            + DETAIL_HEADING_TOP
+            + DETAIL_HEADING_HEIGHT
+            + DETAIL_SEPARATOR_GAP
+            + PROPERTY_HEADER_HEIGHT
+    }
+
+    /// Height available to property rows, below the table header.
+    pub fn property_rows_height(&self) -> f32 {
+        (self.pane_bottom() - self.property_rows_top()).max(0.0)
+    }
+
+    /// The window of property rows the detail pane draws.
+    fn property_window(&self) -> scroll_window::Rows {
+        scroll_window::visible(
+            self.current_properties().len(),
+            PROPERTY_ROW_HEIGHT,
+            self.property_rows_height(),
+            self.detail_scroll,
+        )
+    }
+
+    /// The largest [`Self::detail_scroll`] that still shows a full pane of rows.
+    pub fn max_detail_scroll(&self) -> usize {
+        scroll_window::visible(
+            self.current_properties().len(),
+            PROPERTY_ROW_HEIGHT,
+            self.property_rows_height(),
+            usize::MAX,
+        )
+        .start
+    }
+
+    /// How many property rows fit in the pane — one PageUp/PageDown.
+    ///
+    /// A page of *whatever is on screen*, not a fixed 200 px. The old constant
+    /// paged past three rows of a short window and left half a screen unread in
+    /// a tall one.
+    fn property_page(&self) -> usize {
+        self.property_window().count.max(1)
+    }
+
+    /// Which visible tree row the sidebar drew at window y-coordinate `my`.
+    ///
+    /// Takes a *window* coordinate so that subtracting the pane top and adding
+    /// the scroll offset happen in exactly one place. The old form added the
+    /// scroll offset as **pixels before dividing**, so any list scrolled to a
+    /// position that was not a whole multiple of `TREE_ROW_HEIGHT` selected the
+    /// row above or below the one drawn under the pointer — and once the offset
+    /// became a row index that arithmetic could not even be written.
+    pub fn tree_hit_test(&self, my: f32) -> Option<usize> {
+        let offset = my - self.pane_top();
+        if !offset.is_finite() || offset < 0.0 || offset >= self.pane_height() {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let slot = (offset / TREE_ROW_HEIGHT) as usize;
+        let row = self.tree_scroll.checked_add(slot)?;
+        // Below the last row is not the last row: returning `None` here is what
+        // stops a click on the sidebar's empty tail selecting whatever happens
+        // to sit at the bottom.
+        if row < self.visible_tree_rows().len() {
+            Some(row)
+        } else {
+            None
+        }
+    }
+
     /// Toggle expansion of a parent node.
     pub fn toggle_expand(&mut self, cat: SysInfoCategory) {
         if cat.is_parent() {
@@ -1710,28 +1874,55 @@ impl SysInfoState {
         }
     }
 
+    /// Scroll the sidebar so the selected row is on screen.
+    ///
+    /// Keyboard navigation used to move the selection without touching
+    /// `tree_scroll` at all, so arrowing down past the last drawn row selected
+    /// something the user could not see — and, because the wheel was the only
+    /// thing that moved the sidebar, there was no way to find out what.
+    /// Also clamps `tree_scroll` to the shortened list, which is why the clamp
+    /// is outside the `if let`: collapsing a node removes rows whether or not
+    /// the selection is one of the survivors, and an offset left pointing past
+    /// the new end would draw an empty sidebar.
+    fn scroll_selection_into_view(&mut self) {
+        let rows = self.visible_tree_rows();
+        if let Some(pos) = rows.iter().position(|c| *c == self.selected_category) {
+            let window = self.tree_window();
+            let last_slot = window.start.saturating_add(window.count);
+            if pos < window.start {
+                self.tree_scroll = pos;
+            } else if pos >= last_slot {
+                // Put it on the bottom slot rather than the top: scrolling down
+                // by one row should move the list by one row, not jump a
+                // screenful.
+                self.tree_scroll = pos.saturating_sub(window.count.saturating_sub(1));
+            }
+        }
+        self.tree_scroll = self.tree_scroll.min(self.max_tree_scroll());
+    }
+
     /// Select the next visible tree row.
     pub fn select_next(&mut self) {
         let rows = self.visible_tree_rows();
         if let Some(pos) = rows.iter().position(|c| *c == self.selected_category)
-            && pos + 1 < rows.len()
-            && let Some(&next) = rows.get(pos + 1)
+            && let Some(&next) = pos.checked_add(1).and_then(|n| rows.get(n))
         {
             self.selected_category = next;
-            self.detail_scroll = 0.0;
+            self.detail_scroll = 0;
         }
+        self.scroll_selection_into_view();
     }
 
     /// Select the previous visible tree row.
     pub fn select_prev(&mut self) {
         let rows = self.visible_tree_rows();
         if let Some(pos) = rows.iter().position(|c| *c == self.selected_category)
-            && pos > 0
-            && let Some(&prev) = rows.get(pos - 1)
+            && let Some(&prev) = pos.checked_sub(1).and_then(|n| rows.get(n))
         {
             self.selected_category = prev;
-            self.detail_scroll = 0.0;
+            self.detail_scroll = 0;
         }
+        self.scroll_selection_into_view();
     }
 
     /// Expand the selected node (or select first child if already expanded).
@@ -1745,10 +1936,11 @@ impl SysInfoState {
                 let children = cat.children();
                 if let Some(&first) = children.first() {
                     self.selected_category = first;
-                    self.detail_scroll = 0.0;
+                    self.detail_scroll = 0;
                 }
             }
         }
+        self.scroll_selection_into_view();
     }
 
     /// Collapse the selected node or move to parent.
@@ -1762,8 +1954,9 @@ impl SysInfoState {
         } else if let Some(parent) = cat.parent() {
             // Move to parent.
             self.selected_category = parent;
-            self.detail_scroll = 0.0;
+            self.detail_scroll = 0;
         }
+        self.scroll_selection_into_view();
     }
 
     /// Search all categories for a text match and return matching properties.
@@ -1940,13 +2133,21 @@ impl SysInfoState {
                 self.collapse_selected();
                 EventResult::Consumed
             }
-            // Scroll detail view
+            // Scroll the detail view by a screenful of rows. Clamped at both
+            // ends: paging past the last property used to keep climbing an
+            // unbounded pixel offset while the table stood still, so the same
+            // distance had to be paged back before anything moved.
             Key::PageDown => {
-                self.detail_scroll += 200.0;
+                let page = self.property_page();
+                self.detail_scroll = self
+                    .detail_scroll
+                    .saturating_add(page)
+                    .min(self.max_detail_scroll());
                 EventResult::Consumed
             }
             Key::PageUp => {
-                self.detail_scroll = (self.detail_scroll - 200.0).max(0.0);
+                let page = self.property_page();
+                self.detail_scroll = self.detail_scroll.saturating_sub(page);
                 EventResult::Consumed
             }
             // Ctrl+F = open search
@@ -1994,7 +2195,11 @@ impl SysInfoState {
                     {
                         self.expanded.push(parent);
                     }
-                    self.detail_scroll = 0.0;
+                    self.detail_scroll = 0;
+                    // Expanding a parent above the view pushes every row below
+                    // it down, so the hit row can land off-screen even when the
+                    // sidebar had not been scrolled at all.
+                    self.scroll_selection_into_view();
                     self.status_message = format!("{} results found", results.len());
                 } else {
                     self.status_message = "No results found".to_string();
@@ -2018,37 +2223,51 @@ impl SysInfoState {
 
     fn handle_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> EventResult {
         match &mouse.kind {
-            MouseEventKind::Press(MouseButton::Left)
-                // Check if click is in the sidebar.
-                if mouse.x < SIDEBAR_WIDTH && mouse.y > TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT => {
-                    let row_y = mouse.y - TITLE_BAR_HEIGHT - TOOLBAR_HEIGHT + self.tree_scroll;
-                    let row_idx = (row_y / TREE_ROW_HEIGHT) as usize;
+            MouseEventKind::Press(MouseButton::Left) if mouse.x < SIDEBAR_WIDTH => {
+                if let Some(row) = self.tree_hit_test(mouse.y) {
                     let rows = self.visible_tree_rows();
-                    if let Some(&cat) = rows.get(row_idx) {
+                    if let Some(&cat) = rows.get(row) {
                         if cat.is_parent() {
                             self.toggle_expand(cat);
                         }
                         self.selected_category = cat;
-                        self.detail_scroll = 0.0;
+                        self.detail_scroll = 0;
+                        // Folding a parent removes rows from under the view,
+                        // which can leave the offset past the end of the
+                        // shortened list. The same call the keyboard uses does
+                        // that clamp, so the bound is derived in one place.
+                        self.scroll_selection_into_view();
                     }
-                    return EventResult::Consumed;
                 }
+                return EventResult::Consumed;
+            }
+            // `dy` counts wheel *notches*, not pixels — see
+            // `MouseEventKind::Scroll`. Both branches used to multiply it by
+            // 20.0 on the assumption it was a distance, which moved 20 px per
+            // detent (most of a row, never a whole one) and discarded a
+            // trackpad's fractions entirely. The accumulators bank those
+            // fractions so a slow trackpad eventually steps a row.
             MouseEventKind::Scroll { dy, .. } => {
                 if mouse.x < SIDEBAR_WIDTH {
-                    self.tree_scroll = (self.tree_scroll - dy * 20.0).max(0.0);
+                    let rows = self.tree_wheel.rows(*dy);
+                    self.tree_scroll =
+                        scroll_window::shift(self.tree_scroll, rows).min(self.max_tree_scroll());
                 } else {
-                    self.detail_scroll = (self.detail_scroll - dy * 20.0).max(0.0);
+                    let rows = self.detail_wheel.rows(*dy);
+                    self.detail_scroll = scroll_window::shift(self.detail_scroll, rows)
+                        .min(self.max_detail_scroll());
                 }
                 return EventResult::Consumed;
             }
             MouseEventKind::Move => {
-                if mouse.x < SIDEBAR_WIDTH && mouse.y > TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT {
-                    let row_y = mouse.y - TITLE_BAR_HEIGHT - TOOLBAR_HEIGHT + self.tree_scroll;
-                    let row_idx = (row_y / TREE_ROW_HEIGHT) as usize;
-                    self.hovered_tree_row = Some(row_idx);
+                self.hovered_tree_row = if mouse.x < SIDEBAR_WIDTH {
+                    // The same hit-test the click uses. Two derivations of
+                    // "which row is under the pointer" is how an app comes to
+                    // highlight one row and select another.
+                    self.tree_hit_test(mouse.y)
                 } else {
-                    self.hovered_tree_row = None;
-                }
+                    None
+                };
                 return EventResult::Consumed;
             }
             _ => {}
@@ -2223,19 +2442,29 @@ impl SysInfoState {
     }
 
     fn render_sidebar(&self, tree: &mut RenderTree) {
-        let top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
-        let height = self.window_height - top - STATUS_BAR_HEIGHT;
+        let top = self.pane_top();
+        let height = self.pane_height();
 
         // Sidebar background.
         tree.fill_rect(0.0, top, SIDEBAR_WIDTH, height, COLOR_SIDEBAR_BG);
 
         // Clip to sidebar area.
         tree.clip(0.0, top, SIDEBAR_WIDTH, height);
-        tree.translate(0.0, -self.tree_scroll);
 
+        // Only the rows in the window are drawn, positioned by their *slot* on
+        // screen. Drawing the whole list under a translate meant a thousand
+        // commands the clip then threw away, and made the drawn position and
+        // the hit-tested position two different calculations.
         let rows = self.visible_tree_rows();
-        for (idx, &cat) in rows.iter().enumerate() {
-            let row_y = top + idx as f32 * TREE_ROW_HEIGHT;
+        let window = self.tree_window();
+        for (slot, (idx, &cat)) in rows
+            .iter()
+            .enumerate()
+            .skip(window.start)
+            .take(window.count)
+            .enumerate()
+        {
+            let row_y = top + slot_offset(slot, TREE_ROW_HEIGHT);
             let depth = cat.depth();
             let indent = 12.0 + depth as f32 * TREE_INDENT;
 
@@ -2293,7 +2522,6 @@ impl SysInfoState {
             });
         }
 
-        tree.untranslate();
         tree.unclip();
 
         // Sidebar right border.
@@ -2308,10 +2536,10 @@ impl SysInfoState {
     }
 
     fn render_detail_pane(&self, tree: &mut RenderTree) {
-        let top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
+        let top = self.pane_top();
         let left = SIDEBAR_WIDTH;
         let width = self.window_width - SIDEBAR_WIDTH;
-        let height = self.window_height - top - STATUS_BAR_HEIGHT;
+        let height = self.pane_height();
 
         // Background.
         tree.fill_rect(left, top, width, height, COLOR_SURFACE0);
@@ -2320,7 +2548,7 @@ impl SysInfoState {
         tree.clip(left, top, width, height);
 
         // Category heading.
-        let heading_y = top + 8.0;
+        let heading_y = top + DETAIL_HEADING_TOP;
         tree.push(RenderCommand::Text {
             x: left + 16.0,
             y: heading_y,
@@ -2333,7 +2561,7 @@ impl SysInfoState {
         });
 
         // Separator below heading.
-        let sep_y = heading_y + 22.0;
+        let sep_y = heading_y + DETAIL_HEADING_HEIGHT;
         tree.push(RenderCommand::Line {
             x1: left + 16.0,
             y1: sep_y,
@@ -2344,7 +2572,13 @@ impl SysInfoState {
         });
 
         // Property table.
-        let table_top = sep_y + 8.0;
+        let table_top = sep_y + DETAIL_SEPARATOR_GAP;
+        debug_assert!(
+            (table_top + PROPERTY_HEADER_HEIGHT - self.property_rows_top()).abs() < 0.01,
+            "the furniture this renderer stacks must be the same stack \
+             `property_rows_top` adds up, or the scroll bound belongs to a \
+             table that is not the one on screen"
+        );
         let name_col_width = width * 0.38;
 
         // Header row.
@@ -2370,25 +2604,26 @@ impl SysInfoState {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Property rows.
+        // Property rows. Only the window is drawn, positioned by its slot on
+        // screen — `scroll_window` decides which rows those are, so the
+        // renderer no longer needs skip/break tests of its own that could
+        // disagree with the bound the wheel is clamped to.
         let props = self.current_properties();
-        let content_top = table_top + PROPERTY_HEADER_HEIGHT;
+        let content_top = self.property_rows_top();
+        let window = self.property_window();
 
-        tree.translate(0.0, -self.detail_scroll);
+        for (slot, (idx, prop)) in props
+            .iter()
+            .enumerate()
+            .skip(window.start)
+            .take(window.count)
+            .enumerate()
+        {
+            let row_y = content_top + slot_offset(slot, PROPERTY_ROW_HEIGHT);
 
-        for (idx, prop) in props.iter().enumerate() {
-            let row_y = content_top + idx as f32 * PROPERTY_ROW_HEIGHT;
-
-            // Skip rows above clip area (accounting for scroll).
-            if row_y + PROPERTY_ROW_HEIGHT - self.detail_scroll < content_top {
-                continue;
-            }
-            // Stop rendering below visible area.
-            if row_y - self.detail_scroll > top + height {
-                break;
-            }
-
-            // Alternating row color.
+            // Alternating row color. Keyed on the row's index in the whole
+            // table, not its slot on screen, so the stripes do not invert as
+            // the table scrolls.
             let row_bg = if idx % 2 == 0 {
                 COLOR_ROW_EVEN
             } else {
@@ -2448,7 +2683,6 @@ impl SysInfoState {
             }
         }
 
-        tree.untranslate();
         tree.unclip();
     }
 
@@ -2578,6 +2812,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // Panicking on bad data is what a test is for: an `expect` that fires here
+    // *is* the failure report, and rewriting it as a `match` would only bury
+    // the message. CLAUDE.md scopes the defensive panic lints to non-test code
+    // for exactly this reason.
+    #![allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
+
     use super::*;
 
     /// Every line of the export that sits at column 0 and is not blank.
@@ -2705,5 +2950,453 @@ mod tests {
                 "expected exactly one {heading}",
             );
         }
+    }
+
+    // ========================================================================
+    // Scrolling
+    //
+    // Both panes are lists of uniform rows, so both offsets are row indices
+    // driven by `scroll_window`, and the wheel reaches them through a
+    // `wheel::Accumulator`.
+    //
+    // These are written in *rows actually moved* — the unit of the bug — and
+    // not in "the offset changed". The offset changed under the old
+    // `dy * 20.0` code too: a notch moved 20 px of a 24 px row, so the number
+    // grew every event and the list still never landed on a row boundary. A
+    // test that asserted `scroll > 0` would have passed against it.
+    // ========================================================================
+
+    /// A state whose sidebar *and* property table both overflow their panes.
+    ///
+    /// The two `assert!`s are the fixture checking that it can fail. A scroll
+    /// test run against a list that already fits on screen passes no matter
+    /// what the handler does, because zero is the correct answer either way.
+    fn overflowing_app() -> SysInfoState {
+        let mut app = SysInfoState::new();
+        for &root in TREE_ROOT_ITEMS {
+            if root.is_parent() && !app.expanded.contains(&root) {
+                app.expanded.push(root);
+            }
+        }
+        app.window_height = 300.0;
+        assert!(
+            app.max_tree_scroll() > 0,
+            "fixture's sidebar fits on screen: {} rows in {} px",
+            app.visible_tree_rows().len(),
+            app.pane_height(),
+        );
+        assert!(
+            app.max_detail_scroll() > 0,
+            "fixture's property table fits on screen: {} rows in {} px",
+            app.current_properties().len(),
+            app.property_rows_height(),
+        );
+        app
+    }
+
+    /// `ROWS_PER_NOTCH` as a row count.
+    ///
+    /// Taken from the constant so that retuning the platform default retunes
+    /// the tests — but deliberately *not* from `Accumulator::rows`, which
+    /// would make every expectation below agree with the converter by
+    /// construction and so pass even if this app never called it.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn rows_per_notch() -> usize {
+        wheel::ROWS_PER_NOTCH as usize
+    }
+
+    /// Horizontal probe inside the sidebar.
+    const SIDEBAR_X: f32 = SIDEBAR_WIDTH / 2.0;
+    /// Horizontal probe inside the detail pane.
+    const DETAIL_X: f32 = SIDEBAR_WIDTH + 10.0;
+
+    fn scroll_at(x: f32, dy: f32) -> Event {
+        Event::Mouse(guitk::event::MouseEvent {
+            x,
+            y: 100.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    fn move_to(x: f32, y: f32) -> Event {
+        Event::Mouse(guitk::event::MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        })
+    }
+
+    fn press(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: None,
+        })
+    }
+
+    /// The label text and `y` of every tree row the sidebar actually draws.
+    ///
+    /// Rows are found by matching the drawn string against the labels of the
+    /// visible categories, not by filtering on a coordinate range. A
+    /// coordinate filter derived from the layout would be asking the code
+    /// under test to mark its own homework: move the pane's top edge and both
+    /// the renderer and the filter move with it, and the test keeps passing.
+    fn drawn_sidebar_rows(app: &SysInfoState) -> Vec<(String, f32)> {
+        let labels: Vec<&str> = app.visible_tree_rows().iter().map(|c| c.label()).collect();
+        let mut t = RenderTree::new();
+        app.render_sidebar(&mut t);
+        t.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, y, .. } if labels.contains(&text.as_str()) => {
+                    Some((text.clone(), *y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The top edge of every property row the detail pane actually draws.
+    ///
+    /// Identified by the alternating row stripe: a fill one row high in one of
+    /// the two stripe colours. Structural rather than positional, for the
+    /// reason given on [`drawn_sidebar_rows`].
+    ///
+    /// The height test is not belt-and-braces. `COLOR_ROW_EVEN` and
+    /// `COLOR_SURFACE0` are the same RGB, so a colour-only filter also matches
+    /// the pane's own background and reports one row more than the table
+    /// drew — which is exactly how the first draft of this helper made two
+    /// correct page-step assertions fail by one. A helper filtered on the
+    /// wrong property is as wrong as the code it is checking.
+    fn drawn_property_rows(app: &SysInfoState) -> Vec<(f32, Color)> {
+        let mut t = RenderTree::new();
+        app.render_detail_pane(&mut t);
+        t.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    y, height, color, ..
+                } if (*color == COLOR_ROW_EVEN || *color == COLOR_ROW_ODD)
+                    && (*height - PROPERTY_ROW_HEIGHT).abs() < 0.01 =>
+                {
+                    Some((*y, *color))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn drawn_property_row_tops(app: &SysInfoState) -> Vec<f32> {
+        drawn_property_rows(app)
+            .into_iter()
+            .map(|(y, _)| y)
+            .collect()
+    }
+
+    #[test]
+    fn one_wheel_notch_scrolls_the_sidebar_by_exactly_three_rows() {
+        let mut app = overflowing_app();
+        let before = drawn_sidebar_rows(&app);
+        app.handle_event(&scroll_at(SIDEBAR_X, -1.0));
+        let after = drawn_sidebar_rows(&app);
+
+        let step = rows_per_notch();
+        assert_eq!(app.tree_scroll, step, "one notch is not one notch of rows");
+        assert_eq!(
+            after.first().map(|(t, _)| t.as_str()),
+            before.get(step).map(|(t, _)| t.as_str()),
+            "the offset moved but the drawn list did not follow it",
+        );
+        assert_eq!(
+            after.first().map(|(_, y)| *y),
+            before.first().map(|(_, y)| *y),
+            "row 0's slot moved; the list should scroll under a fixed grid",
+        );
+    }
+
+    #[test]
+    fn one_wheel_notch_scrolls_the_property_table_by_exactly_three_rows() {
+        let mut app = overflowing_app();
+        let before = drawn_property_row_tops(&app);
+        app.handle_event(&scroll_at(DETAIL_X, -1.0));
+        let after = drawn_property_row_tops(&app);
+
+        assert_eq!(app.detail_scroll, rows_per_notch());
+        assert_eq!(
+            before, after,
+            "the drawn slots moved; only which rows occupy them should change",
+        );
+    }
+
+    #[test]
+    fn a_trackpads_fractions_add_up_instead_of_vanishing() {
+        // Five fifths of a notch is one notch, and must move the same three
+        // rows a single detent does. Rounding each event on its own would
+        // return zero five times and the pane would be dead to a trackpad —
+        // which is the same bug as `dy * 20.0`, just silent instead of wrong.
+        let mut app = overflowing_app();
+        for _ in 0..5 {
+            app.handle_event(&scroll_at(SIDEBAR_X, -0.2));
+        }
+        assert_eq!(app.tree_scroll, rows_per_notch());
+    }
+
+    #[test]
+    fn the_two_panes_bank_their_wheel_fractions_separately() {
+        // A fifth of a notch over each pane is 0.6 of a row each: neither
+        // moves. A single shared accumulator would have added them into 1.2
+        // rows and stepped one of the two panes by a row it never received.
+        let mut app = overflowing_app();
+        app.handle_event(&scroll_at(SIDEBAR_X, -0.2));
+        app.handle_event(&scroll_at(DETAIL_X, -0.2));
+        assert_eq!(app.tree_scroll, 0, "the sidebar spent the table's fraction");
+        assert_eq!(
+            app.detail_scroll, 0,
+            "the table spent the sidebar's fraction"
+        );
+    }
+
+    #[test]
+    fn scrolling_one_pane_leaves_the_other_alone() {
+        let mut app = overflowing_app();
+        app.handle_event(&scroll_at(SIDEBAR_X, -3.0));
+        assert!(app.tree_scroll > 0);
+        assert_eq!(app.detail_scroll, 0);
+
+        let tree_before = app.tree_scroll;
+        app.handle_event(&scroll_at(DETAIL_X, -3.0));
+        assert!(app.detail_scroll > 0);
+        assert_eq!(app.tree_scroll, tree_before);
+    }
+
+    #[test]
+    fn the_wheel_stops_at_the_last_row_of_each_pane() {
+        // The old `f32` offsets had no far-end bound at all, so scrolling past
+        // the end kept climbing while the list stood still — and the same
+        // distance had to be scrolled back before anything moved again.
+        let mut app = overflowing_app();
+        for _ in 0..200 {
+            app.handle_event(&scroll_at(SIDEBAR_X, -1.0));
+            app.handle_event(&scroll_at(DETAIL_X, -1.0));
+        }
+        assert_eq!(app.tree_scroll, app.max_tree_scroll());
+        assert_eq!(app.detail_scroll, app.max_detail_scroll());
+
+        let rows = app.visible_tree_rows();
+        let drawn = drawn_sidebar_rows(&app);
+        assert!(!drawn.is_empty(), "the sidebar drew nothing at the far end");
+        assert_eq!(
+            drawn.last().map(|(t, _)| t.as_str()),
+            rows.last().map(|c| c.label()),
+            "the last row of the list never reached the screen",
+        );
+
+        // And back: the very next notch upwards must move the list, not spend
+        // a debt run up by the events that had nowhere to go.
+        let first = drawn.first().map(|(t, _)| t.clone());
+        app.handle_event(&scroll_at(SIDEBAR_X, 1.0));
+        assert_ne!(
+            drawn_sidebar_rows(&app).first().map(|(t, _)| t.clone()),
+            first,
+            "scrolling back up did nothing",
+        );
+    }
+
+    #[test]
+    fn every_drawn_sidebar_row_hit_tests_to_itself() {
+        let mut app = overflowing_app();
+        app.handle_event(&scroll_at(SIDEBAR_X, -1.0));
+        let rows = app.visible_tree_rows();
+        let drawn = drawn_sidebar_rows(&app);
+        assert!(drawn.len() > 1, "nothing drawn to hit-test");
+
+        for (label, y) in &drawn {
+            // The label's own `y` is inside the row it belongs to, so it is a
+            // probe the renderer supplies rather than one the test derives
+            // from the same constants the hit test uses.
+            let idx = app
+                .tree_hit_test(y + 1.0)
+                .expect("a row that is drawn must be clickable");
+            assert_eq!(
+                rows.get(idx).map(|c| c.label()),
+                Some(label.as_str()),
+                "clicking the row labelled {label:?} selects a different one",
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_outside_the_drawn_rows_hit_tests_to_a_row() {
+        let app = overflowing_app();
+        assert_eq!(app.tree_hit_test(app.pane_top() - 1.0), None, "toolbar");
+        assert_eq!(
+            app.tree_hit_test(app.pane_bottom() + 1.0),
+            None,
+            "status bar"
+        );
+        assert_eq!(app.tree_hit_test(f32::NAN), None, "NaN");
+
+        // Empty space below a list too short to fill the pane is not a row
+        // either — the old handler divided the offset and trusted the quotient.
+        let short = SysInfoState::new();
+        assert_eq!(short.max_tree_scroll(), 0, "fixture is not a short list");
+        let below =
+            short.pane_top() + short.visible_tree_rows().len() as f32 * TREE_ROW_HEIGHT + 1.0;
+        assert!(below < short.pane_bottom(), "fixture has no empty space");
+        assert_eq!(
+            short.tree_hit_test(below),
+            None,
+            "empty space below the list"
+        );
+    }
+
+    #[test]
+    fn the_hover_row_is_cleared_off_the_sidebar() {
+        let mut app = overflowing_app();
+        app.handle_event(&move_to(SIDEBAR_X, app.pane_top() + 1.0));
+        assert!(app.hovered_tree_row.is_some(), "no row hovered over a row");
+
+        app.handle_event(&move_to(DETAIL_X, app.pane_top() + 1.0));
+        assert_eq!(
+            app.hovered_tree_row, None,
+            "hover stuck over the other pane"
+        );
+
+        app.handle_event(&move_to(SIDEBAR_X, app.pane_top() + 1.0));
+        app.handle_event(&move_to(SIDEBAR_X, app.pane_bottom() + 1.0));
+        assert_eq!(app.hovered_tree_row, None, "hover stuck below the pane");
+    }
+
+    #[test]
+    fn a_page_down_moves_the_table_by_the_screenful_that_was_showing() {
+        let mut app = overflowing_app();
+        let showing = drawn_property_row_tops(&app).len();
+        assert!(showing > 1, "fixture shows no page to move by");
+        app.handle_event(&press(Key::PageDown));
+        assert_eq!(
+            app.detail_scroll, showing,
+            "a page is the screenful on display, not a fixed row count",
+        );
+    }
+
+    #[test]
+    fn paging_past_either_end_of_the_table_is_bounded() {
+        let mut app = overflowing_app();
+        for _ in 0..50 {
+            app.handle_event(&press(Key::PageDown));
+        }
+        assert_eq!(app.detail_scroll, app.max_detail_scroll());
+
+        // One page back must move by a page, not unwind an overshoot.
+        let showing = drawn_property_row_tops(&app).len();
+        let at_end = app.detail_scroll;
+        app.handle_event(&press(Key::PageUp));
+        assert_eq!(app.detail_scroll, at_end.saturating_sub(showing));
+
+        for _ in 0..50 {
+            app.handle_event(&press(Key::PageUp));
+        }
+        assert_eq!(app.detail_scroll, 0);
+    }
+
+    #[test]
+    fn arrowing_through_the_tree_keeps_the_selection_on_screen() {
+        // Keyboard navigation used to move the selection without touching
+        // `tree_scroll`, so arrowing past the last drawn row selected a
+        // category the user could not see — and the wheel was the only thing
+        // that moved the sidebar, so there was no way to find out which.
+        let mut app = overflowing_app();
+        let total = app.visible_tree_rows().len();
+
+        for _ in 0..total + 5 {
+            let before = app.tree_scroll;
+            app.handle_event(&press(Key::Down));
+            assert!(
+                app.tree_scroll <= before + 1,
+                "one row of selection jumped {} rows of list",
+                app.tree_scroll - before,
+            );
+            let drawn = drawn_sidebar_rows(&app);
+            assert!(
+                drawn
+                    .iter()
+                    .any(|(t, _)| t == app.selected_category.label()),
+                "selection {:?} is off screen; drawn: {drawn:?}",
+                app.selected_category.label(),
+            );
+        }
+        assert_eq!(
+            app.tree_scroll,
+            app.max_tree_scroll(),
+            "never reached the end"
+        );
+
+        for _ in 0..total + 5 {
+            app.handle_event(&press(Key::Up));
+            let drawn = drawn_sidebar_rows(&app);
+            assert!(
+                drawn
+                    .iter()
+                    .any(|(t, _)| t == app.selected_category.label()),
+                "selection {:?} is off screen on the way back up",
+                app.selected_category.label(),
+            );
+        }
+        assert_eq!(app.tree_scroll, 0, "never came back to the top");
+    }
+
+    #[test]
+    fn collapsing_a_node_does_not_leave_the_sidebar_scrolled_past_its_end() {
+        let mut app = overflowing_app();
+        for _ in 0..200 {
+            app.handle_event(&scroll_at(SIDEBAR_X, -1.0));
+        }
+        assert!(app.tree_scroll > 0, "fixture never scrolled");
+
+        for &root in TREE_ROOT_ITEMS {
+            if root.is_parent() {
+                app.selected_category = root;
+                app.handle_event(&press(Key::Left));
+            }
+        }
+        assert!(app.tree_scroll <= app.max_tree_scroll());
+        assert!(
+            !drawn_sidebar_rows(&app).is_empty(),
+            "the sidebar went blank after collapsing every node",
+        );
+    }
+
+    #[test]
+    fn the_row_stripes_do_not_invert_when_the_table_scrolls() {
+        // The stripe has to be keyed on the row's index in the whole table,
+        // not on its slot on screen. Keyed on the slot, the top row is always
+        // the "even" colour and the whole table flickers between two
+        // colourings as it scrolls by an odd number of rows.
+        let mut app = overflowing_app();
+        let top_colour = |a: &SysInfoState| drawn_property_rows(a).first().map(|(_, c)| *c);
+
+        app.detail_scroll = 0;
+        let even = top_colour(&app).expect("no rows drawn at the top");
+        app.detail_scroll = 1;
+        let odd = top_colour(&app).expect("no rows drawn one row down");
+        assert_ne!(
+            even, odd,
+            "row 0 and row 1 got the same stripe in the top slot",
+        );
+        app.detail_scroll = 2;
+        assert_eq!(top_colour(&app), Some(even), "the stripe lost its period");
+    }
+
+    #[test]
+    fn selecting_a_category_returns_the_property_table_to_its_top() {
+        let mut app = overflowing_app();
+        app.handle_event(&scroll_at(DETAIL_X, -3.0));
+        assert!(app.detail_scroll > 0);
+        app.handle_event(&press(Key::Down));
+        assert_eq!(
+            app.detail_scroll, 0,
+            "a different category kept the last one's scroll position",
+        );
     }
 }

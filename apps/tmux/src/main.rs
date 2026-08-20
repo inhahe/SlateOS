@@ -107,6 +107,25 @@ fn char_width() -> f32 {
 fn char_height() -> f32 {
     text::line_height_in(CELL_FONT_SIZE, FontWeightHint::Regular, FontFamily::Mono)
 }
+
+/// Distance between a pane's edge and the first cell of its grid, on every
+/// side. Named rather than written out at each use because the number appears
+/// in two places that must agree — where the content is *drawn* from, and how
+/// many cells are reckoned to fit — and a pane that draws from one inset and
+/// counts by another is off by a cell at the far edge.
+const PANE_CONTENT_INSET: f32 = 2.0;
+
+/// The grid a pane is created with, before the layout pass tells it the size
+/// it is actually drawn at.
+///
+/// A terminal has to have *some* grid between being created and being
+/// measured, and 80x24 is the one every terminal has defaulted to since the
+/// VT100. It should never be observed in a drawn frame:
+/// [`Multiplexer::relayout`] replaces it with the pane's real size before
+/// anything is painted.
+const INITIAL_COLS: usize = 80;
+const INITIAL_ROWS: usize = 24;
+
 const PADDING: f32 = 4.0;
 const SMALL_TEXT: f32 = 11.0;
 const NORMAL_TEXT: f32 = 13.0;
@@ -120,6 +139,58 @@ const MAX_PANES: usize = 32;
 const MAX_SCROLLBACK: usize = 10_000;
 const MAX_COLS: usize = 400;
 const MAX_ROWS: usize = 200;
+
+/// The terminal grid held by a pane drawn `width` x `height` pixels, as
+/// `(cols, rows)`.
+///
+/// The **only** conversion from a pane's pixel rectangle to a cell count.
+/// Two things read it and they must not be allowed to disagree: the layout
+/// pass ([`Multiplexer::relayout`]), which tells each terminal how big it is,
+/// and the paint ([`Multiplexer::render_pane`]), which draws that many cells.
+/// A grid that wraps at 80 columns inside a pane that shows 142 is a terminal
+/// whose output is cut off with blank space beside it — that is the defect
+/// this function exists to make unrepresentable, and a second copy of the
+/// arithmetic is exactly how it comes back.
+fn pane_grid(width: f32, height: f32) -> (usize, usize) {
+    let inset = PANE_CONTENT_INSET * 2.0;
+    (
+        cells_across(width - inset, char_width(), MAX_COLS),
+        cells_across(height - inset, char_height(), MAX_ROWS),
+    )
+}
+
+/// How many whole cells of `cell` pixels fit in `span` pixels, at least one
+/// and at most `max`.
+///
+/// Whole cells only: a pane with room for two and a half columns has two, and
+/// the remainder is padding. Never zero, because a pane too small to hold a
+/// character is still a terminal, and a zero-column grid would divide the
+/// cursor arithmetic by nothing and swallow every key that pages by a
+/// screenful.
+fn cells_across(span: f32, cell: f32, max: usize) -> usize {
+    // A cell size that is not a positive finite number names no grid at all.
+    // This cannot happen with a loaded font, but the width comes from font
+    // metrics rather than a constant, so it is checked rather than assumed.
+    if !cell.is_finite() || cell <= 0.0 {
+        return 1;
+    }
+    let count = (span / cell).floor();
+    // `f32::clamp` propagates NaN rather than resolving it to a bound, so a
+    // width that is not a number has to be caught here or it would reach the
+    // cast below and come out as a zero-column grid.
+    if count.is_nan() {
+        return 1;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let upper = max as f32;
+    let count = count.clamp(1.0, upper);
+    // The clamp has excluded negatives and anything past `max`, and NaN was
+    // rejected above, so the cast can neither wrap nor saturate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        count as usize
+    }
+}
 
 // ============================================================================
 // Terminal cell
@@ -914,11 +985,11 @@ impl Pane {
     ///
     /// Measured against the terminal's own row count rather than the pane's
     /// drawn height, because the pane does not know its height here — key
-    /// handling runs nowhere near layout. The two agree whenever the grid
-    /// matches the pane, which is the state the app is meant to maintain; see
-    /// `known-issues.md` "tmux panes never resize their grid", which is the
-    /// reason they can currently disagree at all. While they do, a pane drawn
-    /// shorter than its grid stops that many lines short of the very top.
+    /// handling runs nowhere near layout. That is correct precisely because
+    /// [`Multiplexer::relayout`] keeps the grid equal to the drawn height: the
+    /// buffer's row count *is* the pane's height, asked of the one place that
+    /// stores it. Before that pass existed the two could differ, and a pane
+    /// drawn shorter than its grid stopped that many lines short of the top.
     fn max_scroll_back(&self) -> usize {
         self.buffer.max_scroll_back(self.buffer.rows)
     }
@@ -1228,6 +1299,22 @@ impl Window {
             index,
         }
     }
+
+    /// The rectangle each of this window's panes occupies, as
+    /// `(id, x, y, width, height)`.
+    ///
+    /// The one layout walk. [`Multiplexer::render`] paints these rectangles
+    /// and [`Multiplexer::relayout`] converts them into cell counts; when the
+    /// two computed the pane area separately, only one of them was ever told
+    /// about a change.
+    fn bounds(&self) -> Vec<(PaneId, f32, f32, f32, f32)> {
+        self.layout.compute_bounds(
+            0.0,
+            TAB_BAR_HEIGHT,
+            WINDOW_WIDTH,
+            WINDOW_HEIGHT - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT,
+        )
+    }
 }
 
 // ============================================================================
@@ -1353,9 +1440,9 @@ struct Multiplexer {
 
 impl Multiplexer {
     fn new() -> Self {
-        let initial_pane = Pane::new(PaneId(0), 80, 24);
+        let initial_pane = Pane::new(PaneId(0), INITIAL_COLS, INITIAL_ROWS);
         let session = Session::new(SessionId(0), "main", 0);
-        Self {
+        let mut mux = Self {
             panes: vec![initial_pane],
             sessions: vec![session],
             active_session: 0,
@@ -1369,6 +1456,52 @@ impl Multiplexer {
             clipboard: String::new(),
             session_chooser: false,
             window_chooser: false,
+        };
+        // The pane above was built at the placeholder grid; give it the real
+        // one before anyone can observe it, so there is no moment at which a
+        // pane of this multiplexer is a size it is not drawn at.
+        mux.relayout();
+        mux
+    }
+
+    /// Tell every pane of the attached session the size of the rectangle it is
+    /// now drawn in.
+    ///
+    /// A terminal is only correct if the program writing into it and the pane
+    /// painting it agree about the grid, and only the layout walk knows a
+    /// pane's rectangle. Without this, `TerminalBuffer::resize` had no callers
+    /// outside the tests: splitting a window four ways left four terminals
+    /// still wrapping at 80 columns and still believing they had 24 rows.
+    ///
+    /// Every window of the session is sized, not just the visible one, because
+    /// a background window's program keeps running and writing — it must not
+    /// discover a new width only when the user switches to it. Other sessions
+    /// are left alone until attached; a detached session has no client and so
+    /// no size.
+    ///
+    /// Idempotent: resizing a buffer to the size it already has changes
+    /// nothing. That is what lets [`Self::render`] call it unconditionally as
+    /// a backstop while the mutations that change a layout also call it
+    /// directly, so that key handling between two frames — which reads
+    /// [`Pane::max_scroll_back`] and [`Pane::page_lines`] — sees a current
+    /// grid rather than the previous frame's.
+    fn relayout(&mut self) {
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        // Collected first because sizing a pane needs `&mut self.panes` while
+        // the walk borrows `self.sessions`.
+        let mut grids: Vec<(PaneId, usize, usize)> = Vec::new();
+        for window in &session.windows {
+            for (id, _, _, w, h) in window.bounds() {
+                let (cols, rows) = pane_grid(w, h);
+                grids.push((id, cols, rows));
+            }
+        }
+        for (id, cols, rows) in grids {
+            if let Some(pane) = self.find_pane_mut(id) {
+                pane.buffer.resize(cols, rows);
+            }
         }
     }
 
@@ -1422,7 +1555,7 @@ impl Multiplexer {
         self.next_session_id = self.next_session_id.saturating_add(1);
 
         let pane_id = PaneId(self.panes.len());
-        let pane = Pane::new(pane_id, 80, 24);
+        let pane = Pane::new(pane_id, INITIAL_COLS, INITIAL_ROWS);
         self.panes.push(pane);
 
         let mut session = Session::new(sid, name, self.current_time);
@@ -1435,6 +1568,7 @@ impl Multiplexer {
 
         self.sessions.push(session);
         self.active_session = self.sessions.len().saturating_sub(1);
+        self.relayout();
         self.set_status(&format!("Created session: {name}"));
     }
 
@@ -1453,6 +1587,10 @@ impl Multiplexer {
             session.attached = true;
             self.active_session = index;
             let name = session.name.clone();
+            // The session being attached has not been sized while it was
+            // detached, and its windows may have been laid out under a
+            // different client.
+            self.relayout();
             self.set_status(&format!("Attached to session: {name}"));
         }
     }
@@ -1465,6 +1603,7 @@ impl Multiplexer {
             if self.active_session >= self.sessions.len() {
                 self.active_session = self.sessions.len().saturating_sub(1);
             }
+            self.relayout();
             self.set_status(&format!("Killed session: {name}"));
         }
     }
@@ -1476,7 +1615,7 @@ impl Multiplexer {
     /// Create a new window in the current session.
     fn new_window(&mut self) {
         let pane_id = PaneId(self.panes.len());
-        let pane = Pane::new(pane_id, 80, 24);
+        let pane = Pane::new(pane_id, INITIAL_COLS, INITIAL_ROWS);
         self.panes.push(pane);
 
         if let Some(session) = self.active_session_mut() {
@@ -1489,6 +1628,7 @@ impl Multiplexer {
             session.windows.push(window);
             session.active_window = session.windows.len().saturating_sub(1);
         }
+        self.relayout();
     }
 
     /// Close the current window. If it's the last window, detach.
@@ -1544,7 +1684,7 @@ impl Multiplexer {
     /// Split the active pane in the given direction.
     fn split_pane(&mut self, direction: SplitDir) {
         let pane_id = PaneId(self.panes.len());
-        let pane = Pane::new(pane_id, 80, 24);
+        let pane = Pane::new(pane_id, INITIAL_COLS, INITIAL_ROWS);
         self.panes.push(pane);
 
         if let Some(session) = self.active_session_mut()
@@ -1557,6 +1697,9 @@ impl Multiplexer {
             window.layout.split_pane(target, pane_id, direction);
             window.active_pane = pane_id;
         }
+        // The pane that was split is now half the size it was, and the new one
+        // has only the placeholder grid. Both learn their real size here.
+        self.relayout();
     }
 
     /// Close the active pane. If it's the last pane, close the window.
@@ -1588,6 +1731,8 @@ impl Multiplexer {
                 pane.alive = false;
             }
         }
+        // Whatever pane absorbed the closed one's space is now larger.
+        self.relayout();
     }
 
     /// Navigate to the next pane in the active window.
@@ -1628,6 +1773,7 @@ impl Multiplexer {
             let delta = if grow { 0.05 } else { -0.05 };
             window.layout.adjust_ratio(window.active_pane, delta);
         }
+        self.relayout();
     }
 
     /// Apply a layout preset to the current window.
@@ -1639,6 +1785,7 @@ impl Multiplexer {
             window.layout = preset.build(&pane_ids);
             window.preset = preset;
         }
+        self.relayout();
     }
 
     /// Swap the active pane with the next pane.
@@ -1841,7 +1988,18 @@ impl Multiplexer {
     // ========================================================================
 
     /// Render the entire multiplexer UI.
-    fn render(&self) -> Vec<RenderCommand> {
+    ///
+    /// Takes `&mut self` because a pane's grid is part of what a frame
+    /// decides: the layout walk below is the only thing that knows how large
+    /// each pane is, so the frame that paints a pane is also the frame that
+    /// has to tell its terminal how large it is. Doing that here rather than
+    /// relying on every mutation to remember makes a pane drawn at one size
+    /// and wrapping at another unreachable, rather than merely unlikely.
+    /// [`Self::relayout`] is idempotent, so the mutations calling it too costs
+    /// nothing.
+    fn render(&mut self) -> Vec<RenderCommand> {
+        self.relayout();
+
         let mut cmds = Vec::with_capacity(256);
 
         let Some(session) = self.active_session() else {
@@ -1869,9 +2027,7 @@ impl Multiplexer {
 
         // Pane area
         if let Some(window) = session.active_window() {
-            let pane_area_y = TAB_BAR_HEIGHT;
-            let pane_area_h = WINDOW_HEIGHT - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
-            let bounds = window.layout.compute_bounds(0.0, pane_area_y, WINDOW_WIDTH, pane_area_h);
+            let bounds = window.bounds();
 
             for (pane_id, x, y, w, h) in &bounds {
                 let is_active = *pane_id == window.active_pane;
@@ -1983,11 +2139,13 @@ impl Multiplexer {
 
         // Render terminal content
         if let Some(pane) = self.find_pane(pane_id) {
-            let content_x = x + 2.0;
-            let content_y = y + 2.0;
+            let content_x = x + PANE_CONTENT_INSET;
+            let content_y = y + PANE_CONTENT_INSET;
             let (cell_w, cell_h) = (char_width(), char_height());
-            let visible_rows = ((height - 4.0) / cell_h) as usize;
-            let visible_cols = ((width - 4.0) / cell_w) as usize;
+            // The same conversion the layout pass used to size this pane's
+            // terminal, so what is drawn and what was written into are the
+            // same grid rather than two independent readings of one rectangle.
+            let (visible_cols, visible_rows) = pane_grid(width, height);
 
             // The grid, and only the grid, is drawn fixed-pitch: `char_width`
             // measured in this family, so the glyphs have to be drawn in it
@@ -2004,6 +2162,8 @@ impl Multiplexer {
             // buffer's own row count so a pane taller than its terminal draws
             // blank space below the grid rather than pulling extra history up
             // into it -- what is on screen must stay what the program wrote.
+            // The layout pass keeps the two equal for any pane that fits
+            // inside MAX_ROWS; the cap is what a pane taller than that gets.
             let capacity = visible_rows.min(pane.buffer.rows);
             let back = if pane.copy_mode { pane.copy_scroll } else { 0 };
             let window = pane.buffer.view_rows(capacity, back);
@@ -3080,7 +3240,7 @@ mod tests {
 
     #[test]
     fn test_mux_render_nonempty() {
-        let mux = Multiplexer::new();
+        let mut mux = Multiplexer::new();
         let cmds = mux.render();
         assert!(!cmds.is_empty());
     }
@@ -3450,12 +3610,12 @@ mod tests {
         for pane in &mut app.panes {
             pane.buffer = buffer_with_lines(24, 200);
         }
-        let live = drawn_text(&app);
+        let live = drawn_text(&mut app);
         assert!(live.contains("line199"), "the live screen shows the newest line");
         assert!(!live.contains("line100"), "and not one from deep in the history");
 
         app.process_prefix_key('g');
-        let top = drawn_text(&app);
+        let top = drawn_text(&mut app);
         assert_ne!(top, live, "scrolling to the top drew the same thing");
         assert!(
             !top.contains("line199"),
@@ -3463,12 +3623,351 @@ mod tests {
         );
 
         app.process_prefix_key('G');
-        assert_eq!(drawn_text(&app), live, "returning to the live screen differs from it");
+        assert_eq!(drawn_text(&mut app), live, "returning to the live screen differs from it");
+    }
+
+    // --- Pane sizing ---
+
+    /// Every pane of the attached session paired with the grid its drawn
+    /// rectangle calls for.
+    ///
+    /// The expectation comes from the layout walk rather than from the
+    /// buffers being checked against it, so a pane that was never sized
+    /// cannot pass by agreeing with itself.
+    ///
+    /// It does *not* independently check the layout walk: a helper that
+    /// asks [`Window::bounds`] where the panes are cannot notice
+    /// [`Window::bounds`] putting them in the wrong place. Mutation testing
+    /// confirmed that blind spot — drawing the panes over the tab bar left
+    /// every test here green. `no_cell_is_drawn_over_the_chrome` is the one
+    /// that covers it, by taking its bounds from the layout constants
+    /// directly.
+    fn expected_grids(app: &Multiplexer) -> Vec<(PaneId, usize, usize)> {
+        app.active_session()
+            .into_iter()
+            .flat_map(|s| s.windows.iter())
+            .flat_map(Window::bounds)
+            .map(|(id, _, _, w, h)| {
+                let (cols, rows) = pane_grid(w, h);
+                (id, cols, rows)
+            })
+            .collect()
+    }
+
+    /// Panics unless every pane's terminal is the size the pane is drawn.
+    fn assert_grids_match(app: &Multiplexer, after: &str) {
+        let expected = expected_grids(app);
+        assert!(!expected.is_empty(), "no panes to check after {after}");
+        for (id, cols, rows) in expected {
+            let pane = app.find_pane(id).expect("a laid-out pane exists");
+            assert_eq!(
+                (pane.buffer.cols, pane.buffer.rows),
+                (cols, rows),
+                "after {after}, {id:?} is drawn {cols}x{rows} \
+                 but its terminal is {}x{}",
+                pane.buffer.cols,
+                pane.buffer.rows,
+            );
+        }
+    }
+
+    /// A pane occupying the whole window has to hold more than the 80x24 every
+    /// terminal starts life at, or none of the tests below distinguish a grid
+    /// that was sized from one that was merely never touched.
+    #[test]
+    fn a_full_window_pane_is_larger_than_the_placeholder_grid() {
+        let app = Multiplexer::new();
+        let pane = app.find_pane(PaneId(0)).expect("the initial pane");
+        assert!(
+            pane.buffer.cols > INITIAL_COLS && pane.buffer.rows > INITIAL_ROWS,
+            "a {WINDOW_WIDTH}x{WINDOW_HEIGHT} window holds only {}x{} cells",
+            pane.buffer.cols,
+            pane.buffer.rows,
+        );
+        assert_grids_match(&app, "startup");
+    }
+
+    /// The claim in full: after *any* change to the arrangement, every pane's
+    /// terminal is the size of the rectangle it is drawn in.
+    ///
+    /// Deliberately never renders. [`Multiplexer::render`] resizes as a
+    /// backstop, so a frame between the steps would hide a mutation that
+    /// forgot to say the arrangement had changed — which is precisely the
+    /// failure this test is for.
+    #[test]
+    fn every_pane_learns_the_rectangle_it_is_drawn_in() {
+        /// One named change to the arrangement of panes.
+        type Step = (&'static str, fn(&mut Multiplexer));
+
+        let mut app = Multiplexer::new();
+        assert_grids_match(&app, "startup");
+
+        let steps: [Step; 14] = [
+            ("a vertical split", |a| a.split_pane(SplitDir::Vertical)),
+            ("a horizontal split", |a| a.split_pane(SplitDir::Horizontal)),
+            ("growing the active pane", |a| a.resize_pane(true)),
+            ("shrinking the active pane", |a| a.resize_pane(false)),
+            ("the even-horizontal layout", |a| {
+                a.apply_layout(LayoutPreset::EvenHorizontal);
+            }),
+            ("the main-vertical layout", |a| {
+                a.apply_layout(LayoutPreset::MainVertical);
+            }),
+            ("the tiled layout", |a| a.apply_layout(LayoutPreset::Tiled)),
+            ("a new window", Multiplexer::new_window),
+            ("a split in the new window", |a| {
+                a.split_pane(SplitDir::Vertical);
+            }),
+            ("switching windows", Multiplexer::next_window),
+            ("closing a pane", Multiplexer::close_pane),
+            ("a new session", |a| a.new_session("second")),
+            ("a split in the new session", |a| {
+                a.split_pane(SplitDir::Horizontal);
+            }),
+            ("attaching back to the first session", |a| a.attach(0)),
+        ];
+        for (name, step) in steps {
+            step(&mut app);
+            assert_grids_match(&app, name);
+        }
+    }
+
+    /// Splitting halves the space, so it has to halve the grid: two panes that
+    /// both still believe they are full width is the original bug exactly.
+    #[test]
+    fn splitting_a_pane_halves_the_grid_of_both_halves() {
+        let mut app = Multiplexer::new();
+        let whole = app.find_pane(PaneId(0)).expect("a pane").buffer.cols;
+        let tall = app.find_pane(PaneId(0)).expect("a pane").buffer.rows;
+
+        app.split_pane(SplitDir::Vertical);
+        let ids = app
+            .active_session()
+            .expect("a session")
+            .active_window()
+            .expect("a window")
+            .layout
+            .pane_ids();
+        assert_eq!(ids.len(), 2);
+
+        let cols: Vec<usize> = ids
+            .iter()
+            .map(|id| app.find_pane(*id).expect("a pane").buffer.cols)
+            .collect();
+        for (id, c) in ids.iter().zip(&cols) {
+            assert!(
+                *c < whole,
+                "{id:?} is half the window wide but still has {c} of {whole} columns"
+            );
+            // A side-by-side split takes nothing off the height.
+            assert_eq!(app.find_pane(*id).expect("a pane").buffer.rows, tall);
+        }
+        // Between them the halves account for the whole width, less the border
+        // and the cell each loses to its own rounding.
+        let sum = cols[0] + cols[1];
+        assert!(
+            sum <= whole && sum + 3 >= whole,
+            "two halves of a {whole}-column pane came to {sum} columns"
+        );
+    }
+
+    /// The user-visible claim. A line that fits across the pane must be drawn
+    /// across the pane — under the fixed 80-column grid it folded at column 80
+    /// with a third of the pane left blank beside the fold.
+    #[test]
+    fn a_line_that_fits_the_pane_is_not_folded() {
+        let mut app = Multiplexer::new();
+        let cols = app.find_pane(PaneId(0)).expect("a pane").buffer.cols;
+        // One short of the full width: longer than the placeholder grid, and
+        // still inside the pane, so a fold can only be the grid being wrong.
+        let width = cols - 1;
+        assert!(width > INITIAL_COLS);
+        let line: String = (0..width)
+            .map(|i| char::from(b'a' + u8::try_from(i % 26).expect("under 26")))
+            .collect();
+
+        app.active_pane_mut().expect("a pane").feed(&line);
+        {
+            let pane = app.active_pane_mut().expect("a pane");
+            assert_eq!(pane.buffer.cursor_row, 0, "the line folded inside the pane");
+            assert_eq!(line_text(&pane.buffer.cells[0]), line);
+        }
+        // And it reaches the screen whole, not just the buffer.
+        assert!(
+            drawn_text(&mut app).contains(&line),
+            "the pane drew a folded line"
+        );
+    }
+
+    /// A pane too small to hold a character is still a terminal, and a
+    /// nonsensical rectangle must not become a nonsensical grid — a
+    /// zero-column buffer would divide the cursor arithmetic by nothing, and a
+    /// zero-row one would make every page key a no-op.
+    #[test]
+    fn a_grid_is_never_smaller_than_one_cell_or_larger_than_the_maximum() {
+        for (w, h) in [
+            (0.0, 0.0),
+            (1.0, 1.0),
+            (-100.0, -100.0),
+            (f32::NAN, f32::NAN),
+            (f32::INFINITY, f32::NEG_INFINITY),
+            (1.0e9, 1.0e9),
+        ] {
+            let (cols, rows) = pane_grid(w, h);
+            assert!(
+                cols >= 1 && rows >= 1,
+                "{w}x{h} px gave a {cols}x{rows} grid"
+            );
+            assert!(
+                cols <= MAX_COLS && rows <= MAX_ROWS,
+                "{w}x{h} px gave a {cols}x{rows} grid"
+            );
+        }
+    }
+
+    /// A frame is the last chance to notice. Whatever else has happened to a
+    /// pane's grid, painting it starts by putting it back in step with the
+    /// rectangle about to be drawn — so a future mutation that changes the
+    /// arrangement without saying so costs a frame's lag, not a terminal that
+    /// wraps in the wrong place until the next split.
+    #[test]
+    fn a_frame_puts_a_pane_that_drifted_back_in_step() {
+        let mut app = Multiplexer::new();
+        app.split_pane(SplitDir::Vertical);
+        let want = expected_grids(&app);
+
+        // Drift every pane behind the multiplexer's back, the way a layout
+        // change that forgot to say so would.
+        for pane in &mut app.panes {
+            pane.buffer.resize(INITIAL_COLS, INITIAL_ROWS);
+        }
+        assert_ne!(
+            (
+                app.find_pane(PaneId(0)).expect("a pane").buffer.cols,
+                app.find_pane(PaneId(0)).expect("a pane").buffer.rows,
+            ),
+            (want[0].1, want[0].2),
+            "the drift this test relies on did not take"
+        );
+
+        let _ = app.render();
+        assert_grids_match(&app, "a frame drawn after the grids drifted");
+    }
+
+    /// A pane's grid has to fit inside the pane at *every* size, not merely at
+    /// the handful a 1200x800 window happens to produce.
+    ///
+    /// Stated as arithmetic over a fine sweep of sizes because the inset is
+    /// smaller than a cell: dropping it changes the column count only at those
+    /// widths where the lost four pixels straddle a cell boundary, which a
+    /// check against one live layout will miss almost every time.
+    #[test]
+    fn a_grid_always_fits_inside_the_pane_that_holds_it() {
+        let (cw, ch) = (char_width(), char_height());
+        let inset = PANE_CONTENT_INSET * 2.0;
+        // From the smallest pane the layout will produce up to the whole
+        // window — a range in which neither MAX_COLS nor MAX_ROWS binds, so
+        // what is being checked is the rounding and not the cap.
+        let mut side = MIN_PANE_SIZE;
+        while side <= WINDOW_WIDTH {
+            let (cols, rows) = pane_grid(side, side);
+            #[allow(clippy::cast_precision_loss)]
+            let (wide, tall) = (cols as f32 * cw, rows as f32 * ch);
+            assert!(
+                inset + wide <= side,
+                "{cols} columns plus the inset need {} px of a {side} px pane",
+                inset + wide
+            );
+            assert!(
+                inset + tall <= side,
+                "{rows} rows plus the inset need {} px of a {side} px pane",
+                inset + tall
+            );
+            side += 0.5;
+        }
+    }
+
+    /// The grid lives between the tab bar and the status bar, and inside the
+    /// window. A cell drawn over the chrome is a cell the user cannot read.
+    ///
+    /// The bounds here are the layout constants rather than
+    /// [`Window::bounds`], deliberately: a test that asks the layout walk
+    /// where the panes are cannot notice the layout walk putting them in the
+    /// wrong place.
+    #[test]
+    fn no_cell_is_drawn_over_the_chrome() {
+        let mut app = Multiplexer::new();
+        app.split_pane(SplitDir::Horizontal);
+        for pane in &mut app.panes {
+            let count = pane.buffer.cols * pane.buffer.rows;
+            pane.feed(&"x".repeat(count));
+        }
+
+        let (cw, ch) = (char_width(), char_height());
+        let bottom = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
+        let mut cells = 0_usize;
+        for cmd in &app.render() {
+            if let RenderCommand::Text {
+                x, y, font_size, ..
+            } = cmd
+                && (font_size - CELL_FONT_SIZE).abs() < 0.01
+            {
+                cells += 1;
+                assert!(*y >= TAB_BAR_HEIGHT, "a cell at y={y} is over the tab bar");
+                assert!(y + ch <= bottom, "a cell at y={y} is over the status bar");
+                assert!(*x >= 0.0, "a cell at x={x} is off the left of the window");
+                assert!(
+                    x + cw <= WINDOW_WIDTH,
+                    "a cell at x={x} runs off the window"
+                );
+            }
+        }
+        assert!(cells > 1000, "only {cells} cells were drawn");
+    }
+
+    /// Nothing the grid draws may land outside the pane it belongs to.
+    ///
+    /// The paint and the sizing take their cell counts from one function; this
+    /// is the check that the rectangle they were both handed is the rectangle
+    /// actually painted. Every pane is filled edge to edge first, so the far
+    /// corner of each grid is drawn rather than merely reckoned.
+    #[test]
+    fn no_cell_is_drawn_outside_the_pane_it_belongs_to() {
+        let mut app = Multiplexer::new();
+        app.split_pane(SplitDir::Vertical);
+        app.split_pane(SplitDir::Horizontal);
+        for pane in &mut app.panes {
+            let count = pane.buffer.cols * pane.buffer.rows;
+            pane.feed(&"x".repeat(count));
+        }
+
+        let bounds = app
+            .active_session()
+            .expect("a session")
+            .active_window()
+            .expect("a window")
+            .bounds();
+        let (cw, ch) = (char_width(), char_height());
+        let mut cells = 0_usize;
+        for cmd in &app.render() {
+            if let RenderCommand::Text {
+                x, y, font_size, ..
+            } = cmd
+                && (font_size - CELL_FONT_SIZE).abs() < 0.01
+            {
+                cells += 1;
+                let inside = bounds.iter().any(|(_, px, py, pw, ph)| {
+                    x >= px && y >= py && x + cw <= px + pw && y + ch <= py + ph
+                });
+                assert!(inside, "a cell at ({x}, {y}) is outside every pane");
+            }
+        }
+        assert!(cells > 1000, "only {cells} cells were drawn");
     }
 
     /// Every glyph the render pass emits at cell size, concatenated. Cells are
     /// drawn one character at a time, so this reassembles the screen as text.
-    fn drawn_text(app: &Multiplexer) -> String {
+    fn drawn_text(app: &mut Multiplexer) -> String {
         app.render()
             .iter()
             .filter_map(|cmd| match cmd {

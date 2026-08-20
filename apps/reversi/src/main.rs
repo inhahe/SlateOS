@@ -71,23 +71,28 @@ const AI_DEPTH: i32 = 4;
 
 // ── Directions for flipping (row_delta, col_delta) ──────────────────
 const DIRECTIONS: [(i32, i32); 8] = [
-    (-1, -1), (-1, 0), (-1, 1),
-    (0, -1),           (0, 1),
-    (1, -1),  (1, 0),  (1, 1),
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, -1),
+    (0, 1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
 ];
 
 // ── Positional weights for AI evaluation ────────────────────────────
 // Corners are extremely valuable, edges are good, squares adjacent to
 // corners (X-squares and C-squares) are dangerous.
 const POSITION_WEIGHTS: [[i32; 8]; 8] = [
-    [120, -20,  20,   5,   5,  20, -20, 120],
-    [-20, -40,  -5,  -5,  -5,  -5, -40, -20],
-    [ 20,  -5,  15,   3,   3,  15,  -5,  20],
-    [  5,  -5,   3,   3,   3,   3,  -5,   5],
-    [  5,  -5,   3,   3,   3,   3,  -5,   5],
-    [ 20,  -5,  15,   3,   3,  15,  -5,  20],
-    [-20, -40,  -5,  -5,  -5,  -5, -40, -20],
-    [120, -20,  20,   5,   5,  20, -20, 120],
+    [120, -20, 20, 5, 5, 20, -20, 120],
+    [-20, -40, -5, -5, -5, -5, -40, -20],
+    [20, -5, 15, 3, 3, 15, -5, 20],
+    [5, -5, 3, 3, 3, 3, -5, 5],
+    [5, -5, 3, 3, 3, 3, -5, 5],
+    [20, -5, 15, 3, 3, 15, -5, 20],
+    [-20, -40, -5, -5, -5, -5, -40, -20],
+    [120, -20, 20, 5, 5, 20, -20, 120],
 ];
 
 // ── Cell state ──────────────────────────────────────────────────────
@@ -493,7 +498,10 @@ impl MoveRecord {
             Cell::White => "W",
             Cell::Empty => "?",
         };
-        format!("{color_str}:{col_char}{row_num}(+{flipped})", flipped = self.flipped)
+        format!(
+            "{color_str}:{col_char}{row_num}(+{flipped})",
+            flipped = self.flipped
+        )
     }
 }
 
@@ -547,22 +555,18 @@ impl ReversiApp {
         }
 
         match event.key {
-            Key::Up
-                if self.cursor_row > 0 => {
-                    self.cursor_row -= 1;
-                }
-            Key::Down
-                if self.cursor_row < 7 => {
-                    self.cursor_row += 1;
-                }
-            Key::Left
-                if self.cursor_col > 0 => {
-                    self.cursor_col -= 1;
-                }
-            Key::Right
-                if self.cursor_col < 7 => {
-                    self.cursor_col += 1;
-                }
+            Key::Up if self.cursor_row > 0 => {
+                self.cursor_row -= 1;
+            }
+            Key::Down if self.cursor_row < 7 => {
+                self.cursor_row += 1;
+            }
+            Key::Left if self.cursor_col > 0 => {
+                self.cursor_col -= 1;
+            }
+            Key::Right if self.cursor_col < 7 => {
+                self.cursor_col += 1;
+            }
             Key::Enter | Key::Space => {
                 self.try_place_piece();
             }
@@ -625,10 +629,7 @@ impl ReversiApp {
                 return;
             }
             // Current player keeps the turn
-            self.message = format!(
-                "{} has no legal moves — turn passes!",
-                color_name(next)
-            );
+            self.message = format!("{} has no legal moves — turn passes!", color_name(next));
             // current_turn stays the same
         }
 
@@ -687,13 +688,9 @@ impl ReversiApp {
         let black_count = self.board.count(Cell::Black);
         let white_count = self.board.count(Cell::White);
         if self.current_turn == Cell::Black {
-            self.message = format!(
-                "Your turn (Black). B:{black_count} W:{white_count}"
-            );
+            self.message = format!("Your turn (Black). B:{black_count} W:{white_count}");
         } else {
-            self.message = format!(
-                "AI thinking (White)... B:{black_count} W:{white_count}"
-            );
+            self.message = format!("AI thinking (White)... B:{black_count} W:{white_count}");
         }
     }
 
@@ -842,7 +839,8 @@ impl ReversiApp {
                 }
 
                 // Cursor highlight
-                if row == self.cursor_row && col == self.cursor_col
+                if row == self.cursor_row
+                    && col == self.cursor_col
                     && self.phase == Phase::Playing
                     && self.current_turn == Cell::Black
                 {
@@ -931,7 +929,11 @@ impl ReversiApp {
             x: BOARD_OFFSET_X,
             y: BOARD_OFFSET_Y + CELL_SIZE * 8.0 + 20.0,
             text: self.message.clone(),
-            color: if self.phase == Phase::GameOver { PEACH } else { TEXT_COLOR },
+            color: if self.phase == Phase::GameOver {
+                PEACH
+            } else {
+                TEXT_COLOR
+            },
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(CELL_SIZE * 8.0 + 250.0),
@@ -1013,7 +1015,11 @@ impl ReversiApp {
             x: px + 15.0,
             y: py + 20.0,
             text: turn_text,
-            color: if self.phase == Phase::GameOver { RED } else { turn_color },
+            color: if self.phase == Phase::GameOver {
+                RED
+            } else {
+                turn_color
+            },
             font_size: INFO_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(190.0),
@@ -1149,7 +1155,11 @@ impl ReversiApp {
         };
         for (idx, record) in self.move_history[history_start..].iter().enumerate() {
             let move_num = history_start + idx + 1;
-            let move_color = if record.color == Cell::Black { BLUE } else { PEACH };
+            let move_color = if record.color == Cell::Black {
+                BLUE
+            } else {
+                PEACH
+            };
             cmds.push(RenderCommand::Text {
                 x: px + 15.0,
                 y: py + 225.0 + idx as f32 * 18.0,
@@ -1344,10 +1354,7 @@ mod tests {
     #[test]
     fn test_flip_horizontal_right() {
         // Black at (3,0), White at (3,1), place Black at (3,2)
-        let board = board_with(&[
-            (3, 0, Cell::Black),
-            (3, 1, Cell::White),
-        ]);
+        let board = board_with(&[(3, 0, Cell::Black), (3, 1, Cell::White)]);
         let flips = board.get_flips(Pos::new(3, 2), Cell::Black);
         // No flip: Black at (3,0) flanks (3,1) if placed at (3,2)?
         // Direction left (-0, -1) from (3,2): sees White at (3,1), then Black at (3,0). Yes!
@@ -1357,10 +1364,7 @@ mod tests {
 
     #[test]
     fn test_flip_horizontal_left() {
-        let board = board_with(&[
-            (3, 5, Cell::White),
-            (3, 6, Cell::Black),
-        ]);
+        let board = board_with(&[(3, 5, Cell::White), (3, 6, Cell::Black)]);
         // Place Black at (3,4) — direction right: sees White at (3,5), then Black at (3,6)
         let flips = board.get_flips(Pos::new(3, 4), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1369,10 +1373,7 @@ mod tests {
 
     #[test]
     fn test_flip_vertical_down() {
-        let board = board_with(&[
-            (2, 3, Cell::Black),
-            (3, 3, Cell::White),
-        ]);
+        let board = board_with(&[(2, 3, Cell::Black), (3, 3, Cell::White)]);
         // Place Black at (4,3) — direction up: sees White at (3,3), then Black at (2,3)
         let flips = board.get_flips(Pos::new(4, 3), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1381,10 +1382,7 @@ mod tests {
 
     #[test]
     fn test_flip_vertical_up() {
-        let board = board_with(&[
-            (4, 3, Cell::White),
-            (5, 3, Cell::Black),
-        ]);
+        let board = board_with(&[(4, 3, Cell::White), (5, 3, Cell::Black)]);
         // Place Black at (3,3) — direction down: sees White at (4,3), then Black at (5,3)
         let flips = board.get_flips(Pos::new(3, 3), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1393,10 +1391,7 @@ mod tests {
 
     #[test]
     fn test_flip_diagonal_down_right() {
-        let board = board_with(&[
-            (2, 2, Cell::Black),
-            (3, 3, Cell::White),
-        ]);
+        let board = board_with(&[(2, 2, Cell::Black), (3, 3, Cell::White)]);
         // Place Black at (4,4) — direction up-left: sees White at (3,3), then Black at (2,2)
         let flips = board.get_flips(Pos::new(4, 4), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1405,10 +1400,7 @@ mod tests {
 
     #[test]
     fn test_flip_diagonal_up_left() {
-        let board = board_with(&[
-            (4, 4, Cell::White),
-            (5, 5, Cell::Black),
-        ]);
+        let board = board_with(&[(4, 4, Cell::White), (5, 5, Cell::Black)]);
         // Place Black at (3,3) — direction down-right: sees White at (4,4), then Black at (5,5)
         let flips = board.get_flips(Pos::new(3, 3), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1417,10 +1409,7 @@ mod tests {
 
     #[test]
     fn test_flip_diagonal_down_left() {
-        let board = board_with(&[
-            (2, 5, Cell::Black),
-            (3, 4, Cell::White),
-        ]);
+        let board = board_with(&[(2, 5, Cell::Black), (3, 4, Cell::White)]);
         // Place Black at (4,3) — direction up-right: sees White at (3,4), then Black at (2,5)
         let flips = board.get_flips(Pos::new(4, 3), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1429,10 +1418,7 @@ mod tests {
 
     #[test]
     fn test_flip_diagonal_up_right() {
-        let board = board_with(&[
-            (4, 2, Cell::White),
-            (5, 1, Cell::Black),
-        ]);
+        let board = board_with(&[(4, 2, Cell::White), (5, 1, Cell::Black)]);
         // Place Black at (3,3) — direction down-left: sees White at (4,2), then Black at (5,1)
         let flips = board.get_flips(Pos::new(3, 3), Cell::Black);
         assert_eq!(flips.len(), 1);
@@ -1473,10 +1459,7 @@ mod tests {
     #[test]
     fn test_no_flip_with_gap() {
         // Black at (0,0), Empty at (0,1), White at (0,2) — no flank because of gap
-        let board = board_with(&[
-            (0, 0, Cell::Black),
-            (0, 2, Cell::White),
-        ]);
+        let board = board_with(&[(0, 0, Cell::Black), (0, 2, Cell::White)]);
         let flips = board.get_flips(Pos::new(0, 3), Cell::Black);
         // Direction left from (0,3): White at (0,2), then Empty at (0,1) — no flank
         assert_eq!(flips.len(), 0);
@@ -1485,10 +1468,7 @@ mod tests {
     #[test]
     fn test_no_flip_same_color() {
         // Black at (0,0), Black at (0,1) — can't flip own pieces
-        let board = board_with(&[
-            (0, 0, Cell::Black),
-            (0, 1, Cell::Black),
-        ]);
+        let board = board_with(&[(0, 0, Cell::Black), (0, 1, Cell::Black)]);
         let flips = board.get_flips(Pos::new(0, 2), Cell::Black);
         assert_eq!(flips.len(), 0);
     }
@@ -1496,9 +1476,7 @@ mod tests {
     #[test]
     fn test_no_flip_edge_of_board() {
         // White at (0,6), place Black at (0,7) — no Black beyond edge
-        let board = board_with(&[
-            (0, 6, Cell::White),
-        ]);
+        let board = board_with(&[(0, 6, Cell::White)]);
         let flips = board.get_flips(Pos::new(0, 7), Cell::Black);
         assert_eq!(flips.len(), 0);
     }
@@ -1612,10 +1590,7 @@ mod tests {
     fn test_game_over_neither_can_move() {
         // Create a position where neither can move but board isn't full
         // Isolated single pieces with no adjacent opponent pieces
-        let board = board_with(&[
-            (0, 0, Cell::Black),
-            (7, 7, Cell::White),
-        ]);
+        let board = board_with(&[(0, 0, Cell::Black), (7, 7, Cell::White)]);
         assert!(board.is_game_over());
     }
 
@@ -1644,10 +1619,7 @@ mod tests {
 
     #[test]
     fn test_winner_tie() {
-        let board = board_with(&[
-            (0, 0, Cell::Black),
-            (0, 1, Cell::White),
-        ]);
+        let board = board_with(&[(0, 0, Cell::Black), (0, 1, Cell::White)]);
         assert_eq!(board.winner(), Cell::Empty);
     }
 
@@ -1712,8 +1684,10 @@ mod tests {
         // The initial moves should not be at X-squares
         let mv = mv.unwrap();
         let x_squares = [
-            Pos::new(1, 1), Pos::new(1, 6),
-            Pos::new(6, 1), Pos::new(6, 6),
+            Pos::new(1, 1),
+            Pos::new(1, 6),
+            Pos::new(6, 1),
+            Pos::new(6, 6),
         ];
         // AI should prefer non-X-square moves at the start
         assert!(!x_squares.contains(&mv), "AI should avoid X-squares early");
@@ -1984,7 +1958,10 @@ mod tests {
         let app = ReversiApp::new();
         let cmds = app.render();
         // Initial board has 4 pieces, each rendered as shadow + body + border = 12 fill/stroke cmds
-        let fill_count = cmds.iter().filter(|cmd| matches!(cmd, RenderCommand::FillRect { .. })).count();
+        let fill_count = cmds
+            .iter()
+            .filter(|cmd| matches!(cmd, RenderCommand::FillRect { .. }))
+            .count();
         assert!(fill_count >= 64 + 4); // 64 cells + at least 4 piece bodies
     }
 
@@ -1994,13 +1971,21 @@ mod tests {
         let cmds = app.render();
         // Valid moves rendered as small rounded rectangles (dots)
         // There are 4 valid moves initially for Black
-        let valid_dot_count = cmds.iter().filter(|cmd| {
-            if let RenderCommand::FillRect { color, corner_radii, .. } = cmd {
-                *color == VALID_MOVE_DOT && corner_radii.top_left > 0.0
-            } else {
-                false
-            }
-        }).count();
+        let valid_dot_count = cmds
+            .iter()
+            .filter(|cmd| {
+                if let RenderCommand::FillRect {
+                    color,
+                    corner_radii,
+                    ..
+                } = cmd
+                {
+                    *color == VALID_MOVE_DOT && corner_radii.top_left > 0.0
+                } else {
+                    false
+                }
+            })
+            .count();
         assert_eq!(valid_dot_count, 4);
     }
 

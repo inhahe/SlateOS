@@ -118,6 +118,9 @@ const DETAIL_PANEL_WIDTH: f32 = 300.0;
 const PROPERTY_ROW_HEIGHT: f32 = 22.0;
 const SECTION_HEADER_HEIGHT: f32 = 28.0;
 const QUEUE_PANEL_HEIGHT: f32 = 150.0;
+/// How much of the queue panel is left when it is collapsed: its header bar,
+/// which is always drawn because it is what you click to expand it again.
+const QUEUE_HEADER_HEIGHT: f32 = 28.0;
 const QUEUE_ROW_HEIGHT: f32 = 22.0;
 const TOOLBAR_BTN_WIDTH: f32 = 100.0;
 const TOOLBAR_BTN_HEIGHT: f32 = 28.0;
@@ -1599,22 +1602,145 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
 // Rendering -- partition list
 // ============================================================================
 
+/// How tall the operation queue's panel is right now.
+///
+/// Collapsed it keeps its header, because the header is the thing you click to
+/// open it again. Four places chose between these two numbers by hand and one
+/// of them is the bottom edge of the partition list, so the choice is made
+/// once.
+fn queue_panel_height(app: &PartitionManagerApp) -> f32 {
+    if app.queue_expanded {
+        QUEUE_PANEL_HEIGHT
+    } else {
+        QUEUE_HEADER_HEIGHT
+    }
+}
+
+/// Where the partition list's rows go: one answer for the renderer, the hit
+/// test and the wheel.
+///
+/// Those three each had a spelling of their own, arrived at independently.
+/// The renderer put row 0 at `top + 18 + PARTITION_ROW_HEIGHT` and clipped to
+/// `list_height - 20`; the click spelled that same top out flat, as a
+/// seven-term sum ending `+ PARTITION_ROW_HEIGHT + 18.0`; the wheel used a
+/// *fourth* number — plain `top`, the heading's own y — for where the list
+/// begins, and `queue_top - top - 40` for how tall it is. Each is the same
+/// rectangle described from memory, and they had already drifted apart:
+///
+/// - The clip ran 22 px *past* the bottom the click accepts, so rows were
+///   painted over the queue panel's header where no click could reach them.
+///   That is invisible today only because `render_queue_panel` runs after
+///   `render_partition_list` and paints over the overdraw — paint order doing
+///   a hit test's job.
+/// - The wheel believed the viewport 2 px taller than it is, which makes the
+///   scroll stop 2 px short and leaves the last row's final sliver
+///   permanently below the fold.
+/// - The click accepted a `DISK_MAP_PADDING`-wide strip to the right of the
+///   last painted pixel, and the wheel a `DISK_MAP_PADDING`-wide strip to the
+///   left of the first one.
+///
+/// None of those is reachable through a number this type spells twice, because
+/// it spells each of them once.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PartitionList {
+    /// Left edge of the panel, and of every row in it.
+    left: f32,
+    /// Width of the panel, and of every row in it.
+    width: f32,
+    /// Top of the "Partitions" heading — the panel's own top edge.
+    panel_top: f32,
+    /// Top of row 0 when the list is scrolled to its start.
+    data_top: f32,
+    /// One past the last pixel a row may occupy.
+    bottom: f32,
+}
+
+impl PartitionList {
+    /// Height of the section heading that sits above the column headers.
+    const HEADING_HEIGHT: f32 = 18.0;
+
+    /// Measure the list as it stands in `app`.
+    fn of(app: &PartitionManagerApp) -> Self {
+        let panel_top =
+            TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + DISK_MAP_HEIGHT + DISK_MAP_PADDING * 2.0 + 30.0;
+        let data_top = panel_top + Self::HEADING_HEIGHT + PARTITION_ROW_HEIGHT;
+        Self {
+            left: SIDEBAR_WIDTH + DISK_MAP_PADDING,
+            width: (app.width - SIDEBAR_WIDTH - DETAIL_PANEL_WIDTH - DISK_MAP_PADDING * 2.0)
+                .max(0.0),
+            panel_top,
+            data_top,
+            // A window short enough that the queue panel and the status bar
+            // between them eat the list leaves it with no rows rather than a
+            // negative number of them.
+            bottom: (app.height - STATUS_BAR_HEIGHT - queue_panel_height(app)).max(data_top),
+        }
+    }
+
+    /// Top of the column-header row, which is also where the divider under it
+    /// is drawn.
+    fn header_y(&self) -> f32 {
+        self.panel_top + Self::HEADING_HEIGHT
+    }
+
+    /// Right edge of the panel — one past its last pixel.
+    fn right(&self) -> f32 {
+        self.left + self.width
+    }
+
+    /// Height of the region rows are drawn into and answer clicks in.
+    fn viewport_height(&self) -> f32 {
+        (self.bottom - self.data_top).max(0.0)
+    }
+
+    /// Top of row `index` at scroll offset `scroll`.
+    fn row_y(&self, index: usize, scroll: f32) -> f32 {
+        self.data_top + (index as f32) * PARTITION_ROW_HEIGHT - scroll
+    }
+
+    /// Whether `(x, y)` is in the region the rows are painted in.
+    fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.left && x < self.right() && y >= self.data_top && y < self.bottom
+    }
+
+    /// The row at `y` out of `count`, or `None` — the inverse of
+    /// [`Self::row_y`], and the only thing that answers a click.
+    ///
+    /// A row owns its top edge and not its bottom one, so no pixel names two
+    /// rows. The offset is checked for sign before the cast because a negative
+    /// `f32` cast to `usize` *saturates to zero* in Rust rather than wrapping
+    /// or trapping — a click above the list would otherwise select row 0, and
+    /// a NaN coordinate would select it too.
+    fn row_at(&self, y: f32, scroll: f32, count: usize) -> Option<usize> {
+        if !(y >= self.data_top && y < self.bottom) {
+            return None;
+        }
+        let offset = y - self.data_top + scroll;
+        if !offset.is_finite() || offset < 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let index = (offset / PARTITION_ROW_HEIGHT) as usize;
+        (index < count).then_some(index)
+    }
+
+    /// Furthest the list may scroll: far enough to bring the last row's bottom
+    /// edge onto the viewport's bottom edge, and no further.
+    fn max_scroll(&self, count: usize) -> f32 {
+        ((count as f32) * PARTITION_ROW_HEIGHT - self.viewport_height()).max(0.0)
+    }
+}
+
 fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let disk = match app.current_disk() {
         Some(d) => d,
         None => return,
     };
 
-    let top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + DISK_MAP_HEIGHT + DISK_MAP_PADDING * 2.0 + 30.0;
-    let left = SIDEBAR_WIDTH + DISK_MAP_PADDING;
-    let list_width = app.width - SIDEBAR_WIDTH - DETAIL_PANEL_WIDTH - DISK_MAP_PADDING * 2.0;
-    let queue_h = if app.queue_expanded {
-        QUEUE_PANEL_HEIGHT
-    } else {
-        28.0
-    };
-    let bottom = app.height - STATUS_BAR_HEIGHT - queue_h;
-    let list_height = bottom - top;
+    let geom = PartitionList::of(app);
+    let top = geom.panel_top;
+    let left = geom.left;
+    let list_width = geom.width;
 
     // Section header
     tree.push(RenderCommand::Text {
@@ -1628,7 +1754,7 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
         overflow: TextOverflow::Ellipsis,
     });
 
-    let header_y = top + 18.0;
+    let header_y = geom.header_y();
 
     // Column headers
     let table = Table::with_gap(PARTITION_COLUMNS, left + 4.0, PARTITION_GAP);
@@ -1640,27 +1766,29 @@ fn render_partition_list(tree: &mut RenderTree, app: &PartitionManagerApp) {
     );
 
     // Divider under header
-    let data_top = header_y + PARTITION_ROW_HEIGHT;
+    let data_top = geom.data_top;
     tree.push(RenderCommand::Line {
         x1: left,
         y1: data_top,
-        x2: left + list_width,
+        x2: geom.right(),
         y2: data_top,
         color: COLOR_SURFACE1,
         width: 1.0,
     });
 
-    // Clip partition list
+    // Clip the rows to exactly the region `PartitionList::row_at` answers for,
+    // so a row that is drawn can be clicked and a row that cannot be clicked is
+    // not drawn.
     tree.push(RenderCommand::PushClip {
         x: left,
         y: data_top,
         width: list_width,
-        height: (list_height - 20.0).max(0.0),
+        height: geom.viewport_height(),
     });
 
     let regions = disk.regions();
     for (i, region) in regions.iter().enumerate() {
-        let ry = data_top + (i as f32) * PARTITION_ROW_HEIGHT - app.partition_scroll;
+        let ry = geom.row_y(i, app.partition_scroll);
 
         let is_selected = match (&app.selected_item, region) {
             (SelectedItem::Partition(idx), DiskRegion::Partition(p)) => p.index == *idx,
@@ -2001,11 +2129,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
 // ============================================================================
 
 fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
-    let queue_h = if app.queue_expanded {
-        QUEUE_PANEL_HEIGHT
-    } else {
-        28.0
-    };
+    let queue_h = queue_panel_height(app);
     let top = app.height - STATUS_BAR_HEIGHT - queue_h;
     let left = SIDEBAR_WIDTH;
     let panel_width = app.width - SIDEBAR_WIDTH;
@@ -2932,26 +3056,10 @@ fn handle_left_click(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
     }
 
     // Partition list click
-    let list_top = TITLE_BAR_HEIGHT
-        + TOOLBAR_HEIGHT
-        + DISK_MAP_HEIGHT
-        + DISK_MAP_PADDING * 2.0
-        + 30.0
-        + PARTITION_ROW_HEIGHT
-        + 18.0;
-    let queue_h = if app.queue_expanded {
-        QUEUE_PANEL_HEIGHT
-    } else {
-        28.0
-    };
-    let list_bottom = app.height - STATUS_BAR_HEIGHT - queue_h;
-
-    if y >= list_top
-        && y < list_bottom
-        && x >= SIDEBAR_WIDTH + DISK_MAP_PADDING
-        && x < app.width - DETAIL_PANEL_WIDTH
-    {
-        return handle_partition_list_click(app, y, list_top);
+    let queue_h = queue_panel_height(app);
+    let list = PartitionList::of(app);
+    if list.contains(x, y) {
+        return handle_partition_list_click(app, y, list);
     }
 
     // Queue panel toggle
@@ -3144,7 +3252,7 @@ fn handle_map_click(
 fn handle_partition_list_click(
     app: &mut PartitionManagerApp,
     y: f32,
-    list_top: f32,
+    list: PartitionList,
 ) -> EventResult {
     let disk = match app.current_disk() {
         Some(d) => d,
@@ -3152,7 +3260,9 @@ fn handle_partition_list_click(
     };
 
     let regions = disk.regions();
-    let row = ((y - list_top + app.partition_scroll) / PARTITION_ROW_HEIGHT) as usize;
+    let Some(row) = list.row_at(y, app.partition_scroll, regions.len()) else {
+        return EventResult::Ignored;
+    };
 
     if let Some(region) = regions.get(row) {
         app.selected_item = match region {
@@ -3233,11 +3343,7 @@ fn handle_mouse_move(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
     }
 
     // Queue hover
-    let queue_h = if app.queue_expanded {
-        QUEUE_PANEL_HEIGHT
-    } else {
-        28.0
-    };
+    let queue_h = queue_panel_height(app);
     let queue_top = app.height - STATUS_BAR_HEIGHT - queue_h;
     if y >= queue_top + 28.0 && y < app.height - STATUS_BAR_HEIGHT && x >= SIDEBAR_WIDTH {
         if app.queue_expanded {
@@ -3253,11 +3359,7 @@ fn handle_mouse_move(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
 }
 
 fn handle_scroll(app: &mut PartitionManagerApp, x: f32, y: f32, dy: f32) -> EventResult {
-    let queue_h = if app.queue_expanded {
-        QUEUE_PANEL_HEIGHT
-    } else {
-        28.0
-    };
+    let queue_h = queue_panel_height(app);
     let queue_top = app.height - STATUS_BAR_HEIGHT - queue_h;
 
     // Queue panel scroll
@@ -3275,12 +3377,10 @@ fn handle_scroll(app: &mut PartitionManagerApp, x: f32, y: f32, dy: f32) -> Even
     }
 
     // Partition list scroll
-    let list_top =
-        TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + DISK_MAP_HEIGHT + DISK_MAP_PADDING * 2.0 + 30.0;
-    if y >= list_top && y < queue_top && x >= SIDEBAR_WIDTH && x < app.width - DETAIL_PANEL_WIDTH {
-        let region_count = app.current_disk().map(|d| d.regions().len()).unwrap_or(0);
-        let max_scroll =
-            (region_count as f32 * PARTITION_ROW_HEIGHT - (queue_top - list_top - 40.0)).max(0.0);
+    let list = PartitionList::of(app);
+    if list.contains(x, y) {
+        let region_count = app.current_disk().map_or(0, |d| d.regions().len());
+        let max_scroll = list.max_scroll(region_count);
         app.partition_scroll = (app.partition_scroll
             + wheel::pixels(dy, PARTITION_ROW_HEIGHT))
         .clamp(0.0, max_scroll);
@@ -3764,6 +3864,235 @@ mod tests {
         assert_eq!(r, EventResult::Ignored);
         assert_eq!(app.partition_scroll, 0.0);
         assert_eq!(app.queue_scroll, 0.0);
+    }
+
+    // -- Partition list geometry tests --
+    //
+    // These read the rectangles `render_partition_list` actually emitted and
+    // drive `handle_left_click` at their edges. A test that instead recomputed
+    // the renderer's arithmetic and compared the hit test to *that* would be
+    // worthless: the two would drift together and it would pass through the
+    // drift. And probing row centres would be nearly as bad — a three-pixel
+    // shift is invisible in the middle of a twenty-four-pixel row.
+
+    /// The clip `render_partition_list` pushes around its rows, as
+    /// `(top, bottom)`.
+    fn painted_clip(app: &PartitionManagerApp) -> (f32, f32) {
+        let mut tree = RenderTree::new();
+        render_partition_list(&mut tree, app);
+        tree.commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::PushClip { y, height, .. } => Some((*y, *y + *height)),
+                _ => None,
+            })
+            .expect("the partition list draws no clip")
+    }
+
+    /// Every row background the partition list painted *and did not clip away*,
+    /// as `(index, top)`.
+    fn visible_painted_rows(app: &PartitionManagerApp) -> Vec<(usize, f32)> {
+        let geom = PartitionList::of(app);
+        let (clip_top, clip_bottom) = painted_clip(app);
+        let mut tree = RenderTree::new();
+        render_partition_list(&mut tree, app);
+        tree.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*x - geom.left).abs() < 0.01
+                    && (*width - geom.width).abs() < 0.01
+                    && (*height - PARTITION_ROW_HEIGHT).abs() < 0.01 =>
+                {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            // Only the rows wholly inside the clip are rows the user can see.
+            .filter(|y| *y >= clip_top && *y + PARTITION_ROW_HEIGHT <= clip_bottom)
+            .map(|y| {
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                let index = ((y - geom.row_y(0, app.partition_scroll)) / PARTITION_ROW_HEIGHT)
+                    .round() as usize;
+                (index, y)
+            })
+            .collect()
+    }
+
+    /// What selecting region `index` of the current disk should record.
+    fn region_identity(app: &PartitionManagerApp, index: usize) -> SelectedItem {
+        match app
+            .current_disk()
+            .expect("no disk selected")
+            .regions()
+            .into_iter()
+            .nth(index)
+            .expect("no such region")
+        {
+            DiskRegion::Partition(p) => SelectedItem::Partition(p.index),
+            DiskRegion::Unallocated(_) => SelectedItem::Unallocated(index),
+        }
+    }
+
+    /// Click once at `(x, y)` with nothing previously selected, and report what
+    /// ended up selected.
+    fn click_selects(app: &mut PartitionManagerApp, x: f32, y: f32) -> SelectedItem {
+        app.selected_item = SelectedItem::None;
+        handle_left_click(app, x, y);
+        app.selected_item.clone()
+    }
+
+    #[test]
+    fn every_visible_partition_row_answers_exactly_where_it_was_painted() {
+        let mut app = app_with_long_lists();
+        let mid_x = PartitionList::of(&app).left + 20.0;
+        let rows = visible_painted_rows(&app);
+        assert!(rows.len() >= 8, "only {} rows visible", rows.len());
+        for (index, top) in rows {
+            let want = region_identity(&app, index);
+            // Sweep the row instead of probing its middle, and include both
+            // edges: a walk that is off by one is right in the middle and
+            // wrong only at the ends.
+            for step in 0..8 {
+                let probe = top + (step as f32) * PARTITION_ROW_HEIGHT / 8.0;
+                assert_eq!(
+                    click_selects(&mut app, mid_x, probe),
+                    want,
+                    "row {index} was painted at {top} but {probe} selects something else"
+                );
+            }
+            assert_eq!(
+                click_selects(&mut app, mid_x, top + PARTITION_ROW_HEIGHT - 0.01),
+                want,
+                "row {index}'s last pixel does not belong to it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clip_the_renderer_emits_is_the_region_a_click_lands_in() {
+        // The clip used to run 22 px past the bottom the click accepted, so
+        // rows were painted over the queue panel's header where no click could
+        // reach them. It was invisible only because the queue panel is drawn
+        // afterwards and covered the overdraw.
+        let mut app = app_with_long_lists();
+        let mid_x = PartitionList::of(&app).left + 20.0;
+        let (clip_top, clip_bottom) = painted_clip(&app);
+
+        assert_ne!(
+            click_selects(&mut app, mid_x, clip_top),
+            SelectedItem::None,
+            "the clip's first pixel row selects nothing"
+        );
+        assert_ne!(
+            click_selects(&mut app, mid_x, clip_bottom - 0.01),
+            SelectedItem::None,
+            "the clip's last pixel row selects nothing"
+        );
+        assert_eq!(
+            click_selects(&mut app, mid_x, clip_top - 0.01),
+            SelectedItem::None,
+            "a click above the clip selects a partition anyway"
+        );
+        assert_eq!(
+            click_selects(&mut app, mid_x, clip_bottom),
+            SelectedItem::None,
+            "a click below the clip selects a partition anyway"
+        );
+    }
+
+    #[test]
+    fn nothing_beside_the_painted_list_selects_a_partition() {
+        // The click accepted `x < app.width - DETAIL_PANEL_WIDTH`, which is
+        // `DISK_MAP_PADDING` px to the right of the last pixel the list paints.
+        let mut app = app_with_long_lists();
+        let geom = PartitionList::of(&app);
+        let mid_y = geom.data_top + PARTITION_ROW_HEIGHT / 2.0;
+        assert_eq!(
+            click_selects(&mut app, geom.right(), mid_y),
+            SelectedItem::None,
+            "the gutter right of the list selects a partition"
+        );
+        assert_eq!(
+            click_selects(&mut app, geom.left - 0.01, mid_y),
+            SelectedItem::None,
+            "the gutter left of the list selects a partition"
+        );
+    }
+
+    #[test]
+    fn a_coordinate_that_is_not_a_number_selects_nothing() {
+        // A negative or NaN `f32` cast to `usize` saturates to zero rather than
+        // wrapping, so an unguarded cast names row 0 for a click that is
+        // nowhere at all.
+        let mut app = app_with_long_lists();
+        let geom = PartitionList::of(&app);
+        let mid_x = geom.left + 20.0;
+        for y in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0] {
+            assert_eq!(
+                click_selects(&mut app, mid_x, y),
+                SelectedItem::None,
+                "y = {y} selected a partition"
+            );
+        }
+        assert_eq!(
+            geom.row_at(f32::NAN, 0.0, 40),
+            None,
+            "a NaN names a row directly"
+        );
+    }
+
+    #[test]
+    fn scrolling_to_the_end_brings_the_last_row_fully_into_view() {
+        // The wheel used to compute the viewport as `queue_top - top - 40`,
+        // where the list truly begins 42 px below `top` — so it stopped 2 px
+        // early and the last row's final sliver could never be scrolled up.
+        let mut app = app_with_long_lists();
+        for _ in 0..400 {
+            handle_scroll(&mut app, LIST_POINT.0, LIST_POINT.1, -1.0);
+        }
+        let count = app
+            .current_disk()
+            .expect("no disk selected")
+            .regions()
+            .len();
+        let geom = PartitionList::of(&app);
+        let last_bottom = geom.row_y(count - 1, app.partition_scroll) + PARTITION_ROW_HEIGHT;
+        let (_, clip_bottom) = painted_clip(&app);
+        assert!(
+            (last_bottom - clip_bottom).abs() < 0.01,
+            "scrolled to the end the last row ends at {last_bottom}, not at the \
+             viewport's own bottom {clip_bottom}"
+        );
+    }
+
+    #[test]
+    fn the_wheel_and_the_click_agree_on_where_the_list_is() {
+        // The wheel accepted `x >= SIDEBAR_WIDTH`, a padding-wide strip to the
+        // left of anything the list paints, while the click did not — so the
+        // gutter scrolled a list it was not part of.
+        let mut app = app_with_long_lists();
+        let geom = PartitionList::of(&app);
+        let mid_y = geom.data_top + PARTITION_ROW_HEIGHT / 2.0;
+        for x in [geom.left - 0.01, geom.right()] {
+            app.partition_scroll = 0.0;
+            handle_scroll(&mut app, x, mid_y, -1.0);
+            assert_eq!(
+                app.partition_scroll, 0.0,
+                "x = {x} is outside the painted list but scrolled it"
+            );
+        }
+        app.partition_scroll = 0.0;
+        handle_scroll(&mut app, geom.left, mid_y, -1.0);
+        assert!(
+            app.partition_scroll > 0.0,
+            "the list's own left edge does not scroll it"
+        );
     }
 
     // -- Size formatting tests --

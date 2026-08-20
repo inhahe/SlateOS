@@ -469,7 +469,11 @@ impl BlockStore {
                     length: chunk.len() as u32,
                     hash,
                 });
-                offset += chunk.len() as u64;
+                // A file cannot be longer than the address space, so this
+                // cannot wrap in practice; saturating rather than `+` so a
+                // corrupt length can never wrap the offset back to zero and
+                // silently alias the start of the file.
+                offset = offset.saturating_add(chunk.len() as u64);
             }
         }
 
@@ -647,7 +651,10 @@ impl SnapshotTree {
     /// Allocate the next unique snapshot ID.
     fn alloc_id(&mut self) -> SnapshotId {
         let id = SnapshotId(self.next_id);
-        self.next_id += 1;
+        // Saturating rather than wrapping: reusing id 0 would make two
+        // different snapshots indistinguishable, which is worse than refusing
+        // to allocate any more.
+        self.next_id = self.next_id.saturating_add(1);
         id
     }
 
@@ -749,7 +756,7 @@ impl SnapshotTree {
             }
             path.push(cid);
             current = self.get(cid).and_then(|s| s.parent_id);
-            depth += 1;
+            depth = depth.saturating_add(1);
         }
         path
     }
@@ -797,8 +804,9 @@ impl SnapshotTree {
     pub fn render_tree_ascii(&self) -> Vec<String> {
         let mut lines = Vec::new();
         let roots = self.list_roots();
+        let last_root = roots.len().saturating_sub(1);
         for (i, root_id) in roots.iter().enumerate() {
-            let is_last_root = i == roots.len() - 1;
+            let is_last_root = i == last_root;
             self.render_subtree_ascii(&mut lines, *root_id, "", is_last_root);
         }
         lines
@@ -846,8 +854,9 @@ impl SnapshotTree {
             format!("{prefix}\u{2502}   ") // "│   "
         };
 
+        let last_child = children.len().saturating_sub(1);
         for (i, child_id) in children.iter().enumerate() {
-            let is_last_child = i == children.len() - 1;
+            let is_last_child = i == last_child;
             self.render_subtree_ascii(lines, *child_id, &child_prefix, is_last_child);
         }
     }
@@ -1041,7 +1050,7 @@ impl SnapshotRetention {
         // Phase 2: if still over max_snapshots, delete oldest non-protected.
         let remaining = tree.count().saturating_sub(to_delete.len());
         if remaining > self.max_snapshots {
-            let excess = remaining - self.max_snapshots;
+            let excess = remaining.saturating_sub(self.max_snapshots);
             let mut deleted_in_phase2 = 0;
             for snap in &candidates {
                 if deleted_in_phase2 >= excess {
@@ -1049,7 +1058,7 @@ impl SnapshotRetention {
                 }
                 if !to_delete.contains(&snap.id) {
                     to_delete.push(snap.id);
-                    deleted_in_phase2 += 1;
+                    deleted_in_phase2 = deleted_in_phase2.saturating_add(1);
                 }
             }
         }
@@ -1452,6 +1461,15 @@ fn format_size(bytes: u64) -> String {
 // ============================================================================
 
 #[cfg(test)]
+// Panicking on bad data is what a test is *for*: an `unwrap` that fires names
+// the broken invariant better than a silent `if let` that skips the assertion.
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 

@@ -3692,27 +3692,11 @@ impl SettingsState {
         // Category navigation with Up/Down when sidebar focused
         match evt.key {
             Key::Up => {
-                let current_idx = SettingsCategory::ALL
-                    .iter()
-                    .position(|c| *c == self.current_category)
-                    .unwrap_or(0);
-                if current_idx > 0 {
-                    let new_cat = SettingsCategory::ALL[current_idx - 1];
-                    self.current_category = new_cat;
-                    self.current_page = new_cat.default_page();
-                }
+                self.step_category(-1);
                 EventResult::Consumed
             }
             Key::Down => {
-                let current_idx = SettingsCategory::ALL
-                    .iter()
-                    .position(|c| *c == self.current_category)
-                    .unwrap_or(0);
-                if current_idx + 1 < SettingsCategory::ALL.len() {
-                    let new_cat = SettingsCategory::ALL[current_idx + 1];
-                    self.current_category = new_cat;
-                    self.current_page = new_cat.default_page();
-                }
+                self.step_category(1);
                 EventResult::Consumed
             }
             Key::Tab => {
@@ -3722,11 +3706,35 @@ impl SettingsState {
                     .iter()
                     .position(|p| *p == self.current_page)
                     .unwrap_or(0);
-                let next_idx = (current_idx + 1) % pages.len();
-                self.current_page = pages[next_idx];
+                // Wrap by index rather than by `%` on a possibly-empty slice:
+                // every category has pages today, and an empty one would make
+                // the remainder a division by zero rather than a no-op.
+                let next = current_idx.saturating_add(1);
+                if let Some(page) = pages.get(next).or_else(|| pages.first()) {
+                    self.current_page = *page;
+                }
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
+        }
+    }
+
+    /// Move the sidebar selection by `delta` categories, stopping at the ends.
+    ///
+    /// Stopping rather than wrapping: the sidebar is a visible list, and an Up
+    /// at the top that jumps to the bottom moves the highlight further than the
+    /// eye follows.
+    fn step_category(&mut self, delta: isize) {
+        let current = SettingsCategory::ALL
+            .iter()
+            .position(|c| *c == self.current_category)
+            .unwrap_or(0);
+        let Some(next) = current.checked_add_signed(delta) else {
+            return;
+        };
+        if let Some(&new_cat) = SettingsCategory::ALL.get(next) {
+            self.current_category = new_cat;
+            self.current_page = new_cat.default_page();
         }
     }
 

@@ -42,6 +42,8 @@
 //! | Not supported | Where it is caught |
 //! |---|---|
 //! | mirror / raidz (more than one vdev child) | `label::parse_config` |
+//! | a separate intent-log (SLOG) device | `label::parse_config` |
+//! | any top-level vdev but the first, e.g. a stripe's second disk | `label::parse_config` |
 //! | big-endian pool | `label::parse_uberblock`, `dmu::Reader::read_block` |
 //! | encryption | `dmu::Reader::read_block` |
 //! | Zstd compression | `zio::decompress` |

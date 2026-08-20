@@ -106,9 +106,10 @@ pub const fn front_label_offset(l: u64) -> u64 {
 ///
 /// - [`KernelError::InvalidArgument`] if neither front label holds a
 ///   decodable nvlist.
-/// - [`KernelError::NotSupported`] if the pool spans more than one top-level
-///   vdev, or the top-level vdev is a mirror/raidz — this driver reads one
-///   device and cannot reconstruct a stripe it cannot see.
+/// - [`KernelError::NotSupported`] if the top-level vdev is a mirror/raidz, if
+///   this device is a separate intent log, or if it holds any top-level vdev
+///   but the first — this driver reads one device and cannot reconstruct a
+///   stripe it cannot see.
 pub fn read_config(src: &dyn SectorSource) -> KernelResult<PoolConfig> {
     let mut last_err = KernelError::InvalidArgument;
     for l in 0..2u64 {
@@ -176,6 +177,47 @@ pub fn parse_config(raw: &[u8]) -> KernelResult<PoolConfig> {
         return Err(KernelError::NotSupported);
     }
     if vdev_tree.nested_array_len(b"children").is_some() {
+        return Err(KernelError::NotSupported);
+    }
+
+    // A separate intent-log (SLOG) device is a full member of the pool and
+    // carries a complete, valid label — same `name`, same `pool_guid`, its own
+    // uberblock array kept current with the pool's transaction groups. Nothing
+    // above this line distinguishes it from the data disk, so without this
+    // check it is accepted, and the failure surfaces several layers later as a
+    // checksum mismatch on the meta object set: `IoError`, which reads as "this
+    // pool is corrupt" when in truth the pool is fine and we opened the wrong
+    // device of it. The log holds recently-committed writes awaiting replay,
+    // never the object tree the DVAs point into.
+    if vdev_tree.get_u64(b"is_log").unwrap_or(0) != 0 {
+        return Err(KernelError::NotSupported);
+    }
+
+    // `id` is this top-level vdev's index in the pool. Only vdev 0 is
+    // addressable here — `dmu::Reader::read_block` refuses any DVA whose vdev
+    // is not 0 — so on a device holding vdev 1 or later *every* readable DVA
+    // names storage that is somewhere else, and the mount is doomed before it
+    // starts. Catching it here names the real problem (this is the wrong
+    // device of a multi-vdev pool) at the point where the answer is still in
+    // hand, instead of at the first block read.
+    //
+    // A stripe's second disk says `type: disk` with no children, exactly as a
+    // single-disk pool's label does, so `id` is the only field in the config
+    // that tells the two apart.
+    //
+    // This does not make every striped pool refuse to mount, and is not meant
+    // to: opening the *first* disk of a stripe still succeeds here, because
+    // vdev 0 genuinely is the device in hand. That mount then fails at the
+    // first block that lives on another vdev, which `read_block` reports as
+    // `NotSupported` after trying the block pointer's other copies. Detecting
+    // the whole-pool shape is impossible from one label — the pool-wide vdev
+    // tree lives in the MOS config object, which is itself reached through a
+    // DVA — so the honest boundary is per-device, and that is what this is.
+    //
+    // Absent means 0 — the field has always been written, and defaulting the
+    // other way would newly refuse any pool whose label we merely failed to
+    // parse a key from.
+    if vdev_tree.get_u64(b"id").unwrap_or(0) != 0 {
         return Err(KernelError::NotSupported);
     }
 

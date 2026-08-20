@@ -42212,7 +42212,7 @@ read**.
 | App | Field | Hits | Why the sweep's grep missed it | Status |
 |---|---|---|---|---|
 | `apps/diskimager` | `scroll_offset` (`main.rs:1015`, written at 1551) | 3 | Three hits, not four — it has no `.max()`/clamp helper of its own, so it falls below the signature's threshold. | **fixed, `344301f1c`** |
-| `apps/devicemanager` | `properties_scroll` (`main.rs:777`, written at 3145) | 5 | Five hits, not four: two extra *writes* (`= 0.0` resets at 878 and 3080) push it over. Resets look like liveness and are not. | to do |
+| `apps/devicemanager` | `properties_scroll` (`main.rs:777`, written at 3145) | 5 | Five hits, not four: two extra *writes* (`= 0.0` resets at 878 and 3080) push it over. Resets look like liveness and are not. | **fixed, `676fa35b0`** |
 
 **diskimager turned out to be a matched pair, and that is a new shape.** Its
 `scroll_offset` was written by the wheel and read by nobody — but its ISO 9660
@@ -42342,7 +42342,8 @@ proof that the doc comment is the defect.
    | emojipicker | done, `6912e8f38` |
    | remotedesktop | done, `ffd9d7b25` |
    | diskimager | done, `344301f1c` |
-   | benchmark, devicemanager, sysinfo (`* 20.0`) | to do |
+   | devicemanager | done, `676fa35b0` — sidebar in rows, properties panel in pixels |
+   | benchmark, sysinfo (`* 20.0`) | to do |
    | spreadsheet (`* 40.0`) | to do |
    | filediff (`* SCROLL_SPEED`) | to do |
    | procexplorer, sysmonitor, terminal, settings, netscan (sign only) | to do — correct in effect, but they should stop open-coding it and pick up trackpad support |
@@ -42486,6 +42487,70 @@ scrolls, renders, and asserts the *first row drawn* is the one at the offset
 and that the loop stops at the bottom of the pane. A renderer that ignores its
 offset passes every render test ever written for it, because the picture it
 draws is a perfectly valid picture of the top of the list.
+
+**A third instance (`apps/devicemanager`, fixed in `676fa35b0`)** — three
+derivations, not two, and the reason it matters is that they *agreed*.
+
+The sidebar's rule for which tree nodes are on screen (a node is drawn if it is
+`visible`, and, if it is a child, if its category is expanded) existed in the
+renderer's forward walk, in `tree_hit_test`'s own loop, and a third time in
+`is_node_visible` as a **backwards scan** — walk up from the node looking for a
+depth-0 parent, and ask whether that parent is expanded. The backwards scan
+never consults the parent's own `visible` flag, so it and the forward walk
+disagree about a device whose category the search filter has hidden.
+
+That state is unreachable today, but only because of an invariant kept in a
+*fourth* function: `apply_search_filter` marks a category invisible exactly when
+it has hidden all of that category's devices. Nothing ties the three walkers to
+that function. Making a category match on its own name — an obvious
+improvement, and one a future session would make without ever reading
+`is_node_visible` — breaks the invariant and the arrow keys start selecting rows
+that are not on screen.
+
+**So: an invariant maintained somewhere else is not a reason for two
+derivations to be allowed to exist.** It is a reason the bug has not fired yet.
+All three now call `visible_tree_indices()`, and the regression test
+(`is_node_visible_agrees_even_where_the_filters_invariant_does_not_hold`)
+hand-builds the state the filter cannot currently produce, because a test that
+only exercises reachable states cannot pin a rule about unreachable ones.
+
+Worth noting how this was caught: not by the 133 passing tests, but by
+deliberately reintroducing each of five defects one at a time and checking a
+test failed. Four fired. The fifth — reverting `is_node_visible` to the
+backwards scan — fired **nothing**, which is what exposed that the divergence
+was latent rather than live, and that the doc comment claiming otherwise was
+overstated.
+
+### Measuring a panel that is not a list of rows
+
+devicemanager's properties panel could not be given a scroll bound at all,
+because its height depends on which tab is open, how many properties the
+selected device has, whether a driver badge is present, and how many separators
+that adds up to. There is no row count to multiply.
+
+The obvious answer — a `measure_general_tab` beside `render_general_tab`, and so
+on — is this whole issue in another costume: two derivations of one layout,
+written to agree, drifting the first time someone adds a line to one of them.
+
+The answer that cannot drift is `guitk::render::content_bottom` (added in
+`44c3f6578`): render the panel into a throwaway `Vec<RenderCommand>` and measure
+*that*. It is not a second derivation, it is the first one's output, so there is
+nothing for it to disagree with. Three details in it are worth keeping in mind
+if it is reused:
+
+- It **ignores `PushClip` on purpose.** Honouring the clip returns the clip
+  height every time, which is exactly the useless answer — the reason to measure
+  is to find the content the clip is hiding.
+- `RenderCommand::Text.y` is the **top** edge, not the baseline (the compositor
+  adds the ascent at `gui/compositor/src/lib.rs:2764`), so a text bottom is
+  `y + line_height`, and the line height depends on the font family in force —
+  which means `PushFont` has to be tracked.
+- A `Line`'s bottom includes half its stroke width and a `BoxShadow`'s includes
+  its offset, blur and spread; a measurement that used the box alone would let a
+  shadow hang off the end of the scroll range.
+
+This is the tool for the remaining free-form panels, starting with
+`C-KANBAN-CARD-DETAIL-PANEL-HAS-A-DEAD-SCROLL-OFFSET`.
 
 ---
 

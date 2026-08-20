@@ -42454,7 +42454,7 @@ proof that the doc comment is the defect.
    | diskimager | done, `344301f1c` |
    | devicemanager | done, `676fa35b0` — sidebar in rows, properties panel in pixels |
    | sysinfo | done, `ffe8dad25` — both panes in rows; see the note below |
-   | benchmark (`* 20.0`) | to do |
+   | benchmark | done, `0bc50c220` — pixels, bounded by a `content_bottom`-measured `max_scroll()`; see the note below |
    | spreadsheet (`* 40.0`) | to do |
    | filediff (`* SCROLL_SPEED`) | to do |
    | procexplorer, sysmonitor, terminal, settings, netscan (sign only) | to do — correct in effect, but they should stop open-coding it and pick up trackpad support |
@@ -42521,6 +42521,53 @@ direction that wastes the most time: it accuses the fix.
 and checks a test fails. That check is what turns "57 tests pass" into
 evidence; it found nothing missing here, but only because it was written after
 the tests rather than instead of them.
+
+**A fourth trap, from benchmark (`0bc50c220`): a pixel view needs no
+accumulator, and it needs a renderer that takes the offset as an argument.**
+
+benchmark was the last `* 20.0` consumer and the first one converted to
+`wheel::pixels` where the reasoning was not obvious, so both halves are worth
+writing down.
+
+*No accumulator.* The first draft gave it a `wheel::Accumulator` beside the
+`wheel::pixels` call, on autopilot from the five row-based conversions before
+it. That is cargo cult. An accumulator exists to bank the fraction of a notch
+that would otherwise be rounded away *because a row index cannot hold it* — a
+`usize` has nowhere to put 0.2 of a row. A pixel offset is an `f32` and is
+already continuous: 0.2 of a notch is 14.4 px of real movement, applied
+immediately. Rule: **an accumulator belongs to an integer offset, and only to
+an integer offset.**
+
+*The renderer has to take the scroll offset as a parameter.* The far-end bound
+here cannot be a row count — a tab is cards, bar charts, a variable number of
+sub-test rows and an optional trend graph — so `max_scroll()` measures it with
+`guitk::render::content_bottom`, by rendering the tab into a scratch tree and
+asking where the drawing stopped. That only works if the renderer can be asked
+to draw at offset *zero*. A renderer that reads `self.scroll_y` can only ever
+answer "how tall is it **from here**", which is the question whose answer you
+are trying to bound; reintroducing exactly that (`render_active_tab(&mut
+scratch, self.scroll_y)`) makes the offset converge on half the true limit and
+is caught by three tests. Hence `render_active_tab(&self, tree, scroll: f32)`
+and `render_content` passing `self.scroll_y` in at the one call site that
+should.
+
+*And the pane audit paid again.* Same lesson as sysinfo: the grep found one
+line, the pane had eleven defects. The History tab's click handler skipped the
+tab title (30 px) before dividing by the row height but not the summary line
+or the column header (50 px more), so a click selected the row **two below**
+the one under the pointer; it never checked the click was inside the content
+rectangle, so the button strip below the pane selected whichever row the
+arithmetic landed on; `Home` was the only scroll key, so there was no keyboard
+route past the fold at all; and switching tabs kept the previous tab's offset,
+opening the new one part-way down its own content. All eleven are put back one
+at a time by `scripts/reintro-benchmark.py`, each caught by a named test.
+
+*A note on that script:* it originally reported four defects as pinned by
+"(build/other failure)" — no named test — which is not evidence of anything,
+since a revert that fails to compile says nothing about the suite. (The real
+cause was the machine's C: drive filling up mid-run.) Both reintroduction
+scripts now fall back to printing the compiler's own `error` lines when a red
+run names no test, so "it failed" and "it did not build" can be told apart.
 
 **Until it is fixed:** two code comments (`apps/netscan/src/main.rs:2541` and
 `apps/settings/src/main.rs:3228`) already point here to explain why they use

@@ -9,6 +9,7 @@ use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
 use guitk::layout::FlexDirection;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::widget::{Widget, WidgetTree};
@@ -906,7 +907,14 @@ struct KanbanApp {
     filter: FilterState,
     selected_card: Option<Id>,
     selected_column: usize,
-    scroll_offset: f32,
+    /// Index of the first card drawn in each column of the board view.
+    ///
+    /// A card index rather than a pixel offset: columns draw whole cards only,
+    /// so a pixel offset could only express positions the renderer then rounds
+    /// away. One offset serves every column, each clamped against its own card
+    /// count — see design-decisions.md §471. A value past the end of a column
+    /// is not an error; that column shows its last page.
+    scroll_offset: usize,
     detail_scroll: f32,
     show_filter_bar: bool,
     input_buffer: String,
@@ -940,7 +948,7 @@ impl KanbanApp {
             filter: FilterState::default(),
             selected_card: None,
             selected_column: 0,
-            scroll_offset: 0.0,
+            scroll_offset: 0,
             detail_scroll: 0.0,
             show_filter_bar: false,
             input_buffer: String::new(),
@@ -1367,6 +1375,75 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
     y_offset + bar_h
 }
 
+// The vertical pieces of a card, in draw order. `render_card` steps through
+// these in sequence and `card_height` sums them, so the height a column
+// *reserves* for a card and the height it *draws* cannot disagree — which is
+// what lets a column work out which cards fit before drawing any of them.
+/// Blank space above the priority bar.
+const CARD_TOP_PAD: f32 = 12.0;
+/// The coloured priority stripe across the top of a card.
+const CARD_PRIORITY_BAR_H: f32 = 3.0;
+/// The title line, always present.
+const CARD_TITLE_H: f32 = 18.0;
+/// The row of label chips, when the card has any.
+const CARD_LABELS_H: f32 = 20.0;
+/// The assignee/due-date line, when either is set.
+const CARD_META_H: f32 = 14.0;
+/// The `[done/total]` checklist line, when the card has a checklist.
+const CARD_CHECKLIST_H: f32 = 14.0;
+/// The comment-count line, when the card has comments.
+const CARD_COMMENTS_H: f32 = 14.0;
+/// Blank space below the last line.
+const CARD_BOTTOM_PAD: f32 = 8.0;
+
+/// Space kept at the bottom of every column for the "+N more" line, reserved
+/// whether or not the column is actually hiding anything.
+const COLUMN_FOOTER_H: f32 = 14.0;
+
+/// Cards a Page Up / Page Down moves the board by.
+///
+/// A fixed count rather than "one screenful": cards are variable height, so a
+/// screenful differs per column, and a key that moved each column by a
+/// different amount would tear a board that scrolls as one.
+const BOARD_PAGE_STEP: usize = 5;
+
+/// The assignee/due-date pieces of a card's metadata line, in display order.
+///
+/// Shared by [`card_height`] and [`render_card`] so that "is there a metadata
+/// line?" is answered the same way by the measurement and by the drawing.
+fn card_meta_parts(card: &Card) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if !card.assignee.is_empty() {
+        parts.push(card.assignee.clone());
+    }
+    if let Some(date) = card.due_date {
+        parts.push(date.display());
+    }
+    parts
+}
+
+/// How tall `card` will be when drawn, without drawing it.
+///
+/// A column needs this *before* it draws, to decide how many cards fit; the
+/// alternative — measuring by rendering into a scratch tree and throwing it
+/// away — would make the answer depend on the drawing succeeding.
+fn card_height(card: &Card) -> f32 {
+    let mut h = CARD_TOP_PAD + CARD_PRIORITY_BAR_H + CARD_TITLE_H;
+    if !card.labels.is_empty() {
+        h += CARD_LABELS_H;
+    }
+    if !card_meta_parts(card).is_empty() {
+        h += CARD_META_H;
+    }
+    if card.checklist_progress().1 > 0 {
+        h += CARD_CHECKLIST_H;
+    }
+    if !card.comments.is_empty() {
+        h += CARD_COMMENTS_H;
+    }
+    h + CARD_BOTTOM_PAD
+}
+
 /// Render a single card.
 fn render_card(
     tree: &mut RenderTree,
@@ -1378,10 +1455,10 @@ fn render_card(
     selected: bool,
 ) -> f32 {
     let padding: f32 = 8.0;
-    let mut card_h: f32 = 12.0; // top padding
+    let mut card_h: f32 = CARD_TOP_PAD;
 
     // Priority indicator bar at top
-    let priority_bar_h: f32 = 3.0;
+    let priority_bar_h: f32 = CARD_PRIORITY_BAR_H;
     tree.push(RenderCommand::FillRect {
         x,
         y,
@@ -1415,7 +1492,7 @@ fn render_card(
         max_width: Some(card_width - padding * 2.0),
         overflow: TextOverflow::Ellipsis,
     });
-    card_h += 18.0;
+    card_h += CARD_TITLE_H;
 
     // Labels row
     if !card.labels.is_empty() {
@@ -1444,17 +1521,11 @@ fn render_card(
                 label_x += lw + 4.0;
             }
         }
-        card_h += 20.0;
+        card_h += CARD_LABELS_H;
     }
 
     // Metadata row: assignee, due date
-    let mut meta_parts: Vec<String> = Vec::new();
-    if !card.assignee.is_empty() {
-        meta_parts.push(card.assignee.clone());
-    }
-    if let Some(date) = card.due_date {
-        meta_parts.push(date.display());
-    }
+    let meta_parts = card_meta_parts(card);
 
     if !meta_parts.is_empty() {
         tree.push(RenderCommand::Text {
@@ -1467,7 +1538,7 @@ fn render_card(
             max_width: Some(card_width - padding * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
-        card_h += 14.0;
+        card_h += CARD_META_H;
     }
 
     // Checklist progress
@@ -1488,7 +1559,7 @@ fn render_card(
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        card_h += 14.0;
+        card_h += CARD_CHECKLIST_H;
     }
 
     // Comment count
@@ -1504,10 +1575,10 @@ fn render_card(
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        card_h += 14.0;
+        card_h += CARD_COMMENTS_H;
     }
 
-    card_h += 8.0; // bottom padding
+    card_h += CARD_BOTTOM_PAD;
 
     // Now render the card background (behind text via ordering - we render bg first)
     // We need to insert this before the text commands, so we render in a separate pass
@@ -1542,6 +1613,15 @@ fn render_card(
         });
     }
 
+    // The two must agree, or a column reserves one height and draws another —
+    // the card after this one would then overlap it or float above it, and the
+    // last card in a column would cross the bottom edge. Cheap to check, and it
+    // fires in the tests rather than in front of a user.
+    debug_assert!(
+        (card_h - card_height(card)).abs() < 0.001,
+        "card drawn {card_h}px tall but measured {}px",
+        card_height(card)
+    );
     card_h
 }
 
@@ -1699,8 +1779,37 @@ fn render_board_view(
         let card_width = col_width - card_margin * 2.0;
         let mut card_y = col_y + header_h + card_gap;
 
-        let filtered_ids = app.filtered_card_ids(ci);
-        for card_id in &filtered_ids {
+        // Only the cards this column has room for. Without this the loop drew
+        // every card in the column, so a column with more cards than fit ran
+        // off the bottom of the window and over whatever was beneath it — and
+        // since the list was cut from the top by the screen edge rather than by
+        // a scroll position, the cards past the fold could not be reached at
+        // all. `scroll_offset` is a *row* index, shared by every column and
+        // clamped separately against each one, so a short column sits at its
+        // last page while a long one is still scrolling; see
+        // design-decisions.md §471.
+        let filtered_ids: Vec<Id> = app
+            .filtered_card_ids(ci)
+            .into_iter()
+            .filter(|id| board.cards.contains_key(id))
+            .collect();
+        // Each row reserves the gap that follows it. That over-reserves by one
+        // gap for the last visible card, which errs towards leaving a strip of
+        // background rather than towards drawing over the column's edge.
+        let heights: Vec<f32> = filtered_ids
+            .iter()
+            .filter_map(|id| board.cards.get(id))
+            .map(|card| card_height(card) + card_gap)
+            .collect();
+        // The "+N more" line's space is reserved whether or not it is needed,
+        // so the number of cards that fit does not depend on how many fit.
+        let room = (height - 8.0) - card_y - COLUMN_FOOTER_H;
+        let window = scroll_window::visible_variable(&heights, room, app.scroll_offset);
+
+        for card_id in filtered_ids
+            .get(window.start..window.end())
+            .unwrap_or_default()
+        {
             if let Some(card) = board.cards.get(card_id) {
                 let is_selected = app.selected_card == Some(*card_id);
                 let ch = render_card(
@@ -1714,6 +1823,22 @@ fn render_board_view(
                 );
                 card_y += ch + card_gap;
             }
+        }
+
+        // A column that is hiding cards says so, in the space the window
+        // deliberately did not fill.
+        let hidden = filtered_ids.len().saturating_sub(window.count);
+        if hidden > 0 {
+            tree.push(RenderCommand::Text {
+                x: col_x + card_margin,
+                y: card_y,
+                text: format!("+{hidden} more"),
+                color: palette::OVERLAY0,
+                font_size: 10.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(card_width),
+                overflow: TextOverflow::Ellipsis,
+            });
         }
     }
 }
@@ -2604,6 +2729,25 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             true
         }
 
+        // Up/Down scroll the columns by a card; PageUp/PageDown by a screenful.
+        // Not clamped here: the number of cards that fit depends on the window
+        // size and on which cards are filtered in, neither of which this
+        // function knows. The renderer clamps against what it is actually
+        // drawing, so an offset past the end shows the last page rather than a
+        // blank column.
+        Key::Up | Key::Down | Key::PageUp | Key::PageDown if app.view == View::Board => {
+            let step = match key.key {
+                Key::PageUp | Key::PageDown => BOARD_PAGE_STEP,
+                _ => 1,
+            };
+            if matches!(key.key, Key::Up | Key::PageUp) {
+                app.scroll_offset = app.scroll_offset.saturating_sub(step);
+            } else {
+                app.scroll_offset = app.scroll_offset.saturating_add(step);
+            }
+            true
+        }
+
         // Enter on selected card opens detail
         Key::Enter => {
             if let Some(_card_id) = app.selected_card
@@ -2830,6 +2974,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
     use guitk::event::Modifiers;
 
@@ -4322,5 +4478,202 @@ mod tests {
             .unwrap()
             .active_card_count(&board.cards);
         assert_eq!(count, 1);
+    }
+
+    // ---- board-view scrolling ----
+
+    /// Test window size for the board view. Tall enough to show several cards
+    /// and short enough that a long column has to hide some.
+    const TEST_W: f32 = 1200.0;
+    const TEST_H: f32 = 600.0;
+
+    /// An app whose first column holds `n` cards named `card0`..`card{n-1}`.
+    fn app_with_cards(n: usize) -> KanbanApp {
+        let mut app = KanbanApp::new();
+        for i in 0..n {
+            app.add_card(&format!("card{i}"), 0);
+        }
+        app
+    }
+
+    /// The `cardN` titles the board view actually drew, in draw order.
+    fn drawn_card_titles(app: &KanbanApp) -> Vec<String> {
+        render_app(app, TEST_W, TEST_H)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } if text.starts_with("card") => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The lowest pixel any command reaches, so "did it draw past the window?"
+    /// is answered from the output rather than from the code that produced it.
+    fn lowest_pixel(app: &KanbanApp) -> f32 {
+        render_app(app, TEST_W, TEST_H)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect { y, height, .. }
+                | RenderCommand::StrokeRect { y, height, .. } => Some(y + height),
+                RenderCommand::Text { y, font_size, .. } => Some(y + font_size),
+                _ => None,
+            })
+            // The full-window background is exactly the window; anything below
+            // it is what this is looking for.
+            .fold(0.0_f32, f32::max)
+    }
+
+    #[test]
+    fn a_card_is_drawn_the_height_it_was_measured() {
+        // The column reserves `card_height` and `render_card` returns what it
+        // drew. If they disagree the cards overlap, or the last one crosses the
+        // column's bottom edge.
+        let mut board = Board::default_board();
+        let label = board.labels.first().map(|l| l.id);
+        for (i, decorate) in [false, true].into_iter().enumerate() {
+            let mut card = Card::new(&format!("c{i}"));
+            if decorate {
+                if let Some(l) = label {
+                    card.labels.push(l);
+                }
+                card.assignee = "someone".to_string();
+                card.comments.push(Comment::new("someone", "hi", 1));
+            }
+            let expected = card_height(&card);
+            let mut tree = RenderTree::new();
+            let drawn = render_card(&mut tree, &card, &board, 0.0, 0.0, 200.0, false);
+            assert!(
+                (drawn - expected).abs() < 0.001,
+                "decorate={decorate}: drew {drawn}, measured {expected}"
+            );
+            board.add_card_to_column(card, 0);
+        }
+    }
+
+    #[test]
+    fn a_column_draws_only_the_cards_that_fit() {
+        // The loop used to draw every card in the column, so a column with more
+        // cards than the window is tall ran off the bottom and over whatever
+        // was beneath it.
+        let app = app_with_cards(60);
+        let drawn = drawn_card_titles(&app);
+        assert!(!drawn.is_empty(), "a 600px board should show some cards");
+        assert!(drawn.len() < 60, "a 60-card column cannot fit in 600px");
+        assert!(
+            lowest_pixel(&app) <= TEST_H,
+            "the board drew down to {}, past a {TEST_H}px window",
+            lowest_pixel(&app)
+        );
+    }
+
+    #[test]
+    fn a_column_that_is_hiding_cards_says_so() {
+        let app = app_with_cards(60);
+        let shown = drawn_card_titles(&app).len();
+        let note = format!("+{} more", 60 - shown);
+        let texts: Vec<String> = render_app(&app, TEST_W, TEST_H)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.contains(&note),
+            "expected {note:?} among the drawn text, got {texts:?}"
+        );
+
+        // A column showing everything makes no such claim.
+        let short = app_with_cards(1);
+        let short_texts: Vec<String> = render_app(&short, TEST_W, TEST_H)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !short_texts
+                .iter()
+                .any(|t| t.starts_with('+') && t.ends_with(" more")),
+            "a column that fits should not claim to be hiding cards: {short_texts:?}"
+        );
+    }
+
+    #[test]
+    fn scrolling_the_board_reaches_the_cards_below_the_fold() {
+        // `scroll_offset` used to be an `f32` that nothing read and nothing
+        // wrote, so the cards past the first screenful were unreachable.
+        let mut app = app_with_cards(60);
+        assert_eq!(
+            drawn_card_titles(&app).first().map(String::as_str),
+            Some("card0")
+        );
+
+        handle_key_event(&mut app, &make_key(Key::Down, Modifiers::NONE));
+        assert_eq!(
+            drawn_card_titles(&app).first().map(String::as_str),
+            Some("card1"),
+            "Down should move the board by one card"
+        );
+
+        handle_key_event(&mut app, &make_key(Key::PageDown, Modifiers::NONE));
+        assert_eq!(
+            drawn_card_titles(&app).first().map(String::as_str),
+            Some(&format!("card{}", 1 + BOARD_PAGE_STEP)[..]),
+            "PageDown should move by {BOARD_PAGE_STEP} cards"
+        );
+
+        // The last card is reachable, which is the whole point.
+        for _ in 0..60 {
+            handle_key_event(&mut app, &make_key(Key::PageDown, Modifiers::NONE));
+        }
+        assert_eq!(
+            drawn_card_titles(&app).last().map(String::as_str),
+            Some("card59"),
+            "the end of a column must be reachable"
+        );
+        assert!(
+            lowest_pixel(&app) <= TEST_H,
+            "the last page drew past the window"
+        );
+
+        // ... and scrolling back up returns to the top without wrapping.
+        for _ in 0..200 {
+            handle_key_event(&mut app, &make_key(Key::PageUp, Modifiers::NONE));
+        }
+        assert_eq!(app.scroll_offset, 0, "the offset must not wrap round");
+        assert_eq!(
+            drawn_card_titles(&app).first().map(String::as_str),
+            Some("card0")
+        );
+    }
+
+    #[test]
+    fn a_column_that_shrinks_under_a_stale_offset_shows_its_last_page() {
+        let mut app = app_with_cards(60);
+        for _ in 0..10 {
+            handle_key_event(&mut app, &make_key(Key::PageDown, Modifiers::NONE));
+        }
+        let deep = app.scroll_offset;
+        assert!(deep > 0, "the test needs the board scrolled down");
+
+        // A filter is applied and most of the cards go away, with nothing
+        // resetting the scroll position.
+        app.filter.search_text = "card1".to_string();
+        let drawn = drawn_card_titles(&app);
+        assert!(!drawn.is_empty(), "the column must not go blank");
+        assert!(
+            drawn.iter().all(|t| t.starts_with("card1")),
+            "the filter was not applied: {drawn:?}"
+        );
+        assert_eq!(
+            app.scroll_offset, deep,
+            "the stored offset is not rewritten"
+        );
     }
 }

@@ -22,7 +22,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-use guitk::rng::{seed_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
@@ -486,11 +486,7 @@ fn count_solutions(grid: &mut [u8; TOTAL_CELLS], limit: usize) -> usize {
     count_solutions_inner(grid, limit, 0)
 }
 
-fn count_solutions_inner(
-    grid: &mut [u8; TOTAL_CELLS],
-    limit: usize,
-    found: usize,
-) -> usize {
+fn count_solutions_inner(grid: &mut [u8; TOTAL_CELLS], limit: usize, found: usize) -> usize {
     if found >= limit {
         return found;
     }
@@ -525,9 +521,7 @@ fn solve_shuffled(grid: &mut [u8; TOTAL_CELLS], rng: &mut SeededRng) -> bool {
     };
 
     let cands = candidates(grid, row, col);
-    let mut digits: Vec<u8> = (1..=9)
-        .filter(|&d| cands & (1 << (d - 1)) != 0)
-        .collect();
+    let mut digits: Vec<u8> = (1..=9).filter(|&d| cands & (1 << (d - 1)) != 0).collect();
     rng.shuffle(&mut digits);
 
     for digit in digits {
@@ -552,9 +546,9 @@ fn generate_full_grid(rng: &mut SeededRng) -> [u8; TOTAL_CELLS] {
     if !solved {
         // Fallback: fill with a known valid grid
         let fallback = [
-            5, 3, 4, 6, 7, 8, 9, 1, 2, 6, 7, 2, 1, 9, 5, 3, 4, 8, 1, 9, 8, 3, 4, 2, 5, 6, 7,
-            8, 5, 9, 7, 6, 1, 4, 2, 3, 4, 2, 6, 8, 5, 3, 7, 9, 1, 7, 1, 3, 9, 2, 4, 8, 5, 6,
-            9, 6, 1, 5, 3, 7, 2, 8, 4, 2, 8, 7, 4, 1, 9, 6, 3, 5, 3, 4, 5, 2, 8, 6, 1, 7, 9,
+            5, 3, 4, 6, 7, 8, 9, 1, 2, 6, 7, 2, 1, 9, 5, 3, 4, 8, 1, 9, 8, 3, 4, 2, 5, 6, 7, 8, 5,
+            9, 7, 6, 1, 4, 2, 3, 4, 2, 6, 8, 5, 3, 7, 9, 1, 7, 1, 3, 9, 2, 4, 8, 5, 6, 9, 6, 1, 5,
+            3, 7, 2, 8, 4, 2, 8, 7, 4, 1, 9, 6, 3, 5, 3, 4, 5, 2, 8, 6, 1, 7, 9,
         ];
         grid = fallback;
     }
@@ -739,22 +733,18 @@ impl SudokuApp {
 
         match key_event.key {
             // Navigation
-            Key::Up
-                if self.selected_row > 0 => {
-                    self.selected_row -= 1;
-                }
-            Key::Down
-                if self.selected_row < GRID_SIZE - 1 => {
-                    self.selected_row += 1;
-                }
-            Key::Left
-                if self.selected_col > 0 => {
-                    self.selected_col -= 1;
-                }
-            Key::Right
-                if self.selected_col < GRID_SIZE - 1 => {
-                    self.selected_col += 1;
-                }
+            Key::Up if self.selected_row > 0 => {
+                self.selected_row -= 1;
+            }
+            Key::Down if self.selected_row < GRID_SIZE - 1 => {
+                self.selected_row += 1;
+            }
+            Key::Left if self.selected_col > 0 => {
+                self.selected_col -= 1;
+            }
+            Key::Right if self.selected_col < GRID_SIZE - 1 => {
+                self.selected_col += 1;
+            }
 
             // Undo / Redo (before number input so Ctrl combos match first)
             Key::Z if key_event.modifiers.ctrl => self.undo(),
@@ -1058,10 +1048,12 @@ impl SudokuApp {
 
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
-                if vals[idx(r, c)] != 0 && has_conflict(&vals, r, c, vals[idx(r, c)])
-                    && !result.contains(&(r, c)) {
-                        result.push((r, c));
-                    }
+                if vals[idx(r, c)] != 0
+                    && has_conflict(&vals, r, c, vals[idx(r, c)])
+                    && !result.contains(&(r, c))
+                {
+                    result.push((r, c));
+                }
             }
         }
 
@@ -1417,11 +1409,14 @@ impl SudokuApp {
 
         // Stats line
         let total = self.stats.total_completed();
-        let best = self
-            .stats
-            .best_time(self.difficulty)
-            .map_or_else(|| "--:--".to_string(), |t| format!("{:02}:{:02}", t / 60, t % 60));
-        let stats_text = format!("Completed: {total}  Best ({}):{best}", self.difficulty.label());
+        let best = self.stats.best_time(self.difficulty).map_or_else(
+            || "--:--".to_string(),
+            |t| format!("{:02}:{:02}", t / 60, t % 60),
+        );
+        let stats_text = format!(
+            "Completed: {total}  Best ({}):{best}",
+            self.difficulty.label()
+        );
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: footer_y + 24.0,
@@ -1534,19 +1529,16 @@ mod tests {
 
     fn known_solution() -> [u8; TOTAL_CELLS] {
         [
-            5, 3, 4, 6, 7, 8, 9, 1, 2,
-            6, 7, 2, 1, 9, 5, 3, 4, 8,
-            1, 9, 8, 3, 4, 2, 5, 6, 7,
-            8, 5, 9, 7, 6, 1, 4, 2, 3,
-            4, 2, 6, 8, 5, 3, 7, 9, 1,
-            7, 1, 3, 9, 2, 4, 8, 5, 6,
-            9, 6, 1, 5, 3, 7, 2, 8, 4,
-            2, 8, 7, 4, 1, 9, 6, 3, 5,
-            3, 4, 5, 2, 8, 6, 1, 7, 9,
+            5, 3, 4, 6, 7, 8, 9, 1, 2, 6, 7, 2, 1, 9, 5, 3, 4, 8, 1, 9, 8, 3, 4, 2, 5, 6, 7, 8, 5,
+            9, 7, 6, 1, 4, 2, 3, 4, 2, 6, 8, 5, 3, 7, 9, 1, 7, 1, 3, 9, 2, 4, 8, 5, 6, 9, 6, 1, 5,
+            3, 7, 2, 8, 4, 2, 8, 7, 4, 1, 9, 6, 3, 5, 3, 4, 5, 2, 8, 6, 1, 7, 9,
         ]
     }
 
-    fn make_cells_from_values(values: &[u8; TOTAL_CELLS], givens: &[bool; TOTAL_CELLS]) -> [Cell; TOTAL_CELLS] {
+    fn make_cells_from_values(
+        values: &[u8; TOTAL_CELLS],
+        givens: &[bool; TOTAL_CELLS],
+    ) -> [Cell; TOTAL_CELLS] {
         core::array::from_fn(|i| {
             if givens[i] {
                 Cell::as_given(values[i])
@@ -1834,7 +1826,10 @@ mod tests {
     fn test_generate_full_grid_different_seeds() {
         let grid1 = generate_full_grid(&mut SeededRng::new(1));
         let grid2 = generate_full_grid(&mut SeededRng::new(2));
-        assert_ne!(grid1, grid2, "Different seeds should produce different grids");
+        assert_ne!(
+            grid1, grid2,
+            "Different seeds should produce different grids"
+        );
     }
 
     #[test]
@@ -2120,7 +2115,10 @@ mod tests {
             app.seed_counter, FALLBACK_SEED,
             "a fresh game did not ask the system for its seed"
         );
-        assert_ne!(app.seed_counter, 42, "a fresh puzzle still comes from a literal");
+        assert_ne!(
+            app.seed_counter, 42,
+            "a fresh puzzle still comes from a literal"
+        );
     }
 
     // ── SudokuApp construction ─────────────────────────────────────
@@ -2277,7 +2275,8 @@ mod tests {
         });
         app.handle_event(&event);
         assert_eq!(
-            app.cells[idx(r, c)].value, original_value,
+            app.cells[idx(r, c)].value,
+            original_value,
             "Given cell should not change"
         );
     }
@@ -2359,7 +2358,11 @@ mod tests {
         });
         app.handle_event(&event);
         assert!(app.cells[idx(r, c)].has_note(3));
-        assert_eq!(app.cells[idx(r, c)].value, 0, "Note mode should not set value");
+        assert_eq!(
+            app.cells[idx(r, c)].value,
+            0,
+            "Note mode should not set value"
+        );
     }
 
     #[test]
@@ -2393,7 +2396,10 @@ mod tests {
         // Switch to value mode and place a digit
         app.note_mode = false;
         app.input_digit(3);
-        assert!(!app.cells[idx(r, c)].has_any_note(), "Notes should be cleared when placing a value");
+        assert!(
+            !app.cells[idx(r, c)].has_any_note(),
+            "Notes should be cleared when placing a value"
+        );
         assert_eq!(app.cells[idx(r, c)].value, 3);
     }
 
@@ -2512,7 +2518,10 @@ mod tests {
         let expected = app.solution[idx(r, c)];
         app.use_hint();
         assert_eq!(app.cells[idx(r, c)].value, expected);
-        assert!(app.cells[idx(r, c)].given, "Hinted cell should become given");
+        assert!(
+            app.cells[idx(r, c)].given,
+            "Hinted cell should become given"
+        );
     }
 
     #[test]
@@ -2547,7 +2556,8 @@ mod tests {
             let val_before = app.cells[idx(r, c)].value;
             app.use_hint();
             assert_eq!(
-                app.cells[idx(r, c)].value, val_before,
+                app.cells[idx(r, c)].value,
+                val_before,
                 "No hint should be given when limit reached"
             );
         }
@@ -2562,7 +2572,10 @@ mod tests {
 
         let before = app.hints_remaining;
         app.use_hint();
-        assert_eq!(app.hints_remaining, before, "Hint on given should not consume a hint");
+        assert_eq!(
+            app.hints_remaining, before,
+            "Hint on given should not consume a hint"
+        );
     }
 
     #[test]
@@ -2579,7 +2592,10 @@ mod tests {
         app.undo();
         assert_eq!(app.cells[idx(r, c)].value, 0);
         assert!(!app.cells[idx(r, c)].given);
-        assert_eq!(app.hints_remaining, hints_before, "Undo should restore hint count");
+        assert_eq!(
+            app.hints_remaining, hints_before,
+            "Undo should restore hint count"
+        );
     }
 
     // ── Game completion ────────────────────────────────────────────
@@ -2624,7 +2640,10 @@ mod tests {
             text: None,
         });
         app.handle_event(&up);
-        assert_eq!(app.selected_row, old_row, "Navigation should be blocked after winning");
+        assert_eq!(
+            app.selected_row, old_row,
+            "Navigation should be blocked after winning"
+        );
     }
 
     // ── New game ───────────────────────────────────────────────────
@@ -2734,7 +2753,11 @@ mod tests {
             text: None,
         });
         app.handle_event(&event);
-        assert_eq!(app.cells[idx(r, c)].value, 0, "Input should be blocked when paused");
+        assert_eq!(
+            app.cells[idx(r, c)].value,
+            0,
+            "Input should be blocked when paused"
+        );
     }
 
     // ── Statistics ─────────────────────────────────────────────────
@@ -2755,7 +2778,11 @@ mod tests {
 
         stats.record_completion(Difficulty::Easy, 150);
         assert_eq!(stats.games_completed(Difficulty::Easy), 3);
-        assert_eq!(stats.best_time(Difficulty::Easy), Some(90), "Best time should not increase");
+        assert_eq!(
+            stats.best_time(Difficulty::Easy),
+            Some(90),
+            "Best time should not increase"
+        );
     }
 
     #[test]
@@ -2801,7 +2828,10 @@ mod tests {
         let app = SudokuApp::new();
         // A freshly generated puzzle should have no conflicts
         let conflicts = app.all_conflict_cells();
-        assert!(conflicts.is_empty(), "Fresh puzzle should have no conflicts");
+        assert!(
+            conflicts.is_empty(),
+            "Fresh puzzle should have no conflicts"
+        );
     }
 
     #[test]
@@ -2824,7 +2854,10 @@ mod tests {
         if conflict_digit != 0 {
             app.input_digit(conflict_digit);
             let conflicts = app.all_conflict_cells();
-            assert!(!conflicts.is_empty(), "Should detect conflict after placing duplicate");
+            assert!(
+                !conflicts.is_empty(),
+                "Should detect conflict after placing duplicate"
+            );
             assert!(conflicts.contains(&(r, c)));
         }
     }
@@ -2855,7 +2888,9 @@ mod tests {
     fn test_render_contains_title() {
         let app = SudokuApp::new();
         let cmds = app.render();
-        let has_title = cmds.iter().any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Sudoku"));
+        let has_title = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Sudoku"));
         assert!(has_title, "Render should contain title text");
     }
 
@@ -2864,12 +2899,15 @@ mod tests {
         let app = SudokuApp::new();
         let cmds = app.render();
         // At least some given digits should be rendered
-        let digit_count = cmds.iter().filter(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, font_size, .. }
+        let digit_count = cmds
+            .iter()
+            .filter(|cmd| {
+                matches!(cmd, RenderCommand::Text { text, font_size, .. }
                 if text.len() == 1
                     && text.chars().next().is_some_and(|ch| ch.is_ascii_digit() && ch != '0')
                     && (*font_size - CELL_FONT_SIZE).abs() < 0.1)
-        }).count();
+            })
+            .count();
         assert!(digit_count > 0, "Render should contain cell digits");
     }
 
@@ -2887,7 +2925,9 @@ mod tests {
             }
         }
         let cmds = app.render();
-        let has_completed = cmds.iter().any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Completed")));
+        let has_completed = cmds.iter().any(
+            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Completed")),
+        );
         assert!(has_completed, "Won state should show 'Completed' text");
     }
 
@@ -2965,7 +3005,11 @@ mod tests {
             text: None,
         });
         app.handle_event(&release);
-        assert_eq!(app.cells[idx(r, c)].value, 0, "Key release should not place a digit");
+        assert_eq!(
+            app.cells[idx(r, c)].value,
+            0,
+            "Key release should not place a digit"
+        );
     }
 
     // ── values_array ───────────────────────────────────────────────

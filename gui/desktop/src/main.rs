@@ -147,6 +147,7 @@ use guitk::cycle;
 use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::RenderTree;
 use guitk::style::{Border, CornerRadii, Shadow};
+use guitk::wheel;
 use launcher::{AppEntry, Category};
 
 use std::collections::BTreeMap;
@@ -224,24 +225,25 @@ fn shadow(tree: &mut RenderTree, rect: Rect, radii: CornerRadii) {
     tree.box_shadow(rect.x, rect.y, rect.w, rect.h, WINDOW_SHADOW, radii);
 }
 
-/// How many whole rows a scroll of `dy` pixels moves a list of fixed-height
-/// rows.
+/// How many whole rows a wheel event of `dy` **notches** moves a list of
+/// fixed-height rows, carrying the fraction in `acc`.
 ///
-/// A menu whose rows are all one height should not come to rest halfway
-/// between two of them, so a delta too small to cross a row boundary still
-/// moves one row rather than nothing — otherwise a mouse that reports small
-/// deltas cannot scroll the menu at all.
-fn scroll_rows(dy: f32) -> i32 {
-    let whole = (dy / START_MENU_ROW_HEIGHT) as i32;
-    if whole != 0 {
-        whole
-    } else if dy > 0.0 {
-        1
-    } else if dy < 0.0 {
-        -1
-    } else {
-        0
-    }
+/// This used to divide `dy` by `START_MENU_ROW_HEIGHT`, as if `dy` were a
+/// pixel measurement — see [`MouseEventKind::Scroll`], which is measured in
+/// notches. A notch is `1.0` and a row is 36 px, so the quotient truncated to
+/// zero for every delta any real device produces, and the whole computation was
+/// dead: what actually scrolled the menu was the fallback below it, which moved
+/// exactly one row for any non-zero `dy` whatsoever. The menu therefore ignored
+/// how hard the wheel was turned — three notches moved one row, and so did a
+/// trackpad's twitch of a twentieth of one.
+///
+/// The remainder has to be carried because `start_menu_scroll` counts whole
+/// rows and cannot hold a fraction: rounding each event separately would
+/// discard every sub-row delta a trackpad sends, which is the same "scrolls
+/// nothing at all" failure in a different disguise.
+fn scroll_rows(acc: &mut wheel::Accumulator, dy: f32) -> i32 {
+    let rows = acc.rows(dy);
+    i32::try_from(rows).unwrap_or(if rows < 0 { i32::MIN } else { i32::MAX })
 }
 
 // --- Taskbar ---------------------------------------------------------------
@@ -562,6 +564,12 @@ pub struct DesktopShell {
     /// stops at the eighth program makes the ninth unreachable rather than
     /// merely unseen.
     pub start_menu_scroll: usize,
+    /// Fractions of a row left over from previous wheel events over the menu.
+    ///
+    /// Reset when the menu closes, alongside the offset itself: a fraction
+    /// earned scrolling one session of the menu must not deliver a row to the
+    /// next one, which would jump the list the instant it opened.
+    start_menu_wheel: wheel::Accumulator,
     /// Whether the power menu is showing.
     ///
     /// Only ever true while [`start_menu_open`](Self::start_menu_open) is: it
@@ -877,6 +885,7 @@ impl DesktopShell {
             taskbar_height: 40,
             start_menu_open: false,
             start_menu_scroll: 0,
+            start_menu_wheel: wheel::Accumulator::default(),
             power_menu_open: false,
             apps: launcher::builtin_app_database(),
             alt_tab_active: false,
@@ -1267,16 +1276,22 @@ impl DesktopShell {
     }
 
     /// Move the start menu's list by whole rows, positive meaning towards the
-    /// first entry — the direction convention `guitk`'s grid already uses for a
-    /// positive scroll delta.
+    /// *last* entry — the direction of the row index itself, which is the
+    /// convention `guitk::wheel::Accumulator` and `guitk::scroll_window::shift`
+    /// both use.
+    ///
+    /// This used to be the other way round, and said so in a doc comment that
+    /// claimed to be matching `guitk` — it was not; it was the one place in the
+    /// tree where a positive scroll delta moved towards row 0. A caller that
+    /// believed the comment scrolled the menu backwards.
     pub fn scroll_start_menu(&mut self, rows: i32) {
         let max = self.start_menu_max_scroll();
         let moved = if rows >= 0 {
             self.start_menu_scroll
-                .saturating_sub(rows.unsigned_abs() as usize)
+                .saturating_add(rows.unsigned_abs() as usize)
         } else {
             self.start_menu_scroll
-                .saturating_add(rows.unsigned_abs() as usize)
+                .saturating_sub(rows.unsigned_abs() as usize)
         };
         self.start_menu_scroll = moved.min(max);
     }
@@ -1291,6 +1306,10 @@ impl DesktopShell {
         } else {
             self.start_menu_open = true;
             self.start_menu_scroll = 0;
+            // The offset is being rewound, so the fraction that was pushing it
+            // must be rewound too — otherwise a menu opened just after a
+            // part-notch scroll steps off row 0 on the next small delta.
+            self.start_menu_wheel.reset();
         }
     }
 
@@ -1553,7 +1572,8 @@ impl DesktopShell {
             self.hit_test(x, y),
             Hit::StartMenuEntry(_) | Hit::StartMenuPanel | Hit::PowerButton
         ) {
-            self.scroll_start_menu(scroll_rows(dy));
+            let rows = scroll_rows(&mut self.start_menu_wheel, dy);
+            self.scroll_start_menu(rows);
             return ShellAction::Consumed;
         }
         if self.hit_test(x, y).is_shell_chrome() {

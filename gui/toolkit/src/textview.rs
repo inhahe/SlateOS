@@ -12,6 +12,7 @@ use crate::cycle;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
+use crate::wheel;
 use textfind::Case;
 
 // ---------------------------------------------------------------------------
@@ -554,6 +555,14 @@ pub struct SimpleTextView {
     search: SearchState,
     /// Configuration.
     pub config: SimpleTextViewConfig,
+    /// Fractions of a row left over from previous wheel events.
+    ///
+    /// [`scroll_offset`](Self::scroll_offset) counts whole lines, so a
+    /// trackpad's tenth-of-a-notch has nowhere to go the moment it is converted
+    /// — rounding each event on its own throws every one of them away and the
+    /// view never moves. The accumulator banks the remainder instead, so ten
+    /// small pushes cross a row exactly as one big one does.
+    wheel: wheel::Accumulator,
 }
 
 /// Search state for highlighting matches.
@@ -609,6 +618,7 @@ impl SimpleTextView {
             dragging: false,
             search: SearchState::default(),
             config: SimpleTextViewConfig::default(),
+            wheel: wheel::Accumulator::default(),
         }
     }
 
@@ -624,6 +634,7 @@ impl SimpleTextView {
             dragging: false,
             search: SearchState::default(),
             config,
+            wheel: wheel::Accumulator::default(),
         }
     }
 
@@ -1080,8 +1091,7 @@ impl SimpleTextView {
         if !self.config.selectable {
             // Still handle scroll
             if let MouseEventKind::Scroll { dy, .. } = event.kind {
-                let lines = (dy / self.config.line_height).round() as i32;
-                self.scroll_by(lines.saturating_neg());
+                self.scroll_by_wheel(dy);
                 return (EventResult::Consumed, None);
             }
             return (EventResult::Ignored, None);
@@ -1114,12 +1124,29 @@ impl SimpleTextView {
                 (EventResult::Consumed, None)
             }
             MouseEventKind::Scroll { dy, .. } => {
-                let lines = (dy / self.config.line_height).round() as i32;
-                self.scroll_by(lines.saturating_neg());
+                self.scroll_by_wheel(*dy);
                 (EventResult::Consumed, None)
             }
             _ => (EventResult::Ignored, None),
         }
+    }
+
+    /// Scroll by one wheel event's worth of `dy`, in notches.
+    ///
+    /// Both wheel arms route through here so they cannot drift apart, and
+    /// because what they each used to do was wrong in the same way: they
+    /// divided the notch count by `line_height`, as if `dy` were a pixel
+    /// measurement. A notch is `1.0` and a line is around nineteen pixels, so
+    /// `(1.0 / 19.0).round()` is `0` — a full detent of a real mouse wheel
+    /// scrolled this view by exactly nothing, and no amount of spinning it ever
+    /// moved a log or a terminal transcript by one line. See
+    /// [`MouseEventKind::Scroll`], which names this failure specifically.
+    fn scroll_by_wheel(&mut self, dy: f32) {
+        // `isize` rows, `i32` API: a wheel delta big enough to overflow the
+        // conversion is one no user produced, and clamping it lands the view at
+        // an end it would have reached anyway.
+        let rows = self.wheel.rows(dy);
+        self.scroll_by(i32::try_from(rows).unwrap_or(if rows < 0 { i32::MIN } else { i32::MAX }));
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> (EventResult, Option<String>) {
@@ -2425,8 +2452,13 @@ impl RichTextView {
                 (EventResult::Consumed, None)
             }
             MouseEventKind::Scroll { dy, .. } => {
-                // Scroll 3 lines per "notch"
-                self.scroll_by_px(-dy * 3.0);
+                // Three *lines* per notch. The comment above this line already
+                // said so; the code said `-dy * 3.0`, which is three pixels —
+                // about a sixth of a line, so a detent moved the text by less
+                // than the height of the glyphs on it. No accumulator here:
+                // `scroll_offset_px` is an `f32`, so it can hold a trackpad's
+                // fraction directly and banking it would only add latency.
+                self.scroll_by_px(wheel::pixels(*dy, self.config.line_height));
                 (EventResult::Consumed, None)
             }
             _ => (EventResult::Ignored, None),
@@ -3047,6 +3079,146 @@ mod tests {
         view.next_match();
         view.prev_match();
         assert_eq!(view.search.current_match, None);
+    }
+
+    /// The wheel event these views are actually sent, in notches.
+    fn wheel(dy: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x: 10.0,
+            y: 10.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    /// One detent of an ordinary wheel moves three lines.
+    ///
+    /// Both wheel arms of `SimpleTextView` used to compute
+    /// `(dy / line_height).round()`, reading the notch count as a pixel
+    /// measurement. A notch is `1.0` and a line is sixteen pixels here (and
+    /// about nineteen in the default config), so the quotient rounded to zero
+    /// and **the wheel scrolled this widget by nothing at all, ever** — the
+    /// failure `MouseEventKind::Scroll`'s own documentation names. Every log
+    /// viewer and terminal transcript built on it was unscrollable by mouse.
+    #[test]
+    fn one_wheel_notch_moves_three_lines() {
+        let mut view = simple_view(200.0, 160.0);
+        view.set_text(&"line\n".repeat(50));
+        // Negative `dy` is towards the user, which moves towards the end.
+        view.handle_event(&wheel(-1.0));
+        assert_eq!(view.scroll_offset, 3);
+        view.handle_event(&wheel(-1.0));
+        assert_eq!(view.scroll_offset, 6);
+        view.handle_event(&wheel(1.0));
+        assert_eq!(view.scroll_offset, 3);
+    }
+
+    /// The non-selectable arm is a second copy of the same handler, and was a
+    /// second copy of the same bug.
+    #[test]
+    fn a_non_selectable_view_scrolls_by_the_wheel_too() {
+        let mut view = simple_view(200.0, 160.0);
+        view.config.selectable = false;
+        view.set_text(&"line\n".repeat(50));
+        view.handle_event(&wheel(-1.0));
+        assert_eq!(view.scroll_offset, 3);
+    }
+
+    /// A trackpad sends fractions of a notch. `scroll_offset` counts whole
+    /// lines and cannot hold a fraction, so the remainder has to be banked —
+    /// rounding each event on its own throws every one of them away.
+    #[test]
+    fn a_trackpads_fractions_add_up_instead_of_being_discarded() {
+        let mut view = simple_view(200.0, 160.0);
+        view.set_text(&"line\n".repeat(50));
+        for _ in 0..9 {
+            view.handle_event(&wheel(-0.1));
+        }
+        // Nine tenths of a notch is 2.7 lines: two delivered, 0.7 still owed.
+        assert_eq!(view.scroll_offset, 2);
+        view.handle_event(&wheel(-0.1));
+        assert_eq!(view.scroll_offset, 3, "the tenth event completes the row");
+    }
+
+    /// The wheel must respect the same end-stops the keyboard does.
+    #[test]
+    fn the_wheel_stops_at_both_ends_of_the_text() {
+        let mut view = simple_view(200.0, 160.0);
+        view.set_text(&"line\n".repeat(50));
+        for _ in 0..100 {
+            view.handle_event(&wheel(-1.0));
+        }
+        assert_eq!(view.scroll_offset, view.max_scroll_offset());
+        assert!(view.is_at_bottom());
+        for _ in 0..100 {
+            view.handle_event(&wheel(1.0));
+        }
+        assert_eq!(view.scroll_offset, 0);
+    }
+
+    /// Input events come from outside the process. A `NaN` that reached the
+    /// accumulator's residue would poison every later event through it.
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_the_view() {
+        let mut view = simple_view(200.0, 160.0);
+        view.set_text(&"line\n".repeat(50));
+        view.handle_event(&wheel(f32::NAN));
+        view.handle_event(&wheel(f32::INFINITY));
+        assert_eq!(view.scroll_offset, 0);
+        view.handle_event(&wheel(-1.0));
+        assert_eq!(view.scroll_offset, 3, "an ordinary notch still works after");
+    }
+
+    /// `RichTextView` scrolls in pixels, and a notch is three *lines* of them.
+    ///
+    /// Its handler said `-dy * 3.0` under a comment reading "Scroll 3 lines per
+    /// notch" — three *pixels*, about a sixth of a line, so a detent moved the
+    /// text by less than the height of the glyphs on it.
+    #[test]
+    fn one_wheel_notch_moves_three_lines_of_rich_text() {
+        let mut view = rich_view(400.0, 160.0);
+        view.set_blocks(vec![RichBlock::Paragraph {
+            spans: vec![RichSpan::plain("word ".repeat(400).trim_end())],
+            spacing_above: 0.0,
+            spacing_below: 0.0,
+        }]);
+        view.handle_event(&wheel(-1.0));
+        assert_eq!(view.scroll_offset_px, 3.0 * TEST_CELL_H);
+        view.handle_event(&wheel(1.0));
+        assert_eq!(view.scroll_offset_px, 0.0);
+    }
+
+    /// No accumulator here, and that is the point: `scroll_offset_px` is an
+    /// `f32`, so it holds the fraction itself and banking it would only add
+    /// latency. A tenth of a notch must move the view on the very first event.
+    #[test]
+    fn a_fraction_of_a_notch_moves_rich_text_now_rather_than_being_banked() {
+        let mut view = rich_view(400.0, 160.0);
+        view.set_blocks(vec![RichBlock::Paragraph {
+            spans: vec![RichSpan::plain("word ".repeat(400).trim_end())],
+            spacing_above: 0.0,
+            spacing_below: 0.0,
+        }]);
+        view.handle_event(&wheel(-0.1));
+        assert!(
+            view.scroll_offset_px > 0.0,
+            "an f32 offset can hold a fraction of a row, so it must show one"
+        );
+        assert!(view.scroll_offset_px < TEST_CELL_H);
+    }
+
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_the_rich_view() {
+        let mut view = rich_view(400.0, 160.0);
+        view.set_blocks(vec![RichBlock::Paragraph {
+            spans: vec![RichSpan::plain("word ".repeat(400).trim_end())],
+            spacing_above: 0.0,
+            spacing_below: 0.0,
+        }]);
+        view.handle_event(&wheel(f32::NAN));
+        view.handle_event(&wheel(f32::INFINITY));
+        assert_eq!(view.scroll_offset_px, 0.0);
+        view.handle_event(&wheel(-1.0));
+        assert_eq!(view.scroll_offset_px, 3.0 * TEST_CELL_H);
     }
 
     #[test]

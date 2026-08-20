@@ -43340,3 +43340,49 @@ likely on a machine that is near the limit.
 project, so it is the one that will hit this first. There is no repository-side
 fix; the value here is the five minutes a future session will otherwise spend
 looking for a `#![no_std]` that is not there.
+
+## C-SPREADSHEET-SCROLLBARS-ARE-DRAWN-BUT-NOT-DRAGGABLE (lane C, 2026-08-20)
+
+**Status:** open — dead control, not a wrong one.
+
+`apps/spreadsheet/src/main.rs` draws a vertical and a horizontal scrollbar
+(`render_scrollbars`, the `scroll_ratio` computations near the end of the
+render path). Both track the offset correctly, so they always *show* the right
+thing. Neither is wired to the mouse: `handle_left_click` tests for sheet tabs,
+column/row resize handles, the autofill handle and then the grid, and returns
+`Ignored` for a click anywhere in the scrollbar gutter. There is no thumb-drag
+state and no `MouseEventKind::Move` arm for one.
+
+So the grid can be moved by the wheel, by the arrow keys, by Page Up/Down and
+by anything that calls `ensure_cell_visible` — but not by the control that
+exists to move it, which is the first thing a user will reach for.
+
+**The fix** is a drag mode alongside the existing `InteractionMode::ColResize`
+/ `RowResize`: press in the gutter jumps a page in that direction, press on the
+thumb records the grab offset, move maps the pointer back through the same
+`scroll_ratio` the renderer used, and release ends it. The mapping must be the
+renderer's own ratio rather than a second derivation of it — that is exactly
+the divergence the layout law (`col_screen_x`/`row_screen_y`) was introduced to
+end, and a scrollbar with its own idea of the offset would reintroduce it in a
+new place. Note `scroll_by` already screens non-finite input, which a drag
+needs because the ratio divides by a content extent that can be zero.
+
+## C-SPREADSHEET-FREEZE-ACCEPTS-A-BAND-BIGGER-THAN-THE-WINDOW (lane C, 2026-08-20)
+
+**Status:** open — degrades safely, but the state is not useful.
+
+`toggle_freeze_panes` pins at the active cell with no upper bound, so selecting
+column T in a 1280 px window and freezing gives a 2000 px frozen band inside a
+~1216 px viewport. The result is safe — `push_clip_rect` clamps the resulting
+negative extent to zero and `render_row_band` returns early on a non-positive
+height, both of which are covered by
+`tests::no_clip_has_a_negative_extent` — but the sheet is then entirely frozen
+band with nothing able to scroll, and the only way out is to freeze again to
+unfreeze.
+
+Excel refuses the operation instead. **The fix** is to cap the freeze at what
+leaves a usable pane (Excel's rule is essentially "the frozen band may not fill
+the viewport"), and to say so in the status bar rather than silently pinning
+less than was asked for. Deferred because it needs a user-visible policy call
+on *which* rule — cap silently, refuse with a message, or scroll the sheet so
+the requested split fits — rather than because it is hard.

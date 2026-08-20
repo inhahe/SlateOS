@@ -19,7 +19,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::wheel;
@@ -1021,6 +1021,100 @@ impl PlayerState {
             .collect()
     }
 
+    // ------------------------------------------------------------------
+    // Track-list geometry
+    //
+    // One definition of where the rows are, used by the renderer and by
+    // every pointer path. They used to have separate ones that disagreed
+    // about two different things at once -- see `row_at`.
+    // ------------------------------------------------------------------
+
+    /// The top of the track rows, measured from the top of the content area
+    /// -- i.e. the bottom edge of the non-scrolling column header.
+    ///
+    /// Content-relative, because that is the space the list is drawn in:
+    /// `render` pushes a `translate(0, TAB_BAR_HEIGHT)` before calling the
+    /// per-tab renderer. `row_at` converts a window coordinate into this
+    /// space once, rather than each pointer path doing its own arithmetic.
+    const fn rows_top() -> f32 {
+        TRACK_ROW_HEIGHT
+    }
+
+    /// The height of the content area, between the tab bar and the controls.
+    fn content_height(&self) -> f32 {
+        (self.height - TAB_BAR_HEIGHT - CONTROLS_HEIGHT).max(0.0)
+    }
+
+    /// The height of the scrolling track-row area.
+    ///
+    /// The column header does not scroll, so it is not part of this.
+    fn rows_height(&self) -> f32 {
+        (self.content_height() - Self::rows_top()).max(0.0)
+    }
+
+    /// How many rows the active tab's list holds.
+    fn row_count(&self) -> usize {
+        match self.active_tab {
+            Tab::Library => self.filtered_library().len(),
+            Tab::Playlists => self.playlist.len(),
+            // Now Playing is not a list. Clicking it used to set
+            // `selected_index` anyway, to a track the tab never showed.
+            Tab::NowPlaying => 0,
+        }
+    }
+
+    /// The track under the *window* y coordinate `y`, or `None` if the
+    /// pointer is not over a row.
+    ///
+    /// The single bound for the click path, the double-click path and the
+    /// renderer. Two separate faults met here:
+    ///
+    /// * The renderer snapped: it drew row `(scroll_offset /
+    ///   TRACK_ROW_HEIGHT) as usize` at the top of the pane, discarding the
+    ///   fractional part, while this arithmetic kept it. A trackpad scrolls
+    ///   by fractions of a row, so after any such scroll the row under the
+    ///   pointer was not the row that had been painted there -- by up to a
+    ///   whole row. The renderer now draws at the continuous offset and
+    ///   clips, which is what the hit test always assumed.
+    /// * `selected_index` was assigned unconditionally, so a click below the
+    ///   last track selected a track index past the end of the list, and a
+    ///   click in the header strip -- or on the Now Playing tab -- selected
+    ///   one too.
+    fn row_at(&self, y: f32) -> Option<usize> {
+        let rel = y - TAB_BAR_HEIGHT - Self::rows_top();
+        if !rel.is_finite() || rel < 0.0 || rel >= self.rows_height() {
+            return None;
+        }
+        let from_top = rel + self.scroll_offset;
+        if !from_top.is_finite() || from_top < 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let idx = (from_top / TRACK_ROW_HEIGHT) as usize;
+        if idx < self.row_count() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    /// How far the active tab's list may be scrolled before its last row
+    /// sits on the bottom edge of the pane.
+    fn max_scroll(&self) -> f32 {
+        let viewport = self.rows_height();
+        if viewport <= 0.0 {
+            // No viewport, so "how far can this scroll" has no answer.
+            // Reporting the current offset makes the clamp a no-op rather
+            // than a decision: a window dragged down to nothing and back
+            // does not lose the reader's place, and does not jump to the
+            // end of the list either.
+            return self.scroll_offset.max(0.0);
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let total = self.row_count() as f32 * TRACK_ROW_HEIGHT;
+        (total - viewport).max(0.0)
+    }
+
     /// Generate M3U playlist content.
     ///
     /// M3U is a bare line-oriented format with no quoting or escape mechanism
@@ -1096,7 +1190,7 @@ pub fn render(state: &PlayerState) -> RenderTree {
 
     match state.active_tab {
         Tab::NowPlaying => render_now_playing(state, &mut tree, content_height),
-        Tab::Library => render_library(state, &mut tree, content_height),
+        Tab::Library => render_library(state, &mut tree),
         Tab::Playlists => render_playlist_view(state, &mut tree, content_height),
     }
 
@@ -1305,8 +1399,22 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
     }
 }
 
+/// The first track index that is at all visible at `scroll_offset`.
+///
+/// Rounds *down*, so a list scrolled by half a row starts with that row's
+/// bottom half rather than skipping it -- which is what makes the drawn rows
+/// line up with the continuous hit test.
+fn first_visible_row(scroll_offset: f32) -> usize {
+    if !scroll_offset.is_finite() || scroll_offset <= 0.0 {
+        return 0;
+    }
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let first = (scroll_offset / TRACK_ROW_HEIGHT) as usize;
+    first
+}
+
 /// Render Library view with track list.
-fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f32) {
+fn render_library(state: &PlayerState, tree: &mut RenderTree) {
     // Column headers
     let header_y = 0.0;
     tree.fill_rect(0.0, header_y, state.width, TRACK_ROW_HEIGHT, MANTLE);
@@ -1358,28 +1466,41 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
         overflow: TextOverflow::Clip,
     });
 
-    // Track list
+    // Track list. Drawn at the *continuous* scroll offset, under a clip, so
+    // a partial row is shown as a partial row. It used to be snapped to a
+    // whole row (`(scroll_offset / TRACK_ROW_HEIGHT) as usize`), which threw
+    // away the fraction the hit test kept -- so after a trackpad scroll the
+    // row under the pointer was not the row painted there.
     let filtered = state.filtered_library();
-    let visible_rows = ((content_height - TRACK_ROW_HEIGHT) / TRACK_ROW_HEIGHT) as usize;
-    let scroll_start = (state.scroll_offset / TRACK_ROW_HEIGHT) as usize;
-    let display_count = visible_rows.min(filtered.len().saturating_sub(scroll_start));
+    let rows_y = PlayerState::rows_top();
+    let rows_h = state.rows_height();
+    let first = first_visible_row(state.scroll_offset);
+    let origin_y = rows_y - state.scroll_offset;
 
-    for i in 0..display_count {
-        let track_idx = scroll_start + i;
+    tree.clip(0.0, rows_y, state.width, rows_h);
+
+    for track_idx in first..filtered.len() {
+        #[allow(clippy::cast_precision_loss)]
+        let row_y = origin_y + track_idx as f32 * TRACK_ROW_HEIGHT;
+        if row_y >= rows_y + rows_h {
+            break;
+        }
         let track = match filtered.get(track_idx) {
             Some(t) => *t,
             None => break,
         };
 
-        let row_y = TRACK_ROW_HEIGHT + i as f32 * TRACK_ROW_HEIGHT;
         let is_playing = state.current_track().map(|ct| ct.path == track.path) == Some(true);
         let is_selected = state.selected_index == Some(track_idx);
 
+        // Striped by *track* index, not by visible slot: the stripes belong
+        // to the rows, so they no longer invert every time the list scrolls
+        // past a row boundary.
         let row_bg = if is_playing {
             SURFACE0
         } else if is_selected {
             SURFACE1
-        } else if i % 2 == 0 {
+        } else if track_idx % 2 == 0 {
             BASE
         } else {
             Color::rgba(49, 50, 68, 80)
@@ -1449,6 +1570,8 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree, content_height: f3
         });
     }
 
+    tree.unclip();
+
     // Sort indicator
     let sort_label = match state.library_sort {
         SortBy::Title => "Sorted: Title",
@@ -1496,19 +1619,25 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
         overflow: TextOverflow::Clip,
     });
 
-    // Playlist tracks
-    let visible_rows = ((content_height - TRACK_ROW_HEIGHT) / TRACK_ROW_HEIGHT) as usize;
-    let scroll_start = (state.scroll_offset / TRACK_ROW_HEIGHT) as usize;
-    let display_count = visible_rows.min(state.playlist.len().saturating_sub(scroll_start));
+    // Playlist tracks. Continuous, clipped -- see `render_library`.
+    let rows_y = PlayerState::rows_top();
+    let rows_h = state.rows_height();
+    let first = first_visible_row(state.scroll_offset);
+    let origin_y = rows_y - state.scroll_offset;
 
-    for i in 0..display_count {
-        let track_idx = scroll_start + i;
+    tree.clip(0.0, rows_y, state.width, rows_h);
+
+    for track_idx in first..state.playlist.len() {
+        #[allow(clippy::cast_precision_loss)]
+        let row_y = origin_y + track_idx as f32 * TRACK_ROW_HEIGHT;
+        if row_y >= rows_y + rows_h {
+            break;
+        }
         let track = match state.playlist.get(track_idx) {
             Some(t) => t,
             None => break,
         };
 
-        let row_y = TRACK_ROW_HEIGHT + i as f32 * TRACK_ROW_HEIGHT;
         let is_current = state.current_track_index == Some(track_idx);
         let is_selected = state.selected_index == Some(track_idx);
 
@@ -1516,7 +1645,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             SURFACE0
         } else if is_selected {
             SURFACE1
-        } else if i % 2 == 0 {
+        } else if track_idx % 2 == 0 {
             BASE
         } else {
             Color::rgba(49, 50, 68, 80)
@@ -1607,6 +1736,8 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             overflow: TextOverflow::Clip,
         });
     }
+
+    tree.unclip();
 
     // Empty state
     if state.playlist.is_empty() {
@@ -1928,21 +2059,40 @@ fn render_button(
 
 /// Handle an input event, returning true if the event was consumed.
 pub fn handle_event(state: &mut PlayerState, event: &Event) -> bool {
-    match event {
+    let consumed = match event {
         Event::Key(key_event) => handle_key(state, key_event),
         Event::Mouse(mouse_event) => handle_mouse(state, mouse_event),
         Event::Resize { width, height } => {
-            state.width = *width as f32;
-            state.height = *height as f32;
+            #[allow(clippy::cast_precision_loss)]
+            {
+                state.width = *width as f32;
+                state.height = *height as f32;
+            }
             true
         }
         Event::Tick { elapsed_ms } => {
+            #[allow(clippy::cast_precision_loss)]
             let secs = *elapsed_ms as f32 / 1000.0;
             state.tick(secs);
             true
         }
         _ => false,
+    };
+
+    // Pull the offset back inside its bounds *here*, once, rather than at
+    // each of the dozen places that can shorten the content under a
+    // scrolled pane: a resize, a search keystroke, a tab switch, removing a
+    // track. Only the wheel handler clamped, so any of the others could
+    // leave the list wound off the end of itself and showing nothing.
+    //
+    // Guarded on a non-zero offset because `max_scroll` walks the library to
+    // count the filtered rows, and an unscrolled list -- which is the usual
+    // case, and the case every `Tick` arrives in -- has nothing to clamp.
+    if state.scroll_offset > 0.0 || !state.scroll_offset.is_finite() {
+        state.scroll_offset = state.scroll_offset.clamp(0.0, state.max_scroll());
     }
+
+    consumed
 }
 
 /// Handle keyboard input.
@@ -2230,17 +2380,13 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
                 }
             }
 
-            // Content area clicks (track selection)
-            let content_y = TAB_BAR_HEIGHT;
-            let content_height = state.height - TAB_BAR_HEIGHT - CONTROLS_HEIGHT;
-            if y >= content_y && y < content_y + content_height {
-                let rel_y = y - content_y;
-                if rel_y > TRACK_ROW_HEIGHT {
-                    let row_idx = ((rel_y - TRACK_ROW_HEIGHT + state.scroll_offset)
-                        / TRACK_ROW_HEIGHT) as usize;
-                    state.selected_index = Some(row_idx);
-                    return true;
-                }
+            // Content area clicks (track selection). `row_at` is the bound
+            // this never had: it used to assign `selected_index`
+            // unconditionally, so a click below the last track selected an
+            // index past the end of the list.
+            if let Some(row_idx) = state.row_at(y) {
+                state.selected_index = Some(row_idx);
+                return true;
             }
 
             false
@@ -2274,28 +2420,17 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
         MouseEventKind::Scroll { dy, .. } => {
             // Scroll track list
             let content_y = TAB_BAR_HEIGHT;
-            let content_height = state.height - TAB_BAR_HEIGHT - CONTROLS_HEIGHT;
+            let content_height = state.content_height();
             if y >= content_y && y < content_y + content_height {
-                let max_scroll = match state.active_tab {
-                    Tab::Library => {
-                        let total = state.filtered_library().len() as f32 * TRACK_ROW_HEIGHT;
-                        (total - content_height + TRACK_ROW_HEIGHT).max(0.0)
-                    }
-                    Tab::Playlists => {
-                        let total = state.playlist.len() as f32 * TRACK_ROW_HEIGHT;
-                        (total - content_height + TRACK_ROW_HEIGHT).max(0.0)
-                    }
-                    _ => 0.0,
-                };
+                let max_scroll = state.max_scroll();
                 // A pixel offset, so `wheel::pixels` rather than an
                 // accumulator: a trackpad's fifth of a notch can be shown as a
                 // fifth of a notch here. The `30.0` it replaces was one of a
                 // dozen private guesses at what a notch is worth -- the tree
                 // held 1, 20, 30 and 40 px per notch at once, and this list's
                 // rows are 36 px tall, so 30 was not even a row.
-                state.scroll_offset = (state.scroll_offset
-                    + wheel::pixels(*dy, TRACK_ROW_HEIGHT))
-                .clamp(0.0, max_scroll);
+                state.scroll_offset = (state.scroll_offset + wheel::pixels(*dy, TRACK_ROW_HEIGHT))
+                    .clamp(0.0, max_scroll);
                 return true;
             }
             false
@@ -2303,41 +2438,32 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
 
         MouseEventKind::DoubleClick(MouseButton::Left) => {
             // Double-click to play track
-            let content_y = TAB_BAR_HEIGHT;
-            let content_height = state.height - TAB_BAR_HEIGHT - CONTROLS_HEIGHT;
-            if y >= content_y && y < content_y + content_height {
-                let rel_y = y - content_y;
-                if rel_y > TRACK_ROW_HEIGHT {
-                    let row_idx = ((rel_y - TRACK_ROW_HEIGHT + state.scroll_offset)
-                        / TRACK_ROW_HEIGHT) as usize;
-
-                    match state.active_tab {
-                        Tab::Library => {
-                            let filtered = state.filtered_library();
-                            if let Some(track) = filtered.get(row_idx) {
-                                let path = track.path.clone();
-                                if let Some(pos) =
-                                    state.playlist.iter().position(|t| t.path == path)
-                                {
-                                    state.current_track_index = Some(pos);
-                                } else {
-                                    let track_clone = (*track).clone();
-                                    state.playlist.push(track_clone);
-                                    state.current_track_index = Some(state.playlist.len() - 1);
-                                }
-                                state.position_secs = 0.0;
-                                state.playing = true;
+            if let Some(row_idx) = state.row_at(y) {
+                match state.active_tab {
+                    Tab::Library => {
+                        let filtered = state.filtered_library();
+                        if let Some(track) = filtered.get(row_idx) {
+                            let path = track.path.clone();
+                            if let Some(pos) = state.playlist.iter().position(|t| t.path == path) {
+                                state.current_track_index = Some(pos);
+                            } else {
+                                let track_clone = (*track).clone();
+                                state.playlist.push(track_clone);
+                                state.current_track_index =
+                                    Some(state.playlist.len().saturating_sub(1));
                             }
-                        }
-                        Tab::Playlists if row_idx < state.playlist.len() => {
-                            state.current_track_index = Some(row_idx);
                             state.position_secs = 0.0;
                             state.playing = true;
                         }
-                        _ => {}
                     }
-                    return true;
+                    Tab::Playlists if row_idx < state.playlist.len() => {
+                        state.current_track_index = Some(row_idx);
+                        state.position_secs = 0.0;
+                        state.playing = true;
+                    }
+                    _ => {}
                 }
+                return true;
             }
             false
         }
@@ -2565,11 +2691,14 @@ mod tests {
         for _ in 0..500 {
             wheel(&mut state, -1.0);
         }
-        let content_height = state.height - TAB_BAR_HEIGHT - CONTROLS_HEIGHT;
         let total = 400.0 * TRACK_ROW_HEIGHT;
+        assert_eq!(state.scroll_offset, total - state.rows_height());
+        // The last row's bottom edge lands on the pane's bottom edge, which
+        // is what "scrolled to the end" is supposed to mean.
+        let last_row_bottom = PlayerState::rows_top() + total - state.scroll_offset;
         assert_eq!(
-            state.scroll_offset,
-            (total - content_height + TRACK_ROW_HEIGHT).max(0.0)
+            last_row_bottom,
+            PlayerState::rows_top() + state.rows_height()
         );
         for _ in 0..500 {
             wheel(&mut state, 1.0);
@@ -2602,6 +2731,304 @@ mod tests {
         );
         assert!(!handled, "the tab bar does not scroll");
         assert_eq!(state.scroll_offset, 0.0);
+    }
+
+    // -- The track list's edges --
+
+    fn click(state: &mut PlayerState, y: f32) {
+        state.selected_index = None;
+        handle_mouse(
+            state,
+            &MouseEvent {
+                x: 100.0,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            },
+        );
+    }
+
+    /// The rectangle the renderer actually clipped the track rows to, in
+    /// *window* coordinates.
+    ///
+    /// Read out of the emitted commands rather than recomputed from the
+    /// constants. Recomputing is what makes a layout test worthless: it
+    /// re-derives the renderer's arithmetic and then checks the hit test
+    /// against *that*, so the two can drift together and the test still
+    /// passes. This asks the renderer what it drew, and adds back the
+    /// `translate(0, TAB_BAR_HEIGHT)` the list is drawn under.
+    fn rows_clip(state: &PlayerState) -> (f32, f32) {
+        let tree = render(state);
+        let (y, h) = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::PushClip { y, height, .. } => Some((*y, *height)),
+                _ => None,
+            })
+            // The first clip is the whole content area, pushed by `render`
+            // before the translate. The row clip is the one inside it.
+            .nth(1)
+            .expect("the track rows are drawn under a clip of their own");
+        (y + TAB_BAR_HEIGHT, h)
+    }
+
+    /// The y of every row rectangle the renderer painted, in window
+    /// coordinates, paired with the track index it painted there.
+    ///
+    /// The row backgrounds are the only full-width `FillRect`s inside the
+    /// row clip, and they are emitted in track order, so walking them in
+    /// order recovers the mapping the renderer used.
+    fn painted_rows(state: &PlayerState) -> Vec<f32> {
+        let tree = render(state);
+        let mut seen_clips = 0usize;
+        let mut out = Vec::new();
+        for cmd in &tree.commands {
+            match cmd {
+                RenderCommand::PushClip { .. } => seen_clips += 1,
+                RenderCommand::PopClip => seen_clips = seen_clips.saturating_sub(1),
+                RenderCommand::FillRect { y, width, .. }
+                    if seen_clips == 2 && *width == state.width =>
+                {
+                    out.push(*y + TAB_BAR_HEIGHT);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_lists_clip_is_the_region_the_hit_test_accepts() {
+        let mut state = player_with_library(400);
+        let (clip_y, clip_h) = rows_clip(&state);
+        assert_eq!(clip_y, TAB_BAR_HEIGHT + PlayerState::rows_top());
+        assert_eq!(clip_h, state.rows_height());
+
+        click(&mut state, clip_y);
+        assert_eq!(state.selected_index, Some(0), "the clip's top edge is dead");
+        click(&mut state, clip_y + clip_h - 0.5);
+        assert!(
+            state.selected_index.is_some(),
+            "the clip's bottom edge is dead"
+        );
+        click(&mut state, clip_y + clip_h);
+        assert_eq!(
+            state.selected_index, None,
+            "the hit test runs past the clip the rows are painted in"
+        );
+    }
+
+    #[test]
+    fn a_half_row_scroll_selects_the_row_that_was_drawn_there() {
+        // The bug: the renderer snapped to whole rows and the hit test did
+        // not, so after any fractional scroll -- which is every trackpad
+        // scroll -- the row under the pointer was not the row painted there.
+        // Probing row *tops* would not catch it: the snapped renderer and
+        // the continuous hit test happened to agree there. The divergence is
+        // in the lower part of each painted row, which is why every probe
+        // below sweeps the row rather than sampling one edge of it.
+        let mut state = player_with_library(400);
+        state.scroll_offset = TRACK_ROW_HEIGHT / 2.0;
+        let painted = painted_rows(&state);
+        let (clip_y, clip_h) = rows_clip(&state);
+        assert!(painted.len() > 2, "the pane must fit several rows");
+        for (track_idx, row_y) in painted.iter().enumerate() {
+            for step in 0..8 {
+                #[allow(clippy::cast_precision_loss)]
+                let probe = row_y + (step as f32 + 0.5) * TRACK_ROW_HEIGHT / 8.0;
+                if probe < clip_y || probe >= clip_y + clip_h {
+                    continue;
+                }
+                click(&mut state, probe);
+                assert_eq!(
+                    state.selected_index,
+                    Some(track_idx),
+                    "row painted at {row_y} hit-tests as {:?} at y={probe}",
+                    state.selected_index
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_row_edge_selects_the_row_the_renderer_drew_there() {
+        let mut state = player_with_library(400);
+        let painted = painted_rows(&state);
+        let (clip_y, clip_h) = rows_clip(&state);
+        for (track_idx, row_y) in painted.iter().enumerate() {
+            for probe in [*row_y, row_y + TRACK_ROW_HEIGHT - 0.5] {
+                if probe < clip_y || probe >= clip_y + clip_h {
+                    continue;
+                }
+                click(&mut state, probe);
+                assert_eq!(state.selected_index, Some(track_idx), "at y={probe}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_column_header_does_not_select_a_track() {
+        let mut state = player_with_library(400);
+        for y in [
+            TAB_BAR_HEIGHT,
+            TAB_BAR_HEIGHT + TRACK_ROW_HEIGHT / 2.0,
+            TAB_BAR_HEIGHT + PlayerState::rows_top() - 0.5,
+        ] {
+            click(&mut state, y);
+            assert_eq!(state.selected_index, None, "the header selected at {y}");
+        }
+    }
+
+    #[test]
+    fn empty_space_below_a_short_list_selects_nothing() {
+        // The bug: `selected_index` was assigned unconditionally, so a click
+        // in the blank part of the pane selected a track index past the end
+        // of the list -- which nothing downstream expected.
+        let mut state = player_with_library(3);
+        let (clip_y, clip_h) = rows_clip(&state);
+        let below_last = clip_y + 3.0 * TRACK_ROW_HEIGHT + 1.0;
+        assert!(below_last < clip_y + clip_h, "the pane must fit >3 rows");
+        click(&mut state, below_last);
+        assert_eq!(state.selected_index, None);
+    }
+
+    #[test]
+    fn the_controls_strip_does_not_select_a_track() {
+        let mut state = player_with_library(400);
+        let in_controls = state.height - CONTROLS_HEIGHT / 2.0;
+        click(&mut state, in_controls);
+        assert_eq!(state.selected_index, None);
+    }
+
+    #[test]
+    fn the_now_playing_tab_has_no_rows_to_select() {
+        // It is not a list, but the click path used to set `selected_index`
+        // on it anyway -- to a track that tab never showed.
+        let mut state = player_with_library(400);
+        state.active_tab = Tab::NowPlaying;
+        click(&mut state, TAB_BAR_HEIGHT + PlayerState::rows_top() + 1.0);
+        assert_eq!(state.selected_index, None);
+    }
+
+    #[test]
+    fn a_window_shorter_than_its_own_chrome_has_no_rows() {
+        let mut state = player_with_library(400);
+        state.height = TAB_BAR_HEIGHT;
+        assert_eq!(state.rows_height(), 0.0);
+        click(&mut state, TAB_BAR_HEIGHT + 1.0);
+        assert_eq!(state.selected_index, None);
+    }
+
+    #[test]
+    fn collapsing_the_window_and_restoring_it_keeps_the_reader_in_place() {
+        // A degenerate pane has no answer to "how far can this scroll", so
+        // the clamp must be a no-op there rather than snapping to either
+        // end of a list it cannot show.
+        let mut state = player_with_library(400);
+        for _ in 0..20 {
+            wheel(&mut state, -1.0);
+        }
+        let was = state.scroll_offset;
+        assert!(was > 0.0);
+        handle_event(
+            &mut state,
+            &Event::Resize {
+                width: 900,
+                height: TAB_BAR_HEIGHT as u32,
+            },
+        );
+        assert_eq!(state.scroll_offset, was);
+        handle_event(
+            &mut state,
+            &Event::Resize {
+                width: 900,
+                height: 700,
+            },
+        );
+        assert_eq!(state.scroll_offset, was);
+    }
+
+    #[test]
+    fn shrinking_the_window_winds_the_list_back_inside_itself() {
+        // Only the wheel handler clamped, so a resize could leave the list
+        // scrolled past its own end and showing nothing at all.
+        let mut state = player_with_library(30);
+        for _ in 0..200 {
+            wheel(&mut state, -1.0);
+        }
+        assert_eq!(state.scroll_offset, state.max_scroll());
+        handle_event(
+            &mut state,
+            &Event::Resize {
+                width: 900,
+                height: 2000,
+            },
+        );
+        assert_eq!(state.scroll_offset, state.max_scroll());
+        assert!(!painted_rows(&state).is_empty(), "the list went blank");
+    }
+
+    #[test]
+    fn a_search_that_shortens_the_library_winds_the_list_back() {
+        let mut state = player_with_library(400);
+        for _ in 0..200 {
+            wheel(&mut state, -1.0);
+        }
+        assert!(state.scroll_offset > 0.0);
+        // "track 39" matches 39 and 390-399: eleven of the 400 titles, few
+        // enough that the pane holds them all and the offset must go to 0.
+        state.searching = true;
+        for ch in "track 39".chars() {
+            handle_event(
+                &mut state,
+                &Event::Key(KeyEvent {
+                    key: Key::A,
+                    pressed: true,
+                    modifiers: Modifiers::default(),
+                    text: Some(ch),
+                }),
+            );
+        }
+        assert_eq!(state.filtered_library().len(), 11);
+        assert_eq!(state.max_scroll(), 0.0, "eleven rows must fit the pane");
+        assert_eq!(state.scroll_offset, 0.0);
+        assert!(!painted_rows(&state).is_empty(), "the list went blank");
+    }
+
+    #[test]
+    fn a_nonfinite_coordinate_selects_nothing() {
+        let mut state = player_with_library(400);
+        for y in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            click(&mut state, y);
+            assert_eq!(state.selected_index, None, "selected on {y}");
+        }
+    }
+
+    #[test]
+    fn a_double_click_plays_the_track_the_pointer_is_over() {
+        let mut state = player_with_library(400);
+        state.scroll_offset = 10.5 * TRACK_ROW_HEIGHT;
+        let painted = painted_rows(&state);
+        let (clip_y, _) = rows_clip(&state);
+        assert!(!painted.is_empty());
+        // The second painted row is fully inside the clip.
+        let row_y = painted[1];
+        assert!(row_y > clip_y);
+        handle_mouse(
+            &mut state,
+            &MouseEvent {
+                x: 100.0,
+                y: row_y + 1.0,
+                kind: MouseEventKind::DoubleClick(MouseButton::Left),
+            },
+        );
+        assert_eq!(
+            state
+                .playlist
+                .get(state.current_track_index.unwrap())
+                .map(|t| t.title.clone()),
+            Some(String::from("track 11")),
+        );
     }
 
     /// A player with `len` one-second tracks, shuffle on, sitting on track 0.
@@ -2670,7 +3097,11 @@ mod tests {
             heard.push(state.current_track_index.unwrap());
         }
         let distinct: std::collections::HashSet<usize> = heard.iter().copied().collect();
-        assert_eq!(distinct.len(), LEN, "a track repeated within one pass: {heard:?}");
+        assert_eq!(
+            distinct.len(),
+            LEN,
+            "a track repeated within one pass: {heard:?}"
+        );
     }
 
     /// Two passes over the same playlist must not be the same pass.
@@ -2758,7 +3189,10 @@ mod tests {
                 .map(|f| f[i].to_bits())
                 .collect::<std::collections::HashSet<u32>>()
                 .len();
-            assert!(distinct >= 20, "bar {i} took only {distinct} distinct heights over 40 frames");
+            assert!(
+                distinct >= 20,
+                "bar {i} took only {distinct} distinct heights over 40 frames"
+            );
         }
     }
 

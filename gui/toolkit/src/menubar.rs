@@ -65,10 +65,14 @@ const SHADOW_OFFSET: f32 = 4.0;
 const SUBMENU_ARROW_WIDTH: f32 = 20.0;
 /// Minimum dropdown panel width.
 const MIN_DROPDOWN_WIDTH: f32 = 160.0;
-/// Underline thickness drawn beneath mnemonic characters.
 /// Screen height a dropdown is allowed to occupy. Matches `menu.rs`; a panel
 /// taller than this scrolls instead of being drawn off the bottom edge.
 const DEFAULT_VIEWPORT_HEIGHT: f32 = 1080.0;
+/// Screen width a dropdown is allowed to occupy, the companion to
+/// [`DEFAULT_VIEWPORT_HEIGHT`]. A submenu that would hang off the right edge
+/// flips to the left of its parent instead — see
+/// [`DropdownPanel::child_origin`].
+const DEFAULT_VIEWPORT_WIDTH: f32 = 1920.0;
 /// Width of the scroll indicator down the right edge of a capped panel.
 const SCROLLBAR_WIDTH: f32 = 4.0;
 /// Gap between that indicator and the panel's border.
@@ -80,6 +84,7 @@ const SCROLLBAR_TRACK_COLOR: Color = Color::from_hex(0x313244);
 /// The thumb itself.
 const SCROLLBAR_THUMB_COLOR: Color = Color::from_hex(0x585B70);
 
+/// Underline thickness drawn beneath mnemonic characters.
 const MNEMONIC_UNDERLINE_THICKNESS: f32 = 1.0;
 /// Vertical offset of the mnemonic underline below the text baseline.
 const MNEMONIC_UNDERLINE_OFFSET: f32 = 2.0;
@@ -298,6 +303,33 @@ impl DropdownPanel {
 
     fn right(&self) -> f32 {
         self.x + self.width
+    }
+
+    /// Where a child submenu `child_width` wide should be placed beside this
+    /// panel.
+    ///
+    /// Normally at [`Self::right`], so the child sits against its parent. When
+    /// that would push the child past [`DEFAULT_VIEWPORT_WIDTH`] it flips to
+    /// the other side instead, ending flush with this panel's left edge — the
+    /// same rule every desktop menu uses, and the reason a `File > Recent >`
+    /// chain opened from a menu bar near the right of the screen does not walk
+    /// off it one level at a time.
+    ///
+    /// The flipped position is floored at zero rather than allowed negative:
+    /// a submenu wider than everything to its left has nowhere good to go, and
+    /// being clipped on the right is at least reachable, whereas being drawn at
+    /// a negative `x` is neither visible nor clickable. There is exactly one
+    /// spelling of this rule because the three places that open a submenu —
+    /// click, hover and the primary-level constructor — must agree; when they
+    /// each said `panel.right()` they agreed only because none of them had a
+    /// rule at all.
+    fn child_origin(&self, child_width: f32) -> f32 {
+        let at_right = self.right();
+        if at_right + child_width > DEFAULT_VIEWPORT_WIDTH {
+            (self.x - child_width).max(0.0)
+        } else {
+            at_right
+        }
     }
 
     fn bottom(&self) -> f32 {
@@ -799,13 +831,13 @@ impl MenuBar {
 
             Key::Enter => {
                 if let Some(ref sub) = self.open_submenu {
-                    let deepest = find_deepest(sub);
-                    if let Some(hi) = deepest.hover_index {
-                        let entries =
-                            resolve_submenu_entries(children_of(&self.items, top_idx), deepest);
-                        if let Some(act) = try_activate_entry(&entries, hi) {
-                            self.apply_activation(act);
-                        }
+                    let (deepest, entries) =
+                        deepest_with_entries_ref(children_of(&self.items, top_idx), sub);
+                    let act = deepest
+                        .hover_index
+                        .and_then(|hi| try_activate_entry(&entries, hi));
+                    if let Some(act) = act {
+                        self.apply_activation(act);
                     }
                 } else if let Some(hi) = self.dropdown_hover {
                     self.activate_entry(top_idx, hi);
@@ -937,24 +969,7 @@ impl MenuBar {
 
         // Submenu chain.
         if let Some(ref sub) = self.open_submenu {
-            self.render_submenu_chain(cmds, sub, top_idx);
-        }
-    }
-
-    fn render_submenu_chain(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        sub: &OpenSubmenu,
-        top_idx: usize,
-    ) {
-        let entries = resolve_submenu_entries(children_of(&self.items, top_idx), sub);
-        let panel = submenu_panel(&entries, sub);
-
-        render_panel(cmds, &panel);
-        render_entries(cmds, &entries, &panel, sub.hover_index);
-
-        if let Some(ref child) = sub.child {
-            self.render_submenu_chain(cmds, child, top_idx);
+            render_submenu_chain(cmds, children, sub);
         }
     }
 
@@ -1047,9 +1062,10 @@ impl MenuBar {
             return None;
         };
         let panel = self.dropdown_panel(top_idx);
+        let width = calculate_dropdown_width(nested);
         Some(OpenSubmenu {
             parent_index: item_idx,
-            x: panel.right(),
+            x: panel.child_origin(width),
             // Hangs off where the row *is*, which is where the panel says it is
             // — including the scroll offset. Recomputing the row's place from
             // the entry list here is how a submenu ends up beside the wrong row
@@ -1057,7 +1073,7 @@ impl MenuBar {
             y: panel
                 .row_top(children, item_idx)
                 .unwrap_or_else(|| panel.viewport_top()),
-            width: calculate_dropdown_width(nested),
+            width,
             hover_index: None,
             scroll: 0.0,
             child: None,
@@ -1086,9 +1102,17 @@ impl MenuBar {
     /// the highlight off the bottom edge and the user watches an unmoving list
     /// with nothing selected in it.
     ///
-    /// Every path that sets `dropdown_hover` from the keyboard goes through
+    /// Every path that sets `dropdown_hover` from the *keyboard* goes through
     /// here — arrows and type-to-jump both — because a scroll wired into one of
     /// two assignments is a scroll missing from the other.
+    ///
+    /// The pointer paths deliberately do not: [`Self::on_mouse_move`] assigns
+    /// `dropdown_hover` directly. The asymmetry is the point rather than an
+    /// oversight. A row the keyboard picked may be anywhere in the list, so it
+    /// has to be brought into view; a row a hit test found is on the screen
+    /// already, by construction, and scrolling to "reveal" it would slide the
+    /// list out from under the very pointer that chose it — one twitch of the
+    /// mouse and the menu bolts. Hover follows the pointer; it never leads it.
     fn set_dropdown_hover(&mut self, hover: Option<usize>, top_idx: usize) {
         self.dropdown_hover = hover;
         if let Some(idx) = hover {
@@ -1120,8 +1144,9 @@ impl MenuBar {
         let Some(ref mut sub) = self.open_submenu else {
             return;
         };
-        let deepest = deepest_submenu_mut(sub);
-        let entries = resolve_submenu_entries(root_children, deepest);
+        // Resolving the deepest node needs every level above it, so the walk
+        // down and the resolve happen together — see [`deepest_with_entries`].
+        let (deepest, entries) = deepest_with_entries(root_children, sub);
         deepest.hover_index = pick(&entries, deepest.hover_index);
         if let Some(idx) = deepest.hover_index {
             let panel = submenu_panel(&entries, deepest);
@@ -1165,23 +1190,30 @@ fn try_activate_entry(entries: &[MenuBarEntry], idx: usize) -> Option<ActivatedE
 }
 
 /// Walk the submenu chain looking for a click hit. This is a free function
-/// so we can pass `&items[top_idx].children` separately from `&mut sub`.
+/// so we can pass the parent's entries separately from `&mut sub`.
+///
+/// `parent_entries` is the level directly above `sub` — the top-level menu's
+/// children for the primary submenu, and each level's own resolved entries for
+/// the one below it. See [`resolve_submenu_entries`].
 fn click_in_submenu_chain(
-    root_children: &[MenuBarEntry],
+    parent_entries: &[MenuBarEntry],
     sub: &mut OpenSubmenu,
     mx: f32,
     my: f32,
 ) -> SubmenuClickResult {
+    // Resolved before descending, not after: the child's `parent_index` indexes
+    // into *these* entries, so the recursion cannot be handed what we were.
+    let entries = resolve_submenu_entries(parent_entries, sub);
+
     // Recurse into child first (deepest wins).
     if let Some(ref mut child) = sub.child {
-        let r = click_in_submenu_chain(root_children, child, mx, my);
+        let r = click_in_submenu_chain(&entries, child, mx, my);
         match r {
             SubmenuClickResult::Miss => {} // Fall through to check this level.
             other => return other,
         }
     }
 
-    let entries = resolve_submenu_entries(root_children, sub);
     let panel = submenu_panel(&entries, sub);
 
     if panel.contains(mx, my) {
@@ -1192,13 +1224,14 @@ fn click_in_submenu_chain(
             }
             // If it's a submenu, signal to open it.
             if let Some(MenuBarEntry::SubMenu { children: sc, .. }) = entries.get(idx) {
+                let child_width = calculate_dropdown_width(sc);
                 return SubmenuClickResult::OpenChild {
                     idx,
-                    child_x: panel.right(),
+                    child_x: panel.child_origin(child_width),
                     child_y: panel
                         .row_top(&entries, idx)
                         .unwrap_or_else(|| panel.viewport_top()),
-                    child_width: calculate_dropdown_width(sc),
+                    child_width,
                 };
             }
         }
@@ -1209,21 +1242,24 @@ fn click_in_submenu_chain(
 }
 
 /// Hover inside submenu chain. Returns `true` if the point is inside.
+///
+/// `parent_entries` means what it does in [`click_in_submenu_chain`].
 fn hover_in_submenu_chain(
-    root_children: &[MenuBarEntry],
+    parent_entries: &[MenuBarEntry],
     sub: &mut OpenSubmenu,
     mx: f32,
     my: f32,
 ) -> bool {
+    let entries = resolve_submenu_entries(parent_entries, sub);
+
     // Recurse into child first.
     if let Some(ref mut child) = sub.child
-        && hover_in_submenu_chain(root_children, child, mx, my)
+        && hover_in_submenu_chain(&entries, child, mx, my)
     {
         sub.hover_index = None;
         return true;
     }
 
-    let entries = resolve_submenu_entries(root_children, sub);
     let panel = submenu_panel(&entries, sub);
 
     if panel.contains(mx, my) {
@@ -1236,13 +1272,14 @@ fn hover_in_submenu_chain(
                 Some(MenuBarEntry::SubMenu { children: sc, .. }) => {
                     let already = sub.child.as_ref().is_some_and(|c| c.parent_index == hi);
                     if !already {
+                        let width = calculate_dropdown_width(sc);
                         sub.child = Some(Box::new(OpenSubmenu {
                             parent_index: hi,
-                            x: panel.right(),
+                            x: panel.child_origin(width),
                             y: panel
                                 .row_top(&entries, hi)
                                 .unwrap_or_else(|| panel.viewport_top()),
-                            width: calculate_dropdown_width(sc),
+                            width,
                             hover_index: None,
                             scroll: 0.0,
                             child: None,
@@ -1264,20 +1301,21 @@ fn hover_in_submenu_chain(
 /// Send `dy` wheel notches to whichever panel of the chain the pointer is over.
 /// Returns whether one took it.
 fn scroll_in_submenu_chain(
-    root_children: &[MenuBarEntry],
+    parent_entries: &[MenuBarEntry],
     sub: &mut OpenSubmenu,
     mx: f32,
     my: f32,
     dy: f32,
 ) -> bool {
+    let entries = resolve_submenu_entries(parent_entries, sub);
+
     // Deepest panel is drawn on top, so it gets the wheel first.
     if let Some(ref mut child) = sub.child
-        && scroll_in_submenu_chain(root_children, child, mx, my, dy)
+        && scroll_in_submenu_chain(&entries, child, mx, my, dy)
     {
         return true;
     }
 
-    let entries = resolve_submenu_entries(root_children, sub);
     let panel = submenu_panel(&entries, sub);
     if !panel.contains(mx, my) {
         return false;
@@ -1288,66 +1326,99 @@ fn scroll_in_submenu_chain(
     true
 }
 
-/// Resolve the entries that an `OpenSubmenu` node refers to by walking the
-/// item tree from `root_children` via the `parent_index` chain. We build the
-/// path by collecting parent indices from the root submenu down to the
-/// target, then walk `root_children` accordingly.
+/// Draw every panel of the submenu chain, parent first so children land on top.
+///
+/// A free function, and not a method, for the same reason the other three
+/// walkers are: it needs the entries of the level above each node, and the only
+/// way to have those is to resolve them on the way down. A method could reach
+/// `self.items` at every level, which is exactly the mistake — it would resolve
+/// each node against the root's children again. `parent_entries` means what it
+/// does in [`click_in_submenu_chain`].
+fn render_submenu_chain(
+    cmds: &mut Vec<RenderCommand>,
+    parent_entries: &[MenuBarEntry],
+    sub: &OpenSubmenu,
+) {
+    let entries = resolve_submenu_entries(parent_entries, sub);
+    let panel = submenu_panel(&entries, sub);
+
+    render_panel(cmds, &panel);
+    render_entries(cmds, &entries, &panel, sub.hover_index);
+
+    if let Some(ref child) = sub.child {
+        render_submenu_chain(cmds, &entries, child);
+    }
+}
+
+/// The entries a submenu node shows, given the entries of the level directly
+/// above it.
+///
+/// `parent_index` indexes into that level and nothing else: the primary
+/// submenu's names an entry of the top-level menu's children, its child's
+/// names an entry of the primary submenu's own entries, and so on down. So a
+/// node can only be resolved by resolving every level above it in turn, which
+/// is why each walker that descends the chain hands the recursion the entries
+/// it just resolved instead of passing the root's children the whole way
+/// down. Passing the root's children down is not a near-miss — at depth two it
+/// reads `parent_index` against a list it does not describe, so a submenu
+/// shows whichever unrelated entry happens to sit at that index in the *first*
+/// level, or nothing at all when that entry is not itself a submenu.
+///
+/// An index that names no submenu resolves to no entries, which renders
+/// nothing and activates nothing, rather than to a panic.
 ///
 /// This clones the entry list because we cannot hold a borrow into the item
 /// tree while also mutating submenu state.
-fn resolve_submenu_entries(root_children: &[MenuBarEntry], sub: &OpenSubmenu) -> Vec<MenuBarEntry> {
-    // We need the path of parent_index values from the top submenu down to `sub`.
-    // Since OpenSubmenu forms a singly-linked list, we walk from `sub` upward
-    // conceptually — but we only have downward links. Instead we collect indices
-    // bottom-up and reverse. However, `sub` may be at any depth and we only have
-    // a pointer to it, not to its ancestors. The simplest correct approach: walk
-    // `root_children` using *just* `sub.parent_index` to get the direct children
-    // of the entry at that index. But for nested submenus we need the full path.
-    //
-    // Since the caller always passes the correct node (the one whose entries we
-    // want), we need to walk from root to this node. We do this by building a
-    // path from the submenu chain.
-    //
-    // For the first-level submenu, parent_index indexes into root_children.
-    // For deeper levels, we need the full chain. Since we can't walk up, the
-    // resolve function simply returns the children of the entry at parent_index
-    // in the *parent's* resolved entries. To handle arbitrary depth, we accept
-    // the root_children and walk down using the node's parent_index as if it
-    // only ever has one level. The caller must provide the correct root for
-    // each level.
-    //
-    // Given the chain structure, the simplest design: the first OpenSubmenu's
-    // parent_index indexes into root_children. Its child's parent_index indexes
-    // into the first submenu's children, etc. So we can resolve by following the
-    // chain from the top.
-
-    // This function is called with a pointer to a *specific* node in the chain.
-    // We need to find that node starting from the top. Since we don't have the
-    // top pointer here, we simply look up sub.parent_index in root_children
-    // for the first level. For deeper levels, the caller must pass the correct
-    // root — but our architecture always passes the original root_children.
-    //
-    // Correct approach: walk from root using parent_index only.
-    // For the FIRST submenu: root_children[parent_index].children
-    // But `sub` might be deeper. We need to find the path.
-    //
-    // Since we can't walk up and we're given an arbitrary node, the only
-    // reliable approach is to walk the chain from the very first submenu
-    // node (which `sub` might be a descendant of). But we don't have the
-    // root submenu pointer.
-    //
-    // Simplification: since `resolve_submenu_entries` is only called in
-    // contexts where we have the correct item tree level, just look up
-    // parent_index in root_children for the top level. For recursion, the
-    // caller handles deeper levels via the chain structure.
-
-    match root_children.get(sub.parent_index) {
+fn resolve_submenu_entries(
+    parent_entries: &[MenuBarEntry],
+    sub: &OpenSubmenu,
+) -> Vec<MenuBarEntry> {
+    match parent_entries.get(sub.parent_index) {
         Some(MenuBarEntry::SubMenu { children, .. }) => children.clone(),
         _ => Vec::new(),
     }
 }
 
+/// The deepest open node of a submenu chain, together with the entries it
+/// shows.
+///
+/// The keyboard has no pointer to follow down the chain the way the mouse
+/// walkers do — it wants the bottom node and nothing else — but the bottom
+/// node's entries are still only reachable by resolving every level above it,
+/// so it cannot simply grab the node and resolve it against the root's
+/// children. This walks and resolves together, which is the only way to get
+/// both.
+fn deepest_with_entries<'a>(
+    parent_entries: &[MenuBarEntry],
+    sub: &'a mut OpenSubmenu,
+) -> (&'a mut OpenSubmenu, Vec<MenuBarEntry>) {
+    let entries = resolve_submenu_entries(parent_entries, sub);
+    // Phrased as `match` for the same reason as `deepest_submenu_mut` below:
+    // the pre-polonius borrow checker rejects the `if let ... else` form.
+    match sub.child {
+        Some(ref mut child) => deepest_with_entries(&entries, child),
+        None => (sub, entries),
+    }
+}
+
+/// The immutable twin of [`deepest_with_entries`].
+fn deepest_with_entries_ref<'a>(
+    parent_entries: &[MenuBarEntry],
+    sub: &'a OpenSubmenu,
+) -> (&'a OpenSubmenu, Vec<MenuBarEntry>) {
+    let entries = resolve_submenu_entries(parent_entries, sub);
+    match sub.child {
+        Some(ref child) => deepest_with_entries_ref(&entries, child),
+        None => (sub, entries),
+    }
+}
+
 /// Walk down to the deepest open submenu node (mutable).
+///
+/// Only for callers that want the *node* and not what it shows — attaching a
+/// freshly-built child, say. A caller that needs the node's entries must use
+/// [`deepest_with_entries`] instead, because entries cannot be resolved from
+/// the node alone.
 fn deepest_submenu_mut(sub: &mut OpenSubmenu) -> &mut OpenSubmenu {
     // NOTE: Phrased as `match` rather than `if let ... else` because the
     // current borrow checker (pre-polonius) doesn't reason about the disjoint
@@ -1355,14 +1426,6 @@ fn deepest_submenu_mut(sub: &mut OpenSubmenu) -> &mut OpenSubmenu {
     // `None` arm, where no prior borrow of `sub.child` is live.
     match sub.child {
         Some(ref mut child) => deepest_submenu_mut(child),
-        None => sub,
-    }
-}
-
-/// Walk down to the deepest open submenu node (immutable).
-fn find_deepest(sub: &OpenSubmenu) -> &OpenSubmenu {
-    match sub.child {
-        Some(ref child) => find_deepest(child),
         None => sub,
     }
 }
@@ -2570,6 +2633,280 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── Nested submenus: which entry list does level N show? ────────────
+    //
+    // `parent_index` indexes into the level directly above its node, so
+    // resolving a node at depth 2 against the *root's* children reads that
+    // index against a list it does not describe. The fixture below is built so
+    // that mistake is visible rather than merely wrong: root child 0 is a
+    // decoy submenu, so the old code resolved the depth-2 panel to the decoy's
+    // entries and drew, hit-tested and activated them — a menu that looks
+    // plausible and does the wrong thing.
+
+    /// `File > Level One > Level Two`, with a decoy submenu parked at the root
+    /// index that the depth-2 node's `parent_index` happens to equal.
+    fn nested_decoy_bar() -> MenuBar {
+        MenuBar::new(vec![MenuBarItem {
+            label: "&File".to_string(),
+            children: vec![
+                MenuBarEntry::SubMenu {
+                    label: "Decoy".to_string(),
+                    children: vec![MenuBarEntry::Action {
+                        label: "Wrong".to_string(),
+                        shortcut: None,
+                        enabled: true,
+                        id: 700,
+                    }],
+                },
+                MenuBarEntry::SubMenu {
+                    label: "Level One".to_string(),
+                    children: vec![
+                        MenuBarEntry::SubMenu {
+                            label: "Level Two".to_string(),
+                            children: vec![
+                                MenuBarEntry::Action {
+                                    label: "Deep A".to_string(),
+                                    shortcut: None,
+                                    enabled: true,
+                                    id: 900,
+                                },
+                                MenuBarEntry::Action {
+                                    label: "Deep B".to_string(),
+                                    shortcut: None,
+                                    enabled: true,
+                                    id: 901,
+                                },
+                            ],
+                        },
+                        MenuBarEntry::Action {
+                            label: "One B".to_string(),
+                            shortcut: None,
+                            enabled: true,
+                            id: 800,
+                        },
+                    ],
+                },
+            ],
+        }])
+    }
+
+    /// Open `File > Level One > Level Two` through the real pointer path and
+    /// hand back a point inside the depth-2 panel's first row.
+    ///
+    /// A submenu node's `x`/`y` *are* its panel's origin — [`submenu_panel`]
+    /// passes them straight through — so a probe can be built from the node
+    /// without resolving its entries, which is exactly what the test must not
+    /// assume it can do correctly.
+    fn open_depth_two(bar: &mut MenuBar) -> (f32, f32) {
+        fn first_row_probe(sub: &OpenSubmenu) -> (f32, f32) {
+            (sub.x + 10.0, sub.y + DROPDOWN_VPAD + ITEM_HEIGHT / 2.0)
+        }
+
+        let panel = open_first_dropdown(bar);
+        // Row 1 of the dropdown is "Level One".
+        let row = panel.row_top(children_of(&bar.items, 0), 1).unwrap();
+        bar.handle_mouse_event(&mouse_move(panel.x + 10.0, row + ITEM_HEIGHT / 2.0));
+        bar.handle_mouse_event(&click(panel.x + 10.0, row + ITEM_HEIGHT / 2.0));
+
+        // Row 0 of that submenu is "Level Two"; hovering it opens the child.
+        let (px, py) = first_row_probe(bar.open_submenu.as_ref().expect("Level One opened"));
+        bar.handle_mouse_event(&mouse_move(px, py));
+
+        let child = bar
+            .open_submenu
+            .as_ref()
+            .and_then(|s| s.child.as_ref())
+            .expect("Level Two opened as a child of Level One");
+        first_row_probe(child)
+    }
+
+    #[test]
+    fn a_third_level_submenu_shows_its_own_entries_and_not_the_roots() {
+        let mut bar = nested_decoy_bar();
+        let _ = open_depth_two(&mut bar);
+
+        let labels: Vec<String> = bar
+            .render(800)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.iter().any(|t| t == "Deep A") && labels.iter().any(|t| t == "Deep B"),
+            "the depth-2 panel must draw its own entries; drew {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|t| t == "Wrong"),
+            "and must not draw the decoy's, which is what indexing the root's \
+             children with a depth-2 parent_index yields; drew {labels:?}"
+        );
+    }
+
+    #[test]
+    fn clicking_a_third_level_row_activates_the_entry_that_was_drawn_there() {
+        let mut bar = nested_decoy_bar();
+        let (px, py) = open_depth_two(&mut bar);
+        bar.handle_mouse_event(&click(px, py));
+        assert_eq!(
+            bar.drain_events(),
+            vec![MenuBarEvent::ItemClicked(900)],
+            "row 0 of Level Two is Deep A; the decoy's id 700 means the hit \
+             test resolved the wrong entry list"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_walks_the_third_level_and_not_the_first() {
+        // The keyboard jumps straight to the deepest node instead of
+        // descending, so it needs its own way to resolve that node's entries.
+        let mut bar = nested_decoy_bar();
+        let _ = open_depth_two(&mut bar);
+
+        bar.handle_key_event(&press(Key::Down));
+        bar.handle_key_event(&press(Key::Down));
+        {
+            let deepest = bar
+                .open_submenu
+                .as_ref()
+                .and_then(|s| s.child.as_ref())
+                .expect("still at depth 2");
+            assert_eq!(
+                deepest.hover_index,
+                Some(1),
+                "two Downs reach Deep B, the second of two entries; the decoy \
+                 has only one, so a wrong resolve stops at 0"
+            );
+        }
+        bar.handle_key_event(&press(Key::Enter));
+        assert_eq!(bar.drain_events(), vec![MenuBarEvent::ItemClicked(901)]);
+    }
+
+    #[test]
+    fn the_wheel_over_a_third_level_submenu_finds_entries_to_scroll() {
+        // A panel resolved to an empty list has nothing to scroll and no rows
+        // to draw, so the wheel silently did nothing over a deep submenu. The
+        // assertion is on the scroll actually moving, which is only possible if
+        // the walker resolved a list long enough to overflow.
+        let deep: Vec<MenuBarEntry> = (0..200)
+            .map(|i| MenuBarEntry::Action {
+                label: format!("Deep {i}"),
+                shortcut: None,
+                enabled: true,
+                id: 1000 + i,
+            })
+            .collect();
+        let mut bar = MenuBar::new(vec![MenuBarItem {
+            label: "&File".to_string(),
+            children: vec![
+                MenuBarEntry::SubMenu {
+                    label: "Decoy".to_string(),
+                    children: vec![MenuBarEntry::Action {
+                        label: "Wrong".to_string(),
+                        shortcut: None,
+                        enabled: true,
+                        id: 700,
+                    }],
+                },
+                MenuBarEntry::SubMenu {
+                    label: "Level One".to_string(),
+                    children: vec![MenuBarEntry::SubMenu {
+                        label: "Level Two".to_string(),
+                        children: deep,
+                    }],
+                },
+            ],
+        }]);
+        let (px, py) = open_depth_two(&mut bar);
+        for _ in 0..5 {
+            bar.handle_mouse_event(&wheel(px, py, -1.0));
+        }
+        let child = bar
+            .open_submenu
+            .as_ref()
+            .and_then(|s| s.child.as_ref())
+            .unwrap();
+        assert!(
+            child.scroll > 0.0,
+            "the deep panel overflows, so the wheel must move it"
+        );
+    }
+
+    // ── Submenus near the right edge of the screen ──────────────────────
+
+    #[test]
+    fn a_child_sits_beside_its_parent_until_that_would_leave_the_screen() {
+        let panel = |x: f32, width: f32| DropdownPanel {
+            x,
+            y: BAR_HEIGHT,
+            width,
+            content_height: 100.0,
+            panel_height: 100.0,
+            scroll: 0.0,
+        };
+        // Room to the right: the child goes there.
+        assert_eq!(panel(100.0, 200.0).child_origin(180.0), 300.0);
+        // Exactly filling the screen still counts as fitting.
+        assert_eq!(panel(1500.0, 240.0).child_origin(180.0), 1740.0);
+        // One pixel too wide, and it flips to end where its parent starts.
+        assert_eq!(panel(1500.0, 240.0).child_origin(181.0), 1319.0);
+        // Nowhere to go on either side: the left edge beats a negative x,
+        // because a panel at x < 0 is neither visible nor clickable.
+        assert_eq!(panel(50.0, 100.0).child_origin(1900.0), 0.0);
+    }
+
+    #[test]
+    fn a_submenu_that_would_run_off_the_right_edge_opens_to_the_left() {
+        let deep = vec![MenuBarEntry::Action {
+            label: "Deep".to_string(),
+            shortcut: None,
+            enabled: true,
+            id: 900,
+        }];
+        let parent_entries = vec![MenuBarEntry::SubMenu {
+            label: "Holder".to_string(),
+            children: vec![MenuBarEntry::SubMenu {
+                label: "Opens Left".to_string(),
+                children: deep,
+            }],
+        }];
+        let mut sub = OpenSubmenu {
+            parent_index: 0,
+            // Far enough right that anything hung off its right edge is off
+            // the screen.
+            x: DEFAULT_VIEWPORT_WIDTH - 200.0,
+            y: BAR_HEIGHT,
+            width: 180.0,
+            hover_index: None,
+            scroll: 0.0,
+            child: None,
+        };
+        let entries = resolve_submenu_entries(&parent_entries, &sub);
+        let panel = submenu_panel(&entries, &sub);
+        assert!(
+            hover_in_submenu_chain(
+                &parent_entries,
+                &mut sub,
+                panel.x + 10.0,
+                panel.viewport_top() + ITEM_HEIGHT / 2.0,
+            ),
+            "the pointer is over the panel"
+        );
+        let child = sub.child.as_ref().expect("hovering a submenu row opens it");
+        assert!(
+            child.x + child.width <= DEFAULT_VIEWPORT_WIDTH,
+            "child spans {}..{} of a {DEFAULT_VIEWPORT_WIDTH}-wide screen",
+            child.x,
+            child.x + child.width
+        );
+        assert_eq!(
+            child.x + child.width,
+            sub.x,
+            "a flipped child ends flush with its parent's left edge"
+        );
     }
 
     // ── Mnemonic parsing ────────────────────────────────────────────────

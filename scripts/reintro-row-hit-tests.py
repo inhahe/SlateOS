@@ -347,9 +347,18 @@ DEFECTS = [
     (
         "guitk",
         MENU,
+        # Anchored on `panel_height()` itself rather than on `show`'s use of
+        # it. Swapping the call at that call site is an equivalent mutation,
+        # which this sweep is what discovered: `show` uses the height only to
+        # decide the upward flip, and for any `y` inside the viewport both
+        # spellings put a too-tall panel at 0, so no test could ever have told
+        # them apart. The cap that is load-bearing is this one, which every
+        # vertical bound in the file is ultimately measured from.
         "a menu taller than the screen is given its full height and runs off it",
-        "        self.scroll = 0.0;\n        let panel_height = self.panel_height();\n",
-        "        self.scroll = 0.0;\n        let panel_height = self.content_height();\n",
+        "    fn panel_height(&self) -> f32 {\n"
+        "        self.content_height().min(DEFAULT_VIEWPORT_HEIGHT)\n"
+        "    }\n",
+        "    fn panel_height(&self) -> f32 {\n        self.content_height()\n    }\n",
     ),
     (
         "guitk",

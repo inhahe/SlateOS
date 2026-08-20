@@ -43970,7 +43970,7 @@ above fires when it stops fitting. The fix at that point is a
 `guitk::scroll_window` plus a `wheel::Accumulator`, as `notif_pane` has — not a
 smaller `CATEGORY_ITEM_HEIGHT`.
 
-**Also noted, not yet fixed:** `gui/desktop/src/notif_pane.rs` duplicates the
+**Also noted — FIXED, see below:** `gui/desktop/src/notif_pane.rs` duplicates the
 quick-settings layout numbers between `render_quick_settings` (`:1008`) and
 `handle_quick_settings_click` (`:1536`) — title, `+20.0`, N × `QS_ROW_HEIGHT`,
 `+4.0`, volume slider, `+QS_ROW_HEIGHT`, brightness slider, written out twice
@@ -43979,3 +43979,55 @@ bounds the area at both ends, so this is debt rather than a bug. The card list
 in the same file has already been collapsed (`card_tops` / `card_at` /
 `content_height` / `max_scroll`), so the quick-settings block is the last
 hand-inverted layout in that pane.
+
+**Quick settings: fixed, and it was hiding a live fault after all.** The
+duplication was real — `render_quick_settings` walked caption, toggles, gap,
+sliders adding heights up while `handle_quick_settings_click` walked the same
+list subtracting them back off, both spelling `20.0` and `4.0` by hand even
+though `QS_TITLE_HEIGHT` and `QS_SLIDER_GAP` already existed — and the
+hand-inverted walk had a hole in it:
+
+```rust
+let slider_y = content_y - toggle_area_end - 4.0;
+...
+if slider_y < QS_ROW_HEIGHT {
+    self.quick_settings.volume = value;
+```
+
+`slider_y` is negative for the four pixels the renderer leaves blank between
+the last toggle and the volume slider, and nothing asked whether it was above
+zero. A negative `f32` divided into a row height is still negative, and
+`slider_y < QS_ROW_HEIGHT` is true of every negative number — so **clicking the
+blank gap set the volume**, to wherever along the track the pointer happened to
+be. There is no visual cue that those four pixels do anything.
+
+Collapsed the same way as everything else in this sweep: `qs_start_y()`,
+`qs_toggle_top(idx)`, `qs_slider_top(slot)` and a `qs_at(local_y) ->
+Option<QsHit>` that inverts them, with `QsHit` naming what is there
+(`Toggle(idx)` / `Volume` / `Brightness`). The renderer places every row from
+the helpers, `handle_quick_settings_click` matches on `qs_at`, and
+`PANE_PADDING + HEADER_HEIGHT` — which was itself written out three times, in
+the renderer, the click dispatcher and `list_start_y` — is now `qs_start_y()`
+once.
+
+Four new tests, all reading rows out of the commands `render_quick_settings`
+pushed (toggle pills by `TOGGLE_WIDTH`/`TOGGLE_HEIGHT` less the six-pixel
+inset; slider rows by the track's width, height *and* colour, so a slider at
+100% is not counted twice by its own filled portion):
+
+| test | pins |
+|---|---|
+| `every_quick_setting_row_answers_where_it_was_drawn` | eight probes across every painted toggle and slider row |
+| `the_gap_above_the_volume_slider_does_not_set_the_volume` | every whole pixel of the gap, clicking the far end of the track so a hit would be loud |
+| `the_caption_and_the_space_past_the_last_slider_belong_to_nothing` | the caption, past the last slider, negative, NaN, ±inf |
+| `a_click_through_the_pane_reaches_the_toggle_that_was_drawn` | the whole path — pane-local coordinates, the dispatcher's bounds, the pill's x range, and the emitted `QuickSettingToggled` |
+
+Measured: deleting the gap check fails
+`the_gap_above_the_volume_slider_does_not_set_the_volume`; shifting the toggle
+renderer three pixels alone fails
+`every_quick_setting_row_answers_where_it_was_drawn`. 2404 tests pass, rustfmt
+clean, clippy unchanged at 82.
+
+That closes the last hand-inverted layout in `notif_pane` — the card list
+(`card_tops`/`card_at`) was collapsed earlier, in the fix that found the 76-px
+drift.

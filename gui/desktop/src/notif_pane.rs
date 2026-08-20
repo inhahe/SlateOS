@@ -284,6 +284,23 @@ impl QuickSetting {
     const COUNT: usize = Self::all().len();
 }
 
+/// What the quick-settings block has at a given height.
+///
+/// The block is a caption, five toggle rows, a four-pixel gap and two slider
+/// rows. The renderer walked that list adding heights up; the hit test walked
+/// it again subtracting them back off. Two hand-inverted walks of one layout
+/// is the arrangement that put every notification card 76 px from where it was
+/// drawn, and it survived that fix in this one function. It is now a single
+/// pair: [`NotificationPane::qs_toggle_top`] / [`NotificationPane::qs_slider_top`]
+/// place the rows, and [`NotificationPane::qs_at`] is their inverse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QsHit {
+    /// The `idx`-th toggle in [`QuickSetting::all`].
+    Toggle(usize),
+    Volume,
+    Brightness,
+}
+
 /// Per-app notification settings.
 #[derive(Clone, Debug)]
 pub struct AppNotifSettings {
@@ -740,9 +757,62 @@ impl NotificationPane {
     // here.
     // ========================================================================
 
+    /// Where the quick-settings block begins, in pane-local coordinates.
+    const fn qs_start_y() -> f32 {
+        PANE_PADDING + HEADER_HEIGHT
+    }
+
     /// Where the scrolling list begins, in pane-local coordinates.
     const fn list_start_y() -> f32 {
-        PANE_PADDING + HEADER_HEIGHT + QUICK_SETTINGS_HEIGHT + QS_SEPARATOR_HEIGHT
+        Self::qs_start_y() + QUICK_SETTINGS_HEIGHT + QS_SEPARATOR_HEIGHT
+    }
+
+    /// Top of the `idx`-th toggle row, relative to the quick-settings block's
+    /// own top.
+    #[allow(clippy::cast_precision_loss)]
+    fn qs_toggle_top(idx: usize) -> f32 {
+        QS_TITLE_HEIGHT + (idx as f32) * QS_ROW_HEIGHT
+    }
+
+    /// Top of the `slot`-th slider row — `0` is volume, `1` is brightness —
+    /// relative to the quick-settings block's own top.
+    #[allow(clippy::cast_precision_loss)]
+    fn qs_slider_top(slot: usize) -> f32 {
+        Self::qs_toggle_top(QuickSetting::COUNT) + QS_SLIDER_GAP + (slot as f32) * QS_ROW_HEIGHT
+    }
+
+    /// What the quick-settings block put at `local_y`, measured from the
+    /// block's own top.
+    ///
+    /// `None` for the section caption above the toggles, for the gap between
+    /// the last toggle and the volume slider, and for anything past the
+    /// brightness slider. The gap in particular used to answer *volume*: the
+    /// old walk computed `content_y - toggle_area_end - QS_SLIDER_GAP` and
+    /// then asked only whether the result was below one row, never whether it
+    /// was above zero, so the four blank pixels the renderer leaves between
+    /// the toggles and the sliders set the volume when clicked.
+    fn qs_at(local_y: f32) -> Option<QsHit> {
+        if !local_y.is_finite() || local_y < QS_TITLE_HEIGHT {
+            return None;
+        }
+        let toggles_end = Self::qs_toggle_top(QuickSetting::COUNT);
+        if local_y < toggles_end {
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            let idx = ((local_y - QS_TITLE_HEIGHT) / QS_ROW_HEIGHT) as usize;
+            return (idx < QuickSetting::COUNT).then_some(QsHit::Toggle(idx));
+        }
+        let first_slider = Self::qs_slider_top(0);
+        if local_y < first_slider {
+            // The gap. The renderer paints nothing here.
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let slot = ((local_y - first_slider) / QS_ROW_HEIGHT) as usize;
+        match slot {
+            0 => Some(QsHit::Volume),
+            1 => Some(QsHit::Brightness),
+            _ => None,
+        }
     }
 
     /// Height of the scrolling viewport.
@@ -890,7 +960,7 @@ impl NotificationPane {
         // tests use, rather than from adding up what each renderer reports
         // having drawn -- that is how the two drifted 76 px apart.
         self.render_header(&mut cmds, PANE_PADDING);
-        self.render_quick_settings(&mut cmds, PANE_PADDING + HEADER_HEIGHT);
+        self.render_quick_settings(&mut cmds, Self::qs_start_y());
 
         // Separator, centred in the gap above the list.
         let y = Self::list_start_y();
@@ -1005,13 +1075,19 @@ impl NotificationPane {
         HEADER_HEIGHT
     }
 
+    /// Draw the quick-settings block and report how tall it turned out.
+    ///
+    /// Every row is placed by [`Self::qs_toggle_top`] or
+    /// [`Self::qs_slider_top`], which are exactly what [`Self::qs_at`]
+    /// inverts, so a click lands on the row it is looking at. The returned
+    /// height is derived from those same helpers and is checked against
+    /// `QUICK_SETTINGS_HEIGHT` — declared independently from the raw
+    /// constants — by `the_quick_settings_block_is_as_tall_as_what_it_draws`.
     fn render_quick_settings(&self, cmds: &mut Vec<RenderCommand>, start_y: f32) -> f32 {
-        let mut y = start_y;
-
         // Section title.
         cmds.push(RenderCommand::Text {
             x: PANE_PADDING,
-            y,
+            y: start_y,
             text: "Quick Settings".to_string(),
             color: theme::SUBTEXT0,
             font_size: 11.0,
@@ -1019,31 +1095,38 @@ impl NotificationPane {
             max_width: Some(120.0),
             overflow: TextOverflow::Ellipsis,
         });
-        y += 20.0;
 
         // Toggle rows.
-        for qs in QuickSetting::all() {
+        for (idx, qs) in QuickSetting::all().iter().enumerate() {
             let enabled = self.quick_settings.get(*qs);
-            self.render_toggle_row(cmds, PANE_PADDING, y, qs.label(), enabled);
-            y += QS_ROW_HEIGHT;
+            self.render_toggle_row(
+                cmds,
+                PANE_PADDING,
+                start_y + Self::qs_toggle_top(idx),
+                qs.label(),
+                enabled,
+            );
         }
 
         // Volume slider.
-        y += 4.0;
-        self.render_slider_row(cmds, PANE_PADDING, y, "Volume", self.quick_settings.volume);
-        y += QS_ROW_HEIGHT;
+        self.render_slider_row(
+            cmds,
+            PANE_PADDING,
+            start_y + Self::qs_slider_top(0),
+            "Volume",
+            self.quick_settings.volume,
+        );
 
         // Brightness slider.
         self.render_slider_row(
             cmds,
             PANE_PADDING,
-            y,
+            start_y + Self::qs_slider_top(1),
             "Brightness",
             self.quick_settings.brightness,
         );
-        y += QS_ROW_HEIGHT;
 
-        y - start_y
+        Self::qs_slider_top(1) + QS_ROW_HEIGHT
     }
 
     fn render_toggle_row(
@@ -1514,12 +1597,10 @@ impl NotificationPane {
             }
             return;
         }
-        y += HEADER_HEIGHT;
-
         // Quick settings area.
-        let qs_end = y + QUICK_SETTINGS_HEIGHT;
-        if ry >= y && ry < qs_end {
-            self.handle_quick_settings_click(rx, ry - y);
+        let qs_y = Self::qs_start_y();
+        if ry >= qs_y && ry < qs_y + QUICK_SETTINGS_HEIGHT {
+            self.handle_quick_settings_click(rx, ry - qs_y);
             return;
         }
         let list_top = Self::list_start_y();
@@ -1534,41 +1615,33 @@ impl NotificationPane {
     }
 
     fn handle_quick_settings_click(&mut self, rx: f32, local_y: f32) {
-        // Skip section title (20px).
-        let content_y = local_y - 20.0;
-        if content_y < 0.0 {
-            return;
-        }
-
-        let qs_list = QuickSetting::all();
-        let toggle_count = qs_list.len() as f32;
-        let toggle_area_end = toggle_count * QS_ROW_HEIGHT;
-
-        if content_y < toggle_area_end {
-            // Which toggle row?
-            let idx = (content_y / QS_ROW_HEIGHT) as usize;
-            if idx < qs_list.len() {
-                // Check if click is on the toggle pill area (right side).
+        match Self::qs_at(local_y) {
+            Some(QsHit::Toggle(idx)) => {
+                // Only the pill on the right is the control; the label is not.
                 let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
-                if rx >= pill_x {
-                    let qs = qs_list[idx];
+                if rx < pill_x {
+                    return;
+                }
+                if let Some(&qs) = QuickSetting::all().get(idx) {
                     self.quick_settings.toggle(qs);
                     self.events.push(NotifPaneEvent::QuickSettingToggled(qs));
                 }
             }
-        } else {
-            // Slider area: volume then brightness.
-            let slider_y = content_y - toggle_area_end - 4.0;
-            let track_x = PANE_WIDTH - PANE_PADDING - SLIDER_WIDTH - PANE_PADDING;
-            if rx >= track_x && rx <= track_x + SLIDER_WIDTH {
+            Some(hit @ (QsHit::Volume | QsHit::Brightness)) => {
+                let track_x = PANE_WIDTH - PANE_PADDING - SLIDER_WIDTH - PANE_PADDING;
+                if rx < track_x || rx > track_x + SLIDER_WIDTH {
+                    return;
+                }
                 let frac = ((rx - track_x) / SLIDER_WIDTH).clamp(0.0, 1.0);
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
                 let value = (frac * 100.0) as u8;
-                if slider_y < QS_ROW_HEIGHT {
+                if hit == QsHit::Volume {
                     self.quick_settings.volume = value;
-                } else if slider_y < 2.0 * QS_ROW_HEIGHT {
+                } else {
                     self.quick_settings.brightness = value;
                 }
             }
+            None => {}
         }
     }
 
@@ -1913,6 +1986,186 @@ mod tests {
             drawn, QUICK_SETTINGS_HEIGHT,
             "the constant the hit test uses must be what the renderer draws"
         );
+    }
+
+    // ---- Quick settings ----
+    //
+    // The block used to be laid out twice: `render_quick_settings` walked the
+    // caption, the toggles, the gap and the sliders adding heights up, and
+    // `handle_quick_settings_click` walked the same list subtracting them
+    // back off, with both walks spelling `20.0` and `4.0` by hand. That is
+    // the arrangement that once put every notification card 76 px from where
+    // it was drawn. These tests read the rows out of the commands the
+    // renderer actually pushed and probe those.
+
+    /// Top of every toggle row the renderer drew, recovered from the pill it
+    /// paints six pixels down.
+    fn painted_toggle_tops(pane: &NotificationPane) -> Vec<f32> {
+        let mut cmds = Vec::new();
+        pane.render_quick_settings(&mut cmds, 0.0);
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    y, width, height, ..
+                } if *width == TOGGLE_WIDTH && *height == TOGGLE_HEIGHT => Some(*y - 6.0),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Top of the volume and brightness rows, recovered from the slider track
+    /// each paints fourteen pixels down. The filled portion and the thumb are
+    /// excluded by colour, so a slider at 100% is not counted twice.
+    fn painted_slider_tops(pane: &NotificationPane) -> Vec<f32> {
+        let mut cmds = Vec::new();
+        pane.render_quick_settings(&mut cmds, 0.0);
+        cmds.iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *width == SLIDER_WIDTH
+                    && *height == SLIDER_HEIGHT
+                    && *color == theme::SURFACE2 =>
+                {
+                    Some(*y - 14.0)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_quick_setting_row_answers_where_it_was_drawn() {
+        let pane = NotificationPane::new();
+        let toggles = painted_toggle_tops(&pane);
+        let sliders = painted_slider_tops(&pane);
+        assert_eq!(toggles.len(), QuickSetting::COUNT);
+        assert_eq!(sliders.len(), 2, "volume and brightness");
+
+        // Sweep each painted row rather than probing its centre: a hit test
+        // that has drifted from the renderer is still correct in the middle.
+        for (idx, &top) in toggles.iter().enumerate() {
+            for step in 0..8 {
+                let probe = top + (step as f32 + 0.5) * QS_ROW_HEIGHT / 8.0;
+                assert_eq!(
+                    NotificationPane::qs_at(probe),
+                    Some(QsHit::Toggle(idx)),
+                    "the toggle drawn at {top} does not answer y={probe}"
+                );
+            }
+        }
+        for (slot, &top) in sliders.iter().enumerate() {
+            let expected = if slot == 0 {
+                QsHit::Volume
+            } else {
+                QsHit::Brightness
+            };
+            for step in 0..8 {
+                let probe = top + (step as f32 + 0.5) * QS_ROW_HEIGHT / 8.0;
+                assert_eq!(
+                    NotificationPane::qs_at(probe),
+                    Some(expected),
+                    "the slider drawn at {top} does not answer y={probe}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_gap_above_the_volume_slider_does_not_set_the_volume() {
+        // It used to. `handle_quick_settings_click` computed
+        // `content_y - toggle_area_end - 4.0` and asked only whether the
+        // result was below one row height, never whether it was above zero,
+        // so the four pixels the renderer leaves blank between the last
+        // toggle and the volume slider dragged the volume to wherever the
+        // pointer happened to be along the track.
+        let toggles_end = *painted_toggle_tops(&NotificationPane::new())
+            .last()
+            .expect("there is at least one toggle")
+            + QS_ROW_HEIGHT;
+        let first_slider = painted_slider_tops(&NotificationPane::new())[0];
+        assert!(
+            first_slider > toggles_end,
+            "there is a gap between the toggles and the sliders to test"
+        );
+
+        let track_x = PANE_WIDTH - PANE_PADDING - SLIDER_WIDTH - PANE_PADDING;
+        let mut probe = toggles_end;
+        while probe < first_slider {
+            assert_eq!(NotificationPane::qs_at(probe), None, "y={probe} is blank");
+
+            let mut pane = NotificationPane::new();
+            pane.state = PaneState::Visible;
+            let before = (pane.quick_settings.volume, pane.quick_settings.brightness);
+            // Right at the far end of the track, so a hit would be loud.
+            pane.handle_quick_settings_click(track_x + SLIDER_WIDTH, probe);
+            assert_eq!(
+                (pane.quick_settings.volume, pane.quick_settings.brightness),
+                before,
+                "a click in the blank gap at y={probe} moved a slider"
+            );
+            probe += 1.0;
+        }
+    }
+
+    #[test]
+    fn the_caption_and_the_space_past_the_last_slider_belong_to_nothing() {
+        let mut probe = 0.0;
+        while probe < QS_TITLE_HEIGHT {
+            assert_eq!(
+                NotificationPane::qs_at(probe),
+                None,
+                "y={probe} is the section caption"
+            );
+            probe += 1.0;
+        }
+        let past = NotificationPane::qs_slider_top(1) + QS_ROW_HEIGHT;
+        assert_eq!(
+            past, QUICK_SETTINGS_HEIGHT,
+            "the block ends after brightness"
+        );
+        assert_eq!(NotificationPane::qs_at(past), None);
+        assert_eq!(NotificationPane::qs_at(past + 100.0), None);
+        assert_eq!(NotificationPane::qs_at(f32::NAN), None);
+        assert_eq!(NotificationPane::qs_at(f32::INFINITY), None);
+        assert_eq!(NotificationPane::qs_at(f32::NEG_INFINITY), None);
+        assert_eq!(NotificationPane::qs_at(-1.0), None);
+    }
+
+    #[test]
+    fn a_click_through_the_pane_reaches_the_toggle_that_was_drawn() {
+        // The whole path this time: pane-local coordinates, the dispatcher's
+        // quick-settings bounds, and the pill's own x range.
+        let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
+        for (idx, &top) in painted_toggle_tops(&NotificationPane::new())
+            .iter()
+            .enumerate()
+        {
+            let mut pane = NotificationPane::new();
+            pane.state = PaneState::Visible;
+            let qs = QuickSetting::all()[idx];
+            let before = pane.quick_settings.get(qs);
+            pane.handle_click(
+                pill_x + TOGGLE_WIDTH / 2.0,
+                NotificationPane::qs_start_y() + top + 1.0,
+                TEST_SCREEN_H,
+            );
+            assert_ne!(
+                pane.quick_settings.get(qs),
+                before,
+                "the toggle drawn at {top} was not the one that flipped"
+            );
+            assert!(
+                pane.events
+                    .iter()
+                    .any(|e| *e == NotifPaneEvent::QuickSettingToggled(qs)),
+                "flipping {qs:?} must announce itself"
+            );
+        }
     }
 
     /// Hover must land on the same card a click would.

@@ -7504,6 +7504,15 @@ mod tests {
         app.handle_event(&scroll_event(f32::NAN, f32::INFINITY));
         assert_eq!(app.scroll().x, 200.0);
         assert_eq!(app.scroll().y, 200.0);
+        // Directly too. The wheel converters screen non-finite input of their
+        // own accord, so going through an event exercises *their* guard and
+        // leaves `scroll_by` -- which is public, and which a scrollbar drag
+        // will call with an arithmetic result rather than a raw delta --
+        // untested. Once a NaN reaches the offset it stays: `clamp` compares,
+        // and every comparison against NaN is false.
+        app.scroll_by(f32::NAN, f32::NEG_INFINITY);
+        assert_eq!(app.scroll().x, 200.0);
+        assert_eq!(app.scroll().y, 200.0);
     }
 
     /// Page Up/Down step by what the pane can show, not by a guessed constant,
@@ -7576,7 +7585,18 @@ mod tests {
         for app in [
             SpreadsheetApp::new(1280.0, 800.0),
             SpreadsheetApp::new(1.0, 1.0),
+            // Narrow enough that the grid has negative width, but tall enough
+            // that the row bands are still drawn -- a square degenerate window
+            // returns before pushing anything, so it proves nothing.
+            SpreadsheetApp::new(60.0, 800.0),
+            SpreadsheetApp::new(1280.0, 60.0),
             frozen_app(2, 3),
+            // The reachable one: `toggle_freeze_panes` pins at the selection,
+            // so a band can be wider than the viewport it is pinned inside.
+            // `grid_width` is clamped at zero, but `grid_right -
+            // frozen_right` is not, and that is the extent the scrolling
+            // band's clip is given.
+            frozen_app(20, 30),
         ] {
             for cmd in app.render() {
                 if let RenderCommand::PushClip { width, height, .. } = cmd {
@@ -7610,7 +7630,20 @@ mod tests {
         };
         assert!(
             scrolled < pinned,
-            "the scrolling band was drawn over the pinned one"
+            "the scrolling columns were drawn over the pinned ones"
+        );
+
+        // The same again down the other axis: a cell in a pinned row against
+        // one in a row that scrolls under it, in the same column so only the
+        // band differs. Checking one axis does not check the other -- the two
+        // row bands are a separate pair of calls, and swapping them leaves
+        // every column assertion above still passing.
+        let (Some(pinned), Some(scrolled)) = (cell_at(7, 1), cell_at(7, 15)) else {
+            panic!("expected both a pinned and a scrolled row to be drawn");
+        };
+        assert!(
+            scrolled < pinned,
+            "the scrolling rows were drawn over the pinned ones"
         );
     }
 

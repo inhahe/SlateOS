@@ -43389,7 +43389,15 @@ the requested split fits — rather than because it is hard.
 
 ## C-CREDMANAGER-SCROLLS-INTO-EMPTY-SPACE-FOREVER (lane C, 2026-08-20)
 
-**Status:** open — found while converting every wheel handler in the tree to
+**Status:** FIXED the same day, in `credmanager: give the two scroll offsets an
+end to stop at`. The three steps below were done in that order and in one
+commit; `scripts/reintro-credmanager.py` puts each of the nine resulting
+defects back and checks the suite goes red for it. The write-up is kept
+because the *shape* of the bug — a bound that could not exist because the
+state did not know the window size — is worth recognising elsewhere in
+`apps/`.
+
+**Originally:** found while converting every wheel handler in the tree to
 `guitk::wheel`; credmanager was the one app deliberately left out of that
 change because fixing it properly needs a small refactor first.
 

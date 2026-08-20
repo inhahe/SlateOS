@@ -56,6 +56,19 @@ use super::zio::{ZEC_LEN, ZioCksum, verify_embedded};
 /// pool at all.
 pub const SPA_VERSION_FEATURES: u64 = 5000;
 
+/// Pool is in use by a live system — the ordinary case.
+pub const POOL_STATE_ACTIVE: u64 = 0;
+/// Pool was cleanly exported. Its on-disk state is consistent and complete,
+/// so a read-only mount is legitimate; `zpool import` accepts it unprompted.
+pub const POOL_STATE_EXPORTED: u64 = 1;
+/// Pool was destroyed. The labels survive — `zpool destroy` only rewrites the
+/// state field — but nothing else about the pool is promised.
+pub const POOL_STATE_DESTROYED: u64 = 2;
+/// Device is a hot spare, held in reserve by one or more pools.
+pub const POOL_STATE_SPARE: u64 = 3;
+/// Device is an L2ARC second-level cache.
+pub const POOL_STATE_L2CACHE: u64 = 4;
+
 /// Offset of `ub_rootbp` within an uberblock.
 const UB_ROOTBP_OFFSET: usize = 40;
 
@@ -106,10 +119,12 @@ pub const fn front_label_offset(l: u64) -> u64 {
 ///
 /// - [`KernelError::InvalidArgument`] if neither front label holds a
 ///   decodable nvlist.
-/// - [`KernelError::NotSupported`] if the top-level vdev is a mirror/raidz, if
-///   this device is a separate intent log, or if it holds any top-level vdev
-///   but the first — this driver reads one device and cannot reconstruct a
-///   stripe it cannot see.
+/// - [`KernelError::NotSupported`] if the pool is not `ACTIVE` or `EXPORTED`
+///   (a hot spare, an L2ARC cache device, or a destroyed pool), if its SPA
+///   version is above [`SPA_VERSION_FEATURES`], if the top-level vdev is a
+///   mirror/raidz, if this device is a separate intent log, or if it holds any
+///   top-level vdev but the first — this driver reads one device and cannot
+///   reconstruct a stripe it cannot see.
 pub fn read_config(src: &dyn SectorSource) -> KernelResult<PoolConfig> {
     let mut last_err = KernelError::InvalidArgument;
     for l in 0..2u64 {
@@ -146,6 +161,53 @@ pub fn parse_config(raw: &[u8]) -> KernelResult<PoolConfig> {
         .ok_or(KernelError::InvalidArgument)?;
     let txg = nv.get_u64(b"txg").unwrap_or(0);
     let version = nv.get_u64(b"version").unwrap_or(0);
+
+    // `SPA_VERSION_FEATURES` is documented as the highest version we mount, so
+    // compare against it rather than leaving the constant a claim nothing
+    // enforces. Nothing above 5000 exists today — 28 was the last numbered
+    // version before feature flags, and feature flags were designed so the
+    // number would never need to rise again — which is exactly why this is
+    // worth writing down now: if it ever does rise, the pool that carries it
+    // has a layout we have never seen, and refusing it by name beats parsing
+    // it by accident.
+    //
+    // No lower bound. Old pools are not rejected on suspicion; if some
+    // version-6 layout difference does break us it will surface as a real
+    // parse failure, which is more informative than a blanket refusal we
+    // never tested.
+    if version > SPA_VERSION_FEATURES {
+        return Err(KernelError::NotSupported);
+    }
+
+    // A pool's state is recorded in its labels, and three of the values name a
+    // device that has a complete, entirely valid label and no pool data behind
+    // it. A hot spare and an L2ARC cache device are both *members* of a pool
+    // while holding none of its object tree: the spare is unwritten reserve
+    // capacity, the cache is an evictable copy of blocks whose home is
+    // elsewhere. A destroyed pool is the same disk it was a moment before
+    // `zpool destroy` — that command rewrites the state field and little else,
+    // which is what makes `zpool import -D` able to undo it — but nothing
+    // promises the object tree is still coherent, and silently mounting a pool
+    // the administrator deleted is the wrong default whatever its condition.
+    //
+    // Without this, all three reach `find_uberblock`. A spare or cache device
+    // has no uberblock array worth the name and fails as `InvalidArgument`
+    // ("not a ZFS device"), which is false — it is very much a ZFS device. A
+    // destroyed pool usually still has its uberblocks and mounts, which is
+    // worse than a wrong error message.
+    //
+    // `EXPORTED` is accepted alongside `ACTIVE`: a clean export leaves the
+    // on-disk state consistent by definition, and read-only is all this driver
+    // does. That matches `zpool import`, which takes an exported pool without
+    // argument and demands `-D` only for a destroyed one.
+    //
+    // Absent means `ACTIVE`. The field is always written in practice, and
+    // defaulting the other way would turn any label key we merely failed to
+    // parse into a refusal to mount a healthy pool.
+    let state = nv.get_u64(b"state").unwrap_or(POOL_STATE_ACTIVE);
+    if state != POOL_STATE_ACTIVE && state != POOL_STATE_EXPORTED {
+        return Err(KernelError::NotSupported);
+    }
 
     let vdev_tree = nv
         .nested(b"vdev_tree")

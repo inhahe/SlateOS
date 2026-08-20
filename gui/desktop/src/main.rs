@@ -105,6 +105,8 @@ mod run_dialog;
 #[allow(dead_code)]
 mod screen_capture;
 #[allow(dead_code)]
+mod scroll_window;
+#[allow(dead_code)]
 mod security_dialog;
 #[allow(dead_code)]
 mod session_mgr;

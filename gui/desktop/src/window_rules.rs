@@ -16,6 +16,7 @@
 //! Rules are evaluated in priority order; first match wins (unless
 //! `apply_all` is set, in which case all matching rules are merged).
 
+use crate::scroll_window;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -933,15 +934,18 @@ impl RulesSettingsUI {
             width: 1.0,
         });
 
-        // Rule rows. `scroll_offset` is a public field that nothing clamps,
-        // so it can name a row past the end of a list that has since shrunk;
-        // taking the window as a slice makes that an empty list rather than
-        // the `end - start` underflow it used to be.
-        let start = self.scroll_offset.min(rules.len());
-        let end = start.saturating_add(self.visible_rules).min(rules.len());
-        let visible = rules.get(start..end).unwrap_or_default();
+        // Rule rows. `scroll_offset` is a public field that nothing clamps, so
+        // it can name a row past the end of a list that has since shrunk — which
+        // used to be an `end - start` underflow here. The shared window is now
+        // the only copy of that arithmetic (`touchpad.rs` and `bluetooth.rs`
+        // each had their own, differently broken), and it goes one better than
+        // the local fix did: a stale offset shows the last page rather than a
+        // blank list.
+        let window =
+            scroll_window::visible_count(rules.len(), self.visible_rules, self.scroll_offset);
+        let visible = rules.get(window.start..window.end()).unwrap_or_default();
         for (row, rule) in visible.iter().enumerate() {
-            let i = start.saturating_add(row);
+            let i = window.start.saturating_add(row);
             let ry = y + 26.0 + (row as f32) * row_h;
             let selected = i == self.selected_rule_idx;
 
@@ -2247,11 +2251,18 @@ mod tests {
     // -- rule list rendering -----------------------------------------------
 
     #[test]
-    fn scrolling_past_the_end_of_a_shrunken_rule_list_renders_nothing() {
+    fn scrolling_past_the_end_of_a_shrunken_rule_list_shows_the_last_page() {
         // `scroll_offset` is public and nothing clamps it, so a list that
         // shrinks under a scrolled view leaves it pointing past the end. That
-        // used to be an `end - start` underflow — a panic in the shell's
-        // render path, reachable from removing rules while scrolled down.
+        // used to be an `end - start` underflow — a panic in the shell's render
+        // path, reachable from removing rules while scrolled down. The first fix
+        // made it render an empty list; sharing `scroll_window` with the other
+        // panels makes it render the last page instead, which is what the user
+        // scrolled down to look at.
+        //
+        // This test was previously named "renders nothing" but only asserted
+        // that *something* drew, so it would have passed either way. It now
+        // names the row it expects to see.
         let mut mgr = WindowRulesManager::new();
         mgr.rules.clear();
         mgr.add_rule(WindowRule::new(0, "only", MatchCriteria::Any));
@@ -2260,6 +2271,13 @@ mod tests {
         ui.scroll_offset = 50;
         let cmds = ui.render(&mgr, 0.0, 0.0, 800.0, 600.0);
         assert!(!cmds.is_empty(), "the chrome still draws");
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "only"
+            )),
+            "the one surviving rule should be pulled back into view"
+        );
     }
 
     #[test]

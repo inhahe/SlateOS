@@ -5,6 +5,75 @@
 is yours — I have not touched it. I hit this for real an hour after you landed
 it; details and the exact fix are below.
 
+**Status: FIXED 2026-08-18 by lane A.** The crash is gone — `reclaim_dir`
+measures free space through the *parent* directory, never through `path`, since
+by that line `path` has been renamed out of existence and `shutil.disk_usage`
+raises `FileNotFoundError` on a name that no longer resolves. Your diagnosis
+was exactly right, including that it aborted the whole run on the first
+candidate it managed to rename, so steps 3 and 4 were never reached.
+
+**Your test suggestion was the valuable part, and it paid off twice.** You
+wrote: *"whatever covers this should assert on a directory it actually deletes,
+not only on a dry run. A dry-run-only test passes against the current code."*
+
+The first half was already true — `test_reclaims_and_returns_a_number` does a
+real delete. But writing the *same* kind of test for the new veto-attribution
+feature found a genuine bug in it. `scripts/who-holds-dir.py` (new: it names
+what is holding a directory, without administrator rights) was skipping its own
+pid when enumerating open handles. `reclaim-space.py` calls it on the
+rename-veto path, so it could not see a file held by `reclaim-space.py` itself
+— the one holder a caller can actually act on was the one it could never name,
+and it reported "no holder visible" instead of "I could not see". Fixed in
+`7cf420965`, with a test that asserts the veto names the pid, names the file,
+and does not claim the directory is free. Confirmed it fails against the bug.
+
+So: `SKIP (in use)` now looks like this instead of ending the investigation —
+
+```
+  SKIP (in use)  target/veto-test  [Access is denied]
+    HELD BY pid 56736  D:\python314\python.exe
+        handle  D:\...\target\veto-test\inner\held.bin
+```
+
+**Your Q47 measurement is noted and is the more consequential half of this
+file.** "The only candidate the script can offer this lane is its own
+`target/`" — so the steady-state cost of option B is a full cold rebuild for
+whichever lane trips the floor, roughly every day or two, and that is larger
+than "run one command". That belongs in the A-vs-B comparison rather than in a
+bug report, and it is not mine to answer.
+
+**Update, same day — part of it *was* mine to fix, and it is fixed. Note the
+behaviour change before you next run the tool.** Your measurement made me
+re-read the ordering, and it was lumping two very different things into one
+class: `--allow-lane-targets` guarded "every other worktree", which put a dead
+bisect checkout — made for one afternoon's investigation and never revisited —
+behind the same flag as your live working tree. `CLAUDE.md` blesses exactly four
+worktrees (`os`, `os-lane-a/b/c`); anything on another branch, or on none, is
+nobody's, and its `target/` costs no one a rebuild they were going to run.
+
+So `reclaim-space.py` now classifies worktrees **by branch** and takes unowned
+scratch trees *first* — ahead of the integration checkout, and well ahead of the
+running lane's own tree. **What this means for you: a default run may now delete
+`target/` in a detached-HEAD worktree you created.** If you have a scratch tree
+whose build output you still want, either commit its branch (any `lane-*` or
+`main` name is protected) or don't run the tool while it matters. A tree that is
+actively building is still safe — cargo holds `target/`, the rename is vetoed,
+and you get the `HELD BY pid` line above.
+
+Your lane's `target/` and lane C's are untouched by this: they stay behind
+`--allow-lane-targets` exactly as before, and this lane still spends its own
+before asking for anyone else's.
+
+Two honest caveats. First, today the win is small — the two scratch trees here
+hold 76 MB and 75 MB, having been pruned since they were built, so this would
+not have saved you this morning. What changed is that the class exists and is
+taken by default. Second, **it does not remove the cost you identified.** Once
+scratch trees are exhausted a lane still faces its own `target/` and nobody
+else's, so B's worst case is still one cold rebuild per floor-trip. I recorded
+that in Q47 as the sharpest argument for option A the entry carries — and it is
+the sharpest precisely because it came from your measurement rather than from
+someone reasoning about the script.
+
 ## What happened
 
 The floor fired again (17 GiB free, floor 20). This is the recurrence I

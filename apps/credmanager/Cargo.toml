@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The salted, stretched master-password derivation, shared with
+# `apps/lockscreen` and `gui/credentials` rather than written a fourth time.
+# This crate previously checked the master password against a 64-bit djb2
+# hash, which is not a password derivation at all: one pass, no salt, no cost,
+# and a 64-bit output that any password colliding with the owner's opens the
+# vault. See `pwkdf`'s module doc and `design-decisions.md` §466.
+pwkdf = { path = "../../pwkdf" }
 
 [lints]
 workspace = true

@@ -27,6 +27,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seed_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 
 // -- Catppuccin Mocha palette -------------------------------------------
@@ -67,31 +68,33 @@ const HINT_FONT: f32 = 13.0;
 /// Maximum wrong guesses before the game is lost.
 const MAX_WRONG: usize = 6;
 
-// -- LCG random number generator ---------------------------------------
-/// Simple linear congruential generator. Parameters from Numerical Recipes.
-struct Lcg {
-    state: u64,
-}
+// -- Randomness ---------------------------------------------------------
 
-impl Lcg {
-    const fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
+/// Seed used when the kernel's entropy source cannot be reached.
+///
+/// A per-crate constant rather than a shared one, so that two programs which
+/// lose entropy on the same boot do not then produce correlated streams. The
+/// bytes spell `HANGMAN!`.
+const FALLBACK_SEED: u64 = 0x4841_4E47_4D41_4E21;
 
-    fn next_u64(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    /// Returns a value in `0..bound` (exclusive upper bound).
-    fn next_bounded(&mut self, bound: usize) -> usize {
-        let val = self.next_u64();
-        (val % bound as u64) as usize
-    }
-}
+// This crate used to carry its own copy of the LCG that got copied into
+// sixteen crates, reducing with `val % bound`. That is the broken reduction:
+// the generator's modulus is 2^64, so bit *k* of its state has period 2^(k+1)
+// and the low bits are a counter rather than a draw. Any power-of-two bound
+// reads only those.
+//
+// Picking the word escaped it -- the word lists are odd lengths, and an odd
+// bound's remainder depends on all 64 bits. Picking which letters to reveal
+// did not. `apply_free_reveals` and the hint both draw against
+// `unrevealed.len()`, the number of *distinct* letters still hidden, which for
+// ordinary English words is most often somewhere between 4 and 8 and so lands
+// on a power of two a good part of the time. On those words the "random"
+// letter revealed was a fixed function of how many draws the game had made,
+// which is to say the same letter every time the game reached that state.
+//
+// `randrange::below` is Lemire's method: it multiplies by the bound into 128
+// bits and keeps the *top* half, so it reads the high bits and never the low
+// ones, with a rejection step that makes it exactly uniform.
 
 // -- Category -----------------------------------------------------------
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -320,7 +323,7 @@ struct HangmanApp {
     /// Persistent stats.
     stats: Stats,
     /// RNG state.
-    rng: Lcg,
+    rng: SeededRng,
     /// Index of the highlighted category in selection screen.
     category_cursor: usize,
 }
@@ -328,7 +331,12 @@ struct HangmanApp {
 impl HangmanApp {
     /// Create a new Hangman game with default settings.
     fn new() -> Self {
-        Self::with_seed(42)
+        // Was `with_seed(42)`: every player, on every machine, got the same
+        // word, and then the same word again in the same order for every round
+        // after it. Predicting a hangman word costs the user nothing but the
+        // game, so this asks the kernel and falls back rather than refusing --
+        // see `randrange::seeded_from_system`.
+        Self::with_seed(seed_from_system(FALLBACK_SEED))
     }
 
     /// Create a new Hangman game with a specific RNG seed.
@@ -342,7 +350,7 @@ impl HangmanApp {
             difficulty: Difficulty::Medium,
             hint_used: false,
             stats: Stats::new(),
-            rng: Lcg::new(seed),
+            rng: SeededRng::new(seed),
             category_cursor: 0,
         };
         app.pick_word();
@@ -367,7 +375,7 @@ impl HangmanApp {
         // If no words match the difficulty filter, use all words.
         let pool = if eligible.is_empty() { words } else { &eligible };
 
-        let idx = self.rng.next_bounded(pool.len());
+        let idx = self.rng.below(pool.len());
         self.word = pool[idx].as_bytes().to_vec();
 
         // Apply free reveals for easy/medium difficulty.
@@ -401,7 +409,7 @@ impl HangmanApp {
             if unrevealed.is_empty() {
                 break;
             }
-            let pick = self.rng.next_bounded(unrevealed.len());
+            let pick = self.rng.below(unrevealed.len());
             let letter = unrevealed[pick];
             if let Some(i) = letter_index(letter) {
                 self.guessed[i] = true;
@@ -493,7 +501,7 @@ impl HangmanApp {
             return false;
         }
 
-        let pick = self.rng.next_bounded(unrevealed.len());
+        let pick = self.rng.below(unrevealed.len());
         let letter = unrevealed[pick];
         if let Some(i) = letter_index(letter) {
             self.guessed[i] = true;
@@ -1731,39 +1739,118 @@ mod tests {
         assert_eq!(Difficulty::Medium.free_reveals(), 1);
     }
 
-    // -- LCG RNG --------------------------------------------------------
+    // -- Seeding and the reveal -----------------------------------------
 
+    // The generator's own contract -- determinism under a seed, divergence
+    // under two, staying inside its bound -- used to be tested here against the
+    // local `Lcg`. It is now tested once, against the shared implementation, in
+    // `randrange`. Sixteen crates each testing their own copy is sixteen
+    // chances to test a copy that has quietly drifted from the one being
+    // shipped. What replaces those tests is about the game.
+
+    /// A fresh game must take its seed from the kernel, not from a literal.
+    ///
+    /// Phrased as "which seed", not as "two fresh games differ", because a host
+    /// test build has no SlateOS kernel: `seed_from_system` correctly takes its
+    /// fallback and two fresh games are then identical, exactly as they were
+    /// under the old hardcoded `42`. A variety check would therefore pass on
+    /// the broken code and fail on the fixed code, which is backwards.
+    #[cfg(not(unix))]
     #[test]
-    fn test_lcg_deterministic() {
-        let mut a = Lcg::new(42);
-        let mut b = Lcg::new(42);
-        for _ in 0..10 {
-            assert_eq!(a.next_u64(), b.next_u64());
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        let fresh = HangmanApp::new().word;
+        assert_eq!(
+            fresh,
+            HangmanApp::with_seed(FALLBACK_SEED).word,
+            "a fresh game did not use the crate's fallback seed"
+        );
+        assert_ne!(
+            fresh,
+            HangmanApp::with_seed(42).word,
+            "a fresh game is still seeded by the old hardcoded literal"
+        );
+    }
+
+    /// Which letter a free reveal picks must not be a short fixed cycle.
+    ///
+    /// This is the property the old reduction destroyed, and the one place in
+    /// this crate where it bit. Picking the word escaped it, because the word
+    /// lists are odd lengths and an odd bound's remainder depends on all 64
+    /// bits. The reveal draws against `unrevealed.len()` instead -- the number
+    /// of *distinct* letters still hidden -- and for ordinary English words
+    /// that is very often even, and often a power of two, which is exactly
+    /// where `val % bound` reads the generator's low bits. Those are a counter.
+    ///
+    /// The variation must be looked for **along one generator's stream**, not
+    /// across seeds: different seeds have different low bits, so sampling 200
+    /// fresh games hides the defect completely -- every letter gets reached and
+    /// the test passes on broken code. Consecutive rounds of a single game
+    /// share one generator, which is where the counter shows.
+    ///
+    /// Measured on the old reduction, one game, first pick of each round, on a
+    /// four-distinct-letter word: at Easy the index ran 2, 0, 2, 0, 2, 0 for
+    /// ever -- two of the four letters could never be revealed first -- and at
+    /// Medium it ran 2, 1, 0, 3, 2, 1, 0, 3, a perfect four-cycle. Even a
+    /// six-letter word only ever produced *even* indices, since an even bound
+    /// inherits the low bit's period of 2.
+    ///
+    /// So the assertion is about period, not coverage: no cycle of length 4 or
+    /// less may reproduce the whole sequence.
+    ///
+    /// Medium is the case that fails on the old code, and it fails outright --
+    /// one letter revealed per round means the round's outcome *is* the draw,
+    /// so the sequence is the bare four-cycle. Easy is kept as well even though
+    /// the old code survives it: its first draw is the periodic one but its
+    /// second is against a bound of 3, whose remainder depends on all 64 bits,
+    /// and that second draw is enough to keep the round outcomes from repeating
+    /// exactly. It still pins the property down for future edits.
+    #[test]
+    fn a_free_reveal_is_not_a_short_fixed_cycle() {
+        for difficulty in [Difficulty::Easy, Difficulty::Medium] {
+            let rounds = reveal_signatures(difficulty, 40);
+            for period in 1..=4usize {
+                let repeats = rounds
+                    .iter()
+                    .enumerate()
+                    .all(|(i, v)| rounds.get(i % period).is_some_and(|f| f == v));
+                assert!(
+                    !repeats,
+                    "at {difficulty:?} the free reveal repeats with period \
+                     {period}: {rounds:?}"
+                );
+            }
         }
     }
 
-    #[test]
-    fn test_lcg_different_seeds() {
-        let mut a = Lcg::new(1);
-        let mut b = Lcg::new(2);
-        assert_ne!(a.next_u64(), b.next_u64());
-    }
-
-    #[test]
-    fn test_lcg_bounded() {
-        let mut rng = Lcg::new(99);
-        for _ in 0..100 {
-            let val = rng.next_bounded(10);
-            assert!(val < 10);
+    /// Play `rounds` consecutive rounds on one fixed word from one generator,
+    /// returning which distinct letters of the word were revealed each round.
+    ///
+    /// The word is forced so that the variety being measured is the reveal's
+    /// and not the word pick's, and the rounds share one app -- and therefore
+    /// one generator -- because that is the only place the defect is visible.
+    fn reveal_signatures(difficulty: Difficulty, rounds: usize) -> Vec<Vec<usize>> {
+        const WORD: &[u8] = b"TESTER";
+        let mut app = HangmanApp::with_seed(7);
+        app.difficulty = difficulty;
+        let mut distinct: Vec<u8> = Vec::new();
+        for &b in WORD {
+            if !distinct.contains(&b) {
+                distinct.push(b);
+            }
         }
-    }
-
-    #[test]
-    fn test_lcg_bounded_one() {
-        let mut rng = Lcg::new(77);
-        for _ in 0..20 {
-            assert_eq!(rng.next_bounded(1), 0);
-        }
+        (0..rounds)
+            .map(|_| {
+                app.word = WORD.to_vec();
+                app.guessed = [false; 26];
+                app.apply_free_reveals();
+                distinct
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &b)| letter_index(b).is_some_and(|i| app.guessed[i]))
+                    .map(|(n, _)| n)
+                    .collect()
+            })
+            .collect()
     }
 
     // -- letter_index ---------------------------------------------------

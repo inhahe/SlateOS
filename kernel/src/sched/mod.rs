@@ -2407,10 +2407,63 @@ fn liveness_report_prefix() -> &'static str {
 ///
 /// At WATCHDOG_CHECK_INTERVAL (5s) per interval, 3 intervals = 15 seconds
 /// of the whole machine making zero task-level progress during boot.  No
-/// legitimate pre-BOOT_OK operation stalls all tasks for that long, so 15s
-/// is comfortably above the noise floor while still catching the hang
-/// promptly.
+/// legitimate pre-BOOT_OK operation stalls all tasks for that long *in an
+/// ordinary build*, so 15s is comfortably above the noise floor while still
+/// catching the hang promptly.
+///
+/// # Why this is a threshold and not a smarter signal
+///
+/// The detector's blind spot is a long CPU-bound *kernel-side* computation:
+/// `USEFUL_WORK_TICKS` only advances for ticks that preempt ring-3 code or a CPU
+/// with a queued task, `kernel_progress_count()` counts page faults and block
+/// I/O, and a pure in-memory compression loop does none of those while printing
+/// nothing.  It is therefore indistinguishable — by every signal the kernel
+/// has — from an in-kernel infinite loop, which is precisely the hang this
+/// detector exists to catch.  Making kernel-mode ticks count as progress would
+/// close the false positive by blinding the detector to its primary target.
+/// Duration is the only knob that separates the two, so duration is what gets
+/// tuned.
+///
+/// # Why instrumentation changes the number
+///
+/// Under `kasan_instrumented` every load and store grows a shadow-byte lookup
+/// first, so the wall-clock cost of a fixed amount of work rises and a threshold
+/// calibrated in seconds silently becomes a threshold calibrated in *less work*.
+/// Measured 2026-08-19, same host, same QEMU, on the bzip2 boot self-test's
+/// repetitive-data round-trip:
+///
+/// | build | silent window | verdict at 15s |
+/// |---|---|---|
+/// | ordinary   | inside one 30 s breadcrumb window, alongside the whole rest of the bzip2 *and* xz self-tests | no report |
+/// | instrumented | ~93 s (armed 898 s → 991 s) | two spurious `SYSTEM HANG` reports |
+///
+/// The self-test *completed and passed*, and the boot ran on to BOOT_OK with
+/// every later self-test green, so the reports were false by direct evidence
+/// rather than by inference.
+///
+/// **Do not scale this by the aggregate boot slowdown.**  That figure was 3.7x
+/// (285 s → 1063 s), and 3.7 x 15 s = 55 s — still under the measured 93 s, so a
+/// threshold derived that way would go on false-firing.  Instrumentation cost is
+/// proportional to memory-access *density*, and a compression inner loop is far
+/// denser than boot taken as a whole; the aggregate ratio is the wrong scaling
+/// factor for a per-operation threshold.  36 intervals = 180 s is ~1.9x the
+/// measured window, chosen against the measurement itself.
+///
+/// The generosity is cheap because it costs only *promptness*, never detection:
+/// `liveness_boot_deadline_check`'s wall-clock backstop still catches any hang
+/// mode by construction, and on an instrumented boot it sits at ~3498 s — so
+/// even at 180 s the progress detectors remain the promptest signal by 19x.
+///
+/// Same bug class, and the same fix, as `KASAN_BOOT_TIMEOUT` in
+/// `scripts/kasan-build.sh` and `BENCH_TIMEOUT` in `scripts/boot-test.sh`: a
+/// constant calibrated on an uninstrumented kernel, applied to an instrumented
+/// one, reported as a kernel fault.
+#[cfg(not(kasan_instrumented))]
 const LIVENESS_ALERT_COUNT: u64 = 3;
+
+/// See the ordinary-build [`LIVENESS_ALERT_COUNT`] for the full derivation.
+#[cfg(kasan_instrumented)]
+const LIVENESS_ALERT_COUNT: u64 = 36;
 
 /// Monotonic timestamp (ns since boot) captured when the liveness watchdog was
 /// armed, or 0 if not armed. Backs the wall-clock boot-deadline backstop below.
@@ -2544,6 +2597,62 @@ fn armed_relative_deadline_ns(budget_ns: u64, arm_ns: u64) -> Option<u64> {
         .filter(|&d| d > 0)
 }
 
+/// Serial writes made by the liveness watchdog *itself*.
+///
+/// Subtracted from [`crate::serial::output_count`] before the silence test in
+/// [`liveness_check`], because the watchdog's own diagnostics are not evidence
+/// that the *kernel* is making progress — they are evidence that the *watchdog*
+/// is. Counting them as progress inverts the meaning of every line this module
+/// prints: the breadcrumb exists precisely to keep speaking *during* a hang, so
+/// letting it certify liveness makes a hang look healthy.
+///
+/// # This is load-bearing, not hygiene
+///
+/// `liveness_boot_deadline_check` emits a breadcrumb every
+/// [`LIVENESS_BREADCRUMB_NS`] (30 s) for the entire armed window, and
+/// `liveness_check` runs every [`WATCHDOG_CHECK_INTERVAL`] (5 s). Without this
+/// subtraction the stall counter is reset by the watchdog's own voice every 30 s
+/// and therefore **cannot exceed 5**, so any [`LIVENESS_ALERT_COUNT`] above 6 is
+/// unreachable and the detector is silently *dead* rather than merely
+/// insensitive. That is strictly worse than the false positive the larger
+/// threshold was introduced to cure: a false positive is loud, a dead detector
+/// is not.
+///
+/// Introduced 2026-08-19 after `LIVENESS_ALERT_COUNT` was raised to 36 for
+/// instrumented builds and the resulting boot passed — not because 180 s of
+/// tolerance was granted, but because 25 s was the most that could ever accrue.
+///
+/// # Why the drills did not catch it
+///
+/// Every liveness drill runs inside `cpu::without_interrupts`, so no timer tick
+/// fires and no breadcrumb is emitted for the duration. The drills therefore
+/// exercise the detector in the one environment where this bug is invisible by
+/// construction. `test_breadcrumb_does_not_certify_liveness` closes that gap by
+/// asserting the invariant directly rather than hoping a drill stumbles on it.
+static LIVENESS_SELF_OUTPUT: AtomicU64 = AtomicU64::new(0);
+
+/// Serial output count with the watchdog's own writes discounted.
+///
+/// The only value [`liveness_check`] and [`liveness_arm`] may use for the
+/// silence test. See [`LIVENESS_SELF_OUTPUT`].
+fn kernel_output_count() -> u64 {
+    crate::serial::output_count().wrapping_sub(LIVENESS_SELF_OUTPUT.load(Ordering::Relaxed))
+}
+
+/// Emit watchdog diagnostics without letting them register as kernel progress.
+///
+/// Wraps *every* print this module makes — breadcrumb, hang report, livelock
+/// report, and the task-table dumps that follow them. The dumps matter as much
+/// as the breadcrumb: a single `dump_all_tasks_serial()` emits hundreds of
+/// lines, which would otherwise be recorded as a large burst of "progress" at
+/// exactly the moment the kernel was declared hung.
+fn watchdog_diagnostic(f: impl FnOnce()) {
+    let before = crate::serial::output_count();
+    f();
+    let after = crate::serial::output_count();
+    LIVENESS_SELF_OUTPUT.fetch_add(after.wrapping_sub(before), Ordering::Relaxed);
+}
+
 /// Record forward progress for the liveness watchdog.
 ///
 /// Called from [`timer_tick`] when this tick is charged to a non-idle
@@ -2599,7 +2708,7 @@ pub fn liveness_arm() {
     // cold console page), which would otherwise show up as "progress" and make
     // the first interval after arming unconditionally exempt from the
     // total-hang check.
-    LIVENESS_LAST_OUTPUT.store(crate::serial::output_count(), Ordering::Relaxed);
+    LIVENESS_LAST_OUTPUT.store(kernel_output_count(), Ordering::Relaxed);
     LIVENESS_LAST_KWORK.store(kernel_progress_count(), Ordering::Relaxed);
 
     LIVENESS_DEADLINE_FIRED.store(false, Ordering::Relaxed);
@@ -2708,25 +2817,29 @@ fn liveness_boot_deadline_check() {
     let bucket = elapsed_ns / LIVENESS_BREADCRUMB_NS;
     if bucket > LIVENESS_BREADCRUMB_BUCKET.load(Ordering::Relaxed) {
         LIVENESS_BREADCRUMB_BUCKET.store(bucket, Ordering::Relaxed);
-        serial_println!(
-            "[liveness] boot-window breadcrumb: {}s armed (deadline {}s, heartbeat={})",
-            elapsed_ns / 1_000_000_000,
-            LIVENESS_BOOT_DEADLINE_NS.load(Ordering::Relaxed) / 1_000_000_000,
-            bsp_heartbeat(),
-        );
+        watchdog_diagnostic(|| {
+            serial_println!(
+                "[liveness] boot-window breadcrumb: {}s armed (deadline {}s, heartbeat={})",
+                elapsed_ns / 1_000_000_000,
+                LIVENESS_BOOT_DEADLINE_NS.load(Ordering::Relaxed) / 1_000_000_000,
+                bsp_heartbeat(),
+            );
+        });
     }
 
     if elapsed_ns >= LIVENESS_BOOT_DEADLINE_NS.load(Ordering::Relaxed)
         && !LIVENESS_DEADLINE_FIRED.swap(true, Ordering::AcqRel)
     {
-        serial_println!(
-            "[liveness] BOOT DEADLINE EXCEEDED: still armed {}s after arming (no BOOT_OK). \
-             The progress-based detectors did not trip, so this is a livelock or partial \
-             hang — some task(s) keep running/switching but boot is not advancing. \
-             Dumping task table:",
-            elapsed_ns / 1_000_000_000,
-        );
-        dump_all_tasks_serial();
+        watchdog_diagnostic(|| {
+            serial_println!(
+                "[liveness] BOOT DEADLINE EXCEEDED: still armed {}s after arming (no BOOT_OK). \
+                 The progress-based detectors did not trip, so this is a livelock or partial \
+                 hang — some task(s) keep running/switching but boot is not advancing. \
+                 Dumping task table:",
+                elapsed_ns / 1_000_000_000,
+            );
+            dump_all_tasks_serial();
+        });
     }
 }
 
@@ -2755,7 +2868,10 @@ fn liveness_check() {
     // routinely satisfied by a perfectly healthy boot (see
     // LIVENESS_LAST_OUTPUT). Snapshot it unconditionally so the comparison is
     // always against the immediately preceding interval.
-    let out_now = crate::serial::output_count();
+    // Discounts the watchdog's own breadcrumbs and dumps — see
+    // LIVENESS_SELF_OUTPUT for why using the raw count makes any
+    // LIVENESS_ALERT_COUNT above 6 unreachable.
+    let out_now = kernel_output_count();
     let out_prev = LIVENESS_LAST_OUTPUT.swap(out_now, Ordering::Relaxed);
     let silent = out_now == out_prev;
 
@@ -2821,20 +2937,22 @@ fn liveness_check() {
         // this branch was the outlier.  A watchdog that switches itself off on
         // its own say-so is a check that cannot fire.
         let stall_secs = count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
-        serial_println!(
-            "[liveness] {}SYSTEM HANG: no task-level forward progress, no serial \
-             output, and no kernel-side progress for {}+ seconds \
-             (useful_work={}, kernel_progress={}, ctx_switches={}, report {}/{}, \
-             watchdog stays ARMED). Dumping task table:",
-            liveness_report_prefix(),
-            stall_secs,
-            current,
-            kwork_now,
-            ctx_now,
-            reports,
-            LIVENESS_MAX_HANG_REPORTS,
-        );
-        dump_all_tasks_serial();
+        watchdog_diagnostic(|| {
+            serial_println!(
+                "[liveness] {}SYSTEM HANG: no task-level forward progress, no serial \
+                 output, and no kernel-side progress for {}+ seconds \
+                 (useful_work={}, kernel_progress={}, ctx_switches={}, report {}/{}, \
+                 watchdog stays ARMED). Dumping task table:",
+                liveness_report_prefix(),
+                stall_secs,
+                current,
+                kwork_now,
+                ctx_now,
+                reports,
+                LIVENESS_MAX_HANG_REPORTS,
+            );
+            dump_all_tasks_serial();
+        });
         return;
     }
 
@@ -2872,17 +2990,19 @@ fn liveness_check() {
     // rather than every interval.
     LIVENESS_CTX_STALL_COUNT.store(0, Ordering::Relaxed);
     let stall_secs = count.saturating_mul(WATCHDOG_CHECK_INTERVAL / 100);
-    serial_println!(
-        "[liveness] {}SUSPECTED LIVELOCK: useful-work ticks advancing but zero \
-         context switches and no serial output for {}+ seconds (useful_work={}, \
-         ctx_switches={}) — a task is likely monopolizing a CPU without \
-         yielding. Dumping task table:",
-        liveness_report_prefix(),
-        stall_secs,
-        current,
-        ctx_now,
-    );
-    dump_all_tasks_serial();
+    watchdog_diagnostic(|| {
+        serial_println!(
+            "[liveness] {}SUSPECTED LIVELOCK: useful-work ticks advancing but zero \
+             context switches and no serial output for {}+ seconds (useful_work={}, \
+             ctx_switches={}) — a task is likely monopolizing a CPU without \
+             yielding. Dumping task table:",
+            liveness_report_prefix(),
+            stall_secs,
+            current,
+            ctx_now,
+        );
+        dump_all_tasks_serial();
+    });
 }
 
 /// Dump every task's scheduling state to the serial log on demand.
@@ -6751,6 +6871,106 @@ fn test_liveness_watchdog() -> KernelResult<()> {
     if !totalhang_ok {
         return Err(KernelError::InternalError);
     }
+
+    // The watchdog's own voice must not certify the kernel's liveness.
+    //
+    // This is the one property no other drill above can observe, because they
+    // all run inside `without_interrupts`: no timer tick fires, so
+    // `liveness_boot_deadline_check` never emits a breadcrumb, so the very
+    // interference being tested is absent by construction.  Asserted directly
+    // instead.
+    //
+    // Without the `watchdog_diagnostic` discount this fails: the breadcrumb is a
+    // `serial_println!` every 30 s, `liveness_check` runs every 5 s, so the stall
+    // counter is reset by the watchdog itself six intervals in and can never
+    // exceed 5 — silently capping LIVENESS_ALERT_COUNT at 6 and making the 36
+    // used by instrumented builds unreachable.  A dead detector reports nothing,
+    // which is exactly what a healthy boot looks like.  See LIVENESS_SELF_OUTPUT.
+    //
+    // The drill must stay *strictly below* LIVENESS_ALERT_COUNT throughout, and
+    // asserts that no report fired.  The first version of it did not, and on the
+    // ordinary build — where LIVENESS_ALERT_COUNT is itself 3 — the third accrual
+    // fired a real `SYSTEM HANG` whose own path zeroes the counter, so the drill
+    // read 0 and blamed the breadcrumb for a reset the report had done.  It also
+    // printed an unprefixed report that `boot-test.sh` would rightly have failed
+    // the boot on.  Hence: one accrual, then the breadcrumb, then one more; 2 is
+    // below every supported threshold (3 and 36 alike).
+    //
+    // `LIVENESS_SELFTEST_ACTIVE` is re-raised for the duration purely as a
+    // backstop: if a future edit ever does cross the threshold here, the report
+    // it emits must be marked a drill rather than failing the boot as a real one.
+    LIVENESS_SELFTEST_ACTIVE.store(true, Ordering::Relaxed);
+    let breadcrumb_ok = crate::cpu::without_interrupts(|| {
+        liveness_arm(); // also zeroes LIVENESS_STALL_COUNT and LIVENESS_HANG_REPORTS
+
+        // One genuinely silent interval accrues.
+        LIVENESS_LAST_KWORK.store(kernel_progress_count(), Ordering::Relaxed);
+        liveness_check();
+        let before = LIVENESS_STALL_COUNT.load(Ordering::Relaxed);
+        if before != 1 {
+            serial_println!("[sched]   FAIL: expected 1 accrued stall interval, got {before}");
+            return false;
+        }
+
+        // Now the watchdog speaks, exactly as the breadcrumb does on a real boot.
+        watchdog_diagnostic(|| {
+            serial_println!(
+                "[sched]   (self-test) simulated watchdog breadcrumb; the interval \
+                 that follows must still count as silent:"
+            );
+        });
+
+        // ...and the next interval must still be silent, so the count keeps
+        // climbing rather than resetting to 0.
+        LIVENESS_LAST_KWORK.store(kernel_progress_count(), Ordering::Relaxed);
+        liveness_check();
+        let after = LIVENESS_STALL_COUNT.load(Ordering::Relaxed);
+        if after != 2 {
+            serial_println!(
+                "[sched]   FAIL: the watchdog's own output reset the stall counter \
+                 ({before} -> {after}); every LIVENESS_ALERT_COUNT above 6 is then \
+                 unreachable and the detector is dead"
+            );
+            return false;
+        }
+
+        // Ordinary kernel output must still count as progress — the discount is
+        // meant to be surgical, not to blind the silence test altogether.  Without
+        // this half the test would pass just as well if `kernel_output_count()`
+        // returned a constant.
+        serial_println!("[sched]   (self-test) ordinary kernel output; must reset the counter:");
+        LIVENESS_LAST_KWORK.store(kernel_progress_count(), Ordering::Relaxed);
+        liveness_check();
+        let reset = LIVENESS_STALL_COUNT.load(Ordering::Relaxed);
+        if reset != 0 {
+            serial_println!(
+                "[sched]   FAIL: ordinary serial output did not reset the stall \
+                 counter (still {reset}) — the silence test is blind"
+            );
+            return false;
+        }
+
+        // The drill is meant to stay under the alert threshold.  If it ever fires
+        // a report it is measuring the report path's own counter reset instead of
+        // the property it names, which is exactly how its first version failed.
+        let reports = LIVENESS_HANG_REPORTS.load(Ordering::Relaxed);
+        if reports != 0 {
+            serial_println!(
+                "[sched]   FAIL: breadcrumb drill crossed LIVENESS_ALERT_COUNT \
+                 ({reports} report(s)); it no longer tests what it claims"
+            );
+            return false;
+        }
+        true
+    });
+    liveness_disarm();
+    LIVENESS_SELFTEST_ACTIVE.store(false, Ordering::Relaxed);
+    if !breadcrumb_ok {
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[sched]   liveness: watchdog breadcrumbs do not certify liveness, ordinary output does: OK"
+    );
 
     // Boot-deadline derivation (see LIVENESS_BOOT_DEADLINE_NS): the cmdline
     // parser must accept the harness's key anywhere in the line and ignore

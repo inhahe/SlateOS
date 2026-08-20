@@ -18,6 +18,7 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{seed_from_system, RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 
 // ---------------------------------------------------------------------------
@@ -51,34 +52,28 @@ const COL_TEAL: u32 = 0x94E2D5;
 const COL_MAUVE: u32 = 0xCBA6F7;
 
 // ---------------------------------------------------------------------------
-// LCG random number generator (no external crate)
+// Randomness
 // ---------------------------------------------------------------------------
 
-struct Lcg {
-    state: u64,
-}
+/// Seed used when the kernel's entropy source cannot be reached.
+///
+/// A per-crate constant rather than a shared one, so that two programs which
+/// lose entropy on the same boot do not then produce correlated streams. The
+/// bytes spell `2048GAME`.
+const FALLBACK_SEED: u64 = 0x3230_3438_4741_4D45;
 
-impl Lcg {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        // Numerical Recipes LCG parameters
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 {
-            return 0;
-        }
-        (self.next() >> 33) as usize % max
-    }
-}
+// This crate used to carry its own copy of the LCG that got copied into
+// sixteen crates. Unlike most of them its reduction was *not* the broken one:
+// `(self.next() >> 33) as usize % max` discards the low 31 bits before taking
+// the remainder, so it never read the counter-like low bits of a
+// power-of-two-modulus LCG -- which matters here, because a 4x4 board makes
+// `empty.len()` a power of two on the very first move. It was left with an
+// ordinary modulo bias and nothing worse.
+//
+// It is replaced anyway. The copy is the defect: this one happened to be a
+// good copy, and the only way to know that was to read all sixteen and check.
+// `randrange::below` is Lemire's method with its rejection step, so the draw
+// is exactly uniform rather than merely unbiased in its high bits.
 
 // ---------------------------------------------------------------------------
 // Direction
@@ -142,15 +137,15 @@ impl GameState {
         self.empty_cells().is_empty()
     }
 
-    fn spawn_tile(&mut self, rng: &mut Lcg) {
+    fn spawn_tile(&mut self, rng: &mut SeededRng) {
         let empty = self.empty_cells();
         if empty.is_empty() {
             return;
         }
-        let idx = rng.next_range(empty.len());
+        let idx = rng.below(empty.len());
         let (r, c) = empty[idx];
         // 90% chance of 2, 10% chance of 4
-        let val = if rng.next_range(10) < 9 { 2 } else { 4 };
+        let val = if rng.chance_in(9, 10) { 2 } else { 4 };
         self.grid[r][c] = val;
         self.update_highest();
     }
@@ -353,7 +348,7 @@ struct UndoEntry {
 
 struct Game2048App {
     state: GameState,
-    rng: Lcg,
+    rng: SeededRng,
     undo_stack: Vec<UndoEntry>,
     max_undo: usize,
     show_help: bool,
@@ -361,13 +356,18 @@ struct Game2048App {
 
 impl Game2048App {
     fn new() -> Self {
-        Self::with_seed(42)
+        // Was `with_seed(42)`: every player, on every machine, got the same
+        // two opening tiles in the same two cells, and then the same spawns
+        // for the rest of the game. Predicting a 2048 board costs the user
+        // nothing but the game, so this asks the kernel and falls back rather
+        // than refusing -- see `randrange::seeded_from_system`.
+        Self::with_seed(seed_from_system(FALLBACK_SEED))
     }
 
     fn with_seed(seed: u64) -> Self {
         let mut app = Self {
             state: GameState::new(),
-            rng: Lcg::new(seed),
+            rng: SeededRng::new(seed),
             undo_stack: Vec::new(),
             max_undo: 50,
             show_help: false,
@@ -821,39 +821,65 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
-    // --- LCG tests ---
+    // --- Seeding ---
 
+    // The generator's own contract -- determinism under a seed, divergence
+    // under two, staying inside its bound, surviving a zero bound -- used to be
+    // tested here against the local `Lcg`. It is now tested once, against the
+    // shared implementation, in `randrange`. Sixteen crates each testing their
+    // own copy is sixteen chances to test a copy that has quietly drifted from
+    // the one being shipped.
+
+    /// A fresh game must take its seed from the kernel, not from a literal.
+    ///
+    /// Phrased as "which seed", not as "two fresh games differ", because a host
+    /// test build has no SlateOS kernel: `seed_from_system` correctly takes its
+    /// fallback and two fresh games are then identical, exactly as they were
+    /// under the old hardcoded `42`. A variety check would therefore pass on
+    /// the broken code and fail on the fixed code, which is backwards. So the
+    /// test names the seed the no-kernel path must use, and the one it must no
+    /// longer use.
+    #[cfg(not(unix))]
     #[test]
-    fn lcg_deterministic() {
-        let mut r1 = Lcg::new(123);
-        let mut r2 = Lcg::new(123);
-        for _ in 0..100 {
-            assert_eq!(r1.next(), r2.next());
-        }
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        let fresh = Game2048App::new().state.grid;
+        assert_eq!(
+            fresh,
+            Game2048App::with_seed(FALLBACK_SEED).state.grid,
+            "a fresh game did not use the crate's fallback seed"
+        );
+        assert_ne!(
+            fresh,
+            Game2048App::with_seed(42).state.grid,
+            "a fresh game is still seeded by the old hardcoded literal"
+        );
     }
 
+    /// The opening board must follow the generator it was given.
     #[test]
-    fn lcg_different_seeds() {
-        let mut r1 = Lcg::new(1);
-        let mut r2 = Lcg::new(2);
-        assert_ne!(r1.next(), r2.next());
-    }
-
-    #[test]
-    fn lcg_range() {
-        let mut rng = Lcg::new(42);
-        for _ in 0..200 {
-            let v = rng.next_range(10);
-            assert!(v < 10);
-        }
-    }
-
-    #[test]
-    fn lcg_range_zero() {
-        let mut rng = Lcg::new(42);
-        assert_eq!(rng.next_range(0), 0);
+    fn the_opening_board_follows_the_generator_it_was_given() {
+        let boards: Vec<_> = (0..8)
+            .map(|s| Game2048App::with_seed(s).state.grid)
+            .collect();
+        let distinct: std::collections::BTreeSet<_> = boards.iter().collect();
+        assert!(
+            distinct.len() > 1,
+            "eight seeds produced one opening board: {boards:?}"
+        );
     }
 
     // --- GameState creation ---
@@ -907,7 +933,7 @@ mod tests {
     #[test]
     fn spawn_tile_adds_one() {
         let mut state = GameState::new();
-        let mut rng = Lcg::new(42);
+        let mut rng = SeededRng::new(42);
         state.spawn_tile(&mut rng);
         let non_zero: usize = state.grid.iter().flatten().filter(|&&v| v != 0).count();
         assert_eq!(non_zero, 1);
@@ -916,7 +942,7 @@ mod tests {
     #[test]
     fn spawn_tile_value_2_or_4() {
         let mut state = GameState::new();
-        let mut rng = Lcg::new(42);
+        let mut rng = SeededRng::new(42);
         for _ in 0..16 {
             state.spawn_tile(&mut rng);
         }

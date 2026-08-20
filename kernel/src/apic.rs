@@ -1062,6 +1062,31 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
         0
     };
 
+    // Feed interrupt timing jitter into the kernel CSPRNG entropy pool.
+    //
+    // This must happen *here*, at entry, for two independent reasons:
+    //
+    // 1. What the entropy estimator credits is the unpredictability of the
+    //    interrupt's *arrival* time.  Timestamping later — as this used to,
+    //    from below the EOI — folds in the handler's own variability
+    //    (`sched::timer_tick`, `hrtimer::process_expired`, the tick-shortening
+    //    branch), which is not hardware noise and is partly a function of our
+    //    own scheduling state.  That inflates the measured deltas, which makes
+    //    credit *easier* to earn: the one direction in which being wrong is
+    //    not conservative.  See `rng::add_interrupt_entropy`'s third-difference
+    //    test, which is Linux's `add_timer_randomness`.
+    //
+    // 2. It keeps the cost inside the `isr_latency` benchmark's window.  Placed
+    //    below the post-EOI capture it was invisible to `bench isr_hard_irq`
+    //    while still running with interrupts disabled — cost that is real but
+    //    unmeasurable is exactly what a latency benchmark exists to prevent.
+    //
+    // A fresh `rdtsc()` is deliberate: `measure_start` is 0 whenever
+    // benchmarking is inactive, which is the normal case, so reusing it would
+    // feed a constant into the pool.  Cost is a `lock xor` + `lock add` + a
+    // Relaxed load of `CRNG_READY`, at 100 Hz.
+    crate::rng::add_interrupt_entropy(crate::bench::rdtsc());
+
     // Per-CPU heartbeat for soft lockup detection.  Every CPU increments
     // its own counter so the BSP can detect stalled APs.
     crate::watchdog::heartbeat();
@@ -1179,12 +1204,6 @@ pub extern "C" fn handle_timer_irq(frame: &crate::idt::InterruptStackFrame, _err
         ISR_HARD_TOTAL.fetch_add(elapsed, core::sync::atomic::Ordering::Relaxed);
         ISR_MEASURE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
-
-    // Feed interrupt timing jitter into the kernel CSPRNG entropy pool.
-    // The TSC value at ISR entry contains genuine hardware noise from
-    // pipeline effects, cache misses, and inter-interrupt timing.
-    // Cost: one atomic XOR + one atomic add (~2 cycles).
-    crate::rng::add_interrupt_entropy(crate::bench::rdtsc());
 
     // Raise softirqs for deferred work.  These will be processed below
     // with interrupts re-enabled, so device IRQs can preempt.

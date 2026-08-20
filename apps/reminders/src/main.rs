@@ -38,6 +38,14 @@
 
 #[allow(unused_imports)]
 use guitk::color::Color;
+// The shared civil-date arithmetic. This app used to carry its own copy of
+// all of it: a Zeller's congruence for the weekday, a *separate* Julian day
+// number for differences, its own leap rule, and month-stepping `while` loops
+// in `add_days`. Two unrelated day-numbering schemes in one struct that had
+// to agree with each other by coincidence, and five apps besides this one
+// with their own incompatible versions. See `known-issues.md`
+// C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC.
+use guitk::date;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 #[allow(unused_imports)]
@@ -126,45 +134,47 @@ impl Date {
         Some(Self { year, month, day })
     }
 
-    /// Day of week: 0=Sunday, 1=Monday, ..., 6=Saturday (Zeller's congruence).
-    pub fn day_of_week(self) -> u32 {
-        let mut y = self.year;
-        let mut m = self.month as i32;
-        if m < 3 {
-            m += 12;
-            y -= 1;
-        }
-        let q = self.day as i32;
-        let k = y % 100;
-        let j = y / 100;
-        let h = (q + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
-        ((h + 6) % 7) as u32
+    /// This date in the shared calendar, for arithmetic.
+    ///
+    /// Private, and paired with [`from_civil`](Self::from_civil): the struct
+    /// itself stays, because its three public fields are read directly all
+    /// over the UI, but nothing computes on them any more.
+    fn civil(self) -> date::Date {
+        date::Date::from_ymd(self.year, self.month, self.day)
     }
 
+    fn from_civil(d: date::Date) -> Self {
+        let (year, month, day) = d.ymd();
+        Self { year, month, day }
+    }
+
+    /// The weekday, as the shared enum.
+    pub fn weekday(self) -> date::Weekday {
+        self.civil().weekday()
+    }
+
+    /// Day of week: 0=Sunday, 1=Monday, ..., 6=Saturday.
+    ///
+    /// Was a hand-written Zeller's congruence, which is correct for years >= 1
+    /// and wrong below that: `y % 100` and `y / 100` truncate toward zero in
+    /// Rust, not the flooring the formula assumes, and nothing stopped a
+    /// caller building such a date. `Weekday::from_index` uses `rem_euclid`
+    /// and has no such range.
+    pub fn day_of_week(self) -> u32 {
+        u32::try_from(self.weekday().index()).unwrap_or(0)
+    }
+
+    /// The weekday's full name.
+    ///
+    /// The `_ => "Unknown"` arm this replaced could not fire, but it was
+    /// there, untestable, in three apps. Matching on the enum removes the arm
+    /// rather than leaving a dead branch that reads like a real fallback.
     pub fn day_of_week_name(self) -> &'static str {
-        match self.day_of_week() {
-            0 => "Sunday",
-            1 => "Monday",
-            2 => "Tuesday",
-            3 => "Wednesday",
-            4 => "Thursday",
-            5 => "Friday",
-            6 => "Saturday",
-            _ => "Unknown",
-        }
+        self.weekday().name()
     }
 
     pub fn day_of_week_short(self) -> &'static str {
-        match self.day_of_week() {
-            0 => "Sun",
-            1 => "Mon",
-            2 => "Tue",
-            3 => "Wed",
-            4 => "Thu",
-            5 => "Fri",
-            6 => "Sat",
-            _ => "???",
-        }
+        self.weekday().short_name()
     }
 
     pub fn month_name(self) -> &'static str {
@@ -176,61 +186,29 @@ impl Date {
     }
 
     /// Add days (positive or negative).
+    ///
+    /// Was a pair of `while` loops that stepped one month at a time, so the
+    /// cost was proportional to the distance moved and a large `n` walked
+    /// thousands of iterations. The shared version converts to a day count,
+    /// adds, and converts back.
     pub fn add_days(self, n: i32) -> Self {
-        let mut y = self.year;
-        let mut m = self.month;
-        let mut d = self.day as i32 + n;
-
-        while d > days_in_month(y, m) as i32 {
-            d -= days_in_month(y, m) as i32;
-            m += 1;
-            if m > 12 {
-                m = 1;
-                y += 1;
-            }
-        }
-        while d < 1 {
-            m = if m == 1 { 12 } else { m - 1 };
-            if m == 12 {
-                y -= 1;
-            }
-            d += days_in_month(y, m) as i32;
-        }
-
-        Self {
-            year: y,
-            month: m,
-            day: d as u32,
-        }
+        Self::from_civil(self.civil().add_days(n))
     }
 
-    /// Add months (clamping day to valid range).
+    /// Add months, clamping the day into the target month: 31 January plus a
+    /// month is 28 February. Not reversible, which is inherent to the clamp.
     pub fn add_months(self, n: i32) -> Self {
-        let total_months = (self.year * 12 + self.month as i32 - 1) + n;
-        let new_year = total_months.div_euclid(12);
-        let new_month = (total_months.rem_euclid(12) + 1) as u32;
-        let max_d = days_in_month(new_year, new_month);
-        Self {
-            year: new_year,
-            month: new_month,
-            day: self.day.min(max_d),
-        }
+        Self::from_civil(self.civil().add_months(n))
     }
 
-    /// Difference in days (self - other), approximate via Julian day number.
+    /// Difference in days between two dates (`self - other`).
+    ///
+    /// No longer "approximate", and no longer computed from a Julian day
+    /// number this struct maintained *separately* from the Zeller congruence
+    /// it used for weekdays. Both truncated toward zero on negative years,
+    /// where the formulas need flooring.
     pub fn days_since(self, other: Self) -> i64 {
-        self.to_day_number() - other.to_day_number()
-    }
-
-    fn to_day_number(self) -> i64 {
-        let mut y = i64::from(self.year);
-        let mut m = i64::from(self.month);
-        if m <= 2 {
-            y -= 1;
-            m += 12;
-        }
-        let d = i64::from(self.day);
-        365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + d - 1
+        i64::from(other.civil().days_until(self.civil()))
     }
 
     pub fn format_short(self) -> String {
@@ -332,59 +310,29 @@ impl DateTime {
 // Date helper functions
 // ============================================================================
 
+// These delegate to `guitk::date` rather than restating it. One behaviour
+// change comes with that, and it is an improvement: an out-of-range month is
+// **clamped** into 1..=12 instead of yielding `0` / `"Unknown"` / `"???"`. A
+// `0` from `days_in_month` was a live loop-termination hazard — the old
+// `while d > days_in_month(y, m)` loop in `add_days` would have spun forever
+// on one — and every caller here passes a month that came from a validated
+// `Date`, so the clamp is unreachable in practice and merely stops being a
+// trap for the next caller.
+
 pub fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    date::is_leap_year(year)
 }
 
 pub fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            if is_leap_year(year) {
-                29
-            } else {
-                28
-            }
-        }
-        _ => 0,
-    }
+    date::days_in_month(year, month)
 }
 
 pub fn month_name(month: u32) -> &'static str {
-    match month {
-        1 => "January",
-        2 => "February",
-        3 => "March",
-        4 => "April",
-        5 => "May",
-        6 => "June",
-        7 => "July",
-        8 => "August",
-        9 => "September",
-        10 => "October",
-        11 => "November",
-        12 => "December",
-        _ => "Unknown",
-    }
+    date::month_name(month)
 }
 
 pub fn month_short(month: u32) -> &'static str {
-    match month {
-        1 => "Jan",
-        2 => "Feb",
-        3 => "Mar",
-        4 => "Apr",
-        5 => "May",
-        6 => "Jun",
-        7 => "Jul",
-        8 => "Aug",
-        9 => "Sep",
-        10 => "Oct",
-        11 => "Nov",
-        12 => "Dec",
-        _ => "???",
-    }
+    date::month_short_name(month)
 }
 
 // ============================================================================
@@ -3090,6 +3038,40 @@ mod tests {
             day: 7,
         };
         assert_eq!(d.day_of_week(), 0);
+    }
+
+    /// The weekday *labels*, which the list and detail views draw and which
+    /// nothing asserted: swapping `short_name()` for `name()` failed no test
+    /// at all, so "Wednesday" could have appeared in a column sized for
+    /// "Wed". `day_of_week` was covered; the two functions that turn it into
+    /// something a user reads were not.
+    #[test]
+    fn weekday_labels_are_the_right_day_in_the_right_length() {
+        // 2024-01-01 is a Monday, so this walks Monday..Sunday in order.
+        let want = [
+            ("Monday", "Mon"),
+            ("Tuesday", "Tue"),
+            ("Wednesday", "Wed"),
+            ("Thursday", "Thu"),
+            ("Friday", "Fri"),
+            ("Saturday", "Sat"),
+            ("Sunday", "Sun"),
+        ];
+        for (i, (long, short)) in want.iter().enumerate() {
+            let d = Date {
+                year: 2024,
+                month: 1,
+                day: 1,
+            }
+            .add_days(i32::try_from(i).unwrap_or(0));
+            assert_eq!(d.day_of_week_name(), *long, "day {i}");
+            assert_eq!(d.day_of_week_short(), *short, "day {i}");
+            // The short form is three characters and is the long form's
+            // prefix. A column laid out for the short name is not laid out
+            // for the long one.
+            assert_eq!(d.day_of_week_short().len(), 3, "day {i}");
+            assert!(long.starts_with(short), "day {i}");
+        }
     }
 
     #[test]

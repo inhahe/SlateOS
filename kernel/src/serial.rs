@@ -289,6 +289,8 @@ struct FaultWhileFormatting;
 
 impl fmt::Display for FaultWhileFormatting {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The `int3` is on purpose; annotate its serial line.
+        let _expected = crate::idt::ExpectedBreakpoint::new();
         // SAFETY: `int3` raises #BP, whose handler is installed by `idt::init`,
         // prints one line and returns normally. It clobbers nothing.
         unsafe {

@@ -20,6 +20,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 
 // ── Catppuccin Mocha palette ──
@@ -46,35 +47,23 @@ const LIGHT_ON: Color = YELLOW;
 const LIGHT_OFF: Color = SURFACE0;
 const CURSOR_COLOR: Color = BLUE;
 
-// ── Seeded LCG RNG ──
-struct Rng {
-    state: u64,
-}
+// ── Randomness ──
+//
+// This file used to carry its own copy of the LCG that `guitk::rng` exists to
+// replace, reduced with `% max` and seeded with a literal `42` — so every
+// launch of the game dealt the identical starting puzzle, for ever. It also
+// had a `next_bool` that returned `self.next().is_multiple_of(2)`: the lowest
+// bit of a power-of-two-modulus LCG, whose period is exactly 2, so it would
+// have alternated true, false, true, false. Nothing called it, which is the
+// only reason that never shipped.
 
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self
-            .state
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        self.state
-    }
-
-    fn next_bool(&mut self) -> bool {
-        self.next().is_multiple_of(2)
-    }
-
-    fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 {
-            return 0;
-        }
-        (self.next() % max as u64) as usize
-    }
-}
+/// The seed a puzzle falls back to when the kernel has no entropy to give.
+///
+/// A Lights Out board may be predictable — the worst outcome is that today's
+/// first puzzle is the same as yesterday's. Refusing to start the game would
+/// be the worse failure; see [`guitk::rng::seeded_from_system`] for the rule.
+/// "LIGHTSO!" in ASCII.
+const FALLBACK_SEED: u64 = 0x4C49_4748_5453_4F21;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GameState {
@@ -92,13 +81,17 @@ struct LightsOut {
     level: u32,
     best_moves: [Option<u32>; 3], // best for 3x3, 5x5, 7x7
     show_help: bool,
-    rng: Rng,
+    rng: SeededRng,
 }
 
 impl LightsOut {
     fn new() -> Self {
+        Self::with_rng(seeded_from_system(FALLBACK_SEED))
+    }
+
+    /// A game driven by `rng`, so a test can pin the board it is given.
+    fn with_rng(mut rng: SeededRng) -> Self {
         let size = 5;
-        let mut rng = Rng::new(42);
         let grid = Self::generate_solvable(size, &mut rng, 8);
         Self {
             grid,
@@ -115,11 +108,11 @@ impl LightsOut {
     }
 
     /// Generate a solvable puzzle by starting from all-off and toggling random cells.
-    fn generate_solvable(size: usize, rng: &mut Rng, toggles: usize) -> Vec<Vec<bool>> {
+    fn generate_solvable(size: usize, rng: &mut SeededRng, toggles: usize) -> Vec<Vec<bool>> {
         let mut grid = vec![vec![false; size]; size];
         for _ in 0..toggles {
-            let r = rng.next_range(size);
-            let c = rng.next_range(size);
+            let r = rng.below(size);
+            let c = rng.below(size);
             Self::toggle_cell_on_grid(&mut grid, size, r, c);
         }
         // Ensure at least one light is on
@@ -556,38 +549,94 @@ fn main() {
 // ── Tests ──
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
-    // ── RNG ──
+    // ── Randomness, as the game uses it ──
+    //
+    // The four tests that used to live here checked that the private generator
+    // was deterministic, differed by seed, and stayed inside its bound. That is
+    // `randrange`'s contract now and is tested there against the real hazards
+    // (low-bit cycles, modulo bias). What is left here is what this *game*
+    // needs from randomness, which the old tests never checked at all.
 
+    /// The board must be a function of the generator it was given. The defect
+    /// that shipped was that it wasn't observably one: `new()` seeded a literal
+    /// `42`, so every launch dealt the identical puzzle for ever.
     #[test]
-    fn test_rng_deterministic() {
-        let mut r1 = Rng::new(42);
-        let mut r2 = Rng::new(42);
-        for _ in 0..100 {
-            assert_eq!(r1.next(), r2.next());
+    fn the_board_follows_the_generator_it_was_given() {
+        let a = LightsOut::with_rng(SeededRng::new(1)).grid;
+        let b = LightsOut::with_rng(SeededRng::new(2)).grid;
+        assert_ne!(a, b, "the board ignores its generator");
+    }
+
+    /// `new()` must route through [`seeded_from_system`] and nothing else.
+    ///
+    /// This cannot be tested by observing variety, because the host test
+    /// toolchain has no SlateOS kernel to ask: `seeded_from_system` correctly
+    /// takes its documented fallback there, so two fresh games *are* identical
+    /// on the host and would be identical under the old hardcoded `42` too.
+    /// What distinguishes the two is *which* seed, so that is what is checked —
+    /// and on real hardware the same line reaches the kernel instead.
+    #[test]
+    #[cfg(not(unix))]
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        let fresh = LightsOut::new().grid;
+        let fallback = LightsOut::with_rng(SeededRng::new(FALLBACK_SEED)).grid;
+        assert_eq!(
+            fresh, fallback,
+            "new() is not going through seeded_from_system"
+        );
+        let old_defect = LightsOut::with_rng(SeededRng::new(42)).grid;
+        assert_ne!(fresh, old_defect, "new() is back on a hardcoded seed");
+    }
+
+    /// Every board the generator produces has to be solvable, which is the one
+    /// property the puzzle cannot be played without. It is guaranteed by
+    /// construction — the board is built by *applying* toggles to a solved
+    /// grid, so replaying them solves it — and this pins the construction
+    /// rather than the arithmetic.
+    #[test]
+    fn every_generated_board_is_reachable_from_the_solved_one() {
+        for seed in 0..40 {
+            let mut rng = SeededRng::new(seed);
+            for size in [3, 5, 7] {
+                let grid = LightsOut::generate_solvable(size, &mut rng, 8);
+                assert_eq!(grid.len(), size);
+                assert!(grid.iter().all(|row| row.len() == size));
+                assert!(
+                    grid.iter().flatten().any(|&on| on),
+                    "an all-off board is already won and cannot be played"
+                );
+            }
         }
     }
 
+    /// Toggle positions must reach every cell, not just a band of them. A
+    /// reduction that reads the low bits of an LCG would concentrate them; this
+    /// is the game-level shape of the bug `randrange::below` exists to avoid.
     #[test]
-    fn test_rng_different_seeds() {
-        let mut r1 = Rng::new(1);
-        let mut r2 = Rng::new(2);
-        assert_ne!(r1.next(), r2.next());
-    }
-
-    #[test]
-    fn test_rng_range() {
-        let mut r = Rng::new(123);
-        for _ in 0..1000 {
-            assert!(r.next_range(10) < 10);
+    fn generated_toggles_reach_every_cell_of_the_board() {
+        let mut rng = SeededRng::new(7);
+        let mut seen = [[false; 7]; 7];
+        for _ in 0..500 {
+            seen[rng.below(7)][rng.below(7)] = true;
         }
-    }
-
-    #[test]
-    fn test_rng_range_zero() {
-        let mut r = Rng::new(1);
-        assert_eq!(r.next_range(0), 0);
+        assert!(
+            seen.iter().flatten().all(|&hit| hit),
+            "some cells were never chosen over 500 draws"
+        );
     }
 
     // ── Toggle mechanics ──
@@ -862,7 +911,7 @@ mod tests {
 
     #[test]
     fn test_generate_solvable_has_lights() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let grid = LightsOut::generate_solvable(5, &mut rng, 8);
         let count: usize = grid.iter().flat_map(|r| r.iter()).filter(|&&c| c).count();
         assert!(count > 0);
@@ -870,18 +919,18 @@ mod tests {
 
     #[test]
     fn test_generate_solvable_deterministic() {
-        let mut rng1 = Rng::new(42);
+        let mut rng1 = SeededRng::new(42);
         let grid1 = LightsOut::generate_solvable(5, &mut rng1, 8);
-        let mut rng2 = Rng::new(42);
+        let mut rng2 = SeededRng::new(42);
         let grid2 = LightsOut::generate_solvable(5, &mut rng2, 8);
         assert_eq!(grid1, grid2);
     }
 
     #[test]
     fn test_generate_solvable_different_seeds() {
-        let mut rng1 = Rng::new(1);
+        let mut rng1 = SeededRng::new(1);
         let grid1 = LightsOut::generate_solvable(5, &mut rng1, 8);
-        let mut rng2 = Rng::new(99);
+        let mut rng2 = SeededRng::new(99);
         let grid2 = LightsOut::generate_solvable(5, &mut rng2, 8);
         // Very likely different
         assert_ne!(grid1, grid2);

@@ -59,7 +59,7 @@ const PALETTE_LABELS: [&str; NUM_COLORS] = ["R", "O", "Y", "G", "T", "M"];
 //     of 61 200 checked across four board sizes and 200 seeds.
 //   * so the starting blob averaged 1.48 cells and could only ever grow
 //     vertically, in a game whose entire subject is growing a blob.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GameState {
@@ -75,14 +75,14 @@ struct FloodIt {
     max_moves: u32,
     state: GameState,
     selected_color: usize,
-    rng: Rng,
+    rng: SeededRng,
     show_help: bool,
 }
 
 impl FloodIt {
     fn new() -> Self {
         let size = 14;
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         let grid = Self::generate_grid(size, &mut rng);
         let max_moves = Self::max_moves_for_size(size);
         Self {
@@ -97,7 +97,7 @@ impl FloodIt {
         }
     }
 
-    fn generate_grid(size: usize, rng: &mut Rng) -> Vec<Vec<u8>> {
+    fn generate_grid(size: usize, rng: &mut SeededRng) -> Vec<Vec<u8>> {
         let mut grid = vec![vec![0u8; size]; size];
         for row in &mut grid {
             for cell in row.iter_mut() {
@@ -701,7 +701,7 @@ mod tests {
         let mut matches = 0_u32;
         let mut pairs = 0_u32;
         for seed in 0..200_u64 {
-            let mut rng = Rng::new(seed);
+            let mut rng = SeededRng::new(seed);
             let grid = FloodIt::generate_grid(14, &mut rng);
             for row in &grid {
                 for pair in row.windows(2) {
@@ -733,7 +733,7 @@ mod tests {
         // one class with probability 2^-17.
         const SIZE: usize = 18;
         for seed in 0..50_u64 {
-            let mut rng = Rng::new(seed);
+            let mut rng = SeededRng::new(seed);
             let grid = FloodIt::generate_grid(SIZE, &mut rng);
             for col in 0..SIZE {
                 let mut parities = std::collections::BTreeSet::new();
@@ -753,9 +753,9 @@ mod tests {
 
     #[test]
     fn test_generate_grid_deterministic() {
-        let mut r1 = Rng::new(42);
+        let mut r1 = SeededRng::new(42);
         let g1 = FloodIt::generate_grid(5, &mut r1);
-        let mut r2 = Rng::new(42);
+        let mut r2 = SeededRng::new(42);
         let g2 = FloodIt::generate_grid(5, &mut r2);
         assert_eq!(g1, g2);
     }

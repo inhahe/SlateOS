@@ -18,6 +18,13 @@
 
 #[allow(unused_imports)]
 use guitk::color::Color;
+// The shared civil-date arithmetic. This app's own copy was *correct* --
+// unlike the calendar's, whose ISO week number was wrong on 38.5% of all
+// dates -- but correct-and-duplicated is still two sources of truth for one
+// calendar, and the one that is never edited is the one that silently stops
+// agreeing. See `known-issues.md`
+// C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC.
+use guitk::date;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 #[allow(unused_imports)]
@@ -443,20 +450,12 @@ impl ContactGroup {
 // Birthday
 // ============================================================================
 
-/// The length of each month, index 0 = January, February in a common year.
+/// The year whose month lengths [`day_of_year`] counts in.
 ///
-/// One table, used both to reject a date that does not exist and to count the
-/// days before a month. Those were two separate statements of the calendar
-/// before -- a flat `1..=31` day check and a table of cumulative offsets -- and
-/// two copies of the same knowledge can disagree, which is exactly what let
-/// "31 February" through.
-const MONTH_LENGTHS: [u8; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-/// The Gregorian leap rule in full: every fourth year, except centuries, except
-/// every fourth century. 1900 was not a leap year; 2000 was.
-fn is_leap_year(year: u16) -> bool {
-    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
-}
+/// Any common year would do; 2001 is named rather than written as a bare
+/// literal at the one call site so that "this is deliberately not a leap year"
+/// is a fact stated once instead of a constant a reader has to check.
+const UNIFORM_YEAR: i32 = 2001;
 
 /// A simple date representation for birthdays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -493,16 +492,17 @@ impl SimpleDate {
     /// in 1989. Rejecting it outright would turn away a genuine date; accepting
     /// it always would keep a typo.
     fn days_in_month(year: u16, month: u8) -> Option<u8> {
-        // `checked_sub` rather than a `month >= 1` guard: month zero does not
-        // exist in the 1-based numbering every caller writes in, and failing the
-        // subtraction *is* that case.
-        let index = usize::from(month.checked_sub(1)?);
-        let length = *MONTH_LENGTHS.get(index)?;
-        if month == 2 && is_leap_year(year) {
-            Some(length.saturating_add(1))
-        } else {
-            Some(length)
+        // The `None` is this function's whole contribution over the shared
+        // one, and it must stay: `date::days_in_month` *clamps* an
+        // out-of-range month into 1..=12, which is the right answer for a
+        // caller that has already validated and the wrong one for
+        // `SimpleDate::new`, whose entire job is to reject "month 13".
+        if !(1..=12).contains(&month) {
+            return None;
         }
+        // Fits in a `u8` because no month is longer than 31 days; the
+        // fallback cannot be reached and is not a policy.
+        u8::try_from(date::days_in_month(i32::from(year), u32::from(month))).ok()
     }
 
     pub fn format_display(&self) -> String {
@@ -566,16 +566,14 @@ impl SimpleDate {
 /// day of slack is well inside the tolerance a "birthdays coming up" list is
 /// asking about.
 fn day_of_year(month: u8, day: u8) -> u16 {
-    // `take` rather than an index into a table of cumulative offsets: the months
-    // before this one are exactly the ones the iterator yields, so a month past
-    // December can only mean "all of them" and can never panic. The previous
-    // version wrote the table's length out a second time as `.min(11)` -- the
-    // same bound in two places, of the kind that stops agreeing the moment
-    // someone edits the table.
-    let before: u16 = MONTH_LENGTHS
-        .iter()
-        .take(usize::from(month.saturating_sub(1)))
-        .map(|&d| u16::from(d))
+    // Clamped to 1..=13 *before* the range is built, not after: `1..13` is
+    // every month, which is what "a month past December" has always meant
+    // here. Clamping to 12 instead would silently drop December, and letting
+    // the value through to `date::days_in_month` would be worse still --
+    // that clamps internally, so month 14 would count December twice.
+    let months_before = 1..u32::from(month.clamp(1, 13));
+    let before: u16 = months_before
+        .map(|m| u16::try_from(date::days_in_month(UNIFORM_YEAR, m)).unwrap_or(0))
         .sum();
     before.saturating_add(u16::from(day))
 }
@@ -3831,28 +3829,48 @@ mod tests {
         assert!(SimpleDate::parse("1990DEC25").is_none(), "not all digits");
     }
 
-    /// Day-of-year must agree with the month-length table it is derived from.
+    /// The first of each month, written out rather than derived.
     ///
-    /// The two used to be independent -- a table of cumulative offsets beside a
-    /// separate day range -- and this is the property that a single table makes
-    /// true by construction: the first day of each month is one past the last
-    /// day of the one before it, with no gap and no overlap.
+    /// This used to build its expectation by accumulating the same
+    /// `MONTH_LENGTHS` table that `day_of_year` summed, so both sides moved
+    /// together and the only thing that could actually fail was the closing
+    /// "adds up to 365" check. A table of `[30, 29, 31, …]` — wrong in two
+    /// months, right in total — passed it. That is the shape this whole change
+    /// is about: an assertion that restates the implementation cannot fail.
+    ///
+    /// The numbers below are the ordinal of the first of each month in a
+    /// common year, and they are independent of anything in this file.
     #[test]
-    fn the_day_of_year_has_no_gaps_between_months() {
-        let mut expected = 1;
-        for (index, length) in MONTH_LENGTHS.iter().enumerate() {
-            let month = u8::try_from(index).expect("twelve months fit in a u8") + 1;
-            assert_eq!(
-                day_of_year(month, 1),
-                expected,
-                "the first of month {month} is not the day after the last of the month before"
-            );
-            expected += u16::from(*length);
+    fn the_first_of_each_month_is_the_day_after_the_last_of_the_one_before() {
+        let firsts: [u16; 12] = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335];
+        for (index, &want) in firsts.iter().enumerate() {
+            let month = u8::try_from(index + 1).unwrap_or(1);
+            assert_eq!(day_of_year(month, 1), want, "the first of month {month}");
         }
-        assert_eq!(
-            expected, 366,
-            "a common year has 365 days, so day 366 is next"
-        );
+        // The last day of a common year, which pins the far end the same way
+        // the literals above pin each boundary.
+        assert_eq!(day_of_year(12, 31), 365, "31 December");
+        // February is 28 days here whatever the year, which is the documented
+        // point of `day_of_year`: it compares a birthday against today, and
+        // those fall in different years, so applying each side's own leap rule
+        // would move one of them and not the other.
+        assert_eq!(day_of_year(2, 28), 59);
+        assert_eq!(day_of_year(3, 1), 60);
+    }
+
+    /// A month past December counts every month, not December twice.
+    ///
+    /// `date::days_in_month` clamps an out-of-range month into 1..=12, so
+    /// handing it a 14 unclamped would have counted December's 31 days twice
+    /// over and put the answer past the end of the year. The clamp therefore
+    /// has to happen on the *range*, before the lookup, and this is what says
+    /// so.
+    #[test]
+    fn a_month_outside_the_calendar_clamps_to_the_whole_year() {
+        assert_eq!(day_of_year(13, 1), 366, "one past December");
+        assert_eq!(day_of_year(14, 1), 366, "two past December");
+        assert_eq!(day_of_year(255, 1), 366, "as far past as a u8 goes");
+        assert_eq!(day_of_year(0, 1), 1, "month zero counts nothing before it");
     }
 
     #[test]

@@ -7277,10 +7277,26 @@ pub fn sys_console_try_read_char(args: &SyscallArgs) -> SyscallResult {
 /// about how long "too long" is.
 pub(crate) const GETRANDOM_WAIT_NS: u64 = 15_000_000_000;
 
+/// `GRND_NONBLOCK` — fail with `WouldBlock` rather than wait for a credited pool.
+///
+/// The three constants below carry Linux's values because that is what libc's
+/// `getrandom`/`getentropy` accept from callers and pass straight through
+/// (`posix/src/unistd.rs`), and what the Linux-ABI entry point at syscall 318
+/// already implements.  Two entry points disagreeing about the numeric value of
+/// a flag would be a bug no test on either side could see.
+pub(crate) const GRND_NONBLOCK: u32 = 0x0001;
+/// `GRND_RANDOM` — accepted and a no-op; we have one pool, as Linux has since 5.6.
+pub(crate) const GRND_RANDOM: u32 = 0x0002;
+/// `GRND_INSECURE` — "I accept possibly-weak bytes": skips the readiness gate.
+pub(crate) const GRND_INSECURE: u32 = 0x0004;
+/// Every bit `SYS_GETRANDOM` will accept; anything else is `InvalidArgument`.
+pub(crate) const GRND_VALID: u32 = GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE;
+
 /// `SYS_GETRANDOM` — fill a userspace buffer with CSPRNG output.
 ///
 /// `arg0`: pointer to the destination buffer.
 /// `arg1`: byte count.
+/// `arg2`: `GRND_*` flags — see below.
 ///
 /// Returns: bytes written, which is `min(arg1, GETRANDOM_MAX)`.
 ///
@@ -7289,23 +7305,60 @@ pub(crate) const GETRANDOM_WAIT_NS: u64 = 15_000_000_000;
 ///
 /// # Waiting for the pool
 ///
-/// This blocks until the kernel CSPRNG has been *credited* real entropy, which
-/// is the guarantee `getrandom(2)` exists to provide and the one Linux's
-/// original `/dev/urandom` failed to give: a pool keyed only from boot-time
-/// clock reads produces correlated output across two boots of the same VM
-/// image, so handing that out as key material is worse than refusing.  On
+/// By default this blocks until the kernel CSPRNG has been *credited* real
+/// entropy, which is the guarantee `getrandom(2)` exists to provide and the one
+/// Linux's original `/dev/urandom` failed to give: a pool keyed only from
+/// boot-time clock reads produces correlated output across two boots of the same
+/// VM image, so handing that out as key material is worse than refusing.  On
 /// timeout the call **fails** rather than returning weak bytes — a caller that
 /// gets an error can fail closed; a caller handed predictable bytes cannot.
 ///
-/// `arg2` is reserved for Linux's `GRND_*` flags and is currently **ignored**.
-/// It cannot yet be honoured because libc reaches this syscall through a
-/// two-argument stub (`posix/src/random.rs` → `syscall2`), which leaves the
-/// third argument register holding whatever the caller last put there;
-/// interpreting that as flags would make every already-built binary pass
-/// garbage.  Plumbing it is a syscall ABI change and so is sequenced with lane
-/// B — see `requests/a-b-getrandom-now-waits-for-a-credited-pool.md`.
+/// # Flags (`arg2`)
+///
+/// Semantics are identical to the Linux-ABI entry point (syscall 318, in
+/// `syscall::linux`), and deliberately so: libc reaches *this* number, ported
+/// Linux binaries reach that one, and a program should not be able to tell which
+/// door it came through.
+///
+/// | flag | effect |
+/// |---|---|
+/// | `GRND_NONBLOCK` (0x1) | uncredited pool ⇒ [`KernelError::WouldBlock`] (`EAGAIN`) instead of waiting |
+/// | `GRND_RANDOM` (0x2) | accepted, no effect — one pool, one readiness gate, as Linux since 5.6 |
+/// | `GRND_INSECURE` (0x4) | skip the readiness gate entirely; never waits |
+///
+/// `GRND_RANDOM | GRND_INSECURE` together is `InvalidArgument`: one asks for
+/// entropy-backed bytes and the other waives the requirement, and Linux 5.6+
+/// rejects the pair.  Any *other* bit set is likewise `InvalidArgument` rather
+/// than ignored — a flag we do not know about is one whose semantics we cannot
+/// promise, so the caller should be told and fall back, not silently handed
+/// output under a contract it thinks it asked for.
+///
+/// # Why this could not always be done
+///
+/// Until 2026-08-18 `arg2` was ignored, because libc reached this syscall
+/// through a two-argument stub (`posix/src/random.rs` → `syscall2`), which left
+/// the third argument register holding whatever the caller last put there;
+/// interpreting that as flags would have made every already-built binary pass
+/// garbage.  Lane B widened the stub to `syscall3` and rebuilt all nine
+/// committed `services/ctest-*` fixtures in the same commit, so no such binary
+/// remains — see `requests/b-a-getrandom-native-abi-now-passes-arg2.md`.
+///
+/// One consequence worth knowing when reading errno on the userspace side:
+/// libc maps [`KernelError::WouldBlock`] to `EAGAIN` (which is the entire point
+/// of `GRND_NONBLOCK`) but pins [`KernelError::TimedOut`] to `EIO`, because
+/// `getentropy(3)` specifies only `EIO`/`EFAULT` and shares the path.
 pub fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
     let len = (args.arg1 as usize).min(crate::syscall::number::GETRANDOM_MAX);
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+
+    // Flags are screened before the zero-length early-out, matching syscall 318.
+    // A malformed flags word is malformed whatever the length: letting
+    // `getrandom(NULL, 0, 0xdeadbeef)` succeed would hand a caller probing for
+    // feature support the answer "supported".
+    if flags & !GRND_VALID != 0 || (flags & GRND_RANDOM != 0 && flags & GRND_INSECURE != 0) {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
 
     // A zero-length request is a no-op success, not an error: callers that
     // loop until a count is exhausted would otherwise have to special-case
@@ -7320,8 +7373,17 @@ pub fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
     // Wait before validating the buffer, not after: `wait_until_ready` sleeps,
     // and a pointer validated before a sleep is a pointer another thread has
     // had time to unmap.
-    if !crate::rng::wait_until_ready(GETRANDOM_WAIT_NS) {
-        return SyscallResult::err(KernelError::TimedOut);
+    //
+    // `is_ready` is consulted first so that `GRND_NONBLOCK` on an already-ready
+    // pool is an ordinary success rather than an `EAGAIN` — the flag says "do
+    // not wait", not "do not serve me".
+    if flags & GRND_INSECURE == 0 && !crate::rng::is_ready() {
+        if flags & GRND_NONBLOCK != 0 {
+            return SyscallResult::err(KernelError::WouldBlock);
+        }
+        if !crate::rng::wait_until_ready(GETRANDOM_WAIT_NS) {
+            return SyscallResult::err(KernelError::TimedOut);
+        }
     }
 
     // `with_user_out_buf` validates before generating anything, which matters

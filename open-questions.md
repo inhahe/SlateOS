@@ -360,6 +360,68 @@ floor now names the tool and accepts `--reclaim-space` to run it and retry.
 That reduces B's cost but deliberately does **not** pick B: it is opt-in per
 run and changes nothing unless asked for.
 
+### 2026-08-18, later — what option B *actually* costs a lane, and why it is now smaller
+
+Lane B ran the tool for real and measured the thing this entry had been pricing
+by assumption
+(`requests/b-a-reclaim-space-crashes-on-every-real-run-and-strands-the-tree.md`).
+Their finding, which is the more consequential half of that file:
+
+> With `os/target` already cleaned and the other two lanes' trees off-limits at
+> the defaults, **the only candidate the script can offer this lane is its own
+> `target/`.**
+
+That is worth stating plainly, because it changes B's price. Above, B's cost is
+written as "a chore that recurs every two to three days" — a chore being an
+*interruption*. But if the only tree a lane may reclaim is its own, the recurring
+cost is not one command; it is **a full cold rebuild for whichever lane trips the
+floor**, every two or three days. That is a materially worse number than this
+entry has been carrying, and it was a structural property of the defaults, not an
+accident: the ordering was `[integration checkout, our own]`, with *every* other
+worktree — live lane tree and dead scratch checkout alike — behind
+`--allow-lane-targets`.
+
+**Lane A has since fixed the part of that which was ours to fix.** Lumping those
+two together was wrong: `CLAUDE.md` blesses exactly four worktrees (`os`,
+`os-lane-a/b/c`), so a checkout on any other branch — or on none, which is what
+`git worktree add <path> <commit>` produces and therefore what every bisect tree
+here is — belongs to nobody, and its `target/` costs no one a rebuild they were
+going to run. `reclaim-space.py` now classifies worktrees **by branch** and
+attacks unowned scratch trees *first*, ahead of the integration checkout and well
+ahead of our own. Live lane trees stay exactly where they were, behind the flag.
+A tree that is mid-build is still protected by the existing rename veto.
+
+Measured in this worktree today, in precisely lane B's situation (`os/target`
+already clean):
+
+```
+Step 2: target/ directories, unowned scratch trees first
+  candidate  …\os-bisect-a\target            [no lane owns it]
+  candidate  …\os-straddle-scratch\target    [no lane owns it]
+  candidate  …\os-lane-a\target              [this lane -- ours to pay]
+```
+
+Two candidates now precede the lane's own tree where before there were none.
+
+**Honesty about the size of that win: today it is small.** Those two scratch
+trees hold 76 MB and 75 MB — they have been pruned since they were built, so they
+would not have saved lane B this morning. What changed is structural, not
+numeric: the class exists, it is taken by default, and it is where a dead bisect
+checkout's build output lands (`os-bisect-a` held a full kernel build when it was
+created). The next lane to trip the floor with a live scratch tree around pays
+nothing instead of paying a rebuild.
+
+**Net effect on the decision: B is cheaper than the paragraph above priced it,
+but not free, and the residual cost is exactly what lane B named.** Once scratch
+trees are exhausted, a lane still faces its own `target/` and nobody else's. That
+is deliberate — spending our own before a neighbour's is the only ordering that
+cannot be read as helping ourselves at their expense — but it means B's
+steady-state cost, in the worst case, remains one cold rebuild per floor-trip.
+Option A (one shared `target/`) does not have that cost at all, because there is
+only one tree to prune and no question of whose it is. **That is the sharpest
+argument for A that has been made in this entry, and it came from a measurement
+rather than from reasoning.**
+
 ## Q48 — [B] Finishing §312 will make "set the system clock", "listen on port 80" and "raise your own resource limit" permanently impossible. Give each of them a real kernel object to hang off, or leave them denied? — Status: OPEN
 
 **In short:** You decided last year (§312) that our C library should stop
@@ -1179,6 +1241,925 @@ I have done the rebuild again (fourth time); the recommendation above still
 stands as written, but the gap between A and B is narrower than the table says.
 
 ---
+
+## Q51 — [A] The thing that blocked 3D graphics for a month has quietly been available all along; it was one wrong command-line flag. Start the 3D work now, or leave it parked? — Status: OPEN
+
+**In short:** Our OS can draw a desktop but cannot do 3D — no games, no
+hardware-accelerated video, no 3D modelling. A month ago you decided to build
+the plumbing for 3D but *not* the graphics engine itself, because we had no way
+to test 3D: the emulator we develop against appeared not to offer it. That turns
+out to have been wrong. It offers it fine; we were starting the emulator with a
+flag that says "no screen at all", and no screen means no 3D. There is another
+flag that means "no window, but 3D still works". I measured it today and our own
+code now sees the 3D capability being offered. **The reason you deferred the
+work has evaporated.** The question is whether to pick it up now — it is a large
+job, roughly the size of the biggest thing this project has attempted — or leave
+it parked and spend the time elsewhere.
+
+**One honest caveat up front:** I proved the *emulator* offers 3D to us. I did
+not prove any 3D actually renders — nothing in our code yet asks for it. And I
+found that simply switching the flag today would **break the 2D display we
+already have** (details below). So this is "the blocker is gone", not "it works
+now".
+
+**Terms, glossed on first use.** *virgl* — the emulator's 3D feature; it takes
+3D commands from inside our OS and runs them on the real graphics card of this
+PC. *Mesa* — the large open-source library that turns an application's 3D calls
+into those commands; it is the piece we would have to port, and it is external
+code, not ours. *Headless* — running with no visible window, which is how all
+our automated tests run. *Scanout* — the act of pointing the display at a chunk
+of memory so it appears on screen.
+
+### What changed
+
+`design-decisions.md` §59 (your decision, 2026-07-14) says the 3D work waits
+"until a virgl test environment exists", and cites the evidence: the emulator
+offered our driver the feature mask `0x30000002`, which contains no 3D bit.
+
+That number is real, but it came from starting the emulator with `-display none`
+("no screen"). Running the **same kernel image** and changing only the graphics
+device and the screen setting:
+
+| Emulator flags | Feature mask offered to our driver | 3D bit? |
+|---|---|---|
+| `-device virtio-gpu-pci -display none` *(what we use today)* | `0x30000002` | no |
+| `-device virtio-gpu-gl-pci -display egl-headless` | `0x30000013` | **yes** |
+
+`egl-headless` is the "no window, but 3D still works" mode. It has been in our
+emulator the whole time.
+
+**What is *not* proven:** nothing negotiated the 3D feature, created a 3D
+context, or drew a triangle. And with the 3D device our current 2D setup
+regresses — the display fails to attach (`SET_SCANOUT: resp=0x1203`), and the
+graphics subsystem goes from 2 devices to 1 with no primary display. Cause: the
+emulator's 3D device routes everything through its 3D engine, which rejects the
+simple 2D memory buffer we hand it. That is a real, fixable piece of work, and
+it is **lane A's** (kernel-side), separate from the Mesa port.
+
+### The options
+
+**A. Do the kernel-side half now; leave Mesa parked.** Fix the 2D-under-3D
+regression and make our driver negotiate and report the 3D feature honestly, so
+the harness *can* run the 3D device. Stop before Mesa.
+*What changes:* nothing a user sees. Internally, the automated test can run
+against a 3D-capable emulator without losing its display, and the "no test
+environment" excuse is gone for good.
+
+**B. Do A, then start the Mesa port.** The full path to actual 3D.
+*What changes:* eventually, 3D applications run — the first time anything in
+this OS renders a 3D frame. Cost: Mesa is a large external port, and by this
+project's own measured rates that is days-to-weeks of active work, the largest
+single item attempted so far. It is also **lane C's zone** (`gui/**`), so it
+competes with the compositor and desktop work, not with kernel work.
+
+**C. Leave it parked; just correct the record.** Update §59 to say the
+prerequisite exists but we are choosing not to spend the time.
+*What changes:* nothing, except that the entry stops asserting something false.
+The risk this guards against is real and has bitten before (§305's audit
+finding: a decision resting on a missing prerequisite went 25 days unchecked
+after the prerequisite arrived, and ~1,100 commits landed on a dead premise).
+
+**My recommendation: A now, and treat B as a separate decision you make later.**
+A is small, is unambiguously lane A's, removes a regression that would otherwise
+ambush whoever *does* flip the harness, and makes the honest-reporting code in
+`virtgpu_uapi.rs` testable against a device that actually offers the bit. It
+commits you to nothing about Mesa. I am not recommending B without your call —
+it is the largest item on the board and it belongs to a lane with its own queue.
+
+### If this is never answered
+
+**Nothing breaks and nothing gets worse.** 3D stays unsupported, which is what
+the code already reports honestly (`3D_FEATURES = 0`, no capsets — those stay
+correct and are *not* being changed on my own initiative). The only ongoing cost
+is that §59 keeps stating a reason for the deferral that is no longer true, and
+the next person to read it will re-derive today's measurement from scratch. The
+§59 entry has been annotated with the finding, so that cost is already capped
+whatever you decide.
+
+**Where it bites:** `kernel/src/drm/virtgpu_uapi.rs:503` (`param_value`, the
+honest zeros), `kernel/src/virtio/gpu.rs:284` (`negotiate(0)` — requests no
+features), `scripts/boot-test.sh:2262,2276` (`-device virtio-gpu-pci`,
+`-display none`).
+
+### UPDATE 2026-08-19 (lane A): option A is **done**. The question is now only B vs C.
+
+**In short:** the kernel-side half described in option A above has been built
+and tested, so you are no longer choosing whether to do it — it exists. What is
+still yours to decide is whether to start the Mesa port (**B**) or leave 3D
+parked and just keep the record straight (**C**). Option A is now a description
+of the tree, not a proposal.
+
+`SLATE_GPU=virtio-gpu-gl-pci ./scripts/boot-test.sh` boots the 3D-capable
+device green — full display bring-up, primary display present, whole test suite
+passing — and the default device is unchanged and separately re-tested. The
+`SET_SCANOUT: resp=0x1203` regression quoted above is fixed.
+
+**The cause was not what this entry guessed.** It says the 3D engine "rejects
+the simple 2D memory buffer we hand it", which is close but not actionable. The
+actual reason: the emulator's translation of our "make me a 2D image" command
+hardcodes the buffer's usage flags and gives the guest no field to change them,
+and its 3D engine only allocates the Windows-shareable texture that displaying
+requires when those flags say *scanout*. So no buffer made with that command
+could ever be displayed on this host, by any guest — including the PC's own
+firmware, which fails identically. The fix is to allocate the framebuffer with
+the richer 3D-flavoured command, which does carry the flags. Reasoning and
+rejected alternatives: `design-decisions.md` §243; evidence and the debugger
+session: `known-issues.md`, 2026-08-19 RESOLVED.
+
+**The caveat in this entry still stands in full, and is worth restating because
+option A's completion makes it easy to over-read.** Nothing renders 3D. The
+driver issues exactly one command from the 3D set — the one that allocates the
+framebuffer — and never creates a rendering context or submits a command
+stream. `3D_FEATURES = 0` and the empty capset list in `virtgpu_uapi.rs` are
+still correct and still untouched. "The 3D device boots" is not "3D works".
+
+**If this is never answered:** unchanged — nothing breaks, nothing degrades. One
+thing did get *better*: the deferral's cited premise is now not merely stale but
+visibly so, since the environment it says does not exist is a documented flag on
+the test harness.
+
+---
+
+
+## Q52 — [A] Should a benchmark-grading gate keep failing on noise it cannot tell from a real fault? — Status: OPEN
+
+**In short:** we have a tool that watches for the machine getting busy while
+benchmarks run, so a slow benchmark isn't mistaken for a real slowdown. To check
+that the tool works, we deliberately load the machine over a known stretch of
+benchmarks and see whether it points at the right ones. Part of that check fails
+the tool if it points *anywhere else at all* — zero tolerance. We have now
+measured that the machine hiccups on its own in 2 runs out of 5 with nothing
+running, and the tool correctly reports those hiccups, which the check then
+counts against it. So the check can fail a perfectly good tool on a coin flip.
+The question is whether to loosen it, and if so how.
+
+**Glossary, in case this is read cold:** *canary* — a tiny fixed piece of work
+timed repeatedly during the run, so a change in its cost reveals the machine got
+busy. *False positive* — the tool pointing at a benchmark nothing was actually
+done to. *Tolerance 0* — any single one of those fails the check outright.
+
+#### The evidence
+
+RESULT P24 (in `known-issues.md`): five benchmark runs, nothing else running on
+the machine. Two of the five contained a real one-off 12.6% jump in the canary's
+cost, and each caused about 3 benchmarks to be reported. That is the same
+signature that failed the check in RESULT P23. The two cases are not
+distinguishable from the output.
+
+Worth stating plainly: the tool is not malfunctioning in any of this. Both
+experiments found it reports exactly what its input says. The disagreement is
+about what the *grading rule* should count as a mistake.
+
+#### Options
+
+| | *What changes:* |
+|---|---|
+| **A. Leave it at zero** | Nothing. The check keeps returning `FAILED (misplaced)` roughly 2 runs in 5 no matter how good the tool is, and each result needs a human to read the note and discount it. |
+| **B. Allow a small isolated cluster** (~3 benchmarks, the measured size of one hiccup) | Runs like P23 read `PASSED` instead of `FAILED`. A tool that genuinely pointed at a *few* wrong benchmarks would now slip through. |
+| **C. Fail only on a shifted *band*, not on isolated spikes** | Distinguishes "reported a stray hiccup somewhere" from "found the window but in the wrong place" — the fault the check actually exists to catch. More code, and the band/spike rule needs its own justification. |
+| **D. Measure the noise properly first** (20+ idle runs, then set the rule from the distribution) | Nothing changes for now; the decision gets made on 20 samples instead of 5. Costs about 45 minutes of machine time, none of it mine to spend badly. |
+
+**My recommendation: D, then C.** Five runs is enough to prove the assumption is
+wrong but too few to calibrate anything — picking a number from 5 samples is how
+the original zero got there. C is the option that matches what the check is for,
+but it should be built on a real distribution rather than on two observations.
+
+#### Why I did not just decide this
+
+The rule I would be relaxing is the one that returned `FAILED` on my own
+experiment three hours ago. Changing a gate immediately after it fails you is
+indistinguishable from moving the goalposts, whatever the reasoning, so this is
+worth a second opinion even though the technical argument seems clear to me.
+
+I have already made the part that carries no such hazard: the grader now prints
+the measured idle-host rate next to the count, so the number is readable in
+context. **No verdict changed.**
+
+#### If this is never answered
+
+Safe, and it does not get worse. The check keeps running and keeps being
+slightly too harsh in a documented, annotated way; nothing is blocked and no
+recorded benchmark number is affected (`design-decisions.md` S229 means nothing
+is auto-corrected on this tool's say-so). The cost is only that future runs of
+this experiment need the note read alongside the verdict.
+
+## Q53 — [A] `CLAUDE.md` says to investigate any benchmark that slows by more than 10%. We have now measured that 71% of our benchmarks can slow by more than that from nothing at all. Change the rule? — Status: OPEN
+
+**In short:** `CLAUDE.md` tells every lane that if a change makes a benchmark
+more than 10% slower, stop and investigate before merging. I have now measured
+what our benchmarks do when *nothing is changed at all* — same source code,
+rebuilt so the machine code sits at slightly different addresses in memory. 61
+of our 86 benchmarks move by more than 10% on that alone. So for most of the
+suite the "10%" rule is asking people to investigate an effect smaller than the
+one the measurement makes up by itself. The number in `CLAUDE.md` is the
+operator's to change, not mine, which is why this is here.
+
+**Glossary, in case this is read cold:** *relink* — rebuilding the program so
+its pieces land at different memory addresses; happens on essentially every
+commit, and changes no behaviour. *QEMU* — the emulator our benchmarks run
+inside; it happens to run a tight loop noticeably slower when the loop
+straddles a particular memory boundary, so an address change alone can change a
+timing. *Band* — the measured range a benchmark moves across several such
+rebuilds; our stand-in for "how much of this number is meaningless".
+
+#### The evidence
+
+Six builds of the identical commit `b36a244bb`, differing only in a deliberate
+padding that shifts everything in memory, benchmarked back-to-back on an idle
+machine (4128 s). Full table in `known-issues.md`.
+
+| benchmarks that move by ≥ | count of 86 | share |
+|---|---|---|
+| 5% | 74 | 86% |
+| **10%** — the `CLAUDE.md` threshold | **61** | **71%** |
+| 20% | 51 | 59% |
+| 50% | 26 | 30% |
+| 100% | 10 | 12% |
+
+Median 26.0%. Worst 182.0%. And the benchmarks `CLAUDE.md` itself singles out
+as performance-critical are among the *worst*, not the best: `pick_next` 132%,
+`page_alloc_free` 92%, `page_fault` 85%, `ipc_channel` 83%, `syscall_dispatch`
+42%. That is not bad luck — they are tight hot loops, which is precisely what
+the emulator's penalty acts on.
+
+Two things this is **not**: it is not ordinary run-to-run noise (the
+measurement medians repeats within each build and then corrects each build
+against the others for machine drift before comparing), and it is not a
+complaint that the tooling ignores this. The harness already withdraws a
+movement that falls inside a measured band. The problem is only the sentence in
+`CLAUDE.md`, which a reader will apply to numbers no band has been measured
+for — and today that is every benchmark except these 86, on this one host, in
+this one build profile.
+
+#### Options
+
+| | *What changes:* |
+|---|---|
+| **A. Leave the 10% as written** | Nothing. The document keeps stating a threshold that, for 71% of benchmarks, is below what a no-op rebuild produces. Anyone who trusts it investigates phantoms, or — worse — reads a real 15% regression as "probably layout" without checking. |
+| **B. Restate it as "larger than that benchmark's measured band, or 10% if no band has been measured"** | The rule matches what the harness already does. A benchmark with a 132% band needs a >132% movement to be worth investigating; an unswept one keeps today's 10%. Honest, but it makes the guarantee for hot paths very weak — and says so out loud. |
+| **C. Raise the flat number** (e.g. to 30%, just above the median band) | One number, still simple. Wrong in both directions at once: too loose for the 25 quiet benchmarks, still far too tight for the 26 that move ≥50%. |
+| **D. Stop grading these benchmarks on QEMU** — treat emulator timings as smoke tests only, and get real regression numbers from hardware | The 10% rule becomes meaningful again, because the effect it is fighting is largely a TCG artefact. Costs a way to run the kernel on real hardware, which we do not currently have as routine infrastructure. |
+| **E. B now, D as the real fix** | Document says something true today; the hardware path is booked as the thing that makes the threshold trustworthy rather than merely honest. |
+
+**My recommendation: E.** B alone is the only option that makes the document
+true, and it costs one sentence. But B is an admission, not a solution — it
+concedes that we cannot detect a 100% regression in `pick_next`, which is not
+an acceptable end state for a scheduler hot path. D is the only option that
+actually restores the guarantee. I have not started D because "run the
+benchmark suite on real hardware" is a piece of infrastructure with its own
+prerequisites, and because whether it is worth building depends on how much you
+want these numbers to mean.
+
+Related but separate: **Q46** asks whether the non-bench boot test should also
+build release. This sweep is release-profile only; the `debug` profile has no
+band measured at all, and the majority of historical benchmark records are
+`opt-level = 0`.
+
+**Update 2026-08-19 — option D may be much cheaper than stated above.** D was
+written as "get real numbers off hardware", i.e. infrastructure we do not have.
+But the penalty producing these bands is a *TCG* artefact — QEMU's software
+interpreter bounds a translation block at the guest page, so a hot loop whose
+backward branch straddles one costs ~1.7× per iteration. QEMU's hardware-
+accelerated mode (WHPX) has no translation blocks at all, and this host supports
+it. If the bands collapse under WHPX, the 10% threshold becomes meaningful
+without any new hardware. That has a cost of its own — WHPX silently disables
+SMEP/SMAP/UMIP here — and is asked as **Q54**, which also commits to measuring
+the WHPX bands so this stops being speculation.
+
+#### Why I did not just decide this
+
+The threshold lives in `CLAUDE.md`, which lane A may edit only on an explicit
+instruction from the operator. Beyond the rule, this one deserves asking on its
+merits: it is a gate that would be *loosened* on the strength of my own
+measurement, and loosening a gate using evidence you produced yourself is worth
+a second pair of eyes regardless of how good the evidence looks.
+
+#### If this is never answered
+
+Safe today, and it degrades slowly rather than suddenly. Nothing is blocked;
+the harness's own behaviour is already correct and is not affected by the
+wording. The cost is that the written rule and the measured reality disagree,
+so every future reader has to rediscover this on their own — and the failure
+mode is the quiet one, where a genuine regression in a hot path is waved
+through as "within the band" by someone who never checked whether a band was
+ever measured for it.
+
+#### Update 2026-08-19 (later) — option D has been measured, and the answer is "mostly yes, but you cannot yet trust the remainder"
+
+> **CORRECTED 2026-08-19 (later still).** The TCG column of the table below
+> was wrong, and wrong in the direction that flattered the conclusion. It has
+> been replaced with numbers `bench-history.py --layout-bands` now reproduces
+> on demand, and the sixth WHPX arm is included. See "How the first version of
+> this table came to be wrong" at the end — it is the same defect this whole
+> question is about, committed by the analysis rather than by the harness.
+
+**In short:** the guess that most of this noise is an artifact of the emulator
+(rather than something real about our code) has now been tested rather than
+argued, by building the *same* kernel at six deliberately different code
+placements and running the suite on the faster emulator mode. The noise does
+fall a long way — the typical benchmark's placement-only spread goes from
+**26.0% to 5.4%**, and the number of benchmarks too noisy to grade nearly
+halves. But it does not collapse to nothing; fourteen benchmarks get *worse*;
+and the instrument that would tell us whether the remainder is placement or
+merely a busy PC is broken on that emulator mode. So this changes the
+recommendation without settling the question.
+
+**The measurement.** Six arms, identical source, `.text` padded by
+0/1024/1536/2048/2560/3072 bytes, all under `-accel whpx`, compared against
+the six-arm TCG sweep at `b36a244bb` — the same six arms Q53's head table is
+drawn from, so the two agree by construction:
+
+| | TCG | WHPX |
+|---|---|---|
+| median placement band | **26.0%** | **5.4%** |
+| mean | 40.6% | 12.8% |
+| worst benchmark | 182.0% (`heap_raw_alloc_free_4096`) | 94.1% (`firewall_check`) |
+| benchmarks whose band exceeds the 10% regression threshold | **61 of 86** | **35 of 86** |
+| benchmarks whose band exceeds 25% | 45 | 13 |
+
+WHPX is narrower on **72 of 86** benchmarks, and the page-straddle explanation
+survives the correction: the benchmarks that were worst under TCG are still
+the ones that collapse, and they are tight hot loops, which is what the
+translation-block penalty acts on.
+
+```
+benchmark                            TCG      WHPX
+heap_raw_alloc_free_4096          182.0%     30.8%
+vfs_throughput_16k_read           148.3%      3.9%
+vfs_stat_breakdown_resolve        142.8%     18.5%
+pick_next                         132.0%     13.3%
+ipc_eventfd                       126.1%     15.4%
+http_gzip_8KiB                    101.0%      3.0%
+```
+
+`pick_next` is the one to look at: it is the scheduler hot path `CLAUDE.md`
+names as performance-critical, it was the headline embarrassment of the
+original Q53 evidence at 132%, and under WHPX it is 13.3%. That is the single
+strongest argument on this page for moving off TCG.
+
+**Why this does not settle it.** Three reasons, in increasing order of how
+much they should bother you:
+
+1. **35 of 86 benchmarks still have a placement band wider than the 10%
+   threshold this question is about.** A 4.8x improvement in the median is not
+   the same as the problem going away. On those 35, a movement under ~10-30%
+   still cannot be read as a regression.
+
+2. **Fourteen benchmarks are *wider* under WHPX**, and the identity of three
+   of them is a warning rather than a curiosity:
+
+   | benchmark | TCG | WHPX |
+   |---|---|---|
+   | `firewall_check` | 52.3% | **94.1%** |
+   | `isr_latency` | 25.4% | **84.4%** |
+   | `ipc_channel_roundtrip_64k` | 4.2% | **50.6%** |
+
+   `isr_latency` is the control benchmark from the original WHPX comparison —
+   the one that barely changed (x0.862) and thereby proved the other speedups
+   were real. A benchmark that does *not* speed up under hardware
+   virtualisation has no translation blocks to lose, so removing them cannot
+   make it *more* placement-sensitive. `ipc_channel_roundtrip_64k` is worse
+   still: it goes from *quiet* (4.2%, comfortably inside the 10% rule) to 50.6%,
+   a twelvefold widening with no placement mechanism that could explain it.
+   Something other than placement is in these numbers, and the correction made
+   this worse rather than better — the first version of this table reported
+   eight wideners, not fourteen, and did not include this one.
+
+3. **We cannot tell how much of the residue is placement and how much is a
+   busy PC, because the detector for that was broken on WHPX when these arms
+   ran.** Every one of them recorded `canary_verdict: broken` — see
+   known-issues.md `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`.
+   The canary's resolution floor was 100x tighter than its own derivation,
+   which TCG clears by 26x and WHPX missed by 4.6x, so on WHPX it refused
+   every sample. And the loss bites hardest exactly here: host interference
+   matters *more* the faster the guest runs (a fixed interruption is a larger
+   fraction of a 3.5x shorter run), so the accelerator with the narrowest true
+   placement band is also the one whose measurements are most exposed to the
+   noise we can no longer detect.
+
+   **That bug is now fixed** (`bf565ae6a` + `26c139a81`), but the fix is not
+   retroactive and must not be: a record whose canary refused every sample
+   does not become trustworthy because the next kernel's canary works. These
+   six arms stay `broken`, and the band above keeps its caveat until the sweep
+   is re-run on a kernel that carries the fix. That re-run is now the single
+   thing standing between this question and an answer.
+
+   Worse, nothing in the tooling says so. `layout_arm_rejection()` screens arms
+   on `host_load`, which is a **hand-supplied label** (`unknown` on every one
+   of these runs), and never consults the **measured** `canary_verdict` sitting
+   in the same record. So the band above was computed from six runs of
+   explicitly unknown contamination. `describe_layout_band` now prints the
+   warning that `--layout-bands` emits above the table
+   (`WARNING: 6/6 arms could not measure host load`), so it is at least no
+   longer silent — but it is reported, not screened, deliberately: see
+   design-decisions.md §239 on why a broken canary is evidence that nobody
+   knows rather than evidence the band is wrong.
+
+**What this does to the options.** Option D ("run the benchmarks somewhere
+faster than TCG") is still the best-supported option on the table — 4.8x on
+the median, and 132% -> 13.3% on `pick_next`, is not a marginal gain — but it
+is *gated on a re-run*, not merely improved by one. The canary fix has landed;
+the arms above predate it. Without a working contamination check the WHPX band
+cannot be distinguished from WHPX host noise, and adopting a threshold derived
+from it would bake that confusion into the gate. The order is therefore:
+re-run the sweep on a kernel carrying the canary fix, and only then set a
+threshold from the result.
+
+Note that the correction to this table **weakened** the case for D without
+overturning it: the median improvement drops from a claimed 7.4x to a measured
+4.8x, the worst-benchmark collapse from a claimed 26x to a measured 1.9x, and
+the count of benchmarks that get *worse* rises from eight to fourteen. If the
+recommendation had rested on the headline ratios it would have moved. It rests
+on `pick_next` and on 61 -> 35 benchmarks crossing the threshold, and both
+survive.
+
+**A note on how this was obtained**, because it affects how much to trust it:
+the six arms were recorded under six different commits (documentation commits
+landed while the sweep ran), so `bench-history.py` filed them as six unrelated
+one-arm experiments and would have reported no band at all. The fix — grouping
+arms by a digest of the build-relevant tree, which is verified identical across
+all six commits — has now landed, so the numbers above are no longer a
+one-off analysis: `python scripts/bench-history.py --layout-bands --profile
+release` prints them. See known-issues.md
+`B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS`.
+
+#### How the first version of this table came to be wrong
+
+Worth reading, because the mistake is the one this whole question is about,
+made by the analysis instead of by the harness.
+
+The TCG column as first published claimed a median band of **36.5%**, a mean
+of **104.9%**, and a worst benchmark of **2466%** (`hpet_read`). None of those
+is reproducible from the six TCG arms, which give **26.0% / 40.6% / 182.0%** —
+and the correct figures were sitting a few hundred lines up this same page, in
+Q53's own head table, disagreeing with it.
+
+`hpet_read`'s actual TCG placement band is **6.2%**. A four-hundred-fold error
+does not come from an arithmetic slip; in this dataset a figure of that size
+arises for exactly one reason, which is comparing a WHPX timing against a TCG
+one (`hpet_read` is 446 ns under TCG and 13,680 ns under WHPX — an HPET read
+costs a VM exit under hardware virtualisation and is emulated inline under
+TCG). Adding the unpadded 16:15 WHPX probe of the same day to the TCG arm set
+and taking a raw peak-to-peak reproduces all three of the old table's top rows
+at the same rank and within a factor of 1.2 (2969% / 1714% / 1624% against the
+claimed 2466% / 1389% / 1333%). The lower rows of the old table are close to
+the clean TCG numbers, so it was a *mixture*, and I cannot fully reconstruct
+how it was produced — only what contaminated it.
+
+That probe is the subject of known-issues.md
+`B-A-AN-ORDINARY-RUN-NEARLY-JOINED-A-LAYOUT-BAND-AS-A-SEVENTH-ARM`: it matches
+a genuine sweep arm on every field the banding code compares — same host, same
+profile, unloaded, `text_pad: 0` truthfully, `accel` absent truthfully, and the
+identical kernel tree — and is separated *only* by not carrying the layout
+sweep's tag. `bench-history.py` rejects it and always did. A hand-written
+analysis that selected arms itself did not, and so made exactly the merge the
+tag exists to prevent, in the exact direction the tag's comment warns about.
+
+Three things follow, and the third is the one that changes practice:
+
+- The near-miss documented in that entry is no longer only a near-miss. The
+  merge happened, in an ad-hoc script, and its output reached this page — a
+  document whose entire purpose is to inform an operator decision.
+- It failed in the predicted direction. Inflating TCG's noise makes the case
+  for moving off TCG look stronger than it is, which is the answer the analysis
+  was hoping for. That is what "fails silently and plausibly" looks like.
+- **Numbers in this file must come from a command the reader can re-run.**
+  Every figure in the corrected table is printed by
+  `bench-history.py --layout-bands`, which routes through
+  `layout_arm_rejection` and therefore cannot pick up an untagged run. That is
+  now the rule for evidence quoted here, and it is cheap: the reason the old
+  table could be checked at all is that the raw records were still on disk.
+
+#### Update 2026-08-19 (final) — the blocking measurement exists now, and it does *not* rescue the 10% rule
+
+Point 3 above said the WHPX band could not be trusted because the contamination
+canary refused every sample on both WHPX runs, and called re-running it "the
+single thing standing between this question and an answer". That re-run has now
+happened, cleanly: six arms, one source digest, one accelerator, and every arm
+reporting `canary_verdict: clean` with 13 valid samples, 0 invalid, 0 below the
+resolution floor.
+
+Reproduce with:
+
+```bash
+python scripts/bench-history.py --layout-bands --profile release
+```
+
+| band | median | mean | worst | over 10% | over 25% |
+|---|---|---|---|---|---|
+| **TCG** (today's default) | 26.0% | 40.6% | 182.0% | **61 of 86 (71%)** | 45 of 86 |
+| WHPX, *broken* canary (the caveated figures in point 3) | 5.4% | 12.8% | 94.1% | 35 of 86 | 13 of 86 |
+| **WHPX, clean canary** (this run) | **6.4%** | **11.1%** | **86.0%** | **29 of 86 (34%)** | 10 of 86 |
+
+**The headline answer: WHPX halves the problem and does not solve it.** The
+share of benchmarks that can move more than 10% from a rebuild that changes
+nothing falls from **71% to 34%** — a large improvement, and still a third of
+the suite. The worst case is 86.0% (`vfs_stat_breakdown_ns`). So the hope
+embedded in this question's framing — that Q53 might be answered by answering
+**Q54** instead, i.e. that switching accelerator would make `CLAUDE.md`'s 10%
+rule workable — **is now measured and false.** A 10% threshold is unusable on
+either accelerator. Q53 has to be decided on its own merits.
+
+**Point 3's caveat is discharged, and the caution it carried was right.**
+`design-decisions.md` §239 decided to *report* the broken-canary band with a
+warning rather than void it, on the grounds that a broken canary means "nobody
+knows", not "the band is wrong". That call is now testable, and it holds: the
+clean-canary band lands within a few points of the caveated one at every summary
+statistic (median 5.4 → 6.4, mean 12.8 → 11.1, worst 94.1 → 86.0). Voiding those
+figures would have discarded an accurate result.
+
+**But one thing the aggregate hides, and it matters for how a band may be
+used.** The two WHPX sweeps agree well in *distribution* and much less well
+*per benchmark*: median absolute difference 2.8 points, but the 90th percentile
+is 27.1 points, the maximum is 63.6, and the two sweeps **agree on the "is this
+benchmark over 10%?" verdict for only 60 of 86**. Some of that is real — the
+sweeps are of different source, and placement sensitivity is a property of a
+particular layout of particular code — but the consequence stands either way:
+
+> A layout band is trustworthy as a statement about *the suite* ("about a third
+> of these benchmarks can move >10% for free"). It is much weaker as a licence
+> to dismiss *one specific* benchmark's movement, because that benchmark's own
+> band is not stable across sweeps.
+
+That distinction was not visible before there were two comparable sweeps to put
+side by side, and it argues against any option that silently subtracts a
+per-benchmark band from a per-benchmark result.
+
+**What this does to the options.** Nothing here selects an option for you, but
+it removes one line of reasoning and sharpens another:
+
+- *Removed:* "wait for Q54; switching accelerator may make this moot." Measured
+  and false. 34% is not a workable false-positive rate for a rule that says
+  investigate every one.
+- *Sharpened:* any option built on per-benchmark bands needs to survive the
+  60-of-86 reproducibility above. An option that raises the threshold uniformly,
+  or that grades against the band as a distribution rather than per benchmark,
+  is not exposed to it.
+
+## Q54 — [A] The emulator we test in has a second mode that is 3.5× faster and roughly halves our benchmark-noise problem — but it silently switches off three of the CPU security features the kernel is built around. Switch, split, or stay? — Status: OPEN
+
+**In short:** Every test we run happens inside QEMU, a program that pretends to
+be a PC. It can do that two ways: by interpreting each machine instruction in
+software (what we use today), or by handing them to the real CPU's built-in
+virtualization hardware. The hardware way is 3.5× faster and roughly halves
+the measurement problem in **Q53** — but does not remove it: the share of
+benchmarks that move by more than 10% from a rebuild that changes nothing falls
+from 71% to 34%, measured. (An earlier version of this paragraph said it "would
+very likely fix" that problem. That was a prediction; it has now been run, and
+it was too optimistic. See Q53's final update.) But on this machine the hardware
+way also silently drops three CPU security features that the kernel relies on,
+so 47 places where the kernel emits protective instructions would stop being
+exercised. I have verified there is no setting that gives both. So: keep
+testing the kernel we ship and keep the bad numbers, or get good numbers by
+testing a kernel that is missing part of its armour.
+
+**Glossary, in case this is read cold:** *TCG* — QEMU's software interpreter;
+today's default; slow, but emulates whatever CPU we ask for. *WHPX* — Windows
+Hypervisor Platform, QEMU using the real CPU's virtualization hardware; fast,
+but only offers features the real CPU and the hypervisor both support. *SMEP /
+SMAP / UMIP* — three CPU switches that make the kernel fault instead of
+proceeding if it is tricked into running or reading user memory at the wrong
+moment; defence against a large family of exploits. *`stac`/`clac`* — the two
+instructions the kernel must wrap around a deliberate access to user memory to
+temporarily lift SMAP; we insert them in 47 places at boot, but only if the CPU
+says it has SMAP. *VM exit* — when the guest touches an emulated device, the
+hardware has to stop and hand control to the host; costs ~13.5 µs.
+
+#### The evidence
+
+One byte-identical kernel (`kernel_sha 7a17cf6be2a10a26`), release profile, 86
+benchmarks, back to back on this host. Full analysis in `design-decisions.md`
+§237; the feature table in `known-issues.md` under
+`ENV-WHPX-CPU-HOST-FIRMWARE-GP`.
+
+| | TCG (today) | WHPX |
+|---|---|---|
+| Typical benchmark | — | **×3.53 faster** (82 of 86 faster) |
+| Best case | — | `ipc_channel_roundtrip_64k` ×10.36 |
+| Device-touching benchmarks | — | **~30× slower** — `hpet_read` 453 ns → 13534 ns |
+| SMEP / SMAP / UMIP | yes | **no** |
+| `stac`/`clac` sites patched in | 47 of 47 | **0 of 47** |
+| Write-combining measurable | no | yes (51.74× vs 1.02×) |
+
+Two things worth pulling out of that table.
+
+**It is not a speed dial, it is a different shape.** Everything CPU-bound gets
+much faster; everything that touches an emulated device gets ~30× *slower*,
+because each access now traps to the hypervisor instead of being computed
+inline. `hpet_read`, `net_arp_lookup` and `net_ns_arp_lookup` all collapse to
+the same ~13.5 µs regardless of what they were before — the cost of one VM exit.
+So switching does not just move the numbers, it changes which benchmarks are
+even meaningful.
+
+**The security-feature loss is not WHPX being unable to do it.** It is that our
+command line asks for `-cpu qemu64,+smep,+smap,+umip` and WHPX silently ignores
+the three `+` additions. The obvious repair — `-cpu host`, ask for the real
+CPU's features — **does not boot at all**: the firmware takes a #GP in early
+platform init, because `-cpu host` advertises VMX and WHPX does not implement
+the register the firmware then reads. That is recorded, with the crash log, as
+`ENV-WHPX-CPU-HOST-FIRMWARE-GP`. I tried it rather than assuming, so the
+either/or below is a measured fact about this host, not an inference:
+
+| | TCG | WHPX + `qemu64` | WHPX + `host` |
+|---|---|---|---|
+| Boots | yes | yes | **no — firmware #GP** |
+| SMEP/SMAP/UMIP | yes | **no** | n/a |
+
+**And the sharpest point against switching, which is easy to miss:** a benchmark
+measures the thing you run it on. Under WHPX we would be timing a kernel with
+the 47 `stac`/`clac` pairs *absent* — a build we do not ship. The numbers would
+be precise, reproducible, free of the layout artefact, and about a slightly
+different kernel. That is not fatal (the effect is bounded: `alternatives.rs`
+has exactly one `Feature` variant, `Smap`, so the whole difference is those two
+instructions on user-memory paths, and the ×10 results are on paths that never
+touch user memory) — but it should be said out loud before choosing, not
+discovered later.
+
+#### Options
+
+| | *What changes:* |
+|---|---|
+| **A. Stay on TCG** | Nothing. Benchmarks stay 3.5× slower and keep the layout noise that makes Q53 unanswerable; the hardening stays exercised on every boot. |
+| **B. Switch everything to WHPX** | Boot tests finish in about half the time, benchmarks become far less noisy — and SMEP/SMAP/UMIP stop being exercised anywhere, so a bug in the `stac`/`clac` insertion would no longer be caught by any test we run. |
+| **C. Split by purpose: boot/correctness on TCG, benchmarks on WHPX** | The boot gate still runs the shipped kernel with all its protections; the benchmark suite gets numbers that mean something. Costs a second QEMU run for a full release gate, and restarts the benchmark history — the `accel` key added in §237 correctly refuses to compare across accelerators, so today's baselines do not carry over. The device-bound benchmarks would need to stay on TCG or have their targets rewritten. |
+| **D. Run both, for everything** | Maximum coverage: a regression that only appears under one accelerator is caught. Roughly doubles the wall-clock cost of the gate, which is already ~6 min for a debug boot. |
+| **E. Sweep intermediate `-cpu` models first, then decide** | Possibly finds a model that boots under WHPX *and* carries SMEP/SMAP — which would collapse this whole question. Cheap to test (the answer is in the first 80 lines of serial output, one boot per model), but the augmentation-dropping above suggests WHPX ignores `+feature` for any base model, so the likely outcome is "no such model exists". |
+
+#### Update 2026-08-19, from the first sweep arm: switching also disables the contamination check
+
+Found while running the probe promised below, and it is the strongest argument
+against switching that has turned up so far — strong enough that it belongs in
+the question rather than in a footnote.
+
+Every benchmark run takes a small reference measurement a dozen times during the
+suite, so that a run polluted by other work on this PC is labelled rather than
+believed. **Under WHPX it fails on all 13 samples and the suite reports
+`canary_verdict: "broken"`** — reproduced on both WHPX runs. So a WHPX run today
+has *no* contamination detection.
+
+Two things make this worse than a missing feature.
+
+- **The loss is largest exactly where the risk is.** Contamination matters more
+  the faster the guest runs: under TCG the emulator's own overhead dominates, so
+  a fixed interruption from Windows is a small slice of a long run; under WHPX
+  the same interruption lands on a run 3.5× shorter and is 3.5× the slice. WHPX
+  needs the canary more and currently supplies it less.
+- **It would trade a noise source we can measure for one we cannot.** The layout
+  artefact this switch is meant to cure is *deterministic* — that is what makes
+  a band measurable, and the harness already withdraws a movement inside one.
+  Host contamination is random and unbounded. Swapping the first for the second
+  is not obviously a gain even though the numbers would look tidier.
+
+**This does not by itself settle the question, because it looks fixable.** The
+cause is not WHPX: the canary refuses any measurement finer than 4 cycles per
+access, and a store costs 0.85 cycles on the real CPU against 5.16 under
+emulation. Worse, that threshold is wrong on its own terms — its stated
+derivation gives 4 *hundredths* of a cycle at the precision the code has used
+since 2026-08-14, so it is 100× too strict, and TCG itself was clearing it by
+only 29%. Full arithmetic in `known-issues.md`
+(`B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`). I will fix that
+regardless of how this question is answered, since it is a defect under TCG too.
+
+What that leaves genuinely open, and what the operator should weigh: fixing the
+floor restores the *measurement*, not automatically the *verdict*. The 25%
+tolerance would then apply to a 0.85-cycle quantity whose real variation has
+never been observed on this accelerator, and a second check in the same family
+(the scattered-access scale test) asserts something that is simply **false on
+real hardware** — that a per-access cost cannot depend on how many pages the
+loop walks, which ignores caches. So option C's true cost is not "one more QEMU
+run"; it is *re-establishing the benchmark suite's self-validation on a platform
+where its assumptions do not hold*. That is real work, it is not hard to
+justify, but it should be chosen knowingly rather than discovered afterwards.
+
+The same bill arrives with **Q53 option D** (real hardware), and larger — every
+assumption that breaks under WHPX breaks on bare metal too, plus the accelerator
+would be recorded as absent there (`TD-A-A-BARE-METAL-RUN-RECORDS-ITS-ACCELERATOR-AS-ABSENT`).
+
+**My recommendation: E first — it is one boot per candidate and it might make the
+question disappear — then C.** C is right if E finds nothing, because the two
+accelerators' weaknesses are disjoint *by purpose*: losing SMAP coverage matters
+for the correctness gate, where a missing `stac` shows up as a fault; the layout
+artefact matters only for benchmarks, where it is currently making 71% of the
+suite unreadable. Splitting puts each weakness where it does not bite. The
+infrastructure for it already exists — §237 made the accelerator part of the
+comparison key precisely so two series can coexist without contaminating each
+other. I am not recommending B: giving up the only place SMEP/SMAP/UMIP are ever
+exercised, to make a benchmark faster, trades a security property for a
+convenience.
+
+**This partly unblocks Q53.** Q53's only option that actually restores the 10%
+regression threshold was **D — get real numbers off real hardware**, which I
+flagged as needing infrastructure we do not have. WHPX is a much cheaper
+candidate for the same job: the page-straddle penalty behind the layout noise is
+a *TCG translation-block artefact*, and WHPX has no translation blocks. Whether
+that is true is measurable in about an hour — see below.
+
+#### What I can do without an answer, and will unless told otherwise
+
+Run the layout sweep under WHPX. Same six padded builds as the Q53 sweep, same
+host, `QEMU_EXTRA="-accel whpx"`; `layout-sweep.py` already propagates the
+setting to every arm, and the `accel` key means the WHPX arms automatically form
+their own band group rather than mixing with the TCG ones. That converts
+"WHPX would probably fix the noise" into a measured band, and it changes no
+default and no committed configuration — it is a probe, and it will be recorded
+as one. If the bands stay wide under WHPX, option C loses most of its value and
+this question gets much easier to answer.
+
+#### Update 2026-08-19 (later) — this table was re-checked against the tool, and the headline holds; one row does not
+
+`design-decisions.md` §240 adopted a rule after a table on **Q53** was found to
+be wrong: evidence quoted here has to be reproducible by a command the reader
+can re-run, because the Q53 figures had been produced by a one-off analysis that
+picked its own runs. This table has the same provenance — it was built by hand
+in §237, and there is no `bench-history.py` mode that regenerates it — so it was
+re-derived from `bench/history.jsonl` before being left in front of you.
+
+**The arithmetic is exact.** Comparing the two records the table names
+(`kernel_sha 7a17cf6be2a10a26`, release, TCG at `text_pad 0` vs the WHPX probe)
+reproduces ×3.53, 82 of 86 faster, best ×10.36, and `hpet_read` 453 → 13534 ns,
+to the digit. Nothing here is fabricated.
+
+**But the TCG side is a single layout arm, and Q53 exists because a single
+layout arm is not a reliable number.** The comparison used the `text_pad 0` arm
+of a six-arm sweep. Re-running it against each of the other five:
+
+| | as published (pad 0) | across all six TCG arms |
+|---|---|---|
+| Typical speedup | ×3.53 | **×3.53 – ×3.97** |
+| Benchmarks faster | 82 of 86 | 82–83 of 86 |
+| Best case | `ipc_channel_roundtrip_64k` ×10.36 | **×10.34 – ×16.71, and a different benchmark each time** |
+| `hpet_read` | 453 → 13534 ns | 441–453 → 13534 ns |
+
+Three conclusions, and they differ by row:
+
+- **The headline is safe, and understates itself.** ×3.53 is the *lowest* of the
+  six; the true typical figure is ×3.5–4.0. Unlike the Q53 case, the arm that
+  happened to be picked was the one least favourable to the argument being made,
+  so this error — such as it is — runs against the conclusion rather than toward
+  it.
+- **The device-bound row is solid.** `hpet_read` sits in 441–453 ns across every
+  arm and collapses to one VM-exit cost regardless, so "~30× slower, and it is a
+  different *shape* rather than a speed dial" is unaffected. That was always the
+  most important claim in the table and it is the best-supported one.
+- **The "best case" row should not be read as naming a benchmark.** Which
+  benchmark wins depends on which TCG arm you compare against —
+  `ipc_channel_roundtrip_64k` at pads 0 and 1536, `io_ring_nop` at 2048 and
+  3072, `http_gzip_8KiB` at 1024, `vfs_throughput_16k_read` at 2560 — and the
+  value ranges to ×16.71. The honest statement is "the best cases are ×10–17",
+  with no name attached. Individual per-benchmark speedups swing by up to 2.9×
+  with arm choice (`heap_raw_alloc_free_4096` is ×1.72–×5.00).
+
+**What this does to the options: nothing.** Every option above turns on the
+typical speedup, the shape change, and the security-feature loss, and all three
+survive. The row that moved was the one no option depends on. This is recorded
+because a table that was checked and found sound is worth as much as one that
+was checked and found wrong — and because the check was cheap and the last one
+like it changed an answer.
+
+#### Update 2026-08-19 (later still) — the check is now a command, and its output is pasted below
+
+**In short:** the two updates above re-checked this table by hand, twice. The
+rule adopted after the Q53 mistake (`design-decisions.md` §240) says a number
+quoted to you has to be regenerable by a command *you* can run — and no such
+command existed for an accelerator comparison, which is what made both checks
+throwaway work that left nothing behind. It exists now. Everything below the
+horizontal rule is its output, pasted rather than transcribed, because
+transcription is where a digit changes.
+
+**One thing you need to know before reading it.** 19 of the runs it uses,
+including the entire six-arm TCG sweep this table is built from, were recorded
+*before* the harness started writing down which accelerator it ran on. The tool
+refuses to guess — the first WHPX run in this history also predates that field,
+so "no label" provably does not mean "TCG" — so those runs only enter the
+comparison because `--assume-missing-accel` asserts it, which is my assertion
+and not a measurement. The report says so in its own third line. It also
+*refuses* the assertion for one run: the 16:15 probe's banner names both
+accelerators, so it is thrown out rather than guessed at.
+
+If you would rather see the part that rests on no assertion at all, this is it:
+
+    python scripts/bench-history.py --accel-compare tcg:whpx --profile release
+
+One binary (`1a278561f858d447`) was run on both accelerators *after* the field
+existed, and it gives **x3.53 typical, 83 of 86 faster, `hpet_read` x0.03**.
+That is a different binary from the one this table was built on, so it is an
+independent replication of the published headline rather than a restatement of
+it. The tool warns, loudly, that one binary is one code layout — which is the
+whole lesson of the update above.
+
+**What the assumed, seven-pair version says**, and how it compares to the
+hand-derived six-arm figures in the previous update:
+
+| | hand-derived (six TCG arms) | the command (seven pairs) |
+|---|---|---|
+| Typical speedup | ×3.53 – ×3.97 | **x3.44 – x3.99** |
+| Benchmarks faster | 82–83 of 86 | **82–83 of 86** |
+| Best case | ×10.34 – ×16.71, different benchmark each time | **x9.57 – x16.71, a different benchmark in 4 of 7** |
+| `hpet_read` | worst case in every arm | **worst case in every pair, x0.03** |
+
+The seventh pair is a newer binary the hand check did not have, which is why the
+span is slightly wider at both ends. No conclusion in this question moves.
+
+**The caveat the tool prints and the hand check did not.** 6 of the 15 runs
+behind these figures could not measure host load, and 2 measured it — so part of
+the difference may be host noise rather than the accelerator. Those six are the
+WHPX arms whose canary was broken (see the Q53 update above and
+`known-issues.md` `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`).
+That is exactly the sort of thing a hand-built table omits and a command does
+not.
+
+---
+
+Accelerator comparison on `Logoplex3` / `release`: **QEMU TCG** -> **Hyper-V/WHPX**. A ratio above x1 means Hyper-V/WHPX is faster.
+
+Reproduce with:
+
+    python scripts/bench-history.py --accel-compare "QEMU TCG:Hyper-V/WHPX" --profile release --assume-missing-accel "QEMU TCG" --markdown
+
+**Assumed:** runs that recorded no accelerator are treated as `QEMU TCG`. That is an assertion by whoever ran this command, not a measurement.
+
+Paired on `kernel_sha` -- one identical kernel image per pair -- **7 pair(s)**: 1a278561f858d447 (pad 0), b563a3b2831891ed (pad 3072), 00989e331039d619 (pad 2560), 114385d50cd39c4c (pad 2048), faae6997a2689db5 (pad 1536), 7c254f51182677f1 (pad 1024), 7a17cf6be2a10a26 (pad 0).
+
+| | QEMU TCG | Hyper-V/WHPX |
+|---|---|---|
+| Typical benchmark | -- | **x3.44 - x3.99 faster** (82-83 of 86 faster) |
+| Best case | -- | x9.57 - x16.71, and a **different benchmark** in 4 of 7 pairs |
+| Worst case | -- | `hpet_read` x0.03 |
+| Host-load check | 2/15 runs measured host load; 6/15 runs could not measure host load; 7/15 runs clean | |
+
+<details><summary>Runs that went in, and what was left out</summary>
+
+`QEMU TCG` -- 19 run(s):
+
+    2026-08-19T03:40:53+00:00  40515da89   ff371839180550c5   pad ?     canary clean          assumed
+    2026-08-19T03:43:51+00:00  40515da89   ff371839180550c5   pad ?     canary contaminated   assumed
+    2026-08-19T03:45:54+00:00  40515da89   ff371839180550c5   pad ?     canary clean          assumed
+    2026-08-19T03:48:02+00:00  40515da89   ff371839180550c5   pad ?     canary clean          assumed
+    2026-08-19T03:50:06+00:00  40515da89   ff371839180550c5   pad ?     canary contaminated   assumed
+    2026-08-19T03:52:11+00:00  40515da89   ff371839180550c5   pad ?     canary clean          assumed
+    2026-08-19T04:10:24+00:00  d7c311deb   ff371839180550c5   pad ?     canary clean          assumed
+    2026-08-19T07:01:22+00:00  5e9a30a22   d3b853cf19a67483   pad ?     canary clean          assumed
+    2026-08-19T07:04:10+00:00  5e9a30a22   d3b853cf19a67483   pad ?     canary clean          assumed
+    2026-08-19T09:27:44+00:00  27bb7a96d   c1418d4a1661e4bc   pad ?     canary contaminated   assumed
+    2026-08-19T09:30:25+00:00  27bb7a96d   c1418d4a1661e4bc   pad ?     canary clean          assumed
+    2026-08-19T12:54:11+00:00  338bada34   63ce0b2997023c22   pad 0     canary clean          assumed
+    2026-08-19T14:44:10+00:00  b36a244bb   7a17cf6be2a10a26   pad 0     canary clean          assumed
+    2026-08-19T14:55:48+00:00  b36a244bb   7c254f51182677f1   pad 1024  canary clean          assumed
+    2026-08-19T15:07:15+00:00  b36a244bb   faae6997a2689db5   pad 1536  canary contaminated   assumed
+    2026-08-19T15:18:29+00:00  b36a244bb   114385d50cd39c4c   pad 2048  canary clean          assumed
+    2026-08-19T15:29:53+00:00  b36a244bb   00989e331039d619   pad 2560  canary contaminated   assumed
+    2026-08-19T15:41:03+00:00  b36a244bb   b563a3b2831891ed   pad 3072  canary clean          assumed
+    2026-08-19T19:25:48+00:00  26c139a81   1a278561f858d447   pad 0     canary clean          recorded
+
+`Hyper-V/WHPX` -- 14 run(s):
+
+    2026-08-19T17:05:40+00:00  943b3f21b   7a17cf6be2a10a26   pad 0     canary broken         recorded
+    2026-08-19T17:17:45+00:00  fb6605fc0   7c254f51182677f1   pad 1024  canary broken         recorded
+    2026-08-19T17:30:07+00:00  493b6aac5   faae6997a2689db5   pad 1536  canary broken         recorded
+    2026-08-19T17:42:41+00:00  1d325ba08   114385d50cd39c4c   pad 2048  canary broken         recorded
+    2026-08-19T17:54:59+00:00  3fff02a30   00989e331039d619   pad 2560  canary broken         recorded
+    2026-08-19T18:07:13+00:00  78a921b4f   b563a3b2831891ed   pad 3072  canary broken         recorded
+    2026-08-19T19:49:04+00:00  41581ca30   1a278561f858d447   pad 0     canary clean          recorded
+    2026-08-19T20:01:13+00:00  a8a62afba   b78cb4dc0e3432bc   pad 1024  canary clean          recorded
+    2026-08-19T20:24:17+00:00  218028ced   1a278561f858d447   pad 0     canary clean          recorded
+    2026-08-19T20:36:26+00:00  334124dbf   b78cb4dc0e3432bc   pad 1024  canary clean          recorded
+    2026-08-19T20:48:36+00:00  334124dbf   4ee6ee95d024ab20   pad 1536  canary clean          recorded
+    2026-08-19T21:00:38+00:00  334124dbf   5159c1535b6a6b0e   pad 2048  canary clean          recorded
+    2026-08-19T21:12:32+00:00  334124dbf   18444cdf9e9ec634   pad 2560  canary clean          recorded
+    2026-08-19T21:24:31+00:00  334124dbf   2a0bc63792dab5d6   pad 3072  canary clean          recorded
+
+- 1 run(s) would have qualified but do not record which accelerator they ran on (2026-08-19T16:15). The `accel` field postdates them. That is NOT the same as 'they ran on TCG': the first WHPX run in this history also predates the field.
+- assumption refused for 2026-08-19T16:15:09+00:00 (9011d525b): its `experiment` banner names Hyper-V/WHPX, so assuming QEMU TCG for it would contradict the only surviving evidence about what it ran on
+- 72 run(s) rejected: no `kernel_sha` was recorded, so there is no way to show this run measured the same binary as anything on the other side, and a cross-accelerator ratio over two different binaries measures the code and the emulator at once
+- 7 run(s) rejected: profile is 'debug', not 'release'; a debug run and a release run differ by far more than the accelerator does
+- 5 kernel image(s) ran only on Hyper-V/WHPX (18444cdf9e9ec634, 2a0bc63792dab5d6, 4ee6ee95d024ab20, and 2 more), so they cannot be pairs; a ratio needs both sides of one binary.
+- 4 kernel image(s) ran only on QEMU TCG (63ce0b2997023c22, c1418d4a1661e4bc, d3b853cf19a67483, and 1 more), so they cannot be pairs; a ratio needs both sides of one binary.
+
+</details>
+
+---
+
+#### Why I did not just decide this
+
+Switching the accelerator would stop exercising a security feature on every
+test we run. That is a user-visible security posture change, not a tooling
+preference, and it is exactly the kind of thing that should not be traded for a
+3.5× speedup by the person who wants the speedup. It also touches
+`scripts/boot-test.sh`'s defaults, which every lane depends on.
+
+#### If this is never answered
+
+Safe, and stable — nothing degrades over time. TCG remains the default and the
+kernel keeps being tested with its protections on, which is the conservative
+side to be stuck on. The standing cost is that the benchmark suite stays 3.5×
+slower and stays noisier than it needs to be. It does **not** block **Q53**
+any more: that question was measured on 2026-08-19 and a 10% rule is unusable on
+*either* accelerator (71% of benchmarks exceed it under TCG, 34% under WHPX), so
+Q53 must be decided on its own and answering this one would not settle it. An
+earlier version of this paragraph said Q53 "stays stuck too" and named this
+question as its cheapest fix; that was a prediction and it did not survive the
+measurement.
+
 
 # Resolved
 

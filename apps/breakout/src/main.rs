@@ -116,18 +116,18 @@ const MAX_LAUNCH_ANGLE: f32 = std::f32::consts::FRAC_PI_3;
 //
 // See `known-issues.md`, "The same broken reduction is copy-pasted into 27
 // crates", and `design-decisions.md` §447.
-use randrange::Rng;
+use randrange::{RandomSource, SeededRng};
 
 /// A uniformly random ball launch direction, in radians from straight up.
 ///
-/// A free function rather than an `Rng` method because a launch angle is this
+/// A free function rather than an `SeededRng` method because a launch angle is this
 /// game's unit, not the generator's.
 ///
 /// Drawn as a continuous angle rather than the old `next_bounded(1000)` mapped
 /// through `v / 500.0 - 1.0`.  That 1000 was an arbitrary quantisation of a
 /// quantity that was never discrete -- it bought nothing, and it was the sole
 /// even bound in the crate.
-fn random_launch_angle(rng: &mut Rng) -> f32 {
+fn random_launch_angle(rng: &mut SeededRng) -> f32 {
     rng.between_f32(-MAX_LAUNCH_ANGLE, MAX_LAUNCH_ANGLE)
 }
 
@@ -264,7 +264,7 @@ struct BreakoutApp {
     /// Remaining duration for the wide-paddle power-up (ms).
     wide_paddle_remaining_ms: u64,
     /// RNG.
-    rng: Rng,
+    rng: SeededRng,
     /// Ball speed for the current level.
     ball_speed: f32,
 }
@@ -291,7 +291,7 @@ impl BreakoutApp {
             bricks_remaining: 0,
             accumulated_ms: 0,
             wide_paddle_remaining_ms: 0,
-            rng: Rng::new(seed),
+            rng: SeededRng::new(seed),
             ball_speed: BASE_BALL_SPEED,
         };
         app.init_bricks();
@@ -571,7 +571,7 @@ impl BreakoutApp {
     }
 
     fn maybe_spawn_powerup(&mut self, x: f32, y: f32) {
-        if self.rng.chance(1, POWERUP_SPAWN_CHANCE) {
+        if self.rng.chance_in(1, POWERUP_SPAWN_CHANCE) {
             let kind = match self.rng.below(3) {
                 0 => PowerUpKind::WidePaddle,
                 1 => PowerUpKind::MultiBall,
@@ -2145,9 +2145,9 @@ mod tests {
                 out.push((lcg(carrier) % 1000) as usize);
                 carrier = lcg(carrier);
             } else {
-                let mut running = Rng::new(carrier);
+                let mut running = SeededRng::new(carrier);
                 carrier = running.next_u64();
-                let mut fresh = Rng::new(carrier);
+                let mut fresh = SeededRng::new(carrier);
                 out.push(lattice(random_launch_angle(&mut fresh)));
                 carrier = fresh.next_u64();
             }
@@ -2157,7 +2157,7 @@ mod tests {
 
     #[test]
     fn launch_angle_stays_within_sixty_degrees_of_vertical() {
-        let mut rng = Rng::new(42);
+        let mut rng = SeededRng::new(42);
         for _ in 0..1000 {
             let angle = random_launch_angle(&mut rng);
             assert!(

@@ -32,7 +32,7 @@ use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::proc::spawn::{MAX_STACK_FRAMES, USER_STACK_GUARD, USER_STACK_TOP};
 use crate::sched;
 use crate::serial_println;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // Exception / interrupt statistics
@@ -1934,7 +1934,70 @@ extern "C" fn handle_breakpoint(frame: &InterruptStackFrame, _error: u64) {
     let rflags = cpu::read_rflags();
     BP_ENTRY_DF.store(rflags & RFLAGS_DF != 0, Ordering::Relaxed);
     BP_ENTRY_AC.store(rflags & RFLAGS_AC != 0, Ordering::Relaxed);
-    serial_println!("EXCEPTION: Breakpoint (#BP) at {:#x}", frame.rip);
+    // Say whether this breakpoint was asked for. The serial log is the only
+    // artefact a failed boot leaves behind, and the host-side triage tools
+    // (`scripts/boot-history.py`) decide "did the kernel die?" by reading the
+    // `EXCEPTION:` lines in it. They cannot tell a self-test's `int3` from a
+    // stray one, so the kernel — which knows — has to say. The convention is
+    // the one the #UD self-test already follows ("deliberate compiler trap").
+    if ExpectedBreakpoint::active() {
+        serial_println!(
+            "EXCEPTION: Breakpoint (#BP) at {:#x} (deliberate self-test)",
+            frame.rip
+        );
+    } else {
+        serial_println!("EXCEPTION: Breakpoint (#BP) at {:#x}", frame.rip);
+    }
+}
+
+/// Nesting depth of open [`ExpectedBreakpoint`] scopes.
+///
+/// A counter rather than a flag so that a self-test which takes a `#BP` from
+/// inside another one's scope cannot close the outer scope early on drop.
+static BP_EXPECTED_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII marker: while alive, a `#BP` on this machine is a deliberate one.
+///
+/// Hold one across any `int3` a self-test executes on purpose, so the resulting
+/// serial line is annotated and the host-side triage tools do not read it as
+/// evidence of a crash.
+///
+/// # Scope of the guarantee
+///
+/// The counter is global, not per-CPU, so in principle a genuine stray `#BP`
+/// taken by *another* CPU inside the few microseconds a scope is open would be
+/// mislabelled. That is accepted deliberately: every `int3` in the tree is a
+/// boot-time self-test running on the BSP (`idt.rs` ×3, `serial.rs` ×1, plus
+/// `power.rs`'s reset-of-last-resort, which triple-faults and never reaches a
+/// handler at all), and the alternative — reading the LAPIC ID from inside an
+/// exception handler — adds an early-boot dependency to a fault path in
+/// exchange for closing a window nothing can currently enter.
+pub struct ExpectedBreakpoint(());
+
+impl ExpectedBreakpoint {
+    /// Open a deliberate-breakpoint scope.
+    #[must_use]
+    pub fn new() -> Self {
+        BP_EXPECTED_DEPTH.fetch_add(1, Ordering::SeqCst);
+        Self(())
+    }
+
+    /// True while at least one scope is open.
+    fn active() -> bool {
+        BP_EXPECTED_DEPTH.load(Ordering::SeqCst) > 0
+    }
+}
+
+impl Default for ExpectedBreakpoint {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ExpectedBreakpoint {
+    fn drop(&mut self) {
+        BP_EXPECTED_DEPTH.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// RFLAGS.DF — the direction flag, bit 10.
@@ -1969,6 +2032,9 @@ static BP_ENTRY_AC: AtomicBool = AtomicBool::new(false);
 /// host test could exercise anyway.
 pub fn df_on_entry_self_test() {
     serial_println!("[idt] Running direction-flag self-test...");
+
+    // Both `int3`s below are on purpose; annotate their serial lines.
+    let _expected = ExpectedBreakpoint::new();
 
     // `std` and `int3` must be in one `asm!` block: if the compiler were free
     // to schedule code between them it could emit a `memcpy` — which is exactly
@@ -2042,6 +2108,9 @@ pub fn ac_on_entry_self_test() {
     serial_println!("[idt] Running alignment-check-flag (SMAP override) self-test...");
 
     let expected_clear = crate::smep_smap::entry_paths_clear_ac();
+
+    // The `int3` below is on purpose; annotate its serial line.
+    let _expected = ExpectedBreakpoint::new();
 
     // Set AC, take a #BP, then restore AC to 0.
     //

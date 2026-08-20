@@ -277,13 +277,42 @@ fn uncharge_cgroup_free(frame_addr: u64, count: u64) {
     }
 }
 
-/// Tag `count` freshly-allocated frames with this CPU's ambient owner.
+/// The single post-allocation hook: everything the allocator must do to
+/// `count` freshly-allocated frames starting at `frame_addr` before handing
+/// them to the caller.
 ///
-/// The allocator cannot tell *who* is asking, so the tag comes from the
-/// per-CPU [`frame_owner::OwnerScope`] context the caller is running under;
-/// allocations outside any scope are recorded as `Owner::Unknown`.
+/// Two things happen here, and both must happen on *every* allocation path,
+/// which is why they share one function rather than being sprinkled
+/// individually across the five alloc return sites:
+///
+/// 1. **Owner tagging.** The allocator cannot tell *who* is asking, so the tag
+///    comes from the per-CPU [`frame_owner::OwnerScope`] context the caller is
+///    running under; allocations outside any scope are recorded as
+///    `Owner::Unknown`.
+/// 2. **KASAN unpoisoning.** A frame can carry stale poison from the heap slot
+///    that last lived in it (`large_dealloc` returns frames to the buddy
+///    allocator, poison and all). Clearing it here — before the allocator or
+///    its caller writes anything through the HHDM alias — is what stops the
+///    next owner's first legitimate write being reported as a use-after-free.
+///    See `kasan::on_frame_alloc`.
+///
+/// Ordering matters: the unpoison must precede any HHDM touch. Every caller
+/// satisfies this today — `alloc_frame_zeroed`'s inline `write_bytes` runs
+/// after `alloc_frame` has returned through this hook, and its pre-zeroed-pool
+/// fast path does not write at all — but a new alloc path that zeroes *before*
+/// calling this would report on its own memset.
 ///
 /// [`frame_owner::OwnerScope`]: super::frame_owner::OwnerScope
+#[inline]
+fn on_frames_allocated(frame_addr: u64, count: u64) {
+    super::kasan::on_frame_alloc(frame_addr, count);
+    tag_alloc_owner(frame_addr, count);
+}
+
+/// Tag `count` freshly-allocated frames with this CPU's ambient owner.
+///
+/// Called only from [`on_frames_allocated`], which is the hook every allocation
+/// path goes through.
 #[inline]
 fn tag_alloc_owner(frame_addr: u64, count: u64) {
     if !super::frame_owner::is_enabled() {
@@ -1922,7 +1951,7 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
                 let _ = unsafe { free_frame(frame) };
                 return Err(e);
             }
-            tag_alloc_owner(addr, 1);
+            on_frames_allocated(addr, 1);
             return Ok(frame);
         }
 
@@ -1948,7 +1977,7 @@ pub fn alloc_frame() -> KernelResult<PhysFrame> {
                     let _ = unsafe { free_frame(frame) };
                     return Err(e);
                 }
-                tag_alloc_owner(addr, 1);
+                on_frames_allocated(addr, 1);
                 return Ok(frame);
             }
         }
@@ -2006,7 +2035,7 @@ pub fn alloc_frame_zeroed() -> KernelResult<PhysFrame> {
             }
             // Re-tag: the frame carries the `ZeroPool` tag applied when the
             // refiller parked it, but it now belongs to this consumer.
-            tag_alloc_owner(frame.addr(), 1);
+            on_frames_allocated(frame.addr(), 1);
             return Ok(frame);
         }
     }
@@ -2092,7 +2121,7 @@ pub fn alloc_order(order: usize) -> KernelResult<PhysFrame> {
         let _ = unsafe { free_order_inner(frame, order) };
         return Err(e);
     }
-    tag_alloc_owner(frame.addr(), count);
+    on_frames_allocated(frame.addr(), count);
 
     Ok(frame)
 }
@@ -2247,7 +2276,7 @@ pub fn alloc_order_constrained(order: usize, max_addr: u64) -> KernelResult<Phys
         let _ = unsafe { free_order_inner(frame, order) };
         return Err(e);
     }
-    tag_alloc_owner(frame.addr(), count);
+    on_frames_allocated(frame.addr(), count);
 
     Ok(frame)
 }

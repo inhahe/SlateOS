@@ -452,6 +452,18 @@ static SPLIT_TALLY_UNCHECKED: AtomicU64 = AtomicU64::new(0);
 struct Measurement {
     /// The name the window was *measured* under — which is not always the name
     /// it is *recorded* under. See [`MEASUREMENTS`].
+    ///
+    /// **Invariant: this is the name printed on the window's live
+    /// `[bench] <name>: min=…` result line.** [`run`] satisfies it for free by
+    /// passing one `name` to both, but a hand-built [`BenchResult`] prints its
+    /// line separately and must be written to keep the two in step — bind the
+    /// literal once and use the binding twice. Three of them did not, and the
+    /// consequence was not a cosmetic mislabel: `MEASURED-AS` (see
+    /// [`print_scorecard`]) is emitted only when this differs from the scored
+    /// name, so noting the *scored* name here suppresses the very line that
+    /// tells a consumer which live line to watch for. `scripts/canary-load.py`
+    /// then took the scorecard name for a live one and waited, through the
+    /// whole suite, for a result line that is never printed.
     name: &'static str,
     /// Set by [`record`] when this window reaches the scorecard, and therefore
     /// `bench/history.jsonl` and run-over-run regression detection.
@@ -527,6 +539,10 @@ fn reset_suite_state() {
 /// the window's index, which the caller **must** store in
 /// [`BenchResult::seq`] — it is the only link between a measurement and the
 /// scorecard entry that covers it.
+///
+/// `name` is the name on the window's **live result line**, not the name it is
+/// scored under; the two differ for six benchmarks and the difference is the
+/// whole content of `MEASURED-AS`. See [`Measurement::name`].
 fn note_measurement(name: &'static str, split: SplitCheck) -> usize {
     let seq = {
         let mut m = MEASUREMENTS.lock();
@@ -1054,6 +1070,21 @@ struct ScoreEntry {
     /// property of healthy code and is the specific failure that makes one
     /// boot's `min` incomparable to another's.
     split: SplitCheck,
+    /// Index into [`MEASUREMENTS`] of the window this entry was measured in.
+    ///
+    /// Carried so the log can *state* the live-name/scored-name correspondence
+    /// instead of leaving a reader to infer it. At least six benchmarks record
+    /// under a name they did not measure under, and the two names go to
+    /// different places: the live `[bench] <name>: min=` line is what a
+    /// host-side tool can watch stream past *during* the run, while the `SCORE`
+    /// line is what ends up in `bench/history.jsonl`. A tool that needs both —
+    /// `scripts/canary-load.py` triggers on the first, `grade-positional.py`
+    /// scores against the second — cannot be given one name that serves both,
+    /// and the pairing cannot be soundly recovered from the log without this.
+    /// Order alignment in particular is *not* sound: `lock_uncontended` is
+    /// recorded after `lock_tracked_nested` but measured before it, so the two
+    /// orders genuinely interleave. See [`print_scorecard`]'s `MEASURED-AS`.
+    seq: usize,
 }
 
 /// Public view of a scorecard entry for the dashboard API.
@@ -1149,6 +1180,7 @@ fn record(name: &'static str, result: &BenchResult, target_ns: Option<u64>) {
         mean_ns: result.mean_ns,
         iterations: result.iterations,
         split: result.split,
+        seq: result.seq,
     });
     // Mark the *measurement* covered, keyed by index rather than by name.
     //
@@ -1259,6 +1291,28 @@ fn print_scorecard() {
                 entry.iterations,
                 entry.split
             ),
+        }
+    }
+
+    // The live-name/scored-name correspondence, stated rather than inferrable.
+    //
+    // A new line type rather than an eighth `SCORE` column: the `SCORE` format
+    // is append-only for *readers of old logs* (missing trailing columns are
+    // tolerated), which is not the same as tolerating an unexpected extra one,
+    // and three host-side parsers consume it. A line nobody matches on today
+    // cannot break any of them.
+    //
+    // Emitted only where the two names differ, because a line saying a name
+    // equals itself is noise, and 59 of them would bury the six that matter.
+    // See [`ScoreEntry::seq`] for why this cannot be recovered host-side.
+    {
+        let measurements = MEASUREMENTS.lock();
+        for entry in &*entries {
+            if let Some(m) = measurements.get(entry.seq) {
+                if m.name != entry.name {
+                    serial_println!("[bench] MEASURED-AS {} {}", entry.name, m.name);
+                }
+            }
         }
     }
 
@@ -1456,18 +1510,38 @@ const CANARY_STORES_PER_WINDOW: u64 = 1024;
 /// `crypto_ed25519_verify` moved 5.1x when the host got busy.
 const CANARY_TOLERANCE_PCT: u64 = 25;
 
-/// Smallest per-access figure this measurement can resolve, in cycles.
+/// Smallest per-access figure this measurement can resolve, in **centicycles**.
 ///
 /// Derived, not invented. The per-access cost is an integer quotient, so at a
-/// per-access value of `m` cycles one cycle of quantisation is `100 / m`
-/// percent. Once that exceeds `CANARY_TOLERANCE_PCT`, any "spread" the canary
-/// reports is rounding rather than host load, and the honest verdict is that
-/// the instrument could not measure — not that the machine was busy.
+/// per-access value of `m` quantisation steps one step is `100 / m` percent.
+/// Once that exceeds `CANARY_TOLERANCE_PCT`, any "spread" the canary reports is
+/// rounding rather than host load, and the honest verdict is that the
+/// instrument could not measure — not that the machine was busy.
 ///
-/// At a 25% tolerance this is 4 cycles. `scripts/bench-history.py` computes the
-/// identical bound from the identical constant, so the kernel and the history
-/// tool cannot disagree about whether a record is usable.
-const CANARY_MIN_RESOLVABLE: u64 = 100u64.div_ceil(CANARY_TOLERANCE_PCT);
+/// # Why the unit had to be corrected, and what it cost
+///
+/// This bound was originally `4 cycles`, and the derivation above was written
+/// when it *was* cycles: `measured` was `delta / n`, a whole number. [`CENTI`]
+/// then made `measured` a count of hundredths — but the filter it feeds was
+/// left comparing the raw `delta` against `n * 4`, i.e. still demanding four
+/// whole cycles per access. The same argument, redone at the precision the
+/// measurement actually has, yields four *centicycles*: the quantisation step
+/// is 0.01 cycle, not 1.
+///
+/// So for the whole life of `CENTI` the instrument rejected deltas 100x larger
+/// than its own justification supports. Under TCG that was invisible — a store
+/// costs ~500 centicycles there, clearing even the 100x-too-strict bound by
+/// 26% — and under WHPX it was fatal: ~87 centicycles per store, rejected
+/// outright, so *every* canary sample of every WHPX run failed and every such
+/// run graded `broken`. All six arms of the 2026-08-19 WHPX layout sweep read
+/// `samples: 0, invalid: 13`. See known-issues.md
+/// `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`.
+///
+/// `scripts/bench-history.py` carries **both** bounds: this one, applied to a
+/// record's `min_centi`, and the whole-cycle form applied to `min` on records
+/// written before `CENTI` existed, which really did carry whole cycles. The
+/// kernel needs only this one, because the kernel only ever measures new runs.
+const CANARY_MIN_RESOLVABLE_CENTI: u64 = 100u64.div_ceil(CANARY_TOLERANCE_PCT);
 
 /// Fixed-point scale for the per-access cost: hundredths of a cycle.
 ///
@@ -1478,8 +1552,9 @@ const CANARY_MIN_RESOLVABLE: u64 = 100u64.div_ceil(CANARY_TOLERANCE_PCT);
 /// is not hypothetical: the 2026-08-14T21:5x run reported exactly 40% ("5-7
 /// cycles") and it was rounding, not load.
 ///
-/// `CANARY_MIN_RESOLVABLE` does not save us here. It bounds a *one*-cycle error
-/// at the tolerance; a spread spans two samples and so can be twice that.
+/// `CANARY_MIN_RESOLVABLE_CENTI` does not save us here. It bounds *one*
+/// quantisation step at the tolerance; a spread spans two samples and so can be
+/// twice that.
 /// Raising the bound instead would be the wrong fix anyway — the store really
 /// does cost ~5 cycles, and a threshold cannot legislate the hardware faster.
 ///
@@ -1540,6 +1615,15 @@ static CANARY_SAMPLES: core::sync::atomic::AtomicU32 = core::sync::atomic::Atomi
 /// and "the instrument found nothing" are different results, and collapsing
 /// them is what let a dead canary report a reassuring 0% spread.
 static CANARY_INVALID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// How many of `CANARY_INVALID`'s failures were below-floor rejections.
+///
+/// A *subset* of `invalid`, not a sibling. `invalid` keeps its existing meaning
+/// — "measurements that produced no figure" — so every consumer of the ~100
+/// historical records keeps reading them exactly as it does today; only the
+/// breakdown is new. Recording it as a sibling would have changed the meaning
+/// of a field already written to disk a hundred times, which is the one thing
+/// an append-only log cannot survive.
+static CANARY_BELOW_FLOOR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// Counts `score` calls so every Nth one triggers a sample.
 static CANARY_SCORED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
@@ -1560,12 +1644,119 @@ static CANARY_SCORED: core::sync::atomic::AtomicU32 = core::sync::atomic::Atomic
 /// still counted and still folded into the extremes, so no verdict depends on
 /// the trace being complete.
 const CANARY_TRACE_MAX: usize = 24;
-/// Trace position meaning "a suite endpoint", not a mid-suite sample.
-const CANARY_POS_ENDPOINT: u32 = u32::MAX;
+/// Trace position meaning "the sample taken *after* the last benchmark".
+///
+/// The two endpoints get distinct sentinels rather than sharing one, because a
+/// reader cannot recover which is which from their order. `report_canary` folds
+/// them in as `[start, end]`, so *when both measured* the first endpoint sample
+/// is the pre-suite one -- but a failed calibration records no start, leaving a
+/// single endpoint sample that is the *end*, sitting in the slot a reader would
+/// have read as the start. Position, not ordinal, is what disambiguates them.
+///
+/// This matters beyond labelling: the end sample is the only right-hand bracket
+/// the trailing benchmarks have. Mid-suite sampling stops at the last multiple
+/// of [`CANARY_SAMPLE_EVERY`], so on a 64-benchmark suite positions 57-63 lie
+/// past every positioned sample, and a positional correction can only either
+/// hold the last sample flat across them or bracket them with the end sample.
+/// It cannot do the latter while "end" might mean "start".
+const CANARY_POS_END: u32 = u32::MAX;
+/// Trace position meaning "the sample taken *before* the first benchmark".
+///
+/// This is the calibration measurement that sets the run's budgets, reused as a
+/// canary sample. See [`CANARY_POS_END`] for why the two are not one sentinel.
+const CANARY_POS_START: u32 = u32::MAX - 1;
 static CANARY_TRACE_POS: [core::sync::atomic::AtomicU32; CANARY_TRACE_MAX] =
     [const { core::sync::atomic::AtomicU32::new(0) }; CANARY_TRACE_MAX];
 static CANARY_TRACE_VAL: [AtomicU64; CANARY_TRACE_MAX] =
     [const { AtomicU64::new(0) }; CANARY_TRACE_MAX];
+/// The two raw arm totals behind each traced sample.
+///
+/// # Why the derived value alone was not enough
+///
+/// The traced value is `(store - nop) * 100 / n`: a *difference*, so a move in
+/// it is ambiguous between the two arms, and the two have opposite meanings. A
+/// dearer store arm is the host getting slower at the thing being measured; a
+/// *cheaper nop arm* is the measurement's own baseline shifting, which is an
+/// instrument artefact and no evidence about the host at all.
+///
+/// That ambiguity is not academic. Across every trace recorded up to
+/// 2026-08-19 the samples fall into three tight clusters -- ~5.04, ~5.16 and
+/// ~5.79 centicycles -- with nothing in between, and the top cluster is +12.3%
+/// over the middle one. A discrete, repeatable, position-independent step is
+/// the profile of a specific mechanism rather than of drift, and identifying it
+/// would raise the positional model's noise floor at no cost in sensitivity
+/// (see known-issues.md, "the recurring 581-centicycle canary event"). But the
+/// arms were computed, used, and thrown away, so the one question that
+/// discriminates -- *which arm moved* -- could not be asked of any run already
+/// recorded.
+///
+/// `measure_access_cost` has always returned both arms; only the trace dropped
+/// them. Keeping them costs two atomics per sample on a path that runs eleven
+/// times per boot.
+static CANARY_TRACE_NOP: [AtomicU64; CANARY_TRACE_MAX] =
+    [const { AtomicU64::new(0) }; CANARY_TRACE_MAX];
+static CANARY_TRACE_STORE: [AtomicU64; CANARY_TRACE_MAX] =
+    [const { AtomicU64::new(0) }; CANARY_TRACE_MAX];
+
+/// Why a reference measurement yielded no per-access figure.
+///
+/// Distinct causes, and conflating them is what made the WHPX failure unreadable:
+/// the diagnostic asserted the arms had not separated, when in fact they had
+/// separated by ~872 cycles and the *instrument* had refused the delta for
+/// being under a bound that was 100x too strict (see
+/// [`CANARY_MIN_RESOLVABLE_CENTI`]). A reader following that message would go
+/// disassemble a store that was perfectly intact.
+///
+/// They also carry opposite evidential weight for the contamination verdict.
+/// A `NotSeparated` sample might have been the excursion the canary is looking
+/// for -- noise big enough to invert the arms is itself load -- so it makes the
+/// verdict UNKNOWN. A `BelowFloor` sample resolved a *small* quantity and was
+/// refused for being small; an excursion is large and would have cleared the
+/// floor comfortably, so it hides nothing. See `report_canary`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ArmFailure {
+    /// The store arm was not slower than the nop arm. Either host load
+    /// inverted them, or the store was optimised away.
+    NotSeparated,
+    /// The arms separated, but by less than the instrument can resolve.
+    ///
+    /// Carries the per-access cost in centicycles, so the report can print the
+    /// figure it is declining to trust rather than suppressing it -- which is
+    /// the difference between "the arms did not separate" (false, and sends the
+    /// reader to the disassembler) and "they separated by 0.87 cycles, under my
+    /// 0.04-cycle floor" (which names the real problem).
+    BelowFloor(u64),
+    /// The scale-invariance check refused the measurement before it was read.
+    ///
+    /// A per-store cost that changes when the loop length changes is measuring
+    /// the loop, not the store, so there is no per-access figure even though
+    /// the arms may have separated cleanly. Kept distinct from the other two
+    /// because it is a statement about the *instrument's* validity rather than
+    /// about this particular delta, and because reporting it as either of the
+    /// others would send the reader somewhere useless: `NotSeparated` points at
+    /// the disassembler, `BelowFloor` at the guest's speed, and neither is the
+    /// problem. Produced only at the calibration sites -- `resolve_arms` cannot
+    /// return it, because the scale check is a separate pair of runs.
+    ScaleRejected,
+}
+
+/// One A/B reference measurement: the derived per-access cost and both arms.
+///
+/// Carried as a struct rather than a bare `Result<u64, ArmFailure>` because the
+/// arms are what makes a surprising value diagnosable, and every path that
+/// produces one of these previously had them in hand and dropped them. A tuple
+/// would do the same job; the names are here because
+/// `(Result<u64, ArmFailure>, u64, u64)` at a call site is exactly the shape in
+/// which a nop and a store get swapped.
+#[derive(Clone, Copy)]
+struct ArmSample {
+    /// Per-access cost in centicycles, or why there is none.
+    measured: Result<u64, ArmFailure>,
+    /// Total for the arm that only loops.
+    nop: u64,
+    /// Total for the arm that loops *and* stores.
+    store: u64,
+}
 
 /// Fold one reference measurement into the running extremes.
 ///
@@ -1574,7 +1765,10 @@ static CANARY_TRACE_VAL: [AtomicU64; CANARY_TRACE_MAX] =
 /// dear at the same positions across two runs is the suite's own cache/TLB
 /// residue, whereas one that is dear at different positions each run is host
 /// load. See known-issues.md P19.
-fn canary_record(measured: u64, pos: u32) {
+///
+/// `nop`/`store` are the raw arms the value was derived from — see
+/// [`CANARY_TRACE_NOP`] for why a difference alone cannot be interpreted.
+fn canary_record(measured: u64, nop: u64, store: u64, pos: u32) {
     CANARY_MIN.fetch_min(measured, Ordering::Relaxed);
     CANARY_MAX.fetch_max(measured, Ordering::Relaxed);
     let slot = CANARY_SAMPLES.fetch_add(1, Ordering::Relaxed) as usize;
@@ -1583,6 +1777,76 @@ fn canary_record(measured: u64, pos: u32) {
     if let (Some(p), Some(v)) = (CANARY_TRACE_POS.get(slot), CANARY_TRACE_VAL.get(slot)) {
         p.store(pos, Ordering::Relaxed);
         v.store(measured, Ordering::Relaxed);
+    }
+    // Separate `if let`: the arms are a strictly additive record, so a future
+    // change that resizes one pair of arrays and not the other must lose the
+    // arms rather than silently drop the sample they belong to.
+    if let (Some(n), Some(s)) = (CANARY_TRACE_NOP.get(slot), CANARY_TRACE_STORE.get(slot)) {
+        n.store(nop, Ordering::Relaxed);
+        s.store(store, Ordering::Relaxed);
+    }
+}
+
+/// Record one failed reference measurement against the right counters.
+///
+/// One function rather than the two-line `match` inline at each of the two
+/// failure sites, because the invariant that makes `CANARY_BELOW_FLOOR` a
+/// readable subset -- that every below-floor increment is accompanied by an
+/// `invalid` increment -- is only checkable if there is one place it happens.
+fn count_arm_failure(why: ArmFailure) {
+    CANARY_INVALID.fetch_add(1, Ordering::Relaxed);
+    if matches!(why, ArmFailure::BelowFloor(_)) {
+        CANARY_BELOW_FLOOR.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The mid-sentence clause naming why a reference measurement produced nothing.
+///
+/// Shared by the two calibration reports so the three causes cannot drift apart
+/// in wording between them -- which is how the "two causes" claim in
+/// [`report_arm_failure_causes`] stayed wrong for as long as it did. The
+/// `BelowFloor` figure is deliberately *not* interpolated here: a `&'static str`
+/// keeps this callable from a `serial_println!` argument position, and the
+/// number is printed on its own line by the caller, where it can sit next to
+/// the floor it fell under.
+fn arm_failure_clause(why: ArmFailure) -> &'static str {
+    match why {
+        ArmFailure::NotSeparated => {
+            "the A/B arms did not separate; the store arm must be the dearer of the two"
+        }
+        ArmFailure::BelowFloor(_) => {
+            "the arms separated, but by less than this instrument can resolve"
+        }
+        ArmFailure::ScaleRejected => {
+            "the scale check above rejected the measurement, so the delta is not \
+             attributable to the store"
+        }
+    }
+}
+
+/// Print the per-access figure a `BelowFloor` failure declined to trust.
+///
+/// Only the below-floor case has a number to show, and showing it is the whole
+/// difference between a message that names the real problem and one that sends
+/// the reader to the disassembler. A no-op for the other causes, so callers can
+/// invoke it unconditionally after the `UNMEASURED` line.
+///
+/// Hundredths rather than [`centi_parts`]' tenths, and deliberately so: the
+/// floor is 0.04 cycles, so a tenths-rounded figure would render both it and
+/// the value that fell under it as "0.0" and lose the entire comparison. This
+/// is the one place a hundredth of a cycle is worth reading.
+fn report_below_floor_figure(why: ArmFailure) {
+    if let ArmFailure::BelowFloor(centi) = why {
+        serial_println!(
+            "[bench]     it measured {}.{:02} cycles/access, under this instrument's \
+             {}.{:02} cycle floor. That is not host load and not codegen -- it is a \
+             guest faster than the canary was calibrated for. See known-issues.md \
+             B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT.",
+            centi / CENTI,
+            centi % CENTI,
+            CANARY_MIN_RESOLVABLE_CENTI / CENTI,
+            CANARY_MIN_RESOLVABLE_CENTI % CENTI
+        );
     }
 }
 
@@ -1603,24 +1867,23 @@ fn canary_record(measured: u64, pos: u32) {
 fn maybe_canary_sample() {
     let n = CANARY_SCORED.fetch_add(1, Ordering::Relaxed);
     if n.wrapping_rem(CANARY_SAMPLE_EVERY) == 0 {
-        match measure_access_cost().0 {
-            Some(measured) => canary_record(measured, n),
+        let sample = measure_access_cost();
+        match sample.measured {
+            Ok(measured) => canary_record(measured, sample.nop, sample.store, n),
             // Do not fold a failed measurement into the extremes: a `0` would
             // drag CANARY_MIN to zero and make the spread meaningless (or,
             // once every sample fails, make it a serene 0%). Count it instead,
             // so the verdict can say the instrument failed.
-            None => {
-                CANARY_INVALID.fetch_add(1, Ordering::Relaxed);
-            }
+            Err(why) => count_arm_failure(why),
         }
     }
 }
 
 /// One amplified A/B measurement of a guest memory access, in cycles.
 ///
-/// Returns `(measured, nop, store)` — the per-access cost, and the two raw
-/// arm totals behind it. `measured` is `None` when the two arms failed to
-/// separate: see "Why this returns an Option" below.
+/// Returns an [`ArmSample`] — the per-access cost, and the two raw arm totals
+/// behind it. `measured` is `None` when the two arms failed to separate: see
+/// "Why this returns an Option" below.
 ///
 /// Factored into its own function because this same measurement is taken
 /// **twice** per suite: once before the benchmarks, to calibrate the budgets,
@@ -1676,7 +1939,7 @@ fn maybe_canary_sample() {
 /// number. Reporting 0 is how the canary spent nine consecutive runs certifying
 /// nothing at all — see known-issues.md
 /// B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.
-fn measure_access_cost() -> (Option<u64>, u64, u64) {
+fn measure_access_cost() -> ArmSample {
     measure_access_at(CANARY_STORES_PER_WINDOW)
 }
 
@@ -1747,7 +2010,7 @@ unsafe impl Sync for SyncUnsafeScatterBuf {}
 /// [`measure_access_at`], and for the same reasons -- the nop arm here strides
 /// the identical index sequence without storing, so the address arithmetic
 /// cancels in the subtraction and only the store's softmmu cost is left.
-fn measure_scattered_access_cost() -> (Option<u64>, u64, u64) {
+fn measure_scattered_access_cost() -> ArmSample {
     measure_scattered_at(SCATTER_STORES)
 }
 
@@ -1758,7 +2021,7 @@ const SCATTER_STORES: u64 = (SCATTER_BYTES / SCATTER_STRIDE) as u64;
 /// [`measure_access_at`] is: so the scale-invariance check can run it at two
 /// scales. Halving the count walks half the buffer, which is still all
 /// distinct pages, so a physical per-access cost must not move.
-fn measure_scattered_at(count: u64) -> (Option<u64>, u64, u64) {
+fn measure_scattered_at(count: u64) -> ArmSample {
     let base = SCATTER_BUF.0.get().cast::<u8>();
     let n = core::hint::black_box(core::cmp::min(count, SCATTER_STORES));
     let stride = core::hint::black_box(SCATTER_STRIDE as u64);
@@ -1797,12 +2060,109 @@ fn measure_scattered_at(count: u64) -> (Option<u64>, u64, u64) {
             })
         },
     );
-    let measured = store
-        .checked_sub(nop)
-        .filter(|delta| *delta >= n.saturating_mul(CANARY_MIN_RESOLVABLE))
-        .map(|delta| delta.saturating_mul(CENTI) / n);
-    (measured, nop, store)
+    let measured = resolve_arms(nop, store, n);
+    ArmSample {
+        measured,
+        nop,
+        store,
+    }
 }
+
+/// Turn a raw arm pair into a per-access figure, or into why there is none.
+///
+/// # Why the scaling comes before the filter
+///
+/// It used to come after, and that was the defect: the delta was compared
+/// against `n * CANARY_MIN_RESOLVABLE` — a *cycle* bound — and only the
+/// survivors were scaled into centicycles. So the comparison happened in one
+/// unit and the value was consumed in another, and the bound was silently 100x
+/// too strict for the whole life of [`CENTI`]. Scaling first means the
+/// threshold and the quantity it judges are the same kind of thing, which is
+/// the only arrangement in which a unit change to one cannot outrun the other.
+///
+/// Extracted into a function rather than repeated at the two measurement sites
+/// for the same reason [`measure_access_at`] is one function called twice: two
+/// copies of this rule is exactly how the old one came to disagree with
+/// `bench-history.py` about what counted as resolvable.
+///
+/// # Why a delta of exactly zero is `NotSeparated` and not `BelowFloor(0)`
+///
+/// The two variants are not two labels for the same event; they are opposite
+/// answers to "could this failed sample have been the excursion the canary is
+/// hunting?", and only `BelowFloor` answers no (see [`ArmFailure`]). That "no"
+/// rests on the sample having *resolved a small quantity*: an excursion is
+/// large, so a figure of 0.87 cycles demonstrably is not one. A delta of zero
+/// resolves nothing — the arms are indistinguishable, so noise of any size at
+/// all could be sitting between them, and calling it `BelowFloor` would remove
+/// it from `unresolved` and let the verdict read CLEAN on a sample that proves
+/// only that the instrument is blind. Zero is also what optimiser elision looks
+/// like, and elision is already documented under the separation-failure causes
+/// in [`report_arm_failure_causes`], where a reader will actually look for it.
+///
+/// The direction matters more than the taxonomy: over-classifying as
+/// `NotSeparated` costs an UNKNOWN verdict on a run that might have been clean,
+/// which is a benchmark someone re-runs. Over-classifying as `BelowFloor` costs
+/// a CLEAN verdict on a run that was contaminated, which is a regression nobody
+/// ever sees.
+///
+/// # Why `const fn`
+///
+/// A kernel `#[cfg(test)]` module never compiles and therefore never runs in
+/// this tree (see the note in `layout_pad.rs`). Making this `const` lets the
+/// boundary cases below be `const` assertions on the real function, so a
+/// regression in it is a build error on every build rather than a test nobody
+/// executes.
+const fn resolve_arms(nop: u64, store: u64, n: u64) -> Result<u64, ArmFailure> {
+    // `n == 0` would divide by zero. It cannot happen from either call site
+    // (both pass a non-zero trip count), but a measurement of nothing has not
+    // separated anything either, so it gets a failure rather than a panic or a
+    // fabricated figure.
+    if n == 0 || store <= nop {
+        return Err(ArmFailure::NotSeparated);
+    }
+    let centi = (store - nop).saturating_mul(CENTI) / n;
+    if centi >= CANARY_MIN_RESOLVABLE_CENTI {
+        Ok(centi)
+    } else {
+        Err(ArmFailure::BelowFloor(centi))
+    }
+}
+
+// Boundary cases for `resolve_arms`, asserted at compile time for the reason
+// given in its doc comment. `matches!` rather than `==` because a derived
+// `PartialEq` is not callable in a const context.
+//
+// The last two are the regression this whole change exists for: a WHPX-shaped
+// pair (872 cycles over 1000 accesses = 0.87 cycles/access) must now *resolve*.
+// Under the old cycle-unit bound it was compared against 1000 * 4 whole cycles
+// and refused, which is how six consecutive sweep arms recorded
+// `samples: 0, invalid: 13` and produced no usable canary at all.
+const _: () = assert!(matches!(
+    resolve_arms(100, 100, 10),
+    Err(ArmFailure::NotSeparated)
+));
+const _: () = assert!(matches!(
+    resolve_arms(101, 100, 10),
+    Err(ArmFailure::NotSeparated)
+));
+const _: () = assert!(matches!(
+    resolve_arms(100, 104, 0),
+    Err(ArmFailure::NotSeparated)
+));
+const _: () = assert!(matches!(
+    resolve_arms(100, 101, 100),
+    Err(ArmFailure::BelowFloor(1))
+));
+const _: () = assert!(matches!(
+    resolve_arms(100, 103, 100),
+    Err(ArmFailure::BelowFloor(3))
+));
+// Exactly at the floor resolves: the comparison is `>=`, and an off-by-one to
+// `>` would silently narrow the instrument by one centicycle.
+const _: () = assert!(matches!(resolve_arms(100, 104, 100), Ok(4)));
+const _: () = assert!(matches!(resolve_arms(0, 872, 1000), Ok(87)));
+// The TCG figure the canary was originally calibrated against, ~5 cycles.
+const _: () = assert!(matches!(resolve_arms(0, 5000, 1000), Ok(500)));
 
 /// One A/B reference measurement at a given trip count.
 ///
@@ -1810,7 +2170,7 @@ fn measure_scattered_at(count: u64) -> (Option<u64>, u64, u64) {
 /// two scales and check that the answer does not depend on the scale — see
 /// [`scale_invariance_check`]. A per-access cost that changes when N changes is
 /// not a measurement of the access.
-fn measure_access_at(trip: u64) -> (Option<u64>, u64, u64) {
+fn measure_access_at(trip: u64) -> ArmSample {
     static CALIBRATION_BYTE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
     let cell = CALIBRATION_BYTE.as_ptr();
     // Opaque on purpose: a trip count the optimiser can see is a trip count it
@@ -1844,21 +2204,17 @@ fn measure_access_at(trip: u64) -> (Option<u64>, u64, u64) {
             })
         },
     );
-    // Require `CANARY_MIN_RESOLVABLE` cycles per access before believing the
-    // delta. The bound used to be one cycle — enough only to stop the integer
-    // division flooring to 0 — while scripts/bench-history.py independently
-    // rejected anything under 4. Neither rule was wrong by its own lights;
-    // having two rules for one question was the defect, so both now derive
-    // from the tolerance. See CANARY_MIN_RESOLVABLE.
-    let measured = store
-        .checked_sub(nop)
-        .filter(|delta| *delta >= n.saturating_mul(CANARY_MIN_RESOLVABLE))
-        // Centicycles, not cycles: see CENTI. `delta` is ~5290 over 1024
-        // stores, so `delta / n` would round three measured significant figures
-        // away and leave a single digit whose quantisation step is 20% of
-        // itself.
-        .map(|delta| delta.saturating_mul(CENTI) / n);
-    (measured, nop, store)
+    // Centicycles, not cycles: see CENTI. `delta` is ~5290 over 1024 stores, so
+    // `delta / n` would round three measured significant figures away and leave
+    // a single digit whose quantisation step is 20% of itself. The resolution
+    // floor is applied to the scaled figure, in the same units — see
+    // `resolve_arms` for why the other order was a hundredfold error.
+    let measured = resolve_arms(nop, store, n);
+    ArmSample {
+        measured,
+        nop,
+        store,
+    }
 }
 
 /// Check that the reference measurement does not depend on how many times it
@@ -1881,12 +2237,17 @@ fn measure_access_at(trip: u64) -> (Option<u64>, u64, u64) {
 ///
 /// Returns `true` if the two scales agree within `CANARY_TOLERANCE_PCT`.
 fn scale_invariance_check(base: u64) -> bool {
-    let (small, _, _) = measure_access_at(base);
-    let (large, _, _) = measure_access_at(base.saturating_mul(2));
-    let (Some(a), Some(b)) = (small, large) else {
+    let small = measure_access_at(base).measured;
+    let large = measure_access_at(base.saturating_mul(2)).measured;
+    let (Ok(a), Ok(b)) = (small, large) else {
+        // The `{:?}` now prints the *reason*, not a bare `None`. That is the
+        // whole point of `ArmFailure`: "BelowFloor(87)" says the arms separated
+        // by 0.87 cycles and the instrument refused it, where "None" said the
+        // arms had not separated at all — a false statement that cost a day of
+        // looking for a store the optimiser had not touched.
         serial_println!(
             "[bench]   canary scale check: UNMEASURABLE at N={} ({:?}) or N={} ({:?}) — \
-             the arms did not separate, so scale-invariance cannot be assessed.",
+             no per-access figure, so scale-invariance cannot be assessed.",
             base,
             small,
             base.saturating_mul(2),
@@ -1952,12 +2313,12 @@ fn scale_invariance_check(base: u64) -> bool {
 /// doubling would walk past [`SCATTER_BYTES`] and wrap onto pages already
 /// resident -- which is itself scale-dependence, introduced by the test.
 fn scatter_scale_invariance_check() -> bool {
-    let (half, _, _) = measure_scattered_at(SCATTER_STORES / 2);
-    let (full, _, _) = measure_scattered_at(SCATTER_STORES);
-    let (Some(a), Some(b)) = (half, full) else {
+    let half = measure_scattered_at(SCATTER_STORES / 2).measured;
+    let full = measure_scattered_at(SCATTER_STORES).measured;
+    let (Ok(a), Ok(b)) = (half, full) else {
         serial_println!(
             "[bench]   scatter scale check: UNMEASURABLE at N={} ({:?}) or N={} ({:?}) — \
-             the arms did not separate, so scale-invariance cannot be assessed.",
+             no per-access figure, so scale-invariance cannot be assessed.",
             SCATTER_STORES / 2,
             half,
             SCATTER_STORES,
@@ -2005,9 +2366,9 @@ fn scatter_scale_invariance_check() -> bool {
     true
 }
 
-/// Explain the two things that make an A/B reference measurement fail.
+/// Explain the things that make an A/B reference measurement fail.
 ///
-/// # Why both must be named
+/// # Why the list must not claim to be closed
 ///
 /// This message used to offer exactly one cause — "the optimiser has removed it
 /// again" — because that is what happened the first time and the text was
@@ -2015,25 +2376,52 @@ fn scatter_scale_invariance_check() -> bool {
 /// the identical symptom from the opposite cause: with six CPU spinners
 /// competing for the host, 1 of 10 measurements inverted in *both* trials, on a
 /// binary whose store had already been proven intact by the scale-invariance
-/// check in the same run.
+/// check in the same run. So a second cause was added — and the text then
+/// asserted there were "two causes", which was wrong again the first time it
+/// met a new platform: under WHPX every failure was a *third* thing, an
+/// instrument whose resolution floor was 100x too strict for a guest that fast.
 ///
-/// A reader who trusts the old wording would go disassemble a function that is
-/// perfectly correct. Naming one cause for a symptom with two is how a
-/// diagnostic becomes a wild-goose chase, and it is the same false attribution
-/// this file has now recorded four times over.
-fn report_arm_failure_causes(invalid: u32) {
+/// A reader who trusts a wrong list goes and disassembles a function that is
+/// perfectly correct. The lesson taken here is not "add a third item and
+/// re-close the list" but "stop asserting the list is closed": it now says
+/// *seen so far*, and the below-floor count is reported as a measured fact
+/// rather than as a category the reader must match their symptom against.
+fn report_arm_failure_causes(invalid: u32, below_floor: u32) {
+    if below_floor > 0 {
+        serial_println!(
+            "[bench]   {} of those {} were NOT separation failures at all: the arms \
+             separated, but by less than {}.{:02} cycles per access, which is this \
+             instrument's resolution floor. That is neither host load nor codegen — it \
+             is a guest faster than the canary was calibrated for (WHPX measures ~0.87 \
+             cycles/store where TCG measures ~5.0). Re-running on an idle machine \
+             cannot help. See known-issues.md \
+             B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT.",
+            below_floor,
+            invalid,
+            CANARY_MIN_RESOLVABLE_CENTI / CENTI,
+            CANARY_MIN_RESOLVABLE_CENTI % CENTI
+        );
+    }
+    let unresolved = invalid.saturating_sub(below_floor);
+    if unresolved == 0 {
+        return;
+    }
     serial_println!(
-        "[bench]   arm-separation failure has two causes, and they need opposite \
-         responses. (1) HOST LOAD: the two arms differ by ~5 cycles per store, so \
-         competing work on the host can make noise exceed the signal and invert \
-         them. Demonstrated: 6 CPU spinners produced exactly {} such failure(s) \
-         per run on a known-good binary. Re-run on an idle machine before \
-         concluding anything. (2) OPTIMISER REMOVAL: the store was elided, so \
-         there is no signal at all. Distinguish them by the 'canary scale check' \
-         line above — if it reported OK, the store is intact and the cause is \
-         load, not codegen. See known-issues.md \
+        "[bench]   the remaining {} are true arm-separation failures. The causes seen \
+         so far need opposite responses. (1) HOST LOAD: the two arms differ by ~5 \
+         cycles per store under TCG, so competing work on the host can make noise \
+         exceed the signal and invert them. Demonstrated: 6 CPU spinners produced \
+         exactly 1 such failure per run on a known-good binary. Re-run on an idle \
+         machine before concluding anything. (2) OPTIMISER REMOVAL: the store was \
+         elided, so there is no signal at all. Distinguish them by the 'canary scale \
+         check' line above — if it reported OK, the store is intact and the cause is \
+         load, not codegen. (3) SCALE REJECTION: that same check reported NOT OK, so \
+         the per-store cost moved with the loop length and the measurement was refused \
+         before it was read; the arms may look perfectly healthy in that case. This \
+         list is what has been observed, not a proof of exhaustiveness; it has been \
+         wrong twice already. See known-issues.md \
          B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.",
-        invalid
+        unresolved
     );
 }
 
@@ -2061,25 +2449,33 @@ fn report_arm_failure_causes(invalid: u32) {
 /// percentage of `start`, so 100 means the host was equally loaded at both
 /// ends. The pair is recorded unconditionally rather than only on failure —
 /// a verdict alone would leave no way to ever calibrate the threshold.
-fn report_canary(start: Option<u64>) {
-    let (end, end_nop, end_store) = measure_access_cost();
+fn report_canary(start: ArmSample) {
+    let end = measure_access_cost();
     // The endpoints are samples too, so fold them in before reading extremes —
     // but only the ones that measured something.
-    for endpoint in [start, end] {
-        match endpoint {
+    // Paired with their sentinels rather than relying on iteration order: a
+    // failed calibration records no start, so the *ordinal* of an endpoint
+    // sample in the trace does not identify it. See `CANARY_POS_END`.
+    for (endpoint, pos) in [(start, CANARY_POS_START), (end, CANARY_POS_END)] {
+        match endpoint.measured {
             // Endpoints are not at a suite position; they bracket the suite.
-            // They are already reported individually as `start`/`end`, so the
-            // sentinel only needs to keep them out of the positional analysis.
-            Some(measured) => canary_record(measured, CANARY_POS_ENDPOINT),
-            None => {
-                CANARY_INVALID.fetch_add(1, Ordering::Relaxed);
-            }
+            // The sentinels keep them out of the *interpolation* domain while
+            // still naming which side of the suite each one measures.
+            Ok(measured) => canary_record(measured, endpoint.nop, endpoint.store, pos),
+            Err(why) => count_arm_failure(why),
         }
     }
 
+    // Bound before `end` is shadowed below: the arm-failure messages report the
+    // last sample's raw arms, and that is precisely the case where `measured`
+    // is an `Err` and the arms are the only thing left to report.
+    let (end_nop, end_store) = (end.nop, end.store);
     // Guard the division: a missing start means the calibration itself failed,
     // and the run's budgets are already untrustworthy in that case.
-    let (start, end) = (start.unwrap_or(0), end.unwrap_or(0));
+    let (start, end) = (
+        start.measured.unwrap_or(0),
+        end.measured.unwrap_or(0),
+    );
     let pct = if start > 0 {
         end.saturating_mul(100) / start
     } else {
@@ -2088,6 +2484,10 @@ fn report_canary(start: Option<u64>) {
 
     let samples = CANARY_SAMPLES.load(Ordering::Relaxed);
     let invalid = CANARY_INVALID.load(Ordering::Relaxed);
+    let below_floor = CANARY_BELOW_FLOOR.load(Ordering::Relaxed);
+    // The failures that might have hidden an excursion, as opposed to the ones
+    // that provably could not. See `ArmFailure` and the verdict block below.
+    let unresolved = invalid.saturating_sub(below_floor);
     // `CANARY_MIN` still holds its u64::MAX sentinel when nothing valid was
     // ever recorded. Print 0 rather than the sentinel, which would otherwise
     // read as an 18-quintillion-cycle memory access.
@@ -2125,9 +2525,17 @@ fn report_canary(start: Option<u64>) {
 
     // `<start> <end> <pct>` keeps its original meaning; the trailing fields are
     // an append-only extension, so the one record written before mid-suite
-    // sampling existed still reads back correctly. `invalid` is the newest.
+    // sampling existed still reads back correctly. `below_floor` is the newest.
+    //
+    // Appended rather than folded into `invalid` because `invalid` is already
+    // on disk in ~100 records with a settled meaning, and because absence has
+    // to stay distinguishable from zero: a record without this field was
+    // written by a kernel that could not tell the two failure kinds apart, and
+    // its failures are genuinely of unknown kind. A parser that defaulted the
+    // field to 0 would assert every historical failure was `NotSeparated`,
+    // which is a claim nobody measured.
     serial_println!(
-        "[bench] CANARY {} {} {} {} {} {} {} {} {} {}",
+        "[bench] CANARY {} {} {} {} {} {} {} {} {} {} {}",
         start_c,
         end_c,
         pct,
@@ -2137,7 +2545,8 @@ fn report_canary(start: Option<u64>) {
         samples,
         invalid,
         lo,
-        hi
+        hi,
+        below_floor
     );
 
     // The positional trace, on its own line so the CANARY record stays a single
@@ -2155,11 +2564,61 @@ fn report_canary(start: Option<u64>) {
                 continue;
             };
             let pos = p.load(Ordering::Relaxed);
-            let (c, t) = centi_parts(v.load(Ordering::Relaxed));
-            if pos == CANARY_POS_ENDPOINT {
-                serial_print!(" end:{}.{}", c, t);
-            } else {
-                serial_print!(" {}:{}.{}", pos, c, t);
+            // Full centicycle resolution here, deliberately *not* the tenths
+            // `centi_parts` yields. The trace exists to drive a per-position
+            // correction, and against a ~5-cycle reference a tenth of a cycle
+            // is ~2% — coarser than the drift such a correction would remove,
+            // so rounding to tenths would let it inject more error than it
+            // takes out. The same CANARY line proves the gap rather than
+            // merely asserting it: a run whose `min`/`max` were 515 and 517
+            // centicycles renders as "5.1" and "5.1" at tenths, i.e. the trace
+            // could not express variation its own record reports.
+            //
+            // Safe to widen because nothing parses this line: it postdates
+            // `bench-history.py`'s `CANARY_RE` (which matches the fixed-arity
+            // tuple on the CANARY line only), and `canary-load-test.sh` merely
+            // greps it for a human to read. Before the first parser exists is
+            // the one moment this change costs nothing.
+            let centi = v.load(Ordering::Relaxed);
+            match pos {
+                CANARY_POS_START => {
+                    serial_print!(" start:{}.{:02}", centi / CENTI, centi % CENTI);
+                }
+                CANARY_POS_END => {
+                    serial_print!(" end:{}.{:02}", centi / CENTI, centi % CENTI);
+                }
+                _ => serial_print!(" {}:{}.{:02}", pos, centi / CENTI, centi % CENTI),
+            }
+        }
+        serial_println!("");
+
+        // The same samples, as the two raw arm totals they were derived from.
+        //
+        // A separate line rather than extra fields on CANARY-TRACE, for the
+        // same reason the trace is not extra fields on CANARY: the trace *is*
+        // parsed now (`bench-history.py`'s `CANARY_TRACE_RE`, which postdates
+        // the comment above claiming nothing parses it), and widening a line a
+        // parser already matches is how a record written today stops being
+        // readable by the tool that wrote it. Appending a line is free; every
+        // existing reader ignores what it does not recognise.
+        //
+        // Positions are repeated rather than implied by order, so the two lines
+        // can be read independently and a dropped sample cannot silently
+        // misalign the arms against the values.
+        serial_print!("[bench] CANARY-ARMS");
+        for slot in 0..(samples as usize).min(CANARY_TRACE_MAX) {
+            let (Some(p), Some(n), Some(s)) = (
+                CANARY_TRACE_POS.get(slot),
+                CANARY_TRACE_NOP.get(slot),
+                CANARY_TRACE_STORE.get(slot),
+            ) else {
+                continue;
+            };
+            let (nop, store) = (n.load(Ordering::Relaxed), s.load(Ordering::Relaxed));
+            match p.load(Ordering::Relaxed) {
+                CANARY_POS_START => serial_print!(" start:{}:{}", nop, store),
+                CANARY_POS_END => serial_print!(" end:{}:{}", nop, store),
+                pos => serial_print!(" {}:{}:{}", pos, nop, store),
             }
         }
         serial_println!("");
@@ -2183,26 +2642,55 @@ fn report_canary(start: Option<u64>) {
     // with failures present -- the failures corroborate it rather than
     // undermining it. Only a *within*-tolerance spread alongside failures is
     // UNKNOWN, since the failed samples could have hidden an excursion.
+    //
+    // "Failures" there means `unresolved`, not `invalid`. The argument for
+    // UNKNOWN is that a failed sample could have been the excursion -- and that
+    // holds for a sample whose arms inverted, but not for one that resolved a
+    // small figure and was refused for being small. An excursion is *large*; it
+    // would have cleared the floor comfortably. Counting below-floor rejections
+    // here is what would keep every WHPX run permanently ungradeable even after
+    // the floor is fixed, and it is what makes 2026-08-17T15:10:08's shape --
+    // one lost sample, twelve at 515-516 centi with zero spread -- gradeable in
+    // future runs where today it can only be BROKEN.
     if samples == 0 {
+        // Two wordings, because "the arms did not separate" is a *false
+        // statement* about a below-floor rejection and was printed as fact on
+        // every WHPX run: the arms there separated by ~872 cycles. A diagnostic
+        // that misdescribes the failure is worse than one that says nothing,
+        // because it is actionable in the wrong direction.
+        if below_floor == invalid {
+            serial_println!(
+                "[bench] CANARY BROKEN: all {} reference measurements resolved a \
+                 per-access cost below this instrument's floor (last: nop={} store={} \
+                 over {} stores/window). The arms DID separate — the instrument, not \
+                 the measurement, is what failed — so contamination is UNKNOWN for this \
+                 run, not clean. See the note below.",
+                invalid,
+                end_nop,
+                end_store,
+                CANARY_STORES_PER_WINDOW
+            );
+        } else {
+            serial_println!(
+                "[bench] CANARY BROKEN: all {} reference measurements failed to produce \
+                 a per-access figure (last: nop={} store={} over {} stores/window), \
+                 so contamination is UNKNOWN for this run — not clean. See the note on \
+                 causes below.",
+                invalid,
+                end_nop,
+                end_store,
+                CANARY_STORES_PER_WINDOW
+            );
+        }
+        report_arm_failure_causes(invalid, below_floor);
+    } else if unresolved > 0 && spread <= CANARY_TOLERANCE_PCT {
         serial_println!(
-            "[bench] CANARY BROKEN: all {} reference measurements could not \
-             separate their two arms (last: nop={} store={} over {} stores/window), \
-             so contamination is UNKNOWN for this run — not clean. See the note on \
-             causes below.",
-            invalid,
-            end_nop,
-            end_store,
-            CANARY_STORES_PER_WINDOW
-        );
-        report_arm_failure_causes(invalid);
-    } else if invalid > 0 && spread <= CANARY_TOLERANCE_PCT {
-        serial_println!(
-            "[bench] CANARY BROKEN: {} of {} reference measurements could not \
-             separate their two arms (last: nop={} store={} over {} stores/window). \
-             The other {} spread only {}% ({}.{}-{}.{} cycles), but a failed sample \
-             is not a quiet one — it could have been the excursion — so \
+            "[bench] CANARY BROKEN: {} of {} reference measurements failed in a way \
+             that could have hidden host load (last: nop={} store={} over {} \
+             stores/window). The other {} spread only {}% ({}.{}-{}.{} cycles), but a \
+             failed sample is not a quiet one — it could have been the excursion — so \
              contamination is UNKNOWN for this run, NOT clean.",
-            invalid,
+            unresolved,
             samples.saturating_add(invalid),
             end_nop,
             end_store,
@@ -2214,7 +2702,7 @@ fn report_canary(start: Option<u64>) {
             hi_c,
             hi_t
         );
-        report_arm_failure_causes(invalid);
+        report_arm_failure_causes(invalid, below_floor);
     } else if spread > CANARY_TOLERANCE_PCT {
         serial_println!(
             "[bench] CONTAMINATED: the reference access cost spread {}% across {} \
@@ -2244,13 +2732,22 @@ fn report_canary(start: Option<u64>) {
             }
         );
         if invalid > 0 {
+            // The breakdown, not just the total: only the `unresolved` half
+            // corroborates contamination (noise big enough to invert a 5-cycle
+            // split is load). A below-floor rejection says nothing either way,
+            // and counting it as corroboration would let a too-strict
+            // instrument manufacture support for a contamination verdict.
             serial_println!(
-                "[bench]   ...{} of {} reference measurements also failed to separate \
-                 their arms, which corroborates the verdict rather than weakening it.",
+                "[bench]   ...{} of {} reference measurements also produced no figure: \
+                 {} failed to separate their arms, which corroborates the verdict rather \
+                 than weakening it, and {} resolved a cost under the instrument's floor, \
+                 which is evidence for neither side.",
                 invalid,
-                samples.saturating_add(invalid)
+                samples.saturating_add(invalid),
+                unresolved,
+                below_floor
             );
-            report_arm_failure_causes(invalid);
+            report_arm_failure_causes(invalid, below_floor);
         }
     } else {
         serial_println!(
@@ -2263,6 +2760,27 @@ fn report_canary(start: Option<u64>) {
             hi_t,
             spread
         );
+        // Reaching OK with rejections present is legitimate -- a below-floor
+        // rejection cannot have hidden an excursion, which is the whole reason
+        // `unresolved` excludes it -- but it must not be *silent*. "Stable
+        // across 5 samples" printed on a run where 8 more were refused reads as
+        // a fuller measurement than it was, and the same silence about
+        // unmeasured things is what let the memory-access clamp bind on 100% of
+        // recorded runs without anyone noticing.
+        if below_floor > 0 {
+            serial_println!(
+                "[bench]   ...on {} of {} attempts, though; the other {} resolved a \
+                 per-access cost under this instrument's {}.{:02} cycle floor and were \
+                 discarded. That does not weaken the verdict -- an excursion is large \
+                 and would have cleared the floor -- but the sample count above is \
+                 correspondingly smaller than the suite took.",
+                samples,
+                samples.saturating_add(invalid),
+                below_floor,
+                CANARY_MIN_RESOLVABLE_CENTI / CENTI,
+                CANARY_MIN_RESOLVABLE_CENTI % CENTI
+            );
+        }
     }
 }
 
@@ -2346,12 +2864,30 @@ pub fn run_all() {
         // cost that changes when the loop length changes is measuring the loop,
         // not the store. Costs two extra A/B runs, once per boot.
         let scale_ok = scale_invariance_check(CANARY_STORES_PER_WINDOW);
-        let (measured, nop, store) = measure_access_cost();
+        let ArmSample {
+            measured,
+            nop,
+            store,
+        } = measure_access_cost();
         // A scale-dependent measurement is not a measurement. Discard it rather
         // than let it calibrate ~60 budgets, and fall through to the same
         // "UNMEASURED" reporting path the arms-did-not-separate case uses --
         // both mean "the instrument failed", which is not "the code is fine".
-        let measured = if scale_ok { measured } else { None };
+        //
+        // Discarded *into a reason*, not into a bare "no value". This sample is
+        // also the contamination canary's start endpoint (see the re-wrap at
+        // the end of this block), so the failure is about to be counted by
+        // `count_arm_failure`; flattening it to `None` here and rebuilding a
+        // `Result` there would mean inventing a cause, and the only two causes
+        // available to invent -- "the arms did not separate" and "the guest is
+        // too fast" -- are both false and both send the reader somewhere
+        // useless. `ScaleRejected` exists precisely so this line does not have
+        // to lie.
+        let measured = if scale_ok {
+            measured
+        } else {
+            Err(ArmFailure::ScaleRejected)
+        };
 
         // Everything below this point -- every budget, and every "N accesses"
         // figure -- is calibrated against the SCATTERED access, not the hot one
@@ -2370,8 +2906,22 @@ pub fn run_all() {
         // compensating fudge factors this block used to carry, and what made
         // the clamp below bind on 100% of recorded runs.
         let scatter_scale_ok = scatter_scale_invariance_check();
-        let (scattered, s_nop, s_store) = measure_scattered_access_cost();
-        let scattered = if scatter_scale_ok { scattered } else { None };
+        let ArmSample {
+            measured: scattered,
+            nop: s_nop,
+            store: s_store,
+        } = measure_scattered_access_cost();
+        // Same reasoning as the hot arm above: the reason is kept, not flattened
+        // away. This sample never reaches the canary's counters, so nothing acts
+        // on the distinction -- but the UNMEASURED line below quotes it, and a
+        // scattered store refused for being under the resolution floor and one
+        // refused for not separating call for opposite responses from whoever
+        // reads the boot log.
+        let scattered = if scatter_scale_ok {
+            scattered
+        } else {
+            Err(ArmFailure::ScaleRejected)
+        };
         // UNIT CHANGE: `scattered` is centicycles (see CENTI), but its consumer
         // divides a raw cycle delta by it (`accesses(delta, access_floor)`), so
         // the floor must be *cycles*. Converting here rather than at that site
@@ -2379,7 +2929,7 @@ pub fn run_all() {
         // this wrong would misstate every "N accesses" figure by 100x while each
         // printed number still looked plausible — the same silent-units failure
         // as the debug/release profile mix-up that made P11 and P13 miss.
-        let scattered_cycles = scattered.map(|c| c / CENTI);
+        let scattered_cycles = scattered.ok().map(|c| c / CENTI);
         // The clamp survives only as a guard against the degenerate case its
         // comment always claimed it was for -- and now it announces itself
         // instead of silently overriding a good measurement, which it did on
@@ -2388,7 +2938,7 @@ pub fn run_all() {
         let clamped = scattered_cycles.is_none_or(|c| c < FLOOR_FALLBACK);
         let floor = core::cmp::max(scattered_cycles.unwrap_or(0), FLOOR_FALLBACK);
         match scattered {
-            Some(value) if !clamped => serial_println!(
+            Ok(value) if !clamped => serial_println!(
                 "[bench]   memory_access_floor: {} cycles/scattered guest byte-store \
                  (measured={}.{} over {} stores at {} B stride: nop={} store={}, {} \
                  interleaved rounds) — the \"N accesses\" figures below are in units \
@@ -2406,7 +2956,7 @@ pub fn run_all() {
             // same as the UNMEASURED case below and must not print like it: the
             // instrument worked, so the run is diagnostic, and the only casualty
             // is the unit the "N accesses" figures are quoted in.
-            Some(value) => serial_println!(
+            Ok(value) => serial_println!(
                 "[bench]   memory_access_floor: CLAMPED — measured {}.{} cycles/scattered \
                  guest byte-store (over {} stores at {} B stride: nop={} store={}, {} \
                  interleaved rounds), which is under the {} cycle fallback, so the \
@@ -2431,25 +2981,23 @@ pub fn run_all() {
             // and it was observed doing so on the 2026-08-15 release boot, where
             // it told the reader to discard two verdicts that were in fact
             // sound. Scope the warning to what the floor actually feeds.
-            None => serial_println!(
-                "[bench]   memory_access_floor: UNMEASURED — {} (nop={} store={} over {} \
-                 stores at {} B stride, {} interleaved rounds). Falling back to the \
-                 arbitrary clamp of {} cycles: the \"N accesses\" figures below are not \
-                 physical and must not be read as findings. The PASS/SLOW verdicts are \
-                 absolute per-profile cycle counts and DO still hold.",
-                if scatter_scale_ok {
-                    "the A/B arms did not separate; the store arm must be the dearer of the two"
-                } else {
-                    "the scale check rejected the measurement, so the delta is not \
-                     attributable to the store"
-                },
-                s_nop,
-                s_store,
-                SCATTER_BYTES / SCATTER_STRIDE,
-                SCATTER_STRIDE,
-                CANARY_ROUNDS,
-                floor
-            ),
+            Err(why) => {
+                serial_println!(
+                    "[bench]   memory_access_floor: UNMEASURED — {} (nop={} store={} over {} \
+                     stores at {} B stride, {} interleaved rounds). Falling back to the \
+                     arbitrary clamp of {} cycles: the \"N accesses\" figures below are not \
+                     physical and must not be read as findings. The PASS/SLOW verdicts are \
+                     absolute per-profile cycle counts and DO still hold.",
+                    arm_failure_clause(why),
+                    s_nop,
+                    s_store,
+                    SCATTER_BYTES / SCATTER_STRIDE,
+                    SCATTER_STRIDE,
+                    CANARY_ROUNDS,
+                    floor
+                );
+                report_below_floor_figure(why);
+            }
         }
         // The hot per-access cost is reported alongside rather than replaced.
         // Its ratio to the scattered cost is the whole reason the budgets used
@@ -2458,7 +3006,7 @@ pub fn run_all() {
         // fudge factors. It is also still the canary's reference, so it has to
         // be printed whatever the budgets use.
         match measured {
-            Some(value) => serial_println!(
+            Ok(value) => serial_println!(
                 "[bench]   memory_access_hot: {}.{} cycles/guest byte-store to ONE address \
                  ({} stores/window, {} interleaved rounds; nop={} store={}) — the \
                  contamination canary's reference only; NOT the budget calibration and NOT \
@@ -2470,23 +3018,35 @@ pub fn run_all() {
                 nop,
                 store
             ),
-            None => serial_println!(
-                "[bench]   memory_access_hot: UNMEASURED — {} (nop={} store={} over {} \
-                 stores/window, {} interleaved rounds). The contamination canary has no \
-                 reference this run; the budgets above are unaffected.",
-                if scale_ok {
-                    "the A/B arms did not separate; the store arm must be the dearer of the two"
-                } else {
-                    "the scale check above rejected the measurement, so the delta is not \
-                     attributable to the store"
-                },
+            Err(why) => {
+                serial_println!(
+                    "[bench]   memory_access_hot: UNMEASURED — {} (nop={} store={} over {} \
+                     stores/window, {} interleaved rounds). The contamination canary has no \
+                     reference this run; the budgets above are unaffected.",
+                    arm_failure_clause(why),
+                    nop,
+                    store,
+                    CANARY_STORES_PER_WINDOW,
+                    CANARY_ROUNDS
+                );
+                report_below_floor_figure(why);
+            }
+        }
+        // The whole sample, not just the derived value: the canary's start
+        // endpoint is traced like every other sample, and a trace that records
+        // the arms for ten samples and not for the eleventh has a hole exactly
+        // where a reader would look first. `measured` is the scale-checked
+        // binding from above, not the raw one from `measure_access_cost`: a
+        // measurement this block refused to calibrate against must not become
+        // the canary's reference either.
+        (
+            floor,
+            ArmSample {
+                measured,
                 nop,
                 store,
-                CANARY_STORES_PER_WINDOW,
-                CANARY_ROUNDS
-            ),
-        }
-        (floor, measured)
+            },
+        )
     };
     // `access_floor` is the SCATTERED cost from here down -- now only the "N
     // accesses" figures, since the budgets became absolute per-profile cycle
@@ -3478,8 +4038,18 @@ fn bench_context_switch() {
     // Each yield is a round-trip (2 context switches).
     let per_switch_ns = min_ns / 2;
 
+    // One binding for the live line's name and `note_measurement`'s, because
+    // they must not drift: `MEASURED-AS` publishes the noted name as the live
+    // one, and a consumer that trusts it (`scripts/canary-load.py`) then waits
+    // for a result line that never appears. They *had* drifted here — the print
+    // said `context_switch_rt` while the note said `context_switch`, so the two
+    // names compared equal, no `MEASURED-AS` was emitted, and the scorecard name
+    // looked like a live name that simply never fires.
+    const LIVE_NAME: &str = "context_switch_rt";
+
     serial_println!(
-        "[bench] context_switch_rt: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        LIVE_NAME,
         min,
         min_ns,
         mean,
@@ -3508,7 +4078,7 @@ fn bench_context_switch() {
         // Registered by hand because this result did not come from `run`.
         // Without it the window is absent from the coverage tally and the
         // scorecard entry below is an orphan — see `SCORED_WITHOUT_MEASUREMENT`.
-        seq: note_measurement("context_switch", SplitCheck::NotChecked),
+        seq: note_measurement(LIVE_NAME, SplitCheck::NotChecked),
     };
     score("context_switch", &ctx_result, target_ns);
     if per_switch_ns <= target_ns {
@@ -4214,8 +4784,14 @@ fn bench_ipc_channel_sync() {
     let min_ns = cycles_to_ns(min);
     let mean_ns = cycles_to_ns(mean);
 
+    // One binding for both the live line and `note_measurement` — see the
+    // identical constant in the context-switch benchmark for why they must not
+    // be written out twice.
+    const LIVE_NAME: &str = "ipc_channel_sync_rt";
+
     serial_println!(
-        "[bench] ipc_channel_sync_rt: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles  [{} iters]",
+        LIVE_NAME,
         min,
         min_ns,
         mean,
@@ -4239,7 +4815,7 @@ fn bench_ipc_channel_sync() {
         mean_ns,
         // Hand-rolled measurement loop, not `run`; no split sets exist.
         split: SplitCheck::NotChecked,
-        seq: note_measurement("ipc_channel_sync", SplitCheck::NotChecked),
+        seq: note_measurement(LIVE_NAME, SplitCheck::NotChecked),
     };
     score("ipc_channel_sync", &sync_result, target_ns);
     if min_ns <= target_ns {
@@ -5077,8 +5653,14 @@ fn bench_isr_latency() {
             let mean_ns = cycles_to_ns(m.mean_cycles);
             let max_ns = cycles_to_ns(m.max_cycles);
 
+            // One binding for both the live line and `note_measurement` — see
+            // the identical constant in the context-switch benchmark for why
+            // they must not be written out twice.
+            const LIVE_NAME: &str = "isr_hard_irq";
+
             serial_println!(
-                "[bench] isr_hard_irq: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles ({}ns)  [{} samples in {} ticks]",
+                "[bench] {}: min={} cycles ({}ns), mean={} cycles ({}ns), max={} cycles ({}ns)  [{} samples in {} ticks]",
+                LIVE_NAME,
                 m.min_cycles,
                 min_ns,
                 m.mean_cycles,
@@ -5102,7 +5684,7 @@ fn bench_isr_latency() {
                 // Aggregated by the ISR itself across real interrupts; the
                 // samples are not ours to partition.
                 split: SplitCheck::NotChecked,
-                seq: note_measurement("isr_latency", SplitCheck::NotChecked),
+                seq: note_measurement(LIVE_NAME, SplitCheck::NotChecked),
             };
             score("isr_latency", &isr_result, 10000);
             if m.min_cycles <= target_cycles {

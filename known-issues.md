@@ -22804,12 +22804,23 @@ recording it mattered more than tightening the dispersion band.
 
 Consequences worth carrying forward:
 
-- The wall-clock band cannot fire yet: no stored record carries `wall_seconds`,
-  so the axis correctly reports `unknown` and will stay there until
-  `MIN_WINDOW_FOR_BAND` (6) comparable runs have one. This is a check that
+- ~~The wall-clock band cannot fire yet: no stored record carries
+  `wall_seconds`, so the axis correctly reports `unknown` and will stay there
+  until `MIN_WINDOW_FOR_BAND` (6) comparable runs have one. This is a check that
   *cannot* fire today — the condition this file treats as equivalent to a check
   that passes — so it is called out rather than left to be discovered: until
-  six timed runs exist, the wall axis is a recorder, not a detector.
+  six timed runs exist, the wall axis is a recorder, not a detector.~~
+  **RESOLVED 2026-08-19 by accumulation, and verified rather than assumed.** 61
+  comparable release records now carry `wall_seconds` — ten times the window
+  minimum — with median 130 s, MAD 17, floor 6.5 s and a resulting band of
+  **181 s**. Replaying each record against the history that causally preceded
+  it, the wall axis **fires on 8 runs, clears 59 and abstains on 22**: it is a
+  detector, not a recorder. `test-bench-history.py` now carries the positive
+  control that proves it (`test_the_wall_band_fires_on_the_real_history`),
+  asserting both that it condemns at least one genuine run and that it clears
+  more than it condemns — the same two-sided shape as the dispersion control
+  below, and for the same reason. That is the **fifth** time in this project a
+  freshly-written check has needed proof it can fire at all.
 - The dispersion band *can* fire and provably does: `test-bench-history.py`
   exercises it against the real `bench/history.jsonl` and asserts both that it
   fires on at least one genuine run and that it does not fire on the majority.
@@ -25618,6 +25629,33 @@ is not a boot outcome, and compile errors are common enough that recording them
 would reset every streak faster than it could grow.
 
 Rationale and the alternatives considered: design-decisions.md §209.
+
+**Amended 2026-08-19: deliberate probes are excluded, and were not before.** A
+gap in the above that only showed up when it fired. A run under a deliberately
+non-default configuration — `QEMU_EXTRA`, an overridden `QEMU_CPU`, or a
+`BENCH_EXPERIMENT` arm — was recorded as an ordinary boot of the tree, because
+`boot-history.jsonl` had no `experiment` field at all (`bench/history.jsonl` had
+carried one since the layout sweeps). On 2026-08-19 the `-cpu host` probe of
+`ENV-WHPX-CPU-HOST-FIRMWARE-GP` died inside OVMF *before our kernel was loaded*,
+landed as a plain `TIMEOUT`, and reset the streak to **0** — a fact about which
+CPU models WHPX accepts, silently retargeting four entries' closure bars in this
+file.
+
+The second half is worse, and is why this is amended here rather than merely
+fixed in code. `--streaks` counts a differently-failing boot toward a
+fingerprint's `since_last`, on the argument *"a boot that failed differently is
+still a boot in which this did not appear."* That argument assumes the kernel
+**ran**. A probe need not have. Counting one is a manufactured clean streak
+arriving through the one door with no guard on it — property 2 above, defeated
+from the other side.
+
+Fixed in `6cb8d893e`: `boot-test.sh` now records *why* a run was
+non-representative, and the clean streak, the fingerprint streaks and the
+wall-time medians all step over such rows. Probes still appear in `--list` —
+they are excluded from *inference*, not hidden — and the report prints how many
+were set aside, so a shrunken denominator is never silent. The three rows that
+predated the field were backfilled in `554b2e3d0`; the three-condition test for
+when editing an append-only log is legitimate at all is design-decisions.md §238.
 
 ## B-A-THE-BOOT-LOCK-HAS-NO-QUEUE-SO-A-POLITE-WAITER-CAN-BE-OVERTAKEN-FOREVER (lane B, 2026-08-16)
 
@@ -30316,6 +30354,75 @@ Until then this entry stays open, and the guard against silently regressing to
 uncached is the WC-vs-UC line itself: on any platform that models memory types it
 warns, and on TCG it says plainly that it cannot tell.
 
+**2026-08-19 -- the manual QEMU run happened, and write-combining works.** The
+run was made the sanctioned way, via `QEMU_EXTRA` on a one-off `--experiment`
+boot; `scripts/boot-test.sh`'s accelerator is untouched and all three lanes still
+run TCG. Each log states its own accelerator from the guest's CPUID, so the
+pairing below is not an assumption but a reading:
+
+| Accelerator | WC cycles | UC cycles | Ratio |
+|---|---|---|---|
+| QEMU TCG | 360,219,423 | 369,748,072 | **1.02x** |
+| Hyper-V/WHPX | 636,766 | 32,948,353 | **51.74x** |
+
+**The doubt above is resolved in the favourable direction: QEMU's `ati-vga` BAR0
+is a RAM-backed memory region, not a trapping device model.** Had it been the
+latter, every store would have trapped to the hypervisor and the ratio would have
+stayed ~1x under WHPX too. It did not -- WC is 51.74x faster than UC, which is
+only possible if the CPU is genuinely combining stores in a write-combining
+buffer, which in turn is only possible if the guest PAT is being honoured by
+hardware.
+
+The per-store costs settle it beyond the ratio. The fill is 4-byte (`u32`)
+stores over 1 MiB, so 256 Ki stores per pass:
+
+| | cycles/store | reading |
+|---|---|---|
+| WHPX, WC | **2.4** | stores absorbed by the write-combining buffer, retiring at near register speed |
+| WHPX, UC | **125.7** | each store going to the bus on its own, as `UC` requires |
+| TCG, WC | 1374 | emulation overhead |
+| TCG, UC | 1410 | the same emulation overhead |
+
+Both WHPX figures are what the hardware ought to produce, and they are what a
+trapping device model could not: a VM exit costs ~13.5 us (see
+`design-decisions.md` §237, measured on this host), which is thousands of cycles,
+so 2.4 cycles/store rules out a trap per store outright. The earlier worry that
+"~3090 cycles/store is weak evidence of a trapping model" was reading TCG's
+per-store *emulation* overhead -- which swamps the memory type entirely, and is
+exactly why TCG's two halves come out 1374 and 1410, i.e. 1.02x.
+
+**What this does and does not establish.** It establishes that our PAT
+programming is correct end to end -- the MSR we write, the `PageFlags` bit
+pattern we choose, and the mapping we install really do produce write-combining
+on hardware that implements it. That was the actual open question, and it is
+answered. It does not establish anything about a *real* RV100's aperture, whose
+behaviour also depends on the card's own memory controller; but that was always
+a hardware question (Q49), and it is no longer blocking confidence in the kernel
+side.
+
+**Status: the kernel-side question is closed.** The entry stays open only for
+the real-hardware confirmation, and the standing guard is unchanged: on a
+platform that models memory types the WC-vs-UC line warns, and on TCG it says
+plainly that it cannot tell. Note the corollary for anyone reading a TCG boot
+log: a 1.02x reading there is *not* a regression report, it is the absence of a
+measurement.
+
+**Provenance, and a mistake worth not repeating.** The figures above were read
+from the two boots' serial logs and transcribed here; the WHPX log itself is
+gone. `build/serial-test.txt` is gitignored scratch that `boot-test.sh` deletes
+at the start of every boot, and a later WHPX run in the same session overwrote
+it before it had been copied anywhere. This file already warns about exactly that
+(see the `boot-history.jsonl` entry above: "gitignored scratch that the next run
+overwrites, so until now the evidence for a hang survived only if somebody pasted
+it in here before the next boot", which had already cost the
+`B-FORKEXEC-BOOT-HANG` investigation) -- and the warning was not heeded a second
+time. Nothing was actually lost here, because the numbers were transcribed before
+the overwrite and the benchmark half is committed in `bench/history.jsonl`; but
+the near-miss makes the rule concrete: **an experimental boot's log is evidence
+only once it has been copied out from under `build/`, and that copy must happen
+in the same step that reads it, not later.** `build/serial-canary-fail1.txt` (the
+TCG side) survived precisely because it had been given a stable name.
+
 ### BUG-BOOT-SPINLOCK-STALL-UNNAMED -- an intermittent boot hang reports `lock '?'` and `cpu 0 holds 0 lock(s)`, because lockdep is not yet enabled when the self-test battery runs -- 2026-08-17 -- OPEN (flaky; the diagnostic gap is the actionable part)
 
 **Observed.** Boot #10 of the lane-A tree (2026-08-17, tree at `8fd6813e1`)
@@ -32923,7 +33030,48 @@ userspace cannot obtain — see the next entry and
 `requests/c-a-userspace-entropy-syscall.md`. `apps/lockscreen` still derives
 its stored hash with a single SHA-256 pass and has not been touched.
 
-## C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE (lane C, 2026-08-17)
+### The salt half is fixed too, 2026-08-18 (`6771f575e`)
+
+`KEY_DERIVATION_SALT` is **gone**. Every vault now draws 16 bytes from the
+kernel CSPRNG and stores them beside the verifier. The paragraph above says
+the salt had to wait for entropy userspace could not obtain; that premise was
+false when it was written — see the next entry's correction.
+
+Salt and cost travel together in one `KdfParams { salt: [u8; 16], rounds:
+u32 }`, for the same reason the round count was stored in the first place:
+both are properties of the stored verifier, and a vault that loses either can
+never be opened again. `KdfParams` is what `CredentialStore` holds now
+(`with_kdf_params`, `kdf_params()`), what `derive_session_key` takes, and what
+`IdentityVerifier::verify` takes. **All of it must round-trip through any
+persistence layer** — the same warning the round count already carried, now
+covering the salt as well, and a vault whose salt is lost is unopenable rather
+than merely slow.
+
+`KdfParams::fresh` **refuses** (`CredentialError::EntropyUnavailable`) when
+the kernel cannot be reached, rather than falling back to a clock. A salt is
+chosen once and then lives as long as the vault does, so a predictable one is
+a permanent weakness that nothing later will notice or repair; refusing to
+create the vault is the recoverable outcome. Recorded as design-decisions
+§464.
+
+The salt is re-drawn on *every* `set_master_password`, including a change of
+an existing password — the old key is derived under the old parameters to
+check the old password and to re-encrypt, then both change together. A change
+that is rejected leaves the old salt in place
+(`a_rejected_password_change_leaves_the_salt_alone`).
+
+Six new tests pin it: two vaults do not share a salt, the salt changes the
+key, a vault reloaded with the wrong salt does not open, changing the password
+changes the salt, the rejected-change case, and the refusal on the
+`handle_request` IPC surface. Tests reach a `#[cfg(test)]`
+`set_master_password_keeping_salt` seam, because a host build has no kernel
+and would otherwise be unable to construct a store at all.
+
+**Still untouched:** `apps/lockscreen` still derives its stored hash with a
+single SHA-256 pass and a shared constant. It is a separate crate with the
+same defect and now has no excuse either.
+
+## C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE (lane C, 2026-08-17) — **FIXED 2026-08-18; and the "where the fix has to come from" paragraph below was wrong when it was written**
 
 **In short:** nothing in lane C can obtain an unpredictable number. The
 credential manager's password *generator* — the feature whose entire job is
@@ -32950,6 +33098,113 @@ Until then the honest thing is for `generate_password` to *say* it is not
 cryptographically strong rather than to look like it is, and for anything that
 needs a real nonce to use a persisted counter instead (see the keystream
 entry above).
+
+### The syscall already existed. Nobody grepped. (2026-08-18)
+
+The paragraph above — "the fix has to come from the kernel", "lane C has no
+interface to it" — was **false on the day it was written**. `SYS_GETRANDOM`
+(number 90) has been in `kernel/src/syscall/handlers.rs` all along, is *not*
+capability-gated, validates the user pointer before it generates, and is
+backed by `kernel/src/rng.rs`: ChaCha20 seeded from RDRAND/RDSEED and
+interrupt timing. Exactly the thing the entry says does not exist.
+
+Worse, **lane C was already calling it** from `userspace/ssh-keygen` while
+this entry and `requests/c-a-userspace-entropy-syscall.md` were being
+written. The request was filed against an assumption instead of a grep, and
+then this entry cited the request as evidence for the assumption. Two
+documents agreeing with each other is not corroboration when one is the
+other's source.
+
+The real blocker was smaller and entirely inside lane C: the `SystemRandom`
+wrapper lived in `guitk::rng`, and `gui/credentials` (a headless service) does
+not and should not depend on a GUI toolkit. Merging the two RNG crates into
+`randrange` — which `gui/credentials` already depended on — removed it. See
+`C-THE-SHARED-RNG-CRATE-WAS-ITSELF-DUPLICATED` and design-decisions §463.
+
+**What is actually fixed:**
+
+- `Xorshift64` and `generate_password(.., seed: u64)` are gone.
+  `generate_password` draws from the kernel and returns `Option<String>`,
+  refusing rather than falling back (`NO_ENTROPY_MESSAGE`). Design-decisions
+  §462 covers the fail-closed rule; §464 covers the salt.
+- Per-vault salts, above.
+- The fail-closed wrapper itself is no longer copied per crate: it is
+  `randrange::SecretSource`, which checks the source's health on *both* sides
+  of a draw, because `SystemRandom` refills from the kernel mid-draw and a
+  password whose tail is zeroes looks fine to the user.
+
+**The lesson, which is the same one as the LCG sweep:** grep before you file.
+A request that asks another lane for something that already exists costs that
+lane a context-switch and costs this one a day of believing itself blocked.
+
+~~**One genuine gap remains, and it is not a blocker.** `kernel/src/rng.rs`
+tracks `seeded: bool` internally, but `sys_getrandom` does not appear to
+surface it, so a caller that runs before the pool is seeded cannot tell.~~
+Noted at the end of `requests/c-a-userspace-entropy-syscall.md`; it matters
+only for very-early-boot callers, which lane C currently has none of.
+
+### Lane A answered, and closed that gap by making the call fallible (2026-08-18)
+
+`requests/a-c-getrandom-is-available.md`. The gap above is resolved in the
+strongest available way — **not** by surfacing a "seeded" flag for callers to
+check, but by making it impossible to read from an unseeded pool. Both halves
+of what lane C asked for now hold:
+
+| | |
+|---|---|
+| **Syscall** | `SYS_GETRANDOM` = 90, **no capability** — deliberately ungated |
+| Unpredictable to another process | ChaCha20, 256-bit key never leaving the kernel |
+| Different across two boots of one VM image | **now true; it was not before** |
+
+The second criterion is the one that needed work, and lane C's guess about
+*why* was right: the old pool was keyed from HPET reads, TSC jitter and APIC
+tick counts, every one of which correlates across two boots of an identical
+image. The kernel now separates **credited** entropy from merely *keyed* —
+only RDSEED/RDRAND and interrupt-arrival timing earn credit, clock reads earn
+none — and `getrandom` blocks until 256 bits are credited.
+
+There is no capability to hold. Lane C had offered to accept an ambient one;
+lane A declined on the grounds that a capability every process receives at
+spawn is ambient authority with extra bookkeeping, and that withholding
+randomness protects nothing — a process denied it does not stop needing
+unpredictable bytes, it just makes worse ones itself. Which is precisely what
+the sixteen hand-rolled LCGs in this lane were.
+
+**What this changes for lane C code: `getrandom` can now fail.** It waits at
+most 15 s, then returns an error surfacing as `EIO`. That is a new failure
+mode on a call that previously always succeeded.
+
+It should be unreachable here — credit accrues from the 100 Hz timer, and lane
+A measured the pool ready **330 ms after interrupts are enabled**, long before
+any GUI process exists. But the handling must still be right, and the two
+tiers in design-decisions §465 handle it in opposite directions **on purpose**:
+
+- **Secrets propagate the failure and never fall back.** Lane A asked for this
+  explicitly; `SecretSource::secret` already does it. A vault that refuses to
+  create a salt is recoverable; one created with a predictable salt is not,
+  and nothing later can detect it. Note the new failure is a *refusal*, not
+  weak bytes — the kernel never hands over material it cannot vouch for, so
+  there is no "check the strength afterwards" case to get wrong.
+- **Novelty falls back, and that stays correct.** `seeded_from_system` taking
+  its per-crate fallback on `EIO` is intended behaviour, not a hole. A game
+  that will not start is worse than a predictable one.
+
+**One caveat that would bite a call site that must not block.** On our native
+ABI the `GRND_*` flags are accepted by libc, validated, and then *discarded* —
+they never reach the kernel, because `posix/src/random.rs` reaches it through
+a two-argument stub. So `GRND_NONBLOCK` does not actually prevent blocking.
+Lane B is tracking the ABI fix
+(`requests/a-b-getrandom-now-waits-for-a-credited-pool.md`). Lane C has no
+such call site — every draw is at app startup or during a deliberate user
+action — so this is noted, not escalated. Lane A offered to prioritise the ABI
+change if one appears.
+
+**Nothing left to action.** The request asks lane C to drop the xorshift in
+`gui/credentials` and close this entry; both happened during the `randrange`
+merge, before the answer arrived. Only a historical comment at
+`gui/credentials/src/main.rs:43` still names it. C-Q5 ("do we write our own
+crypto, or port a vetted implementation") is untouched by this and still
+stands — an entropy source is not a crypto library.
 
 ## C-SHA-256-IS-IMPLEMENTED-ELEVEN-TIMES-IN-THIS-TREE (lane C, 2026-08-17)
 
@@ -34409,475 +34664,6 @@ with a controlled comparison.
     experiment is alternating runs of two commits, three each, comparing
     medians - not consecutive runs of successive commits.
 
-## TD-THE-TOP-BORDER-IS-DRAWN-OUTSIDE-THE-FRAME-INSETS (lane C, 2026-08-17)
-
-**In short:** the 1-pixel line the compositor draws around a window is drawn
-one pixel higher than the space the layout reserved for it. Nobody sees a
-problem, because the row it lands on is part of the window's drop shadow and
-is repainted anyway. But it means the code that *draws* the frame and the code
-that *measures* the frame disagree by one pixel, and the next person to trust
-the measurement will be wrong by one pixel too.
-
-`Window::frame_insets` returns `(top, side, bottom) = (TITLE_BAR_HEIGHT,
-BORDER_WIDTH, BORDER_WIDTH)`: a border down each side and along the bottom,
-and **no border above the title bar**. Every measurement derives from that —
-`frame_rect`, `outer_rect`, `title_bar_rect`, hit testing, damage tracking.
-
-`Compositor::render_border` (gui/compositor/src/lib.rs) does not. It strokes a
-box whose top edge is `BORDER_WIDTH` above `frame_rect`, so the frame is drawn
-one row taller than it is measured. That row falls inside `outer_rect` (which
-adds `SHADOW_SIZE` = 8 px of shadow beyond the frame) and inside
-`window_drawn_extent`, so it is repainted correctly and is inside the resize
-grab band — hence no visible symptom today.
-
-**Where:** `render_border` carries the discrepancy explicitly now, as a
-`Rect::new` that adds the row to `frame_rect` with a comment, rather than as
-open-coded constants that merely happened not to match. `frame_insets` is at
-`gui/compositor/src/lib.rs`; `nothing_a_window_draws_falls_outside_its_damage_extent`
-pins the containment that keeps it harmless.
-
-**Proper fix:** decide which is right and make both agree.
-- If the border above the title bar is wanted (it is what a real window frame
-  looks like), `frame_insets` should return `top = TITLE_BAR_HEIGHT +
-  BORDER_WIDTH` and `title_bar_rect` should start `BORDER_WIDTH` below the top
-  of the frame box. This shifts every framed window's title bar and the resize
-  grab bands by one pixel, and moves the boundary between "title bar" (drag to
-  move) and "top border" (drag to resize) — so it wants a look at the drag
-  tests, whose grab points are chosen relative to `TITLE_BAR_HEIGHT`.
-- If it is not wanted, `render_border` should stroke `frame_rect` unmodified
-  and the extra row disappears.
-
-Not urgent: nothing is visibly wrong and nothing is unsafe. Logged because a
-one-pixel disagreement between drawing and measurement is exactly the kind of
-thing that becomes a real bug the moment either side is touched.
-
-## C-THE-CREDENTIAL-STORE-ENCRYPTS-EVERY-SECRET-WITH-THE-SAME-KEYSTREAM (lane C, 2026-08-17)
-
-**In short:** the credential manager — the thing that holds the user's saved
-passwords — scrambles every secret in the vault with the *same* repeating
-pattern. Anyone who can read the vault file can recover its contents without
-ever learning the master password, by lining two entries up against each
-other and cancelling the pattern out. This is the single worst defect
-currently known in lane C's tree.
-
-**Where:** `gui/credentials/src/main.rs`, `encrypt` / `decrypt` /
-`generate_keystream`.
-
-`generate_keystream(key, len)` produces `SHA-256(key ‖ 0) ‖ SHA-256(key ‖ 1) ‖
-…`. It takes no nonce (a number used once, mixed in so that encrypting the
-same thing twice gives different output). So it is a pure function of the
-session key, and every credential in a vault is XORed with the identical
-keystream. XOR two ciphertexts together and the keystream cancels, leaving the
-two plaintexts XORed with each other — the classic "two-time pad", which is
-routinely solved by hand for text. No key recovery is needed and no master
-password is needed; read access to the stored ciphertexts is enough.
-
-The doc comment says "this is a demonstration cipher; production use would
-employ AES-256-GCM", which covers *weak* but not *broken*: a demonstration
-cipher is still expected to keep two records from decrypting each other.
-
-**Proper fix (does not need any new primitive):** give every encryption its own
-nonce and mix it into the keystream — `SHA-256(key ‖ nonce ‖ counter)` — then
-store the nonce beside the ciphertext. A per-record sequence number that is
-persisted and never reused under a given key is a sufficient nonce and needs
-no randomness, so this is fixable today with the SHA-256 already in the file.
-That turns the construction into SHA-256 used as a counter-mode PRF, which is
-a defensible stream cipher rather than a broken one.
-
-Still missing after that fix, and requiring things the tree does not yet have:
-authentication (the ciphertext can be flipped bit-for-bit undetected — wants an
-HMAC or a real AEAD) and a vetted AES-256-GCM. See
-`open-questions.md` → "Do we write our own cryptographic primitives?".
-
-**Resolved 2026-08-17, as described.** `encrypt` now takes a nonce and returns
-`nonce ‖ ciphertext`; `decrypt` reads the nonce back off the front and returns
-`Result`, because a blob shorter than the 8-byte nonce never came from
-`encrypt`. `generate_keystream(key, nonce, len)` is
-`SHA-256(key ‖ nonce ‖ counter)`. `CredentialStore` supplies nonces from
-`next_nonce`, a counter that only ever increases; `take_nonces(n)` hands out a
-contiguous base so a caller already holding `&mut credentials` (the re-encrypt
-loop in `set_master_password`) can still get fresh ones. Gaps are harmless —
-nonces must be unique, not contiguous.
-
-Regression test:
-`the_same_plaintext_twice_does_not_produce_the_same_ciphertext` asserts the
-*bodies* differ and not merely the nonce prefixes, plus
-`a_blob_too_short_to_hold_a_nonce_is_rejected_not_misread`.
-
-**One thing a persistence layer must not get wrong**, and there is no
-persistence layer yet: `next_nonce` has to round-trip to disk. A vault
-reloaded with the counter reset to zero re-issues nonces it has already used
-and reintroduces exactly this bug. The field carries a comment saying so.
-
-The authentication half is *not* fixed and remains open under C-Q5.
-
-## C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES (lane C, 2026-08-17)
-
-**In short:** the credential manager turns the user's master password into a
-key with a single pass of SHA-256, mixed with a fixed word that is compiled
-into the program and is therefore identical on every SlateOS machine. Both
-halves of that are wrong in the same direction: a single pass means an
-attacker can try billions of candidate passwords per second on a GPU, and a
-shared fixed word means one precomputed table cracks every user in the world
-rather than having to be rebuilt per user.
-
-**Where:** `gui/credentials/src/main.rs`, `derive_session_key` and the
-`KEY_DERIVATION_SALT` constant.
-
-```rust
-const KEY_DERIVATION_SALT: &str = "slateos_credential_salt";
-
-fn derive_session_key(master_password: &str) -> [u8; 32] {
-    let mut input = master_password.as_bytes().to_vec();
-    input.extend_from_slice(KEY_DERIVATION_SALT.as_bytes());
-    sha256(&input)
-}
-```
-
-A password-to-key function is supposed to be *deliberately slow* (key
-stretching) and *per-user distinct* (a random salt stored with the vault).
-This is neither. `apps/lockscreen` derives its stored hash the same way and
-has the same problem.
-
-**Proper fix:** iterate. Even a plain `for _ in 0..N { h = sha256(h ‖ pw) }`
-with N in the hundreds of thousands is an enormous improvement and needs
-nothing new — that is essentially PBKDF2's structure. The per-vault random
-salt needs a randomness source the crate does not have (see below), but a
-salt that merely varies per *installation* already defeats a shared table, so
-it should not wait for one. The end state wants a memory-hard KDF (scrypt or
-Argon2id), which is gated on the same open question as the cipher.
-
-**Half resolved 2026-08-17 — the stretching. The salt is still shared.**
-
-`derive_session_key(password, rounds)` now runs `rounds` iterations of
-`SHA-256(acc ‖ password ‖ salt)`. The password and salt are folded back in on
-*every* round rather than the accumulator merely being rehashed: a chain of
-the form `h = SHA-256(h)` is the same chain for every password, so an attacker
-could walk it once and test candidates against any point on it. Mixing the
-password in each round is what forces the full cost per guess.
-
-The count was picked by measurement, not by taste: one SHA-256 of a ~70-byte
-input on this machine is **1.278 µs release** (8.564 µs debug), so
-`DEFAULT_KDF_ROUNDS = 100_000` is ~130 ms per unlock.
-
-**A second defect had to be fixed for the first fix to be worth anything.**
-The store kept `master_password_hash = SHA-256(password)` to check unlock
-attempts against. An attacker holding the vault would have tested guesses
-against *that* — one SHA-256 each — and never called `derive_session_key` at
-all, so the stretching would have been decorative. The field is now
-`master_password_verifier`, `SHA-256(stretched key ‖ label)`, so a guess costs
-the full derivation. `IdentityVerifier::verify` had the identical bug on the
-re-verification path and is routed through the same value.
-Both comparisons use `constant_time_eq` rather than `==`, which returns early
-on the first differing byte and so leaks how many leading bytes matched.
-
-**Why the round count is stored rather than compiled in.** `kdf_rounds` is a
-field of `CredentialStore` (`with_kdf_rounds`, default `DEFAULT_KDF_ROUNDS`).
-The right number rises with hardware, and a vault written under the old number
-must keep opening after the default moves — it can only do that if it
-remembers what the old number was. Every real password-hashing format records
-its cost parameters beside the hash for this reason. **This too must
-round-trip through any persistence layer.** It also lets the test module run
-at 4 rounds instead of putting the suite in the minutes;
-`default_kdf_rounds_are_usable` exercises the shipped number once.
-
-**Still open:** the salt. `KEY_DERIVATION_SALT` is still a compile-time
-constant shared by every install, because a per-vault salt needs entropy that
-userspace cannot obtain — see the next entry and
-`requests/c-a-userspace-entropy-syscall.md`. `apps/lockscreen` still derives
-its stored hash with a single SHA-256 pass and has not been touched.
-
-## C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE (lane C, 2026-08-17)
-
-**In short:** nothing in lane C can obtain an unpredictable number. The
-credential manager's password *generator* — the feature whose entire job is
-producing something an attacker cannot guess — runs a 3-line xorshift
-generator seeded by a number its caller passes in, in practice a timestamp.
-An attacker who knows roughly when a password was generated can enumerate the
-possibilities.
-
-**Where:** `gui/credentials/src/main.rs`, `Xorshift64` and
-`generate_password(.., seed: u64)`.
-
-`Xorshift64` is a perfectly good *statistical* generator and a useless
-*cryptographic* one: its entire future output is determined by 64 bits of
-state, and recovering that state from output is trivial. Seeded from a
-second-resolution timestamp, the real entropy is closer to 20 bits.
-
-**Where the fix has to come from:** the kernel. A userspace CSPRNG needs a
-seed from an entropy pool the kernel maintains (RDRAND/RDSEED, interrupt
-timing, etc.), surfaced through a syscall. `kernel/src/crypto.rs` exists
-(lane A) but lane C has no interface to it. Filed as
-`requests/c-a-userspace-entropy-syscall.md`.
-
-Until then the honest thing is for `generate_password` to *say* it is not
-cryptographically strong rather than to look like it is, and for anything that
-needs a real nonce to use a persisted counter instead (see the keystream
-entry above).
-
-## C-SHA-256-IS-IMPLEMENTED-ELEVEN-TIMES-IN-THIS-TREE (lane C, 2026-08-17)
-
-**In short:** eleven separate copies of the same cryptographic hash function
-have been written by hand in this repository. Each one can be independently
-wrong, and each one has to be independently reviewed, tested and fixed. Some
-of them guard logging in and unlocking the screen.
-
-**Where** (found by `grep -rn "fn sha256" --include=*.rs`):
-
-| Copy | Lane | Shape |
-|---|---|---|
-| `kernel/src/crypto.rs` | A | one-shot |
-| `posix/src/sha2.rs` | B | one-shot, has the FIPS million-`a` vector |
-| `posix/src/crypt.rs` | B | via `sha2` |
-| `init/login/src/main.rs` | B | block compression + one-shot |
-| `userspace/coreutils/src/bin/sha256sum.rs` | B | one-shot |
-| `userspace/backup/src/main.rs` | B | streaming |
-| `kernel/src/oci.rs` | A | digest string |
-| `kernel/build.rs` | A | build-time |
-| `gui/credentials/src/main.rs` | **C** | one-shot |
-| `apps/lockscreen/src/main.rs` | **C** | one-shot |
-| `apps/backup/src/main.rs` | **C** | streaming `Sha256` struct |
-
-All three lane-C copies do carry the standard known-answer vectors (empty,
-`"abc"`, the 448-bit message), so none of them is presently *wrong*. That is
-luck holding, not a design.
-
-**Proper fix:** one implementation, one set of test vectors, shared. Lane C
-can extract its three into a small top-level crate alongside the existing
-`byteread` / `textfind` / `textfmt` utility crates and adopt it; lanes A and B
-have to opt in themselves, so the cross-lane half is a request rather than an
-edit. Note `kernel/` is `no_std`, so the shared crate must be `no_std` with an
-`alloc`-free one-shot API to be adoptable by all three lanes.
-
-### Correction and progress, 2026-08-17
-
-**It is twenty-six, not eleven.** The original count came from
-`grep "fn sha256"`, which misses every copy that names its entry point
-something else or exposes only a `Sha256` struct. Two greps are needed to see
-them all, and neither alone is sufficient:
-
-```
-grep -rln "0x6a09e667" --include=*.rs .   # the eight IV words
-grep -rln "fn sha256\|struct Sha256" --include=*.rs .
-```
-
-The union is 26 files. The original entry also missed one of lane C's own:
-**`apps/diskimager`** has a streaming copy, so lane C had four, not three.
-
-**Done.** `sha2/` now exists at the workspace root — `no_std`, no `alloc`, the
-four FIPS 180-4 vectors, a streaming form cross-checked against the one-shot
-one at every length up to three blocks and every split within each length, and
-a `benches/rate.rs` (commit `d8ad84f54`). `gui/credentials` is migrated
-(`eb6e77799`), which is also the first evidence for the claim that the copies
-cost something: it was **22% faster** afterwards (1.20 vs 1.54 µs/iter on a
-70-byte input, both measured in one process), because that copy allocated a
-`Vec` per call for the padded message. That matters concretely — the
-credential KDF runs 100 000 hashes per unlock.
-
-**Remaining, 25 copies.** Lane C's three: `apps/backup` (streaming +
-`sha256_bytes`/`sha256_hex`/`sha256_file`), `apps/diskimager` (streaming),
-`apps/lockscreen` (one-shot). Lanes A and B own the other 22 and must opt in
-themselves; requests are filed rather than edits made.
-
-**What consolidating does and does not buy.** It does not make the primitive
-vetted — a single unvetted SHA-256 is still unvetted, and whether this tree
-should be writing its own crypto at all is `open-questions.md` C-Q5. What it
-buys is that the answer has one place to land, that a mistake is caught once
-rather than needing to be caught 26 times, and — per the measurement above —
-that the duplication was costing performance as well as review budget.
-
-### Lane C is done, 2026-08-17
-
-All four of lane C's copies are gone. `gui/credentials` (`eb6e77799`),
-`apps/diskimager` (`65883cf92` — which was not a migration but a bug fix; see
-`C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256` below), and now
-`apps/backup` and `apps/lockscreen`. **22 copies remain, all in lanes A and B**
-— 20 in B, 3 in A, minus `posix/src/crypt.rs` which correctly delegates to
-`posix/src/sha2.rs` rather than carrying its own.
-
-The migrations were not neutral. Deleting the copies removed clippy warnings
-in bulk, because a hand-transcribed FIPS table is one long run of exactly the
-constructs the workspace lints forbid — `w[i - 15]`, `h[i] = h[i] + a`,
-`block_start + 64`:
-
-| Crate | warnings before | after |
-|---|---|---|
-| `apps/backup` | 368 | 266 |
-| `apps/lockscreen` | 85 | **11** |
-
-That is 176 warnings that were never going to be fixed in place, because
-fixing them means bounds-checking a loop whose bounds are the specification.
-It is worth stating as a general result: **an inlined copy of a published
-algorithm is a large, permanent lint-debt liability, and moving it into a
-crate that is written once against the vectors is the only way to discharge
-it.** The remaining `apps/**` lint debt is now dominated by ordinary
-application code, which is fixable.
-
-Two further findings from the audit, both recorded separately:
-
-- The mechanical check that found the disk-imager stub — extract every
-  8-hex-digit literal from a file and look for a contiguous run equal to the
-  64-word K table and the 8-word IV — also found the **same stub hashing
-  system passwords** in `userspace/login` and `userspace/chpasswd`. See
-  `C-THE-SAME-STUB-IS-THE-SYSTEM-PASSWORD-HASH` at the end of this file.
-- Five further lane-B copies have no known-answer vector at all
-  (`userspace/backup`, `pkg`, `rsync`, `ssh`, `useradm`), though all five do
-  carry the full constant tables. Listed in
-  `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
-
-
-## C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256 (lane C, 2026-08-17)
-
-**In short.** `apps/diskimager` offers to checksum an image with MD5, SHA-1 or
-SHA-256 and shows you a digest of exactly the right length. None of the three
-is the algorithm it claims. All three are the same made-up mixing function, so
-the "SHA-256" it prints for a downloaded `.iso` will never match the SHA-256
-the publisher printed — and its "verify after write" tick box is checking the
-disk against a number that means nothing outside this program.
-
-**Where.** `apps/diskimager/src/main.rs`, `HashState` (~lines 205-290).
-
-**What it actually computes.** `new()` seeds `state` with the genuine
-published initial values for whichever algorithm you picked — the real
-SHA-256 IV (`0x6a09e667, 0xbb67ae85, …`), the real MD5 and SHA-1 ones. That
-is the entire resemblance. `update()` then ignores all of it:
-
-```rust
-for (idx, &byte) in data.iter().enumerate() {
-    let slot = idx % 8;
-    if let Some(s) = self.state.get_mut(slot) {
-        *s = s.wrapping_mul(31).wrapping_add(byte as u64);
-    }
-}
-```
-
-That is eight interleaved `u64` polynomial accumulators — a Rabin-style
-rolling fingerprint with base 31 — and it is identical for all three
-algorithms. `finalize()` then stirs the eight words together and truncates the
-hex to 32, 40 or 64 characters depending on which name you asked for. The
-choice of algorithm affects **only the length of the output string** and the
-eight seed constants.
-
-**How it survived.** Two ways, both worth noting because they generalise.
-
-1. *The tests check shape, not value.* There are eight tests over `HashState`.
-   They assert the digest is 64 characters, that it is all hex digits, that
-   the same input twice gives the same output, and that two different inputs
-   give different outputs. Every one of those passes for `*s = s*31 + byte`.
-   Not one test compares against a known answer — and a known-answer vector is
-   the *only* test that can distinguish a hash from a plausible-looking
-   function, which is precisely why FIPS publishes them.
-
-2. *It has already been "fixed" once, at the wrong level.* There is a
-   nine-line comment in `finalize()` explaining that the previous version
-   emitted the raw state words and truncated, so that bytes landing in
-   discarded words produced identical digests — "a real collision" — and that
-   folding all eight words in fixes it. That diagnosis is correct and the fix
-   works. But it treats the stub as the thing to repair rather than the thing
-   to replace, which is the band-aid accumulation `CLAUDE.md` warns about: the
-   collision was a symptom, and the disease is that this is not a hash.
-
-**Impact.** Two distinct failures, one much worse than the other.
-
-- **Comparing against a published checksum is broken outright, and silently.**
-  This is the headline use of a disk imager: download an install image, paste
-  in the checksum from the download page, confirm it matches. It never will.
-  The user sees `Mismatch`, concludes their download is corrupt, and
-  re-downloads forever. Worse in the other direction: the Verify tab will
-  happily *display* a 64-character "SHA-256" that a user may copy and publish
-  as if it were one.
-- **Verify-after-write is weaker than it looks but not worthless.** It
-  compares the source against the written-back data using the same function on
-  both sides, so it is a self-consistency check, and a base-31 polynomial over
-  `u64` does catch random corruption with high probability. It will not catch
-  deliberate tampering, and it is not what the UI implies.
-
-**Severity.** High. It is a correctness bug in the feature the application
-exists for, it is invisible to the user (the output is well-formed and
-stable), and the tests are green.
-
-**Proper fix.** Not "write the missing rounds into `update()`" — delegate.
-`sha2/` already exists at the workspace root (`d8ad84f54`): `no_std`, no
-`alloc`, checked against all four FIPS 180-4 vectors. SHA-1 and MD5 need the
-same treatment — they are obsolete *for security* but a disk imager needs them
-precisely because publishers still post them, so they should be shared crates
-in the same shape, each with the known-answer vectors from FIPS 180-4 and RFC
-1321 respectively. Then `HashState` becomes a thin enum over three real
-implementations.
-
-**And add value-checking tests**, in `diskimager` as well as in the crates, so
-the next stub cannot pass. The minimum bar for any hash in this tree: the
-digest of the empty input, and the digest of `"abc"`. Both are published for
-all three algorithms.
-
-### FIXED, 2026-08-17 (`cf5ebb13f`, and the commit that follows it)
-
-Done as written above — delegated, not patched.
-
-`blockbuf`, `sha1` and `md5` now sit at the workspace root beside `sha2`.
-Three crates rather than two because SHA-1 and MD5 written standalone would
-have meant a third and fourth copy of Merkle–Damgård partial-block and padding
-logic, which is the half that actually hides bugs: a wrong compression
-function fails the first known-answer vector, whereas a wrong buffer only
-misbehaves in the seam between two `update` calls — so it passes every
-published vector, all of which arrive in a single call. `blockbuf` is that
-logic once, tested over every length up to three blocks at every possible
-split point. MD5's `T` table is generated from its definition
-`floor(2^32 · |sin(i+1)|)` rather than transcribed, which removes that error
-class rather than testing for it.
-
-`HashState` is now a three-variant enum over `md5::Md5` / `sha1::Sha1` /
-`sha2::Sha256`, and `diskimager` carries four new tests:
-
-| Test | What the stub would have failed |
-|---|---|
-| `hashes_match_their_published_vectors` | everything — six vectors, empty and `"abc"`, all three algorithms |
-| `each_algorithm_produces_its_own_length_and_value` | nothing; it guards the picker wiring, not the maths |
-| `splitting_the_input_does_not_change_the_digest` | nothing; it guards the *new* risk, that a file read in chunks hashes differently from a file read whole |
-| `finalize_is_repeatable` | nothing; the real hashers consume themselves on finalize, so `HashState` finalizes a clone |
-
-117 tests pass in `diskimager`; 26 tests and 5 doctests in the three crates.
-The crate's 29 remaining clippy warnings are pre-existing and unchanged —
-measured before and after, identical counts by lint — and are tracked
-separately under the `apps/**` half of the lint debt.
-
-**The generalisable lesson, restated because it is the only one that
-matters:** none of the eight original tests was wrong. They were all true of
-`state[i % 8] = state[i % 8] * 31 + byte`. Shape tests cannot fail on a stub,
-so a subsystem with only shape tests is untested no matter how many it has.
-
-## C-THE-SAME-STUB-IS-THE-SYSTEM-PASSWORD-HASH (found by lane C, owned by lane B, 2026-08-17)
-
-**In short.** The made-up mixing function that `apps/diskimager` was passing
-off as three checksums is also, byte for byte, the function `userspace/login`
-and `userspace/chpasswd` use to hash passwords into `/etc/shadow`. Two
-consequences, both reproduced: a password set with `passwd` cannot be used to
-log in at all, and the entries `chpasswd` writes are labelled `$5$` — the
-standard crypt(3) identifier for SHA-crypt — while containing something that
-is not SHA-crypt, not SHA-256, and not stretched by any number of rounds.
-
-**Not mine to fix.** `userspace/**` is lane B's. Filed in full, with the
-reproduction and the mechanical check that found it, as
-`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`. Logged here so
-it is not lost if that request is actioned and removed.
-
-**The short form of the fix**, which is lane B's call: `posix/src/crypt.rs` is
-already a correct and complete SHA-crypt — `$5$`/`$6$`/`$1$`, the `rounds=`
-field, the crypt base-64 alphabet, Drepper's published vectors, 29 tests —
-delegating its core to `posix/src/sha2.rs`. Three tools that read and write
-one file should be calling it instead of each hashing differently. The part
-with a genuine tradeoff is what to do with the entries already written in two
-wrong formats.
-
-**Why this is in lane C's tracker at all.** Because the two bugs are the same
-bug, and finding the second one cost nothing once the first was understood.
-The check is mechanical: extract every 8-hex-digit literal from a file that
-claims to implement a published algorithm, and look for a contiguous run
-matching the algorithm's published constant table. `chpasswd` and `login`
-carry the genuine SHA-256 IV and no K table at all — exactly the disk imager's
-shape. It is worth running over any transcribed algorithm in this tree,
-because it costs nothing and, unlike a test that checks the digest's shape, it
-cannot be satisfied by a plausible-looking function.
 ## A-ADHOC-QEMU-PROBES-LEAK-THE-EMULATOR-ABOUT-TWO-THIRDS-OF-THE-TIME (lane A, 2026-08-18) - **fixed by `scripts/qemu-probe.py`; read this before hand-rolling a probe**
 
 **In short:** the one-line trick everyone uses to ask QEMU "do you support this
@@ -35513,11 +35299,369 @@ nothing wrong with it.
 
 ### Still to do
 
-Five more hand-rolled generators remain in lane C and should move onto
-`guitk::rng` — none of them generate secrets, so this is tidying rather than
-security: `gui/desktop/src/power.rs` (three copies of the same xorshift in one
-file), `gui/desktop/src/wallpaper.rs` (an LCG), `apps/paint` (xorshift 13/17/5),
-`apps/netscan`, `apps/spades`.
+**Corrected 2026-08-18.** This section originally listed five generators and
+said "none of them generate secrets, so this is tidying rather than security."
+That was wrong on both counts. The survey behind it grepped for one xorshift
+constant and missed everything written differently — and one of the things it
+missed, `apps/credmanager`, generates credentials people store and use. See
+the entry below it.
+
+The lesson is worth keeping: a "have I found them all?" sweep that greps for
+the *implementation* finds only the copies that look like the one you started
+from. The sweep that found the rest looked for `wrapping_mul` with either LCG
+constant, for every shift triple, and for the word `seed` — and still turned
+up a generator in a *third* password generator that had been converted to a
+crate and so matched none of them.
+
+Converted since: `gui/desktop/src/power.rs`, `gui/desktop/src/wallpaper.rs`
+(the slideshow shuffle), `apps/paint`, `apps/netscan`, `apps/spades`,
+`apps/credmanager`.
+
+Still outstanding, none of which generate secrets:
+
+| Where | What |
+|---|---|
+| `gui/desktop/src/wallpaper.rs:758` | a second LCG, separate from the shuffle |
+| `gui/toolkit/src/listview.rs:427` | an LCG |
+| `apps/speedtest/src/main.rs:414,546` | an LCG, twice |
+| `apps/videoplayer/src/main.rs:1291` | an LCG |
+
+## [C] FIXED — the credential manager generated the same passwords for everyone (2026-08-18)
+
+**In short:** `apps/credmanager` — the app whose whole job is to make and keep
+strong passwords — built every password from a fixed starting number, `12345`,
+that was bumped by one each time you pressed Generate. The result was not
+random at all: the first password it ever made for you was the first it made
+for everyone who ever ran it, the second was the second, and so on. Anyone who
+had the program could work out the passwords it would produce. Meanwhile the
+meter beside the password said things like "94 bits of entropy", which is the
+strength of a password picked at random — a true statement about the *settings*
+and a false one about the password on screen, whose real strength was zero.
+
+This is the same defect as the `apps/passwordgen` entry above, found by the
+follow-up sweep that entry's "still to do" list should have done and didn't.
+It is worse in one respect: passwordgen makes a password you look at, while a
+credential manager makes one you *save and use*, so a bad password here is
+still protecting an account tomorrow.
+
+### What was wrong
+
+- `PasswordGenerator::new()` set `seed: 12345`. There was no other source of
+  randomness in the type.
+- `pseudo_random(bound, offset)` was not even a running generator — it was a
+  stateless integer hash of `seed + offset`. So the *n*th password was a pure
+  function of `n`, published in the source. No state to recover, nothing to
+  observe: you could compute the whole sequence from the repository.
+- It reduced with `% bound`, so characters early in each pool came up slightly
+  more often — the least of the problems here.
+- `entropy_bits()` reported `length x log2(pool_size)` regardless. That number
+  is a property of a password drawn uniformly at random; attached to this one
+  it was a false assurance shown in the UI.
+
+### The fix
+
+The same shape as `passwordgen`, which is the point — one pattern, so the next
+reviewer recognises it:
+
+- `CredRandom` with exactly two live variants, `System(Box<SystemRandom>)` and
+  `Unavailable`, plus a `#[cfg(test)]` `Seeded`. There is deliberately no
+  fallback between them: a fallback is how the original defect survives the
+  fix, and nobody can tell a predictable password from an unpredictable one by
+  looking at it.
+- `CredRandom::secret` checks health on both sides of a draw, so a kernel that
+  fails on a refill halfway through a password yields a refusal rather than a
+  password whose second half is zeroes.
+- `generate()` returns `Option<String>`. The three call sites now go through
+  one `regenerate_password` helper, which on refusal clears the password that
+  was showing and records the message — leaving the old one on screen beside
+  "cannot generate" reads as an offer to keep using it.
+- The refusal is rendered in red *where the password would be*. Left in the
+  "Click Generate to create a password" state it would read as "you have not
+  pressed the button yet", which is the wrong thing to tell someone whose
+  generator cannot generate.
+- The test module gained the house lint-allow block it never had, which is why
+  seven `expect_used` findings in it had been showing up as real ones.
+
+Nine tests: every mode refuses without entropy, two generators never agree,
+pressing Generate twice gives two different passwords, a refusal clears the
+displayed password, a success clears an earlier refusal, and the refusal
+reaches the screen.
+
+### Related, not yet fixed
+
+`gui/credentials/src/main.rs` has a *third* `generate_password`, taking the
+seed as a `u64` parameter. Nothing outside its own tests calls it yet, so no
+user has been given a password from it — but it is public API in a credentials
+crate, and the next caller to wire it up will pass it a clock or a counter.
+It should draw from the kernel and fail closed like the other two before it
+acquires a caller. Tracked as `C-GUI-CREDENTIALS-GENERATE-PASSWORD-TAKES-A-SEED`.
+**Fixed 2026-08-18 in `7b9a1bace`, still without a caller** — see the closing
+section of `C-THE-SHARED-RNG-CRATE-WAS-ITSELF-DUPLICATED`.
+
+`gui/credentials` also carries a comment saying "there is no source of
+unpredictable numbers in userspace yet", which is why
+`KEY_DERIVATION_SALT` is a constant every install shares. That statement is
+now out of date — `guitk::rng::SystemRandom` reaches the kernel CSPRNG through
+the posix `getrandom` symbol, which is the route this batch used. The
+per-vault salt in
+`C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES` is
+therefore unblocked. **Both comments are deleted and the salt is fixed as of
+`6771f575e`.**
+
+## C-THE-SHARED-RNG-CRATE-WAS-ITSELF-DUPLICATED (lane C, 2026-08-18) — FIXED
+
+Two crates existed to end hand-rolled random number generators, written at
+roughly the same time in different corners of lane C, neither aware of the
+other: `randrange` (14 consumers, all games, `no_std` and dependency-free, no
+entropy source) and `guitk::rng` (7 consumers, `RandomSource` + `SystemRandom`,
+inside the GUI toolkit). They used the same method name `below` for two
+different things — a `u64` bound in one, an index in the other.
+
+This was not a cosmetic overlap. `gui/credentials` is a headless service whose
+dependencies are `sha2` and `randrange`; the only wrapper for the kernel
+CSPRNG lived in a widget library it must not link. The entry above says its
+third `generate_password` "should draw from the kernel" — it could not, until
+the entropy source moved somewhere a program without a screen can reach it.
+
+Merged into `randrange` (see design-decisions.md §463): names follow the games,
+the trait and the entropy source follow the desktop, `guitk::rng` becomes
+`pub use randrange as rng;` so no call site changes meaning. The bounded
+reduction now uses Lemire's high-bit multiply *with* a rejection step, so the
+one code path is exactly uniform — it is what a password draws through now,
+not just a card shuffle. `SeededRng` drops `Copy`, because a generator that
+duplicates itself on a move-out gives two callers the same sequence silently.
+
+21 consumer crates converted; randrange 25 tests, all affected crates green.
+
+### The sweep missed an eighth generator, again
+
+`apps/pinball/src/main.rs` carried a private `struct Rng` — the literal
+copy-pasted LCG that `randrange`'s module docs dissect, reduced with
+`% bound` — and **two** earlier sweeps for hand-rolled generators did not find
+it. It surfaced only incidentally, while grepping for consumers during this
+merge.
+
+Two defects in it:
+
+- `Pinball::new()` seeded a fixed `42`, so every session's first table was
+  identical: the same multiball throw, every launch, forever. Nobody reported
+  it because a pinball table looks random the first time you see it.
+- `next_bounded` reduced with `%`, which on this LCG biases toward the low end
+  of the range. It was only ever called from tests, so the bias never reached
+  play — which is why it survived.
+
+Fixed: seeds from `SystemRandom`, falling back to a fixed seed rather than
+refusing to start (the spades precedent — a table may be predictable; a machine
+that will not start is the worse failure, and this is a loss of *variety*, not
+of confidentiality). `with_seed` became `with_rng` so a new table carries the
+old generator forward instead of reseeding one from the other's output. Its
+four generator tests were deleted and replaced with three that test what the
+*game* needs from randomness — chiefly that multiball throws its extra balls
+both ways across 40 seeds.
+
+**The lesson for the next sweep:** grepping for the *name* of a thing finds
+the copies that kept the name. Both misses here were crates that had renamed
+the struct or inlined the arithmetic. Grep for the constants instead — the
+multiplier `6364136223846793005` and its LCG siblings are far harder to
+disguise than the word `Rng`.
+
+### Both of those are now done (2026-08-18, `7b9a1bace` and `6771f575e`)
+
+`C-GUI-CREDENTIALS-GENERATE-PASSWORD-TAKES-A-SEED` and
+`C-THE-MASTER-PASSWORD-IS-HASHED-ONCE-WITH-A-SALT-EVERY-INSTALL-SHARES` were
+unblocked in the strongest sense — `gui/credentials` already depended on
+`randrange`, which now carries `SystemRandom` — and both are fixed:
+
+- **The seed parameter is gone.** `generate_password` draws from the kernel
+  and returns `Option<String>`, refusing rather than falling back. Fixed
+  before it ever acquired a caller, which was the point.
+- **`KEY_DERIVATION_SALT` is gone.** Every vault draws its own 16 bytes; see
+  the marked-up entry above and design-decisions §464.
+- Both stale "there is no source of unpredictable numbers in userspace yet"
+  comments are deleted, and `requests/c-a-userspace-entropy-syscall.md` is
+  marked **resolved** rather than deleted — it turns out the syscall it asked
+  for had existed the whole time, and that is worth keeping a record of. The
+  correction is written up under
+  `C-THERE-IS-NO-RANDOMNESS-SOURCE-FOR-USERSPACE`.
+
+**A third copy of the same wrapper appeared while fixing this**, which is the
+signal the top of this entry is about: `apps/passwordgen`, `apps/credmanager`
+and `gui/credentials` had each independently written the same fail-closed
+`secret()` guard. The *rule* moved into `randrange::SecretSource`; the
+`System`/`Seeded`/`Unavailable` enums stay in each consumer, because their
+`Seeded` variant is `#[cfg(test)]` and `cfg(test)` does not cross a crate
+boundary — a `Seeded` defined in `randrange` would be reachable from
+production code in every caller, which is the one thing those enums exist to
+prevent.
+
+### The constant grep, run immediately, found twenty more
+
+The list here originally read "four non-secret hand-rolled generators remain".
+That number came from the name-based sweeps. Running the constant-based grep
+this entry recommends — one command, thirty seconds — turned up **twenty**, in
+twenty-one files (one of which, `apps/breakout`, is a deliberate reproduction
+of the historical generator inside its own tests, and is not a defect).
+Tracked as `C-TWENTY-MORE-HAND-ROLLED-LCGS`.
+
+Fourteen carry a whole private `struct Lcg` / `struct Rng`, copy-pasted:
+`apps/{dots,game2048,hangman,life,lightsout,mahjong,match3,maze,memory,pipes,
+simon,sudoku,tetris,wordle}`. Four have the arithmetic inlined with no type at
+all — `apps/{flashcards,radio,speedtest,videoplayer}` — which is why a grep for
+`Rng` could never have found them. Two are in the toolkit and the desktop:
+`gui/toolkit/src/listview.rs:427` and `gui/desktop/src/wallpaper.rs:758` (a
+*second* LCG in that file, separate from the shuffle already fixed).
+
+Nearly all of them repeat pinball's *other* defect as well: `new()` seeds a
+literal `42` (or `123`, or `12345`), so every session of that game is the same
+session — the same maze, the same tetromino order, the same word. That is the
+more visible bug of the two, and it has been shipping in fourteen games.
+
+`% bound` appears in most of them and `(next() >> 33) as usize % max` in the
+rest — the same reduction `randrange`'s module docs exist to explain, in
+crates that were never told the crate exists.
+
+#### All fourteen struct-carrying crates are done (2026-08-18)
+
+Every crate that carried a private `struct Lcg` / `struct Rng` now uses
+`guitk::rng` (`= randrange`), seeds from the system with a per-crate fallback
+constant, and has tests for the hazard its own draw pattern was exposed to:
+`apps/{dots,game2048,hangman,life,lightsout,mahjong,match3,maze,memory,pipes,
+simon,sudoku,tetris,wordle}`. A constant grep across `apps/ gui/ net*/ pkg/`
+now returns only the inlined sites listed below plus `apps/breakout:2129`,
+which is the deliberate historical reproduction inside its own tests.
+
+**What the sweep actually found, measured rather than assumed.** Each rewrite
+was checked by putting the old reduction back into `randrange` and re-running
+the new tests against it, and the results were not uniform:
+
+| Crate | Draw pattern | Old reduction's effect |
+|---|---|---|
+| `apps/maze` | 4-element shuffle + 1 neighbour draw = 4 draws/step | **3 of 24** orderings, all ending on the same direction |
+| `apps/hangman` | 1–2 draws per round | free reveal ran a fixed 4-cycle at Medium |
+| `apps/tetris` | 7-element bag shuffle | 6 dead cells in the 7×7 piece/slot table |
+| `apps/sudoku` | 9-digit shuffle inside the solver | corner-digit histogram `[19,17,11,3,9,5,15,2,9]` where fair is 10 each |
+| `apps/mahjong` | 144-tile shuffle | **none measurable** — 143 draws at mostly odd bounds wash the counter out |
+| `apps/game2048`, `apps/pipes` | — | **none** — these copies shifted (`>> 33`) before reducing |
+
+The bottom two rows are the point of the whole entry rather than an
+embarrassment to it. Three of the sixteen copies were harmless, and there was
+no way to know *which* three without reading all sixteen and measuring each.
+The copy is the defect; a good copy is still a copy.
+
+Two lessons worth keeping, both learned by first writing a test that passed on
+broken code:
+
+1. **Sample along one generator's stream, never across fresh seeds.** A
+   low-bit defect is a counter *within* a stream; different seeds have
+   different low bits, so re-seeding between samples hides it completely. A
+   hangman test that sampled 200 freshly-seeded generators found zero missing
+   letters under the broken reduction.
+2. **Reproduce the caller's whole draw pattern, not just the shuffle.**
+   `apps/maze`'s shuffle in isolation reaches 12 of 24 orderings; add the one
+   extra neighbour draw the caller makes each step and it collapses to 3. A
+   test of the shuffle alone would have missed the bug entirely, which is how
+   it survived.
+
+Seeding is tested by asserting **which** seed, not that two games differ: a
+host `cargo test` has no SlateOS kernel, so `seed_from_system` takes the
+fallback and two fresh games *are* identical — exactly as they were under the
+old hardcoded `42`. A variety check therefore passes on the broken code and
+fails on the fix. Those tests are `#[cfg(not(unix))]` for that reason.
+
+~~**Still open**, all with the arithmetic inlined and no type at all — the ones
+a name-based grep could never find:~~
+
+- ~~`apps/flashcards:356` (`1_664_525` / `1_013_904_223`, so even the
+  constant grep recommended above misses it — a *third* set of constants)~~
+- ~~`apps/radio:553` (`1103515245` / `12345`)~~
+- ~~`apps/speedtest:414,546`~~
+- ~~`apps/videoplayer:1291,1295`~~
+- ~~`gui/toolkit/src/listview.rs:427`~~
+- ~~`gui/desktop/src/wallpaper.rs:758`~~
+
+#### CLOSED 2026-08-18 — and the inventory itself was the last defect
+
+All six inlined sites are converted (`5af5b1c9e`, `d9deeb3a4`, `55ef7b558`).
+A constant grep across `apps/ gui/ net*/ pkg/` now returns `apps/breakout:2129`
+— the deliberate historical reproduction inside its own tests — and two doc
+comments that name the old constants in order to explain what was removed.
+
+**The list above was wrong, and it was wrong for a structural reason.** It was
+assembled by grepping for `6364136223846793005`, exactly as the "lesson for the
+next sweep" three sections up recommends. That lesson was an improvement on
+grepping for the name `Rng`, and it is still what caught fourteen of the
+crates — but it inherits the same flaw one level down. **Keying an inventory on
+any token keys it on the copies that kept that token.** The entry even records
+its own counter-example without drawing the conclusion: flashcards is listed
+with a note that it uses a *third* set of constants and "even the constant grep
+recommended above misses it". It was in the list only because it had been found
+some other way.
+
+Two crates were missed entirely, and both were worse than any of the twenty
+counted:
+
+- **`apps/musicplayer`** — shuffle was `(idx * 7 + 3) % len`, which is not a
+  generator at all but an affine map, and its orbit is a fixed cycle. Measured
+  on a real album: **a 12-track album shuffled between exactly 2 of its
+  tracks**, and a 7-track list reached **1**. The visualiser was
+  `(t * 31 + i * 7) % 100` — a sliding staircase, not noise. The shuffle
+  branch also never consulted `repeat_mode`, so shuffle could never end.
+- **`apps/mixer`** — peak meters were `(id * 7 + tick * 13) % 100`: stream 1
+  read 20, 33, 46, 59, 72, 85, 98, 11, 24 — thirteen hundredths per tick,
+  period exactly 100, and every stream ran the same ramp offset by 7 per id.
+  Eight channels displayed eight copies of one climbing bar.
+
+Neither contains a single LCG constant, so no constant grep at any width would
+have found them. What found them was **grepping for the behaviour**: the
+comment phrases people write when they roll their own —
+`pseudo.rand|pseudo-rand|pseudorandom|simple random|fake random|deterministic
+shuffle|poor man's random|cheap random` — plus a broad `wrapping_mul` scan.
+Four lines of grep, and it found the two worst sites in the lane.
+
+**The lesson, superseding the one above:** an inventory keyed on a token
+measures how uniform the copying was, not how much of it there is. Grep for
+what the code *does* and for how a person *describes* doing it. Both misses
+here announced themselves in a comment.
+
+**And not all of it is even a generator.** Three distinct failure shapes turned
+up in this tail, none of them the low-bit LCG bias the entry was written about:
+
+| Shape | Example | What it actually is |
+|---|---|---|
+| Affine map | `(idx * 7 + 3) % len` | a fixed cycle; visits `len / gcd(7, len)` values |
+| Arithmetic ramp | `(t * 31 + i * 7) % 100` | a sawtooth with a known period |
+| Width mismatch | `(state >> 33) / u32::MAX` | 31 bits over a 32-bit maximum — a "fraction" that never reaches 0.5 |
+
+The third is the one to watch for, because it looks like arithmetic rather than
+randomness and reads as correct. It made **speedtest's simulated jitter
+one-sided**: `frac - 0.5` was always negative, so 0 of 20 latency probes landed
+above the base and 0 of 60 throughput steps above the target. A progress bar
+that only ever undershoots.
+
+**Also fixed while here**, each found by the same behaviour sweep rather than by
+any list: `apps/videoplayer`'s shuffle was a fixed permutation (1 distinct order
+over 10 rebuilds; only track 5 ever came first over 60 runs), and
+`gui/desktop`'s `populate_slideshow_paths` demanded its shuffle seed from a
+caller that did not exist yet — the same defect `random_wallpaper` in that file
+had already been fixed for, surviving because the two were read separately
+(`1003a4dae`).
+
+**Two tests in this tail passed on broken code and were caught only by the
+reintroduce-the-defect step**, which is the strongest argument for keeping that
+step mandatory:
+
+- `the_visualizer_is_not_an_arithmetic_ramp` first asked that bar-to-bar steps
+  "not all be equal" — but the ramp's modulo wrap supplies a second step value,
+  so it passed. Counting *distinct* steps bucketed to a hundredth fails it:
+  "bar heights take only 2 distinct steps -- a ramp, not a level".
+- `different_streams_have_independent_peak_levels` first asked for a spread of
+  differences between two meters — but the smoothing is asymmetric (attack 0.6,
+  decay 0.15), so a constant target-offset still yields a varying level-offset,
+  and it passed. Counting direction *disagreements* fails it: "the two meters
+  moved the same way on all but 18 of 120 ticks -- lockstep".
+
+Both near-misses are recorded in the comments above the tests that replaced
+them, so the next reader learns the shape rather than just the assertion.
 
 ---
 
@@ -35775,7 +35919,7 @@ existing configuration can newly be rejected.
 
 ---
 
-## A-GETRANDOM-VALIDATES-THE-GRND-FLAGS-THEN-THROWS-THEM-AWAY (lane A, 2026-08-18) — **open; needs an ABI change in lane B's tree first**
+## A-GETRANDOM-VALIDATES-THE-GRND-FLAGS-THEN-THROWS-THEM-AWAY (lane A, 2026-08-18) — **FIXED 2026-08-18; both steps landed**
 
 **What a user would see:** a program that explicitly asks `getrandom` *not* to
 block can be made to wait anyway — up to 15 seconds — and a program that says
@@ -35883,6 +36027,56 @@ Still open until lane A lands step 2: the kernel continues to ignore `arg2` on
 90, so `GRND_NONBLOCK` and `GRND_INSECURE` remain inert on the native path.
 What has changed is that nothing on our side would now discard the answer.
 
+### FIXED (appended 2026-08-18, lane A) — step 2 has landed; the entry is closed
+
+`kernel/src/syscall/handlers.rs::sys_getrandom` reads `args.arg2` as the
+`GRND_*` word, with the semantics syscall 318 already had:
+`GRND_NONBLOCK` ⇒ `WouldBlock` instead of waiting, `GRND_INSECURE` ⇒ skip the
+readiness gate, `GRND_RANDOM` ⇒ accepted no-op, `GRND_RANDOM | GRND_INSECURE`
+and any unknown bit ⇒ `InvalidArgument`. Combined with lane B's step 1, the
+full chain now works: a program that says "do not block" is not blocked, and a
+program that says "I accept weak bytes" can get them.
+
+**The `GRND_*` constants moved to `handlers.rs` and 318 now imports them.**
+They were declared twice — once per entry point — which is one declaration that
+can be edited alone. Two entry points disagreeing about the numeric value of a
+flag is a bug no test on either side can see, because each side would be
+self-consistent.
+
+Two deliberate choices worth keeping:
+
+- **Flags are screened before the zero-length early-out.** `getrandom(NULL, 0,
+  FLAG)` is the shape of a feature probe, and answering it with success for a
+  flag we do not implement is worse than answering `EINVAL` — the caller then
+  uses the flag believing it is honoured. Syscall 318 already ordered it this
+  way; the native path now matches.
+- **`is_ready()` is consulted before `GRND_NONBLOCK` is acted on**, so the flag
+  on an already-credited pool is an ordinary success. `GRND_NONBLOCK` means "do
+  not wait", not "do not serve me"; a handler that returned `EAGAIN`
+  unconditionally would be a plausible misreading and is excluded by test.
+
+**The test is the part to preserve.** `test_dispatch_getrandom_flags`
+(`kernel/src/syscall/dispatch.rs`) asserts `GRND_NONBLOCK` ⇒ **`WouldBlock`
+specifically**, not "some error". That battery runs before `rng::init`, so a
+handler that ignored the flag would *also* fail there — with `TimedOut`, from
+`wait_until_ready`'s "nothing is crediting this pool" early-out. A test written
+as "it errors" would have passed against the broken handler, which is a fair
+description of how this flag stayed inert for as long as it did. The two errnos
+are not interchangeable downstream either: libc maps `WouldBlock` to `EAGAIN`
+and pins `TimedOut` to `EIO`, and `EAGAIN` is the only one a `GRND_NONBLOCK`
+caller retries on.
+
+Replied to lane B as
+`requests/a-b-getrandom-kernel-now-reads-arg2-step-2-landed.md`, including a
+declined offer: lane B proposed splitting `TimedOut` out so it surfaces
+distinctly on `getrandom` rather than sharing `getentropy`'s `EIO`. Declined —
+`getentropy(3)` specifies only `EIO`/`EFAULT` and shares the path, and no caller
+can act differently on the distinction. **The cost, recorded so it is not
+invisible:** a timed-out `getrandom(buf, n, 0)` is indistinguishable at the
+errno from a genuine I/O failure, so a machine whose entropy is not accruing
+looks like a machine with a broken RNG. The kernel logs the difference where it
+happens; the errno does not carry it.
+
 ### A-RECLAIM-SPACE-CANNOT-FREE-A-LANE'S-OWN-TARGET — the rename probe is vetoed by an unattributed handle
 
 **Where:** `scripts/reclaim-space.py` step 3 ("*our own* `target/`"), via
@@ -35907,19 +36101,30 @@ time isolates it to exactly one:
 | `.rustc_info.json`, `CACHEDIR.TAG`, `debug`, `release`, `x86_64-unknown-none` | OK |
 | **`x86_64-pc-windows-gnu`** | **Access is denied** |
 
-That `debug` renames while `x86_64-pc-windows-gnu` does not is the informative
+> **RETRACTED — the two paragraphs below are wrong.** They are kept because
+> they were acted on, and a reader who finds only the correction would not know
+> why the wrong tool was reached for. See **"Correction"** at the end of this
+> entry. Do not use the conclusion they reach.
+
+~~That `debug` renames while `x86_64-pc-windows-gnu` does not is the informative
 part. An open file *inside* a directory blocks renaming every ancestor, so if
 the handle were on some file below `x86_64-pc-windows-gnu/debug/` then renaming
 `debug` would have failed too — it did not. The handle is therefore on the
 `x86_64-pc-windows-gnu` directory node itself, which is the signature of a
 process holding it as its **current working directory** rather than having a
-file open in it.
+file open in it.~~
 
-That also explains why it could not be attributed: a cwd is not an image path,
+~~That also explains why it could not be attributed: a cwd is not an image path,
 so `Get-Process | Where Path -like` finds nothing (checked — no process runs
 from under `target/`), and `D:\utils\handle.exe` is v3.2 and refuses to
 enumerate without administrator rights ("Initialization error: Make sure that
-you are an administrator"), which this session does not have.
+you are an administrator"), which this session does not have.~~
+
+The half that survives: `handle.exe` here really is v3.2 and really does refuse
+to enumerate without administrator rights ("Initialization error: Make sure
+that you are an administrator"), which this session does not have. That is what
+left the handle unattributed. The inference about *what kind* of handle it was
+does not follow — see below.
 
 **Why it matters.** Step 3 is the step that spends *this lane's* build output
 before any other lane's — the script's stated fairness rule. If it is
@@ -35934,17 +36139,529 @@ refusing to delete a directory the OS says is in use, which is the whole reason
 it renames instead of consulting timestamps. The bug, if any, is whatever holds
 the cwd.
 
-**Next step when it recurs:** run `handle.exe` (or Process Explorer's
-Find-Handle) from an elevated shell against `x86_64-pc-windows-gnu` and record
-the owning process. If it turns out to be a long-lived tool (rust-analyzer, a
-shell, an editor) the fix is on that side; if it is an orphaned test process,
-it is `scripts/run-timeout.py`'s job-object teardown that let one escape and
-that is the real bug. Until it is attributed, do not "fix" it by weakening the
-probe — a reclaim that deletes a directory something is using is far worse than
-one that frees less than it hoped.
+**Next step when it recurs:** run
+
+```
+python scripts/who-holds-dir.py target/x86_64-pc-windows-gnu
+```
+
+and record what it names. If it is a long-lived tool (rust-analyzer, a shell,
+an editor) the fix is on that side; if it is an orphaned test process, it is
+`scripts/run-timeout.py`'s job-object teardown that let one escape and that is
+the real bug. Read the exit status, not just the output: **2 means
+inconclusive** — no holder found, but some processes could not be inspected, so
+the directory has *not* been shown to be free. Only **1** is "really free".
+
+Until it is attributed, do not "fix" it by weakening the probe — a reclaim that
+deletes a directory something is using is far worse than one that frees less
+than it hoped.
 
 **Discovered:** 2026-08-18, while testing `boot-test.sh --reclaim-space`
 end-to-end.
+
+### Correction (2026-08-18, lane A) — the cwd conclusion was drawn from a misread table
+
+**In short:** the reasoning above concluded "a process is sitting in that
+directory" from the fact that a *different* directory called `debug` renamed
+fine. But the `debug` in that table is `target/debug` — a **sibling** of
+`target/x86_64-pc-windows-gnu`, not the `debug` *inside* it. A sibling
+renaming successfully says nothing whatsoever about what is held inside its
+neighbour, so the conclusion has no support. Worse, the ruled-out possibility
+is the *likely* one: a build directory's most probable blocker is a loaded
+`.dll` under `x86_64-pc-windows-gnu/debug/deps/`, and that is precisely the
+case the entry's own attribution attempt could not have seen.
+
+The table lists **children of `target/`**. Read it again with that in mind:
+every row is `target/<child>`. So the successful rename was `target/debug`,
+and the argument "an open file below `x86_64-pc-windows-gnu/debug/` would have
+blocked `debug` too" compares a directory to one that is not its ancestor. It
+would only hold if the table had listed the children of
+`target/x86_64-pc-windows-gnu`, which was never probed.
+
+**Four things make Windows refuse a directory rename, and all four raise the
+same `Access is denied`:**
+
+| cause | seen by `Get-Process ... Path -like`? |
+|---|---|
+| **an ordinary open file** inside it | **no** — the commonest case, and not a path property of the process object |
+| a running `.exe` whose image is inside it | yes — this is the only one it can see |
+| a **loaded `.dll`** inside it | **no** — a DLL is not the process's image path |
+| a process whose **cwd** is inside it | **no** — a cwd is not a path property of the process object at all |
+
+The entry checked with `Get-Process | Where Path -like`, saw nothing, and
+concluded the cause must be a cwd. In fact that check is blind to *three of the
+four* causes, so "it found nothing" was never evidence for any one of them over
+the others.
+
+Two candidates outrank the cwd it settled on. The first is an open file, which
+is simply the ordinary way a directory becomes un-renamable. The second is a
+loaded DLL: `target/x86_64-pc-windows-gnu/debug/deps/` is exactly where cargo
+puts proc-macro output and test-harness DLLs — loaded, mapped and
+un-renamable. Neither was excluded by anything that was actually run.
+
+There is a second, quieter defect in that check: `Get-Process` reports nothing
+for a process it cannot open, and it does so **silently**, so its empty result
+conflates "no process matches" with "I could not look at 174 of them".
+
+**What replaces it.** `scripts/who-holds-dir.py` (added 2026-08-18) tests all
+four causes, needs no elevation, and refuses to conflate those two answers:
+
+* Open files come from `NtQuerySystemInformation(SystemExtendedHandleInformation)`,
+  which lists every handle on the system for any caller. A handle is only a
+  number until it is named, and naming it means duplicating it here, which
+  needs `PROCESS_DUP_HANDLE` on the owner — granted for same-user processes.
+* Images and loaded modules come from `EnumProcessModulesEx(LIST_MODULES_ALL)`.
+* The cwd is read out of the target's PEB via `NtQueryInformationProcess` +
+  `ReadProcessMemory`, needing only
+  `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`.
+* Processes it cannot open are **counted and printed**, and exit status 2
+  ("inconclusive") is distinct from 1 ("really free"). Passing `--no-handles`
+  or `--no-modules` also forces 2, because a check that did not run cannot have
+  cleared anything.
+
+Every right it needs is granted for same-user processes, which is what makes
+`handle.exe`'s demand for administrator rights avoidable rather than merely
+inconvenient.
+
+**The open-file case was found by the tool failing to find it.** The first
+version tested only the three causes above. Given a two-line Python script
+holding one file open in a directory, the rename was refused — and the scan
+printed "no holder visible". That is the same false negative as the original
+investigation, reproduced in the replacement for it, and it is why the fourth
+cause is listed first in the table.
+
+Two things had to be got right to make that scan usable, both found by
+measurement rather than reasoning:
+
+* **`GetFileType`, not a granted-access heuristic, is what makes it wedge-proof.**
+  `NtQueryObject`'s name query blocks forever on a synchronous pipe with I/O
+  outstanding. Filtering on the classic hang-prone access mask let enough
+  through to stall a 16-thread pool at 349 of 558 processes. `GetFileType`
+  answers from the file object without touching the device, so it cannot block,
+  and only `FILE_TYPE_DISK` has a path on a volume — pipes and consoles are not
+  merely safe to skip, they are incapable of blocking a rename. Full scan
+  after the change: ~15s, no timeout.
+* **Kernel object addresses are zeroed for an unprivileged caller.** The
+  obvious optimisation — name each kernel object once and share the name among
+  every process holding it — is unavailable: measured here, 333 342 handles,
+  22 267 of them files, and exactly **one** distinct `Object` value across all
+  of them. Each handle must be named on its own.
+
+Verified on this machine: it names the exact file and pid for a deliberately
+held directory; it finds cwd holders in this worktree; and it finds image *and*
+module holders under `C:\Program Files\Git\usr\bin` — including `msys-2.0.dll`,
+a mapped DLL that no image-path filter could ever have surfaced, which is the
+blind spot that produced this correction.
+
+**`reclaim-space.py` now attributes its own veto.** `reclaim_dir` calls the
+scan on the rename-failure path, so `SKIP (in use)` no longer states a
+conclusion and discards the evidence:
+
+```
+  SKIP (in use)  target/veto-test  [Access is denied]
+    HELD BY pid 56736  D:\python314\python.exe
+        handle  D:\visual studio projects\os-lane-a\target\veto-test\inner\held.bin
+```
+
+That is the whole reason this entry went unresolved: the one moment the answer
+is obtainable is the moment the rename fails, and by the time anyone reads the
+log the holder has exited. It runs only on the veto path — the scan costs
+seconds and a veto is rare — and its failures are printed, never raised, since
+diagnostics attached to an already-decided veto must not be able to turn a
+partial reclaim into no reclaim at all.
+
+**The underlying question is still open.** This corrects the reasoning and
+supplies the tool; it does not say what was holding the directory that day.
+The condition has not recurred since, and nothing was diagnosed
+retrospectively — when it next appears, run the script above before forming a
+hypothesis.
+
+**Lesson worth carrying:** the original argument was a single deduction from a
+single observation, with no control. The observation was even real — `debug`
+did rename. What made it wrong was reading the row as a child when it was a
+sibling, and there was nothing in the argument's structure to catch that. The
+replacement tool then reproduced the same class of error one level up, by
+enumerating the causes it had thought of and calling the list complete; what
+caught *that* was a deliberate test with a known answer, not more thinking.
+Where a cheap discriminating check exists — here, probing the children of the
+*failing* directory rather than of its parent — run it instead of reasoning
+from the check you happen to have already run.
+
+## A-A-FRESH-CHECKOUT-CANNOT-BOOT-TEST-AND-NEITHER-FAILURE-NAMES-THE-MISSING-STEP (lane A, 2026-08-18)
+
+**Status: FIXED 2026-08-18 by lane A.** `boot-test.sh` now refuses before the
+build, names the missing *step*, and can provision it. See "What actually
+shipped" at the end of this entry — in particular the one place the prescribed
+fix was deliberately not followed, and the third exit code that turned out to be
+necessary.
+
+**Where:** `kernel/src/main.rs:6108-6112`, `kernel/src/proc/spawn.rs` (netstack,
+httpget, udpget), `kernel/src/container.rs` (hello), and
+`scripts/boot-test.sh:1418`.
+
+**Symptom.** `git worktree add` a detached checkout of this repository and run
+`./scripts/boot-test.sh`, and it cannot succeed, in two stages:
+
+1. `cargo build` fails with **15 `include_bytes!` errors**, all of the form
+   `couldn't read services/<name>/target/x86_64-unknown-none/release/<name>: No
+   such file or directory`. Six distinct binaries are embedded — `init`,
+   `hello`, `ticker`, `netstack`, `httpget`, `udpget` — from paths that are
+   `target/` directories and therefore gitignored.
+2. Supply those, and staging then fails with
+   `cp: cannot stat 'limine/BOOTX64.EFI': No such file or directory` —
+   `limine/` is a downloaded bootloader tree, also gitignored.
+
+**Why it is worth an entry.** Neither failure is wrong on its own terms; the
+defect is that **`boot-test.sh` builds neither prerequisite and reports both as
+raw file-not-found**, so the message names the missing *file* and never the
+missing *step*. A reader who did not build this tree by hand has no way to get
+from "couldn't read .../release/netstack" to "run `cargo build --release
+--target x86_64-unknown-none` in each of `services/*`", nor from the `cp`
+failure to "fetch limine". The knowledge lives only in the shell history of
+whoever set the tree up first.
+
+**How it was found.** Setting up a throwaway worktree (`os-bisect-a`) to bisect
+the SHA-256 slowdown against commits from May. Both failures cost a bisect step
+each before the cause was clear.
+
+**What the proper fix looks like.** `boot-test.sh` already has a preflight
+section (the free-space floor is in it). Add two checks there, in the same
+style — refuse *before* building, and name the remedy:
+
+- for each of the six embedded services, if the release binary is absent, print
+  the exact `cargo build` invocation that produces it, and offer to run them
+  (`--build-services`, matching the existing opt-in `--reclaim-space` shape:
+  the run that noticed should not silently do minutes of extra work);
+- for `limine/BOOTX64.EFI`, print the fetch command rather than letting `cp`
+  fail 1400 lines later, after a full workspace build has already been spent.
+
+The list of six should be derived, not hardcoded twice — `grep -o` over the
+`include_bytes!` paths in `kernel/src` is enough and cannot drift out of date
+the way a literal list would.
+
+**Workaround until then:** copy `services/*/target/x86_64-unknown-none/release/`
+and `limine/` from an already-working worktree. That is also the *better* thing
+to do when bisecting, for an unrelated reason: holding the service binaries
+fixed makes `kernel/` the only variable across the bisect.
+
+### What actually shipped
+
+`boot-test.sh` does **not** grow its own service loop and its own
+`--build-services` flag, as prescribed above. Between the entry being written
+and being acted on, `scripts/bootstrap-worktree.sh` had appeared, and it already
+provisions all three classes. Adding a second implementation of "which artifacts
+must exist" would have re-created, inside `boot-test.sh`, precisely the drift the
+last paragraph of the prescription complains about. So the preflight
+*delegates*: a new `check_prerequisites()` runs
+`bootstrap-worktree.sh --check` before the build and before the boot lock, and
+`--bootstrap` provisions and continues in one go (the opt-in shape the entry
+asked for, spelled the way `--reclaim-space` is).
+
+Four things were needed to make that delegation safe:
+
+**1. The list of six is derived, as prescribed.** `SERVICES=(init hello ticker
+netstack httpget udpget)` and its path-building `artifact_for` are gone,
+replaced by a `grep -o` over the `include_bytes!` paths in `kernel/src` feeding
+an associative array from service name to artifact path. A service embedded from
+two different paths is now an error rather than a coin flip, since provisioning
+one and leaving the other missing produces a tree that fails to build while the
+checker calls it ready.
+
+**2. A scan that finds nothing exits 2, not 0.** If the `grep` returns no
+embedded artifacts at all — the shape a future refactor of how services are
+embedded would produce — the script refuses instead of reporting "all
+prerequisites present". A checker whose whole job is to say what is missing must
+never answer "nothing" when what it means is "I could not tell".
+
+**3. "Cannot build" and "will quietly test less" are different exit codes.** The
+entry treats the prerequisites as one class; they are two. A missing service
+binary or a missing `limine/` stops the build or the staging — exit 1, refuse. A
+missing `rootfs.ext4` stops neither: the boot test runs, reports PASSED, and
+silently skips ~58 REAL-glibc Path-Z rungs. That is exit **3**, and `boot-test.sh`
+prints a warning and continues. Conflating them forces the caller to pick between
+refusing a run that would have been useful and accepting a green result that
+measured less than it claims — and `rootfs.ext4` needs WSL to build, so on this
+host the refusing branch would have fired constantly.
+
+**4. `--need=<classes>` scopes the question to what the run actually uses.**
+`boot-test.sh --no-build --no-stage` boots the already-staged ESP image: it
+compiles nothing and copies nothing, so absent service binaries and an absent
+`limine/` cannot affect it. An unconditional check would have refused that run —
+and a gate that blocks correct runs is a gate that gets switched off. The
+preflight therefore derives its scope from `NO_BUILD`/`NO_STAGE`.
+
+**Tests:** `scripts/test-bootstrap-worktree.py`, 37 checks over 13 fixture
+worktrees, running the real script (nothing stubbed). Two are the ones no
+hand-maintained list could pass: embed a service nobody has heard of, delete its
+binary, and require it to be reported `MISSING`. Run against
+`git show HEAD:scripts/bootstrap-worktree.sh` the suite produces 17 failures,
+so it is not vacuous. All four `check_prerequisites()` branches were exercised in
+throwaway worktrees rather than reasoned about, which caught a real bug: the
+first version only re-checked after `--bootstrap` if the provisioner exited 0,
+and the provisioner exits 1 whenever `rootfs.ext4` alone could not be built —
+so a run that had successfully provisioned limine and every service was still
+refused. The re-check is now unconditional, for the same reason
+`check_free_space` ignores `reclaim-space.py`'s exit status: a run that could not
+provision everything may well have provisioned everything that blocks a build.
+
+## A-A-4x-CRYPTO-"REGRESSION"-BISECTS-TO-A-COMMIT-THAT-ONLY-EDITS-audio_mixer.rs (lane A, 2026-08-18)
+
+**Status: the machine code did not change. Do NOT revert the commit this
+bisects to.** What is wrong is our confidence in the benchmark, not the kernel.
+
+### What was seen
+
+`bench/history.jsonl` shows `crypto_sha256_64B` sitting in a 1930-2560 ns band
+for 20 consecutive runs and then stepping to 8087/8083 ns — a clean step, not
+drift, and the second reading has a perfectly clean contamination canary
+(spread 0%, whole-suite drift -0.1%), so it is not host load.
+
+Rebuilding the last known-good commit `5666d38cb` from scratch in a fresh
+worktree on the same host, with the same staged service binaries and
+bootloader, reproduces the split:
+
+| benchmark | `5666d38cb` | HEAD `b2180939e` | ratio |
+|---|---|---|---|
+| `crypto_sha256_64B` | 7426 cy | 30048 cy | 4.05x |
+| `crypto_sha256_1KiB` | 55274 cy | 249860 cy | 4.52x |
+| `crypto_hmac_sha256` | 20058 cy | 77056 cy | 3.84x |
+
+### What it bisects to
+
+`git bisect run` over the 145-commit range, restricted with `-- kernel/` to the
+21 commits that touch guest code, threshold 15000 cycles (chosen in the empty
+band between the ~7-10k and ~28-30k populations — no measurement has ever
+landed near it):
+
+```
+GOOD 91a52df12: 9490    BAD  665fbb27b: 28184
+GOOD 80a1e70c1: 7180    GOOD 398d57d1c: 7324
+GOOD 0e54368e9: 7364
+665fbb27bd5773438c629798dd5d2e39df49c731 is the first bad commit
+```
+
+**`665fbb27b` is "kernel: take `mix_output`'s 12 KiB of scratch off the stack".
+It changes `kernel/src/audio_mixer.rs` and nothing else** — 77 insertions, 25
+deletions, one file. There is no causal path from the audio mixer to SHA-256.
+
+### Why it is not a code change
+
+`llvm-nm` on a pre-regression kernel and on HEAD gives, for every SHA-256
+symbol, **the same size and the same mangled hash** — `compress` is `0x26e`
+bytes with hash `h8234a763022d2833` in both, likewise `Sha256::update`
+(`0x14f`), `sha256` (`0xb6`) and `hmac_sha256` (`0x411`). Identical machine
+code, identical 64-byte input, ~4x slower, deterministic.
+
+The only thing that differs is the **address**:
+
+| symbol | good build | HEAD |
+|---|---|---|
+| `crypto::compress` | `…80b039f0` | `…80afce00` |
+| `crypto::sha256` | `…80afd1f0` | `…80af6600` |
+| `net::tcp::tcp_checksum_ip` | `…808b5be0` | `…808ae8c0` |
+
+a uniform shift of `0x6BF0` (27632 bytes).
+
+### The shape of the damage, across all 98 benchmarks
+
+Comparing the GOOD step (`398d57d1c`) against the BAD one (`665fbb27b`) — same
+host, same suite, adjacent commits:
+
+| ratio | benchmark | good -> bad |
+|---|---|---|
+| **12.48x** | `net_tcp_checksum_v6_1460b` | 5946 -> 74224 |
+| 3.85x | `crypto_sha256_64B` | 7324 -> 28184 |
+| 3.63x | `crypto_sha256_1KiB` | 54606 -> 198208 |
+| 3.18x | `crypto_hmac_sha256` | 19712 -> 62654 |
+| 2.46x | `vfs_write_16k` | 1434244 -> 3521676 |
+| … | … | … |
+| 0.78x | `crypto_poly1305_1KiB` | 24274 -> 18868 |
+| 0.75x | `ipc_channel_roundtrip` | 2714 -> 2028 |
+
+**Median ratio across all 98: 0.995.** Five benchmarks above 2x, none below
+0.5x, and several genuinely *faster*. This is not a machine that got slower —
+it is a handful of specific hot loops falling off a cliff while everything else
+is unmoved. The two worst are both tight streaming loops over a byte buffer,
+which is the signature of an address-indexed structure in the emulator
+(translation-block jump cache and/or the softmmu TLB, both direct-mapped on
+address bits) aliasing for those particular loops at those particular
+addresses.
+
+### Why it still matters even though it is not our bug
+
+- **Every crypto and checksum number in `bench/history.jsonl` is only
+  comparable within a build.** A 4x swing can be introduced by an unrelated
+  one-file commit, so the 10%-regression rule in `CLAUDE.md` cannot be applied
+  to these benchmarks as they stand: it will fire on noise and miss real
+  regressions hidden under a favourable relayout.
+- **It will keep flapping.** Nothing about `665fbb27b` is special; the next
+  commit that shifts `.text` can move it back or somewhere worse.
+- The effect is almost certainly **invisible on real hardware**, so it must not
+  be "fixed" in the kernel by contorting the crypto code.
+
+### Open: the mechanism, and what to do about the suite
+
+Being run down now with a `QEMU_EXTRA` knob added to `boot-test.sh` (identical
+binary, varied emulator) — see the next entry when it lands. The fix for the
+suite is likely one of: pin the hot benchmarks' buffers to a fixed alignment,
+report crypto throughput relative to an in-run reference loop rather than in
+absolute cycles, or mark these benchmarks as placement-sensitive and compare
+them only against same-build baselines.
+
+### RESOLVED as to cause (2026-08-18): placement, proven by a control that killed the first answer
+
+Three builds of the **same source**, differing only in how symbols are named
+and therefore in what order the linker gathers `.text`:
+
+| build | `crypto::compress` at | `crypto_sha256_64B` |
+|---|---|---|
+| HEAD, ordinary (legacy mangling) | `…80afce00` | **30048 cy** |
+| HEAD + `#[rustc_align(4096)]` on `compress` | `…80365000` | 7196 cy |
+| **HEAD, pristine, `RUSTC_BOOTSTRAP=1` only** | `…80364980` | **7188 cy** |
+
+The third row is the control, and it is the important one. The alignment
+attribute **did nothing**: pristine source built the same way is just as fast.
+What actually moved `compress` was `RUSTC_BOOTSTRAP=1` switching Rust's symbol
+mangling from legacy to v0 — mangled names become section names
+(`.text._RNv…`), section names drive link order, and `compress` landed
+somewhere else.
+
+**The near-miss is worth recording.** The aligned run restored all three
+benchmarks to baseline (7196/55676/19962 against 7426/55274/20058) and looked
+like a clean, causal fix. Reporting it would have shipped "align `compress` to
+4 KiB" as a remedy for something alignment has no part in. The only reason it
+was caught is that the mangling change was visible in `llvm-nm` output and was
+treated as a confound rather than a curiosity.
+
+### What is established
+
+- **No kernel code is at fault.** SHA-256's machine code is byte-identical
+  across every one of these builds; only `compress`'s address changes.
+- **The effect is one function's address.** `crypto_sha256_64B`, `_1KiB` and
+  `hmac_sha256` all route through `compress` and all three move together.
+  `crypto_sha512_64B` — near-identical code, same file, *different function* —
+  went 0.59x (faster) across the same boundary, and `poly1305`, `chacha20`,
+  `crc32`, `crc32c`, `ed25519` and `x25519` are all ~1.0x or faster.
+- **Any move is enough.** `…80365000` and `…80364980` are both fine; they are
+  not related by alignment, only by not being `…80afce00`.
+- **It is emulator-side.** `-accel tcg,tb-size=512` with a bit-identical binary
+  changed nothing (8053 ns vs 8087/8083), which rules out translation-buffer
+  flush thrash — the one hypothesis in this family a larger buffer would fix.
+  The remaining candidates are QEMU's address-indexed structures (the
+  direct-mapped TB jump cache, the softmmu TLB). Which one it is has **not**
+  been pinned down, and pinning it down needs QEMU source we do not have
+  checked out. It does not change what we should do.
+
+### What NOT to do
+
+- **Do not revert `665fbb27b`.** It is a good commit and is not the cause; it
+  merely shifted `.text` by 0x6BF0.
+- **Do not align, pad or reorder kernel code to chase this.** Any such fix is
+  luck, holds only until the next commit shifts `.text` again, and is
+  meaningless on real hardware where the effect almost certainly does not
+  exist.
+- **Do not switch the kernel to v0 mangling to "fix" it.** That is the same
+  luck wearing a respectable hat: it reshuffles every symbol and will land some
+  other hot function on the bad address eventually.
+
+### What WAS done about it (2026-08-18, commits df0403e6a and 60e75a32a)
+
+Nothing in the kernel — there is nothing there to fix. Both changes are to the
+measuring apparatus, and both target the same failure: this cost a multi-hour
+bisect because the history recorded *what* the numbers were and nothing about
+*where the code was*.
+
+1. **`hot_symbols` on every benchmark record.** `bench-history.py` now reads
+   the load address of `crypto::compress`, `crypto::sha512_compress` and
+   `net::tcp::tcp_checksum_ip` out of the measured ELF and stores them beside
+   the timings. A repeat of this becomes a one-line observation — the crypto
+   benchmarks jumped *and* `compress` moved in the same run — instead of a
+   bisect. The ELF is parsed directly rather than via `nm`/`objdump`, neither
+   of which is on PATH here by default; a diagnostic that silently records
+   nothing on a machine missing an optional tool is worse than none, because
+   its absence reads as "the addresses did not move". For the same reason the
+   field is *absent* when no ELF was offered but `{}` when one was offered and
+   yielded nothing.
+
+2. **`--experiment` / `BENCH_EXPERIMENT`, so probes stop poisoning baselines.**
+   The five runs above measure kernels no checkout reproduces — three at
+   ~8085 ns for `crypto_sha256_64B`, two at ~1936 for *identical source* under
+   a different mangling scheme, one under non-default QEMU flags. All five went
+   into the history unlabelled, and all five would have entered one 8-run
+   reference window, stretching that benchmark's outlier fence past 4x and
+   blinding the level-shift detector for it for the next eight runs. They are
+   now labelled with what each actually was; labelled records are kept in full
+   but excluded from `comparable_records`. `QEMU_EXTRA` implies the label
+   automatically, since that was the case that slipped through; a hand-modified
+   *guest* cannot be detected from the harness and must still be declared.
+
+**What is still open.** Which QEMU structure produces the effect (TB jump cache
+vs. softmmu TLB) is unknown and needs QEMU source we do not have checked out.
+It is recorded as unknown rather than guessed because the guess would be
+untestable here — and knowing the answer would not change either action above.
+
+### The apparatus was used in anger, and it worked (2026-08-18, `49f8e2b52`)
+
+**In short:** the very next commit to touch `crypto.rs` moved SHA-256 63-68%
+*faster*, and `hot_symbols` — added above for exactly this — answered why in one
+line instead of a bisect. It is placement again, not a speed-up.
+
+`ec93008ad`/`49f8e2b52` replaced the kernel's private SHA-256 with the shared
+`sha2` crate (a re-export, so the machine code is the same implementation).
+Lane C's request predicted a 22% gain from that crate's compression function;
+the reply to it (`requests/a-c-sha2-kernel-will-adopt-but-your-22pct-does-not-carry.md`)
+predicted **no gain**, and committed to checking the addresses before the code if
+the numbers moved. They moved. Here is the check.
+
+`compress` is a **crate-root** item in `sha2`, so adopting it moved the function
+from the middle of the kernel's own `.text` to a completely different part of the
+image — `…80afce00` → `…8119bb30`, **+0x69ED30 (6.6 MiB)**. That is the largest
+displacement this benchmark has ever seen, and the SHA-256 family landed back in
+its fast band:
+
+| commit | exp | sha256_64B | sha256_1KiB | **sha512_64B** | hmac_sha256 | chacha20_1KiB | poly1305_1KiB |
+|---|---|---|---|---|---|---|---|
+| `5666d38cb` | — | 2043 | 21170 | 3246 | 5542 | 12452 | 5280 |
+| `b2180939e` | tb-size control | 8087 | 67350 | 2664 | 20781 | 12068 | 5094 |
+| `b2180939e` | tb-size control (repeat) | 8083 | 67219 | 1908 | 20730 | 12056 | 5104 |
+| `780ab7be2` | tb-size=512 test arm | 8053 | 67084 | 1903 | 20695 | 12128 | 5079 |
+| `20b45a860` | `rustc_align(4096)` (confounded) | 1935 | 14971 | 1952 | 5367 | 12216 | 5209 |
+| `20b45a860` | mangling control | 1937 | 14995 | 1953 | 5406 | 12124 | 5162 |
+| `60e75a32a` | — | 7930 | 65754 | 1908 | 20768 | 12085 | 5128 |
+| **`49f8e2b52`** | **— (sha2 adopted)** | **2920** | **20865** | **1929** | **7601** | 12192 | 4985 |
+
+(`entries` — the per-iteration cycle counts, the quantity the bisect above used.)
+
+**SHA-256 is bimodal; the controls are not.** Across those eight runs
+`crypto_sha256_64B` is either ~1935-2920 or ~7930-8087, with nothing between,
+and `_1KiB` and `hmac_sha256` step in lockstep with it — all three route through
+`compress`. Meanwhile **`crypto_sha512_64B`, which was *not* migrated, sits at
+1903-1953 across every one of the same boundaries** (the 3246/2664 in the first
+two rows are the contaminated runs), and `chacha20`/`poly1305` are flat to ±3%.
+The `sha512_compress` address barely moved either (`…80af5580` → `…80af3570`).
+An unmigrated near-identical function in the same file, unmoved and unchanged, is
+as clean a control as this bench can offer.
+
+**So there is no 22%.** The crate's `compress` is not measurably faster than the
+one it replaced; the function merely landed on a better address. Had
+`hot_symbols` not been in the record, a −63% on three crypto benchmarks the same
+day a crypto crate was adopted is exactly the coincidence someone would have
+written up as a win.
+
+**One number is not claimed.** 2920 sits above the previous fast band's
+1935-2043, so it is tempting to read a residual cost. It is not read that way
+here: `crypto_sha256_64B` was flagged in this run's dispersion, and a single
+sample inside a bimodal, placement-sensitive benchmark cannot support a 1.4x
+claim in either direction. Likewise, a first pass that split all 70 records at a
+flat `<4500` cycles produced a headline "60.38x between the bands" — that figure
+is an artifact (SHA-512's own contaminated runs exceed 4500 and fall in the
+"slow" side), and it is recorded here only so nobody re-derives it and believes
+it. The defensible evidence is the eight-run table and the SHA-512 control,
+nothing wider.
+
+**Nothing was done to the kernel in response, per the rules above** — no
+alignment, no padding, no reordering. The numbers are in the history as measured,
+with the addresses beside them, which is the whole point.
 
 ## [B] FIXED — `csplit` wrote the wrong bytes into the wrong files, in four independent ways (2026-08-18)
 
@@ -36020,3 +36737,5346 @@ nothing else — every other case is identical — and costs the single-pass
 structure that makes the two cursors above tractable. Left as-is deliberately;
 if `csplit` ever needs to handle an input too large to hold in memory, that is
 the change that fixes both at once.
+
+## A-SYSROOT-STALENESS-GATE-IS-WEDGED-BY-GIT-TOUCHING-A-FILE-IT-WATCHES
+
+**Status:** FIXED 2026-08-18, the same day it was diagnosed. Lane A
+(`scripts/`, `toolchain/`). The diagnosis below is kept in full because the
+*reasoning* it corrects — "mtime answers an ordering question that a hash
+cannot" — is plausible enough that someone will propose it again. See
+"How it was fixed" at the end.
+
+**Symptom.** `scripts/create-ext4-rootfs.sh` and `scripts/ctest-fixtures.py`
+both refuse to proceed with
+
+```
+[ctest] ERROR: toolchain/sysroot/lib/libc.a is OLDER than 1 tracked source(s).
+[ctest]          newer: toolchain/build-sysroot.ps1
+```
+
+and the remedy they print — re-run `toolchain/build-sysroot.ps1` — **does not
+clear it.** The gate is unsatisfiable by its own instructions, which is worse
+than a gate that over-reports: the reader follows the advice, sees no change,
+and has no next move except `ALLOW_STALE_FIXTURES=1`, which disables a real
+check for an unrelated reason.
+
+**Why re-running does not help.** `build-sysroot.ps1` assembles the sysroot
+with `Copy-Item`, and PowerShell's `Copy-Item` **preserves the source file's
+timestamp**. So `libc.a`'s mtime is not the assembly time — it is the mtime of
+`target/…/libposix.a`, i.e. when cargo last *linked* it. If posix has not
+changed, cargo does not relink, the source mtime does not move, and the copy
+faithfully reproduces the old timestamp. `libc.a` can therefore never become
+newer than an input that was touched after the last real posix build.
+
+**What touches an input without changing it: git.** `checkout`, `merge` and
+`stash` all write mtimes. `sysroot_staleness()` watches `posix/src`,
+`posix/Cargo.toml`, `toolchain/stubs` and `toolchain/build-sysroot.ps1`; any
+git operation that writes one of those wedges the gate. This is not an edge
+case here — `CLAUDE.md` requires `git fetch origin && git merge origin/main` at
+the start of *every* task, and the three lanes merge constantly. It was
+triggered here by a plain `git checkout --` that restored a file to
+byte-identical content.
+
+**Why the current design chose mtime.** Deliberately, and the reasoning is in
+`scripts/ctest-fixtures.py` → `sysroot_staleness()`: *"mtime, not a hash,
+because the question is 'was this built after that was edited' — an ordering,
+which a content hash of a file the stamps do not track cannot answer."* That is
+correct as far as it goes. The hole is the premise that mtime records when a
+file was **edited**; it records when a file was **written**, and git writes
+files it has not edited.
+
+**The proper fix.** Give the sysroot the same treatment the ctest fixtures
+already got when this exact class of bug hit them (their stamps are at
+`version 2` for the same reason): have `toolchain/build-sysroot.ps1` write a
+`toolchain/sysroot/.sysroot.stamp` recording the SHA-256 of every input it was
+built from — the same four roots `sysroot_staleness()` walks — and have the
+checker compare **hashes against that stamp** instead of comparing mtimes. That
+answers the docstring's objection directly: the inputs stop being "files the
+stamps do not track". It also makes the gate satisfiable, because re-running
+the build script always rewrites the stamp. Keep the mtime comparison as a
+fallback for when the stamp is absent, exactly as the fixture gate now keeps it
+as a fallback for when python is absent.
+
+**Workaround used on 2026-08-18** (recorded so it is not mistaken for a fix):
+`touch -d <time before libc.a> toolchain/build-sysroot.ps1`, legitimate only
+because `git diff HEAD` proved the file byte-identical to the commit it was
+built from — i.e. the restored mtime asserts something true. Do not reach for
+`ALLOW_STALE_FIXTURES=1` instead; that suppresses the fixture content check too.
+
+**Related:** the sibling defect in the same run — the mtime gate `exit 1`ing
+before the content-stamp gate could run — *was* fixed, in the commit that adds
+this entry. This entry is the remaining half, one level up, in the check the
+fixtures' own stamps cannot reach.
+
+### How it was fixed
+
+As described above: the sysroot now carries a content stamp.
+
+- `toolchain/build-sysroot.ps1` calls `scripts/ctest-fixtures.py sysroot-stamp`
+  after assembling, writing `toolchain/sysroot/.sysroot.stamp` — the SHA-256 of
+  every file under the four input roots, text hashed with CRLF folded to LF per
+  the `version 2` rule the fixture stamps already use.
+- `sysroot_staleness()` returns `(mode, findings)`: hash drift when the stamp is
+  present, the old `find -newer` ordering when it is not, exactly as the fixture
+  gate falls back when python is absent. It reports which mode it used, so a
+  weaker answer never reads as the stronger one.
+- `scripts/create-ext4-rootfs.sh` no longer reimplements the scan; it shells out
+  to `ctest-fixtures.py sysroot-check` and keeps its `find` loop only for the
+  no-python path. The input list and the folding rule now exist once.
+
+**The gate is satisfiable now**, which was the actual complaint: the stamp is
+rewritten on every run of `build-sysroot.ps1` whether or not cargo relinked, so
+following the printed remedy always clears it.
+
+Three things worth keeping in mind:
+
+- **The stamp is gitignored, deliberately** (`/toolchain/sysroot/` already
+  covered it). Unlike the fixture stamps, which sit beside tracked ELFs and must
+  survive a fresh clone, this one describes *this machine's* `libc.a`. A tracked
+  copy would arrive in a checkout asserting a libc you have not built yet was
+  built from those sources — the precise false-green the stamp exists to
+  prevent. A missing stamp truthfully means "nobody has built the sysroot here".
+- **`sysroot-stamp` run by hand is a silencer.** It records the sources as they
+  are now and claims `libc.a` came from them, without verifying it — the same
+  hazard `ctest-fixtures.py stamp` carries for fixtures, and the reason both are
+  separate commands rather than something `check` does implicitly.
+- **`target/` is excluded from the input walk.** It holds the output of building
+  those sources, so including it would make the stamp self-referential and no
+  two consecutive runs could ever agree. The mtime scan this replaces had the
+  same exposure and got away with it only because nobody had run cargo inside
+  `toolchain/stubs`.
+
+**The workaround recorded above is no longer needed** and should not be
+repeated: `touch`ing an input to defeat the check now defeats nothing, because
+the check no longer looks at timestamps when a stamp exists.
+
+---
+
+### [A] PREDICTION P22 — the positional model has never been shown to predict anything
+
+**Registered 2026-08-18, before the discriminating run exists.**
+
+> **Renumbered from P21 on 2026-08-18, the day after it was registered.** P21
+> was already taken by "the no-op path translation should stop allocating"
+> (above, since graded), so for one day two unrelated predictions shared an
+> identifier — including in `design-decisions.md` §229 and in the scripts that
+> implement this experiment. An ambiguous identifier on a *prediction* is worse
+> than on most things: the whole point of registering one in advance is that a
+> later reader can check what was claimed before the evidence arrived, and they
+> cannot do that if the name resolves to two different claims. The graded P21
+> keeps its number because it is settled and cross-referenced from a dozen
+> places; this one, being a day old, moved.
+
+`scripts/bench-history.py` now converts the canary's positional trace into a
+per-benchmark factor and prints it beside the benchmarks that ran in a disturbed
+stretch (design-decisions.md §229). Every property asserted for that model so far
+is a property of its *arithmetic*, proved by unit tests against synthetic traces.
+Not one is a property of the machine. By this file's own maxim — a detector that
+has never been shown to fire on a known stimulus is not yet a detector — the
+model is at the same stage the canary itself was at before P20 graded.
+
+The stimulus exists and is already scripted. `scripts/canary-load-test.sh N`
+starts N CPU spinners once `Booting QEMU` appears, so load lands on the
+measurement window. What it has never done is start them *late* — the load has
+always covered the whole suite, which is precisely the uniform case this model is
+designed to contribute nothing to.
+
+- **P22(a)** — load applied to an *interior window* of the suite will produce
+  canary factors above 1.0 confined to that window and to the one sampling
+  interval either side of it. *Falsified if the flagged positions are spread
+  across the whole suite*, which would mean the factor tracks something other
+  than where the load was.
+- **P22(b)** — the benchmarks the model flags will be inflated relative to their
+  own historical medians, and the ones it does not flag will not. This is the
+  claim a *correction* would rest on, and it is the one most likely to fail:
+  the canary times a memory access, so a branch-bound benchmark may sit inside a
+  flagged stretch and be barely affected. *Falsified if flagged and unflagged
+  benchmarks are inflated by indistinguishable amounts.*
+- **P22(c)** — the ratio between a benchmark's inflation and its canary factor
+  will vary systematically with what the benchmark does, memory-bound ones
+  tracking closest. *Falsified if the ratio is flat across benchmark kinds*,
+  which would remove the second of the two objections in §229 to correcting
+  automatically.
+
+**What each outcome licenses.** P22(a) alone establishes attribution — the model
+can say *where*, which is all the printed line currently claims. P22(a)+(b)
+together are what would justify applying the factor to the recorded value;
+without (b) a correction is arithmetic on an unvalidated coupling. (c) decides
+whether one factor per position is enough or whether the correction would need a
+per-benchmark sensitivity, which nothing currently measures.
+
+**To run it (2026-08-18: the missing piece now exists).** The entry above
+recorded that `canary-load-test.sh` could only start its spinners at `Booting
+QEMU`, so every disturbance covered the whole suite and (a) could not be tested.
+Both halves of that gap are now closed:
+
+```
+scripts/canary-load-test.sh 6 --load-at=crypto_x25519 --load-until=http_mime_type
+```
+
+- **Placing the load.** `--load-at`/`--load-until` follow the growing serial log
+  for the result line the kernel prints when a named benchmark finishes, and
+  start/stop the spinners there. The trigger is a benchmark *name* rather than a
+  wall-clock delay on purpose: a delay would have to be tuned against a suite
+  whose length moves with the host, and it would leave the experiment's own
+  ground truth — which positions were loaded — as an estimate. Estimating the
+  ground truth of an experiment about positions defeats the experiment.
+- **Grading it.** `scripts/grade-positional.py` reads the completed run's SCORE
+  lines to establish the loaded positions exactly, then scores the model three
+  ways: sensitivity over the loaded window, localisation over the window widened
+  by the sampling interval, and — the number that actually discriminates — the
+  false-positive rate over the remainder, which the disturbance provably could
+  not reach. Sensitivity alone cannot separate a working model from one that
+  flags everything; only the clean region can, which is why the stimulus has to
+  be an interior window rather than a suffix.
+- **The grader can return a negative.** All five of its verdicts (SUPPORTED,
+  blind, not-localised, misplaced, ungraded) have tests that produce them, and
+  each was confirmed reachable by mutating the grader and watching exactly the
+  intended test fail. A grader that could only say SUPPORTED would make this
+  prediction unfalsifiable, which is the failure this entry exists to avoid.
+
+Two caveats that must survive to whoever runs it. `scripts/test-grade-positional.py`
+passing is **not** evidence for P22 — its end-to-end case is a synthetic log whose
+trace was written by hand to be the right answer. And a window near either end of
+the suite grades as UNGRADED rather than SUPPORTED, because once widened it leaves
+no clean region and would pass whatever the model did.
+
+**Until P22 grades**, treat the attribution line as a *hypothesis about which
+benchmarks to re-run*, not as evidence about any of them, and do not build a
+correction on it. The line's own printed caveat says the same thing, which is
+deliberate: the caveat has to survive being read by someone who never opens this
+file.
+
+---
+
+### [A] RESULT P22, first attempt — VOID: the stimulus never landed where the label said — 2026-08-18
+
+**In short:** we deliberately slowed the computer down during a known stretch of
+the benchmark suite, to see whether the drift model would point at that stretch.
+The tool that was supposed to apply the slowdown applied it too late and left it
+on too long, so the stretch we *labelled* as slowed was in fact untouched and a
+later stretch we labelled clean was the one that suffered. The grader, which
+took the label on trust, then reported that the model had looked in the wrong
+place — when in fact the model had pointed straight at the real disturbance.
+**This run grades nothing about P22(a) and must not be cited as evidence against
+it.** It does carry real evidence for P22(b), which does not depend on the label.
+
+Command, for the record:
+
+```
+scripts/canary-load-test.sh 6 --load-at=cp_try_wait_empty --load-until=net_veth_recv
+```
+
+Serial log preserved at `build/p22-loaded-serial.txt`, boot log at
+`build/p22-loaded-boot.log`. Both are kept because the run's *timings* are
+sound — it is only the label on them that is wrong, and the timings are what the
+P22(b) finding below rests on.
+
+#### What was claimed, and what actually happened
+
+The label said positions 30–55. Measured afterwards against the previous clean
+run — from the benchmark timings themselves, which are independent of both the
+canary (the instrument under test) and the load script (the claim under test):
+
+| region | positions | n | best-case | mean | |
+|---|---|---|---|---|---|
+| before the window | 0–29 | 30 | ×0.97 | ×0.88 | clean by construction |
+| **the labelled window** | 30–55 | 26 | **×0.99** | **×1.12** | **not disturbed** |
+| beyond the window's reach | 64–85 | 22 | **×1.40** | **×2.30** | **this is where the load went** |
+
+The load did not arrive in the window at all, and it was still running two
+sampling intervals past the point it was supposed to have been removed.
+
+#### Why — and the reason is arithmetic, not carelessness
+
+The whole 86-benchmark suite is a **~6 s tail of a ~131 s boot**, occupying
+about 350 of the run's 27,847 serial lines. A 26-benchmark interior window is
+therefore roughly **two seconds** long. Against that:
+
+- the bash follower polled with `sleep 1`, so the trigger was noticed up to a
+  second late — half the window, gone before anything started;
+- the load was then six `python -c` spin loops started as **new processes**
+  under MSYS, each of which is a fresh interpreter startup, so the first spinner
+  reached its loop later still;
+- and the release at `--load-until` paid the same poll latency again at the far
+  end, by which time the suite had moved on.
+
+Net effect: the load switched on after the labelled window had largely passed
+and switched off well into the region labelled clean. Nothing in the script was
+wrong in the sense of doing something other than it said; the costs it paid were
+simply larger than the thing it was measuring. That is the general shape of the
+error worth remembering — **a controller whose latency is comparable to the
+window it controls does not control that window.**
+
+#### The second failure, which is the dangerous one
+
+The grader took `--load-at`/`--load-until` as ground truth. Every flag the model
+raised in the escaped region was therefore counted as a **false positive**, and
+the run was reported `FAILED (misplaced)` — 22 of 44 "provably-clean" benchmarks
+flagged. Those 22 flags were the model **correctly reporting a real
+disturbance** that the run's own label denied.
+
+A grader that can convict a model for being right is worse than no grader. The
+general rule, which cost a whole run to learn and is now written at the top of
+`scripts/grade-positional.py`:
+
+> You cannot grade "did the model find the disturbance" until you have
+> established "there was a disturbance to find."
+
+#### What was changed before re-running (commit `2916a3d2f`)
+
+- **`scripts/canary-load.py`** replaces the bash follower. Spinners are spawned
+  *before* QEMU boots and park on a semaphore, so firing the load is a kernel
+  wakeup rather than six interpreter startups; the log is tailed in-process at
+  0.1 s; and a JSON record states what the controller actually did. The spinners
+  watch their own parent and exit if it dies, because an MSYS `kill` of a native
+  Windows process is `TerminateProcess` and runs no handler — the record is
+  written by asking the controller to stop via a file, never by signalling it.
+- **`scripts/grade-positional.py`** now measures the stimulus before it grades
+  the model, and returns `UNGRADED` — whatever the model did — unless both:
+  the labelled window ran measurably slower than the run's own untouched prefix
+  (*the load reached it*), and the region beyond the load's reach did not
+  (*the load stayed put*). Re-run against the void log above, it now says
+  `UNGRADED — the stimulus never reached the window`, and prints all three
+  regions so the reason is visible rather than inferred.
+- **The thresholds came out of the history, not out of a principle.** The first
+  draft reused the model's own 10% reporting threshold, which is *below the
+  instrument's noise floor*: across the 60 clean release runs on this host, 38%
+  of benchmarks move ≥10% on the mean from one run to the next. Requiring both
+  the best-case median (≥1.15) and the mean median (≥1.30) to fire costs **1
+  false positive in 236 clean region-pairs**, against a real disturbance that
+  measured 1.40 and 2.30. `scripts/test-grade-positional.py` re-derives that
+  rate from the real `bench/history.jsonl` on every run and fails if it drifts
+  above 5%, so a suite that gets noisier cannot quietly turn the gate back into
+  a rubber stamp.
+- **The baseline is the single previous clean run**, not a median of eight. An
+  8-run window spans eight commits of kernel changes, and those are not spread
+  evenly over the suite, so different *regions* acquire different apparent
+  drifts: it put the untouched prefix at ×0.70 where the previous run put it at
+  ×0.88 — an error larger than the disturbance being measured.
+
+#### The one real finding: evidence for P22(b)
+
+P22(b) — *"the benchmarks the model flags will be inflated relative to their own
+historical medians, and the ones it does not flag will not"* — makes **no
+reference to where the load was applied**, so the broken label does not touch
+it. On this run:
+
+| | n | best-case | mean |
+|---|---|---|---|
+| flagged by the model | 34 | ×1.31 | ×1.84 |
+| not flagged | 52 | ×0.97 | ×0.92 |
+
+That is a clean separation, and it is the first evidence of any kind that the
+model's flags correspond to benchmarks that really did run slowly.
+
+**Three limits on how far it goes**, all of which must survive with the number:
+
+1. **It is one observation, not 34.** The flagged benchmarks form a single
+   contiguous stretch at the end of the suite, because the load was one
+   contiguous stretch. "The model flagged the slow region" and "the model
+   flagged 34 benchmarks that were slow" are the same fact counted twice.
+2. **The magnitude does not track.** Correlating each benchmark's canary factor
+   against its measured inflation gives Pearson r = **+0.30** on the best case
+   and **+0.03** on the mean. The model's *binary* judgement carries the signal;
+   the size of the factor it prints carries almost none. That bears directly on
+   P22(c) and on §229's second objection to correcting automatically — a
+   correction multiplies by the factor, and the factor is what does not
+   correlate.
+3. **It says nothing about P22(a)**, which is the attribution claim the printed
+   line actually makes, and which needs a window whose ground truth is sound.
+
+#### Status
+
+- **P22(a): UNGRADED.** Re-run required, with the fixed stimulus.
+- **P22(b): supported by one run, weakly** — see the three limits above.
+- **P22(c): refuted-leaning.** r = +0.03 on the mean is not a ratio varying
+  systematically with benchmark kind; it is a ratio carrying no information.
+  Not recorded as a result because it was measured on a run whose stimulus was
+  uncontrolled, and it deserves a run where the disturbance is known.
+
+**The standing advice does not change**: treat the attribution line as a
+hypothesis about which benchmarks to re-run, not as evidence about any of them,
+and do not build a correction on it.
+
+
+---
+
+### [A] RESULT P22, second attempt — VOID: the window had no right-hand edge — 2026-08-18
+
+**In short:** the experiment was run again, with the stimulus-measuring gate
+that the first attempt's failure produced. It is void as well, for a different
+and more embarrassing reason: the benchmark name given as the *end* of the load
+window does not exist as far as the load controller is concerned, so the load
+switched on where it was told and then never switched off. The label said
+"positions 61-73". What actually happened was "position 61 to the end of the
+boot". Nothing about the drift model can be concluded from it, and — this is
+the point of writing it down — the benchmark numbers looked *good*.
+
+#### What happened
+
+The run was launched as:
+
+    ./scripts/canary-load-test.sh --bench         --load-at=crypto_sha256_1KiB --load-until=vfs_throughput_16k_write
+
+`vfs_throughput_16k_write` is a real benchmark. It is on the scorecard, it is
+in `bench/history.jsonl`, and `grade-positional.py` places a window with it
+without complaint. It is also a name the load controller can never see.
+
+The kernel prints two different things under two different names:
+
+| | printed when | name used | who reads it |
+|---|---|---|---|
+| live result line | as each benchmark finishes | `vfs_write_16k` | `canary-load.py`, live, to time the load |
+| `SCORE` line | after the whole suite | `vfs_throughput_16k_write` | `bench-history.py`, `grade-positional.py` |
+
+They agree for 59 of the 86 scored benchmarks and disagree for 27. `--at` and
+`--until` match the *live* line, because that is the only one that exists while
+the suite is still running. A human choosing a window reads the *scorecard*,
+because that is what the positions are numbered against. So the natural way to
+pick a window bound produces a name that cannot work, and nothing said so.
+
+The controller waited for a `vfs_throughput_16k_write` line that was never going
+to come, held the load until the harness stopped it, and exited **0**. Its
+record said `outcome: stopped`, `released: false` — the fault was written down
+and nothing looked at it.
+
+#### Why this run must be discarded even though it looks good
+
+Graded against the label, the model did well:
+
+- 13 of 13 benchmarks in the labelled window were flagged;
+- 27 of 30 flags were within reach of the labelled window;
+- 3 false positives, and they are adjacent (positions 49/50/51).
+
+The measured-stimulus gate refused it anyway, and was right to: the window's
+best-case ratio was ×1.07 against a 1.15 threshold. But the *reason* it printed
+— "the stimulus never reached the window" — was a true sentence pointing at the
+wrong fault. A reader would have gone looking for a load that was too weak or
+mistimed. The load was neither. It was unbounded.
+
+That is the general lesson, and it is the same one the first attempt taught in a
+different costume: **a run that cannot answer the question must say so for the
+right reason, or the next person debugs the wrong thing.**
+
+#### The part that is still unexplained
+
+The load ran to the end of the boot. Positions 81-85 should therefore have been
+the *most* disturbed benchmarks in the run. They measured clean — best-case
+×1.09, ×1.02, ×1.03, ×1.00, ×0.72 — and the in-kernel canary read 5.16 at
+sample 80, its undisturbed value. The spinners were checked and did not
+self-terminate (their deadline is `started + 1800 + 120`).
+
+So either the load stopped being effective before the suite ended, or the
+benchmarks at the end of the suite are insensitive to host CPU load. Both are
+possible and they have opposite implications for every future run. The serial
+log carries no timestamps, so nothing recorded in this run can distinguish them.
+
+This is the specific question the **host-side canary** added afterwards exists
+to answer: a thread on the host re-times a fixed unit of work every 50ms and
+timestamps each sample, so the next run can say when the machine actually became
+busy and when it stopped being busy, independently of anything the kernel
+reports. Until that has run, treat "the load was applied" and "the machine was
+slow" as two separate claims with no evidence connecting them.
+
+#### One more thing this run showed: the `mean` is not a usable per-benchmark statistic
+
+On the *undisturbed* prefix of this run, per-benchmark mean ratios ranged from
+×0.06 to ×34.10, while best-case ratios over the same benchmarks stayed within
+×0.9-×1.1. A single preemption inside one iteration of a 2000-iteration
+benchmark moves the mean by an order of magnitude; the best case only moves when
+every iteration was slowed.
+
+This is why the stimulus gate's two statistics are not equal partners, and
+§230 has been corrected to say so: the best-case ratio is the discriminating
+one and the mean is a weaker corroborating condition. Do not read a
+per-benchmark mean ratio as evidence of anything on its own.
+
+#### What was changed as a result
+
+1. **The kernel now states the pairing.** `[bench] MEASURED-AS <scored> <live>`,
+   printed for each benchmark whose two names differ. The kernel is the only
+   party that knows it — `BenchResult::seq` already indexes the measurement
+   window exactly — and neither host-side reconstruction is sound. Aligning the
+   two orders fails because they genuinely interleave (`lock_uncontended` is
+   recorded *after* `lock_tracked_nested` but measured *before* it); it mapped
+   `io_ring_nop` onto `page_fault_anonymous` and left `page_fault` with no
+   candidate at all. Parsing `bench.rs` recovers 21 of 27 and cannot recover the
+   six that build their `BenchResult` by hand — `isr_latency`'s struct says
+   "isr_latency" and the line it prints says "isr_hard_irq".
+2. **A scorecard name is now translated, and the translation is announced.**
+   Silence there would be the same fault in a nicer suit.
+3. **Both directions are refused before the boot.** `--known-names` rejects a
+   name that is not a live line; `--require-scored` rejects one the grader
+   could not place a window with. A bad name costs a second instead of a
+   two-and-a-half-minute boot.
+4. **The controller exits non-zero when a trigger or release never matched**,
+   and records `problem` saying which.
+5. **The grader accepts that confession** and grades UNGRADED on it *ahead of*
+   the measured-stimulus complaint, so the printed reason names the real fault.
+   It derives the same conclusion from the record's own booleans when the field
+   is absent, so it cannot be talked out of a verdict by an older or quieter
+   controller.
+6. **A host-side canary** now measures whether the host actually got busy.
+
+#### Status
+
+- **P22(a): still UNGRADED.** Two attempts, two void runs, no result.
+  *(Superseded 2026-08-19 — the third attempt graded SUPPORTED; see "RESULT P22,
+  third attempt" immediately below. This section is left exactly as written: it
+  records what was known at the time, and the two void runs are the reason the
+  third one could be trusted.)*
+- The model's apparent performance on this run (13/13 sensitivity, 3 false
+  positives) is **not** evidence and must not be cited as such. It was measured
+  against a window that is not the window that was applied.
+
+### [A] RESULT P22, third attempt — SUPPORTED: the model located a load it was not told about — 2026-08-19
+
+**In short:** the benchmark suite has a feature that tries to guess which of its
+own measurements were disturbed by other activity on the machine. Twice we tried
+to test it by deliberately slowing the computer down during a known stretch of
+the suite, and twice the test itself broke before it measured anything. The third
+attempt worked. The feature correctly picked out benchmarks inside the disturbed
+stretch and flagged **none** of the 58 benchmarks we can prove were undisturbed.
+One scary-looking number in the output — a monitor claiming the computer got
+*faster* while we were loading it — turned out to be a broken thermometer, not a
+real effect, and is fixed.
+
+#### The run
+
+```
+scripts/canary-load-test.sh --at crypto_sha256_1KiB --until vfs_stat_3comp
+```
+
+Load: 6 spinner processes, held 3.33 s of an 8.85 s suite (37.6%), over suite
+positions 60–71 (12 of 86 benchmarks). Fired and released on the correct
+benchmarks; the window had both edges, which is what the first two attempts
+lacked.
+
+| Region | best-case | mean | reading |
+|---|---|---|---|
+| clean prefix (60 benchmarks before the window) | ×0.97 | ×0.87 | the run's own speed, the reference |
+| **loaded window** (12) | **×1.34** | **×2.58** | **DISTURBED** (needs ×1.15 / ×1.30) |
+| beyond the model's reach (6) | ×1.03 | ×1.07 | clean |
+
+```
+VERDICT: SUPPORTED -- 7 of 12 loaded benchmarks flagged, 0 of 58 clean ones
+  sensitivity     : 7 of 12 loaded benchmarks flagged
+  localisation    : 7 of 7 flagged benchmarks were within reach
+  false positives : 0 of 58 provably-clean benchmarks flagged
+```
+
+The stimulus is measured **from the benchmarks**, independently of both the model
+under test and the load script's own claims — the distinction the first attempt
+was lost on.
+
+#### Why 7 of 12 is the ceiling, not a shortfall
+
+The obvious objection is that 7/12 sensitivity looks mediocre. It is in fact the
+instrument's resolution limit, and the run's own canary trace shows why:
+
+```
+[bench] CANARY-TRACE 0:5.17 8:5.16 16:5.16 24:5.16 32:5.16 40:5.16
+                     48:5.04 56:5.16 64:6.17 72:5.16 80:5.16
+```
+
+The canary is sampled **every 8 benchmarks**. The window is positions 60–71, so
+exactly **one** sample (position 64) falls inside it — 56 is before the window,
+72 is after. That one sample is the only elevated reading in the whole run
+(6.17 against a 5.16 baseline, ×1.196), and it is correctly inside the window.
+
+So the model was working from a single elevated sample and attributed 7
+benchmarks to it. It cannot attribute all 12 without a second sample inside the
+window. **Sensitivity here is bounded by the sampling interval, not by the
+model**; a fair sensitivity test needs a window several times wider than 8
+benchmarks, or a finer canary interval. What this run does establish cleanly is
+the claim P22(a) actually makes — *attribution*: 7 of 7 flagged benchmarks were
+within reach of the real window, and nothing outside it was flagged.
+
+The 0-of-58 false-positive result is not resolution-limited and is the stronger
+half of the finding.
+
+#### The x0.78 that nearly sank the write-up
+
+The load controller's host-side canary reported **x0.78** — a fixed unit of work
+on the host completing *faster* while six CPU burners ran. Backwards, and not
+something to write up around.
+
+It is an artefact of the statistic. Measured directly on this 12-core host, 12
+back-to-back trials, six spinners verifiably alive in every one:
+
+| statistic | median ratio | range | inverted (<1.0) |
+|---|---|---|---|
+| **median** (what was being reported) | ×1.106 | ×0.784 .. ×1.526 | **3 of 12** |
+| min | ×1.004 | ×0.999 .. ×1.036 | 0 materially |
+| trimmed 25% | ×1.005 | ×0.999 .. ×1.130 | 0 materially |
+
+One trial returned **×0.784** — run 3's number, from a load that was applied
+correctly. A separate zero-spinner control produced **×0.77** with no load at all.
+The median's run-to-run spread (1.95×) is simply wider than the effect it was
+being asked to detect.
+
+Recomputing run 3's canary best-case gives **×1.018**, and that is the *correct*
+reading: with 12 cores and 6 spinners the probe keeps a free core, so it should
+see almost nothing. Two ruled-out explanations, for the record: it is **not** a
+CPU frequency ramp (`min` was identical to three decimals across idle/loaded/idle
+— 0.247 / 0.246 / 0.246 ms), and **not** a baseline-composition artefact
+(comparing against temporally adjacent samples made it *worse*, ×0.716, not
+better).
+
+**Consequence: the host canary cannot answer "was the load applied", even in
+principle, at this spinner-to-core ratio.** It was the wrong instrument for that
+question and is now demoted to descriptive colour.
+
+#### What was fixed
+
+1. **Occupancy replaces inference.** Each spinner publishes its own
+   `process_time` into a shared cell; the controller snapshots them at fire and
+   at release. Six spinners across 3.3 s should burn ~20 s of CPU, and the ratio
+   of burned to available is the answer. It needs no baseline, cannot be
+   confounded by whatever else the host is doing, and does not care how many
+   cores the machine has. Verified end-to-end at 102% on a live 4-spinner run.
+2. **Best-case promoted, median demoted.** `inflation` now carries the best-case
+   ratio; the median is retained as `median_inflation`, explicitly labelled
+   unreliable. Old records are detected and labelled `(median, unreliable)` on
+   display rather than silently compared against new ones.
+3. **`load-not-applied`** joins the two existing confessions. Occupancy below
+   0.5 voids the run, admissible under the same rule as the others: the
+   controller reporting from the spinners' own clocks that they never ran is an
+   *admission* of an empty window, not a claim to have filled one. The grader
+   derives it independently rather than trusting the field.
+4. **A test that had quietly stopped testing anything.** `test-grade-positional`
+   checked its "run 2's broken record" case against `build/canary-load-record.json`
+   — the *live* output path, overwritten by every run. It had become a test of
+   whichever run happened last, and duly "failed" once run 3 succeeded there. Now
+   reads the preserved copy.
+5. **Sabotaged boots are labelled.** `canary-load-test.sh` restores
+   `bench/history.jsonl` (this run's numbers are deliberately poisoned) but not
+   `boot-history.jsonl`, so a loaded run left an anonymous 117 s entry that a
+   future reader would take for a boot-time regression. Now labelled
+   `p22-loaded`; `wall_seconds` there is displayed only, never used as a
+   baseline, so this is legibility rather than correctness.
+
+#### Note on the kernel delta
+
+This run carried one lane-A kernel change (the `MEASURED-AS` line, emitted in
+the post-suite reporting path). Its clean prefix measured ×0.97 best-case,
+matching run 2's ×0.96 — the change is inert with respect to the benchmarks, as
+its position in the code implies.
+
+#### Status
+
+- **P22(a): SUPPORTED.** Attribution works: 7 of 7 flagged benchmarks inside the
+  real window, 0 of 58 provably-clean benchmarks flagged. This supersedes
+  "still UNGRADED" above.
+- **Sensitivity: not yet fairly measured.** 7 of 12 is bounded by the canary's
+  8-benchmark sampling interval, which put a single sample inside the window. A
+  window several times wider than 8 benchmarks is needed to measure it.
+  **Registered as PREDICTION P23 below** — a 32-benchmark window carrying four
+  samples, with the pass threshold derived from the model's own arithmetic
+  *before* the run, precisely so this paragraph cannot be marked correct after
+  the fact.
+- **P22(b): unchanged** — supported by one run, weakly (see the first attempt).
+- **P22(c): unchanged** — refuted-leaning.
+- **No correction is applied to any recorded value.** §229 stands: the model may
+  now say *where*, which is all the printed line claims; it is not yet licensed
+  to say *by how much*.
+
+### [A] PREDICTION P23 — sensitivity, measured with a window wide enough to carry it — registered 2026-08-19
+
+**Registered before the run exists.** Numbers below are derived from the model's
+arithmetic, not guessed; the derivation is written out so a later reader can
+check that the threshold was not chosen after seeing the answer.
+
+**In short:** the suite has a feature that guesses which of its measurements were
+disturbed by other activity on the machine. The last experiment showed it points
+at the *right place*, but it only caught 7 of the 12 disturbed measurements — and
+that looked like a weak result. We think it is not weak at all: the feature only
+takes a reading every 8th measurement, and the disturbed stretch was only 12 long,
+so it got exactly **one** reading inside it. This run makes the disturbed stretch
+32 long so it gets **four**, which is the first fair test of how much it catches.
+
+#### The run to make
+
+```
+scripts/canary-load-test.sh --at io_ring_nop --until crypto_poly1305_1KiB
+```
+
+Verified against the previous run's SCORE lines before registering: this lands
+the load on **positions 32–63, 32 of 86 benchmarks** — an interior window with
+32 benchmarks before it and 22 after. (`io_ring_nop` is a scorecard name; the
+controller triggers on its live line `io_ring_nop_submit`, and says so.)
+
+| | run 3 (graded) | this run |
+|---|---|---|
+| loaded window | positions 60–71 (12) | positions 32–63 (32) |
+| canary samples **inside** the window | **1** (position 64) | **4** (32, 40, 48, 56) |
+| provably-clean region | 58 | 38 (positions 0–23, 72–85) |
+
+#### The claims
+
+- **P23(a) — sensitivity ≥ 24 of 32 (75%).** *Falsified below 75%.* With four
+  samples inside the window instead of one, the model's flagged set should cover
+  most of it rather than a triangle around a single point.
+- **P23(b) — false positives remain 0 of 38.** *Falsified by any flag in the
+  provably-clean region.* This is the half of run 3's result that was **not**
+  resolution-limited, and widening the window is the obvious way to break it: a
+  model that quietly flags in proportion to window size would fail here and pass
+  (a).
+- **P23(c) — localisation stays 100%**: every flagged benchmark inside the window
+  widened by the sampling interval (24–71). *Falsified by any flag outside it.*
+- **P23(d) — the whole-run verdict will again read `Canary OK`.** *Falsified if
+  it reads CONTAMINATED.* Added after discovering that run 3's did (see the
+  entry above): spread is a function of the excursion's **depth**, not its
+  extent, so tripling the window should not move it. If (a) and (d) both hold,
+  the positional model is shown to be the more sensitive of the two instruments
+  on windows differing by a factor of nearly three — a stronger claim for it
+  than P22(a) alone makes, and an argument against letting `Canary OK` be the
+  last word on whether a run is trustworthy.
+
+#### Caveat, registered rather than discovered afterwards
+
+The margin under the blindness cliff is **two samples**, not a comfortable
+distance. `trace_reference` is the median of the 11 positioned samples, so at 6
+elevated the baseline becomes the disturbance and sensitivity collapses to zero
+(table in the entry above). This window elevates 4 by design — 32, 40, 48, 56 —
+but samples 24 and 64 sit immediately outside the window's edges, and if the
+load's ramp-up or ramp-down elevates *both* of them even partially, the count
+reaches 6 and the median moves.
+
+So a **0% sensitivity result must be read as the cliff, not as a refutation of
+the model** — and it is checkable rather than a matter of interpretation: the
+run's own CANARY-TRACE says how many samples were elevated and which baseline
+the model chose. If that happens the correct response is to re-run narrower
+(24 wide, 3 samples, predicted 83%), not to reinterpret P23.
+
+#### Where 75% comes from
+
+`interpolate_trace` is a straight line between adjacent samples, and
+`report_positional_attribution` flags a factor above **1.10**. Run 3's one
+elevated sample read ×1.196 against its baseline, which reproduces its 7 exactly:
+the ramp crosses 1.10 at 4.09 positions either side of the peak, so positions
+61–67 flag and 60 and 68 do not — 7, in the window, all of them.
+
+Applying the same arithmetic to four contiguous elevated samples: the factor is
+**flat** at ×1.196 across 32–56 and ramps at each end, crossing 1.10 at position
+≈28.1 on the way up and ≈59.9 on the way down. Flagged: **29–59**. Intersected
+with the real window 32–63 that is **28 of 32 = 87.5%**, with 29–31 flagged
+outside the window but inside reach, and nothing in the clean region.
+
+So 87.5% is the arithmetic's own answer and **75% is the threshold**, leaving
+room for the elevation to be less uniform across a 3×-longer window than a
+single sample was — which is the physical thing this run actually measures, and
+the reason it is worth running rather than deriving.
+
+#### What each outcome licenses
+
+- **All three hold** → 7-of-12 was the sampling interval, as claimed, and
+  sensitivity is a property of the interval rather than of the model. The
+  remaining lever on it is `CANARY_SAMPLE_EVERY`, not the arithmetic.
+- **(a) fails while (b) and (c) hold** → the model attributes far less than its
+  own interpolation implies, and the 7-of-12 explanation in the run 3 write-up is
+  wrong and must be retracted there.
+- **(b) fails** → the more serious outcome. It would mean run 3's 0-of-58 was an
+  artefact of a narrow window, and the whole attribution claim weakens to
+  "flags a lot, some of it in the right place".
+
+**Not a licence to correct anything.** P23 is about *how much* of a disturbance
+the model finds, not about whether the factor is the right size to divide by —
+that is P22(b)/(c), still unmeasured. §229 stands either way.
+
+### [A] The contamination verdict said `Canary OK` on run 3 — the positional model is the more sensitive instrument, not a refinement of it — 2026-08-19
+
+**In short:** the suite has two ways of noticing that other activity on the
+machine spoiled its measurements. On the run where we deliberately spoiled them,
+the *older and more authoritative* one — the one whose word decides whether a
+run's numbers are trusted — said everything was fine. The newer one caught it.
+That is the opposite of the relationship they were assumed to have, and it means
+a run can be waved through by the gate while carrying a disturbance the other
+half of the same instrument can see.
+
+Found while deriving P23's threshold, not by looking for it. It was in run 3's
+serial log the whole time and the run 3 write-up above missed it.
+
+#### What run 3 actually printed
+
+```
+[bench] CANARY 5 5 100 5 6 22 13 0 504 617
+[bench] Canary OK: reference access cost stable across 13 samples (5.0-6.1 cycles, spread 22%).
+```
+
+Six CPU spinners, verifiably burning the host (occupancy measured directly), for
+**37.6% of the suite**. Inside the loaded window the benchmarks ran ×2.58 mean /
+×1.34 best-case slower than the clean prefix. And the verdict was **`Canary OK`**.
+
+22% against a `CANARY_TOLERANCE_PCT` of 25 — a **3-point** margin. This is not a
+rounding artefact: the kernel computes the spread in hundredths of a cycle
+(504/617 are the last two fields) precisely so the verdict is never rounded into
+existence, so 22% is the real figure.
+
+#### Why the spread verdict cannot see this
+
+Spread is `(max − min) / min` **over the samples**, and that is a function of the
+extremes only — it is completely blind to *how much* of the suite sits at the
+high end. One elevated sample out of 13 and six elevated out of 13 produce the
+**same** spread, so a disturbance can grow without limit in extent and never move
+this number. What moves it is the *depth* of the excursion, and a load that
+elevates the reference access by ×1.196 is simply not deep enough to clear 25%,
+however long it runs.
+
+The positional model asks the other question — where the samples sit relative to
+each other — and that is why it fired on the same data.
+
+**Consequence: these two are not a coarse check and a refinement of it. They are
+sensitive to orthogonal properties** (depth vs. extent), and the one that gates
+trust is the one blind to extent.
+
+#### The reverse failure: the positional model goes silent above half-suite coverage
+
+Measured against the real code (`scripts/positional-model-limits.py`), sweeping window
+width with the elevation held at run 3's ×1.196:
+
+| window width | samples inside | baseline | sensitivity | false positives |
+|---|---|---|---|---|
+| 8 | 1 | 5.16 | 4/8 | 0/62 |
+| 16 | 2 | 5.16 | 12/16 | 0/54 |
+| 24 | 3 | 5.16 | 20/24 | 0/46 |
+| 32 | 4 | 5.16 | 28/32 | 0/38 |
+| 40 | 5 | 5.16 | 36/40 | 0/30 |
+| **48** | **6** | **6.17** | **0/48** | 0/22 |
+| 56 | 7 | 6.17 | 0/56 | 0/14 |
+| 64 | 8 | 6.17 | 0/64 | 0/8 |
+
+`trace_reference` is the **median** of the samples, so once more than half of
+them are elevated *the disturbance becomes the baseline* and every factor lands
+at or below 1.0. Sensitivity does not degrade — it collapses from 90% to zero
+between two adjacent window widths.
+
+**This is a consequence of a deliberate choice, not an oversight.** The median is
+there so that a uniformly busy host produces factors of exactly 1.0 and is left
+to `global_drift`, which is the estimator built for it; a mean would let the
+burst drag the baseline toward itself. That reasoning is correct and the
+docstring states it.
+
+**But it leaves a band that neither estimator owns: coverage above ~50% and below
+100%.** There, the positional model is silent by construction, while
+`global_drift` derives one whole-suite factor from a run that is genuinely part
+clean and part disturbed — so it under-corrects the disturbed part and
+*over-corrects* the clean part, which is worse than not correcting at all. Nobody
+has measured that band; the two graded runs (P20 whole-suite, P22 12 of 86) sit
+on either side of it.
+
+Not filed as a bug against either estimator, because neither is behaving other
+than as designed. Filed because **both failure modes look exactly like a clean
+run** — `Canary OK` and "no stretch ran more than 10% above baseline" are the
+same two lines you get from an idle machine — and this file's standing maxim is
+that a check which cannot fire is indistinguishable from one that passes.
+
+#### What follows
+
+- **P23 gains a fourth claim** (registered below in the P23 entry): the whole-run
+  verdict will *again* read `Canary OK`, because widening the window changes the
+  extent and not the depth. If it does, the asymmetry is demonstrated twice
+  rather than once, on windows differing by a factor of nearly three.
+- **P23's window was sized under the cliff on purpose** — 4 of 11 positioned
+  samples — and the margin is two samples, which is thinner than it looks. See
+  the caveat added to that entry.
+- **Not repaired here.** Changing `trace_reference` to a low quantile would move
+  the cliff, and doing that in the same breath as running the experiment that
+  measures the model would be tuning the instrument to its own test. The
+  measurement comes first.
+
+### [A] Three scorecard benchmarks emit no `MEASURED-AS` line, so they cannot be used as load-window bounds — 2026-08-19
+
+**In short:** the load-window tool needs a benchmark name to mark where a
+disturbance starts or stops. Three of the suite's 86 scored benchmarks —
+including `context_switch` and `ipc_channel_sync`, two of the headline
+performance numbers — cannot be named at all. Asking for a window at
+`context_switch` is refused in about a second with a list of near-miss
+suggestions, none of which is the right answer, because the right answer does
+not exist. Nothing is mismeasured and no run is silently wrong; a region of the
+suite is simply unavailable to the experiment that would probe it.
+
+#### The two namespaces, and the line that bridges them
+
+A benchmark prints a live result line while it runs, and a `SCORE` line at the
+end of the suite. For 27 of 86 the two names differ. `canary-load.py` triggers
+on the *live* name and `grade-positional.py` places its window with the *scored*
+name, so a bridge is required, and `bench.rs:1297` supplies it — the kernel
+states each pairing itself as `[bench] MEASURED-AS <scored> <live>`. That is the
+right design: the pairing cannot be recovered host-side, because the two orders
+genuinely interleave, nor from the source, because several benchmarks build
+their `BenchResult` by hand.
+
+#### The gap
+
+The emission is conditional on a lookup succeeding:
+
+```rust
+if let Some(m) = measurements.get(entry.seq) {
+    if m.name != entry.name {
+        serial_println!("[bench] MEASURED-AS {} {}", entry.name, m.name);
+```
+
+For three entries `measurements.get(entry.seq)` does not resolve, so no line is
+emitted and the pairing is simply absent. Derived from the current
+`build/canary-load-names.txt` (98 live names, 86 scored, 24 pairings):
+
+| scored name | almost certainly measured as | status |
+|---|---|---|
+| `context_switch` | `context_switch_rt` | live, unscored, unpaired |
+| `ipc_channel_sync` | `ipc_channel_sync_rt` | live, unscored, unpaired |
+| `isr_latency` | `isr_hard_irq` | live, unscored, unpaired |
+
+The right-hand names are three of the 15 live names that are neither scored nor
+an alias target, and the `_rt` suffix pattern makes two of the three pairings
+hard to read any other way. **They are a hypothesis, not a finding** — the whole
+point of `MEASURED-AS` is that host-side name-matching is not trustworthy, so
+guessing the pairing here would repeat the mistake the line exists to prevent.
+The fix must come from the kernel: find why `entry.seq` does not resolve for
+these three, not paper over it with a suffix rule.
+
+#### Effect, and why it is bounded
+
+83 of 86 scorecard names work as window bounds. The three that do not are
+**refused before the build**, by name, in about a second — the failure mode is a
+window that cannot be requested, never a window that lands somewhere other than
+its label. That distinction is the whole reason the guard was written, and it is
+holding here: this is the guard reporting a real gap, not a hole in it.
+
+#### Not repaired here, deliberately
+
+`bench.rs` is the harness PREDICTION P23 is registered against. Changing it in
+the same breath as running the experiment it hosts would mean the run no longer
+tests the code the prediction was written for — the same objection already
+recorded against retuning `trace_reference` before the measurement. P23 does not
+need any of the three names, so the gap does not block it.
+
+**Trigger to fix:** after P23 is run and graded. The investigation starts at
+`ScoreEntry::seq` in `kernel/src/bench.rs` and the question is why three entries
+carry a `seq` with no corresponding `MEASUREMENTS` slot — the scorecard entries
+built by hand are the obvious suspects. Regression coverage already exists:
+`scripts/test-canary-load.py` asserts that a scored-but-not-live name is refused
+*by name*, so the count of such names shrinking to zero is observable.
+
+### [A] RESULT P23 — all four registered claims falsified, and the model was right every time — 2026-08-19
+
+**In short:** the experiment predicted the contamination model would catch 75% of
+the benchmarks it disturbed. It caught 50%, flagged two benchmarks it should not
+have, and tripped a whole-run alarm that was predicted to stay quiet. All four
+predictions were wrong. The model, however, did exactly what its arithmetic says
+it does — every number it produced is reproducible from its own recorded input.
+What was wrong was the *prediction*, which assumed a kind of disturbance the
+machine does not actually produce.
+
+Run: `scripts/canary-load-test.sh --at io_ring_nop --until crypto_poly1305_1KiB`,
+6 spinners, 98% occupancy, window landing at positions 32-63 as registered.
+Serial log archived at `build/p23-run-serial.txt`. Boot 123, streak 22, PASS.
+
+#### The scorecard
+
+| claim | registered | measured | |
+|---|---|---|---|
+| P23(a) sensitivity | >= 24 of 32 (75%) | **16 of 32 (50%)** | FALSIFIED |
+| P23(b) false positives | 0 of 38 | **2 of 38** (`vfs_throughput_16k_write@72`, `..._read@73`) | FALSIFIED |
+| P23(c) localisation | 100% | **17 of 19 (89%)** | FALSIFIED |
+| P23(d) whole-run verdict | `Canary OK` | **`CONTAMINATED`** (spread 47%, tolerance 25%) | FALSIFIED |
+
+Grader's verdict: `FAILED (misplaced)`.
+
+#### The model is not what failed
+
+The whole trace it worked from is one line:
+
+```
+CANARY-TRACE 0:5.16 8:5.16 16:5.16 24:5.05 32:5.16 40:5.84 48:7.47
+             56:5.17 64:5.16 72:5.81 80:5.17
+```
+
+Median baseline 5.16. Three samples clear the 10% flag threshold — 40 (x1.132),
+48 (x1.448) and 72 (x1.126) — and interpolating between them reproduces the
+grader's output exactly: **19 flagged, 16 inside the window, 17 within reach, 2
+outside at 72 and 73.** Not approximately; identically. There is no defect here
+to fix. The model transcribed its input faithfully.
+
+#### Why sensitivity was 50% and not 75%
+
+The 75% figure came from `scripts/positional-model-limits.py`, which models the
+window as **uniformly** elevated. Its own docstring disclaims this in as many
+words: *"no real load does -- the real one ramps within a sampling interval at
+each edge."* That disclaimer turns out to understate the problem. The window's
+two interior samples were elevated (40, 48); **its two edge samples, 32 and 56,
+read baseline** — 5.16 and 5.17, indistinguishable from an idle host — while the
+spinners were at 98% occupancy throughout.
+
+So the load was unquestionably applied and the probe still could not see it half
+the time. With 6 spinners on a 12-core host the probe frequently lands on a free
+core; the run's own summary says so (`host canary x0.99 ... near x1.00 is
+expected when the host has more cores than spinners`). The stimulus is **spiky
+at the canary's sampling resolution**, not a plateau, and a 4-sample window that
+happens to catch 2 spikes yields exactly the 50% observed.
+
+This is the more useful finding of the two: the width table in the entry above
+is arithmetic, and arithmetic is all it was ever claimed to be. Sensitivity
+against a *real* load is bounded not by the sampling interval but by how often
+6 spinners actually collide with the probe — which no synthetic trace can
+predict, and which this run measures at roughly half.
+
+#### The two "false positives" are a real signal
+
+Positions 72 and 73 are `vfs_throughput_16k_write` and `vfs_throughput_16k_read`
+— the two heaviest I/O benchmarks in the suite. The canary read **5.81 at
+position 72** while 64 and 80 both read baseline. The load was released at
+position 63, and position 64 is clean, which rules out spinner teardown.
+
+So the elevation at 72 is real and is not the load. The most likely explanation
+is that those two benchmarks disturb the host enough to inflate the canary's own
+reference — the suite contaminating its own instrument. If that is right, then
+the grader's "provably clean" region is not clean, P23(b) was **unfalsifiable as
+written**, and the model was penalised for correctly reporting a disturbance
+whose only fault was not having been caused by the load script.
+
+**This is a hypothesis with one supporting run.** Position 72 is elevated in 3
+of the 4 archived traces, but those runs carried loads in different places, so
+they do not separate the two explanations. The control that does is a bench boot
+with no load at all — registered as P24 below.
+
+#### P23(d) did not test what it was meant to
+
+The claim was that widening the window changes extent and not depth, so the
+spread verdict — blind to extent — would stay quiet. It did not: spread came out
+at 47% against a 25% tolerance.
+
+But the reason is that **depth was not held constant**, which the prediction
+simply assumed it would be. Run 3's worst sample was 6.17; this run's was 7.47.
+Nothing in the design pins the peak, so the two runs differ in depth *and*
+extent, and the run therefore says nothing either way about the extent-blindness
+claim. That claim stands on the run-3 evidence alone, undisturbed and untested
+here. Registering P23(d) at all was the error: it was a prediction about a
+quantity the experiment did not control.
+
+#### What this costs, and what it does not
+
+Nothing recorded is corrected on the model's say-so (design-decisions.md S229
+stands), so a 50%-sensitive model with a self-contaminating reference has not
+put a wrong number in any benchmark history. What it does mean is that
+**`grade-positional.py`'s attribution should be read as a lower bound on extent,
+never as a boundary** — it found the middle of a 32-wide window and missed both
+edges, and the same run flagged two benchmarks outside it for unrelated reasons.
+
+### [A] PREDICTION P24 — how noisy is the model on a host with nothing wrong with it? — registered 2026-08-19
+
+**In short:** P23 penalised the model for flagging two benchmarks that no load
+had touched. Before concluding the model invents disturbances, it is worth
+checking the obvious alternative: that those two benchmarks really do disturb
+the machine, all by themselves, every run. Nobody has ever run this suite with
+no load at all and looked at what the model says. This registers what I expect
+before doing it.
+
+**The run:** `scripts/boot-test.sh --bench --host-load=idle`, five times, host
+otherwise quiet. No spinners, no load window, nothing to detect. At ~136s each
+this costs about twelve minutes for all five — P23's real cost, not the twelve
+minutes per run that was assumed before it was measured.
+
+**Why five and not one.** A single run cannot distinguish "position 72 is
+special" from "one sample was noisy". The archived traces are genuinely
+ambiguous: position 72 is elevated in three of four, but *not* in P22 run 3,
+which is the one run whose load sat immediately beside it. One clean unloaded
+run would prove nothing and one dirty one only slightly more.
+
+#### Claims
+
+- **P24(a) — the model is quiet on an idle host.** At least 3 of the 5 runs flag
+  **zero** benchmarks. *Falsified if 3 or more runs flag anything at all.*
+- **P24(b) — position 72 is not special.** The canary sample at position 72
+  clears the 10% threshold in **at most 2** of the 5 runs. *Falsified at 3 or
+  more* — which would make the two P23 "false positives" a real, repeatable
+  property of `vfs_throughput_16k_write/read`, and P23(b) unfalsifiable as it
+  was written.
+- **P24(c) — no whole-run alarm.** At most 1 of the 5 runs reports
+  `CONTAMINATED`. *Falsified at 2 or more*, which would mean the 25% spread
+  tolerance is simply too tight for this host and every contamination verdict
+  recorded to date needs re-reading.
+
+#### Which way I actually lean, and why it is close
+
+I am registering P24(b) **against** the self-contamination hypothesis I proposed
+one entry above, because P22 run 3 is real evidence against it: its load sat at
+positions 60-71, immediately adjacent, and position 72 still read a clean 5.16.
+If those two VFS benchmarks reliably inflated the canary, run 3 is the run that
+should have shown it most clearly, and it did not.
+
+Against that, P23's own trace is hard to explain away: the load was released at
+position 63, position 64 read clean, and 72 read 5.81. Load residue does not
+skip a sample and come back.
+
+So this is close to a coin flip and is registered as such. **That is the point
+of registering it.** Had I written this up after the runs, either outcome would
+have read as confirmation of whichever story the data told.
+
+#### What each outcome licenses
+
+| outcome | what it means |
+|---|---|
+| all three hold | the model is quiet when nothing is wrong; P23's 2 false positives were noise, and the 50% sensitivity finding stands alone |
+| P24(b) falsified | the suite contaminates its own instrument; `grade-positional.py` needs a notion of benchmarks that are *expected* to disturb the canary, and P23(b) must be regraded as unfalsifiable rather than failed |
+| P24(a) falsified | the model flags on an idle host, which makes every positional attribution it has ever produced suspect and is a far more serious finding than P23's |
+| P24(c) falsified | the spread tolerance, not the model, is the thing that is miscalibrated |
+
+### [A] RESULT P24 — the idle host is not quiet, and "false positive" was the wrong name — 2026-08-19
+
+**In short:** five benchmark runs with nothing else running on the machine. Two
+of the five still showed a moment where memory access briefly cost 13% more than
+usual, and the model dutifully reported it. Those reports were counted against
+the model in the previous experiment as "false positives". They are not false;
+the machine really did hiccup. What was wrong is the grader's assumption that
+anywhere outside the deliberate load is guaranteed undisturbed.
+
+Five `scripts/boot-test.sh --bench --host-load=idle` runs, no spinners, no load
+window. Serial logs archived as `build/p24-run{1..5}-serial.txt`.
+
+#### The scorecard — all three claims hold
+
+| claim | registered | measured | |
+|---|---|---|---|
+| P24(a) quiet on idle | >= 3 of 5 runs flag zero | **3 of 5** (runs 2, 3, 4) | HOLDS |
+| P24(b) position 72 not special | elevated in <= 2 of 5 | **0 of 5** | HOLDS |
+| P24(c) no whole-run alarm | <= 1 `CONTAMINATED` | **0 of 5** | HOLDS |
+
+Scored with the real model, not by hand:
+
+```
+run      baseline  flagged  positions
+P24 r1     5.16       3     [31, 32, 33]
+P24 r2     5.16       0     []
+P24 r3     5.15       0     []
+P24 r4     5.16       0     []
+P24 r5     5.16       3     [7, 8, 9]
+```
+
+#### The self-contamination hypothesis is dead
+
+Position 72 read clean in **all five** runs (5.16, 5.04, 5.15, 5.16, 5.16).
+`vfs_throughput_16k_write/read` do not disturb the canary's reference. The
+hypothesis I raised one entry above is refuted, and the P24(b) lean registered
+against it — on the strength of P22 run 3 — was correct.
+
+#### What is actually happening
+
+Every canary sample ever recorded, across all archived traces, falls into two
+groups with **nothing in between**:
+
+- a baseline cluster spanning 5.04-5.22, overwhelmingly 5.16
+- excursions, the smallest of which is 5.81
+
+The gap between 5.22 (+1.2% over baseline) and 5.81 (+12.6%) is empty. So the
+10% flag threshold is **not** miscalibrated — it sits cleanly inside that gap,
+which is close to the best place it could be. I had started to write the
+opposite; the distribution says otherwise and this corrects it.
+
+The 5.81 value is worth noting on its own: it appears in three different runs
+(P23 at position 72, P24 r1 at 32, P24 r5 at 8), always as a single isolated
+sample, always at the same magnitude. A recurring discrete cost rather than a
+continuous one — something quantised, landing at an arbitrary position.
+
+So the model is not manufacturing anything. **On an idle host the canary
+measures a real excursion roughly two runs in five, and the model reports it.**
+That is the instrument working.
+
+#### The consequence: the grader's ground truth is wrong, not the model's output
+
+`grade-positional.py` scores any flag outside the load window's reach as a false
+positive, with **tolerance 0**. That rule is only sound if the host is
+undisturbed everywhere outside the window, and these five runs measure how often
+that assumption fails: **2 of 5**, at ~3 benchmarks each.
+
+A gate that fails on a coin-flip of host noise cannot distinguish a good model
+from a bad one, which is the only thing it exists to do. P23's
+`FAILED (misplaced)` verdict is therefore **not evidence against the model** —
+its two outside-reach flags at positions 72-73 are indistinguishable from the
+spikes seen here at positions 32 and 8 with no load at all.
+
+**P23's recorded verdict stands as it was graded** — results are not rewritten
+after the fact. What changes is how it is read, and that is what this entry is
+for.
+
+#### The harder finding, which no threshold fixes
+
+The idle-host excursion is +12.6%. The smallest *genuinely loaded* sample in
+P23's window was +13.2% (position 40). Those two are not separable by magnitude:
+a threshold raised to suppress the noise would also have discarded real signal,
+and only P23's +44.8% sample at position 48 sits clearly above the noise
+population.
+
+So on this host, a 6-spinner load and an ordinary idle hiccup produce
+overlapping per-sample excursions. The model's discrimination is limited by
+that overlap, not by the sampling interval and not by the median-baseline cliff.
+Raising `POSITIONAL_NOTE_PCT` would trade a false positive for a false negative
+at roughly one-for-one and is **not** the fix.
+
+The fix worth pursuing is at the source: find what the recurring 581-centicycle
+event *is*. It is discrete, repeatable in magnitude, and position-independent,
+which is the profile of a specific mechanism rather than of thermal or
+scheduling drift. Eliminating or excluding it would raise the model's floor
+without costing any sensitivity. Recorded as the next investigation rather than
+guessed at here.
+
+### [A] RESOLVED — the three unpairable benchmarks: the `seq` was never the problem — 2026-08-19
+
+**In short:** the previous entry said three benchmarks could not be used as
+load-window bounds because a kernel lookup failed for them. That diagnosis was
+wrong. The lookup always succeeded; what was wrong was one word at three call
+sites, where a benchmark told the harness it was called one thing and then
+printed a different name on the line the harness's consumers actually read.
+Fixed, verified by a boot: all three are now usable, and the suite's pairing
+count went from 24 to 27.
+
+#### What the earlier entry got wrong
+
+It read the emission site —
+
+```rust
+if let Some(m) = measurements.get(entry.seq) {
+    if m.name != entry.name {
+```
+
+— and concluded "for three entries `measurements.get(entry.seq)` does not
+resolve". It resolves for every entry. The kernel says so on its own coverage
+line, and said so at the time the entry was written:
+
+```
+Scorecard coverage: 86 of 98 measured windows reached the scorecard,
+12 are declared diagnostics, 0 unjudged
+```
+
+`0 unjudged` is exactly the statement that no scorecard entry has a dangling
+`seq`, and `SCORED_WITHOUT_MEASUREMENT` exists to count that case and read zero.
+The `if let` was read as the failing step because it is the only fallible-looking
+thing in the snippet; the *inner* condition was never checked. **The lesson is
+narrow and worth keeping: a conditional emission has two ways to stay silent,
+and the guard that looks fallible is not always the one that fired.**
+
+#### What was actually wrong
+
+`m.name != entry.name` was **false**. Three benchmarks build their `BenchResult`
+by hand, and each passed the *scored* name to `note_measurement()` while printing
+a *different* literal on its live result line:
+
+| live line printed | passed to `note_measurement` | scored as |
+|---|---|---|
+| `context_switch_rt` | `"context_switch"` | `context_switch` |
+| `ipc_channel_sync_rt` | `"ipc_channel_sync"` | `ipc_channel_sync` |
+| `isr_hard_irq` | `"isr_latency"` | `isr_latency` |
+
+So the two names compared equal, no `MEASURED-AS` was emitted, and
+`canary-load.py` took the scorecard name for a live one and would have waited
+through the entire suite for a result line the kernel never prints.
+
+`run()` cannot make this mistake — it passes one `name` to both the print and
+`note_measurement`. The other three hand-built results (`io_ring_nop_submit`,
+`page_fault_anonymous`, and the fourth via `run`) already passed the live name.
+Only these three had drifted, and nothing anywhere stated that they must not.
+
+The earlier entry's hypothesised pairings, incidentally, were all three correct.
+That is not vindication of the method: it declined to act on them precisely
+because host-side name-guessing is what `MEASURED-AS` exists to replace, and the
+kernel has now stated the same three pairings itself. Being right by suffix rule
+and being right by evidence are not the same, and only the second one is
+repeatable.
+
+#### The fix
+
+Each of the three sites now binds its live-line name once and uses that binding
+twice:
+
+```rust
+const LIVE_NAME: &str = "context_switch_rt";
+serial_println!("[bench] {}: min={} cycles …", LIVE_NAME, …);
+…
+seq: note_measurement(LIVE_NAME, SplitCheck::NotChecked),
+```
+
+The invariant this restores — **`Measurement::name` is the name printed on the
+window's live result line** — was true of every benchmark that goes through
+`run()` and was written down nowhere. It is now on both `Measurement::name` and
+`note_measurement()`, along with the consequence of breaking it, because the
+consequence is not a cosmetic mislabel: noting the *scored* name suppresses the
+very line that tells a consumer which live line to watch for.
+
+#### Enforcement, because nothing caught this for a day
+
+Nothing in the kernel can catch the drift — it cannot know what literal a
+`serial_println!` printed. So the check is host-side and runs every time:
+`canary-load.py:report_unreachable_scored()` names any scored benchmark that
+resolves to no live line, after every run, silently when there is nothing to say.
+This is the same reasoning as `SCORED_WITHOUT_MEASUREMENT`: a gap recomputed from
+each run's own output cannot go stale, and a silent miscount becomes a printed
+anomaly. Before this, the only thing that noticed was a test that happened to
+probe for orphans and reported a count.
+
+`scripts/test-canary-load.py` covers the sweep's message, its silence, and its
+refusal to accuse when it has no data — and asserts on the last `--bench` serial
+log that no scored name is unreachable. That last check deliberately does **not**
+read `build/canary-load-names.txt`: the name file is a cache only a canary-load
+run refreshes, so a stale one would fail long after a fix and pass through a
+regression no canary-load run has yet observed.
+
+#### Verified
+
+Boot of 2026-08-19, `RUN CLEAN`, 652s: 27 `MEASURED-AS` lines (was 24), the three
+new pairings exactly as tabulated above, coverage still `0 unjudged`, and all
+canary-load tests green. All 86 scorecard names are now usable as window bounds;
+the "83 of 86" figure in the previous entry is superseded.
+
+---
+
+### [A] RESOLVED — the replication gate asked "same binary?" and answered with the commit, so it fired in both directions at once — 2026-08-19
+
+**Symptom.** A `--bench` run flagged `page_alloc_zeroed_free` at 6532ns, `REGRESSED,
+UNREPLICATED`, and printed the advice the gate exists to give: re-run *without
+rebuilding* to confirm. That was done — `--no-build --no-stage`, so QEMU booted the
+identical bytes — and the re-run measured 3493ns, inside the benchmark's own
+3379–3854ns range. It should have been read as a contradiction of the flag and as an
+A/A pair besides. Instead the tool treated it as a fresh commit's first measurement
+and manufactured four *new* claims out of an image that had not changed by one byte:
+
+| benchmark | flagged run | re-run | reported |
+|---|---|---|---|
+| `sched_pick_next_d1` | 40ns | 65ns | +62% REGRESSED, UNREPLICATED |
+| `vfs_stat_breakdown_ns` | 56ns | 81ns | +45% REGRESSED, UNREPLICATED |
+| `http_build_response_gzip_1KiB` | 193176ns | 251656ns | +30% REGRESSED, UNREPLICATED |
+| `http_gzip_1KiB` | 192035ns | 245506ns | +28% REGRESSED, UNREPLICATED |
+
+The A/A banner — the one check whose entire job is to say "these two runs are the same
+image, nothing below can be code" — stayed silent throughout.
+
+**Cause.** `values_for_commit()`, `replication_verdict()` and the A/A banner all asked
+"is this the same *binary*?" — their docstrings said exactly that — and all three
+answered by comparing `record["commit"]`. A commit label is neither necessary nor
+sufficient for that question, and this run hit both failures at once:
+
+- **Same binary, different commit.** The re-run the tool *itself prescribes* is made
+  without rebuilding, so if anything was committed in between — and something was, the
+  `MEASURED-AS` fix — the confirming record is filed under a new commit. The gate then
+  cannot find the very evidence it asked for. This is not an unlucky case; it is the
+  *normal* case for the workflow the tool prescribes.
+- **Same commit, different binary.** The flagged run carried `dirty: true`, so its
+  `commit` field named a tree that was never built. Two such runs share a label while
+  measuring different code, and the gate would have counted each as evidence about the
+  other.
+
+**Fix.** Identity now comes from the kernel image itself. `bench-history.py` hashes the
+ELF it was handed (`--kernel-elf`, which `boot-test.sh` already passes) and stores
+`kernel_sha`; `binary_identity()` prefers that hash, falls back to a *clean* commit,
+and otherwise reports "unidentifiable" rather than a sentinel that would make every
+unidentifiable run look alike.
+
+The comparison itself is `same_image(a, b)`, a **relation** rather than an equality
+between identity strings — because a hashed run and an older unhashed-but-clean run of
+the same commit are the same image, yet no two labels drawn from those records compare
+equal, and the entire 79-record pre-hash history is on the unhashed side. Both hashed
+⇒ the bytes decide; at most one hashed ⇒ fall back to a clean commit; unidentifiable
+matches nothing, including another unidentifiable record. The asymmetry is deliberate:
+two hashes settle the question between themselves and a matching commit cannot
+overrule them (see design-decisions.md §232).
+
+The banner now distinguishes three states instead of two: **A/A** (same image),
+**SAME COMMIT / DIFFERENT IMAGE** (both hashed, hashes differ — known-different code
+under one label), and **SAME COMMIT / UNKNOWN IMAGE** (at least one side unpinnable —
+named rather than left for the reader to fill in from the matching commit in the
+header line).
+
+**Verified.** 379 assertions in `scripts/test-bench-history.py` green, including an
+end-to-end reconstruction of the failure above (two records of one image under two
+commits must read as A/A and must not fail the build) and each of the three banner
+states. Live against the real history: a hashed re-read of the 2026-08-19 serial log
+against the unhashed clean baseline of the same commit now prints A/A, and the same
+run with `--dirty` correctly degrades to UNKNOWN IMAGE.
+
+**What this does not fix.** Every record written before this change is unhashed, so
+pairs among them still fall back to the clean-commit rule and a dirty pre-hash record
+still identifies nothing. That is not recoverable — the bytes are gone — and it is why
+the fallback exists rather than being retired.
+
+### [A] OPEN — the canary's excursions are discrete, position-independent, and invisible to the benchmarks beside them; the arms that would explain them were discarded — 2026-08-19
+
+**In short:** The contamination canary — the little A/B measurement the suite takes
+between benchmarks to notice when the host got busy — sometimes reads 12.6% high. It
+is supposed to mean "the machine was loaded here, distrust the numbers around it". But
+the benchmarks measured at that exact point in the suite are not slow at all. Either
+the canary is crying wolf, or it is detecting something the benchmarks are immune to.
+The measurement that would tell the two apart was being computed and thrown away on
+every run; it is now recorded, and this entry says what to do with it.
+
+**The observation.** 104 trace samples across the 8 runs that carry a CANARY-TRACE
+line fall into three tight clusters and nothing else:
+
+| cluster | n | mean | vs. mode |
+|---|---|---|---|
+| ~5.04 centicycles | 15 | 5.044 | −2.3% |
+| ~5.16 centicycles (mode) | 85 | 5.161 | — |
+| ~5.80 centicycles | 4 | 5.798 | **+12.3%** |
+
+There is nothing between 5.06 and 5.14, and nothing at all between 5.18 and 5.78. For
+a quantity that is supposed to track a continuously-varying host load, that is the
+wrong shape: it is the profile of a mechanism with discrete states, not of drift.
+
+**It is not positional.** The four high samples land at `end`, at position 32, at
+`end` again, and at position 8, in three different runs. The low samples scatter
+similarly — position 24/32/64/72 in one run, 0/8/80 in another. So this is neither the
+suite's own cache/TLB residue (which would recur at the same positions) nor a warm-up
+or tail effect (which would concentrate at the edges).
+
+**The benchmarks beside it do not see it.** The clearest case is the run at
+2026-08-19T02:28:02, whose only excursion is a single +12.6% sample at position 8,
+against the immediately preceding run as baseline:
+
+| pos | benchmark | baseline → spike run | move |
+|---|---|---|---|
+| 6 | `compress_zero_page` | 6497 → 6488 | −0.1% |
+| 7 | `compress_repeating` | 116478 → 117137 | +0.6% |
+| **8** | **`rdtsc_overhead`** | **37 → 38** | **+2.7%** |
+| 9 | `hpet_read` | 464 → 449 | −3.2% |
+| 10 | `context_switch` | 1375 → 1403 | +2.0% |
+
+Median move for positions 4–12 is **+0.6%**; median move across all 86 benchmarks in
+the run is **+0.8%**. The benchmarks measured where the canary claims a 12.6% host
+slowdown are indistinguishable from the ones measured anywhere else.
+
+**Why "it was just a brief spike" does not survive the timescales.** The canary value
+is a **minimum** over ~525 rounds, a window of roughly **4.7 ms**. A minimum cannot
+register a transient: to move the min, an effect must cover essentially the *whole*
+window. But in that same run the median benchmark takes **1.64 ms** and 60 of 86 are
+shorter than the canary's own window. Anything sustained enough to lift a 4.7 ms
+minimum by 12.6% would comfortably cover the adjacent benchmarks — and it did not
+touch them. So a real, uniform host slowdown is not supported by the data.
+
+**Why the recorded value cannot settle it.** The traced figure is
+`(min_store − min_nop) * 100 / n` — a **difference of two minima**. A move in it is
+ambiguous between the arms, and the two arms mean opposite things:
+
+- a **dearer store arm** is the host genuinely getting slower at the thing being
+  measured — a real contamination signal, and the canary doing its job;
+- a **cheaper nop arm** is the measurement's own baseline shifting, which is an
+  instrument artefact and says nothing whatever about the host.
+
+The derived difference looks identical either way. Every trace recorded up to this
+point computed both arms and discarded them, keeping only the difference, which is
+exactly why the +12.3% cluster cannot be attributed today.
+
+Note also that under TCG these "cycles" are host wall time, not guest work: the TSC is
+calibrated to the host i7-8700K's real 3708.8 MHz, so the canary is measuring host
+nanoseconds per emulated store — i.e. TCG throughput. A discrete step in TCG
+translation behaviour is a live candidate for a mechanism with exactly three states.
+
+**What was done.** `kernel/src/bench.rs` now retains both raw arm totals per traced
+sample and emits `[bench] CANARY-ARMS <pos>:<nop>:<store> ...` beside the existing
+CANARY-TRACE line; `scripts/bench-history.py` parses it and merges the arms onto the
+matching trace samples, so `canary.trace[i]` gains `nop` and `store` alongside `centi`.
+The merge is all-or-nothing and label-checked: a length or label disagreement drops
+every arm rather than attaching any, because a *misplaced* arm is evidence pointing
+confidently at the wrong slot and nothing downstream could detect it, whereas a missing
+arm is a legible gap.
+
+**What this does not do.** It does not explain the clusters — it collects the evidence
+that can. The 79 existing records have no arms and never will; this needs new runs.
+
+**Next step.** Accumulate runs until the ~5.80 cluster recurs (it appeared in 3 of 8
+traced runs, so a handful of `--bench` boots should catch it), then read the arms at
+that sample. If `store` rose while `nop` held, the canary is right and the benchmarks'
+immunity is the thing to explain. If `nop` fell, the excursion is an instrument
+artefact and the canary's contamination verdict is over-sensitive by ~12% in a way
+that has been silently inflating `spread` all along. The ~5.04 cluster is the same
+question mirrored and should be read the same way.
+
+### [A] RESULT — the canary's arms separate three mechanisms, and only one of them is contamination — 2026-08-19
+
+**In short:** Six `--bench` boots with the new arm recording (78 sampled arm pairs)
+answer the question the previous entry left open. The canary's odd readings are not one
+phenomenon but three, and the two raw arms tell them apart at a glance where the single
+derived number could not. One of the three is a genuine host disturbance; one is a
+uniform speed change that is harmless; one is the instrument fooling itself.
+
+**Correction to a premature reading.** The first run with arms caught a single +12.2%
+sample whose `store` arm was bit-identical to the modal value while `nop` fell 4.6%, and
+on that one sample it looked as though the canary's high readings were *generally* the
+opposite of contamination. Five more runs refute that as a general claim: two of the
+three large excursions collected since move **both** arms together and are real. The
+n=1 reading was the rare case, not the rule. Recorded because the wrong version was
+stated aloud before the additional runs existed.
+
+**The three mechanisms.** Classifying all 78 samples against the modal arms
+(`nop`=14156, `store`=19444) with a 0.5% threshold: 63 quiet, 13 both-arms, 2 one-arm.
+
+| # | signature | n | centi produced | what it is |
+|---|---|---|---|---|
+| 1 | both arms scale by the **same** factor, −2.26% | 11 | 504–506 | uniform speed change |
+| 2 | both arms rise together, +34% to +45% | 2 | 641, 766 | genuine host disturbance |
+| 3 | **one** arm moves, the other does not | 2 | 579, 477 | instrument artefact |
+
+Mechanism 1 is the historical ~5.04 cluster, and it is not an excursion at all: both
+arms scale by one factor (mean divergence between the two arms across all 13 both-arm
+samples is **0.41 percentage points**), so the difference scales with them and the
+reported figure moves without anything having gone wrong. Mechanism 3 is the historical
+~5.80 cluster — the one arm sample at 579 is a `nop`-only drop.
+
+**Why a one-arm move must be an artefact, and why it is always downward.** The canary
+value is a minimum over ~500 rounds. Minima are asymmetric:
+
+- for a minimum to move **up**, essentially *every* round must be slower;
+- for a minimum to move **down**, a **single** lucky fast round suffices.
+
+So one arm's minimum catching one lucky round is cheap and sporadic — which is exactly
+the discrete, position-independent pattern in the traces. Both observed artefacts are
+one arm moving *down* (`nop` −4.59% with `store` +0.00%; `store` −2.06% with `nop`
++0.01%), and no one-arm *upward* move appears in 78 samples, as the asymmetry predicts.
+
+The consequences differ by arm, and both are bad:
+- a lucky **nop** round **inflates** the figure — a false contamination alarm (the 579);
+- a lucky **store** round **deflates** it — a blind spot that *masks* contamination (the 477).
+
+**The benchmarks do not see any of it, including the real disturbances.** For each
+excursion, the eight benchmarks in its own sampling interval, against a median baseline
+from the four quiet runs:
+
+| excursion | arms | median move in its interval |
+|---|---|---|
+| 579 @ pos 72 | nop −4.6%, store ±0 | −0.02% |
+| 766 @ pos 56 | nop +43.5%, store +44.9% | −0.26% |
+
+For the artefact that is the expected result. For the +44% both-arms spike it is the
+informative one: the disturbance is real, sustained enough to lift a minimum across the
+canary's whole ~4.5 ms window, and still invisible in the benchmarks bracketing it —
+because that window is a small slice of a sampling interval tens of milliseconds long.
+Run wall times agree (113 s and 117 s for the two flagged runs against 112–117 s for the
+clean ones), as do whole-run medians (−0.03%, −0.15%).
+
+So a `contaminated` verdict from mechanism 2 is *true* about the host and *not*
+evidence that the numbers in that interval are wrong. The canary is the more sensitive
+instrument, which is the same conclusion RESULT P24 reached from the other direction.
+
+**What this means for the verdict logic.** The current rule thresholds the derived
+difference and therefore cannot separate any of these: it treats a harmless uniform
+−2.26% scaling, a self-inflicted +12.2% artefact, and a real +44% disturbance as points
+on one scale. With the arms recorded, the rule can key on the signature instead —
+one-arm ⇒ discard the sample; both-arms-proportional ⇒ not an excursion; both-arms-up
+⇒ a real host event, reported as such rather than as "these benchmarks are suspect".
+Not yet implemented; the arms had to exist first, and only 6 runs carry them.
+
+**Caveats.** Two samples per artefact/disturbance class is thin. The claim that the
+historical ~5.80 cluster is mechanism 3 rests on one arm-bearing sample at 579; the
+supporting argument is structural (mechanism 1 is observed only at −2.26% and could
+reach 579 only as a proportional +12.2%, which has never been observed) rather than
+purely empirical. The 79 pre-arms records cannot be reclassified at all.
+
+### [A] RESOLVED — the KASAN pre-shadow checker lost its anchor when `kernel_main` was split into cases, and failed the build with ~40 false violations — 2026-08-19
+
+**In short:** The KASAN-instrumented build has been failing since `86a56f78c`, on a
+check that was wrong rather than on anything wrong with the kernel. Because that build
+is run by hand and not by the routine boot gate, nothing noticed. The instrumented
+kernel itself was fine the whole time.
+
+**Symptom.** `./scripts/kasan-build.sh --boot` compiles successfully and then dies at
+the invariant check, before ever booting:
+
+```
+=== KASAN uninstrumented-path invariants are NOT satisfied ===
+  STRUCTURE: kernel_main
+    calls _RNvNvCs..._6kernel11kernel_main4case
+    before 6serial4init - it runs in the pre-shadow window but is not in ENTRY_ALLOWED_CALLS
+  ... ~40 more ...
+  STRUCTURE: no call to '6serial4init' found in kernel_main; the pre-shadow window's
+  end can no longer be located
+```
+
+**Cause.** `check_entry_order` walks `kernel_main`'s calls in program order and stops
+at `serial::init`, which marks the point where the KASAN shadow is live; everything
+before it must be in `ENTRY_ALLOWED_CALLS`. Commit `86a56f78c` split `kernel_main` into
+36 nested `#[inline(never)] fn case()` helpers to cut its peak stack frame from 19 776
+to 10 976 bytes. That moved the pre-shadow statements — *and* the `serial::init` call
+that ends the window — into the first helper. The scan then saw a call to
+`kernel_main::case` where it expected `serial::init`, never found the anchor, and so
+treated the entire function as pre-shadow.
+
+The refactor was correct and the checker's expectation was the stale part: it was
+anchored to how `kernel_main` happened to be carved into functions rather than to what
+it does.
+
+**Fix, part 1 — follow the body.** The scan now descends into nested helpers in
+flattened program order. A v0-mangled symbol nests as `...11kernel_main4case` /
+`...11kernel_mains0_4case`, so `NESTED_ENTRY_SUBSTRING` recognises them as
+`kernel_main`'s own body rather than as calls out of it. A helper with no disassembly
+is reported rather than skipped, since an unfollowed helper is a hole in the window.
+
+**Fix, part 2 — do not bury the real finding.** When the anchor cannot be located the
+checker now reports *that alone*. Without the anchor the scan never learned where the
+window ends, so every violation it emits is an artefact of the unbounded window; the
+real run printed ~40 such lines above the one accurate diagnosis, each inviting the
+reader to go exempt a call that was never in the window. The message also names the two
+ways the anchor goes missing (moved into an unrecognised helper, or inlined away).
+
+**Verified.** Against the instrumented kernel the checker now reports OK: 14 functions
+reachable before the shadow is installed, 21 on the check path, 45 from the poisoned
+roots, none instrumented. Teeth confirmed by emptying `ENTRY_ALLOWED_CALLS`, which
+yields exactly the two genuine pre-shadow calls (`boot::hhdm_offset_early`,
+`mm::kasan::early_init`) attributed to `kernel_main::case` — so the descent reaches
+them rather than passing vacuously. The anchor-missing path was exercised by pointing
+`WINDOW_END_SUBSTRING` at a symbol that does not exist: one message, not forty.
+
+**Why it went unnoticed, and what would catch it next time.** The instrumented build is
+not part of `boot-test.sh`, so a check that only this build runs can rot for a week
+without a red gate. Nothing here changes that; it remains a manual build.
+
+### [A] RESOLVED — a healthy KASAN boot 96% of the way to BOOT_OK was reported as a wedge in the sanitizer, then recorded as a kernel panic — 2026-08-19
+
+**In short:** the instrumented (KASAN) build was re-run to see whether an old
+silent-hang bug still reproduced. It came back reading `Wedged RIP =
+kernel::mm::kasan::byte_bad` and was filed in the boot history as `PANIC --
+kernel died`. Both statements were false. The kernel was fine: it had printed
+27 841 lines, was still printing when the harness killed it, and had reached
+96% of the way to `BOOT_OK`. Four separate defects had to line up to produce
+that, and each is fixed here. None of them was in the kernel's behaviour; all
+four were in the tooling that reports on it.
+
+**What actually happened.** `boot-test.sh`'s 900s timeout is calibrated on an
+uninstrumented kernel. Instrumentation puts a shadow-byte lookup in front of
+every load and store, so the same boot needs ~3.3× longer. Measured back to
+back on the same host:
+
+| build | result |
+|---|---|
+| uninstrumented | `BOOT_OK` at **285s**, 27 497 serial lines |
+| instrumented | killed at **900s** on serial line 26 410 — the line an uninstrumented boot prints at **96%** of the way to `BOOT_OK` |
+
+It missed the finish line by under a minute. Then three reporting bugs turned
+"ran out of clock" into "died".
+
+**Defect 1 — `kasan-build.sh` never raised the timeout.** The command in its own
+header, `./scripts/kasan-build.sh --boot`, was therefore *certain* to fail.
+Fixed: `KASAN_BOOT_TIMEOUT=3600` (~3.8× the measured 938s need), applied unless
+the caller passes `--timeout=`. This is the same bug, and now the same fix, as
+`BENCH_TIMEOUT` in `boot-test.sh`, whose comment already records that the
+identical false negative "happened".
+
+**Defect 2 — the harness called a live guest wedged.** On timeout `boot-test.sh`
+sampled the RIP and printed it as `Wedged RIP`, unconditionally. Under KASAN
+nearly any sample lands in the shadow checker, so the label named a plausible
+culprit for a hang that did not exist — the single most misleading output the
+harness could have produced. The evidence to know better was already in hand:
+the stall detector was armed at `--stall-secs=180` and never fired, which is
+positive proof the log kept growing. Fixed: serial-growth tracking is now
+unconditional rather than gated on the opt-in detector, and the timeout path
+reports which kind of timeout it was —
+
+```
+=== Timeout at 900s with the guest STILL PRODUCING OUTPUT (serial grew 1s ago) ===
+=== This is a budget that was too small, not a hang. Re-run with a larger --timeout. ===
+  RIP when the clock ran out (guest was live; not a hang) = 0x...
+```
+
+`capture_guest_state` now takes the RIP label from its caller, and it is a
+required argument, not a default: from the stall detector "Wedged RIP" is a
+finding, from the timeout path the same words are an unfounded diagnosis.
+
+**Defect 3 — `boot-history.py` classified it `PANIC` on the strength of three
+self-test breakpoints.** There is no `PANIC` or `FATAL` text anywhere in the
+log. The evidence it used was:
+
+```
+[idt] Running direction-flag self-test...
+EXCEPTION: Breakpoint (#BP) at 0xffffffff813b56b6
+[idt]   DF is clear on exception entry: OK
+```
+
+— printed by *every* boot, green ones included. What kept it hidden is worth
+recording, because it is the shape of the next bug of this kind: `classify()`
+consults the exception list only when the marker was never reached, so on a
+green boot the mislabelling is unreachable, and it fires precisely on the
+failed boot whose verdict someone is relying on. A latent bug in a triage tool
+that can only manifest during triage.
+
+Fixed on both sides, and deliberately so, so that neither is the only thing
+holding the verdict up:
+
+- **Kernel side.** `ExpectedBreakpoint` (`kernel/src/idt.rs`) is an RAII scope
+  held across every deliberate `int3`; `handle_breakpoint` appends
+  `(deliberate self-test)` while one is open. This is the convention the #UD
+  self-test already followed (`(deliberate compiler trap)`) — the kernel knows
+  whether a fault was asked for and the host parser cannot, so the kernel says.
+  All four reachable sites are wrapped (`idt.rs` ×3, `serial.rs` ×1;
+  `power.rs`'s `int3` triple-faults by design and never reaches a handler).
+- **Host side.** `_can_be_fatal()` additionally rejects `(#BP)` outright:
+  vector 3's handler is documented "Logged but non-fatal" and structurally
+  returns, so whatever raised it, the kernel was still running afterwards. A
+  stray breakpoint is still recorded and still printed — "the kernel survived
+  it" is not the claim "nobody needs to see it" — it simply cannot on its own
+  mean the kernel died.
+
+Verified by removing each guard in turn: with the vector rule disabled the
+unannotated sample reproduces `PANIC` exactly; with either guard alone the
+verdict is `TIMEOUT`. Three regression tests in `scripts/test-boot-history.py`
+cover the unannotated form (the text the kernel actually emitted that day), the
+annotated form, and a real `#PF` printed alongside self-test breakpoints, which
+must still read as `PANIC` — the vector rule must be about the vector, not
+about the neighbourhood.
+
+**The original question, answered.** The silent-hang bug did **not** reproduce.
+The instrumented kernel ran the whole self-test battery, including the KASAN
+shadow's own coverage checks, without a single KASAN report. The run was
+inconclusive only about the last 4% of the boot, and only because of the
+timeout; there is nothing here that argues the old hang is still live.
+
+**Still true, and not fixed here:** the instrumented build is not part of
+`boot-test.sh`, so nothing in the routine gate exercises any of this. It
+remains a manual build, and a manual build is one nobody runs until it has
+already rotted — which is how the previous entry's checker bug survived a week.
+
+---
+
+### [A] RESOLVED — the liveness watchdog reported two `SYSTEM HANG`s during a bzip2 self-test that completed and passed, because its 15 s threshold is calibrated on an uninstrumented kernel — 2026-08-19
+
+**In short:** With the timeout fixed (previous entry), the KASAN boot finally
+reached the finish line — and was still failed, this time by the kernel's own
+hang detector. It printed `SYSTEM HANG` twice in the middle of the bzip2
+compression self-test. The self-test then finished, passed, and the boot ran on
+to `BOOT_OK` with every later self-test green, so nothing was hung. The
+detector declares a hang after 15 seconds of no visible progress; under
+sanitizer instrumentation the one compression step it fired on takes about 93
+seconds instead of a few. The threshold is now 180 seconds when the kernel is
+built instrumented, and unchanged otherwise.
+
+**Verdict:** `SELFTEST_FAIL` on boot 140 — "marker reached but a self-test /
+liveness gate failed". The clean streak, restored to 1 by the preceding green
+boot, was reset to 0 again.
+
+#### What the log actually shows
+
+```
+23784:[bzip2]   Empty input round-trip ✓
+23785:[liveness] boot-window breadcrumb: 900s armed (deadline 3498s, heartbeat=70246)
+23786:[liveness] SYSTEM HANG: ... (useful_work=2756, kernel_progress=373530, ctx_switches=1635, report 1/3, watchdog stays ARMED)
+24110:[liveness] boot-window breadcrumb: 930s armed (deadline 3498s, heartbeat=72155)
+24111:[liveness] SYSTEM HANG: ... (useful_work=2756, kernel_progress=373530, ctx_switches=1635, report 2/3, watchdog stays ARMED)
+24435:[liveness] boot-window breadcrumb: 960s armed (deadline 3498s, heartbeat=74070)
+24436:[liveness] boot-window breadcrumb: 990s armed (deadline 3498s, heartbeat=75992)
+24437:[bzip2]   Repetitive data round-trip (3000B → 45B, 1%) ✓
+...
+24441:[bzip2] Self-test passed.
+24442:[xz] === self-test start ===
+24461:[xz] === self-test passed ===
+```
+
+The evidence that this is a false positive is **structural, not statistical**:
+the operation the detector accused of hanging *finished and reported success* on
+the very next line it printed. That is direct proof, not an n=1 inference from a
+boot that happened to survive.
+
+Corroborating: `heartbeat` advanced monotonically throughout (70246 → 72155 →
+74070 → 75992), so the CPU was executing; and `useful_work`, `kernel_progress`
+and `ctx_switches` were **byte-identical in both reports**, which is the
+signature of exactly one task computing without yielding, printing, or faulting.
+
+#### Why every signal the kernel has said "hung"
+
+The detector's blind spot is a long CPU-bound *kernel-side* computation:
+
+| signal | why it stayed frozen |
+|---|---|
+| `USEFUL_WORK_TICKS` | only advances for ticks that preempt ring-3 code or a CPU with a *queued* task; a lone in-kernel task's ticks are not counted |
+| `kernel_progress_count()` | counts page faults resolved and block I/O completed; an in-memory compression loop does neither |
+| `serial::output_count()` | bzip2 prints once per round-trip, at the end |
+| `total_ctx_switches()` | nothing to switch to |
+
+So a legitimate compression loop is indistinguishable — by every signal the
+kernel possesses — from an in-kernel infinite loop, which is precisely the hang
+this detector exists to catch. Teaching `USEFUL_WORK_TICKS` to count kernel-mode
+ticks would close the false positive by blinding the detector to its primary
+target. **Duration is the only knob that separates the two**, so duration is what
+was tuned.
+
+#### The measurement, and the scaling factor that would have been wrong
+
+| build | silent window inside the bzip2 self-test |
+|---|---|
+| ordinary | the whole bzip2 self-test *and* the xz self-test *and* the pathbar tests all fit between the 60 s and 90 s breadcrumbs (`build/p24-run1-serial.txt`, `p24-run5`) |
+| instrumented | ~93 s for one round-trip (armed 898 s → 991 s) |
+
+**The aggregate boot slowdown is the wrong number to scale by.** It was 3.7×
+(285 s → 1063 s), and 3.7 × 15 s = 55 s — still under the measured 93 s, so a
+threshold derived that way would have gone on false-firing. Instrumentation cost
+is proportional to memory-access *density*, and a compression inner loop is far
+denser than boot taken as a whole. 36 intervals × 5 s = 180 s is ~1.9× the
+measured window, chosen against the measurement itself rather than against a
+ratio borrowed from elsewhere. This is worth remembering: **a per-operation
+threshold cannot be rescaled by a whole-program ratio.**
+
+#### The fix
+
+`kernel/src/sched/mod.rs` — `LIVENESS_ALERT_COUNT` is now `3` under
+`#[cfg(not(kasan_instrumented))]` and `36` under `#[cfg(kasan_instrumented)]`.
+Everything downstream scales automatically: the printed `for {}+ seconds` is
+`count * (WATCHDOG_CHECK_INTERVAL / 100)`, and all five self-test drill loops
+are written `for _ in 0..LIVENESS_ALERT_COUNT` rather than against a literal.
+The ordinary gate is bit-for-bit unaffected.
+
+The generosity costs only *promptness*, never detection:
+`liveness_boot_deadline_check`'s wall-clock backstop catches any hang mode by
+construction and sits at ~3498 s on an instrumented boot, so even at 180 s the
+progress detectors remain the promptest signal by 19×.
+
+#### The pattern, now three for three
+
+This is the third instance in two days of the same defect: **a constant
+calibrated on an uninstrumented kernel, applied to an instrumented one, and
+reported as a kernel fault.**
+
+1. `BENCH_TIMEOUT` in `scripts/boot-test.sh` (earlier)
+2. `KASAN_BOOT_TIMEOUT` — the harness budget; reported as `Wedged RIP =
+   kasan::byte_bad` (previous entry)
+3. `LIVENESS_ALERT_COUNT` — the kernel's own detector; reported as
+   `SELFTEST_FAIL` (this entry)
+
+Each was found only by running the instrumented build, and each was hidden
+behind the previous one — #3 was unreachable until #2 was fixed, because the
+boot never got that far. **There may be a #4 behind this one**; the only way to
+find out is to keep re-running the instrumented boot until it is clean, which is
+what happens next.
+
+**Still true, and not fixed here:** the instrumented build remains outside
+`boot-test.sh`. Every one of these three was a constant that rotted silently
+because nothing routine exercised the profile it applied to.
+
+### [A] RESOLVED — there *was* a #4, and it was the fix above: the liveness watchdog counted its own breadcrumbs as kernel progress, so raising `LIVENESS_ALERT_COUNT` past 6 silently disabled the detector entirely — 2026-08-19
+
+**In short:** the kernel has a watchdog that decides the machine has hung if
+nothing at all is printed for long enough. It also prints its own periodic
+"still watching" note. Nobody had noticed that the watchdog was counting *its
+own* note as a sign of life — so every 30 s it reassured itself that the kernel
+was fine. The previous entry raised the watchdog's patience from 15 s to 180 s
+for instrumented builds; because of this bug, that change did not make the
+watchdog more patient, it turned it **off**. The instrumented boot that followed
+passed not because the false positive was fixed but because the detector had
+stopped being able to fire at all. Fixed by making the watchdog discount
+everything it says itself.
+
+#### The arithmetic, which is the whole bug
+
+Three constants, all in `kernel/src/sched/mod.rs`:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `WATCHDOG_CHECK_INTERVAL` | 500 ticks = **5 s** | how often `liveness_check` runs |
+| `LIVENESS_BREADCRUMB_NS` | **30 s** | how often the armed watchdog prints `[liveness] boot-window breadcrumb` |
+| `LIVENESS_ALERT_COUNT` | 3 (→ 36 instrumented) | consecutive silent intervals before `SYSTEM HANG` |
+
+`liveness_check`'s silence test was `crate::serial::output_count()` compared
+against the previous sample: *any* change meant "not silent", and reset
+`LIVENESS_STALL_COUNT` to zero. The breadcrumb is a `serial_println!`, so it
+bumps `OUTPUT_COUNT` like any other line.
+
+30 s ÷ 5 s = **6 checks per breadcrumb**, so the counter is zeroed before it can
+ever reach 6 — its ceiling is 5. Therefore:
+
+- **any `LIVENESS_ALERT_COUNT` above 6 is unreachable**, and the detector is not
+  "less sensitive" but *dead*;
+- 36 was 6× past that line.
+
+The failure mode is the worst available: it is silent, it looks like success,
+and the thing it disables is the thing that would otherwise have told you.
+
+#### It was a pre-existing latent bug, not one introduced by the fix
+
+At the shipping value of 3 the detector still worked — 3 < 5 — so this had been
+latent for the watchdog's entire history, surviving on a margin of two intervals
+nobody had computed. Two consequences that were true all along:
+
+1. A real hang that happened to begin just before a breadcrumb got its stall
+   counter reset once, delaying (not preventing) the report.
+2. Worse, the **hang report itself** was self-erasing: `SYSTEM HANG` and
+   `SUSPECTED LIVELOCK` are each followed by `dump_all_tasks_serial()`, which
+   emits hundreds of lines. Those were recorded as a large burst of kernel
+   *progress* at exactly the moment the kernel had been declared hung —
+   guaranteeing the counter restarted from zero right after every report.
+
+So the fix wraps every print this module makes, not just the breadcrumb.
+
+#### Why the drills passed a broken change
+
+`kernel/src/sched/mod.rs` carries several liveness self-tests, and all of them
+gave a clean pass on the disabled detector. Every one runs inside
+`cpu::without_interrupts` — no timer tick fires, so no breadcrumb is emitted,
+so the interference under test **cannot occur inside the test**. The drills were
+blind to this bug by construction, not by oversight in their assertions.
+
+This is the general hazard: a test that suppresses interrupts cannot observe any
+defect whose mechanism is a timer-driven side effect.
+
+#### How it was actually caught
+
+Not by a test. The instrumented boot came back green, and the green was checked
+rather than accepted: the question asked was *"did the stall the fix was meant to
+tolerate actually recur, and did the counter climb through it?"* The serial log
+showed the bzip2 window still silent — and two breadcrumbs inside it, each
+followed by the stall counter restarting. The boot passed because the detector
+could not fire, which is not the same thing as passing.
+
+Second time in two sessions that verifying *why* something passed overturned the
+verdict.
+
+#### The fix
+
+`LIVENESS_SELF_OUTPUT: AtomicU64` accumulates the watchdog's own serial writes.
+`kernel_output_count()` returns `serial::output_count()` minus that total, and is
+what `liveness_arm` baselines and `liveness_check` compares. `watchdog_diagnostic(f)`
+samples `output_count()` around a closure and adds the delta to
+`LIVENESS_SELF_OUTPUT`; all four print sites — breadcrumb, `BOOT DEADLINE
+EXCEEDED`, `SYSTEM HANG`, `SUSPECTED LIVELOCK`, each including its trailing task
+dump — are wrapped in it.
+
+Deliberately *not* done: making the breadcrumb quieter, or lengthening
+`LIVENESS_BREADCRUMB_NS` past the threshold. Both would restore reachability
+while leaving the inversion in place, and both would break again the next time
+either constant moved. The breadcrumb exists precisely so the kernel keeps
+speaking *during* a hang; letting that speech certify liveness inverts its
+meaning, and the subtraction is the only fix that addresses the inversion
+itself.
+
+#### The new drill, and why its first version failing was the proof
+
+A drill was added that arms the watchdog, accrues one silent interval, emits a
+simulated breadcrumb through `watchdog_diagnostic`, and asserts the counter
+reaches **2** rather than resetting to 0. It then prints an *ordinary*
+`serial_println!` and asserts the counter *does* reset — without that half, the
+test would pass equally well if `kernel_output_count()` returned a constant, i.e.
+if the silence test were blinded altogether.
+
+The first version of this drill failed the ordinary boot
+(`FAIL: the watchdog's own output reset the stall counter (2 -> 0)`), and the
+failure was the fix's own confirmation. It had accrued to 3 — which on the
+ordinary build *is* `LIVENESS_ALERT_COUNT` — so the report path fired and the
+report path's own `LIVENESS_STALL_COUNT.store(0, …)` zeroed the counter. The
+drill was measuring the report path's reset, not the property it named. But
+reaching 3 at all is impossible if the breadcrumb had reset the counter, so the
+"failure" demonstrated exactly the behaviour under test.
+
+Corrected by staying strictly below the threshold (1 → breadcrumb → 2), keeping
+`LIVENESS_SELFTEST_ACTIVE` raised so any report is prefixed and cannot fail the
+boot from `boot-test.sh`'s pattern match, and asserting
+`LIVENESS_HANG_REPORTS == 0` so the drill fails loudly if it ever drifts up into
+the threshold again instead of quietly testing the wrong thing.
+
+#### The lesson that generalises past this file
+
+**An instrument must not measure its own output.** The three preceding entries
+were all one defect wearing different constants; this one is a different defect
+that the third was hiding. Wherever a component both *emits* a signal and
+*consumes* that class of signal as evidence, the emission has to be subtracted at
+the source — not tuned around, because tuning leaves the inversion in place for
+the next person who moves either number.
+
+The concrete review rule: for any counter used as a liveness or progress signal,
+enumerate who increments it. If the observer is on that list, the observer's
+threshold has a ceiling it can never cross, and that ceiling is invisible in the
+constant's definition.
+
+### [A] OPEN — the bench harness treats "replicates exactly" as proof of a code regression, but that is also the signature of a code-*layout* artifact under TCG — 2026-08-19
+
+**In short:** the benchmark harness guards hard against random noise: it will not
+call something a regression until the same slowdown shows up in a second run of
+the same binary. That guard is sound as far as it goes, but it only rules out
+*noise*. It does not rule out the other thing that reproduces perfectly — the
+compiler having moved unrelated code to a different address. Changing one file
+shifts the address of everything linked after it, and under emulation that alone
+can move an unrelated benchmark by 2× in either direction, identically every run.
+So the harness's highest-confidence verdict is reached by both a real regression
+and a pure artifact, and it cannot presently tell them apart.
+
+#### The evidence
+
+Commit `5e9a30a22` changed three kernel files — `sched/mod.rs` (+308 lines),
+`idt.rs` (+73), `serial.rs` (+2). It touched **no crypto, IPC, VFS, net, mm or
+HTTP code**. Comparing the two `--bench` runs of that image against the last run
+of `d7c311deb`, thirteen benchmarks moved >25% *and* agreed between the two runs
+to within 10%:
+
+| direction | count | examples |
+|---|---|---|
+| slower | 3 | `crypto_sha512_64B` 1921 → **3661, 3661** ns (1.91×) |
+| **faster** | **10** | `crypto_poly1305_1KiB` 13693 → 4977, 5081 (0.37×); `page_fault` 4592 → 2092, 2097 (0.46×); `vfs_read_256` 20256 → 11198, 10451 |
+
+`crypto_sha512_64B` reproduced to **within 4 cycles out of 13582, twice**, against
+a historical band of 1867–1929 ns across seven prior runs on two commits. That is
+not noise by any definition the harness uses — and it is exactly what it will
+report as `REGRESSED … replicated`.
+
+#### Why it is nonetheless not a regression, proved two independent ways
+
+1. **Direction.** Ten of the thirteen got *faster*, with identical replication
+   confidence. A change can only add work; nothing in a liveness-watchdog edit
+   makes Poly1305 2.7× faster. So the deterministic-mover set demonstrably
+   contains movements that cannot have been caused by the code — which is enough,
+   on its own, to establish that "replicated exactly" does not imply "caused by
+   this commit."
+2. **The metric is a minimum.** These benchmarks report `min` over 500–2000
+   iterations. The commit's added work lives in the timer-tick path and runs at
+   most once per `WATCHDOG_CHECK_INTERVAL` (500 ticks), so almost every iteration
+   sees none of it — and **a periodic interrupt cannot raise a minimum**. Only a
+   *per-iteration constant* moves a min, and code placement is one; added periodic
+   work is not.
+
+Both point at the same mechanism: the image grew, everything linked after
+`sched/mod.rs` shifted address, and QEMU's TCG — which retranslates guest code
+into host code cache — is strongly sensitive to that placement.
+
+#### Why this matters more than a wrong verdict on one commit
+
+The harness is unusually careful everywhere else, and the surrounding text says
+so at length: it cancels whole-suite drift, it withdraws unreplicated claims, it
+warns that the canary is blind to host descheduling, it refuses to treat an A/A
+pair's movement as code. Every one of those guards addresses *variance*. None
+addresses *bias from relinking*, and because a layout artifact survives every
+variance guard, it arrives at the reader wearing the harness's strongest label.
+
+That inverts the intended reading exactly the way the liveness watchdog's own
+breadcrumb did: the mechanism that is supposed to increase confidence is the one
+that manufactures it.
+
+#### Concretely, this run
+
+No regression is attributed to `5e9a30a22`. The three "slower" movers are
+`crypto_sha512_64B` (layout, per above), `firewall_check` (102 then 78 ns against
+a 45–79 band — the second run lands *inside* the band, so unreplicated), and
+`ipc_channel` (723, 755 against a 532–1011 band — inside it). `lock_uncontended`
+was reported `REGRESSED … replicated` by the A/A run despite that run's own
+banner stating no movement in it can have been caused by code; its two samples
+are 280 and 486 ns, which is bimodal, not replicated. That last one is a
+straightforward bug in the replication predicate and is the cheapest part to fix.
+
+#### What the fix looks like
+
+Three parts, in increasing cost:
+
+1. **Fix the A/A contradiction.** When the baseline image sha equals this run's,
+   suppress the `REGRESSED` section outright rather than printing it under a
+   banner that says it cannot mean anything. Presently both are emitted and the
+   reader must notice they contradict.
+2. **Record the image sha per benchmark comparison and label cross-image
+   movements as `MOVED (image changed)`, not `REGRESSED`,** unless the changed
+   files plausibly reach the benchmark. The harness already records
+   `kernel_sha`; it just is not consulted for this.
+3. **Separate layout from mechanism directly** by benchmarking the same source
+   twice with a deliberate no-op layout perturbation (e.g. a padding `#[used]`
+   static sized to shift the text segment). Two builds of identical semantics
+   that disagree by 2× would let the harness *calibrate* a per-benchmark layout
+   sensitivity band, and report movement only outside it. This is the real fix
+   and the only one that makes cross-commit crypto/mm numbers trustworthy under
+   TCG at all.
+
+**Part (3) landed 2026-08-19** — the mechanism exists; see design-decisions.md
+§234. `SLATEOS_TEXT_PAD=<bytes>` emits a `#[used]` array into
+`.text.slateos_layout_pad`, which `kernel/linker.ld` places first in `.text` so
+it shifts every function; the boot banner reports `textpad=<n>`;
+`bench-history.py` records it per run and computes a per-benchmark band from the
+spread across arms; movements inside a *measured* band are withdrawn from
+`REGRESSED` under an `EXPLAINED BY CODE PLACEMENT` heading. Verified objectively
+rather than by assertion: `python scripts/layout-sweep.py --self-test` builds
+real kernels and checks that every one of 115,542 shared `.text` symbols moved by
+exactly the pad, that malformed pads fail the build, and — as a negative
+control — that a 4096-byte pad is *rejected* as a sample because it preserves
+every page-straddle relationship. That control earned its keep immediately: it
+caught a const-fold in the first draft that made the unpadded arm ~256 bytes
+shorter in *code*, reintroducing the very confound the sweep exists to remove.
+
+**The first sweep completed 2026-08-19**, on the fourth attempt: six arms at
+pads 0/1024/1536/2048/2560/3072, all at commit `b36a244bb`, release profile,
+Logoplex3, 4128 s. `python scripts/bench-history.py --layout-bands --profile
+release` now prints a band for **86** benchmarks. Note the `--profile release`
+— the default is `debug`, which still has no sweep and so still reports every
+movement as `unmeasured`.
+
+**What it measured, and why it is worse news than expected:**
+
+| | band |
+|---|---|
+| max | **182.0%** (`heap_raw_alloc_free_4096`) |
+| p90 | 107.3% |
+| median | **26.0%** |
+| p25 | 7.7% |
+| min | 1.4% (`net_ns_arp_lookup`) |
+
+| benchmarks with a band ≥ | count | share |
+|---|---|---|
+| 100% | 10 | 12% |
+| 50% | 26 | 30% |
+| 20% | 51 | 59% |
+| **10%** | **61** | **71%** |
+| 5% | 74 | 86% |
+
+Performance-critical paths are not the well-behaved end of that distribution;
+several are the worst of it: `pick_next` 132.0%, `page_alloc_free` 91.9%,
+`page_fault` 84.9%, `ipc_channel` 82.8%, `io_ring_nop` 74.5%,
+`syscall_dispatch` 41.9%, `isr_latency` 25.4%, `sched_pick_next` 20.1%,
+`vfs_stat_root` 14.8%. Only `context_switch` (5.5%) and
+`ipc_channel_roundtrip_64k` (4.2%) are quiet.
+
+**The consequence, stated plainly: `CLAUDE.md`'s benchmarking protocol says
+"if a change regresses a benchmark by more than 10%, investigate before
+merging", and for 71% of the suite 10% is below the noise this emulator
+manufactures from a relink alone.** Every number under that threshold on those
+61 benchmarks was, in the strict sense, unfalsifiable — a "regression" and an
+"improvement" of the same size are equally likely to be the linker. This is
+now filed for the operator as `open-questions.md` A-Q6, because the threshold
+lives in `CLAUDE.md`, which lane A may not edit on its own initiative.
+
+Two caveats on reading the bands:
+
+- **This is not run-to-run variance wearing a costume.** It is damped twice
+  before it can be read as placement sensitivity: `layout_bands()` takes the
+  median over repeats *within* each pad first, then divides each arm by its own
+  `speed_factor` against the group's per-benchmark medians to remove host
+  drift. An arm whose factor cannot be computed voids the entire group rather
+  than falling back to an uncorrected 1.0 — because uncorrected drift *widens*
+  the band, and a wider band dismisses more real movements.
+- **A band is a lower bound.** Six sampled layouts cannot contain the worst
+  pair among all of them, so a movement just outside its band is
+  *unexplained*, not cleared.
+
+  Four attempts on 2026-08-19 were needed, and each failure bought a guard, so
+  the history is worth keeping rather than summarising as "it kept failing":
+
+  | Attempt | Died | Cause | Guard added |
+  |---|---|---|---|
+  | 1 | arm 1, 1 s | `bash` resolved to WSL's, which cannot open the Windows path | — (misdiagnosed as MSYS; the "fix" only moved the error) |
+  | 2 | arm 1, 1 s | same root cause, now showing as `qemu-system-x86_64 not found` — WSL's bash has no QEMU | `find_bash()`: each candidate must *parse the boot test* **and** *find QEMU and OVMF using the boot test's own search* |
+  | 3 | arm 2, 43 min | the kernel's layout-pad self-test had been folded to a constant FAIL, so every padded release kernel halted at boot | `--self-test` claim 4: every branch of the on-target check must be present in the optimised image |
+  | 4 | — completed, 4128 s | — | — |
+
+  Attempts 1 and 2 are one root cause seen twice — the first "fix" addressed the
+  message rather than the cause, which is why the second attempt failed two
+  lines further down. The separate guard against a sweep that *runs* but
+  produces no band (`check_arm_counts()`, which applies `bench-history.py`'s own
+  `layout_arm_rejection()` to each arm's record as it lands) was added between
+  attempts 2 and 3 and has never had to fire.
+
+  Attempt 4's arm 2 is the pad that wedged attempt 3, and its passing is
+  stronger evidence than the binary grep that fixed it: `main.rs` halts the CPU
+  when the layout-pad self-test fails, so reaching `BENCH_OK` proves the
+  success branch both exists *and* was taken.
+
+**Both paths to a build failure now consult the band (2026-08-19).** The first
+version taught only the run-over-run comparison about layout, leaving
+`level_shifts()` — the *sustained*-shift check, wired into
+`--fail-on-regression` independently — able to fail a build on a placement
+artifact. The gap was in that function's own stated reasoning: "host disturbance
+is random per run, while a code regression is in every run after the commit",
+which is true and incomplete, because a layout artifact is *also* in every run
+after the commit. `mode_structure()` does not cover it either — it needs the
+benchmark to have been seen at both modes across binaries, so the first commit
+exhibiting an artifact is `MODE_UNDECIDED` and fails. A sustained shift is now
+excused on the same positive evidence as everywhere else, plus one precondition
+specific to this path: `placement_is_constant()` blocks the excuse when every
+run the shift is drawn from is provably one kernel image, since then the
+addresses are identical throughout and layout is the one hypothesis ruled out by
+arithmetic. See design-decisions.md §234, "Both paths to a build failure".
+
+**Part (2) landed 2026-08-19, in the opposite direction to how it was written
+above** — and the reversal is the whole reason it had stayed blocked. As stated,
+(2) reads "label cross-image movements `MOVED (image changed)` *unless* the
+changed files plausibly reach the benchmark". That phrasing needs proof of
+**non**-reachability to withdraw a regression, and nothing available here can
+supply it: a static map cannot see through helper functions, trait objects,
+inlining or LTO, so "I found no path" is not "there is no path". Worse, it fails
+in the unsafe direction — a missed path silently relabels a real regression as a
+build artifact.
+
+So the map is used one way only: **it may escalate, never dismiss.** A movement
+is excused solely by the *measured* layout band, exactly as before; the map then
+runs afterwards and, when the diff provably touches a subsystem the benchmark
+demonstrably enters, prints a warning that placement and the diff are now both
+live explanations and this measurement cannot separate them. Every uncertainty —
+no map entry, a `git diff` that failed, an unparseable `bench.rs` — resolves to
+silence, which changes no verdict. `benchmark_subsystems()` in
+`scripts/bench-history.py` derives the map by matching `score("name", …)` call
+sites in `kernel/src/bench.rs` against `mod::` paths in the surrounding function
+and resolving those to files under `kernel/src/`; it deliberately under-covers
+(67 of 86 benchmarks) and over-attributes (`vfs_stat_root` picks up `sync` and
+`lockdep`), both of which are the safe direction for an escalate-only signal.
+Wired into both excuse sites — the run-over-run `EXPLAINED BY CODE PLACEMENT`
+loop and the sustained-shift path — and pinned by three tests in
+`test-bench-history.py`, one of which asserts the one-directionality directly.
+See design-decisions.md §235.
+
+**A sweep now checks, arm by arm, that its arms count (2026-08-19).** Two sweep
+attempts have been voided, and the second is the one that shaped this: it would
+have built and booted six kernels over ~3 hours, printed six confirmations,
+exited 0, and produced no band whatsoever — because the dirty-flag bug above
+made every run after the first record itself as `dirty`, and `layout_arms()`
+drops a `dirty` record. The only symptom would have been `--layout-bands`
+printing nothing, hours later, with the cause a guess.
+
+Note what every existing check verified: that the *run* succeeded. It built, it
+booted, it printed the pad it was asked for. That was never the question.
+`layout_arms()` has four further ways to refuse a record — `dirty`, a loaded
+host, a missing commit, the wrong profile — and a completely successful run
+satisfies them exactly as easily as a failed one does.
+
+So `layout-sweep.py` now calls `check_arm_counts()` after every arm, which asks
+`bench-history.py`'s `layout_arm_rejection()` whether the row just written will
+be *counted*, and aborts naming the reason if not. That predicate is the one
+`layout_arms()` itself applies — extracted, not copied. A copy would agree today
+and drift on the next edit to either, after which it would certify every arm of
+a sweep that yields no band, which is the outcome it exists to prevent; a
+drifted copy is worse than no check. It also confirms the newest row is *this*
+arm's before judging it, since otherwise a concurrent append would have the
+verdict for one run reported as though it were about another.
+
+There is deliberately no cheaper pre-flight. The rejection reasons are
+properties of a record, and the record does not exist until a run produces it;
+`dirty` in particular is computed by `boot-test.sh` with its own pathspec
+exclusions, and predicting it in Python would be a third statement of that rule.
+A pre-flight that disagrees with the real check is worse than none — it would
+clear a sweep that then records six discarded arms, with a green pre-flight
+standing as evidence the tree was fine. One arm (~20 min) is the price of one
+statement per rule.
+
+Until a sweep has actually been run, the original guidance stands: treat any
+flagged movement in a benchmark whose subsystem the commit did not touch as
+layout until shown otherwise — and check the *direction histogram* of all
+deterministic movers first, because a mixed one is diagnostic on its own.
+
+#### Further instance — 2026-08-19, the KASAN frame-hook change
+
+A clean worked example of why (1) and (2) are worth the effort, and of how much
+run time the absence of them costs. Two `--bench` runs of the *same* binary (the
+frame-unpoison hook, which touches only `mm/kasan.rs`, `mm/frame.rs` and
+`main.rs`):
+
+- **Run 1 flagged 12 regressions** of +26% to +91% — `vfs_stat_3comp`,
+  `syscall_dispatch`, `shm_create_close`, `net_ns_arp_lookup`, `ipc_pipe` and
+  friends. It also invalidated its own calibration three separate ways in the
+  same output: `scatter scale check: FAILED … this run's budget calibration is
+  not a physical quantity`, `CONTAMINATED: reference access cost spread 55% over
+  13 samples`, and `MEASUREMENT VOID` on two more. The regression section is
+  printed anyway, above the notice that says not to believe it.
+- **Run 2, same binary, no rebuild, calibration valid** (`scatter scale check:
+  OK`, 19% of a 25% tolerance): 11 of the 12 withdrew, several inverting to
+  `IMPROVED` — `shm_create_close` −46%, `syscall_dispatch` −40%,
+  `net_ns_arp_lookup` −41%. A mixed direction histogram, exactly as the
+  paragraph above predicts.
+
+The one survivor, `pick_next` (+44%, own range 492–651 ns), was reported
+`REGRESSED … replicated -- every recorded run of this commit shows it`. But
+"replicated" here only means *both runs of one image agree*; the comparison is
+still cross-image against `5e9a30a22`, which is precisely case (2). `pick_next`
+allocates no frames — the only `frame::alloc_order` under `kernel/src/sched/` is
+task-stack creation (`task.rs:1050`), not the pick path — so no edit in this
+change reaches it. Layout, by the standing rule.
+
+Two things this instance adds. First, **the `REGRESSED … replicated` wording is
+actively misleading for a cross-image pair** and should be reworded along with
+fix (1): a reader reasonably takes "replicated" to mean "confirmed as a code
+effect", when it only rules out single-run noise. Second, and the reason (3)
+matters more than it looks: **this host's own noise floor exceeds the effect
+sizes being reported.** The harness says so itself — "Two runs of one unchanged
+binary have been measured moving 85% apart" — and this pair demonstrated it live,
+with `page_alloc_zeroed_free` spanning 3625→5420 ns (50%) across two runs of one
+image. An A/B against a stashed build would therefore not have been decisive
+either; it would have cost ~20 minutes of rebuild and boot to produce another
+sample from a distribution wider than the signal. That is the actual argument for
+(3): without a calibrated per-benchmark layout band there is no experiment
+available at this noise level that can settle a 44% cross-image movement.
+
+#### Partly fixed — 2026-08-19: parts (1) and (4) landed; (2) and (3) remain
+
+`scripts/bench-history.py`:
+
+- **(1) The A/A contradiction is gone.** When the baseline record is the same
+  kernel image as this run, `report()` now emits **no verdict heading at all** --
+  not `REGRESSED`, not `REGRESSED, UNREPLICATED`, not `UNCONFIRMED`, not
+  `IMPROVED`, not `NOT REPLICATED`. The movements are still listed, under
+  `A/A MOVEMENT (... this host's measurement noise, measured -- NOT a regression
+  and NOT an improvement, in either direction)`, and the per-benchmark repeat
+  samples are kept beneath each row, because "this binary produced 363 and 680 ns"
+  is the one number an A/A pair exists to produce. Only the claim was dropped.
+  Replayed against the documented 602fc62e0 pair in `bench/history.jsonl`, the
+  four movements now read as a two-directional noise floor (+85%, +54%, +36%,
+  -29%) instead of as two confirmed regressions.
+- **(4) `REGRESSED ... replicated` no longer reads as "confirmed as a code
+  effect".** The heading says "every recorded run of this same *kernel image*"
+  (the gate is `same_image`; the old wording said "commit", which names a check
+  this harness deliberately does not implement -- see `binary_identity`), and it
+  is followed by an explicit statement of what replication does *not* rule out:
+  the baseline is a different image, relinking re-rolls whether a hot loop
+  straddles a guest page, that costs ~1.7x per iteration under TCG, and it
+  reproduces every run. The note points at `scripts/straddle-check.py --compare`.
+- **New, and not in the original three:** a **direction histogram**, printed when
+  movement left the band in both directions in one comparison. This is the
+  cheapest discriminator available and the only one that is evidence about the
+  *set* rather than a row -- a code change moves what it touched in the direction
+  it pushed, while relinking moves whatever lands badly in whichever direction it
+  lands. It is an observation, not a verdict, because an optimisation commit
+  legitimately produces a mixed histogram too; the falsifier is printed with it.
+
+Tests: `scripts/test-bench-history.py` gained three cases -- every verdict
+heading asserted absent by name under A/A (the bare word `REGRESSED` is a
+substring of three headings, so a loose check would pass with two of them still
+printing), the per-row repeat samples asserted still present, and the histogram
+asserted to fire on a mixed comparison and stay silent on a one-directional one.
+Discovery floor raised 40 -> 70.
+
+**Still open:** (2) needs a benchmark-to-source reachability map before a
+cross-image movement can be labelled `MOVED (image changed)` without deleting
+the signal -- every non-A/A comparison is cross-image by definition, so the
+label is only meaningful where the changed files demonstrably cannot reach the
+benchmark. (3) is unchanged and is still the only fix that makes cross-commit
+crypto/mm numbers trustworthy under TCG at all.
+
+
+---
+
+### [A] RESOLVED — a KASAN self-test left a freed heap slot permanently poisoned, so 62 of the instrumented build's 64 report slots were spent on false use-after-frees and the real report budget was exhausted two thirds of the way through the boot — 2026-08-19
+
+**Id:** `B-KASAN-STALE-POISON-ON-LIVE-SLOT`
+
+**In short:** KASAN keeps a side table ("shadow") with one byte per 8 bytes of
+memory, marking each 8-byte chunk as usable or not. Freeing marks a chunk
+"freed"; allocating marks it "usable" again. Both of those updates were skipped
+whenever KASAN was switched off — but the *switching off* did not clean up the
+marks already written. A boot self-test switched KASAN on, freed a 64-byte block
+(marking it "freed"), and switched KASAN off again, leaving that block sitting
+on the allocator's free list still wearing the "freed" mark. Whatever allocated
+it next got no mark update, because KASAN was off. From then on the block was in
+active use while permanently labelled freed, and every ordinary read or write to
+it was reported as a use-after-free. There were 64 such reports on one
+instrumented boot, and after 64 the kernel stops reporting — so every *genuine*
+memory-corruption report in the last 1600 lines of a 27701-line boot was
+silently dropped, in the one build profile that exists to catch them.
+
+#### How it presented
+
+The instrumented boot that closed
+`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` reached `BOOT_OK`
+in 951 s and looked clean. It was not clean:
+
+| Observation | Value |
+|---|---|
+| `[kasan] CRITICAL: use-after-free` reports | 64 |
+| ...fired *after* the KASAN self-tests ended (line 25623) | 62 |
+| Distinct addresses across all 64 reports | one 20-byte span, `0xffff80007eb072c0`-`...72d3` |
+| Report budget exhausted at | line 26035 of 27701 |
+| Boot lines left unprotected after that | ~1666 |
+
+Reports on a *single* span, interleaved with unrelated `[quarantine]`,
+`[watermark]` and `[ipv6]` self-tests, is not the signature of a corruption bug;
+it is the signature of one piece of memory that the checker is permanently wrong
+about.
+
+#### The mechanism
+
+`on_alloc` and `on_free` (`kernel/src/mm/kasan.rs`) both open with
+`if !is_enabled() { return; }`. That pair of gates is only sound while the shadow
+is guaranteed clean whenever KASAN is off, and the two directions do not fail the
+same way:
+
+| Sequence | `on_free` poisons? | `on_alloc` unpoisons? | Result |
+|---|---|---|---|
+| freed off, reallocated on | no | yes | clean |
+| freed on, reallocated on | yes | yes | correct |
+| **freed on, reallocated off** | **yes** | **no** | **`0xFA` over live memory, forever** |
+
+`kasan::self_test_freed_address()` performed the third row *by design*: it
+enabled KASAN, allocated 64 bytes, freed them (so the shadow read `KASAN_FREE`),
+and returned the address — because its caller, `kasan_rt::self_test`, needed a
+known-bad address to drive the report path with. It then restored KASAN to
+disabled and returned, leaving the poisoned slot on the free list.
+
+The instrumented build is what turns that into visible damage.
+`kasan::shadow_allows` is deliberately **not** gated on `is_enabled()` — it backs
+the compiler-emitted `__asan_load*`/`__asan_store*` calls, which LLVM emits
+unconditionally — so the poison is consulted on every access to that memory even
+though KASAN is nominally off.
+
+#### Why nothing caught it
+
+- **The self-tests all passed**, because each one asserts about the shadow state
+  it just created. None asserts anything about the state it *leaves behind*.
+- **The uninstrumented build is immune in practice.** With KASAN off nothing
+  calls `check()`, so the stale poison sits there inert. The bug is only
+  observable in the profile that is run rarely and read least carefully.
+- **The verification that declared the boot clean could not have failed.** It
+  grepped for `BUG: KASAN` and `__asan_report`, neither of which appears
+  anywhere in `kernel/src/`. The kernel prints `[kasan] CRITICAL:`
+  (`kasan.rs`). This is the same "matcher that can never fire" hazard
+  `scripts/boot-history.py`'s own docstring warns about; see the correction
+  logged below.
+
+#### The fix
+
+Three changes in `kernel/src/mm/kasan.rs` and one in `kernel/src/mm/kasan_rt.rs`:
+
+1. **`disable()` now wipes.** It clears `ENABLED` first (so no new poison can
+   start), then resets every *mapped* shadow frame to `KASAN_ADDRESSABLE` via a
+   new `clear_all_poison()`, iterating the existing `SHADOW_MAPPED` bitmap so the
+   cost is proportional to the heap actually touched, not to the 8 GiB shadow
+   reservation. This restores the invariant the two gates depend on — *poison
+   exists only while enabled* — **by construction**, rather than requiring every
+   present and future enable/disable window to remember to clean up. The
+   direction is the safe one: a wiped shadow reads addressable everywhere, so the
+   worst case is a missed report, never a false one.
+   - The fill uses `mm::rawmem::fill_u8`, not `core::ptr::write_bytes`: the
+     `core` intrinsic is subject to LLVM's memory-intrinsic instrumentation, and
+     a shadow write that itself takes a shadow check underneath the sanitizer is
+     the recursion this module exists outside of.
+   - Unmapped shadow is left alone. It resolves to the single read-only zero page
+     aliased across the whole reservation; one store there would appear as poison
+     at millions of unrelated addresses, which is exactly why it is read-only.
+2. **`self_test_freed_address()` becomes `with_self_test_freed_address(|addr| ...)`.**
+   The old signature *was* the bug: it handed out an address naming a slot that
+   was back on the free list while still poisoned. Scoping it to a closure makes
+   the cleanup structural, and the cleanup is the state restore that already
+   existed — if KASAN was on, the poison is correct and `on_alloc` will clear it
+   at reuse; if KASAN was off, `disable()` wipes on the way out. No future caller
+   can reintroduce the leak by forgetting a step that no longer exists.
+3. **`with_map_lock`'s doc comment corrected.** It claimed a lock give-up "is
+   never a correctness problem — an unpoisoned shadow byte reads as
+   'addressable' and fails open." True of the poison direction; **false** of the
+   unpoison direction, which fails *closed* and is precisely how a live slot ends
+   up permanently marked freed.
+4. **Regression test** — `kasan::self_test` Test 6 performs the exact failing
+   sequence (KASAN on, alloc, free, assert poisoned, `disable()`) and asserts
+   the shadow is addressable afterwards, plus `shadow_allows(a, 64)` so a wipe
+   that cleared one byte but missed the rest of the slot still fails. It asserts
+   about the *shadow byte*, not about "did a report fire", so it holds in the
+   ordinary build too — the uninstrumented build is where the poison is planted
+   and where the wipe either happens or does not.
+
+#### The lesson that generalises
+
+**An enable/disable flag that gates a state *mutation* must also own the state's
+teardown.** Gating both halves of a poison/unpoison pair on the same flag looks
+symmetric and is not: the flag can be cleared between the two halves, and only
+one of the two failure directions is safe. Any time a flag gates "write X" and
+"undo X" separately, ask what happens when it flips in between — and if the
+answer is bad in one direction only, the flag's `off` transition, not the
+individual hooks, is where the fix belongs.
+
+---
+
+### [A] CORRECTION — "zero KASAN reports" in the `B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` closure was verified with a matcher that could not fire — 2026-08-19
+
+**In short:** When I closed that bug I wrote in `roadmap.md` that two instrumented
+boots reached `BOOT_OK` with "zero KASAN reports". The check behind that claim
+searched the boot log for the strings `BUG: KASAN` and `__asan_report`. Neither
+string is emitted by this kernel anywhere — it prints `[kasan] CRITICAL:`. So the
+check was guaranteed to find nothing regardless of what the boot did, and the
+boot in fact produced 64 use-after-free reports (see
+`B-KASAN-STALE-POISON-ON-LIVE-SLOT` above).
+
+**What stands and what does not.** The *closure itself* stands: the bug being
+closed was a spurious wedge report caused by a boot timeout calibrated for an
+uninstrumented kernel, and two instrumented boots reaching `BOOT_OK` is the
+evidence for that, independent of report counts. What does not stand is the
+parenthetical "with zero KASAN reports", which has been struck in `roadmap.md`
+and replaced with the real figure and a pointer here.
+
+**Not retroactively checkable.** `build/serial-test.txt` is overwritten by every
+boot, so the two earlier instrumented runs' logs no longer exist. Only the third
+run's report count is known.
+
+**Why it happened, and the guard.** `BUG: KASAN` is what *Linux* prints; I
+matched the pattern I expected rather than the pattern the code emits. The
+discipline that would have caught it costs one command: **before trusting a
+negative grep, grep the source for the pattern** and confirm it can be produced
+at all. This is the identical hazard `scripts/boot-history.py`'s docstring
+already documents, which I had quoted approvingly earlier in the same session —
+a warning is not a guard, and only a matcher checked against the emitter is.
+
+---
+
+### [A] RESOLVED — KASAN poison survives a frame returning to the buddy allocator, so every large heap free permanently mismarks physical memory that is then reused for anything at all — 2026-08-19
+
+**Id:** `B-KASAN-POISON-SURVIVES-FRAME-REUSE`
+
+**Resolved 2026-08-19** by hooking the frame allocator (`frame::on_frames_allocated`
+→ `kasan::on_frame_alloc`) on all five allocation return sites. Measured on a
+whole-boot instrumented run (`scripts/kasan-build.sh --boot`, `BOOT_OK` in 937 s
+of a 3600 s budget, boot test PASSED):
+
+| | Before | After |
+|---|---|---|
+| KASAN reports | **64** by serial line 2092 (budget exhausted) | **3** in 27 592 lines |
+| of which false positives | 64 | **0** |
+| `map_lock_giveups` | 3, with "shadow coverage has holes this boot" | **0** |
+| shadow coverage | — | 2630 frames; 1 496 684 080 B poisoned / 4 294 571 020 B unpoisoned |
+
+All three surviving reports are *deliberate* self-test violations, and each is
+matched by the subsystem's own detector agreeing with KASAN: two from
+`kasan-rt`'s report-path test, and one from the heap slab-poison test's
+intentional overflow — `[kasan] … out-of-bounds (heap redzone) on write of 1
+bytes @ 0xffff800131b5c32c` against `[heap] BUFFER OVERFLOW detected!
+slot=0xffff800131b5c300, alloc=40, class=64, offset=44` (`0xc32c` = slot + 44).
+So the profile is now both quiet *and* demonstrably live — the failure shape
+called out at the bottom of this entry (a check that cannot fire, presenting as
+a check that found nothing) is excluded by the same evidence that shows it clean.
+
+Note that these three deliberate violations consume 3 of the 64-report budget on
+every instrumented boot. That is left as-is deliberately: the cost is negligible
+and the reports are positive evidence each boot that the detector still works.
+
+**In short:** KASAN marks memory "freed" when the heap frees it, and "usable"
+again when the heap hands it out. But *large* heap allocations do not come from
+the heap's own slabs — they come straight from the physical frame allocator, and
+freeing one gives those physical frames back to the frame allocator, which will
+happily reuse them for something that is not a heap object at all: a page table,
+a slab page, a DMA buffer. Nothing on those paths tells KASAN the memory is
+usable again, so the "freed" mark stays. From then on every legitimate access to
+that memory is reported as a use-after-free. Turning KASAN on for the whole boot
+(§233) surfaced this instantly: 64 reports — the entire per-boot report budget —
+inside the first 2092 lines of boot, after which real findings are suppressed.
+
+#### Evidence
+
+First instrumented boot with KASAN active from init:
+
+```
+499:[kasan] CRITICAL: use-after-free (freed heap) on write of 8 bytes @ 0xffff80007fe4f000
+513:[kasan] CRITICAL: use-after-free (freed heap) on write of 8 bytes @ 0xffff80007fe4e000
+527:[kasan] CRITICAL: use-after-free (freed heap) on write of 8 bytes @ 0xffff80007fe4d000
+541:[kasan] CRITICAL: use-after-free (freed heap) on write of 8 bytes @ 0xffff80007fe4c000
+555:[kasan] CRITICAL: use-after-free (freed heap) on read  of 8 bytes @ 0xffff80007fe4c000
+586:[kasan] CRITICAL: use-after-free (freed heap) on read  of 8 bytes @ 0xffff80007fe4c008
+604:[kasan] CRITICAL: use-after-free (freed heap) on read  of 8 bytes @ 0xffff80007fe4c010
+...
+```
+
+Three things identify this as stale poison rather than a real use-after-free:
+
+1. **The write addresses are 4 KiB apart and descending** — `…4f000`, `…4e000`,
+   `…4d000`, `…4c000` — which is a page walk, not an object.
+2. **All four share one identical 12-frame backtrace**, so they are one loop.
+3. **The reads that follow march `+0, +8, +0x10, +0x18, …` from the lowest of
+   them**, which is a linear scan of freshly acquired memory, i.e. exactly what a
+   *new owner* of a reused frame does.
+
+`0xffff80007fe4c000` is HHDM + `0x7fe4c000` ≈ 2.14 GiB into a 3 GiB guest — a
+direct-map alias of a physical frame, not a slab slot.
+
+#### The mechanism
+
+| Step | Code | Shadow effect |
+|---|---|---|
+| large alloc | `HeapInner::large_alloc` → `frame::alloc_order` → `to_virt(hhdm)` | `on_alloc` (heap.rs:1300) unpoisons |
+| large free | `GlobalAlloc::dealloc` → `on_free` (heap.rs:1332) | **whole region poisoned `0xFA`** |
+| ...then | `HeapInner::large_dealloc` → `frame::free_order` | frames go to the buddy allocator |
+| reuse | `frame::alloc_frame` for a page table / slab page / DMA buffer | **nothing unpoisons** |
+| any access | via the HHDM alias | reported as use-after-free, forever |
+
+This is `B-KASAN-STALE-POISON-ON-LIVE-SLOT` one layer down, and the same shape:
+*poison outliving the object because reuse happens through a path that does not
+unpoison.* The earlier fix put the teardown on `disable()`, which handles the
+enable/disable transition; it cannot help here, because KASAN never gets
+disabled — the poison outlives the *allocation*, not the *enabled window*.
+
+It has always been latent. It was invisible before §233 only because KASAN was
+never enabled long enough for a large free and a frame reuse to both land inside
+the same enabled window.
+
+#### The fix (as applied)
+
+**Hook the frame allocator, which is what Linux does** (`kasan_unpoison_pages()`
+on page alloc, `kasan_poison_pages()` on page free). Concretely:
+
+1. Add `kasan::on_frame_alloc(phys, bytes)` and call it from `frame::alloc_frame`
+   and `frame::alloc_order`, unpoisoning the HHDM alias of the returned frames
+   **before the allocator or its caller touches them** — a frame that is zeroed
+   through HHDM on the way out would otherwise take an instrumented access to
+   still-poisoned memory and report.
+2. That alone is a correctness fix and fails open: after it, no stale poison can
+   survive frame reuse regardless of what the frame becomes.
+
+**Re-entrancy is the trap to get right, and the first answer to it was wrong.**
+`unpoison_range` → `set_shadow` → `ensure_shadow_mapped` → `frame::alloc_frame`
+→ the new hook → `unpoison_range`… The shadow VA itself is outside the covered
+window so it does not recurse, but the *HHDM alias of a freshly allocated shadow
+frame* is inside it, and `ensure_shadow_mapped` zeroes exactly that. Each level
+covers 8x more memory so it terminates in practice, but "terminates in practice"
+is not the standard this module holds itself to (see the raw-accessor
+termination argument at the top of `kasan.rs`).
+
+The prescription originally written here — *"use an explicit per-CPU re-entrancy
+flag and skip the hook when already inside it"* — was implemented and is
+**wrong**. The flag is only sound with interrupts disabled (otherwise an
+IRQ-context allocation on the same CPU sees the flag set and skips its own
+unpoison), and disabling interrupts means every call reaches `with_map_lock` on
+its `!irqs_were_on` path — the one that **gives up instead of spinning**. A
+given-up unpoison fails *closed*: the stale `0xFA` stays on live memory and every
+later access to it is reported forever. That is this very bug, reintroduced by
+its own fix. The first boot with that version said so plainly:
+`map_lock_giveups=3` and `WARNING: 3 IRQ-context allocation(s) went unpoisoned
+(MAP_LOCK busy) — shadow coverage has holes this boot`, in a build where KASAN is
+live only for the self-test window. Whole-boot, firing on every frame allocation,
+it would have been far more.
+
+**The correct answer is not to guard the recursion but to not have it.** The hook
+writes exactly one value, `KASAN_ADDRESSABLE` (`0x00`), and an *unbacked* shadow
+frame already reads `0x00` — the entire shadow window resolves through a shared
+read-only zero page until something backs it (`ZERO_PT`'s 512 entries all point
+at one all-zero page; `get_shadow` likewise returns `KASAN_ADDRESSABLE` for an
+unmapped frame). So "back the shadow frame, then write zero into it" and "leave
+it alone" are the same result. `fill_shadow_with(..., IfUnmapped::Skip)` takes
+the second, which allocates nothing — no recursion, no guard, no interrupts-off
+window, no `MAP_LOCK`, no hole — at zero cost, because the skipped write was a
+no-op by construction. The fix still lands where it matters: poisoning *does*
+back the shadow frame, so any frame carrying stale `0xFA` necessarily has its
+shadow bit set and gets cleared.
+
+Generalised: **an unpoison-only path never needs to allocate shadow, and any
+design in which it does is buying a re-entrancy problem for nothing.**
+
+**Deliberately not doing (yet):** poisoning on frame *free*. That would add
+page-granularity use-after-free detection, which is a genuinely stronger check
+and attractive — but it is a new claim rather than the removal of a false one,
+and it risks its own false positives (the frame allocator writes its own
+metadata and freelist links through the HHDM alias of frames it has just
+freed). Land the unpoison side, get a clean whole-boot instrumented run, and
+consider poisoning-on-free as a separate change with its own boot evidence.
+
+#### Why this matters more than the report count suggests
+
+The 64-report budget is exhausted at line 2092 of a ~27700-line boot. Everything
+after that is unprotected, so the profile is at present *worse* than useless for
+its stated purpose (`B-KNULLJUMP`): it consumes its entire detection budget on
+false positives in the first 8% of the boot and then goes quiet, which reads
+exactly like a clean run. That is the same failure shape as the two entries above
+it — a check that cannot fire, presenting as a check that found nothing.
+
+### [A] RESOLVED — KASAN's own shadow-page bootstrap wrote through an *instrumented* `core::ptr::write_bytes`, so backing a shadow page reported a use-after-free against KASAN's bookkeeping — 2026-08-19
+
+**Id:** `B-KASAN-SHADOW-BOOTSTRAP-SELF-REPORT`
+
+**In short:** When KASAN needs a new page of its own bookkeeping memory, it asks
+the frame allocator for a frame and zeroes it. That zeroing was done with a
+`core` library call — and in the instrumented build, `core` calls compiled into
+the kernel *are* checked by KASAN. So KASAN checked its own bookkeeping write,
+against a frame that had just come back from the allocator and could still be
+marked "freed" from whatever last used it, and reported a use-after-free that
+was entirely its own doing. The whole point of `mm::rawmem` is that this class
+of call must not appear in the memory-debugging modules; two had survived inside
+`mm::kasan` itself.
+
+#### Where
+
+`kernel/src/mm/kasan.rs`:
+
+| Site | Call | Consequence |
+|---|---|---|
+| `ensure_shadow_mapped` | `core::ptr::write_bytes(frame_virt, 0, FRAME_SIZE)` on the **HHDM alias of a freshly-allocated frame** | genuine false report — the alias is inside the covered window and the frame may carry stale `0xFA` |
+| `set_shadow` | `core::ptr::write_volatile(sv, val)` on a **shadow byte** | no report today, because the shadow window lies outside the covered range — but that is a coincidence of the address-space layout, not an invariant anyone maintains |
+
+Both are now `crate::mm::rawmem::fill_u8` / `write_u8`.
+
+#### Why the module-level opt-out did not cover them
+
+This is exactly the hazard `mm::rawmem`'s module docs and `design-decisions.md`
+§118/§119 were written for, restated:
+
+> A module-level `sanitize` attribute cannot exempt a generic `core` function.
+> `sanitize` is a per-function LLVM attribute, and a generic `core` function
+> monomorphises into *this* crate carrying the default (instrumented)
+> attribute — the exempt module's attribute never applies to it.
+
+`mm::kasan` carries `#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]`
+at line 80 and reads, from its own module docs down, as though that settles the
+question. It does not, and the two survivors were found by grepping for the
+pattern rather than by reading the file — the same lesson as
+`B-KASAN-FALSE-CLEAN-STREAK`: a rule stated in prose is not a rule that is
+enforced.
+
+**The check that would have caught it:** `grep -n "core::ptr::" ` over every
+module carrying the `sanitize(address = "off")` opt-out. That is one command and
+it should have been run when `mm::rawmem` was introduced, since introducing it
+was the admission that these call sites are bugs. It is worth wiring into
+`scripts/` as a lint rather than leaving as a thing to remember.
+
+#### Relationship to the frame-reuse bug
+
+`B-KASAN-POISON-SURVIVES-FRAME-REUSE` is the reason the frame `ensure_shadow_mapped`
+allocates could be poisoned at all. Fixing that removes most of the fuel;
+fixing this removes the ignition. Both are needed: the frame hook cannot cover
+`ensure_shadow_mapped`'s own frame, because that allocation happens *inside* the
+hook's re-entrancy guard and is deliberately skipped.
+
+---
+
+### [A] RESOLVED — `bench/boot-history.jsonl` recorded `profile: "debug"` for both an instrumented and an ordinary boot, so every duration statistic drawn from it averaged two populations that differ by 3.4x — 2026-08-19
+
+**Symptom.** `python scripts/boot-history.py --list` over the 153 records
+accumulated to 2026-08-19 shows rows like
+
+```
+2026-08-19T08:14:15+00:00  27bb7a96d  PASS               1096s
+2026-08-19T09:04:58+00:00  27bb7a96d  PASS                337s
+```
+
+— same verdict, same commit, same `profile`, and a wall time that differs by a
+factor of 3.3. Nothing in the record says why. The 1096 s rows are
+KASAN-instrumented boots (`scripts/kasan-build.sh`); the 337 s rows are ordinary
+ones. The file's own `profile` field could not tell them apart because it
+records the *cargo* profile, and both builds are `debug`.
+
+**Why it mattered.** Every consumer of the durations in that file was silently
+averaging a mixture:
+
+- the median printed by `--streaks` described no build that exists;
+- "is this boot unusually slow?" — the question the file is kept for — had no
+  answerable form, because slow-for-an-instrumented-boot and
+  slow-for-an-ordinary-boot are three-fold apart;
+- a timeout calibrated off the mixture is too tight for one population and too
+  loose for the other. There is already one record with this shape: a `TIMEOUT`
+  at 367 s wall with 3492 serial lines, which is a perfectly healthy
+  instrumented boot cut off by an uninstrumented timeout, filed as a failure.
+- `B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` is titled "KASAN
+  builds only" and its fingerprint could not honour its own scope, because the
+  record it matches against did not carry the build.
+
+**The fix.** The kernel now announces its own build, immediately after
+`=== Kernel booting ===` (`kernel/src/main.rs`):
+
+```
+[boot] build profile: sanitizer=kasan-instrumented
+[boot] build profile: sanitizer=none
+```
+
+`scripts/boot-history.py` parses it into `Serial.sanitizer`, writes it into
+every record, groups wall times by it (`wall_populations` / `report_wall`,
+which deliberately prints *no* combined figure), shows it as a column in
+`--list`, and scopes the KASAN fingerprint by it.
+
+**The part that is the actual lesson, and is not the parsing.** The banner is
+printed **unconditionally, with a varying value** — not printed only by the
+instrumented build. The tempting version is one line inside
+`#[cfg(kasan_instrumented)]`, and it is wrong for a reason this project has now
+been bitten by three times (`B-KASAN-FALSE-CLEAN-STREAK`, the liveness watchdog
+counting its own breadcrumbs, the preshadow check's unexpandable roots): *a
+signal whose absence is meaningful is a signal that cannot distinguish "no" from
+"nobody asked".* Every one of the 153 historic records predates the banner, and
+a good number of them are instrumented. Had absence meant "uninstrumented", the
+fix would have relabelled all 153 of them — in exactly the direction that makes
+the two populations look like one, which is the bug.
+
+So `sanitizer` is three-valued and stays that way through the whole pipeline:
+`"kasan-instrumented"` / `"none"` / `None` ("this log cannot say"). The three
+states are kept distinct in the JSONL too — the key is written even when the
+value is null, so an *absent* key means "row predates the field" while a *null*
+one means "the kernel did not say". Nothing anywhere is permitted to fold
+`None` into `"none"`; `_fp_kasan_midprint` declines only on an explicit
+`"none"`, so its single validated occurrence (2026-08-12, from a pre-banner
+kernel) still matches. `scripts/test-boot-history.py` asserts that directly —
+it is the one test whose failure would mean the fingerprint's streak had
+silently reset to a perfect clean one.
+
+**Not fixed here:** the 153 existing records stay `null`. They are not
+recoverable — the evidence needed to reclassify them is precisely the line that
+did not exist — and guessing from wall time would manufacture the certainty the
+whole three-valued design exists to refuse.
+
+---
+
+## The bench harness recorded itself as dirty, because it recorded itself (lane A)
+
+**Status:** FIXED 2026-08-19 (the mechanism). The ≤21 historical rows it
+mislabelled are not recoverable; see the last section.
+
+`boot-test.sh` stamps every row it writes to `bench/history.jsonl` and
+`bench/boot-history.jsonl` with a `dirty` flag, from
+
+```sh
+git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null || BT_DIRTY=1
+```
+
+Those two files are tracked, and they are the two files the harness appends to
+on its way out. So the check included its own output: the first `--bench` run
+at a commit is recorded clean, and it leaves the tree modified, so every run
+after it says `"dirty": true` with nothing under test having changed.
+
+The mislabel is **sticky, not per-commit**. The modification persists until
+someone happens to commit `bench/history.jsonl`, which may be several commits
+later — so a run's flag depends on whether an unrelated commit swept up the
+record file, not on the tree it measured. In the current history the pure form
+is still visible: `40515da89` has one clean row followed by five dirty ones and
+`5e9a30a22` one clean then one dirty, with no source commit in between.
+
+### Why it is not cosmetic
+
+`dirty` means *the commit hash does not identify the source that was built*,
+and consumers delete evidence on the strength of it:
+
+| Consumer in `bench-history.py` | What a spurious `dirty` does |
+|---|---|
+| `layout_arms()` | drops the record outright — a layout band is only meaningful across arms of identical source |
+| `same_image()` / `run_identity()` | refuses the `commit` fallback, so pre-`kernel_sha` rows stop matching each other |
+
+The first is what made this urgent. A six-arm layout sweep runs `boot-test.sh`
+six times at one commit; under the old check arm 1 was clean and arms 2–6 were
+dirty, so `layout_arms()` would have kept **one** arm — two short of
+`MIN_PADS_FOR_LAYOUT_BAND` — and `layout_bands()` would have returned `{}`.
+Every consumer treats `{}` as "nobody measured this", which is correct and
+which is exactly the problem: three hours of QEMU, no error, no band, and a
+`--fail-on-regression` gate that goes on believing no layout sensitivity has
+ever been measured. The project's recurring failure shape — a check that cannot
+fire, presenting as a check that found nothing.
+
+### The fix
+
+The pathspec now excludes the harness's own records:
+
+```sh
+git -C "$PROJECT_ROOT" diff --quiet HEAD -- . \
+    ':(exclude)bench/history.jsonl' \
+    ':(exclude)bench/boot-history.jsonl' 2>/dev/null || BT_DIRTY=1
+```
+
+Narrowing `dirty` is the dangerous direction in general — a flag that fires
+less often admits more records into comparisons — so the justification has to
+be exact rather than merely plausible: these two files are never compiled and
+never read by the kernel, so no edit to either can change what was built, and
+what was built is the only thing `dirty` claims anything about.
+
+`scripts/test-boot-test.py` covers it, and covers it by **extracting the check
+from `boot-test.sh` rather than restating it**, so a rewrite of the line is
+either exercised or fails loudly at extraction. It asserts both directions
+(records excluded, kernel source still dirty, staged edits still dirty, seen
+from an unrelated cwd) and that the excluded paths are still the ones
+`bench-history.py` and `boot-history.py` actually write — the drift that would
+otherwise reintroduce this silently under a new filename.
+
+Two environment hazards were hit writing that test and are documented in it,
+because both are the kind that make a harness bug look like a code bug: a
+newline inside one argv entry does not survive to MSYS/WSL bash (the fragment
+`BT_DIRTY=0\ngit …` arrives as `BT_DIRTY=0 git …`, a *temporary environment
+assignment*, so `$BT_DIRTY` is never set), and the `bash` on PATH here is WSL,
+which cannot open `C:\…` at all and whose git disagrees with Windows git about
+line-ending normalisation.
+
+### Not fixed: the rows already written
+
+Of 90 rows in `bench/history.jsonl`, 21 carry `"dirty": true`. Six are provably
+spurious (clean-then-dirty at one commit). The other fifteen are the first row
+at their commit and so cannot be told apart from a genuinely uncommitted tree —
+the stickiness means "first row at this commit" is not evidence of anything.
+They are not recoverable: the only thing that could reclassify them is a diff
+of a tree that no longer exists. They stay as they are, permanently excluded
+from layout bands and from the `same_image` commit fallback, for the same
+reason the 153 `sanitizer: null` rows above stay null — guessing would
+manufacture exactly the certainty the flag exists to withhold.
+
+---
+
+## `subprocess.run(["bash", ...])` gets WSL's bash, not Git's — and WSL's bash has no QEMU (lane A)
+
+**Status:** FIXED 2026-08-19 (in `scripts/layout-sweep.py`; the environment
+fact itself is permanent and affects any script that spawns bash)
+
+This machine has two bashes:
+
+| | `pwd` of `D:\...\os-lane-a` | QEMU visible? | Opens `D:\...\boot-test.sh`? |
+|---|---|---|---|
+| `C:\Program Files\Git\usr\bin\bash.exe` | `/d/visual studio projects/os-lane-a` | yes | yes |
+| `C:\Windows\System32\bash.exe` (WSL) | `/mnt/d/visual studio projects/os-lane-a` | **no** | **no** (exit 127) |
+
+Windows `CreateProcess` does **not** search `PATH` first. It searches the
+application directory, the current directory, **`System32`**, the Windows
+directory, and only then `PATH`. So `subprocess.run(["bash", ...])` launches
+WSL's bash whenever WSL is installed, no matter what `PATH` says.
+
+`shutil.which("bash")` does not warn you, because it answers a different
+question. Measured here:
+
+```
+shutil.which('bash')                        -> C:\Program Files\Git\usr\bin\bash.EXE
+subprocess.run(['bash','-c','pwd']).stdout  -> /mnt/d/visual studio projects/os-lane-a
+```
+
+`which` implements a `PATH` search; the launcher does not. They disagree, and
+the one that decides is the one that does not tell you.
+
+WSL's bash is effectively a different machine: its own filesystem view, its own
+`PATH`, and **no QEMU, no MSVC, no Windows Rust toolchain**. It parses
+`boot-test.sh` perfectly and then cannot run it.
+
+### One root cause, two symptoms, and a fix that only looked like one
+
+This killed two release layout sweeps in succession:
+
+1. **First sweep**: `bash: D:\...\scripts\boot-test.sh: No such file or
+   directory`, exit 127, from a file that was plainly present — WSL's bash
+   cannot open a drive-letter path with backslashes. Diagnosed as an absolute-
+   vs-relative path bug and fixed by naming the script relatively. The error
+   went away, which read as the bug being solved.
+2. **Second sweep**: `ERROR: qemu-system-x86_64 not found`, one second in. Same
+   root cause. The relative-path fix moved the failure two lines further down
+   `boot-test.sh` and changed nothing else.
+
+The relative name was, and remains, correct — it just was never the disease.
+Note also that the first diagnosis blamed *MSYS*; it was WSL. Git's bash
+handles the absolute Windows path fine. Any comment in this tree claiming
+otherwise predates 2026-08-19.
+
+### The fix
+
+`layout-sweep.py` resolves bash **explicitly**, via `find_bash()`, most-specific
+candidate first with bare `bash` last (it is the correct answer on a real Linux
+host and the wrong one here, so it is a fallback rather than a preference). Each
+candidate must demonstrate two things before it is accepted:
+
+- `bash -n scripts/boot-test.sh` parses — proving this bash can open the exact
+  argv string the sweep will pass. Not `os.path.exists`: the file existed the
+  whole time.
+- `extract_dependency_probe()` — the boot test's **own** `# Find QEMU` and
+  `# Find OVMF` blocks, lifted out verbatim and run under that candidate. Both
+  bashes pass the parse; only one passes this. Extracted rather than restated,
+  because a Python translation of those candidate lists is a second opinion
+  about where QEMU is, and a preflight that says "found" while the boot test
+  says "not found" is worse than no preflight — it certifies the sweep and then
+  the sweep dies anyway. It raises rather than returning an empty fragment if
+  the block moves.
+
+The chosen bash is printed, so which one ran is on the record rather than
+inferred.
+
+### Consequence for tests
+
+`test-boot-test.py` used to run the dirty-check fragment under bare `bash` —
+i.e. under WSL, while `boot-test.sh` in production runs under Git's bash. It
+was validating a check that a *different git* would actually perform, on the
+very axis (`core.autocrlf`, pathspec handling) the check is sensitive to. It
+now enumerates every distinct bash on the machine via `available_bashes()`
+(de-duplicated by each one's own `pwd`, not by path, since several candidates
+are frequently the same binary) and asserts the check gives the **same verdict
+under all of them**. That is strictly stronger than picking the right one, and
+needs no coupling to `layout-sweep.py`.
+
+### If you are writing a script that spawns bash
+
+Do not pass the bare string `"bash"`. Resolve it, and verify the resolved one
+can do the thing you need — not merely that it exists.
+
+---
+
+## The layout-pad self-test could never pass in an optimised build: LLVM answered the comparison itself (lane A)
+
+**Status:** FIXED 2026-08-19
+**Where:** `kernel/src/layout_pad.rs` (`self_test_pad_is_first_in_text`,
+`pad_bytes`), `kernel/linker.ld`, `scripts/layout-sweep.py` (`--self-test`)
+**Found by:** the six-arm release layout sweep, which died on its second arm
+after a 43-minute build.
+
+### Symptom
+
+```
+[boot] build profile: sanitizer=none textpad=1024
+[layout_pad] FAIL: pad at 0xffffffff80001000 but .text starts at 0xffffffff80001000
+             — linker.ld is not placing .text.slateos_layout_pad first, ...
+BENCH_OK not found within 1200s.
+```
+
+The two addresses in that message are *the same address*. They are identical
+byte-for-byte under `cat -A`. The check compared them, took the not-equal
+branch, and printed both — with the same value in each.
+
+`main.rs` halts on that failure, deliberately (a misplaced pad makes every
+sweep sample a subset of every other one, and numbers that under-report layout
+sensitivity are worse than no numbers because they are used to dismiss real
+regressions). So the kernel wedged, the boot test timed out at 1200 s, and the
+sweep stopped.
+
+### Root cause
+
+LLVM's object model guarantees that two **distinct global objects** occupy
+**distinct addresses**. That is a licence to constant-fold `&A == &B` to
+`false` without consulting the linker.
+
+`__text_start` and `__layout_pad_start` are two distinct `extern static u8`
+declarations. They are also, by construction, *the same address* —
+`linker.ld` emits them back to back with nothing in between:
+
+```
+.text : ALIGN(4K) {
+    __text_start = .;
+    __layout_pad_start = .;
+    KEEP(*(.text.slateos_layout_pad))
+```
+
+So the source asked "are these two addresses equal?", the optimiser read it as
+"are these two distinct globals the same object?", answered *no* at compile
+time, and deleted the equal-branch as dead code. The check had become a
+constant `FAIL`.
+
+The decisive evidence, which is worth repeating because address-printing alone
+looks like a linker bug and sent the first hour in the wrong direction:
+
+| grep of the padded release binary | count |
+|---|---|
+| `linker.ld is not placing` (the FAIL string) | 1 |
+| `pad byte(s) at the head of .text` (the OK string) | **0** |
+| `no padding in this build` | 1 |
+
+The success message is not in the image. Nothing references it, because the
+branch that printed it does not exist. The ELF itself was entirely correct
+throughout: `__text_start` = `__layout_pad_start` = `ffffffff80001000`,
+`__layout_pad_end` = `ffffffff80001400`, i.e. exactly the 1024 bytes requested,
+placed first.
+
+### Why it survived until the second arm of a real sweep
+
+Three filters, each of which independently hides it:
+
+- **`layout-sweep.py --self-test` checks the ELF, not the kernel.** It verifies
+  the pad symbol sits exactly at `__text_start` — reading the symbol table on
+  the host. That claim was true. It said nothing about whether the code that
+  makes the same claim *on the target* still existed. A 34-minute self-test
+  passed on a kernel that could not boot.
+- **Arm 1 uses `pad=0`,** which takes the early `if pad == 0` return before
+  reaching the comparison. The sweep's first arm therefore always passes.
+- **A debug build does not fold it.** Every interactive test of this module had
+  been a debug build or an unpadded one.
+
+So the first optimised, nonzero-pad *boot* is the first moment the bug can
+appear, and that is exactly where it appeared.
+
+### This is the project's signature defect, inverted
+
+The recurring failure class here is *a check that cannot fire, presenting as a
+check that found nothing*. This is the mirror image: **a check that always
+fires, regardless of the evidence.** It is the rarer and, in one respect, the
+kinder form — it is loud. But it is worse in another: because the failure is
+fatal by design, an always-firing check does not merely mislead, it bricks
+every build it is compiled into.
+
+Both forms have the same underlying shape — *the answer was decided somewhere
+other than where the question was asked.* In the classic form the decision is
+made by a guard that never runs; here it is made by the optimiser.
+
+### The fix
+
+`opaque_addr()` in `layout_pad.rs`: read each linker symbol's address through
+an empty `asm!` block with the value as an `inout(reg)` operand.
+
+```rust
+fn opaque_addr(symbol: *const u8) -> usize {
+    let mut addr = symbol as usize;
+    // SAFETY: the template assembles to nothing ...
+    unsafe {
+        core::arch::asm!("/* {0} */", inout(reg) addr,
+                         options(nomem, nostack, preserves_flags));
+    }
+    addr
+}
+```
+
+The compiler must assume the block wrote an arbitrary integer into that
+register, so nothing it knew about the symbol survives — including that it was
+a symbol at all. The comparison then happens at run time against what the
+linker actually emitted, which is the only place the question has an answer.
+Applied to both `self_test_pad_is_first_in_text` and `pad_bytes` (the latter
+has not been observed folding, but rests on the identical assumption and would
+fail *silently*, with a wrong length, rather than loudly).
+
+Notes on the shape of it:
+
+- The template is `"/* {0} */"`, an assembler comment, not `""`. rustc rejects
+  an operand the template never names; the comment assembles to nothing.
+- Deliberately **not** `options(pure)`. Purity would let the optimiser reason
+  about the result again, which is the entire thing being prevented.
+- **Not `core::hint::black_box`.** It would very likely work today, but its
+  documentation is explicit that it guarantees nothing and may become a no-op.
+  A check that silently reverts to always-failing on a compiler upgrade is not
+  a check — and reverting is precisely what it would do here.
+
+### The regression test, and why it is a string search
+
+`--self-test` gained a fourth claim: after each padded build, **every branch of
+`self_test_pad_is_first_in_text` must still be present in the optimised
+image**. A folded-away branch takes its message with it, since nothing else
+references the string — so string-presence is a direct, cheap proxy for "the
+comparison is still being made at run time". This is the only claim in the
+self-test that is about the *kernel* rather than about the ELF, which is
+exactly the gap that let the bug through.
+
+The strings are **extracted from `layout_pad.rs`, not copied** into the Python
+(`on_target_messages()`), for the same reason `extract_dependency_probe()`
+extracts the QEMU search rather than restating it: a copy drifts, and a drifted
+copy checks a message the kernel no longer prints. Rewording a message updates
+the check in the same edit; *deleting* a branch makes the count drop and the
+extractor refuse. It takes the longest literal fragment between `{}`
+placeholders, because `core::fmt` stores a format string as separate pieces —
+a whole formatted message is never contiguous in the binary and searching for
+one would never match.
+
+Verified in both directions: the fixed pad=1024 release binary contains all
+three messages; a deliberately reverted build (raw `addr_of!`, no barrier) is
+missing the success message and the new claim fails.
+
+### If you are comparing two linker symbols
+
+Assume the optimiser will answer for you. Two `extern static` declarations are
+two distinct globals as far as LLVM is concerned, whatever the linker script
+does with them — so any comparison, subtraction or aliasing question about them
+must be laundered through an optimisation barrier first. Symbols that a linker
+script *intends* to alias are the dangerous case, because the code reads
+correctly and the ELF is correct; only the compiled kernel is wrong.
+
+### ENV-WHPX-CPU-HOST-FIRMWARE-GP -- `-accel whpx` cannot be combined with `-cpu host`: OVMF #GPs in `PlatformPei` before the kernel loads -- 2026-08-19 -- CLOSED as a fact of the environment (no fix available to us; recorded so it is not re-attempted)
+
+**Why this was tried.** Under `-accel whpx`, the guest reports **no** SMEP, SMAP
+or UMIP, while under TCG it reports all three. The cause is not WHPX's nature but
+our command line: `scripts/boot-test.sh` passes
+`-cpu qemu64,+smep,+smap,+umip`, and under WHPX the three `+` augmentations are
+silently dropped. Every other feature matches exactly between the two
+accelerators (no SSSE3, SSE4.x, POPCNT, AVX, XSAVE, AES-NI, RDRAND, RDTSCP or
+1 GiB pages in either), which is what identifies the cause as the augmentations
+specifically rather than a different base model.
+
+The obvious repair is `-cpu host`, which under a hardware accelerator ought to
+hand the guest the real CPU's features -- recovering SMEP/SMAP/UMIP and, as a
+bonus, giving us the first boot we would ever have run on a CPU advertising
+XSAVE/AVX/AES-NI, all of which `qemu64` hides.
+
+**It does not work.** `QEMU_CPU=host QEMU_EXTRA="-accel whpx"` never reaches our
+kernel. OVMF dies in early platform init:
+
+```
+!!!! X64 Exception Type - 0D(#GP - General Protection)  CPU Apic ID - 00000000 !!!!
+RIP  - 0000000000834EEE, CS  - 0000000000000038, RFLAGS - 0000000000000046
+RAX  - 0000000000000005, RCX - 000000000000003A
+!!!! Find image based on IP(0x834EEE) ... OvmfPkg/PlatformPei/PlatformPei/DEBUG/PlatformPei.dll !!!!
+```
+
+Log preserved at `build/serial-whpx-cpuhost-gp.txt` (copied out immediately --
+see the provenance note on the write-combining entry for why that matters).
+
+`RCX` holds the MSR index for `rdmsr`/`wrmsr`, and `0x3A` is
+`IA32_FEATURE_CONTROL` -- the VMX/SMX lock register. `RAX = 5` is that register's
+lock bit plus "VMX outside SMX". So this is consistent with OVMF's platform init
+touching `IA32_FEATURE_CONTROL` on a CPU whose CPUID (now the host's, thanks to
+`-cpu host`) advertises VMX, on an accelerator that does not implement the MSR --
+WHPX exposes no nested virtualization. Under `qemu64` the CPUID never advertises
+VMX, so the code path is never taken, which is why only `-cpu host` trips it.
+
+**Consequence, and why it matters beyond curiosity.** There is no QEMU
+configuration on this host that gives us WHPX *and* SMEP/SMAP/UMIP:
+
+| | TCG | WHPX + `qemu64` | WHPX + `host` |
+|---|---|---|---|
+| Boots | yes | yes | **no -- firmware #GP** |
+| SMEP/SMAP/UMIP | yes | **no** | n/a |
+| `[alt]` sites patched | 47/47 | **0/47** | n/a |
+
+So the accelerator choice is a genuine either/or: TCG buys the hardening
+coverage (and the 47 `stac`/`clac` alternative sites, `alternatives.rs` having
+exactly one `Feature` variant, `Smap`), WHPX buys ~3.5x faster benchmarks and
+the ability to measure anything that depends on real memory types. That is what
+makes it an operator decision rather than an obvious one.
+
+**Not worth re-attempting without new information.** Intermediate `-cpu` models
+were not swept, and one might in principle boot while carrying SMEP/SMAP/UMIP --
+but the augmentation-dropping above suggests WHPX ignores `+feature` regardless
+of base model, so the likely outcome is either `qemu64`'s feature set or
+`host`'s crash. If someone does try, the cheap probe is the `[cpu] Feature
+detection:` block in the first 80 lines of serial: it answers in one boot.
+
+### TD-A-A-BARE-METAL-RUN-RECORDS-ITS-ACCELERATOR-AS-ABSENT, WHICH IS THE ONE CONFLATION §237 EXISTS TO PREVENT (lane A, 2026-08-19) -- FIXED 2026-08-19; see "Resolution" at the end of this entry. The `boot-history.jsonl` sibling at the end remains OPEN.
+
+**In short:** Every benchmark record now stores which emulator it ran on, so
+that a fast run under hardware acceleration is never compared against a slow one
+under software emulation. It reads that from a line the kernel prints at boot.
+But the kernel only prints that line **when it is running under something** --
+on real hardware it prints a different sentence, so the field comes out empty.
+Empty is also exactly what an old log looks like. So the day we finally run the
+benchmarks on a real PC, those results would be filed as "unknown", pooled with
+years of old emulator runs, and compared against them.
+
+**Where:** `scripts/bench-history.py` -- `ACCEL_RE` (line ~160) and
+`parse_accel()` (line ~604). Kernel side, `kernel/src/hypervisor.rs:235-243`.
+
+**The defect.** `detect()` prints the parseable banner only inside
+`if hv.is_virtual()`:
+
+```rust
+if hv.is_virtual() {
+    serial_println!("[hypervisor] Detected: {} (signature: {:?})", hv.name(), signature_str());
+} else {
+    serial_println!("[hypervisor] Running on bare metal (no hypervisor detected)");
+}
+```
+
+`ACCEL_RE` matches only the first. So `parse_accel()` returns `None` for a
+bare-metal boot -- and `None` is documented, correctly, to mean *"the log
+predates the banner"*. §237's whole argument is that absent must be its own
+value because folding it into a known one widens a band and a wider band
+dismisses real regressions in silence. This is that same fold, arriving by the
+back door: two genuinely different platforms both render as absent, and the
+grouping key `(commit, accel)` cannot tell them apart.
+
+**Why it matters more than it looks.** This is not a hypothetical platform. It
+is **Q53 option D** and the fallback in **Q54** -- "get real regression numbers
+off real hardware" is the only option on the table that fully restores
+`CLAUDE.md`'s 10% threshold, because the layout noise behind it is a TCG
+artefact. The first thing that work would produce is a set of records that this
+code mislabels. It would not be noticed either, because the mislabelling is
+silent and the resulting group is *plausible*.
+
+The saving grace today is only that `(commit, accel)` includes the commit, so an
+old absent-accel record and a future bare-metal one at different commits do not
+in fact share a group. That is luck, not design: it fails the moment anyone
+benchmarks a commit that also has pre-banner history, which is every commit
+before 2026-08-19.
+
+**The fix** is script-side and works on logs already written, which is why it is
+preferable to changing the kernel's output: teach `parse_accel()` the second
+sentence and return `"bare metal"` for it. Two anchored patterns, tried in
+order, with a test for each and a test that the two do not cross-match. The
+kernel already prints enough to distinguish them; only the reader is blind.
+`Hypervisor::name()` already has `"bare metal"` as the `None` variant's string,
+so the returned value stays in the same vocabulary as every other accelerator
+and no new token is invented.
+
+**Not fixed on the spot** only because a six-arm WHPX layout sweep was in
+flight, and `bench-history.py` is re-invoked by `boot-test.sh` once per arm, so
+an edit lands mid-run. The change is provably a no-op for those arms (they are
+all `Hyper-V/WHPX`), but a typo in it would not be, and the sweep is ~1 h of
+machine time. Fix immediately after it lands.
+
+**Smaller sibling, same file family.** `bench/boot-history.jsonl` records no
+accelerator at all. The new `experiment` field covers the decision-relevant case
+today, because `QEMU_EXTRA` is how the accelerator gets overridden and that now
+marks the row as a probe. But that is an indirect proxy: if the default
+accelerator in `boot-test.sh` ever changes -- which is precisely what Q54 asks
+-- boots on either side of the change become indistinguishable, and clean
+streaks would span both. Record `accel` there too, from the same banner, when
+Q54 is answered either way.
+
+#### Resolution (2026-08-19)
+
+Fixed as designed, script-side, in `scripts/bench-history.py`: a second
+anchored pattern `BARE_METAL_RE` for the kernel's other sentence, and a named
+constant `ACCEL_BARE_METAL = "bare metal"` — the same string as
+`Hypervisor::name()`'s `None` variant (`kernel/src/hypervisor.rs:77`), so the
+field's vocabulary stays the kernel's own and the harness invents no token of
+its own. `parse_accel()` tries `ACCEL_RE` first and falls back to the second,
+so the three platforms now get three answers: a vendor label, `"bare metal"`,
+and `None` for a log that predates both banners.
+
+**Three tests, and the third is the one that matters.** The first two check
+the parser; on their own they would pass for a parser that gets the *relation*
+between the three answers wrong, so both assert the relation directly
+(`parse_accel(metal) == parse_accel(old)` is `False`, and likewise against
+TCG). The third — `test_a_bare_metal_arm_does_not_band_with_a_pre_banner_one`
+— reconstructs the exact case the entry identified as surviving only by luck:
+identical source, three arms from real hardware and three from a pre-banner
+kernel at the *same* commit. Before the fix those six formed one group. They
+now form two. That is the assertion the entry was actually about; the parser
+returning a new string is only the means.
+
+**Non-crossing is asserted, not reasoned about.** The two patterns cannot
+match each other's line, and the test says so of both directions. This is
+belt-and-braces — the literals diverge immediately after `[hypervisor] ` and
+the kernel emits exactly one per boot — but the failure it rules out is worse
+than the bug being fixed: a loosened `ACCEL_RE` would capture some fragment of
+the bare-metal sentence as a *vendor name*, filing the run under an
+accelerator that does not exist. `None` at least announced that something was
+unknown; a plausible-looking wrong vendor announces nothing. The anchoring is
+tested the same way, with a line that merely quotes the banner.
+
+**Mutation-verified, four mutations, all caught:** bare-metal detection
+removed entirely, i.e. the original bug (2 failures); `ACCEL_BARE_METAL` set
+back to `None` (3); the line anchor dropped so a quoted banner counts (1);
+`ACCEL_RE` loosened to swallow the bare-metal line and capture a nonexistent
+vendor (2).
+
+**Not retroactive, and it does not need to be.** No row on disk was written by
+a bare-metal boot — this machine has never run one — so no existing record
+changes meaning and none is rewritten. The fix is entirely forward-looking, by
+design: it works on logs as they are *read*, which is why it was preferable to
+changing the kernel's output. The day the first bare-metal log is produced, it
+parses correctly without anyone remembering this entry existed.
+
+**The `boot-history.jsonl` sibling above is still open** and is deliberately
+left so: it is gated on Q54 being answered, since what makes it bite is the
+default accelerator *changing*, and recording a field to guard a change nobody
+has decided to make yet is guesswork about which change it will be.
+
+### B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT: ITS RESOLUTION FLOOR IS 100x TIGHTER THAN ITS OWN DERIVATION (lane A, 2026-08-19) -- FIXED 2026-08-19 in `bf565ae6a` + `26c139a81`; see "Resolution" at the end of this entry
+
+**In short:** Every benchmark run takes a small reference measurement a dozen
+times during the suite, to notice if the host machine got busy halfway through
+and quietly ruined the numbers. Under the emulator we use today it works. Under
+the *hardware-accelerated* emulator it fails **every single time** -- all 13
+samples rejected -- so a run has no contamination check at all and does not
+loudly say so. The cause is not the accelerator: it is a threshold that says
+"refuse to believe a measurement finer than 4 cycles", written when the
+measurement was rounded to whole cycles. It has been kept in hundredths of a
+cycle since 2026-08-14, so the threshold is now 100x tighter than the reasoning
+that produced it.
+
+**Where:** `kernel/src/bench.rs` -- `CANARY_MIN_RESOLVABLE` (~line 1524), applied
+in `measure_access_at()` (~line 1986); mirrored in `scripts/bench-history.py`
+`CANARY_MIN_RESOLVABLE` (~line 305), used at ~line 956.
+
+#### Observed
+
+Two WHPX runs, `2026-08-19T16:15:09` and `2026-08-19T17:05:40` (the first arm of
+the WHPX layout sweep), both record:
+
+```json
+"canary": {"invalid": 13, "samples": 0, "min": 0, "max": 0, "pct": 0, "spread": 0},
+"canary_verdict": "broken"
+```
+
+against every TCG run on the same host reading a clean `min=5, max=5,
+min_centi=504`. Serial from the WHPX arm, preserved at
+`build/evidence-whpx-sweep-arm0.log`:
+
+```
+[bench]   canary scale check: UNMEASURABLE at N=1024 (None) or N=2048 (None) -- the arms did not separate
+[bench]   memory_access_hot: UNMEASURED -- nop=940 store=1812 over 1024 stores/window, 500 interleaved rounds
+```
+
+#### The arithmetic, which is the whole bug
+
+`measure_access_at()` accepts the delta only if it clears
+`n * CANARY_MIN_RESOLVABLE`, i.e. **4 cycles per access**:
+
+| | nop | store | delta | required (`1024 x 4`) | verdict |
+|---|---|---|---|---|---|
+| TCG | 14156 | 19442 | **5286** | 4096 | accepted -- 5.16 cyc/store |
+| WHPX | 940 | 1812 | **872** | 4096 | **rejected**, every sample |
+
+A store to one hot static byte costs 0.85 cycles on the real CPU -- a
+store-buffer hit, which is the correct answer and not a measurement failure.
+Under TCG the same store costs 5.16 because every guest store goes through
+softmmu. **The threshold encodes TCG's cost as a law of nature**, and the
+constant's own doc comment says so out loud: *"the store really does cost ~5
+cycles, and a threshold cannot legislate the hardware faster."* On hardware it
+does not cost 5 cycles.
+
+Note also how little margin TCG had: 5286 against 4096 is **29%**. This was one
+modest TCG speedup away from failing on the platform it was designed for.
+
+#### Why the threshold is wrong on its own terms, not merely inconvenient
+
+`CANARY_MIN_RESOLVABLE` is documented as *derived, not invented*:
+
+> The per-access cost is an integer quotient, so at a per-access value of `m`
+> cycles one cycle of quantisation is `100 / m` percent. Once that exceeds
+> `CANARY_TOLERANCE_PCT`, any "spread" the canary reports is rounding rather
+> than host load.
+
+That derivation was correct when `measured` was `delta / n` in whole cycles. It
+has not been since `CENTI` was introduced: `measured` is now
+`delta * CENTI / n` in **hundredths**, and `CENTI`'s own doc comment states the
+consequence -- *"putting the quantisation step at 0.01 cycle (~0.2%)."*
+
+Redo the derivation at the current precision. One quantisation step is 1
+centicycle; requiring it to stay under the 25% tolerance gives
+
+```
+measured_centi >= 100 / CANARY_TOLERANCE_PCT = 4 centicycles = 0.04 cycles
+```
+
+The code demands 4 **cycles**. The bound is exactly `CENTI` -- 100x -- too
+strict, and the excess is precisely the unit change that was supposed to have
+removed the problem. Under the corrected bound WHPX's `delta = 872` clears
+`1024 x 0.04 = 41` comfortably and yields 85 centicycles = 0.85 cyc/store,
+which is the physically right answer.
+
+This is the class of defect this file keeps recording: a constant survived the
+change that invalidated its justification, stayed harmless on the one platform
+it was measured on, and failed silently on the first platform that differed.
+
+#### The fix
+
+Express the floor in the unit the quantity is now carried in. In
+`measure_access_at()` compare the *centicycle* per-access value against
+`CANARY_MIN_RESOLVABLE`, rather than comparing raw `delta` against
+`n * CANARY_MIN_RESOLVABLE`:
+
+```rust
+let measured = store
+    .checked_sub(nop)
+    .map(|delta| delta.saturating_mul(CENTI) / n)
+    .filter(|centi| *centi >= CANARY_MIN_RESOLVABLE);
+```
+
+`scripts/bench-history.py` must move in the same commit or the two disagree
+about which records are usable -- and its bound is *load-bearing for historical
+records*, which were written in whole cycles before `CENTI` existed (see its
+comment at lines 299-304: "retained solely to keep judging the historical
+records"). So the Python side needs **two** bounds, keyed on whether the record
+carries `min_centi`, not one bound applied to both eras. Tests for: a
+TCG-scale record, a WHPX-scale record, a pre-`CENTI` historical record, and
+the boundary at exactly 4 centicycles.
+
+**What the fix does not do.** It restores the *measurement*; it does not by
+itself make the contamination *verdict* trustworthy under WHPX. The 25% spread
+tolerance would then be applied to a 0.85-cycle quantity whose real variation
+across a suite has never been observed on this accelerator. Expect to have to
+re-derive the tolerance from records once the floor stops rejecting them --
+and do it from data, which is the standing lesson of `CANARY_TOLERANCE_PCT`'s
+own comment.
+
+#### The failure is not merely undetected, it is *misattributed* -- fix the message too
+
+Worse than a silent failure, because it sends the reader somewhere there is
+nothing to find. The suite prints, verbatim:
+
+```
+CANARY BROKEN: 13 measurement(s) failed - contamination is UNKNOWN for this run, not clean
+A reference access cost of zero is not a fast machine, it is a failed measurement:
+  the A/B arms did not separate.
+Two causes need opposite responses: (1) the store was optimised away ... or
+  (2) host load exceeded the ~5-cycle A/B signal and inverted the arms ...
+```
+
+Every clause of that is false under WHPX:
+
+- **"the A/B arms did not separate"** -- they separated by 872 cycles. The
+  instrument *refused* the delta; it did not fail to obtain one.
+- **"A reference access cost of zero is not a fast machine"** -- here it very
+  nearly is one. The message was written against the release-profile
+  optimiser-elision bug, where zero really did mean no signal, and it
+  generalises that case to all cases.
+- **"the ~5-cycle A/B signal"** -- 5 cycles is TCG's number, quoted as a
+  property of the measurement itself.
+- **"Two causes"** -- there are three, and the third is the one that fired. A
+  reader following either offered branch re-runs on an idle machine (which
+  will never help) or audits the optimiser (which is innocent).
+
+So the fix has a third part beside the kernel bound and the Python bound:
+`measure_access_at()` should distinguish *arms did not separate*
+(`checked_sub` failed, or delta is genuinely ~0) from *delta was below the
+resolution floor*, and the report must name the latter as its own cause --
+"the guest is faster than this instrument can resolve" -- with the measured
+per-access figure printed rather than suppressed. A diagnostic that offers a
+closed list of causes must either be exhaustive or say it is not; this one
+asserted exhaustiveness (*"Two causes"*) and was wrong the first time it met a
+new platform.
+
+#### Second, separate defect in the same measurement family
+
+The scattered-access scale check also fails under WHPX, and **its fix is not a
+constant**:
+
+```
+[bench]   scatter scale check: FAILED -- 18.5 cycles/scattered store at N=64 but 26.2 at N=128
+          (41% apart, tolerance 25%). A physical per-access cost cannot depend on how many
+          pages the loop walks, so this run's budget calibration is not a physical quantity.
+```
+
+The quoted premise is **false on real hardware**. Walking 256 KiB and walking
+512 KiB are different cache working sets, so a per-access cost genuinely does
+depend on how many pages the loop walks. The premise holds only under TCG,
+where each access is a softmmu call of constant cost and the cache hierarchy is
+invisible. So this check does not have a threshold bug -- it asserts a property
+that only an emulator has. Redesigning it means deciding what invariant *is*
+true across accelerators before touching the code; logged here, not guessed at.
+
+#### Consequences beyond this file
+
+This materially affects **Q54** (should we switch accelerator) and **Q53**
+(is the 10% regression threshold meaningful). Both treat "run the benchmarks
+somewhere faster than TCG" as the fix for the layout-noise problem. That move
+also silently disables contamination detection -- and the loss is worse than it
+sounds, because contamination matters *more* the faster the guest runs: under
+TCG the emulator's own overhead dominates, so a fixed host interruption is a
+small fraction of a long run; under WHPX the same interruption lands on a run
+3.5x shorter and is 3.5x the fraction. WHPX both needs the canary more and,
+today, provides it less. Q54 is amended accordingly.
+
+#### The fleet data: TCG clears its own floor by 16%, and five runs already lost samples to it
+
+Everything above was argued from two WHPX runs. Replaying all 100 records in
+`bench/history.jsonl` through the same arithmetic says the floor is not a
+WHPX-only problem waiting to happen -- it is already grazing the platform it
+was designed for.
+
+**78 records carry a resolvable `min_centi`** (centicycle precision; the
+remaining 22 are pre-`CENTI` logs or the three zero-sample runs). Against a
+floor of **400 centicycles** (`CANARY_MIN_RESOLVABLE = 4` cycles x `CENTI`),
+the five lowest surviving per-access costs ever recorded are:
+
+| record | `min_centi` | margin over the floor |
+|---|---|---|
+| 2026-08-16T08:35 | 465 | **+16%** |
+| 2026-08-19T03:43 | 477 | +19% |
+| 2026-08-17T23:49 | 489 | +22% |
+| 2026-08-18T16:17 | 501 | +25% |
+| 2026-08-19T15:29 | 501 | +25% |
+
+72 of the 78 sit in a tight 500-520 band -- about +26%. So the honest summary
+is not "TCG is comfortably above the floor and WHPX is below it"; it is that
+**TCG's whole distribution lives within a quarter of the floor, and its worst
+observed sample cleared it by 16%.** An instrument whose usable range starts
+16% below the only quantity it has ever measured is not calibrated for that
+quantity; it happens to fit. That is a second, independent argument for the
+re-derivation -- one that does not depend on caring about WHPX at all.
+
+**Five TCG runs have already lost a sample** (`invalid = 1` out of 13):
+
+```
+2026-08-17T15:10:08   invalid=1  samples=12  start=0   min_centi=515  spread=0
+2026-08-17T19:36:08   invalid=1  samples=12  start=0   min_centi=505
+2026-08-17T23:49:39   invalid=1  samples=12  start=6   min_centi=489
+2026-08-18T01:13:33   invalid=1  samples=12  start=0   min_centi=625
+2026-08-18T05:08:49   invalid=1  samples=12  start=0   min_centi=515
+```
+
+**Why those losses cannot be explained from the record -- and why that is the
+misattribution defect showing up in the data rather than in the message.**
+`measure_access_at()` returns `None` for two different events: `checked_sub`
+failing because host load inverted the arms, and the delta being rejected for
+falling under the floor. Both increment the same `invalid` counter and write
+nothing else. So for each of those five runs we can say a sample was
+discarded and we cannot say why, and no amount of re-reading the file will
+recover it. Do **not** claim these as floor rejections; the point is precisely
+that the claim is unavailable.
+
+The cost of that ambiguity is visible in the first row. 2026-08-17T15:10:08
+lost its *first* sample (`start = 0`); the other twelve read 515-516
+centicycles with a spread of literally zero -- as quiet a host as this suite
+has ever recorded. It is graded **`broken`**. That grade follows correctly
+from `canary_verdict()`'s stated precedence (`bench-history.py:985` -- a
+within-tolerance spread alongside a failure is BROKEN, because the failed
+sample could have hidden an excursion), and that precedence is right in the
+absence of better information. But the information is only absent because the
+kernel throws it away: had the record said *why* the sample failed, a
+floor rejection on a machine whose other twelve samples are flat is not an
+excursion that got hidden, and the run is clean.
+
+**This adds a fourth part to the fix.** Beside the kernel bound, the Python
+bound and the report wording, `report_canary`'s record needs to count the two
+rejection causes **separately** -- e.g. a `below_floor` counter beside
+`invalid` -- and `canary_verdict()` should treat a below-floor rejection as
+non-evidence rather than as a possibly-hidden excursion. Otherwise the fix
+makes future runs measurable while leaving the verdict logic unable to tell a
+quiet run from a suppressed one, which is the same conflation one level up.
+
+**And a fifth, without which the kernel fix is invisible.** `bench-history.py`
+line 956 tests `canary["min"]` -- **whole cycles** -- against
+`CANARY_MIN_RESOLVABLE = 4`, and returns BROKEN below it. After the kernel
+starts accepting sub-cycle measurements, a legitimate WHPX record reading 0.87
+cycles/store carries `min = 0` and `min_centi = 87`: the kernel accepts the
+measurement and this line throws it away, so every consumer -- `--report`,
+the gate, the wall populations -- still sees `broken`. The fix follows the
+exemption pattern already present twelve lines below at 974-976: when the
+record carries `min_centi`, judge `min_centi` against the centicycle bound;
+only fall back to the whole-cycle bound on records that predate it. The
+"two bounds keyed on whether the record carries `min_centi`" requirement in
+the fix list above is this line, and it is load-bearing, not tidying.
+
+**One incidental corroboration of §237.** The 2026-08-19T16:15:09 record is a
+confirmed WHPX run (backfilled in `boot-history.jsonl`) whose `accel` field is
+*absent*, because `accel` recording landed after it. It is also one of the
+three zero-sample records. Had `accel` absence been folded into a "TCG"
+default, this run would have been filed as a TCG record with a broken canary
+-- a self-inflicted mystery. Absent got its own key, so it reads as what it
+is: unknown.
+
+**A number for Q52, in passing.** Across 94 release records the canary grades
+**51 clean, 29 contaminated, 5 broken, 9 absent** -- so roughly **31% of
+release runs that had a working canary were flagged contaminated**. Q52 asks
+whether a grading gate should keep failing on noise it cannot distinguish
+from a real fault; the answer has to be sized against that 31%, not against
+an assumption that contamination is rare.
+
+#### Resolution (2026-08-19)
+
+Fixed in two commits, kernel then tooling, because either alone would have
+changed nothing observable.
+
+**`bf565ae6a` -- `kernel/src/bench.rs`.** `CANARY_MIN_RESOLVABLE` was replaced
+in place by `CANARY_MIN_RESOLVABLE_CENTI`, and the scaling now happens *before*
+the comparison, so the threshold and the quantity it judges are the same kind
+of thing. (Retaining the old constant, as the written plan proposed, would have
+left dead code: `bench-history.py` computes its own bound from
+`CANARY_TOLERANCE_PCT` and never imported the kernel's.)
+
+A refused measurement now carries *why*, as a new `ArmFailure` enum, because
+the causes need opposite responses from the reader and carry opposite
+evidential weight for the verdict:
+
+| variant | what happened | can it have hidden an excursion? |
+|---|---|---|
+| `NotSeparated` | arms inverted, or the store was elided | **yes** -- keeps the verdict UNKNOWN |
+| `BelowFloor(n)` | arms separated by a resolvable but sub-floor amount | no -- an excursion is large and would have cleared the floor |
+| `ScaleRejected` | the scale-invariance check refused it before it was read | yes |
+
+`ScaleRejected` did not exist in the plan and had to be added: the calibration
+block flattened a scale rejection to "no value" and the canary then re-inflated
+it into a *separation failure*, which is simply a false statement about what
+happened. A delta of exactly zero is `NotSeparated`, not `BelowFloor(0)` -- it
+resolves nothing, so noise of any size could sit between the arms, and the safe
+direction of error is UNKNOWN (a re-run) over CLEAN (a missed regression).
+
+Boundary cases are `const` assertions on the real `const fn`, following
+`layout_pad.rs`: a kernel `#[cfg(test)]` module never compiles here, so a test
+written that way could never fail. Mutation-checked -- `>=` to `>` on the floor
+fails the build.
+
+**`26c139a81` -- `scripts/bench-history.py`.** The same defect turned out to be
+present here in *three* places, not the one this entry predicted, and each is
+the same mistake: reading a whole-cycle field as though it were the whole story.
+
+1. `min` is rounded to whole cycles, so 0.87 cycles/access reads back as
+   `min == 0` -- bit-for-bit what a dead instrument writes. (Predicted above.)
+2. **`start` is rounded the same way**, and the pre-`invalid` heuristic "a zero
+   start means one endpoint measurement failed" condemned the identical good
+   records. Not predicted; found only because the new WHPX-scale test still
+   failed after fixing (1). It now applies only where there is no `invalid`
+   field to read, which is the only situation it was ever an inference about.
+3. Every failure counted against the verdict equally. `below_floor` -- the new
+   11th wire field -- is now subtracted, so the `BelowFloor` rejections that
+   remain after the floor fix cannot keep a fast guest ungradeable.
+
+`below_floor`'s absence stays distinguishable from zero on disk: a pre-fix
+record's failures are genuinely of unknown kind. The verdict *assumes* zero
+when judging such a record -- the conservative direction, which preserves every
+existing classification -- but never writes it.
+
+**Not retroactive, deliberately.** The six 2026-08-19 WHPX sweep arms recorded
+`samples: 0`, and `samples == 0` outranks the whole split: there is no finding
+to grade. They stay `broken` and the six-arm band keeps its `6/6 arms could not
+measure host load` caveat (see design-decisions.md §239). The fix stops such a
+run happening; it does not manufacture data for one that already did.
+
+**Verification.** 605 assertions in `scripts/test-bench-history.py`, including
+two new groups covering the boundary from both sides in both units. Six
+mutations checked and all caught: dropping the centi bound (12 failures),
+dropping its doubling (1), not subtracting `below_floor` (1), subtracting all
+of `invalid` (10), restoring the unconditional zero-start fallback (2), storing
+`below_floor` with a default (6).
+
+**One correction to the plan, recorded because the plan was wrong in the
+direction this whole entry is about.** `build/canary-fix-plan.md` §3.4 put the
+centicycle boundary at `CANARY_MIN_RESOLVABLE_CENTI` itself. That is one
+quantum short: a spread is `(hi - lo) / lo` across two independently-quantised
+samples, so it carries a quantum from *each* end -- `200/m` percent, not
+`100/m`. The whole-cycle branch has reasoned that way since P18 measured it;
+the plan simply failed to carry the doubling down with the unit, which is the
+same species of oversight as the original bug.
+
+### B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS, AND ITS PER-ARM GUARD CANNOT SEE THIS (lane A, 2026-08-19) -- FIXED 2026-08-19 in `020e014d0` + `ff74de728` + `fc40b5f15` + `f376cb8ff`; see "Resolution" at the end of this entry
+
+**In short:** a layout sweep builds and boots the same kernel six times at six
+different code placements, and the six results are only comparable to each
+other. `bench-history.py` decides which runs are comparable by asking whether
+they were recorded at the same git commit. That is not the same question. The
+WHPX sweep running when this was written committed nothing to `kernel/` at
+all -- the six arms are byte-identical builds -- but three *documentation*
+commits landed while it ran, so the arms recorded three different commit
+hashes and the tool filed them as three unrelated experiments of one arm each.
+Six of a minimum three are needed to form a band; one is not. The sweep would
+have produced nothing, ~70 minutes later, with no error anywhere.
+
+**Where:** `scripts/bench-history.py` -- `layout_arms()` line 3108, the group
+key `(record["commit"], record.get("accel"))`. Guard hole:
+`scripts/layout-sweep.py` -- `check_arm_counts()`.
+
+**Evidence.** Mid-sweep, with three arms recorded:
+
+```
+('b36a244bb', None)              pads= [0, 1024, 1536, 2048, 2560, 3072]   <- the TCG sweep, intact
+('943b3f21b', 'Hyper-V/WHPX')    pads= [0]
+('fb6605fc0', 'Hyper-V/WHPX')    pads= [1024]
+('493b6aac5', 'Hyper-V/WHPX')    pads= [1536]
+```
+
+and the arms really are one experiment -- the `kernel/` tree object is
+identical across every commit involved:
+
+```
+943b3f21b  kernel-tree=6876f9eb3b843727242e8f260f225df3b62f28ec
+fb6605fc0  kernel-tree=6876f9eb3b843727242e8f260f225df3b62f28ec
+493b6aac5  kernel-tree=6876f9eb3b843727242e8f260f225df3b62f28ec
+3fff02a30  kernel-tree=6876f9eb3b843727242e8f260f225df3b62f28ec
+
+$ git diff --name-only 943b3f21b 3fff02a30
+known-issues.md
+open-questions.md
+```
+
+Nothing that can affect any build changed across the whole span. The arms are
+sound; only the key that groups them is wrong.
+
+**Why the guard did not catch it -- the third hole of the same shape.**
+`check_arm_counts()` exists because two earlier sweeps were voided silently,
+and its docstring says so. It printed, for every arm:
+
+```
+[layout-sweep] confirmed: the pad=0 record is accepted as an arm by bench-history.py
+[layout-sweep] confirmed: the pad=1024 record is accepted as an arm by bench-history.py
+[layout-sweep] confirmed: the pad=1536 record is accepted as an arm by bench-history.py
+```
+
+All three statements are true. `layout_arm_rejection()` is a predicate on a
+*single record* -- is this row dirty, is the host loaded, is the profile
+right -- and every arm passed it. But whether a sweep yields a band is a
+property of the *group*, and no per-record predicate can see a group. The
+guard was built to answer "will this row be kept?" and the question that
+matters is "will this row land beside the previous one?".
+
+**Why this is not a data problem and must not be fixed as one.** The recorded
+`commit` values are correct: that genuinely was HEAD at each boot. Nothing in
+the log is false, so `design-decisions.md` §238 (an append-only measurement
+log may be corrected in place, but only for facts about the *harness*) does
+not apply and the rows must not be touched. The defect is that `commit` is
+being used as a *proxy* for "the kernel source that produced this binary", and
+that proxy silently stopped holding the moment anything outside the build
+inputs became committable during a run. This is the same class of defect as
+`CANARY_MIN_RESOLVABLE` surviving the `CENTI` change: an inference resting on
+a justification that quietly became false, with no test able to notice because
+the justification was never expressed as code.
+
+**The fix, in three parts.**
+
+1. **Compute source identity; stop inferring it.** Define
+   `src_digest(treeish)` **once**, as a hash over the build-relevant paths of
+   a tree -- and give it two callers rather than two implementations:
+
+   - `boot-test.sh` calls it on the *working tree* and records the result in
+     each row, so uncommitted state counts and a doc commit does not.
+   - `layout_arms()` groups by `(src_digest, accel)`; for a row written before
+     the field existed it **derives** the digest from the row's `commit`,
+     which git still holds. That is not editing data -- the rows stay exactly
+     as written -- it is reading `commit` for what it can actually answer.
+     Sound only because `layout_arms()` already drops `dirty` rows, so for
+     every row it keeps, `commit` really does identify the source.
+
+   The derivation is what rescues the six arms already recorded: their commits
+   differ, but `git rev-parse <c>:kernel` is
+   `6876f9eb…` for every one of them, so the correct key groups them and the
+   sweep's ~70 minutes are not lost.
+
+   **The exclusion list must be explicit top-level paths, never a glob**, and
+   this is the part that is easy to get dangerously wrong. The obvious
+   spelling -- exclude `*.md` and `*.txt` -- is *unsafe*: this tree contains
+   `kernel/src/fs/declared.txt`, `kernel/src/fs/existing_files.txt` and
+   `kernel/ada/prebuilt/stamp.txt`, all inside the kernel build. A recursive
+   `*.txt` exclusion would drop them from the digest, and two genuinely
+   different kernels would then share a key and merge into one band -- a band
+   that wide dismisses every regression, silently.
+
+   That asymmetry decides the whole design. Over-inclusion splits arms that
+   belong together and yields "unmeasured", under which a movement stays a
+   regression and a human looks at it. Under-inclusion merges arms built from
+   different source, and fails in the direction that hides faults. Over-
+   inclusion is what we have today and it has now cost a sweep; it is *still*
+   the correct direction to err in. So the key is narrowed by an audited list
+   of root documents (`*.md` at depth 0, the root `*.txt` design documents,
+   `requests/`, `bench/*.jsonl`) and by nothing else. Anything new and
+   unrecognised counts, and costs at worst a split.
+
+2. **Make the guard ask the question that matters.** `check_arm_counts()`
+   should, from arm two onward, compare this arm's group key against the
+   previous arm's and abort the sweep immediately when they differ, naming
+   both. Three hours of silence becomes a twenty-minute failure with the
+   reason attached -- which is the stated purpose of the guard and the reason
+   it exists.
+
+3. **Say it in the sweep's own output.** `layout-sweep.py` should print, at
+   start, that committing anything during the sweep will void it under the
+   current fallback path -- and stop needing to say so once part 1 lands.
+
+**The obvious interim mitigation does not work, and finding out why sharpened
+the fix.** Freezing commits for the rest of the sweep looked like it would let
+the remaining arms share a commit and form a three-pad band. It cannot:
+`boot-test.sh` captures `BT_HEAD` *before* the build (deliberately -- it must
+name the source that was built, not the source at the time the row is
+written), so arm 4 was already stamped with the commit that was HEAD ~10
+minutes before it recorded. At most two of the six arms can now share a key,
+one below `MIN_PADS_FOR_LAYOUT_BAND`. Freezing buys nothing, so it was not
+done.
+
+That is what forces the retroactive derivation in part 1 rather than a
+record-a-new-field-and-move-on fix, and the derivation is the better design
+anyway: it states the rule once, applies it to old and new rows alike, and
+does not leave a cutover date before which bands are computed by one rule and
+after which by another.
+
+**Re-run the sweep after part 1 lands** regardless -- not to obtain the band,
+which the derivation recovers, but to validate part 1 end-to-end on a sweep
+that is *deliberately* committed through. A fix for a silent-fragmentation
+bug that has never been observed to survive a commit mid-sweep is a fix on
+paper.
+
+#### A git-only digest would be under-inclusive — the kernel embeds six untracked binaries
+
+Found while auditing what part 1's digest must cover, and it changes the
+design: **a `src_digest` computed from git alone is wrong in the unsafe
+direction.** The kernel `include_bytes!`s six ring-3 service binaries, and
+none of them is tracked:
+
+```
+services/hello/target/x86_64-unknown-none/release/hello    tracked=NO exists=YES
+services/init/target/x86_64-unknown-none/release/init      tracked=NO exists=YES
+services/ticker/target/x86_64-unknown-none/release/ticker  tracked=NO exists=YES
+rootfs.ext4                                                tracked=NO
+```
+
+They are build artifacts, gitignored by design (`boot-test.sh` line 1483 has
+a whole comment about a fresh checkout not having them). So two arms that
+embed *different* `init` binaries would produce different kernels, hash
+identically under a tracked-files-only digest, and merge into one band --
+which is precisely the merge-two-different-kernels failure the exclusion-list
+argument above rules out. Ruling it out via the exclusion list and then
+re-admitting it through untracked files would be an odd way to lose.
+
+**The same hole is already in `dirty`, today.** `git diff --quiet HEAD -- .`
+cannot see untracked files, so `dirty == False` does not mean "the built
+kernel is reproducible from this commit" -- it means "the *tracked* files
+match HEAD". Rebuild `services/init` between two boots at one commit and both
+rows say `dirty: false`, and `layout_arms()` will happily band them across
+two different kernels. The existing TCG band rests on this too. It has
+probably never bitten, because a sweep runs its arms back-to-back and nothing
+rebuilds the services in between -- but "probably never" is the same
+guarantee the commit-proxy had until this morning.
+
+**So the digest has two halves**, and the second is free: enumerate the
+embedded artifacts by the *same derivation* `bootstrap-worktree.sh` already
+uses -- it greps `include_bytes!` out of `kernel/src` (line 106) rather than
+keeping a list -- and hash their contents alongside the tracked build inputs.
+A service added to the kernel is then covered without anyone remembering,
+which is the property that derivation was written for in the first place.
+`rootfs.ext4` joins them: every boot attaches it, and what it contains
+changes what the suite measures.
+
+One statement of each rule, in one more place than planned.
+
+#### The derivation was validated against the real records before being written
+
+A design that rescues six recorded arms is a claim about data that already
+exists, so it can be tested before any of it is implemented.
+`build/srcdigest-proto.py` (read-only; safe to run while a sweep holds the
+tree) computes the proposed digest over `git ls-tree -r <commit>` with the
+exclusion list above, and was run against the arms as recorded. Four
+controls, all with a stated failure mode:
+
+| control | result |
+|---|---|
+| the four WHPX arms recorded so far, across **four different commits** | one digest, `397a6447…` — **groups** |
+| the TCG sweep commit `b36a244bb` | `1a167159…` — **discriminates**; a digest that matched here would band two unrelated sweeps |
+| a kernel-only commit (`d937ea7bd`, `kernel/src/layout_pad.rs`) vs its parent | digests differ — **sensitive** to the thing that matters |
+| a doc-only pair (`5850f706f` vs `5ea44e308`) | identical — **insensitive** to the thing that broke it |
+
+and the exclusion list audited directly: 101 of 13,427 paths excluded, of
+which 68 are `requests/`, 31 are root documents and 2 are the harness's own
+`bench/*.jsonl`. **Zero** lie under `kernel/`, `toolchain/`, `services/`,
+`.cargo/`, or `Cargo.{toml,lock}` — which is the assertion the
+`kernel/src/fs/declared.txt` trap made necessary, now checked rather than
+reasoned about.
+
+The third and fourth controls are the pair that matters, and they are worth
+stating as a single sentence: *a kernel edit changes the key and a
+documentation edit does not*, which is exactly what `commit` failed to do and
+the entire reason for the change. Neither control is implied by the first
+two — a digest could group the arms by being insensitive to everything.
+
+#### Resolution (2026-08-19)
+
+All three parts landed, in four commits, and the six recorded arms were
+rescued as the design predicted.
+
+| part | commit | what it does |
+|---|---|---|
+| 1a | `020e014d0` | `scripts/src_digest.py` — one definition of source identity, with the audited exclusion list and the `include_bytes!` derivation for the untracked artifacts |
+| 1b | `fc40b5f15` | `boot-test.sh` computes it over the **working tree** and stamps every row, so uncommitted state counts and a docs commit does not |
+| 1c | `ff74de728` | `arm_group_key()` groups by `(src_digest, accel)`, deriving the digest from `commit` for rows written before the field existed |
+| 2 | `f376cb8ff` | `check_arm_counts()` now takes the previous arm's `(pad, key)` and aborts the sweep the moment two arms disagree |
+
+**Part 3 was answered by part 1, not skipped.** The planned warning was
+"committing anything during this sweep will void it *under the current
+fallback path*", and the plan already said it should "stop needing to say so
+once part 1 lands." It has. A sweep that commits through itself now records
+one digest across all six arms, so there is nothing left to warn about — and
+printing a warning about a hazard that no longer exists is worse than
+printing nothing, because the next reader will design around it. What replaced
+it is part 2's message, which is not a warning about a possibility but a
+report of an actual disagreement, naming both keys.
+
+**The rescue was verified, not assumed.** `arm_group_key` on the six recorded
+WHPX arms — six different commits, every one a documentation commit — returns
+a single key, because `git rev-parse <c>:kernel` is `6876f9eb…` for all six.
+The arms band. The ~70 minutes are not lost.
+
+**Two things this fix quietly repaired that were not in the original report.**
+
+1. *`dirty` stopped being a reason to drop a well-identified arm.* The entry's
+   own postscript established that `dirty` cannot see untracked files, so it
+   never meant what `layout_arms` used it for. Now `dirty` and `commit` are
+   consulted **only** when a row carries no `src_digest`. For a row that does,
+   the digest answers the identity question directly — including the embedded
+   service binaries `dirty` was blind to — so the commit hash is provenance
+   rather than identity. That removes the *second* silent way to void a
+   three-hour sweep (the harness's own `bench/history.jsonl` write is what
+   made later arms dirty), which was a separate voided sweep, not this one.
+2. *The class of failure, not just this instance.* `arm_group_key` fixes the
+   specific cause — a docs commit is no longer a new identity. It does not
+   make silent fragmentation impossible: a real edit landing mid-sweep, a
+   rebuilt service binary, a regenerated `rootfs.ext4`, or an accelerator that
+   fell back to TCG on one run all still split a sweep in exactly the same
+   way. Part 2 catches every one of those without enumerating any of them,
+   because comparing consecutive keys asks the question directly instead of
+   listing its causes. That is why part 2 was worth doing after part 1 rather
+   than being made redundant by it.
+
+**Still outstanding, deliberately: the end-to-end re-run.** The entry's last
+paragraph asked for a sweep that *deliberately* commits through itself, on
+the grounds that "a fix for a silent-fragmentation bug that has never been
+observed to survive a commit mid-sweep is a fix on paper." That is still true
+and the re-run has not happened. It is not being held open as a bug, because
+the mechanism is covered from both ends by tests that do not need three hours:
+`scripts/test-src-digest.py` exercises the digest's grouping and
+discrimination against the real recorded rows, and the four controls tabulated
+above were run against `bench/history.jsonl` as it actually exists. What the
+re-run would add is confidence that the *live* recorder path writes the field
+the parser reads, which the next benchmark boot demonstrates for free — so it
+is tracked as a validation step on the next sweep rather than as an open
+defect.
+
+
+#### VALIDATION (2026-08-19, same day) -- the end-to-end re-run happened, both parts held, and it found a third cause
+
+The paragraph immediately above says the re-run "has not happened" and is
+"tracked as a validation step on the next sweep". It happened that afternoon.
+Recording the outcome here rather than editing that paragraph, because what it
+predicted and what it got are different in an instructive way.
+
+**Part 1 held.** Three commits were made *deliberately* while the sweep ran --
+`b3ee55d25` (design-decisions §240), `0d9da98c6` (a Q54 amendment) and
+`a8a62afba` (a known-issues entry), all root `*.md`. The tracked half of the
+digest was byte-identical across all three and the commit preceding them:
+`tracked:11d8ab60978a1b56` at `41581ca30`, `b3ee55d25`, `0d9da98c6` and
+`a8a62afba`. A documentation commit landing mid-sweep is no longer a new
+identity. That is the exact claim that could only be made on paper before.
+
+**Part 2 held, and earned its place.** The sweep still fragmented -- for a cause
+neither part 1 nor the four controls could have covered -- and part 2 caught it
+on the second arm and named it:
+
+```
+pad=0:    ('full:ace827eb370bec40', 'Hyper-V/WHPX')
+pad=1024: ('full:f75959ab7b96d782', 'Hyper-V/WHPX')
+```
+
+Same accelerator; the source digest alone moved. It stopped after ~24 minutes
+rather than spending ~72 on a band that could not form. Note that part 2's own
+message already lists "a regenerated `rootfs.ext4`" among the causes it exists
+to catch, and that is precisely what it caught -- written before anyone knew it
+was happening.
+
+**The third cause: the boot test was rewriting `rootfs.ext4`,** which is an
+input to the digest's artifact half. Measured `f62e019d` -> `b2ecc74d` across
+one boot on an idle tree. Fixed in `218028ced` by attaching the image with
+`snapshot=on`. Full write-up in
+`B-A-THE-BOOT-TEST-REWRITES-ROOTFS.EXT4, WHICH-IS-AN-INPUT-TO-THE-IDENTITY-OF-WHAT-IT-JUST-BOOTED`.
+
+**What this says about the reasoning in the paragraph above.** That paragraph
+argued the re-run was low-value because the mechanism was "covered from both
+ends by tests that do not need three hours". The tests it cites are sound and
+all still pass; they simply could not see this, because every one of them
+reasons about `bench/history.jsonl` *as recorded* and the defect was in what the
+act of booting does to the tree. The re-run was not confirming a fix -- it was
+the only thing in the project capable of observing that testing the system
+changes the system. The general lesson, which is worth more than the bug: a test
+that only inspects recorded output cannot detect that the recorder has side
+effects.
+
+### B-A-AN-ORDINARY-RUN-NEARLY-JOINED-A-LAYOUT-BAND-AS-A-SEVENTH-ARM, AND ONLY ONE FIELD STOPPED IT (lane A, 2026-08-19) -- reopened and re-closed the same day: `bench-history.py` did stop it, but an ad-hoc analysis bypassed the guard entirely and published the merged numbers. See "AMENDMENT" at the end.
+
+**In short:** a "layout band" is a range of timings measured from six builds of
+the *same* kernel placed at six different code offsets; its job is to say how
+much a benchmark moves for reasons that are not a code change, so that a
+movement inside that range can be dismissed. Anything that widens the band
+therefore *dismisses* real regressions. An ordinary benchmark run from earlier
+the same day -- not part of any sweep, and executed under hardware
+virtualisation, so a median 3.5x faster -- turned out to match a genuine sweep
+arm on every field that the banding code compares except one. It was rejected,
+correctly, and no code needs to change. This entry exists for two reasons: the
+near-miss was until now recorded only in a source comment, where nobody
+reading the issue log would find it; and what the merge would have *cost* had
+never been measured, only asserted. It is measured below, and it is worse than
+"the band gets wider".
+
+**Where:** `scripts/bench-history.py` -- `LAYOUT_SWEEP_TAG` (the guard that
+held) and `layout_arm_rejection()` (the four checks that did not).
+
+**The run.** `bench/history.jsonl`, `2026-08-19T16:15:09+00:00`, commit
+`9011d525b`, experiment *"WHPX vs TCG: benchmark suite under hardware
+virtualisation"*. Compare it field by field against the six-arm TCG sweep at
+`b36a244bb`:
+
+| field `layout_arm_rejection` consults | TCG sweep arm | the 16:15 probe | separates? |
+|---|---|---|---|
+| `host` | this machine | this machine | no |
+| `profile` | release | release | no |
+| `host_load` | unloaded | unloaded | no |
+| `text_pad` | 0, 1024, 1536, 2048, 2560, 3072 | **0** -- truthfully, it was unpadded | **no** |
+| source identity | `kernel` tree `6876f9eb…` | **`6876f9eb…`** -- byte-identical | **no** |
+| `accel` | absent (`None`) | **absent (`None`)** -- predates the accelerator banner | **no** |
+| `experiment` contains `LAYOUT_SWEEP_TAG` | yes | **no** | **yes -- the only one** |
+
+Verified rather than argued: `git rev-parse 9011d525b:kernel` and
+`git rev-parse b36a244bb:kernel` are the same object, so the digest fix of
+`B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS` groups them
+too -- it had to, since they really are the same source. The two facts that
+make the probe *not* an arm are that it ran on a different accelerator and was
+not asked to be one, and only the second of those is recorded anywhere.
+
+**Every blind field is blind for a defensible reason, which is why this is not
+fixable by adding a check.**
+
+- `text_pad: 0` is *correct*. An unpadded kernel has zero padding. There is no
+  value the field could hold that would mean "not a sweep arm" without lying.
+- `accel: None` is correct-for-its-time: that kernel predates the banner the
+  parser reads, and `None` means *unknown*, not *TCG*. Reading unknown as TCG
+  is exactly the conflation `TD-A-A-BARE-METAL-RUN-RECORDS-ITS-ACCELERATOR-AS-
+  ABSENT` is about, in the other direction.
+- The source digest is *correct and equal*, because the source genuinely was
+  equal. A digest cannot separate two runs of one binary; that is the property
+  it was built to have.
+
+So the intent -- "this run was submitted as an arm" -- is not derivable from
+any measurement. It has to be *declared*, and `LAYOUT_SWEEP_TAG` is that
+declaration. That is the entire argument for keeping a field whose only
+content is a string a producer writes and a consumer matches, and which looks
+redundant beside six fields of real data.
+
+**What the merge would have cost, measured.** Across all 86 benchmark entries
+the two runs share, the probe is a median **3.54x** faster than the median TCG
+arm -- but the ratio ranges from **0.03x to 10.43x**. That spread is the part
+worth noticing: a seventh arm three-and-a-half times faster on average would
+not merely have widened the band by a known factor, which a reader might have
+spotted as implausible. It would have *deformed* it per-benchmark, inflating
+some entries tenfold, leaving others alone, and inverting a few. There is no
+inspection of the resulting band that recovers "one of these came from a
+different machine model" from that.
+
+**Direction of error, again.** The tag fails safe in both directions and this
+is not luck. A missing tag on a real arm splits the sweep -- expensive, loud
+enough to notice (no band appears), and it dismisses nothing. A spurious tag
+on a non-arm merges -- silent, and every regression inside the inflated band
+is dismissed. Since the tag is written by exactly one producer
+(`scripts/layout-sweep.py`, importing the constant rather than repeating the
+string) the spurious direction requires someone to type the sentinel by hand
+into `BENCH_EXPERIMENT`, which is as close to unreachable as a declared field
+gets.
+
+**Nothing to do in `bench-history.py`.** No code change; the guard held, and
+the `LAYOUT_SWEEP_TAG` comment already names this run rather than describing a
+scenario. What was missing was the entry you are reading -- the standing rule
+is that an observed near-miss goes in the tracker, not only in the comment on
+the code that survived it, because the tracker is what gets read when someone
+is deciding whether a field is worth keeping. If a future change proposes
+deriving "is this an arm?" from the data instead of the declaration, this
+entry is the counterexample: on 2026-08-19 the data was identical and the
+answer was no.
+
+#### AMENDMENT (2026-08-19, same day) -- it was not a near-miss. The merge happened, outside the harness, and reached the operator's decision queue
+
+Written a few hours after the above, and it downgrades that verdict. The
+sentence "the guard held" is true of `bench-history.py` and false of the
+project, because the guard is only reached by code that *calls* it.
+
+**What happened.** The WHPX-vs-TCG comparison table in `open-questions.md`
+Q53 -- the evidence for that question's option D -- was produced by a
+hand-written analysis that selected and grouped arms itself instead of going
+through `layout_arm_rejection()`. Its TCG column therefore included this very
+16:15 probe among the TCG arms. Published figures versus the truth:
+
+| | as published | actual TCG band |
+|---|---|---|
+| median | 36.5% | **26.0%** |
+| mean | 104.9% | **40.6%** |
+| worst | 2466% (`hpet_read`) | **182.0%** (`heap_raw_alloc_free_4096`) |
+| `hpet_read` | 2466% | **6.2%** |
+
+`hpet_read` is the cleanest possible fingerprint: it costs a VM exit under
+hardware virtualisation (13,680 ns) and is emulated inline under TCG (446 ns),
+so admitting one WHPX row to a TCG band inflates it ~30x. Re-adding the probe
+to the TCG arms and taking a raw peak-to-peak reproduces the old table's top
+three rows at the same rank and within a factor of 1.2. The lower rows are
+near the clean numbers, so the published table was a mixture and cannot be
+fully reconstructed -- only diagnosed.
+
+**It failed in the predicted direction, which is the whole point.** Inflating
+TCG's noise makes the case for abandoning TCG look stronger. The corrected
+numbers still favour that option but by 4.8x on the median rather than 7.4x,
+with the worst-benchmark collapse falling from 26x to 1.9x and the count of
+benchmarks that get *worse* under WHPX rising from eight to fourteen. An
+analysis that contaminates its own baseline in favour of its own hypothesis is
+exactly the silent, plausible failure the direction-of-error argument in this
+entry predicts -- and it was found only because the numbers were re-derived
+from the raw records while updating the table for a sixth arm, not because
+anything flagged them.
+
+**So the corrected lesson is not "keep the tag".** It is that a predicate is
+not a guard unless it is on the only path. `layout_arm_rejection()`'s own
+docstring already says this about a *restatement* of it drifting; this is the
+same failure with the restatement written in an analysis script rather than in
+`layout-sweep.py`. Two consequences, both adopted:
+
+1. **Evidence quoted in `open-questions.md` must be reproducible by a command
+   the reader can re-run.** Every figure in the corrected Q53 table is printed
+   by `bench-history.py --layout-bands`, which routes through
+   `layout_arm_rejection` and so cannot pick up an untagged run. Recorded in
+   the Q53 entry itself so it is found by the next person writing evidence
+   there rather than only by someone reading this file.
+2. **An ad-hoc analysis that groups records must call the real predicate.**
+   `build/whpx-band-preview.py` did -- it monkeypatches the *key* and reuses
+   `layout_arm_rejection` unmodified, which is why its WHPX column is correct
+   and survived the re-derivation intact. That is the pattern to copy; the TCG
+   column was produced by something that did not, and did not survive.
+
+The original verdict above is left as written rather than edited, because
+"CLOSED, the guard held" being wrong within hours of being written is itself
+the useful record.
+
+### TD-A-THE-EVIDENCE-RULE-ADOPTED-IN-§240-CANNOT-BE-SATISFIED-BY-ANY-EXISTING-COMMAND (lane A, 2026-08-19)
+
+**Status:** FIXED 2026-08-19 in `scripts/bench-history.py` (`--accel-compare`),
+with 13 tests in `scripts/test-bench-history.py`, every one of them
+mutation-checked. See "How it was fixed" below — including the one clause of
+the spec that the recorded data cannot satisfy on its own, which is now an
+explicit, labelled assertion by the reader rather than a silent inference.
+
+(It was blocked until the WHPX layout sweep finished: the fix is in `scripts/**`,
+and editing `scripts/**` mid-sweep changes the source digest and aborts the
+sweep — see `B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS`.
+The sweep landed, so the block cleared.)
+
+**In short:** we just adopted a rule saying that any number quoted to the
+operator in `open-questions.md` has to be regenerable by a command they can run
+themselves. Both of the tables that rule was written for compare benchmark runs
+made under *different emulators*, and no such command exists — the tool has a
+mode for comparing code layouts and a mode for listing records, but nothing that
+compares two accelerators. So the rule is currently unsatisfiable for exactly
+the evidence that motivated it, and both tables had to be re-checked by throwaway
+scripts that leave nothing behind for the next reader.
+
+#### What it is
+
+`design-decisions.md` §240 adopted, after the Q53 contamination:
+
+> evidence quoted in `open-questions.md` must be reproducible by a command the
+> reader can re-run
+
+`scripts/bench-history.py` offers `--list`, `--layout-bands`, and the record/diff
+path. None of them produces an accelerator comparison. The two tables that need
+one:
+
+| Table | Claim | How it was produced |
+|---|---|---|
+| **Q54** "The evidence" | ×3.53 typical, 82/86 faster, `hpet_read` 453 → 13534 ns | hand-built in `design-decisions.md` §237 |
+| **Q53** "Update 2026-08-19" | TCG vs WHPX layout-band widths | `build/whpx-band-preview.py`, which monkeypatches `bh`'s grouping key |
+
+Q53's is the better of the two — it reuses `bh.layout_arm_rejection` unmodified,
+which is why its WHPX column survived re-derivation intact — but it is a
+throwaway script in `build/`, i.e. gitignored, i.e. not a command the operator
+has.
+
+#### Why this is debt and not a bug
+
+Nothing is currently *wrong*. Both tables have now been checked by hand: Q53's
+was corrected (`41581ca30`), Q54's was confirmed sound with one row amended
+(`0d9da98c6`). The defect is that the check is not repeatable — the next person
+to update either table, including a future me with no memory of today, gets no
+help from the tooling and no warning if they select records the way the Q53
+analysis did.
+
+That is precisely the failure §240 describes. Writing the rule and not building
+the thing that makes it satisfiable leaves the rule as an intention.
+
+#### What the proper fix looks like
+
+An `--accel-compare` mode on `scripts/bench-history.py`:
+
+- Takes two accelerator names (or `--accel-compare A:B`), a profile, and
+  optionally a `kernel_sha` or `src_digest` to pin the source.
+- **Selects records through the same predicate the layout code uses**, not a
+  fresh enumeration — §240 rule 2. Where the layout predicate does not apply
+  (an accelerator comparison is not a band), the selection it *does* make must
+  be printed, record by record, so the reader sees which runs went in.
+- **Refuses to compare a single TCG arm against a single WHPX run without
+  saying so.** The Q54 amendment found the typical speedup is ×3.53–×3.97
+  depending on which of six layout arms is chosen, and that the "best case"
+  benchmark is a different benchmark in four of the six. If a band exists for
+  either side, the tool should report the range, not one arm's number.
+- Emits markdown, so the table in `open-questions.md` is pasted output rather
+  than transcribed output. Transcription is where a digit changes.
+
+#### How to reproduce the gap
+
+```bash
+python scripts/bench-history.py --help    # no accelerator-comparison mode
+```
+
+Then try to regenerate Q54's table from the documented inputs. It cannot be done
+without writing new code, which is the whole of this entry.
+
+#### How it was fixed
+
+```bash
+python scripts/bench-history.py --accel-compare tcg:whpx --profile release     [--assume-missing-accel tcg] [--accel-pin PREFIX] [--markdown]
+```
+
+Each bullet of the spec above, and what it turned into:
+
+- **Pinning.** Pairing is on `kernel_sha` — the SHA-256 of the ELF that was
+  measured — not on `src_digest`, and `--accel-pin` accepts a prefix of either.
+  A layout band groups arms built from one *source*, because they are
+  deliberately different binaries; an accelerator comparison wants the opposite,
+  the *same binary* run twice, and `kernel_sha` settles that by observation
+  rather than by argument. It is also the only pin that works on this history:
+  the six TCG sweep arms carry no `src_digest` at all and the six WHPX arms
+  carry a `full:` one, so no digest match across the two sides can ever exist —
+  while their `kernel_sha` values match pad for pad.
+- **The shared predicate (§240 rule 2).** The three filters both selections
+  agree on — wrong host, wrong profile, deliberately loaded host — now live once,
+  in `measurement_mismatch`; `layout_arm_rejection` and `accel_run_rejection`
+  both delegate to it and only word the answer for their own reader. The test
+  suite asserts the equivalence over a matrix *and* reads the `MISMATCH_*`
+  constants off the module, so a fourth filter added without a case fails the
+  suite rather than going unexercised.
+- **The selection is printed, run by run** — timestamp, commit, `kernel_sha`,
+  pad, canary verdict, and whether the accelerator was recorded or assumed —
+  followed by a "Not used" block that accounts for every record that did not
+  make it, grouped by reason.
+- **It never presents one arm as "the" number.** Where several binaries are
+  shared, every headline row is a span (`x3.44 - x3.99`), the "benchmarks
+  faster" row is a span, and the best-case row *refuses to name a benchmark*
+  when the pairs disagree about which one won. Where only one binary is shared
+  it prints a warning that names this exact defect and the sweep command that
+  would replace it with a range.
+- **Markdown.** `--markdown` emits the tables plus a collapsed `<details>`
+  selection block, so `open-questions.md` gets pasted output. Both forms are
+  ASCII throughout, including the `x` in `x3.53`: this prints to a console whose
+  code page is not UTF-8, where a multiplication sign is mojibake.
+
+#### The clause the data cannot satisfy, and what was done instead
+
+The spec asks for Q54's six-arm range to be regenerable. It is not, from the
+records alone: **19 otherwise-usable runs — including the entire TCG sweep the
+table is built from — predate the `accel` field.** `parse_accel` deliberately
+reports those as unknown rather than as TCG, and it is right to: the *first*
+WHPX run in this history also predates the field, so "no banner" provably does
+not mean "TCG", and a tool that inferred it would be wrong about a real record
+here.
+
+So the inference is not made. `--assume-missing-accel NAME` lets the reader
+supply the fact the harness failed to record; it is an assertion by whoever
+types it, exactly like `--host-load idle`, and every report resting on one says
+so in its third line and repeats the flag in its own reproduce command. The
+assumption cannot be verified, but it can sometimes be *falsified*, and that
+half is enforced: a run whose own `experiment` banner names a different
+accelerator is refused individually and listed. The 2026-08-19 16:15 probe is
+banner-titled "WHPX vs TCG", so it names both and is refused under either
+assumption — the safe direction, since an unusable record costs a pair and a
+mislabelled one corrupts every figure its pair feeds.
+
+Both tables were then re-derived against the new command:
+
+| | Q54 as published/amended | `--accel-compare` |
+|---|---|---|
+| Without the assumption | — | **1 pair** (`1a278561f858d447`), typical **x3.53**, **83 of 86** faster, worst `hpet_read` **x0.03** |
+| With `--assume-missing-accel tcg` | ×3.53–×3.97 over six arms, 82–83 of 86, best case a different benchmark in four of six | **7 pairs**, typical **x3.44 – x3.99**, **82–83 of 86**, best case a different benchmark in **4 of 7** — the same four Q54 names |
+
+The unassumed row is worth keeping: it is a *different binary* from the one Q54
+used, so its x3.53 is an independent replication of the published headline
+rather than a restatement of it. `hpet_read` is the worst case in all seven
+pairs, which is the one row placement does not move.
+
+#### What it still cannot do
+
+- It cannot catch a run that used a non-default accelerator and wrote nothing
+  about it in its banner. Nothing can; that record did not record what it did.
+  The only real fix is the one already in flight — every run recording `accel`,
+  which runs from 2026-08-19 onward do.
+- `bench/boot-history.jsonl` still records no `accel` at all, so boot timings
+  cannot be compared across accelerators by this or any other command. That is
+  gated on Q54 and tracked separately.
+
+### B-A-THE-BOOT-TEST-REWRITES-ROOTFS.EXT4, WHICH-IS-AN-INPUT-TO-THE-IDENTITY-OF-WHAT-IT-JUST-BOOTED (lane A, 2026-08-19)
+
+**Status:** FIXED 2026-08-19 in `scripts/boot-test.sh` (`snapshot=on`); verified
+by a controlled before/after hash across one boot. See "How it was found" — it
+was found by the sweep re-run that a *different* entry
+(`B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS`) demanded, and
+it is a genuinely separate cause, not that entry reopening.
+
+**In short:** the boot test attaches a 256 MB disk image full of test programs,
+and the guest writes to it while it runs. That image is also one of the
+ingredients we hash to answer "what source produced this measurement?". So
+every boot changed the answer to that question, as a side effect of asking it.
+Layout sweeps — which build the same source six times and need all six runs to
+agree they are the same source — therefore fragmented into six groups of one and
+could never produce a result. Fixed by giving the guest a throwaway copy to
+write to.
+
+#### The measurement
+
+Controlled, on an otherwise-idle tree with nothing else running:
+
+| | `rootfs.ext4` sha256 |
+|---|---|
+| before arm 2's boot (taken while arm 2 was still *compiling*) | `f62e019d81e680195ff95a501eee67a0633f981b4c4c5ece412cd4cb6dd0c00a` |
+| after arm 2's boot | `b2ecc74d87dbe967448d12ff295e39a1284c3382938e0fc0cac16d48a6335b6b` |
+
+One boot, contents changed. This was the discriminating test between two
+hypotheses that the circumstantial evidence could not separate — "every boot
+mutates it" versus "only the first boot after a repack does, then it is
+idempotent" — and it came out on the first.
+
+Note what is *not* the mechanism: the ext4 superblock is untouched (`s_mtime`
+never, mount count 0, state `0x1` cleanly-unmounted). Our ext4 driver does not
+update the mount fields, so the change is in data/metadata blocks written by the
+Path-Z rungs, and none of the obvious superblock-level tells would have revealed
+it. Anyone re-investigating this by reading the superblock will conclude,
+wrongly, that nothing happened.
+
+#### How it was found
+
+The sweep re-run that closed
+`B-A-A-LAYOUT-SWEEP-IS-VOIDED-BY-ANY-COMMIT-MADE-WHILE-IT-RUNS` demanded. That
+entry's fix had two parts and **both worked exactly as designed**:
+
+- **Part 1** (documentation commits must not change source identity):
+  validated. Three commits (`b3ee55d25`, `0d9da98c6`, `a8a62afba`) landed
+  deliberately while the sweep ran, and the *tracked* half of the digest was
+  byte-identical across all of them and the commit before them —
+  `tracked:11d8ab60978a1b56` at every one.
+- **Part 2** (compare consecutive arms' group keys and stop on a mismatch):
+  validated in the strongest possible way — it caught a cause part 1 does not
+  cover, on its second arm, and named it:
+
+```
+pad=0:    ('full:ace827eb370bec40', 'Hyper-V/WHPX')
+pad=1024: ('full:f75959ab7b96d782', 'Hyper-V/WHPX')
+```
+
+  Same accelerator, digest alone moved. It stopped after ~24 minutes instead of
+  spending ~72 on a band that could not form. Its message already lists "a
+  regenerated `rootfs.ext4`" among the causes it exists to catch, which is
+  precisely what it caught.
+
+So the re-run did its job. It is worth stating plainly that part 2 is the reason
+this bug is a half-hour of machine time and a diagnosis, rather than a sweep
+that silently produced nothing for the third time.
+
+#### Why this was invisible before today
+
+The six arms that banded successfully before today carry `src_digest: null` —
+they predate the digest feature and grouped by `commit`, which a boot does not
+change. So adding the source digest is what exposed this; the mutation itself is
+older. A reader comparing old records to new should not conclude the tree got
+worse.
+
+There is also a comment in `scripts/boot-test.sh` above `check_rootfs_freshness`
+that has known since it was written that "QEMU opens the image read-write, so a
+boot updates its mtime". It says *mtime*. The step from "the timestamp moves" to
+"the bytes move, and something downstream hashes those bytes" was never taken,
+and the file it warned about became a digest input later.
+
+#### The fix, and the two fixes rejected
+
+`-drive ...,snapshot=on`: QEMU buffers guest writes into a throwaway overlay and
+never modifies the host file.
+
+- **Rejected: `readonly=on`.** The Path-Z rungs mount /mnt read-write and
+  writing is part of what they exercise; read-only would change what the test
+  tests. `snapshot=on` preserves the guest's behaviour exactly and discards it
+  afterwards, which is what a fixture wants.
+- **Rejected: exclude `rootfs.ext4` from the digest.** It genuinely *is* an
+  input — 73 staged ELFs that the Path-Z rungs execute. Dropping it lets two
+  different images share one identity, merging runs that must never be compared.
+  Over-inclusion splits a band (safe: the answer becomes "unmeasured");
+  under-inclusion merges one (unsafe: an inflated band dismisses real
+  regressions silently). Fix the mutation, not the ledger.
+
+The fix also un-inverts something: the image's mtime now records when it was
+*packed* rather than when it was last *run*, which is what every other staleness
+check in that script assumes about the files it compares. The stale half of the
+`check_rootfs_freshness` rationale was rewritten rather than deleted, so a
+future reader who finds `-ot` working there does not conclude the hash-based
+guard is redundant — it is not, for the reason that never depended on mtime.
+
+#### Side result, recorded here because it unblocks Q53
+
+The same run confirmed the contamination canary now works under WHPX. Arm 2
+reported `RUN CLEAN: every instrument that could measure did, and none of them
+fired`, with 13 samples and 9 of 13 arm-pairs quiet — not the
+`canary_verdict: "broken"` that both earlier WHPX runs produced. That was the
+blocker named in **Q53** point 3.
+
+---
+
+### [A] RESOLVED — every history window pooled QEMU TCG runs with Hyper-V/WHPX runs, so the wall-clock and dispersion bands were fitted to two populations whose medians differ by 3.5x in one direction and 30x in the other — 2026-08-19
+
+**Status:** RESOLVED 2026-08-19. Found while proving the wall-clock axis had
+become a live detector (see `B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING` above);
+the axis works, and the moment it started working it exposed this.
+
+**In short.** The benchmark history decides whether a run was quiet by
+comparing it against *comparable* earlier runs. "Comparable" filtered by host,
+by build profile, by whether the machine was deliberately loaded, and by
+whether the run was a tagged experiment — but **not by which virtual-machine
+accelerator produced it.** QEMU has two, and they are not the same computer:
+on one byte-identical kernel image (`kernel_sha 7a17cf6be2a1`), Hyper-V/WHPX
+is ~3.5x *faster* than TCG on the median benchmark and ~10x faster at best,
+while being ~30x *slower* on device-bound ones — a HPET read costs 13.5 us
+under WHPX (each read is a VM exit to the hypervisor) against 450 ns under
+TCG's inline emulation. Pooling those into one band is the same error as
+pooling debug and release builds, which this file already fixed once, except
+worse: the debug/release move is a multiple in one direction, and this one is a
+multiple in *both*, so no scalar drift correction can rescue it.
+
+**What it would have done.** Today the wall band over 61 comparable release
+records sits at 181 s (median 130, MAD 17, floor 6.5). The two accelerators do
+not overlap at all: the TCG layout-sweep arms run 114–132 s, the WHPX arms
+162–180 s. So:
+
+- As clean TCG runs accumulate, the band tightens toward ~149 s, and **every
+  honest WHPX run then reports a wall-clock excursion** — attributed to host
+  descheduling, which is what that axis means, when the real cause is that a
+  different accelerator was used.
+- Run the other way — a few honest WHPX runs enter a mostly-TCG window — and
+  the MAD inflates until the band fires on nothing at all. A check that cannot
+  fire is this file's recurring failure mode.
+
+**Why it had not bitten yet, and why that is not reassuring.** All 14 WHPX
+records also carry an `experiment` tag, so `record_experiment()` already
+excluded them on other grounds. That is a property of how the WHPX sweep
+happened to be invoked, not something the window logic guarantees. The first
+un-tagged WHPX boot would have started poisoning the bands silently. Note also
+that `arm_group_key` (the layout-artefact grouping) *has* partitioned by
+`accel` since the field existed — so the codebase already held the correct
+belief in one place and the wrong one in another, which is exactly the shape of
+bug that survives review.
+
+**The fix.** `comparable_records(records, host, profile, accel)` gained the
+accelerator as a fourth filter, and `accel` is threaded as a required fourth
+positional through every window consumer: `previous_for_host`,
+`report_run_position`, `level_shift_window`, `placement_is_constant`,
+`level_shifts`, `repeats_by_commit`, `mode_structure`, `mode_split_search`,
+`values_for_binary`, `replication_verdict`, `report`, and `cmd_list`'s causal
+replay. `--list` re-judges every stored row rather than printing the verdict
+filed with it, so it needed the same partition or it would have shown the
+defect to a reader in the view most likely to be believed.
+
+**Required, not defaulted — deliberately.** `profile` used to default to
+`debug`. That default was removed in the same change. A window selector that
+silently picks a population when the caller forgets to name one is precisely
+the failure being fixed here: on this host the unnamed-accelerator bucket holds
+sixty runs, so the wrong answer looks like a full and healthy history rather
+than an error. Both selectors now raise `TypeError` if omitted, and a test
+asserts it.
+
+**An absent `accel` is not TCG.** `ACCEL_UNRECORDED = None` is its own bucket
+and groups only with itself. Folding it into TCG is tempting — 60 of the 61
+records are unlabelled and would light up the band immediately — and it is
+*provably* wrong: the first WHPX run on this host (`2026-08-19T16:15:09`)
+predates the field, so an absent value is demonstrably not evidence of TCG.
+The accepted cost is that the first *labelled* TCG run finds no history and
+both banded axes abstain for ~5 runs. That blindness is made loud rather than
+papered over: `accel_thinning_note()` states, in the verdict's own notes, how
+many comparable runs the window holds, how many were excluded for predating the
+field, how many for naming a different accelerator, and why. Silent blinding is
+worse than loud abstention — the doctrine this file has arrived at three times.
+Recorded as `design-decisions.md` §241.
+
+**Evidence the fix is real, not just present.** Ten mutations of the production
+file were run against the suite; all ten fail it. Two survived the first pass
+and were only caught after the tests were strengthened, which is the whole
+point of running the exercise:
+
+- *"the thinning note is spoken even when nothing was thinned"* survived
+  because the fixture for the stays-quiet case had no excluded neighbours, so
+  the length guard was never the thing under test. The fixture now keeps the
+  neighbours, which is the only version of the check that can tell the length
+  guard from the neighbour guard.
+- *"`--list` judges every record against one pooled history"* survived because
+  nothing exercised `cmd_list` at all. It now has a test that builds a
+  seven-run TCG history plus one ordinary WHPX run and asserts the WHPX row
+  reads `unknown` (no history of its own) rather than `contaminated` (condemned
+  by the TCG band).
+
+**A falsification test, derived from the data rather than hand-picked.** Any
+benchmark where `min(WHPX) > 4 * max(TCG)` across labelled release records
+yields exactly `hpet_read`, `net_arp_lookup` and `net_ns_arp_lookup` — a
+*structural* VM-exit signature, not a tuned threshold. Applied to the 60
+unlabelled records it flags exactly one: the known 16:15 WHPX probe, which
+doubles as the test's positive control. So the unlabelled window is genuinely
+homogeneous, and the claim that it is TCG-like is now checked rather than
+assumed.
+
+**A second consumer, found by the tests rather than by reading.** Threading the
+argument turned `comparable_records` into a required-argument function, which
+made `scripts/grade-positional.py` fail loudly instead of silently — it builds
+its per-benchmark baseline from the same window. That grader is *more* exposed
+than the bands are, because everything it prints is a **ratio** of this run's
+per-benchmark value to the baseline's. A uniform scale error would cancel in
+those ratios and be harmless; the accelerator's is emphatically not uniform, so
+a baseline from the wrong one *reshapes* the inflation curve and manufactures a
+disturbance in whichever region the two accelerators disagree about most. It
+now reads the accelerator from the graded run's own serial banner
+(`bh.parse_accel`) rather than from a flag — a run that has to be *told* which
+accelerator produced it can be told wrong. Its own regression test derives the
+gate's null distribution from real history and now forms consecutive-run pairs
+*within* an accelerator before pooling them; a pair straddling the boundary
+does not measure between-run drift at all, and would have inflated the null
+until the gate it calibrates could never fire.
+
+**A restatement removed while in the area.** `comparable_records` and the new
+`accel_window_thinning` each open-coded the host / profile / not-loaded
+conditions that `measurement_mismatch` already expresses — the exact drift
+hazard `design-decisions.md` §240 was written about, sitting inside the file
+that documents it. Both now call it. A mutation that removed the delegation
+from `accel_window_thinning` survived the first pass: nothing checked that the
+excluded-neighbour *count* counts only neighbours. It now does — a record on
+another host, in another profile, under load, or tagged as an experiment was
+never a candidate for this window, and counting one would make the note claim
+that a run is usable once you settle on an accelerator when in fact it is
+excluded three other ways.
+
+**Mutation ledger for this change: 14 mutations, 14 caught** — 12 against
+`bench-history.py`, 2 against `grade-positional.py`. Three of the fourteen
+survived a first pass and were only caught after the tests were strengthened.
+
+---
+
+### [A] RESOLVED — the boot-duration history had the same accelerator blindness as the benchmark history, held off only by a tag that Q53 proposes to stop applying — 2026-08-19
+
+**Status:** RESOLVED 2026-08-19, immediately after the sibling defect above.
+Found by asking whether the fix just made to `bench-history.py` had a twin, and
+it did: `boot-history.py` grouped boot durations by *build* alone.
+
+**In short.** `bench/boot-history.jsonl` records how long each QEMU boot took,
+and prints a median per population so that "this boot was slow" means
+something. It already knew that a KASAN-instrumented build costs ~3.4x an
+ordinary one and kept those apart. It did **not** know that the *accelerator*
+matters: on this host a boot under Hyper-V/WHPX takes ~173 s against ~121 s
+under QEMU TCG. Both were about to be called the same population.
+
+**The measured cost of pooling.** 12 timed non-experiment boots of the
+uninstrumented build, median 121 s. 17 WHPX boots, median 173 s. Pooled, the
+median is 171 s — **41% above** the figure that describes a normal boot, and
+four times CLAUDE.md's 10% regression threshold. A median that wrong does not
+merely mislead; it makes the number useless in both directions, since a real
+40% regression on TCG would land inside the pooled spread and a healthy WHPX
+boot would look like one.
+
+**Why it had not bitten, and why the reprieve is expiring.** All 17 WHPX boots
+carry an `experiment` tag, and `wall_populations` drops tagged boots outright.
+That is the same coincidence that protected the benchmark history — a fact
+about how the probes were invoked, not a rule the file applies — except here it
+has a *scheduled* expiry: **Q53 is a live proposal to make WHPX the ordinary
+way to boot the tree.** The day that is answered "yes", the tag stops appearing
+and the 41% shift arrives untagged, with nothing to attribute it to. The old
+docstring said the two 2026-08-19 WHPX boots were excluded, and it was true;
+what it did not say was that nothing in the code was doing the excluding.
+
+**The fix.** `Serial` gained an `accel` field, `build_record` writes `accel`
+unconditionally (`null` included, on the same three-state rule as `sanitizer`:
+absent = row predates the field, null = the log did not say, string = it did),
+`accel_of` collapses the two ways of not knowing without ever folding either
+into a named accelerator, and `population_of(rec)` is the **pair** — the label
+a human reads and the key the numbers are grouped by are one function, so a
+legend cannot come to name a different partition from the one it describes.
+`wall_populations`, `report_wall`, `report` and `cmd_list` all use it; `--list`
+gained an accelerator column (`tcg`/`whpx`/`metal`/`?`) beside the sanitizer
+one, for the same reason that column exists — a duration that looks wrong is
+almost always a row from the other population, and until now only half of that
+population was visible.
+
+**The banner is parsed once, in the other file.** `_parse_accel` delegates to
+`bench-history.py`'s `parse_accel` rather than carrying a second copy of the
+two `[hypervisor]` patterns (`design-decisions.md` §240). A copy would drift
+*silently* here, because a pattern that stopped matching returns the same
+`None` a pre-banner log does. The delegation is asserted by a test that reads
+the expected answer out of `bench-history.ACCEL_BARE_METAL`, not out of a
+literal — two parsers that agree today would otherwise satisfy it.
+
+**Failure to load the delegate costs the label, not the boot.** That `try` is
+the one place in this file where swallowing an exception is correct:
+`boot-test.sh` calls this script from its EXIT trap with `|| true`, so a raise
+does not surface anywhere — it silently loses the record of the boot, which for
+a *failing* boot is the most expensive outcome the script has. The failure is
+printed to stderr and the row is written with `accel: null`. Both halves of
+that are under test, including the stderr message.
+
+**Every existing row reads `?`, and that is the honest answer.** All 182 rows
+predate the field. `accel_of` therefore reports one unknown population rather
+than back-filling the 165 non-experiment boots as TCG — the same reasoning as
+§241, and for the same reason it is not merely conservative: the WHPX boots in
+this very file predate the banner too, so "no banner" is demonstrably not
+evidence of TCG.
+
+**Mutation ledger for this change: 15 mutations, 15 caught.** One survived the
+first pass — *"the listing never says a row cannot answer"*, which turned the
+`?` accelerator token into `tcg`. It survived because the fixture omitted
+`sanitizer`, so the column *beside* the one under test was also printing `?`
+and satisfied a check that merely looked for a `?` on the line. The fixture now
+names the sanitizer and the assertion reads the accelerator column by position.
+That is precisely the failure mode this project keeps rediscovering: a test
+that passes for a reason unrelated to the thing it is named after.
+
+### [A] RESOLVED — no framebuffer created with `RESOURCE_CREATE_2D` can ever be scanned out on a virgl-capable virtio-GPU, and every step before the last one reports success — 2026-08-19
+
+**In short:** with QEMU's GL-capable GPU (`virtio-gpu-gl-pci`) our display
+never came up: `SET_SCANOUT` was refused with `ERR_INVALID_RESOURCE_ID` for a
+resource the device had just created successfully. It was not our bug in the
+usual sense — OVMF's own driver fails identically on the same host — but it was
+ours to fix, because the only way out is for the guest to create the
+framebuffer with a *different command*. It now does, and the GL device brings
+up the display. This was the kernel-side prerequisite that
+`requests/a-c-the-virgl-test-environment-that-blocked-mesa-now-exists.md`
+promised lane C.
+
+**The chain, all four links needed:**
+
+1. QEMU routes *every* command through virglrenderer as soon as the device is
+   `virtio-gpu-gl`, regardless of feature negotiation. Declining
+   `VIRTIO_GPU_F_VIRGL` does **not** keep you on the 2D path — we accepted no
+   page-0 features at all and were still on it.
+2. QEMU's `virgl_cmd_create_resource_2d` hardcodes `args.bind = (1 << 1)`
+   (`RENDER_TARGET`). The 2D command has no `bind` field, so no guest can
+   influence this.
+3. virglrenderer's `vrend_resource_d3d_init` allocates the shared D3D11 texture
+   only for a resource whose bind includes `VIRGL_RES_BIND_SCANOUT` (1 << 18).
+   Without that bit it returns early, leaving `res->d3d_tex2d == NULL`.
+4. On Windows, `virgl_renderer_resource_get_info_ext` — which QEMU calls on
+   `SET_SCANOUT` — ends in `vrend_renderer_resource_d3d11_texture2d`, which
+   returns `EINVAL` when there is no D3D11 texture. QEMU turns that into
+   `ERR_INVALID_RESOURCE_ID`.
+
+**The fix:** create the framebuffer with `RESOURCE_CREATE_3D` (0x0204) instead,
+with `target = PIPE_TEXTURE_2D` and `bind = RENDER_TARGET | SAMPLER_VIEW |
+SCANOUT`. That command carries an explicit `bind`, QEMU dispatches it
+unconditionally, and it passes the guest's value through verbatim. It is used
+only when the device offered `VIRTIO_GPU_F_VIRGL`; a plain `virtio-gpu-pci`
+does not offer it and takes the unchanged 2D path. We now accept that bit —
+not to render 3D, but because it is the device's statement that the 3D command
+block exists, which is exactly the condition under which the 2D path is a dead
+end.
+
+**Why this took a debugger and not a code read.** The failure is structurally
+invisible from inside the guest. QEMU's virgl path *discards* virglrenderer's
+return code in `virgl_cmd_create_resource_2d`, and never sets `cmd->error` in
+`virgl_resource_attach_backing` or `virgl_cmd_transfer_to_host_2d` — so create,
+attach and transfer all answer `OK_NODATA` for a resource that cannot be
+displayed, and `SET_SCANOUT`'s `0x1203` is the *only* guest-observable signal.
+There is no command sequence a guest can issue to tell "the resource was never
+created" from "the resource exists but has no shareable texture". Two
+hypotheses were killed by experiment before the right one — the resource format
+(`B8G8R8A8` → `R8G8B8A8` changed nothing) and virglrenderer failing to
+initialise (it initialises fine: `gl_version 31 - es profile enabled` via ANGLE
+under `-display egl-headless`; it is `sdl,gl=on` that fails outright with
+`virgl could not be initialized: 22`). What settled it was breaking on the
+virglrenderer exports under `cdb`: `virgl_renderer_init` is called with flags
+`0x1102`, which includes `VIRGL_RENDERER_D3D11_SHARE_TEXTURE` — so link 3 is
+live on this host — and `virgl_renderer_resource_get_info_ext` returns `0x16`
+(`EINVAL`).
+
+**A wrong opcode cost a whole cycle, and it failed *silently*.** The first
+attempt sent 0x0201 for `RESOURCE_CREATE_3D`. That is `CTX_DESTROY`, which
+answers `OK_NODATA` — so the driver logged a successful resource creation for a
+resource that was never created, and the symptom was byte-identical to the
+original bug. The 3D block starts at 0x0200 (`CTX_CREATE`); `RESOURCE_CREATE_3D`
+is 0x0204. The same shape of silent failure guards the *size* of the request:
+QEMU's `VIRTIO_GPU_FILL_CMD` returns without setting an error if the descriptor
+is shorter than the struct, so a short command is accepted and ignored. That is
+why `VirtioGpuResourceCreate3d`'s trailing `_padding` is documented as wire
+format and its 72-byte size is a `const _: () = assert!(…)` — nothing else in
+the file would catch it.
+
+**The GL path now has harness coverage:** `SLATE_GPU=virtio-gpu-gl-pci
+./scripts/boot-test.sh` swaps the device *and* the display backend
+(`egl-headless`; QEMU refuses to start a GL device under `-display none`) and
+marks the run an experiment, since a run on a different display backend is not
+comparable on wall time with a tracking run. Passing the device through
+`QEMU_EXTRA` cannot substitute: that *adds* a second GPU and the driver binds
+the first one it finds, so the GL device is never the one under test — which is
+how an earlier attempt to reproduce this silently measured the plain device.
+---
+
+## C-THE-LOCK-SCREEN-STORED-A-BARE-SHA-256-OF-THE-PASSWORD (lane C, 2026-08-18) — FIXED
+
+**In short:** the program that guards a locked session checked the typed
+password by hashing it once and comparing the result to a stored number. No
+salt, no repetition. That makes the stored value the *same* number on every
+machine for any given password, so one precomputed table cracks every
+SlateOS user at once, and a graphics card can try billions of guesses a
+second against it. It now uses a shared derivation (`pwkdf`) with a random
+per-install salt and 100,000 rounds, and the same crate is what
+`gui/credentials` will use, so there is exactly one answer to "how is a
+password stored here".
+
+### What the code did
+
+`apps/lockscreen/src/main.rs`'s `PasswordValidator` held a `[u8; 32]` that
+was `sha256(password.as_bytes())` and nothing else, compared with a
+constant-time equality. Two properties follow immediately:
+
+- **No salt.** `sha256("hunter2")` is a fixed 32-byte value known to anyone
+  who has ever computed it. A stolen store needs no cracking at all for any
+  password that appears in a wordlist — it needs a lookup. It also leaks
+  equality: two users with the same password have byte-identical entries, so
+  an administrator can see who shares a password with whom without breaking
+  either.
+- **No stretching.** One SHA-256 compression is the cheapest possible guess.
+  The cost of the defence should be tuned to be *inconvenient* — the point of
+  a work factor is that the attacker pays it billions of times and the user
+  pays it once, on a keystroke they already expected to wait for.
+
+### Why it survived review
+
+The crate had five tests of the hash: FIPS vectors for `sha256` and a
+constant-time-comparison test. They all passed, and they were all testing
+`sha2`, which is correct and already owns those exact vectors
+(`sha2/src/lib.rs:489,497,645`). Nothing tested the property that actually
+mattered — *that the stored value is not a bare hash of the password* — so a
+suite of 60-odd tests was fully green on a store with no salt in it. The five
+duplicated tests are now deleted and replaced by three that test what
+lockscreen is responsible for: `the_stored_value_is_not_a_bare_hash_of_the_password`,
+`two_installs_store_different_values_for_one_password`, and a round trip
+through the stored salt and verifier.
+
+### The fix
+
+A new crate, `pwkdf`, holds the derivation once: a 16-byte salt drawn from
+the kernel entropy source, 100,000 rounds folding password and salt in every
+round, and a domain-separated verifier so that the value stored on disk is
+not itself usable as a key. `PasswordValidator::enrol` returns
+`Result<_, KdfError>` and **refuses** when entropy is unavailable, per
+design-decisions §465 — a secret is the tier that refuses rather than falling
+back.
+
+The reason it is a crate rather than a function in `apps/lockscreen` is that
+`gui/credentials` had *independently* grown the same derivation. Two
+independently-correct derivations are still *incompatible*, and on the day
+someone wires the lock screen to the credential store, the cheap way to
+reconcile them is to weaken the store to match the screen. Extracting the
+crate while neither is wired to the other costs nothing; doing it afterwards
+costs an argument about a migration.
+
+`userspace/cryptsetup` deliberately keeps its own PBKDF2 and does **not**
+use `pwkdf`: LUKS specifies the derivation on disk, so that one is a format
+obligation, not a duplicate.
+
+### Still to do
+
+- ~~**`gui/credentials` is not yet on `pwkdf`.**~~ **Done the same day.** Its
+  `SALT_LEN`, `KdfParams`, `stretch` and the body of `DEFAULT_KDF_ROUNDS` are
+  gone; `derive_session_key` and `verifier_for` are now three-line adapters
+  over `pwkdf::derive_key` and `pwkdf::verifier_for` (net −150 lines). What
+  it keeps is `VERIFIER_DOMAIN` — the label that stops a vault verifier from
+  being replayable against a lock screen — and a `From<pwkdf::KdfError>`
+  written as an exhaustive match rather than a `map_err`, so that a second
+  `pwkdf` failure mode would stop compiling here instead of being silently
+  folded into "no entropy". Two new tests pin the migration: the stored
+  format is still `sha256(key ‖ "slateos-credential-verifier")`, and a vault
+  verifier differs from a lock-screen one derived from the same key. Both
+  verified by flipping the domain constant. 83 tests, clippy clean.
+- **`pwkdf::stretch` is PBKDF2's *shape*, not PBKDF2**, and the module doc
+  says so. Whether to keep a hand-written construction or port a vetted one
+  is open question **C-Q5**, which is the operator's call; the crate is
+  written so that swapping the interior is a change to one function.
+
+### Two unrelated production risks fixed in the same file
+
+- **`LockoutTimer::tick` looped instead of dividing.** `while ms >= 1000 { ms
+  -= 1000; secs -= 1 }` needed two guards to keep its subtractions from
+  underflowing, neither visible to the compiler, and it spun once per elapsed
+  second on a single large `dt_ms` — the frame after a suspend, or a debugger
+  pause. Replaced with `%` and `saturating_sub`.
+- **`active_user` had a "defensive" fallback that panicked in exactly the
+  case it defended against**: `self.users.get(i).unwrap_or_else(|| &self.users[0])`
+  indexes an empty vector precisely when `get` returned `None` because the
+  vector was empty. The invariant ("there is always a user") was real but
+  conventional, established in one constructor and relied on by nine callers.
+  It is now structural: `UserList` splits the first user out of the `Vec`, so
+  there is no empty state to defend against and `first()` is total.
+
+**Discovered:** 2026-08-18, while converting `apps/lockscreen` off its
+hand-rolled hashing.
+
+
+## C-THE-LOCK-SCREENS-PASSWORD-CHECK-IS-NOT-CONNECTED-TO-ANY-PASSWORD (lane C, 2026-08-18) — OPEN, cross-lane
+
+**In short:** The desktop lock screen can check a password correctly, and the
+system knows every user's real password, and there is no path between those two
+facts. Worse than unconnected: the two sides store *different* scrambles of the
+password, so they cannot be joined by plumbing. Filed to lane B as
+`requests/c-b-the-lock-screen-has-no-way-to-check-a-real-password.md`.
+
+### The two halves
+
+`apps/lockscreen`'s `PasswordValidator` (line 270) verifies against a
+`pwkdf::PasswordVerifier` — salt, rounds, 32-byte verifier — supplied by its
+caller through `from_stored`. That is the right shape: the screen deliberately
+does not own a store.
+
+The store, though, is in lane B and speaks crypt(3): `/etc/shadow` holds
+`$6$<salt>$<86 chars>` (SHA-512-crypt, `posix/src/crypt.rs`, §329), and
+`userdb::Record::check_password` verifies against exactly that. There is no
+lossless conversion from a `$6$` string to `(salt, rounds, verifier)`, and
+there should not be — a hash you can convert is a hash you did not need.
+
+So no production code constructs a `PasswordValidator` at all. The only
+constructor with a caller is `#[cfg(test)] for_test`.
+
+### Why it must not be fixed on this side
+
+Two cheap fixes are available and both are wrong:
+
+- **Teach the lock screen to read crypt strings.** That puts a second
+  password-checking implementation in a GUI app — the exact defect that
+  produced §329 (three tools, three disagreeing hashers) and §466 (two
+  disagreeing KDFs). It also requires handing a password hash to an
+  unprivileged process, which is what `/etc/shadow`'s permissions exist to
+  prevent.
+- **Give the lock screen its own password.** Then the screen unlocks with
+  something that is not the account password and does not change when `passwd`
+  runs — a machine that stays unlockable by an old password forever.
+
+The correct shape is a privileged verifier: the screen sends the password to a
+service that owns the store and gets back yes/no. Every other OS does this
+(PAM). It is lane B's to build, which is why this is a request rather than a
+patch.
+
+### The related gap in `logind`
+
+`userspace/logind/src/main.rs:882` — `unlock_session` sets `locked = false`
+with no password, no caller check and no capability. As session bookkeeping
+that is probably intended (systemd's `UnlockSession` is the same shape, with
+the authentication in PAM); it is listed here only because it completes the
+picture. Today the whole chain is: lock screen checks a password nobody
+supplied → asks logind to unlock → logind unlocks unconditionally. The
+authentication is decorative end to end.
+
+### Not a duplicate of `init/login`
+
+It looks like one and is not. A *login* screen authenticates someone who has no
+session; a *lock* screen re-checks someone who already has one. Real systems
+ship both. They should share the verification path and need not share anything
+else. `roadmap.md` carries them as separate `[x]` items (lines 2614 and 6129)
+with no cross-reference, which is what made this take a while to see.
+
+### Independent of B-Q4
+
+Which user store wins (`/etc/users.yaml` vs `/etc/passwd`+`/etc/shadow`) does
+not change anything here: under the privileged-verifier shape the service reads
+whichever store wins and this side is unchanged. That is a further argument for
+that shape — it is the only one that does not have to wait for B-Q4.
+
+**Discovered:** 2026-08-18, while auditing what actually calls the lock screen
+after converting it onto `pwkdf`.
+
+
+## C-THE-CREDENTIAL-MANAGER-CHECKED-ITS-MASTER-PASSWORD-WITH-DJB2 (lane C, 2026-08-18) — FIXED
+
+**In short:** `apps/credmanager` — the password manager — checked the password
+that opens the vault against a 64-bit djb2 hash. Not a weak password hash: not
+a password hash at all. No salt, no cost, and narrow enough that the vault
+opened for *any* string colliding with the owner's password, not just the
+password itself. It now uses the shared `pwkdf` derivation, like the lock
+screen and the credential service.
+
+### What the code did
+
+```rust
+fn simple_hash(input: &str) -> u64 {
+    let mut hash: u64 = 5381;
+    for byte in input.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(u64::from(byte));
+    }
+    hash
+}
+
+struct Vault { master_password_hash: u64, /* … */ }
+
+fn unlock(&mut self, password: &str, now: u64) -> bool {
+    if simple_hash(password) == self.master_password_hash { /* unlocked */ }
+}
+```
+
+Three independent failures, of which only the first is the obvious one:
+
+- **No cost.** Testing a guess took two arithmetic operations per character,
+  so an attacker holding the stored value ran the plausible-password space at
+  memory speed.
+- **No salt.** The same password produced the same 64 bits in every vault on
+  every machine, so one precomputed table opened all of them — and equal
+  stored values told the attacker which vaults to try it against.
+- **64 bits, non-cryptographic.** djb2 collisions are constructible, not
+  theoretical, and `unlock` accepted any colliding string.
+
+### Why it survived review
+
+Its three tests passed, and none of them could have failed for the reason the
+code was wrong: `simple_hash` *was* deterministic, *did* map `"abc"` and
+`"def"` apart, and *did* start from 5381. They asserted the properties the
+implementation happened to have rather than the ones its caller depended on.
+This is the same shape as `apps/lockscreen`'s five FIPS-vector tests over a
+store that had no salt in it.
+
+### The fix
+
+`master_password_hash: u64` is now `master: PasswordVerifier` — the salt, the
+round count and the stored value together, because all three must agree and a
+persistence layer that writes down only the last has locked the owner out.
+Three constructors replace one: `create` (fresh salt, fallible per §465's
+*secret* tier — it refuses rather than falling back to a predictable salt),
+`from_stored` (reopen), and `#[cfg(test)] for_test` (named salt, `TEST_ROUNDS
+= 16`, so a 139-test suite does not spend ~130 ms per vault). `unlock` is now
+`self.master.check(password.as_bytes())`.
+
+Five tests replace the three; each was verified by reintroducing the defect it
+guards against and confirming it, and only it, fails.
+
+### Also removed: a hardcoded master password in non-test code
+
+`AppState::new()` built its vault with `Vault::new("My Vault", "master123")` —
+in a credential manager, outside `#[cfg(test)]`. It never shipped only because
+`main` is still empty, which is not a property to rely on. `new` now takes an
+already-opened vault; the demo password lives in `#[cfg(test)] for_test`.
+
+### Four unrelated defects fixed in the same file
+
+- **The strength meter counted bytes, not characters.** `password.len()`
+  scored a four-character non-ASCII password as a twelve-character one —
+  an overstatement, the one direction a strength meter must not err in.
+- **The generator's alphabet was defined twice**: the punctuation string in
+  `build_charset`, and a hand-written `26 + 26 + 10 + 30` in `pool_size`. They
+  agreed by coincidence; adding one symbol would have made every generated
+  password score against a pool it was not drawn from, with no failing test.
+  `pool_size` is now `build_charset().len()`, and the symbol count has one
+  definition shared with the strength meter.
+- **`navigate_entry_list` walked the index through `i32`**, clamping with
+  `len() as i32 - 1` — correct only because the empty case returns early, and
+  silently wrong above `i32::MAX`. Now walked in `usize` with saturating ops.
+- **12 `arithmetic_side_effects` warnings** cleared, which is all of them; the
+  crate is clippy-clean at `--all-targets`.
+
+**Discovered:** 2026-08-18, while auditing the tree for the third copy of a
+password check after extracting `pwkdf` (§466).
+
+---
+
+## C-THE-SNAP-SUBSYSTEM-TILED-THE-SCREEN-INSTEAD-OF-THE-WORK-AREA (lane C, 2026-08-18) — FIXED
+
+**Where:** `gui/desktop/src/snap.rs`
+
+Three defects in the window-snap subsystem, all of which would have surfaced
+only on the day someone wired it up, and none of which the module's own 60-odd
+tests could have caught.
+
+**What the code did.**
+
+1. `SnapLayoutPreset::build(screen_w, screen_h)` anchored every zone at
+   `(0, 0)` and gave it the full screen height, though the module doc has
+   always said the zones cover "the work area". Every snapped window would
+   have extended underneath the taskbar and hidden its own bottom edge.
+2. `detect_edge` measured against the full screen, so the bottom edge and both
+   bottom corners lay *inside* the taskbar's strip — simultaneously unreachable
+   as snaps and stealing input from the bar.
+3. `edge_to_default_zone` sent the *vertical* edges to the *horizontal* halves:
+   `Top => (TwoEqualHalves, 0)` (commented `// maximize hint`, which it was
+   not) and `Bottom => (TwoEqualHalves, 1)`. Dragging a window to the top moved
+   it left; dragging it to the bottom moved it right.
+
+Found while fixing these, in the same file:
+
+4. `is_in_picker_trigger` was `cursor_y < top + THRESHOLD` with no lower bound,
+   so with the taskbar at the top of the screen the whole taskbar was inside
+   the picker's trigger band. `detect_edge` had the same shape on all four
+   sides.
+5. `update_picker_hover` and `render_picker` each computed the thumbnail grid
+   from their own copy of the same expression, 400 lines apart — an arrangement
+   in which editing one padding constant gives a picker that highlights one
+   thumbnail and selects another.
+6. The `SixGrid` arm looked its labels up by a computed index and carried an
+   `unwrap_or(&"Zone")` fallback for an out-of-range index the loop bounds
+   already made impossible: a branch that could never run and could never be
+   tested.
+
+**Why it survived review.** The suite was green and *could not have failed* for
+any of these. `six_grid_zones_do_not_overlap`, `two_halves_covers_full_width`
+and `four_quadrants_cover_full_area` all assert *relationships between zones* —
+and a layout translated bodily off the work area tiles just as perfectly as one
+on it. `all_edges_map_to_valid_zones` asserted only that each edge mapped to a
+zone that **exists**, which `Top => left half` satisfies completely. This is the
+same shape as `C-THE-CREDENTIAL-MANAGER-CHECKED-ITS-MASTER-PASSWORD-WITH-DJB2`
+and the lock screen's FIPS-vector tests over a store with no salt in it: a green
+suite asserting the properties the implementation happens to have rather than
+the ones its caller depends on.
+
+**The fix.** See `design-decisions.md` §467. `build` now takes a `WorkArea`
+`{x, y, width, height}` and applies the origin at one `.map()` after the match,
+so no arm can forget it; `detect_edge` and `is_in_picker_trigger` are bounded
+on both sides; `edge_to_default_snap` returns `Option<EdgeSnap>` with
+`Top => Maximize` and `Bottom => None`; the picker grid lives in one
+`thumb_origin` helper used by both the hit-test and the draw;
+`picker_items_per_row` returns `NonZeroUsize` so the two divisions are
+infallible by type; the `SixGrid` labels are a `[[&str; 3]; 2]` iterated
+directly, which deletes the dead fallback. Also cleared all seven of the file's
+pre-existing `arithmetic_side_effects` warnings.
+
+**Tests.** Eleven new tests, each verified to discriminate by reintroducing the
+exact defect it is meant to catch and confirming it, and only it, failed. Two
+fixture-design points came out of that exercise and are worth remembering:
+a fixture must offset `x` and `y` **separately** (with only a top-taskbar
+fixture, "`build` drops the `x` origin" failed *nothing*), and a fixture's
+`right()`/`bottom()` must not coincidentally equal the screen's (the first
+left-dock fixture was `x=64, width=1856`, so `right() == 1920` and a
+screen-relative right bound was still indistinguishable from a correct one).
+
+---
+
+## C-TOUCHPAD-GESTURE-LIST-DRAWS-PAST-THE-PANEL (lane C, 2026-08-19) — FIXED 2026-08-19
+
+**Where:** `gui/desktop/src/touchpad.rs` — `TouchpadSettingsUI::scroll_offset`
+(declared line ~649) and the gesture loop in `render` (line ~977).
+
+The Gestures section of the touchpad settings panel draws **every** binding in
+`mgr.config.gestures`, advancing `cy` by ~22px each, and never compares `cy`
+against `h` — the panel height it is handed as a parameter and uses only to
+fill the background. `TouchpadConfig::set_gesture` pushes new bindings without a
+bound, so the list is user-growable, and past roughly `h / 22` entries the rows
+are emitted below the panel, drawn over whatever is underneath.
+
+**`scroll_offset` is the field that exists to prevent exactly this, and it is
+dead.** It is `pub`, it is initialised to 0, and it is never read anywhere in
+the crate — grep finds only the declaration and the initialiser. So a caller
+that wires a scroll wheel to it sees nothing happen, which is worse than the
+field not existing: the API advertises a scrollable list and silently ignores
+the request.
+
+This is the same shape as
+`C-TWO-SNAP-IMPLEMENTATIONS-WITH-DIFFERENT-GAP-POLICIES` below — state written
+into a struct as though the feature were finished, with nothing calling it —
+and it was found the same way, by asking what *reads* a public field rather
+than what writes one.
+
+**What the proper fix looks like.** Have the gesture loop start at
+`self.scroll_offset` clamped to the list length, as `window_rules.rs::render`
+already does at line ~940 (that one was fixed and has a regression test at
+~2251), and stop emitting once `cy` would exceed `y + h`. Both halves are
+needed: clamping alone still overdraws a long list, and the height check alone
+leaves the tail unreachable. Tests should assert (a) a list longer than the
+panel emits no command below `y + h`, (b) a `scroll_offset` past the end
+renders the last page rather than nothing or a panic, and (c) scrolling by one
+moves the first visible row by one — the last being the one that fails if the
+offset is read but ignored.
+
+**Not fixed in the commit that found it** only because that commit's workspace
+gate was already running and editing the crate would have invalidated it. It is
+the next thing lane C picks up.
+
+### It was not one bug, it was three copies of one bug
+
+Fixing it started with the question "who else has a dead `scroll_offset`?", and
+the answer was **`bluetooth.rs`, identically**: `BluetoothSettingsUI` also takes
+`h`, also spends it only on the background rectangle, also loops (three times —
+connected, paired, nearby) with no height check, and also carries a
+`pub scroll_offset: usize` that nothing in the crate reads. A machine that has
+seen a lot of nearby devices drew them straight through the bottom of the panel,
+unscrollably. `window_rules.rs` was a third copy: it *did* bound its list, but
+with its own `end - start` arithmetic that had already underflowed once.
+
+So the fix is a shared primitive rather than three local patches —
+`gui/desktop/src/scroll_window.rs`, which answers "given a list, a row height, a
+panel height and a requested offset, which rows are visible?" in one tested
+place. Its three policies are recorded as `design-decisions.md` §470. The three
+panels now call it:
+
+| Panel | Before | After |
+|---|---|---|
+| `touchpad.rs` gestures | whole list, no height check, offset dead | `scroll_window::visible` |
+| `bluetooth.rs` devices | three lists, no height check, offset dead | `scroll_window::visible_variable` over one flattened list |
+| `window_rules.rs` rules | own arithmetic; stale offset → blank list | `scroll_window::visible_count`; stale offset → last page |
+
+Two things fell out of doing it this way. Bluetooth's three sections had to be
+flattened into one sequence *including their headings* before they could share
+one offset — otherwise a list scrolled to start mid-section shows devices under
+no label. And `window_rules` got a behaviour upgrade for free: an offset left
+over from a longer list now pulls back to the last page instead of rendering
+nothing.
+
+Both panels also gained a line saying how much is hidden. A truncated list that
+looks complete is worse than a long one, because the user has no reason to try
+scrolling.
+
+### What the reintroduction checks found
+
+Eleven defect variants were restored one at a time and the suite re-run; all
+eleven were caught by the test named for them. Two things needed correcting to
+get there, and both are worth recording because both were *tests* being wrong
+rather than code:
+
+- **`the_pinch_control_stays_on_screen_however_long_the_gesture_list_is` could
+  pass with the height budget removed entirely.** It asserted the control was
+  *emitted*, and it always is — being drawn off the bottom of the panel is still
+  being drawn. It now reads the command's `y` and asserts it lands inside the
+  panel. This is the same failure mode as the snap entry below records: a test
+  asserting a property the implementation happens to have rather than the one
+  the caller depends on.
+- **The sweep's first run reported three "pattern not found" misses that were
+  not misses at all** — the source files are CRLF and the harness's multi-line
+  patterns were written with `\n`, so they silently matched nothing. A sweep that
+  quietly tests fewer defects than it claims is worse than no sweep, so the
+  harness now takes its newline from the file.
+
+`window_rules.rs`'s own regression test was also renamed and strengthened: it was
+called `scrolling_past_the_end_of_a_shrunken_rule_list_renders_nothing` but only
+asserted that *something* drew, so it would have passed under either policy. It
+now names the row it expects to see.
+
+### Still open: nothing writes these offsets
+
+The fix makes `scroll_offset` *work*; it does not wire a scroll wheel to it. All
+three fields are still only ever written by `new()`, so today the lists are
+bounded and truthful but not yet scrollable in practice. That is input plumbing
+in the settings shell rather than in these panels, and it is tracked separately —
+the panels are now correct for any value a caller sets, which is the half that
+had to come first.
+
+---
+
+## C-TWO-SNAP-IMPLEMENTATIONS-WITH-DIFFERENT-GAP-POLICIES (lane C, 2026-08-18) — FIXED 2026-08-19
+
+**Where:** `gui/desktop/src/snap.rs` and `gui/desktop/src/main.rs::snap_window`
+(around line 1700). Fixed as described under **What the proper fix looks like**
+below; the gap policy that had to be decided along with it is recorded as
+`design-decisions.md` §469.
+
+The desktop has **two** implementations of window snapping, and they disagree.
+
+| | `main.rs::snap_window` | `snap.rs` |
+|---|---|---|
+| Wired up? | **yes** — this is what runs | **no** — `mod snap;` is its only reference |
+| Geometry | integers | `f32` |
+| Gap between zones | **none** | `ZONE_GAP = 6.0` |
+| Layouts | halves and quarters | seven presets, plus a picker |
+| Work area | uses `work_area()` | uses `WorkArea` (as of §467) |
+
+Neither is wrong in isolation. The problem is that they are two answers to one
+question, only one of which a user can see, and the invisible one is the more
+capable. Whoever wires `snap.rs` up must also decide the gap policy for the
+whole shell — a 6 px gap and no gap are both defensible, but a desktop where
+some snaps have a gap and others do not is not.
+
+**What the proper fix looks like.** Delete `main.rs::snap_window`'s geometry
+and route it through a `SnapManager` owned by the shell, seeded from
+`work_area()` and updated whenever the taskbar moves or the screen resizes
+(`set_work_area`). The `SnapManager` already exposes everything needed:
+`hit_test`, `edge_snap_hit`, `snap_window`, `render_overlay`, and a
+`SnapHistory` for restore-on-unsnap, which `main.rs` currently has no
+equivalent of at all.
+
+**Why it was not done in §467's commit.** Wiring it is a user-visible behaviour
+change to the shell's drag handling (gaps appear, the top edge starts
+maximising, a zone overlay and layout picker appear during drags), which is a
+larger change than the correctness fix it would be riding on, and wanted to land
+as its own commit with its own tests. §467 fixed what `snap.rs` *does* on the
+grounds that the cheapest moment for two implementations to agree is before
+either is wired.
+
+### What the fix turned out to be
+
+`DesktopShell` now owns a `snap: snap::SnapManager`. `snap_window(id, left)` is
+a two-line wrapper over a new `snap_window_to_zone(id, preset, zone)`, which is
+the only place window geometry is set from a snap. `main.rs` computes no snap
+rectangles at all any more. Three further pieces came with it:
+
+| Piece | Why |
+|---|---|
+| `unsnap_window` / `is_snapped` | `SnapHistory` was there and unreachable; the shell had no restore-on-unsnap at all. |
+| `history.remove` in `move_window`, `resize_window`, `remove_window` | A moved or resized window is no longer in its zone, so unsnapping it would teleport a window the user had just placed. A closed window's entry would otherwise leak one per snapped-then-closed window forever. |
+| `sync_snap_area()` at the top of every snap | `work_area()` derives from `screen_width`, `taskbar_height` and `appearance`, all **public mutable fields**. A cached work area kept in sync by notification would be one forgotten call site away from tiling a screen that no longer exists, so it is re-read on use instead. |
+
+### Two defects the wiring exposed, both now fixed
+
+1. **`snap.rs` produced zones outside the work area on small screens.** Every
+   arm of the layout builder subtracts `ZONE_GAP` before dividing, so at a
+   three-pixel-wide work area `(3 - 6) / 2` is a **negative** half-width and the
+   second zone starts at x = 4.5 — outside the rectangle it is tiling. Not
+   hypothetical: `DesktopShell::new(1, 1080)` is legal and the window-manager
+   tests build one at widths down to zero. The existing in-bounds test could not
+   see it because it only ran on desktop-sized areas, where the subtraction is
+   free. `build` now tries the gap and keeps it only if every zone stays at
+   least `ZONE_GAP` in both dimensions, else rebuilds edge-to-edge — applied to
+   the built zones, so a preset added later inherits the rule without knowing it
+   exists.
+2. **Rounding the zone's origin and extent separately put a window off-screen.**
+   On a 1921-pixel screen the right half is `x = 963.5, width = 957.5`, which
+   rounds to 964 + 958 = an edge at **1922**. `round_rect` now rounds the
+   *edges*, giving `964..1921`. The same argument makes two adjacent zones meet
+   by construction rather than by arithmetic luck.
+
+### What the reintroduction checks found
+
+Nine defect variants were restored one at a time and the suite re-run. Eight
+were caught immediately. The ninth was a test that could not fail:
+
+| Defect restored | Result |
+|---|---|
+| A rejected zone id leaves the layout switched | **NOTHING FAILED.** `snapping_to_a_zone_that_does_not_exist_changes_nothing` asked for a bad zone of `TwoEqualHalves` — the preset already in force — so the un-done layout switch was invisible. Rewritten to ask for a zone of `SixGrid`, with the "these differ" precondition asserted. |
+| Gap kept when it does not fit | caught |
+| Gap always dropped | caught |
+| Origin and extent rounded separately | caught |
+| Move does not end the snap | caught |
+| Resize does not end the snap | caught |
+| Closing leaks the history entry | caught |
+| History recorded after the snap rather than before | caught |
+| Work area not re-read before snapping | caught |
+
+The last two are worth naming because both were written *because* of an earlier
+sweep habit, not discovered by one: `SnapManager::snap_window` inserts a
+zero-geometry placeholder for a window it has not seen, so recording history
+after the snap restores to a 0×0 window at the origin; and nothing in the suite
+changed the screen size after construction until
+`snapping_follows_the_screen_and_the_taskbar_after_they_change` was added.
+
+**Still not wired:** the drag-time affordances — `hit_test`, `edge_snap_hit`,
+`render_overlay` and the layout picker. Snapping is now single-implementation
+and keyboard-driven; making a *drag* to a screen edge snap is a separate,
+genuinely user-visible change and is tracked as its own work.
+
+---
+
+## C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC (lane C, 2026-08-18) — FIXED
+
+**Where:** `apps/calendar`, `apps/reminders`, `apps/habits`, `apps/contacts`,
+`apps/rssreader`, `apps/systray` — **all six fixed**, against
+`gui/toolkit/src/date.rs`. See `design-decisions.md` §468 for the pattern and
+the alternatives that were rejected.
+
+`guitk::date` is the shared civil-date module: `Date`, `Weekday`, `from_ymd`,
+`add_days`, `add_months`, `days_until`, `day_of_year`, `iso_week`,
+`is_leap_year`, `days_in_month`, `month_grid`. **Six apps computed the same
+things themselves instead, and none of the six referenced it.** These are not
+stylistic duplicates; they are six independently-written implementations of
+arithmetic that has exactly one right answer, so they can and do disagree —
+with the shared module and with each other.
+
+### The measured damage in `apps/calendar`
+
+Replicating all three of the calendar's own formulas over every day from
+1900-01-01 to 2100-01-01 (73 049 days) and comparing against the real
+definitions:
+
+| Calculation | Method it used | Mismatches |
+|---|---|---|
+| Weekday | hand-written Zeller's congruence | **0** of 73 049 |
+| Day difference | its own Julian day number, kept *separately* from Zeller | **0** of 73 049 |
+| ISO week number | `day_of_year / 7 + 1`, offset by 1 January's weekday, `.min(53)` | **28 144 of 73 049 — 38.5 %** |
+
+The weekday and difference formulas were correct over the tested range (both
+break below year 1, where `%`/`/` truncate toward zero rather than flooring,
+and nothing stopped a caller constructing such a date). The week number was
+wrong on well over a third of all days, typically by one week.
+
+It could not have been right. ISO week 1 is *the week containing the year's
+first Thursday*, which is frequently not the week containing 1 January — 2027
+begins in week 53 of 2026; 2024 ends in week 1 of 2025. A formula that starts
+counting at 1 January cannot express that, whatever constant is added to it.
+Its own comment said "simple approximation"; nothing said the approximation
+was visible to the user, which it was — the week and month views draw it.
+
+### Why the green suite could not see it
+
+The **only** test covering `week_number` was:
+
+```rust
+#[test]
+fn test_week_number() {
+    let d = Date { year: 2024, month: 1, day: 8 };
+    let wn = d.week_number();
+    assert!((1..=53).contains(&wn));
+}
+```
+
+The implementation ended in `week.min(53)`. It could not return a value
+outside `1..=53` whatever it computed, so the assertion restated the
+implementation's own clamp rather than any requirement a caller has. This is
+the same failure shape as `C-THE-SNAP-SUBSYSTEM-TILED-THE-SCREEN-INSTEAD-OF-THE-WORK-AREA`
+and as the `credmanager`/`lockscreen` hash entries: **a green suite that
+asserts the properties an implementation happens to have, rather than the ones
+its caller depends on.** A test whose assertion the code satisfies by
+construction cannot fail, and a test that cannot fail is not a test.
+
+### What was fixed
+
+`apps/calendar/src/main.rs` now keeps its `Date { year, month, day }` struct —
+75 field accesses and 69 struct literals depend on the shape — and routes every
+*calculation* through `guitk::date` via a private `civil()`/`from_civil()`
+bridge. Deleted: the Zeller congruence, the separate Julian day number
+(`to_day_number`, removed outright), the local leap rule, the month-stepping
+`while` loops in `add_days`, and the week-number approximation.
+
+Two behaviour changes came with it, both improvements, both deliberate:
+
+- `days_in_month`/`month_name`/`month_short` **clamp** an out-of-range month
+  instead of returning `0`/`"Unknown"`/`"???"`. A `0` from `days_in_month` was
+  a live loop-termination hazard.
+- `week_number` returns the real ISO week, and a new `iso_week() -> (i32, u32)`
+  exposes the week-numbering *year* beside it, because a week number without
+  its year is ambiguous at exactly the boundary where it is most likely to be
+  read wrong.
+
+The replacement tests are `week_numbers_match_the_iso_standards_worked_examples`
+(ten cases, every one chosen so week 1 is *not* the week containing 1 January)
+and `a_week_number_is_constant_across_its_own_monday_to_sunday` (an 800-day
+walk comparing each date against the Monday of its own week). Both were
+verified by reintroduction: ten defect variants were restored one at a time
+and each failed a test that named it. The constancy test initially caught
+*nothing* — it exercised only the new `iso_week()` and never `week_number()`,
+the accessor the views actually draw — so it now asserts over both and over
+their agreement.
+
+### The other five, each rewired the same way
+
+Each kept its own date struct — the field accesses are load-bearing — and
+routes every *calculation* through `guitk::date` via a private
+`civil()`/`from_civil()` bridge. Each was checked by reintroducing the defects
+it should catch, one at a time, rather than by "the tests still pass".
+
+| App | What it had | What the rewire did | Commit |
+|---|---|---|---|
+| `apps/reminders` | `day_of_week`, `day_of_week_name`, `day_of_week_short`, `is_leap_year`, `days_in_month`, `month_name` | all delegated; `to_day_number` deleted outright. Clippy arithmetic warnings 36 → 19 | `28b1703c9` |
+| `apps/habits` | `day_of_week`, `day_of_week_short`, `is_leap_year`, `days_in_month` on `i32`/`u32` | delegated; `to_day_number` kept (6 call sites) but reimplemented as `days_since_epoch`, so the day count and the weekday now come from the same place | `83b407436` |
+| `apps/contacts` | `is_leap_year(u16)`, `days_in_month(u16, u8) -> Option<u8>`, `day_of_year(u8, u8)` | `MONTH_LENGTHS` and `is_leap_year` deleted; `days_in_month` keeps its `None`; `day_of_year` clamps the month *range* before the lookup, since letting 14 through would make the clamp count December twice. Clippy: clean | `1afae95ee` |
+| `apps/rssreader` | `is_leap_year(u64)`, `days_in_month(month, leap)`, `days_from_civil`, `civil_from_days` | two Hinnant transcriptions and both twenty-line `#[expect]` blocks deleted; `days_in_month` re-signatured to take the **year** instead of a leap flag its caller supplied | `d0a7967e2` |
+| `apps/systray` | `days_in_month(&self) -> u8`, `first_weekday_of_month` (Sakamoto), a twelve-arm month-name match | all three delegated. Clippy 7 → 4 | this commit |
+
+### What the reintroduction checks found
+
+Across the six apps, ~46 defect variants were restored one at a time. **Six
+tests caught nothing** and were rewritten:
+
+| Test | Why it could not fail |
+|---|---|
+| `calendar::test_week_number` | asserted `(1..=53).contains(&wn)`; the implementation ended in `.min(53)` |
+| `calendar::a_week_number_is_constant_…` (my own replacement) | exercised only the new `iso_week()`, never `week_number()`, the accessor the views draw |
+| `reminders` / `habits` weekday coverage | asserted `day_of_week` twice over and never the label functions that turn it into text a user reads |
+| `habits::test_to_day_number_monotonic` | asserted only `d2 > d1` for dates a year apart — true of any monotone function, including one that returns the year |
+| `contacts::the_day_of_year_has_no_gaps_…` | accumulated the same `MONTH_LENGTHS` table `day_of_year` summed, so only the closing "sums to 365" check could fail |
+| `rssreader` (no test at all) | `days_to_ymd` saturating to `i32::MIN` instead of `i32::MAX` failed nothing — a documented, user-visible ordering guarantee with nothing behind it |
+
+`systray`'s two surviving date tests were single-case: one month for
+`first_weekday_of_month`, one month name for `date_str`. A weekday table wrong
+in eleven of twelve entries passed both. They are now
+`each_month_starts_where_the_previous_one_ran_out` — which pins the relation
+the calendar popup actually depends on, that month *n+1* begins exactly
+`days_in_month(n)` days after month *n* — and
+`every_month_renders_its_own_three_letter_name`.

@@ -105,6 +105,8 @@ mod run_dialog;
 #[allow(dead_code)]
 mod screen_capture;
 #[allow(dead_code)]
+mod scroll_window;
+#[allow(dead_code)]
 mod security_dialog;
 #[allow(dead_code)]
 mod session_mgr;
@@ -594,6 +596,26 @@ pub struct DesktopShell {
     next_z: u32,
     /// Next window ID (for local tracking; compositor assigns real IDs).
     next_window_id: u64,
+    /// The shell's **one** snap implementation.
+    ///
+    /// `snap.rs` used to be dead code — `mod snap;` was its only reference —
+    /// while the shell computed snapped geometry itself, in integers, with no
+    /// gap and only halves. Two answers to one question, of which the user
+    /// could see the less capable one. Every snapped rectangle now comes from
+    /// here; see `known-issues.md`
+    /// `C-TWO-SNAP-IMPLEMENTATIONS-WITH-DIFFERENT-GAP-POLICIES` and
+    /// `design-decisions.md` §469.
+    ///
+    /// Its work area is **not** kept in sync by notification.
+    /// [`screen_width`](Self::screen_width), `taskbar_height` and `appearance`
+    /// are all public fields that anything may assign, and `work_area()`
+    /// derives from all three, so an "update on change" scheme would be one
+    /// forgotten call site away from tiling a screen size that no longer
+    /// exists. [`sync_snap_area`](Self::sync_snap_area) re-seeds it at the top
+    /// of every operation that reads geometry instead — cheap (a layout is at
+    /// most eight rectangles) and impossible to forget in a way that compiles
+    /// but is wrong.
+    pub snap: snap::SnapManager,
 }
 
 /// Desktop visual theme — every colour the shell paints with.
@@ -802,9 +824,52 @@ fn taskbar_alpha(settings: &AppearanceSettings) -> u8 {
     }
 }
 
+/// Round a snap module coordinate to the integer geometry windows carry.
+///
+/// `as` on a float is a *saturating* cast in Rust — out-of-range values clamp
+/// to the bound and NaN becomes 0 — so this cannot wrap a 4000-pixel screen
+/// into a negative coordinate the way the equivalent C would. Rounding rather
+/// than truncating matters at the seam: a zone starting at `x = 966.5` next to
+/// one ending there must not both truncate to 966 and leave a column drawn
+/// twice.
+fn round_to_i32(v: f32) -> i32 {
+    v.round() as i32
+}
+
+/// As [`round_to_i32`], for a width or height. Negative rounds to 0.
+fn round_to_u32(v: f32) -> u32 {
+    v.round().max(0.0) as u32
+}
+
+/// Convert a snap zone's floating-point rectangle to the integer geometry a
+/// window carries, by rounding its **edges** rather than its origin and its
+/// extent independently.
+///
+/// Rounding the two separately is what the obvious `(round(x), round(w))`
+/// does, and it is wrong exactly where it matters. On a 1921-pixel screen the
+/// right half sits at `x = 963.5` with `width = 957.5`; rounded separately
+/// that is 964 wide 958, an edge at **1922** — one column past the screen the
+/// zone was supposed to tile. Rounding the edges gives `964..1921`, flush,
+/// because the right edge is rounded as the coordinate it actually is. The
+/// same argument applies to two adjacent zones: their shared edge is one
+/// number, so rounding it once makes them meet by construction instead of by
+/// arithmetic luck.
+fn round_rect(x: f32, y: f32, width: f32, height: f32) -> (i32, i32, u32, u32) {
+    let x0 = round_to_i32(x);
+    let y0 = round_to_i32(y);
+    let x1 = round_to_i32(x + width);
+    let y1 = round_to_i32(y + height);
+    (
+        x0,
+        y0,
+        u32::try_from(x1.saturating_sub(x0)).unwrap_or(0),
+        u32::try_from(y1.saturating_sub(y0)).unwrap_or(0),
+    )
+}
+
 impl DesktopShell {
     pub fn new(screen_width: u32, screen_height: u32) -> Self {
-        Self {
+        let mut shell = Self {
             windows: BTreeMap::new(),
             focused_window: None,
             current_desktop: 0,
@@ -822,6 +887,31 @@ impl DesktopShell {
             theme: DesktopTheme::default(),
             next_z: 1,
             next_window_id: 1,
+            // Placeholder: the real area needs `taskbar_rect()`, which needs
+            // the appearance scaling that is only set two fields up. Seeded
+            // immediately below rather than left to the first snap, so that a
+            // caller reading `shell.snap.layout()` before ever snapping gets
+            // the screen it is actually on.
+            snap: snap::SnapManager::new(snap::WorkArea::whole_screen(0.0, 0.0)),
+        };
+        shell.sync_snap_area();
+        shell
+    }
+
+    /// The work area as the snap module wants it.
+    fn snap_area(&self) -> snap::WorkArea {
+        let (x, y, width, height) = self.work_area();
+        snap::WorkArea::new(x as f32, y as f32, width as f32, height as f32)
+    }
+
+    /// Re-seed the snap manager's work area from the shell's current geometry.
+    ///
+    /// Called at the top of every snap operation. See the field's doc for why
+    /// this is pull-on-use rather than push-on-change.
+    fn sync_snap_area(&mut self) {
+        let area = self.snap_area();
+        if self.snap.work_area() != area {
+            self.snap.set_work_area(area);
         }
     }
 
@@ -1572,6 +1662,12 @@ impl DesktopShell {
 
     /// Remove a window.
     pub fn remove_window(&mut self, id: WindowId) {
+        // Window ids are handed out by a counter that never repeats within a
+        // session, so a stale entry would not be *mis*-applied to a later
+        // window — but it would still accumulate for the lifetime of the shell,
+        // one per snapped-then-closed window, which is a leak whatever it is
+        // called.
+        self.snap.history.remove(id.0);
         self.windows.remove(&id);
         if self.focused_window == Some(id) {
             // Focus the topmost remaining window
@@ -1665,7 +1761,17 @@ impl DesktopShell {
     }
 
     /// Move a window.
+    ///
+    /// A move by any route — drag, keyboard, a program placing its own window
+    /// — ends the window's tenancy of a snap zone. It is no longer in the zone
+    /// it was put in, so keeping the entry would leave
+    /// [`unsnap_window`](Self::unsnap_window) able to yank a window the user
+    /// has since placed by hand back to a position it left minutes ago.
+    /// [`snap_window_to_zone`](Self::snap_window_to_zone) sets the position
+    /// directly rather than going through here, so this does not undo the snap
+    /// it is part of.
     pub fn move_window(&mut self, id: WindowId, x: i32, y: i32) {
+        self.snap.history.remove(id.0);
         if let Some(w) = self.windows.get_mut(&id) {
             w.x = x;
             w.y = y;
@@ -1680,7 +1786,11 @@ impl DesktopShell {
     }
 
     /// Resize a window.
+    ///
+    /// Ends a snap for the same reason [`move_window`](Self::move_window)
+    /// does: a resized window no longer fills the zone it was snapped to.
     pub fn resize_window(&mut self, id: WindowId, width: u32, height: u32) {
+        self.snap.history.remove(id.0);
         if let Some(w) = self.windows.get_mut(&id) {
             w.width = width;
             w.height = height;
@@ -1693,24 +1803,96 @@ impl DesktopShell {
 
     /// Snap window to left/right half of screen.
     ///
-    /// The two halves are derived from each other rather than both from
-    /// `ww / 2`: the right one starts where the left one ends and runs to the
-    /// work area's edge, so an odd width leaves its last column to the right
-    /// window instead of leaving a one-pixel strip of desktop between them.
+    /// A thin naming over [`snap_window_to_zone`](Self::snap_window_to_zone):
+    /// the two halves are zones 0 and 1 of the `TwoEqualHalves` preset. The
+    /// shell used to compute the two rectangles itself, which is what made
+    /// `snap.rs` dead code and let the two disagree about whether snapped
+    /// windows touch.
     pub fn snap_window(&mut self, id: WindowId, left: bool) {
-        let (wx, wy, ww, wh) = self.work_area();
-        let left_width = ww / 2;
-        let right_width = ww.saturating_sub(left_width);
-        let right_x = wx.saturating_add(i32::try_from(left_width).unwrap_or(i32::MAX));
-        if let Some(w) = self.windows.get_mut(&id) {
-            w.y = wy;
-            w.height = wh;
-            w.width = if left { left_width } else { right_width };
-            w.x = if left { wx } else { right_x };
-            w.state = WindowState::Normal;
-            // Snapping is the user placing the window, same as moving it.
-            w.restored = None;
-        }
+        let zone = if left { 0 } else { 1 };
+        self.snap_window_to_zone(id, snap::SnapLayoutPreset::TwoEqualHalves, zone);
+    }
+
+    /// Snap a window into one zone of a layout preset.
+    ///
+    /// Returns `false` if the window or the zone does not exist, in which case
+    /// nothing is changed — including the layout, which is only adopted once
+    /// the target is known to be real.
+    ///
+    /// The window's pre-snap geometry is recorded so that
+    /// [`unsnap_window`](Self::unsnap_window) can put it back. That is separate
+    /// from [`restored`](ManagedWindow::restored), which is the *maximize*
+    /// memory and is deliberately cleared here: a snap is the user placing the
+    /// window, so a later un-maximize must not yank it somewhere else. The two
+    /// memories answer different questions and a window can be in both states'
+    /// history without ambiguity.
+    pub fn snap_window_to_zone(
+        &mut self,
+        id: WindowId,
+        preset: snap::SnapLayoutPreset,
+        zone: snap::ZoneId,
+    ) -> bool {
+        self.sync_snap_area();
+        let Some(w) = self.windows.get(&id) else {
+            return false;
+        };
+        let before = snap::SavedGeometry {
+            x: w.x as f32,
+            y: w.y as f32,
+            width: w.width as f32,
+            height: w.height as f32,
+        };
+
+        let previous = self.snap.active_preset();
+        self.snap.set_layout(preset);
+        // Recorded *before* the snap, because `SnapManager::snap_window` fills
+        // in a zero-geometry placeholder for a window it has not seen — which
+        // would restore to a 0x0 window at the origin.
+        self.snap.history.record(id.0, zone, before);
+        let Some((x, y, width, height)) = self.snap.snap_window(id.0, zone) else {
+            // No such zone in this preset. Undo both the layout switch and the
+            // history entry, so a bad zone id is not observable at all.
+            self.snap.history.remove(id.0);
+            self.snap.set_layout(previous);
+            return false;
+        };
+
+        let Some(w) = self.windows.get_mut(&id) else {
+            return false;
+        };
+        let (wx, wy, ww, wh) = round_rect(x, y, width, height);
+        w.x = wx;
+        w.y = wy;
+        w.width = ww;
+        w.height = wh;
+        w.state = WindowState::Normal;
+        // Snapping is the user placing the window, same as moving it.
+        w.restored = None;
+        true
+    }
+
+    /// Put a snapped window back where it was before it was snapped.
+    ///
+    /// Returns `false` if the window is not snapped, which is also what makes
+    /// this safe to call unconditionally from a drag handler.
+    pub fn unsnap_window(&mut self, id: WindowId) -> bool {
+        let Some(geometry) = self.snap.history.restore(id.0) else {
+            return false;
+        };
+        let Some(w) = self.windows.get_mut(&id) else {
+            return false;
+        };
+        w.x = round_to_i32(geometry.x);
+        w.y = round_to_i32(geometry.y);
+        w.width = round_to_u32(geometry.width);
+        w.height = round_to_u32(geometry.height);
+        w.state = WindowState::Normal;
+        true
+    }
+
+    /// Whether a window is currently occupying a snap zone.
+    pub fn is_snapped(&self, id: WindowId) -> bool {
+        self.snap.history.snapped_zone(id.0).is_some()
     }
 
     /// Get visible windows on current desktop, sorted by Z-order.
@@ -2865,6 +3047,14 @@ mod window_manager_tests {
         shell.add_window(title, 100, 100, 400, 300, 1)
     }
 
+    /// A window's rectangle, for tests that assert one operation left it alone.
+    /// `ManagedWindow` is neither `Copy` nor `PartialEq` — it carries a title
+    /// and an icon — so the comparison has to name the fields that matter.
+    fn geometry(shell: &DesktopShell, id: WindowId) -> (i32, i32, u32, u32) {
+        let w = shell.windows.get(&id).unwrap();
+        (w.x, w.y, w.width, w.height)
+    }
+
     fn press(key: Key, modifiers: Modifiers) -> KeyEvent {
         KeyEvent {
             key,
@@ -3014,13 +3204,25 @@ mod window_manager_tests {
     // Snapping
     // ==================================================================
 
-    /// Both halves used to be `width / 2`, which left a one-pixel strip of
-    /// desktop down the middle of any odd-width screen. The two halves must
-    /// meet exactly and between them cover the whole work area, at every width
-    /// including the degenerate ones.
+    /// Both halves used to be `width / 2` computed in the shell, which left a
+    /// one-pixel strip of desktop down the middle of any odd-width screen and
+    /// no deliberate gap at all. They now come from `snap.rs`, whose zones are
+    /// separated by [`crate::snap::ZONE_GAP`] — so the property is no longer "the
+    /// halves meet" but "they are exactly one gap apart, and with that gap they
+    /// span the work area precisely".
+    ///
+    /// The widths swept are not decoration. `snap.rs` subtracts the gap before
+    /// halving, so below 18 pixels the subtraction would produce a *negative*
+    /// half and place the right zone outside the area it is tiling; the gap is
+    /// therefore dropped under that threshold, and 17/18 pin the boundary. 1921
+    /// pins the rounding rule: the right half lands on `x = 963.5, width =
+    /// 957.5`, which rounds to an edge at 1922 unless the edges are rounded
+    /// rather than the origin and extent separately.
     #[test]
-    fn the_two_snapped_halves_cover_the_work_area_with_no_gap() {
-        for screen_width in [1920_u32, 1921, 2560, 3, 2, 1, 0] {
+    fn the_two_snapped_halves_span_the_work_area_with_one_gap_between_them() {
+        let gap = crate::round_to_i32(crate::snap::ZONE_GAP);
+
+        for screen_width in [1920_u32, 1921, 2560, 19, 18, 17, 3, 2, 1, 0] {
             let mut shell = DesktopShell::new(screen_width, 1080);
             let left = open(&mut shell, "left");
             let right = open(&mut shell, "right");
@@ -3031,23 +3233,198 @@ mod window_manager_tests {
             let (wx, wy, ww, wh) = shell.work_area();
             let l = shell.windows.get(&left).unwrap();
             let r = shell.windows.get(&right).unwrap();
+            let l_right_edge = l.x + i32::try_from(l.width).unwrap();
+            let r_right_edge = r.x + i32::try_from(r.width).unwrap();
 
-            assert_eq!(l.x, wx, "width={screen_width}");
+            // The gap is affordable exactly when it leaves each half no
+            // narrower than the gap itself.
+            let expected_gap = if screen_width >= 3 * u32::try_from(gap).unwrap() {
+                gap
+            } else {
+                0
+            };
+
+            assert_eq!(l.x, wx, "the left half starts at the work area, width={screen_width}");
             assert_eq!(
-                r.x,
-                wx + i32::try_from(l.width).unwrap(),
-                "the halves must meet, width={screen_width}"
+                r.x - l_right_edge,
+                expected_gap,
+                "the halves must be one gap apart, width={screen_width}"
             );
             assert_eq!(
-                l.width + r.width,
-                ww,
-                "the halves must cover the work area, width={screen_width}"
+                r_right_edge,
+                wx + i32::try_from(ww).unwrap(),
+                "the right half must end flush with the work area, width={screen_width}"
+            );
+            assert!(
+                l.width.abs_diff(r.width) <= 1,
+                "the halves must be equal up to rounding, width={screen_width}: \
+                 {} vs {}",
+                l.width,
+                r.width
             );
             for w in [l, r] {
                 assert_eq!(w.y, wy, "width={screen_width}");
                 assert_eq!(w.height, wh, "width={screen_width}");
                 assert_eq!(w.state, WindowState::Normal);
             }
+        }
+    }
+
+    /// `work_area()` is derived from three fields the shell publishes as
+    /// mutable — screen size, taskbar height, appearance — so a snap has to
+    /// re-read it rather than trust a copy taken when the shell was built.
+    /// Without that, changing resolution or moving the taskbar would tile a
+    /// screen that no longer exists, and nothing would say so.
+    #[test]
+    fn snapping_follows_the_screen_and_the_taskbar_after_they_change() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+
+        shell.screen_width = 1280;
+        shell.screen_height = 800;
+        shell.taskbar_height = 96;
+        shell.snap_window(id, false);
+
+        let (wx, wy, ww, wh) = shell.work_area();
+        let w = shell.windows.get(&id).unwrap();
+        assert_eq!(
+            w.x + i32::try_from(w.width).unwrap(),
+            wx + i32::try_from(ww).unwrap(),
+            "the right half must end at the new screen's right edge"
+        );
+        assert_eq!(w.y, wy);
+        assert_eq!(w.height, wh, "and stop above the taller taskbar");
+    }
+
+    /// Unsnapping puts the window back exactly where it was, not merely
+    /// somewhere unsnapped.
+    #[test]
+    fn unsnapping_restores_the_geometry_the_window_had_before() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+        shell.move_window(id, 137, 249);
+        shell.resize_window(id, 640, 480);
+        let before = geometry(&shell, id);
+
+        assert!(!shell.is_snapped(id));
+        shell.snap_window(id, true);
+        assert!(shell.is_snapped(id));
+        assert_ne!(shell.windows.get(&id).unwrap().width, before.2);
+
+        assert!(shell.unsnap_window(id));
+        assert_eq!(geometry(&shell, id), before);
+        assert!(
+            !shell.is_snapped(id),
+            "and the window must no longer claim a zone"
+        );
+    }
+
+    /// Unsnapping a window that was never snapped is a no-op, which is what
+    /// makes it safe to call unconditionally from a drag handler.
+    #[test]
+    fn unsnapping_an_unsnapped_window_changes_nothing() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+        let before = geometry(&shell, id);
+
+        assert!(!shell.unsnap_window(id));
+        assert_eq!(geometry(&shell, id), before);
+    }
+
+    /// A window the user has since moved or resized is no longer in its zone,
+    /// so it must stop answering to "unsnap" — otherwise a later unsnap would
+    /// teleport a window the user had just placed by hand.
+    #[test]
+    fn moving_or_resizing_a_snapped_window_ends_the_snap() {
+        for (label, act) in [
+            ("move", (|s: &mut DesktopShell, id| s.move_window(id, 10, 10))
+                as fn(&mut DesktopShell, WindowId)),
+            ("resize", |s: &mut DesktopShell, id| s.resize_window(id, 300, 200)),
+        ] {
+            let mut shell = shell();
+            let id = open(&mut shell, "app");
+            shell.snap_window(id, true);
+            assert!(shell.is_snapped(id), "{label}: precondition");
+
+            act(&mut shell, id);
+
+            assert!(!shell.is_snapped(id), "{label} must end the snap");
+            assert!(!shell.unsnap_window(id), "{label}: nothing left to restore");
+        }
+    }
+
+    /// Closing a snapped window must not leave its saved geometry behind: the
+    /// history is keyed by window id, and ids are not reused within a session,
+    /// so every snapped-then-closed window would leak one entry forever.
+    #[test]
+    fn closing_a_snapped_window_forgets_its_saved_geometry() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+        shell.snap_window(id, true);
+        assert!(!shell.snap.history.is_empty());
+
+        shell.remove_window(id);
+
+        assert!(shell.snap.history.is_empty());
+        assert!(!shell.is_snapped(id));
+    }
+
+    /// A zone id that the preset does not have must leave the shell exactly as
+    /// it found it — including the active layout, which is otherwise switched
+    /// before the zone is known to exist.
+    #[test]
+    fn snapping_to_a_zone_that_does_not_exist_changes_nothing() {
+        let mut shell = shell();
+        let id = open(&mut shell, "app");
+        let before = geometry(&shell, id);
+        let layout = shell.snap.active_preset();
+        // The preset asked for is deliberately *not* the one already in force.
+        // Asking for a bad zone of the current layout leaves the failed layout
+        // switch invisible — which is exactly what the first version of this
+        // test did, and it passed with the undo deleted.
+        let other = crate::snap::SnapLayoutPreset::SixGrid;
+        assert_ne!(layout, other, "precondition: the switch must be observable");
+
+        assert!(!shell.snap_window_to_zone(id, other, 99));
+
+        assert_eq!(geometry(&shell, id), before);
+        assert_eq!(
+            shell.snap.active_preset(),
+            layout,
+            "a rejected snap must not leave the layout switched"
+        );
+        assert!(!shell.is_snapped(id));
+    }
+
+    /// The zones of a preset are the shell's to use, not just `snap.rs`'s: a
+    /// quadrant snap must land in the quadrant the module says it does.
+    #[test]
+    fn snapping_to_a_quadrant_lands_in_that_quadrant() {
+        let mut shell = shell();
+        let (wx, wy, ww, wh) = shell.work_area();
+        let mid_x = wx + i32::try_from(ww).unwrap() / 2;
+        let mid_y = wy + i32::try_from(wh).unwrap() / 2;
+
+        for (zone, right, bottom) in [
+            (0, false, false),
+            (1, true, false),
+            (2, false, true),
+            (3, true, true),
+        ] {
+            let id = open(&mut shell, "app");
+            assert!(shell.snap_window_to_zone(
+                id,
+                crate::snap::SnapLayoutPreset::FourQuadrants,
+                zone
+            ));
+
+            let w = shell.windows.get(&id).unwrap();
+            assert_eq!(w.x > mid_x - 1, right, "zone {zone} horizontal half: x={}", w.x);
+            assert_eq!(w.y > mid_y - 1, bottom, "zone {zone} vertical half: y={}", w.y);
+            assert!(
+                i32::try_from(w.width).unwrap() < i32::try_from(ww).unwrap(),
+                "zone {zone} must be a quadrant, not the whole width"
+            );
         }
     }
 
@@ -3254,10 +3631,21 @@ mod window_manager_tests {
             shell.current_desktop, 0,
             "plain Super+Right snaps; it must not switch desktop"
         );
+        // Stated as "it occupies the right half", not as a literal x. The exact
+        // coordinate is `snap.rs`'s business — it depends on the zone gap, and
+        // pinning it here is what made this test fail for a reason that had
+        // nothing to do with the two chords it exists to keep apart.
+        let w = shell.windows.get(&id).unwrap();
+        assert!(shell.is_snapped(id), "and it must actually have snapped");
+        assert!(
+            w.x > wx + i32::try_from(ww / 2).unwrap() - 1,
+            "to the right half, not the left: x={} of {ww}",
+            w.x
+        );
         assert_eq!(
-            shell.windows.get(&id).unwrap().x,
-            wx + i32::try_from(ww / 2).unwrap(),
-            "and it must actually have snapped"
+            w.x + i32::try_from(w.width).unwrap(),
+            wx + i32::try_from(ww).unwrap(),
+            "flush with the right edge of the work area"
         );
 
         assert!(shell.handle_hotkey(&press(Key::Right, ctrl_super())));

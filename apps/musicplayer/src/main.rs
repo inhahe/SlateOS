@@ -19,10 +19,19 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
 use std::path::PathBuf;
+
+/// Seed used when the system has no entropy to offer.
+///
+/// Shuffle order and the visualiser are novelty randomness, not secrets, so
+/// losing entropy must not stop playback. The constant is per-crate
+/// ("MUSICPLR") so that two programs falling back on the same boot do not then
+/// agree with each other.
+const FALLBACK_SEED: u64 = 0x4D55_5349_4350_4C52;
 
 // ============================================================================
 // Catppuccin Mocha Theme Colors
@@ -629,6 +638,26 @@ pub struct PlayerState {
     // Window size
     pub width: f32,
     pub height: f32,
+
+    /// Playlist positions already played in the current shuffle pass.
+    ///
+    /// Held as "what has been heard" rather than as a precomputed order,
+    /// because `playlist` is pushed to from outside this type (the library and
+    /// drag-drop handlers append to `state.playlist` directly). A stored
+    /// permutation would go stale the moment that happened -- indices past the
+    /// new length, or new tracks the order does not mention. A played-set has
+    /// no such invariant to keep: entries beyond the end are simply never
+    /// candidates, and tracks added mid-pass join the candidates at once.
+    shuffle_played: Vec<usize>,
+
+    /// Current heights of the Now Playing visualiser bars, in `0.0..=1.0`.
+    ///
+    /// State advanced by `tick`, not a function of `position_secs` evaluated
+    /// during render -- see `tick` for what the old arithmetic actually drew.
+    visualizer_bars: Vec<f32>,
+
+    /// The stream shuffle and the visualiser draw from.
+    rng: SeededRng,
 }
 
 impl Default for PlayerState {
@@ -640,7 +669,20 @@ impl Default for PlayerState {
 impl PlayerState {
     /// Create a new player with default state.
     pub fn new() -> Self {
+        Self::with_rng(seeded_from_system(FALLBACK_SEED))
+    }
+
+    /// A player whose shuffle and visualiser come from a known seed.
+    #[cfg(test)]
+    fn with_seed(seed: u64) -> Self {
+        Self::with_rng(SeededRng::new(seed))
+    }
+
+    fn with_rng(rng: SeededRng) -> Self {
         Self {
+            shuffle_played: Vec::new(),
+            visualizer_bars: vec![0.0; VISUALIZATION_BARS],
+            rng,
             current_track_index: None,
             position_secs: 0.0,
             playing: false,
@@ -701,9 +743,27 @@ impl PlayerState {
         match self.current_track_index {
             Some(idx) => {
                 if self.shuffle {
-                    // Simple pseudo-random based on position
-                    let next = (idx.wrapping_mul(7).wrapping_add(3)) % len;
-                    self.current_track_index = Some(next);
+                    self.shuffle_played.push(idx);
+                    match self.draw_unplayed_track() {
+                        Some(next) => self.current_track_index = Some(next),
+                        None => {
+                            // The pass is over. Repeat-all starts a new one;
+                            // anything else stops, which the old code never
+                            // did -- its shuffle branch ignored `repeat_mode`
+                            // entirely and so could not reach the end of a
+                            // playlist.
+                            if self.repeat_mode == RepeatMode::All {
+                                self.shuffle_played.clear();
+                                match self.draw_unplayed_track() {
+                                    Some(next) => self.current_track_index = Some(next),
+                                    None => return,
+                                }
+                            } else {
+                                self.playing = false;
+                                return;
+                            }
+                        }
+                    }
                 } else {
                     let next = idx + 1;
                     if next >= len {
@@ -722,6 +782,75 @@ impl PlayerState {
             None => self.current_track_index = Some(0),
         }
         self.position_secs = 0.0;
+    }
+
+    /// Redraw the Now Playing visualiser bars.
+    ///
+    /// The heights used to be computed during render as
+    /// `((position_secs * 10) as u32 * 31 + i * 7) % 100`. That is an exact
+    /// arithmetic progression in the bar index with a step of 7, so it never
+    /// drew a waveform at all -- it drew a straight diagonal ramp that slid
+    /// sideways by 31 hundredths per tenth-second and wrapped at 100. Measured
+    /// at t = 0 the first sixteen bars were
+    /// `0, 7, 14, 21, 28, 35, 42, 49, 56, 63, 70, 77, 84, 91, 98, 5`;
+    /// at t = 1, the same ramp shifted: `31, 38, 45, ...`. On screen it was a
+    /// moving staircase, identical on every machine and for every track.
+    ///
+    /// The bars are now state advanced here rather than a function of
+    /// `position_secs` evaluated in the renderer, both so that they can be
+    /// random at all -- rendering takes `&PlayerState` -- and so that the
+    /// animation does not stall whenever the position happens not to change.
+    fn advance_visualizer(&mut self) {
+        for bar in &mut self.visualizer_bars {
+            // Eased towards a new target rather than snapped to it: a bar that
+            // jumps to an independent height every frame flickers, which reads
+            // as noise rather than as an audio level.
+            let target = self.rng.unit_f32();
+            *bar = bar.mul_add(0.6, target * 0.4);
+        }
+    }
+
+    /// Current visualiser bar heights, each in `0.0..=1.0`.
+    pub fn visualizer_bars(&self) -> &[f32] {
+        &self.visualizer_bars
+    }
+
+    /// Pick a playlist position not yet heard in this shuffle pass.
+    ///
+    /// Returns `None` when every track has been played, which is what tells
+    /// `next_track` the pass is over.
+    ///
+    /// This replaces `next = (idx * 7 + 3) % len`, which was not random and
+    /// frequently not even a permutation. It is an affine map, so its orbit is
+    /// a fixed cycle whose length depends on `gcd(6, len)` and `gcd(7, len)`;
+    /// measured over every playlist length from 2 to 16, the tracks it could
+    /// ever reach were:
+    ///
+    /// ```text
+    ///   len:  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16
+    ///  seen:  2  1  2  4  2  1  2  3  4 10  2 12  2  4  4
+    /// ```
+    ///
+    /// A twelve-track album on shuffle alternated between exactly two tracks
+    /// -- 3, 0, 3, 0 -- forever. A seven-track one played track 3 and nothing
+    /// else. A three-track one replayed the track already playing, because for
+    /// `len = 3` the map is the identity. Only lengths coprime to both 6 and 7
+    /// (11 and 13 in that range) behaved even approximately like a shuffle.
+    fn draw_unplayed_track(&mut self) -> Option<usize> {
+        let candidates: Vec<usize> = (0..self.playlist.len())
+            .filter(|i| !self.shuffle_played.contains(i))
+            .collect();
+        candidates.get(self.rng.below(candidates.len())).copied()
+    }
+
+    /// Turn shuffle on or off, starting a fresh pass when it goes on.
+    ///
+    /// A method rather than a bare `state.shuffle = !state.shuffle` at each of
+    /// the keyboard and mouse handlers, so that the played-set is cleared in
+    /// both places instead of in whichever one was edited most recently.
+    pub fn toggle_shuffle(&mut self) {
+        self.shuffle = !self.shuffle;
+        self.shuffle_played.clear();
     }
 
     /// Move to previous track.
@@ -778,6 +907,7 @@ impl PlayerState {
         if !self.playing {
             return;
         }
+        self.advance_visualizer();
         let dur = self.current_duration();
         if dur <= 0.0 {
             return;
@@ -1128,10 +1258,10 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
 
         for i in 0..VISUALIZATION_BARS {
             let amplitude = if state.playing {
-                // Generate pseudo-random bar heights based on position and index
-                let seed = (state.position_secs * 10.0) as u32;
-                let val = ((seed.wrapping_mul(31).wrapping_add(i as u32 * 7)) % 100) as f32 / 100.0;
-                val * max_bar_height
+                // Read, not computed: the heights are advanced by `tick`. See
+                // `PlayerState::advance_visualizer` for what the arithmetic
+                // that used to live here actually drew.
+                state.visualizer_bars().get(i).copied().unwrap_or(0.0) * max_bar_height
             } else {
                 2.0 // Flat line when paused
             };
@@ -1887,7 +2017,7 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
             true
         }
         Key::S if !key_event.modifiers.ctrl => {
-            state.shuffle = !state.shuffle;
+            state.toggle_shuffle();
             true
         }
         Key::R if !key_event.modifiers.ctrl => {
@@ -2072,7 +2202,7 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
                 if (x - (btn_center_x + 140.0 + 16.0)).abs() < 20.0
                     && (rel_y - btn_y - 16.0).abs() < 20.0
                 {
-                    state.shuffle = !state.shuffle;
+                    state.toggle_shuffle();
                     return true;
                 }
 
@@ -2360,7 +2490,207 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
+
+    /// A player with `len` one-second tracks, shuffle on, sitting on track 0.
+    fn shuffling_player(seed: u64, len: usize) -> PlayerState {
+        let mut state = PlayerState::with_seed(seed);
+        for i in 0..len {
+            let mut t = Track::from_path(PathBuf::from(format!("{i}.wav")));
+            t.title = format!("track {i}");
+            t.duration_secs = 1.0;
+            state.playlist.push(t);
+        }
+        state.current_track_index = Some(0);
+        state.repeat_mode = RepeatMode::All;
+        state.toggle_shuffle();
+        state
+    }
+
+    /// Shuffle has to be able to reach every track.
+    ///
+    /// The regression test for `next = (idx * 7 + 3) % len`, an affine map
+    /// whose orbit is a fixed cycle. Measured on the old code, the number of
+    /// distinct tracks it could ever reach, by playlist length:
+    ///
+    /// ```text
+    ///   len:  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16
+    ///  seen:  2  1  2  4  2  1  2  3  4 10  2 12  2  4  4
+    /// ```
+    ///
+    /// Twelve is the case that matters most -- an album -- and it alternated
+    /// between two tracks forever. This test walks every length in that table
+    /// so that a future change cannot fix one and break another.
+    #[test]
+    fn shuffle_reaches_every_track_at_every_playlist_length() {
+        for len in 2..=16usize {
+            let mut state = shuffling_player(0x5EED_0000_0000_0000 + len as u64, len);
+            let mut seen = std::collections::HashSet::new();
+            seen.insert(0usize);
+            for _ in 0..(len * 12) {
+                state.next_track();
+                if let Some(idx) = state.current_track_index {
+                    seen.insert(idx);
+                }
+            }
+            assert_eq!(
+                seen.len(),
+                len,
+                "playlist of {len}: shuffle only ever reached {} tracks: {seen:?}",
+                seen.len()
+            );
+        }
+    }
+
+    /// A shuffle pass plays each track once before repeating any.
+    ///
+    /// This is the property the played-set exists to provide, and the reason
+    /// the fix is not merely "draw a random index each time": drawing
+    /// independently would let a track repeat immediately, which listeners
+    /// read as a broken shuffle even though it is uniform.
+    #[test]
+    fn a_shuffle_pass_plays_every_track_once_before_repeating() {
+        const LEN: usize = 10;
+        let mut state = shuffling_player(0xC0FF_EE00_1234_5678, LEN);
+        let mut heard = vec![0usize];
+        for _ in 1..LEN {
+            state.next_track();
+            heard.push(state.current_track_index.unwrap());
+        }
+        let distinct: std::collections::HashSet<usize> = heard.iter().copied().collect();
+        assert_eq!(distinct.len(), LEN, "a track repeated within one pass: {heard:?}");
+    }
+
+    /// Two passes over the same playlist must not be the same pass.
+    #[test]
+    fn consecutive_shuffle_passes_differ() {
+        const LEN: usize = 8;
+        let mut state = shuffling_player(0xBEEF_1234_5678_9ABC, LEN);
+        let pass = |state: &mut PlayerState| -> Vec<usize> {
+            (0..LEN)
+                .map(|_| {
+                    state.next_track();
+                    state.current_track_index.unwrap()
+                })
+                .collect()
+        };
+        let first = pass(&mut state);
+        let second = pass(&mut state);
+        assert_ne!(first, second, "the second pass replayed the first");
+    }
+
+    /// Shuffle with repeat off has to end.
+    ///
+    /// The old shuffle branch never consulted `repeat_mode`, so it could not
+    /// reach the end of a playlist under any setting.
+    #[test]
+    fn shuffle_with_repeat_off_stops_after_one_pass() {
+        const LEN: usize = 6;
+        let mut state = shuffling_player(0x1357_9BDF_2468_ACE0, LEN);
+        state.repeat_mode = RepeatMode::Off;
+        state.playing = true;
+        for _ in 1..LEN {
+            state.next_track();
+            assert!(state.playing, "stopped before the pass was over");
+        }
+        state.next_track();
+        assert!(!state.playing, "shuffle ran past the end of the playlist");
+    }
+
+    /// The visualiser must not draw a straight ramp.
+    ///
+    /// The old heights were `(t * 31 + i * 7) % 100`, an exact arithmetic
+    /// progression in the bar index: bar to bar the height rose by precisely
+    /// 0.07, and on the two indices where the modulo wrapped it fell by 0.93.
+    ///
+    /// So the discriminating property is not "the steps are not all equal" --
+    /// the wrap alone defeats that, and the first version of this test passed
+    /// on the broken code for exactly that reason. It is how *many* distinct
+    /// steps there are: a ramp with a wrap has two, and thirty-one independent
+    /// draws have essentially thirty-one.
+    #[test]
+    fn the_visualizer_is_not_an_arithmetic_ramp() {
+        let mut state = shuffling_player(0x0BAD_C0DE_0BAD_C0DE, 3);
+        state.playing = true;
+        for _ in 0..30 {
+            state.advance_visualizer();
+        }
+        let bars = state.visualizer_bars().to_vec();
+        // Bucketed to a hundredth, the resolution the old ramp itself worked
+        // at, so its two step values collapse to two buckets rather than being
+        // separated by float noise.
+        let steps: std::collections::HashSet<i32> = bars
+            .windows(2)
+            .map(|w| ((w[1] - w[0]) * 100.0).round() as i32)
+            .collect();
+        assert!(
+            steps.len() >= 20,
+            "bar heights take only {} distinct steps -- a ramp, not a level: {bars:?}",
+            steps.len()
+        );
+    }
+
+    /// Every visualiser bar has to move.
+    #[test]
+    fn every_visualizer_bar_moves_over_time() {
+        let mut state = shuffling_player(0x2468_ACE0_1357_9BDF, 3);
+        state.playing = true;
+        let mut history: Vec<Vec<f32>> = Vec::new();
+        for _ in 0..40 {
+            state.advance_visualizer();
+            history.push(state.visualizer_bars().to_vec());
+        }
+        for i in 0..VISUALIZATION_BARS {
+            let distinct = history
+                .iter()
+                .map(|f| f[i].to_bits())
+                .collect::<std::collections::HashSet<u32>>()
+                .len();
+            assert!(distinct >= 20, "bar {i} took only {distinct} distinct heights over 40 frames");
+        }
+    }
+
+    /// A fresh player is seeded by the system, not by a literal.
+    ///
+    /// Host `cargo test` has no SlateOS entropy source, so `seeded_from_system`
+    /// returns the fallback and two fresh players agree -- exactly as a
+    /// hardcoded seed would. The test therefore asserts *which* seed. Gated off
+    /// Unix, where the host does have entropy.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_fresh_player_is_seeded_by_the_system_and_not_by_a_literal() {
+        fn first_pass(mut state: PlayerState) -> Vec<usize> {
+            for i in 0..12 {
+                let mut t = Track::from_path(PathBuf::from(format!("{i}.wav")));
+                t.duration_secs = 1.0;
+                state.playlist.push(t);
+            }
+            state.current_track_index = Some(0);
+            state.repeat_mode = RepeatMode::All;
+            state.toggle_shuffle();
+            (0..12)
+                .map(|_| {
+                    state.next_track();
+                    state.current_track_index.unwrap()
+                })
+                .collect()
+        }
+        let fresh = first_pass(PlayerState::new());
+        assert_eq!(fresh, first_pass(PlayerState::with_seed(FALLBACK_SEED)));
+        assert_ne!(fresh, first_pass(PlayerState::with_seed(7)));
+    }
 
     #[test]
     fn test_audio_format_detection_wav() {

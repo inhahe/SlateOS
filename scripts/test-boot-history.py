@@ -129,6 +129,30 @@ S_PTHREAD = _PROLOGUE + (
     "PANIC: unhandled page fault in kernel mode\n"
 )
 
+#: The IDT self-test breakpoints, verbatim from the KASAN boot of 2026-08-19
+#: that this pair of samples exists to keep from being misread again.
+#:
+#: They are UNannotated on purpose: this is the text the kernel emitted before
+#: `ExpectedBreakpoint` was added, and it is what proves the host-side guard
+#: stands on its own rather than merely agreeing with the kernel-side one.
+S_SELFTEST_BP_UNANNOTATED = (
+    "[idt] Running direction-flag self-test...\n"
+    "EXCEPTION: Breakpoint (#BP) at 0xffffffff813b56b6\n"
+    "[idt]   DF is clear on exception entry: OK\n"
+    "EXCEPTION: Breakpoint (#BP) at 0xffffffff813b56e7\n"
+    "[idt]   iretq restores the caller's DF: OK\n"
+    "[idt] Direction-flag self-test PASSED\n"
+)
+
+#: The same three lines as the kernel emits them now.
+S_SELFTEST_BP_ANNOTATED = S_SELFTEST_BP_UNANNOTATED.replace(
+    "(#BP) at 0xffffffff813b56b6\n",
+    "(#BP) at 0xffffffff813b56b6 (deliberate self-test)\n",
+).replace(
+    "(#BP) at 0xffffffff813b56e7\n",
+    "(#BP) at 0xffffffff813b56e7 (deliberate self-test)\n",
+)
+
 #: B-FORKEXEC-BOOT-HANG, 2026-06-12: a quiet stop *between* lines, right
 #: after the last thread of a process is reaped. No exception, no panic.
 S_FORKEXEC = _PROLOGUE + (
@@ -158,6 +182,29 @@ S_LIVELOCK = _PROLOGUE + (
     "[watchdog] timer still armed 200s after arming (no BOOT_OK yet)\n"
     "[watchdog] still armed\n"
 )
+
+
+#: The build-profile banner, both values, as kernel/src/main.rs prints it
+#: immediately after "=== Kernel booting ===".
+#:
+#: Note none of the samples above carry it. That is deliberate and load-bearing:
+#: every occurrence in every `validated_by` list predates the banner, so the
+#: pre-banner samples are the *real* evidence and must keep matching. If adding
+#: the banner to `_PROLOGUE` had been the easy way to make these tests pass,
+#: that would have been the bug -- see `test_kasan_fp_still_matches_a_pre_banner_log`.
+S_BANNER_KASAN = "[boot] build profile: sanitizer=kasan-instrumented\n"
+S_BANNER_NONE = "[boot] build profile: sanitizer=none\n"
+
+#: The `[hypervisor]` banner, in each of the three shapes the kernel emits.
+#: Verbatim from `kernel/src/hypervisor.rs`; `bench-history.py` owns the
+#: patterns that read them and this file's parser delegates to it, so these
+#: samples are also what keeps that delegation honest -- a copy of the regex
+#: here would agree with a broken copy there.
+S_BANNER_TCG = '[hypervisor] Detected: QEMU TCG (signature: "TCGTCGTCGTCG")\n'
+S_BANNER_WHPX = ('[hypervisor] Detected: Hyper-V/WHPX '
+                 '(signature: "Microsoft Hv")\n')
+S_BANNER_METAL = ("[hypervisor] Running on bare metal "
+                  "(no hypervisor detected)\n")
 
 
 def _serial(bh, text, marker="BOOT_OK"):
@@ -314,6 +361,64 @@ def test_non_deliberate_exception_still_reads_as_a_fault(bh):
     s = _serial(bh, S_PTHREAD)
     check("a kernel-mode page fault is still a fault", len(s.exceptions), 1)
     check("and is not filed as benign", s.benign_exceptions, ())
+
+
+def test_selftest_breakpoints_do_not_read_as_a_kernel_death(bh):
+    """Regression, 2026-08-19: a slow boot reported as PANIC.
+
+    A KASAN-instrumented boot ran past its 900s budget while still printing --
+    27 841 lines, no PANIC and no FATAL text anywhere -- and was recorded as
+    "PANIC: kernel died". The evidence the classifier acted on was three
+    `EXCEPTION: Breakpoint (#BP)` lines from the IDT self-tests, which every
+    boot prints and which the benign filter did not know about.
+
+    What made it survive so long is worth stating, because it is the shape of
+    the next bug of this kind: `classify()` looks at exceptions only when the
+    marker was never reached, so on every green boot the mislabelling is
+    unreachable, and it fires exactly on the failed boot whose verdict someone
+    is relying on.
+    """
+    s_text = _PROLOGUE + S_SELFTEST_BP_UNANNOTATED + "[shell] prompt ready\n"
+    s = _serial(bh, s_text)
+    check("an unannotated self-test #BP is not evidence of a death",
+          s.exceptions, ())
+    check("but it is still retained and reportable",
+          len(s.benign_exceptions), 2)
+    check("so a boot that merely ran out of clock reads as TIMEOUT",
+          bh.classify(s, 1), "TIMEOUT")
+
+
+def test_annotated_breakpoints_are_benign_by_the_kernels_own_word(bh):
+    """The kernel-side half: `ExpectedBreakpoint` marks its own `int3`s.
+
+    Checked separately from the host-side vector rule so that neither can
+    quietly become the only thing holding the verdict up. If the `(#BP)` rule
+    were deleted tomorrow this test would still pass, and vice versa.
+    """
+    s_text = _PROLOGUE + S_SELFTEST_BP_ANNOTATED + "[shell] prompt ready\n"
+    s = _serial(bh, s_text)
+    check("the annotation alone makes them benign", s.exceptions, ())
+    check("both are retained", len(s.benign_exceptions), 2)
+    check("and the kernel says so in the log itself",
+          all("deliberate self-test" in e for e in s.benign_exceptions), True)
+
+
+def test_a_breakpoint_is_never_fatal_but_a_page_fault_still_is(bh):
+    """The vector rule must be about the vector, not about breakpoints in general.
+
+    The danger in exempting a vector is exempting too much: a rule keyed on
+    "an EXCEPTION line near a self-test" would swallow a real #PF that happened
+    to land in the same neighbourhood.
+    """
+    s_text = _PROLOGUE + S_SELFTEST_BP_UNANNOTATED + (
+        "EXCEPTION: Page Fault (#PF) at 0xffffffff82713dc2, address=0x97, error=0x0\n"
+        "  Cause: not-present, read, kernel\n"
+    )
+    s = _serial(bh, s_text)
+    check("the #PF alongside them is still a fault", len(s.exceptions), 1)
+    check("and it is the #PF, not a #BP",
+          "#PF" in s.exceptions[0] if s.exceptions else False, True)
+    check("so the run still classifies as PANIC", bh.classify(s, 1), "PANIC")
 
 
 def test_fp_w1(bh):
@@ -616,6 +721,32 @@ def test_caller_supplied_commit_wins_over_git(bh):
     check_true("no supplied commit falls back to git", clean["commit"])
 
 
+def test_an_uncomputable_source_digest_is_absent_not_empty(bh):
+    """Absent means unknown; empty would be a value that every row shares.
+
+    `commit` and `dirty` between them never identified the built source -- the
+    kernel `include_bytes!`s six gitignored service binaries that
+    `git diff --quiet HEAD` cannot see -- so runs now stamp themselves with a
+    `src_digest` instead. boot-test.sh omits the flag entirely when it could
+    not compute one, and this pins the half of that contract living here.
+
+    The distinction is the whole safety property. Downstream, `arm_group_key`
+    treats an absent digest as unknown and falls back to a key that groups
+    nothing new. An empty string is not unknown: it is a value, equal to every
+    other empty string, so a fleet of rows that all failed to compute a digest
+    would silently band together as though they shared a build.
+    """
+    args = _Args()
+    args.src_digest = "full:0123456789abcdef"
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("a supplied digest is recorded", rec.get("src_digest"),
+          "full:0123456789abcdef")
+
+    absent = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check("an uncomputable digest leaves the key out entirely",
+          "src_digest" in absent, False)
+
+
 class _Args:
     exit_code = 1
     marker = "BOOT_OK"
@@ -628,6 +759,15 @@ class _Args:
     commit = ""
     branch = ""
     dirty = False
+    # Empty is the ordinary case here too: boot-test.sh omits the flag when the
+    # digest could not be computed, and build_record() must then leave the key
+    # out entirely rather than store an empty one. An absent field reads as
+    # unknown downstream and refuses to group; a shared empty string would
+    # group every such row together. See scripts/src_digest.py.
+    src_digest = ""
+    # Empty is the ordinary case -- a boot of the tree, not a probe. The
+    # experiment path has its own tests below.
+    experiment = ""
 
 
 # --------------------------------------------------------------------------
@@ -658,6 +798,82 @@ def test_streak_resets_on_a_match(bh):
     st = {s.fp.id: s for s in bh.streaks(records)}["W1"]
     check("streak resets at the match", st.since_last, 2)
     check("occurrence counted", st.occurrences, 1)
+
+
+def _probe(verdict, why="QEMU_EXTRA=-accel whpx (non-default emulator flags)"):
+    """A boot run under conditions no checkout reproduces."""
+    r = _rec(verdict)
+    r["experiment"] = why
+    return r
+
+
+def test_an_experiment_boot_is_not_evidence_about_the_tree(bh):
+    """A deliberate probe must not touch any statistic describing the tree.
+
+    The failure this prevents is not hypothetical. On 2026-08-19 a one-off
+    `-cpu host` boot -- run purely to find out whether WHPX could carry
+    SMEP/SMAP/UMIP -- died inside OVMF before our kernel was loaded, and landed
+    in the history as a plain TIMEOUT. It reset a long consecutive-clean streak
+    to zero, and four open kernel issues have closure conditions written as
+    counts of consecutive clean boots.
+
+    Both directions are asserted, because only one of them is safe. Excluding
+    the probe from the *streak* is a correction; excluding it from
+    `since_last` is a correctness requirement, since a boot that never reached
+    our kernel cannot be evidence that a kernel bug failed to reappear.
+    """
+    records = [_rec("PASS"), _probe("TIMEOUT"), _rec("PASS")]
+
+    # A probe in the middle is stepped over, not treated as a break: the tree
+    # booted clean twice running, and nothing about the tree happened between.
+    check("a probe does not break the clean streak",
+          bh.tail_clean_streak(records), 2)
+    check("...and the same records without the tag do break it",
+          bh.tail_clean_streak([_rec("PASS"), _rec("TIMEOUT"), _rec("PASS")]),
+          1)
+
+    # The dangerous direction: a probe must not advance a closure bar.
+    st = {s.fp.id: s for s in bh.streaks(records)}["W1"]
+    check("a probe is not counted toward a fingerprint's clean run",
+          st.since_last, 2)
+    check("...and it is not counted among the records considered",
+          st.recorded, 2)
+
+
+def test_a_probe_that_passed_is_excluded_just_the_same(bh):
+    """Exclusion follows from being a probe, never from having failed.
+
+    A rule that only skipped *failed* experiments would be worse than none: it
+    would quietly inflate every clean streak with boots that never tested the
+    tree, which is the one error this module exists to prevent. The two WHPX
+    boots of 2026-08-19 both passed, and both are equally uninformative.
+    """
+    records = [_rec("PASS"), _probe("PASS"), _probe("PASS")]
+    check("passing probes do not pad the streak",
+          bh.tail_clean_streak(records), 1)
+
+    st = {s.fp.id: s for s in bh.streaks(records)}["W1"]
+    check("...nor a fingerprint's clean run", st.since_last, 1)
+
+
+def test_experiment_wall_times_do_not_move_the_median(bh):
+    """`wall time by build` must describe a boot someone can actually run.
+
+    Measured, not supposed: the two WHPX boots took 168 s and 186 s against a
+    TCG median near 120 s for the same profile, so leaving them in shifts the
+    only number that answers "how long should this take?".
+    """
+    def timed(wall, probe=False):
+        r = _probe("PASS") if probe else _rec("PASS")
+        r["wall_seconds"] = wall
+        return r
+
+    records = [timed(120), timed(120), timed(186, probe=True)]
+    pops = bh.wall_populations(records)
+    check("only one population, and the probe is not in it",
+          {k: sorted(v) for k, v in pops.items()},
+          {f"{bh.sanitizer_of(_rec('PASS'))} on {bh._ACCEL_UNKNOWN}":
+           [120.0, 120.0]})
 
 
 def test_unvalidated_fingerprint_reports_no_streak(bh):
@@ -705,6 +921,391 @@ def test_clean_verdicts_are_all_known(bh):
     """A typo'd verdict in CLEAN_VERDICTS silently makes nothing clean."""
     unknown = sorted(bh.CLEAN_VERDICTS - set(bh.VERDICT_HELP))
     check("every clean verdict is a documented verdict", unknown, [])
+
+
+# --------------------------------------------------------------------------
+# Build profile (which sanitizer the kernel was built with)
+# --------------------------------------------------------------------------
+
+
+def test_sanitizer_read_from_the_banner(bh):
+    kasan = _serial(bh, S_BANNER_KASAN + S_PASS)
+    plain = _serial(bh, S_BANNER_NONE + S_PASS)
+    check("instrumented banner parsed", kasan.sanitizer, "kasan-instrumented")
+    check("uninstrumented banner parsed", plain.sanitizer, "none")
+
+
+def test_absent_banner_is_none_the_object_not_none_the_string(bh):
+    """The distinction the whole three-valued field exists for.
+
+    A log with no banner cannot say which build it was; a log that says
+    `sanitizer=none` says it was not instrumented. Folding the first into the
+    second would relabel every boot recorded before 2026-08-19 -- a population
+    that certainly includes instrumented ones -- as definitely-not-instrumented,
+    in exactly the direction that makes the two populations look like one.
+    """
+    s = _serial(bh, S_PASS)
+    check("no banner -> None", s.sanitizer, None)
+    check("and specifically not the string 'none'", s.sanitizer == "none", False)
+
+
+def test_banner_survives_a_second_key_being_added(bh):
+    """A parser that quietly stops matching produces the same answer as a kernel
+    that never printed, and those must stay distinguishable -- so the regex keys
+    off `sanitizer=`, not off the whole line."""
+    text = "[boot] build profile: sanitizer=none opt=3 lto=thin\n" + S_PASS
+    check("extra keys do not break the match", _serial(bh, text).sanitizer,
+          "none")
+    # No longer hypothetical: `textpad=` was appended on 2026-08-19 for the
+    # layout-sensitivity sweep (kernel/src/layout_pad.rs). Assert the *real*
+    # banner, not just a stand-in for it -- the stand-in would have kept
+    # passing whatever the kernel actually printed.
+    real = "[boot] build profile: sanitizer=kasan-instrumented textpad=3072\n"
+    check("the real two-key banner still yields the sanitizer",
+          _serial(bh, real + S_PASS).sanitizer, "kasan-instrumented")
+
+
+def test_kasan_fp_still_matches_a_pre_banner_log(bh):
+    """Scoping the fingerprint by build must not un-validate its own evidence.
+
+    S_KASAN is the 2026-08-12 occurrence, from a kernel that could not print a
+    banner. If "unknown" were treated as "not instrumented", this fingerprint's
+    single validated occurrence would stop matching and its streak would reset
+    to a perfect clean one -- the precise failure this suite exists to catch.
+    """
+    verdict, fps = _fps(bh, S_KASAN, 2)
+    check_true("pre-banner KASAN wedge still matches",
+               "B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT"
+               in fps)
+
+
+def test_kasan_fp_matches_an_instrumented_log(bh):
+    _, fps = _fps(bh, S_BANNER_KASAN + S_KASAN, 2)
+    check_true("instrumented KASAN wedge matches",
+               "B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT"
+               in fps)
+
+
+def test_kasan_fp_declines_an_explicitly_uninstrumented_log(bh):
+    """The issue is titled "KASAN builds only"; now the kernel can say so.
+
+    Only an explicit denial rules it out. This is the one direction where
+    narrowing is safe, because the kernel positively asserted the build.
+    """
+    _, fps = _fps(bh, S_BANNER_NONE + S_KASAN, 2)
+    check("uninstrumented build declines the KASAN fingerprint",
+          "B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT" in fps,
+          False)
+    check_true("and the record is not lost -- W1 is disjoint, so nothing "
+               "silently absorbs it", isinstance(fps, list))
+
+
+def test_record_carries_the_sanitizer_even_when_unknown(bh):
+    """Present-and-null, not absent.
+
+    Within rows that have a serial log at all, an absent key must mean "written
+    before the field existed" and null must mean "the kernel did not say". Omit
+    the key when unknown and those collapse into one, leaving a consumer to
+    guess -- which on this file's history means guess "uninstrumented".
+    """
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check_true("sanitizer key always written", "sanitizer" in rec)
+    check("unknown build recorded as null", rec["sanitizer"], None)
+    rec2 = bh.build_record(_serial(bh, S_BANNER_KASAN + S_PASS), "PASS",
+                           _Args())
+    check("known build recorded verbatim", rec2["sanitizer"],
+          "kasan-instrumented")
+    # It must survive the round trip that actually happens: the file is JSONL.
+    check("null survives serialisation", json.loads(json.dumps(rec))["sanitizer"],
+          None)
+
+
+def test_sanitizer_of_groups_the_two_ways_of_not_knowing(bh):
+    absent = {"verdict": "PASS"}
+    null = {"verdict": "PASS", "sanitizer": None}
+    known = {"verdict": "PASS", "sanitizer": "none"}
+    check("absent key groups as unknown", bh.sanitizer_of(absent),
+          bh.sanitizer_of(null))
+    check("and never as the kernel's own 'none'",
+          bh.sanitizer_of(absent) == bh.sanitizer_of(known), False)
+    check("an explicit 'none' groups as itself", bh.sanitizer_of(known), "none")
+
+
+def test_wall_times_are_never_averaged_across_builds(bh):
+    """The defect this change fixes, stated as a test.
+
+    Two populations whose wall times differ by ~3.4x were both recorded
+    `profile: "debug"`, so any median drawn over the file described neither.
+    """
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "wall_seconds": 320.0},
+        {"verdict": "PASS", "sanitizer": "none", "wall_seconds": 340.0},
+        {"verdict": "PASS", "sanitizer": "kasan-instrumented",
+         "wall_seconds": 1100.0},
+        {"verdict": "PASS", "wall_seconds": 900.0},
+    ]
+    pops = bh.wall_populations(records)
+    # The keys are the (build, accelerator) pair. Spelled out from the two
+    # constants rather than built with `population_of`, so this asserts the
+    # partition instead of restating the code that produces it.
+    plain = f"none on {bh._ACCEL_UNKNOWN}"
+    kasan = f"kasan-instrumented on {bh._ACCEL_UNKNOWN}"
+    check("three populations kept apart", sorted(pops), sorted(
+        [plain, kasan, f"{bh._SAN_UNKNOWN} on {bh._ACCEL_UNKNOWN}"]))
+    check("uninstrumented median", bh._median(pops[plain]), 330.0)
+    check("instrumented median", bh._median(pops[kasan]), 1100.0)
+
+
+def test_wall_populations_ignore_rows_without_a_duration(bh):
+    """A missing `wall_seconds` must not become a zero -- a zero would drag the
+    median of whichever population it landed in toward a value no boot took."""
+    records = [{"verdict": "PASS", "sanitizer": "none"},
+               {"verdict": "PASS", "sanitizer": "none", "wall_seconds": None},
+               {"verdict": "PASS", "sanitizer": "none", "wall_seconds": 300.0}]
+    check("only the row with a duration counts",
+          bh.wall_populations(records)[f"none on {bh._ACCEL_UNKNOWN}"],
+          [300.0])
+
+
+def test_report_prints_each_build_separately_and_no_combined_figure(bh):
+    import contextlib
+    import io
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "wall_seconds": 330.0},
+        {"verdict": "PASS", "sanitizer": "kasan-instrumented",
+         "wall_seconds": 1100.0},
+    ]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(records, None)
+    out = buf.getvalue()
+    check_true("uninstrumented population reported", "330s" in out)
+    check_true("instrumented population reported", "1100s" in out)
+    check_true("and the reader is told why they are apart",
+               "separately on purpose" in out)
+    # 715 is the mean of 330 and 1100: the number the old code would have
+    # produced, and the one no boot on this host has ever taken.
+    check("no figure averaged across builds", "715" in out, False)
+
+
+def test_report_names_the_build_of_the_run_it_just_recorded(bh):
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report([], {"verdict": "PASS", "sanitizer": "kasan-instrumented"})
+    check_true("current run's build is printed",
+               "build: kasan-instrumented" in buf.getvalue())
+
+
+# --------------------------------------------------------------------------
+# Accelerator (which emulator/hypervisor the boot ran under)
+# --------------------------------------------------------------------------
+
+
+def test_accel_read_from_the_banner(bh):
+    """All three shapes, because the kernel prints three and not two.
+
+    `bench-history.py` matches `Detected: ...` with one pattern and the
+    bare-metal sentence with another; a boot-history that exercised only the
+    first would still pass while bare metal silently rendered as "cannot say".
+    """
+    check("TCG banner parsed", _serial(bh, S_BANNER_TCG + S_PASS).accel,
+          "QEMU TCG")
+    check("WHPX banner parsed", _serial(bh, S_BANNER_WHPX + S_PASS).accel,
+          "Hyper-V/WHPX")
+    check("bare-metal banner parsed", _serial(bh, S_BANNER_METAL + S_PASS).accel,
+          "bare metal")
+
+
+def test_accel_parsing_is_really_delegated(bh):
+    """The delegation is the point, so assert it rather than assume it.
+
+    This file deliberately keeps no copy of the banner patterns
+    (`design-decisions.md` sec 240). A copy would be worse than duplication
+    here: a pattern that stopped matching returns the same `None` a pre-banner
+    log does, so the drift would never announce itself. Reading the answer back
+    out of `bench-history.py`'s own constant is what proves there is one
+    parser and not two that happen to agree today.
+    """
+    check("bare metal comes from bench-history's constant, not a literal",
+          _serial(bh, S_BANNER_METAL + S_PASS).accel,
+          bh.bench_history().ACCEL_BARE_METAL)
+    check("and the delegate is reached at all",
+          bh.bench_history().parse_accel.__module__, "bench_history")
+
+
+def test_an_unreadable_delegate_costs_the_label_not_the_boot(bh):
+    """The one place in this file where swallowing an error is right.
+
+    `boot-test.sh` calls this script from its EXIT trap with `|| true`, so an
+    exception raised here does not surface anywhere -- it silently loses the
+    record of the boot. For a *failing* boot that is the most expensive thing
+    this script can do. A missing accelerator label costs a row's grouping; a
+    missing row costs the evidence.
+    """
+    import io as _io
+    import contextlib
+    real = bh.bench_history
+
+    def broken():
+        raise RuntimeError("no bench-history today")
+
+    err = _io.StringIO()
+    bh.bench_history = broken
+    try:
+        with contextlib.redirect_stderr(err):
+            s = _serial(bh, S_BANNER_WHPX + S_PASS)
+            rec = bh.build_record(s, "PASS", _Args())
+    finally:
+        bh.bench_history = real
+    check("the boot is still recorded", rec["verdict"], "PASS")
+    check("with an accelerator of 'cannot say', never a guess", rec["accel"],
+          None)
+    check_true("and the failure is announced where a human sees it",
+               "accelerator banner" in err.getvalue())
+
+
+def test_absent_accel_banner_is_none_not_tcg(bh):
+    """The conflation this field exists to prevent, stated as a test.
+
+    A log with no `[hypervisor]` line cannot say what ran it. Reading that as
+    "TCG" is not a harmless default: the first WHPX run on this host
+    (2026-08-19T16:15:09) predates the banner, so the guess is *known* to be
+    wrong for a record already in the file -- and wrong in the direction that
+    drops a 168s boot into a population whose median is ~120s.
+    """
+    s = _serial(bh, S_PASS)
+    check("no banner -> None", s.accel, None)
+    check("and specifically not the string 'QEMU TCG'", s.accel == "QEMU TCG",
+          False)
+
+
+def test_record_carries_the_accel_even_when_unknown(bh):
+    """Present-and-null, not absent -- the same three-state rule as `sanitizer`.
+
+    Absent means "this row predates the field"; null means "the log did not
+    say". Omitting the key when unknown collapses those, and this file already
+    contains rows of both kinds.
+    """
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check_true("accel key always written", "accel" in rec)
+    check("unknown accelerator recorded as null", rec["accel"], None)
+    rec2 = bh.build_record(_serial(bh, S_BANNER_WHPX + S_PASS), "PASS", _Args())
+    check("known accelerator recorded verbatim", rec2["accel"], "Hyper-V/WHPX")
+    check("null survives serialisation",
+          json.loads(json.dumps(rec))["accel"], None)
+
+
+def test_accel_of_groups_the_two_ways_of_not_knowing(bh):
+    absent = {"verdict": "PASS"}
+    null = {"verdict": "PASS", "accel": None}
+    known = {"verdict": "PASS", "accel": "QEMU TCG"}
+    check("absent key groups as unknown", bh.accel_of(absent), bh.accel_of(null))
+    check("and never as a named accelerator",
+          bh.accel_of(absent) == bh.accel_of(known), False)
+    check("a named accelerator groups as itself", bh.accel_of(known),
+          "QEMU TCG")
+
+
+def test_population_is_the_pair_not_either_half(bh):
+    """Two boots that agree on the build and differ on the accelerator are two
+    populations, and so are two that agree on the accelerator and differ on the
+    build. Either half alone merges a pair that differs by ~1.4x or ~3.4x."""
+    tcg_plain = {"sanitizer": "none", "accel": "QEMU TCG"}
+    whpx_plain = {"sanitizer": "none", "accel": "Hyper-V/WHPX"}
+    tcg_kasan = {"sanitizer": "kasan-instrumented", "accel": "QEMU TCG"}
+    check("same build, different accelerator -> different populations",
+          bh.population_of(tcg_plain) == bh.population_of(whpx_plain), False)
+    check("same accelerator, different build -> different populations",
+          bh.population_of(tcg_plain) == bh.population_of(tcg_kasan), False)
+    check_true("and both halves are named in the label a human reads",
+               "none" in bh.population_of(tcg_plain)
+               and "QEMU TCG" in bh.population_of(tcg_plain))
+
+
+def test_an_untagged_whpx_boot_does_not_move_the_tcg_median(bh):
+    """The whole reason this change exists, with the real numbers.
+
+    `wall_populations`' docstring records two WHPX boots at 168s and 186s
+    against a TCG median near 120s. They stayed out of the TCG median only
+    because they happened to carry an `experiment` tag -- a fact about how they
+    were invoked, not a rule this file applies. Q53 proposes making WHPX the
+    ordinary way to boot the tree, at which point the tag stops appearing.
+
+    So the fixture is untagged on purpose. Under the old grouping the four rows
+    are one population with a median of 144s -- a duration no boot took, and
+    ~20% off both real ones, which is twice CLAUDE.md's regression threshold.
+    """
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "accel": "QEMU TCG",
+         "wall_seconds": 118.0},
+        {"verdict": "PASS", "sanitizer": "none", "accel": "QEMU TCG",
+         "wall_seconds": 122.0},
+        {"verdict": "PASS", "sanitizer": "none", "accel": "Hyper-V/WHPX",
+         "wall_seconds": 168.0},
+        {"verdict": "PASS", "sanitizer": "none", "accel": "Hyper-V/WHPX",
+         "wall_seconds": 186.0},
+    ]
+    pops = bh.wall_populations(records)
+    check("the two accelerators are two populations", sorted(pops),
+          ["none on Hyper-V/WHPX", "none on QEMU TCG"])
+    check("TCG median is the TCG boots'", bh._median(pops["none on QEMU TCG"]),
+          120.0)
+    check("WHPX median is the WHPX boots'",
+          bh._median(pops["none on Hyper-V/WHPX"]), 177.0)
+    check("and no population holds the pooled figure",
+          any(bh._median(v) == 144.0 for v in pops.values()), False)
+
+
+def test_report_prints_the_accelerator_beside_the_build(bh):
+    import contextlib
+    import io
+    records = [
+        {"verdict": "PASS", "sanitizer": "none", "accel": "QEMU TCG",
+         "wall_seconds": 120.0},
+        {"verdict": "PASS", "sanitizer": "none", "accel": "Hyper-V/WHPX",
+         "wall_seconds": 177.0},
+    ]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(records, {"verdict": "PASS", "sanitizer": "none",
+                            "accel": "Hyper-V/WHPX"})
+    out = buf.getvalue()
+    check_true("TCG population reported", "120s" in out)
+    check_true("WHPX population reported", "177s" in out)
+    check_true("the legend names the accelerator too",
+               "accelerator" in out)
+    check_true("and the current run is labelled with its own pair",
+               "build: none on Hyper-V/WHPX" in out)
+    # 148.5 is the mean of the two: the figure the old grouping produced, and
+    # one no boot on this host has ever taken.
+    check("no figure pooled across accelerators", "148" in out, False)
+
+
+def test_list_shows_the_accelerator(bh, tmpdir):
+    import contextlib
+    import io
+    path = os.path.join(tmpdir, "h.jsonl")
+    accels = ("QEMU TCG", "Hyper-V/WHPX", "bare metal", None)
+    with open(path, "w", encoding="utf-8") as fh:
+        for accel in accels:
+            # An explicit `sanitizer` so the column beside this one renders as
+            # `-`. Leave it out and *it* prints `?`, and a test that merely
+            # looked for a `?` somewhere on the line would be satisfied by the
+            # neighbour -- which is exactly how a row that cannot say could
+            # start claiming TCG without any test noticing.
+            rec = {"ts": "2026-08-19T00:00:00", "verdict": "PASS",
+                   "commit": "abc1234", "sanitizer": "none", "accel": accel}
+            fh.write(json.dumps(rec) + "\n")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.cmd_list(path, 10)
+    rows = [line.split() for line in buf.getvalue().splitlines() if line.strip()]
+    check("one row per record", len(rows), len(accels))
+    # Column 5: ts, commit, verdict, wall, sanitizer, accel, label, fingerprints.
+    check("each accelerator gets its own token, and 'cannot say' is not one of "
+          "them", [r[5] for r in rows], ["tcg", "whpx", "metal", "?"])
 
 
 # --------------------------------------------------------------------------
@@ -773,9 +1374,9 @@ def main():
              if name.startswith("test_") and callable(fn)]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes -- the failure mode this whole script is about. Assert a floor.
-    if len(tests) < 35:
+    if len(tests) < 60:
         print(f"FATAL: test discovery found only {len(tests)} tests; the suite "
-              f"has at least 35. Discovery is broken, not the code.")
+              f"has at least 60. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

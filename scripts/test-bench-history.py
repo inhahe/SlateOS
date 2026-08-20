@@ -27,10 +27,14 @@ from a check that passes".
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import inspect
+import io
+import json
 import math
 import os
+import statistics
 import sys
 import tempfile
 
@@ -96,6 +100,20 @@ def write(tmpdir, name, text):
     return path
 
 
+def capture(func, *args, **kwargs):
+    """Run `func`, returning `(stdout_text, return_value)`.
+
+    Reporting functions here are asserted on for *what they say*, not only for
+    what they return -- several of this file's regression tests exist because a
+    diagnostic returned the right verdict and printed the wrong explanation
+    beside it.
+    """
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        result = func(*args, **kwargs)
+    return buf.getvalue(), result
+
+
 def test_parse_formats(bh, tmpdir):
     """Both SCORE line formats parse, including a log spanning the change."""
     # Pre-dispersion format. Records written before the kernel emitted
@@ -107,16 +125,16 @@ def test_parse_formats(bh, tmpdir):
                 "random noise\n")
     check("old-format SCORE parses with dispersion absent",
           bh.parse_serial(old),
-          {"page_alloc_free": (14052, 1000, "OVER", None, None, None),
-           "firewall_check": (228, 300, "PASS", None, None, None)})
+          {"page_alloc_free": (14052, 1000, "OVER", None, None, None, 0),
+           "firewall_check": (228, 300, "PASS", None, None, None, 1)})
 
     new = write(tmpdir, "new.txt",
                 "[bench] SCORE page_alloc_free 14052 1000 OVER 20110 1000\n"
                 "[bench] SCORE firewall_check 228 300 PASS 261 2000\n")
     check("new-format SCORE parses mean and iterations",
           bh.parse_serial(new),
-          {"page_alloc_free": (14052, 1000, "OVER", 20110, 1000, None),
-           "firewall_check": (228, 300, "PASS", 261, 2000, None)})
+          {"page_alloc_free": (14052, 1000, "OVER", 20110, 1000, None, 0),
+           "firewall_check": (228, 300, "PASS", 261, 2000, None, 1)})
 
     # A single boot can straddle the change only in a replayed/concatenated
     # log, but the parser should not care which line has the extension.
@@ -125,8 +143,51 @@ def test_parse_formats(bh, tmpdir):
                   "[bench] SCORE b 20 30 PASS\n")
     check("a log mixing both formats parses both",
           bh.parse_serial(mixed),
-          {"a": (10, 1, "OVER", 15, 500, None),
-           "b": (20, 30, "PASS", None, None, None)})
+          {"a": (10, 1, "OVER", 15, 500, None, 0),
+           "b": (20, 30, "PASS", None, None, None, 1)})
+
+
+def test_suite_position_matches_the_canary_axis(bh, tmpdir):
+    """Each entry carries its 0-based SCORE-line ordinal, counted over lines.
+
+    This is the join key between a benchmark and the canary trace, and it only
+    exists while the log is being read in order -- records are written with
+    `sort_keys=True`, which alphabetises `entries` and destroys suite order on
+    the way to disk.
+
+    The duplicate-name case is the one that matters. `record()` on the kernel
+    side pushes a SCORECARD entry *and* ticks `CANARY_SCORED` for every scored
+    benchmark, name collisions included, so the kernel's position axis counts
+    lines. A parser numbering by `len(entries)` would instead count *distinct
+    names* and silently shift every benchmark after a collision one place left
+    of where the sample was actually taken -- an off-by-one that reads as a
+    perfectly plausible integer and would misattribute a contamination spike to
+    its neighbour.
+    """
+    log = write(tmpdir, "positions.txt",
+                "[bench] SCORE first 10 20 PASS 12 500\n"
+                "[bench] this is not a score line\n"
+                "[bench] SCORE second 10 20 PASS 12 500\n"
+                "[bench] SCORE third 10 - TRACK 12 500\n")
+    got = bh.parse_serial(log)
+    check("positions follow SCORE-line order",
+          [got[n][6] for n in ("first", "second", "third")], [0, 1, 2])
+    check("non-SCORE lines do not consume a position",
+          got["second"][6], 1)
+    check("a TRACK line occupies a position like any other",
+          got["third"][6], 2)
+
+    # A repeat of `first` must not renumber what follows it.
+    dup = write(tmpdir, "positions-dup.txt",
+                "[bench] SCORE first 10 20 PASS 12 500\n"
+                "[bench] SCORE second 10 20 PASS 12 500\n"
+                "[bench] SCORE first 11 20 PASS 12 500\n"
+                "[bench] SCORE fourth 10 20 PASS 12 500\n")
+    got = bh.parse_serial(dup)
+    check("a duplicate name takes the later position, last-wins",
+          (got["first"][0], got["first"][6]), (11, 2))
+    check("a duplicate does not shift its successors",
+          got["fourth"][6], 3)
 
 
 def test_parse_split_column(bh, tmpdir):
@@ -292,6 +353,463 @@ def test_canary(bh, tmpdir):
           bh.parse_canary(twice), {"start": 300, "end": 900, "pct": 300})
 
 
+def test_canary_trace_parses_and_keeps_its_units(bh, tmpdir):
+    """The per-sample trace parses, and both wire precisions land in one unit.
+
+    The trace is the only record of *where* in the suite the reference cost
+    moved. `min`/`max`/`spread` can say how far it moved and can never say
+    where, yet the two causes of movement have opposite remedies: dear at the
+    same positions across runs is the suite's own cache/TLB residue, dear at
+    differing positions is host load. So the trace has to survive into the
+    record, not just onto the console.
+
+    The units assertion is the one with teeth. The kernel printed tenths
+    before it printed hundredths, so both widths sit in the logs on disk, and
+    "5.1" and "5.10" are the same measurement. A parser that read the fraction
+    as a plain integer would make them 51 and 510 -- a tenfold error, in the
+    quantity a positional correction would multiply by.
+    """
+    log = write(tmpdir, "canary-trace.txt",
+                "[bench] SCORE a 10 1 PASS\n"
+                "[bench] CANARY 5 5 100 5 5 0 13 0 515 517\n"
+                "[bench] CANARY-TRACE 0:5.15 8:5.17 16:5.15 end:5.15\n")
+    got = bh.parse_canary(log)
+    check("the trace is attached to the canary",
+          [s["centi"] for s in (got or {}).get("trace", [])],
+          [515, 517, 515, 515])
+    check("suite positions are kept as integers",
+          [s["pos"] for s in (got or {}).get("trace", [])],
+          [0, 8, 16, None])
+
+    # `end:` is not at a suite position -- it brackets the suite. None rather
+    # than a sentinel integer so no arithmetic can mistake it for position 0,
+    # and so it survives a JSON round-trip as null. It additionally names
+    # *which* side it brackets, which the tail correction needs and which the
+    # sample's ordinal cannot supply.
+    check("an endpoint sample has no position, and says which end it is",
+          (got or {})["trace"][-1],
+          {"pos": None, "centi": 515, "edge": "end"})
+    check("a positioned sample carries no edge key at all",
+          "edge" in (got or {})["trace"][0], False)
+
+    # Tenths and hundredths must be the same quantity. Padding right is what
+    # makes that true; padding left (or int(frac)) silently divides by ten.
+    check("a tenths-era trace reads in the same units as a hundredths-era one",
+          [s["centi"] for s in bh.parse_canary_trace(" 0:5.1 8:5.10 16:5")],
+          [510, 510, 500])
+
+    # The real line from build/ab-old-2.log, kept verbatim. It is a genuinely
+    # contaminated run and the reason a *positional* correction is worth
+    # having: a 3.2x spike confined to position 32 and a smaller one at 72,
+    # against a flat ~5.1 everywhere else. Whole-suite `spread` reports one
+    # number for that and cannot tell it from every benchmark being 3x slower.
+    real = ("[bench] CANARY-TRACE 0:5.3 8:5.1 16:5.1 24:5.1 32:16.3 40:5.8 "
+            "48:5.0 56:5.1 64:5.9 72:7.1 80:5.1 end:5.1 end:14.8")
+    samples = bh.parse_canary_trace(real[len("[bench] CANARY-TRACE"):])
+    check("the real 13-sample trace parses whole", len(samples), 13)
+    check("the real trace preserves the isolated spike",
+          max(s["centi"] for s in samples if s["pos"] == 32), 1630)
+    check("and the quiet positions stay quiet",
+          sorted({s["centi"] for s in samples if s["pos"] in (8, 16, 24, 80)}),
+          [510])
+
+
+def test_canary_trace_absence_is_not_an_error(bh, tmpdir):
+    """No trace must read as "not recorded", never as an empty measurement.
+
+    Every one of the 68 canary records already on disk predates this parser,
+    so "absent" is the common case and has to stay distinguishable from "the
+    trace was taken and was empty". The kernel suppresses the line entirely
+    when `samples == 0`, which is exactly when a reader must not conclude the
+    host was quiet.
+    """
+    plain = write(tmpdir, "canary-no-trace.txt",
+                  "[bench] CANARY 283 275 97 271 279 2 9\n")
+    check("a canary without a trace has no trace key",
+          "trace" in (bh.parse_canary(plain) or {}), False)
+
+    # A trace with no samples must not create the key either -- an empty list
+    # would read as a completed measurement that found nothing.
+    check("an empty trace line does not create the key",
+          "trace" in (bh.parse_canary(write(
+              tmpdir, "canary-empty-trace.txt",
+              "[bench] CANARY 283 275 97 271 279 2 9\n"
+              "[bench] CANARY-TRACE\n")) or {}), False)
+
+    # A trace belongs to the CANARY line it follows. Two suites in one log,
+    # the second emitting no trace: the first suite's trace must not be
+    # stapled onto the second suite's record, which is what tracking the
+    # "last trace seen" independently of the last canary would do.
+    twice = write(tmpdir, "canary-trace-twice.txt",
+                  "[bench] CANARY 100 100 100 100 100 0 9\n"
+                  "[bench] CANARY-TRACE 0:9.99 8:9.99\n"
+                  "[bench] CANARY 300 900 300\n")
+    got = bh.parse_canary(twice)
+    check("the last canary still wins", (got or {}).get("start"), 300)
+    check("and it does not inherit the earlier suite's trace",
+          "trace" in (got or {}), False)
+
+    # A trace arriving before any canary has nothing to attach to and must be
+    # dropped rather than crashing or inventing a record.
+    check("a trace with no canary at all yields no canary",
+          bh.parse_canary(write(tmpdir, "canary-orphan-trace.txt",
+                                "[bench] CANARY-TRACE 0:5.15\n")), None)
+
+
+def test_canary_arms_attach_to_the_trace_they_belong_to(bh, tmpdir):
+    """The two raw arms must reach the record, alongside the value they made.
+
+    The traced figure is `(store - nop) * 100 / n` -- a *difference*, so a move
+    in it is ambiguous between the two arms, and the two mean opposite things. A
+    dearer store arm is the host getting slower at the thing being measured; a
+    cheaper nop arm is the measurement's own baseline shifting, which is an
+    instrument artefact and no evidence about the host at all. Every trace
+    recorded before this line existed computed both arms and threw them away,
+    which is why the ~5.79-centicycle cluster cannot be attributed today.
+
+    So the arms have to survive into the record next to the derived value, and
+    -- the part with teeth -- next to the *right* value.
+    """
+    log = write(tmpdir, "canary-arms.txt",
+                "[bench] SCORE a 10 1 PASS\n"
+                "[bench] CANARY 5 5 100 5 5 0 13 0 515 517\n"
+                "[bench] CANARY-TRACE 0:5.15 8:5.17 end:5.15\n"
+                "[bench] CANARY-ARMS 0:1000:1515 8:1000:1517 end:1000:1515\n")
+    got = bh.parse_canary(log)
+    check("each traced sample gains its two arms",
+          [(s["nop"], s["store"]) for s in (got or {}).get("trace", [])],
+          [(1000, 1515), (1000, 1517), (1000, 1515)])
+    check("and keeps the derived value it already had",
+          [s["centi"] for s in (got or {}).get("trace", [])],
+          [515, 517, 515])
+    check("the endpoint label survives the merge",
+          (got or {})["trace"][-1]["edge"], "end")
+
+    # The arms are raw totals, not a rescaled value: `n` is not on the line and
+    # reconstructing it from the quotient would round-trip through the very
+    # division whose ambiguity the arms exist to resolve.
+    check("arms are parsed as raw integers, undivided",
+          bh.parse_canary_arms(" 0:123456789:987654321"),
+          [{"pos": 0, "nop": 123456789, "store": 987654321}])
+
+
+def test_canary_arms_never_merge_onto_the_wrong_sample(bh, tmpdir):
+    """A misaligned arm is worse than a missing one, so a disagreement drops all.
+
+    A missing arm is a gap: the consumer sees no `nop` key and knows to say
+    nothing. A *misplaced* arm is evidence pointing confidently at the wrong
+    slot, and nothing downstream can detect it -- it would produce exactly the
+    wrong attribution the arms were added to prevent. The trace is the older,
+    independently useful record, so it survives intact and the arms are what
+    get dropped.
+    """
+    base = ("[bench] CANARY 5 5 100 5 5 0 13 0 515 517\n"
+            "[bench] CANARY-TRACE 0:5.15 8:5.17 end:5.15\n")
+
+    short = bh.parse_canary(write(tmpdir, "canary-arms-short.txt", base +
+                                  "[bench] CANARY-ARMS 0:1000:1515\n"))
+    check("a truncated arms line merges nothing",
+          any("nop" in s for s in (short or {})["trace"]), False)
+    check("and leaves the trace entirely intact",
+          [s["centi"] for s in (short or {})["trace"]], [515, 517, 515])
+
+    # Same length, mismatched labels: position 24 was never traced. Merging by
+    # ordinal alone would file 24's arms under 8.
+    skewed = bh.parse_canary(write(
+        tmpdir, "canary-arms-skewed.txt", base +
+        "[bench] CANARY-ARMS 0:1000:1515 24:1000:1517 end:1000:1515\n"))
+    check("equal length is not enough -- the labels must agree too",
+          any("nop" in s for s in (skewed or {})["trace"]), False)
+
+    # An endpoint against a positioned sample is the same failure wearing a
+    # different label, and is the one an ordinal-only merge is likeliest to hit:
+    # a failed calibration records one endpoint instead of two.
+    edge_skew = bh.parse_canary(write(
+        tmpdir, "canary-arms-edge.txt", base +
+        "[bench] CANARY-ARMS 0:1000:1515 end:1000:1517 8:1000:1515\n"))
+    check("an endpoint may not merge onto a positioned sample",
+          any("nop" in s for s in (edge_skew or {})["trace"]), False)
+
+
+def test_canary_arms_absence_is_not_an_error(bh, tmpdir):
+    """Every canary record on disk predates the arms, so absence is the norm.
+
+    A reader must be able to tell "the arms were not recorded" from "the arms
+    were recorded and were equal". The first is 79 existing records; the second
+    would be a finding.
+    """
+    plain = write(tmpdir, "canary-arms-absent.txt",
+                  "[bench] CANARY 5 5 100 5 5 0 13 0 515 517\n"
+                  "[bench] CANARY-TRACE 0:5.15 end:5.15\n")
+    got = bh.parse_canary(plain)
+    check("a trace without arms keeps every sample",
+          len((got or {})["trace"]), 2)
+    check("and no sample claims an arm it does not have",
+          any("nop" in s or "store" in s for s in (got or {})["trace"]), False)
+
+    # Arms with no trace to attach to are dropped rather than stood up as a
+    # second, parallel sample list -- that would hand every consumer a second
+    # shape to handle for a case that does not occur in a whole log.
+    orphan = bh.parse_canary(write(
+        tmpdir, "canary-arms-orphan.txt",
+        "[bench] CANARY 5 5 100 5 5 0 13 0 515 517\n"
+        "[bench] CANARY-ARMS 0:1000:1515\n"))
+    check("arms without a trace create no trace key",
+          "trace" in (orphan or {}), False)
+    check("but the canary itself still parses",
+          (orphan or {}).get("pct"), 100)
+
+    # And arms before any canary have nothing to attach to at all.
+    check("arms with no canary at all yield no canary",
+          bh.parse_canary(write(tmpdir, "canary-arms-nocanary.txt",
+                                "[bench] CANARY-ARMS 0:1000:1515\n")), None)
+
+
+def test_arm_classification_separates_artefact_from_host(bh, tmpdir):
+    """The arms must sort excursions the derived value cannot tell apart.
+
+    Every value below is a real recorded arm pair from bench/history.jsonl on
+    2026-08-19, not a constructed one, because the whole claim is about what
+    actually occurs on this host. The reference is the modal quiet pair
+    nop=14156 store=19444.
+    """
+    ref = (14156, 19444)
+    c = lambda nop, store: bh.classify_arm_sample(
+        {"nop": nop, "store": store}, *ref)
+
+    check("the modal pair is quiet", c(14156, 19444), bh.ARM_QUIET)
+    check("and so is a pair a few cycles off it", c(14160, 19460), bh.ARM_QUIET)
+
+    # centi=579. store is bit-identical to the mode; nop alone fell 4.6%.
+    # No host state slows or speeds the nop loop without touching the store
+    # loop interleaved with it, so this is one lucky round in one arm.
+    check("a nop-only drop is an instrument artefact",
+          c(13506, 19444), bh.ARM_ARTEFACT)
+    # centi=477, the mirror case: a lucky store round, which *deflates* the
+    # reported figure and so masks contamination rather than inventing it.
+    check("a store-only drop is the same artefact, masking instead of alarming",
+          c(14158, 19044), bh.ARM_ARTEFACT)
+
+    # centi=504/506. Both arms fall by the same proportion: the measurement
+    # scaled uniformly, which moves the difference without anything being wrong.
+    check("both arms falling together is a uniform scaling",
+          c(13836, 19004), bh.ARM_SCALED)
+    check("...and it is still a scaling a few cycles either way",
+          c(13830, 19012), bh.ARM_SCALED)
+
+    # centi=641 and 766. Both arms up 34-45%: to lift a *minimum*, essentially
+    # every round of both arms must have been slower, which is a real host
+    # state and not something one lucky round can fake.
+    check("both arms rising together is a real host disturbance",
+          c(19466, 26040), bh.ARM_DISTURBED)
+    check("...at either observed magnitude", c(20320, 28170), bh.ARM_DISTURBED)
+
+    # A sample with no arms is not classifiable, and must say so rather than
+    # being lumped in with "quiet" -- 79 records on disk have no arms, and
+    # reading them as quiet would be a fabricated clean bill of health.
+    check("a sample with no arms classifies as None",
+          bh.classify_arm_sample({"centi": 516}, *ref), None)
+    check("...and so does one measured against no reference",
+          bh.classify_arm_sample({"nop": 1, "store": 2}, 0, 0), None)
+
+
+def test_arm_classification_uses_the_run_as_its_own_baseline(bh, tmpdir):
+    """The reference is per-run and is the median, not a stored constant.
+
+    The absolute arm totals are a property of this host and this build, so a
+    baked-in constant would go wrong the first time either changed. And it must
+    be the median rather than the mean: the mean is dragged by the very
+    excursions being classified, which is how a single +44% sample can make its
+    thirteen quiet neighbours look displaced.
+    """
+    # A whole run scaled to different absolute totals -- a faster host, or a
+    # different build -- must still read as quiet throughout.
+    scaled_run = [{"pos": i, "centi": 516, "nop": 7078, "store": 9722}
+                  for i in range(13)]
+    check("a run at wholly different absolute totals is still quiet",
+          set(bh.classify_canary_trace(scaled_run)), {bh.ARM_QUIET})
+
+    # One big excursion among twelve quiet samples. Against the mean the
+    # excursion would drag the reference up and mislabel the quiet ones.
+    trace = [{"pos": i, "centi": 516, "nop": 14156, "store": 19444}
+             for i in range(12)]
+    trace.append({"pos": 96, "centi": 766, "nop": 20320, "store": 28170})
+    got = bh.classify_canary_trace(trace)
+    check("the lone excursion is the only sample labelled disturbed",
+          got.count(bh.ARM_DISTURBED), 1)
+    check("...and it is the last one", got[-1], bh.ARM_DISTURBED)
+    check("...leaving every other sample quiet",
+          set(got[:-1]), {bh.ARM_QUIET})
+
+    # An unarmed trace yields a same-length list of None, so callers can zip it
+    # against the trace without a length check.
+    bare = [{"pos": 0, "centi": 516}, {"pos": 8, "centi": 517}]
+    check("an unarmed trace classifies as all-None, same length",
+          bh.classify_canary_trace(bare), [None, None])
+
+    # Mixed: a trace where only some samples carry arms still classifies the
+    # armed ones and reports None for the rest.
+    mixed = [{"pos": 0, "centi": 516, "nop": 14156, "store": 19444},
+             {"pos": 8, "centi": 516}]
+    check("an unarmed sample among armed ones is None, not quiet",
+          bh.classify_canary_trace(mixed), [bh.ARM_QUIET, None])
+
+
+def _trace(*pairs):
+    """Build a trace list from `(pos_or_edge, centi)` pairs."""
+    out = []
+    for pos, centi in pairs:
+        if isinstance(pos, str):
+            out.append({"pos": None, "centi": centi, "edge": pos})
+        else:
+            out.append({"pos": pos, "centi": centi})
+    return out
+
+
+def test_positional_model_separates_local_from_uniform(bh, tmpdir):
+    """The positional factor must be blind to a uniform slowdown and only that.
+
+    This is the property that makes the model complementary to `global_drift`
+    rather than a second, disagreeing estimate of the same thing. If the host
+    was uniformly dearer, `global_drift` is the right correction and this one
+    must contribute nothing; if a burst hit one stretch of the suite,
+    `global_drift` is the *wrong* correction -- it subtracts a median that the
+    burst barely moved -- and this one has to carry it.
+    """
+    flat = _trace((0, 500), (8, 500), (16, 500), (24, 500))
+    doubled = _trace((0, 1000), (8, 1000), (16, 1000), (24, 1000))
+    positions = {"a": 0, "b": 8, "c": 16, "d": 24}
+
+    check("a flat trace corrects nothing",
+          bh.positional_factors({"trace": flat}, positions),
+          {"a": 1.0, "b": 1.0, "c": 1.0, "d": 1.0})
+    check("a uniformly dear run also corrects nothing -- that is global_drift's",
+          bh.positional_factors({"trace": doubled}, positions),
+          {"a": 1.0, "b": 1.0, "c": 1.0, "d": 1.0})
+
+    # One sample 3x dear. The median is unmoved, so the burst shows up whole.
+    burst = _trace((0, 500), (8, 500), (16, 1500), (24, 500))
+    factors = bh.positional_factors({"trace": burst}, positions)
+    check("a burst is attributed to the position it landed on",
+          round(factors["c"], 3), 3.0)
+    check("and the benchmarks either side of it are untouched",
+          [factors["b"], factors["d"]], [1.0, 1.0])
+
+
+def test_positional_interpolation_and_its_refusals(bh, tmpdir):
+    """Between samples the model interpolates; outside them it declines to guess."""
+    trace = _trace((0, 400), (10, 400), (20, 800))
+
+    check("a benchmark sitting on a sample gets that sample's own value",
+          bh.interpolate_trace(trace, 10), 400.0)
+    check("one halfway between two samples gets the midpoint",
+          bh.interpolate_trace(trace, 15), 600.0)
+    check("and a quarter of the way gets a quarter of the rise",
+          bh.interpolate_trace(trace, 12), 480.0)
+
+    # Held flat outside the sampled span, not extrapolated. Extrapolation would
+    # invent its largest values exactly where there is least evidence.
+    check("before the first sample the model holds flat",
+          bh.interpolate_trace(trace, 0), 400.0)
+    check("after the last sample it holds flat too, rather than extrapolating",
+          bh.interpolate_trace(trace, 60), 800.0)
+
+    # Two samples define a line through both of themselves and can express no
+    # excursion at all, so the model refuses to be built on them.
+    check("two samples are not enough to build a positional model",
+          bh.interpolate_trace(_trace((0, 400), (10, 800)), 5), None)
+    check("...and yield no factors rather than a map of ones",
+          bh.positional_factors({"trace": _trace((0, 400), (10, 800))},
+                                {"a": 0, "b": 10}), {})
+    check("no trace at all yields no factors",
+          bh.positional_factors({}, {"a": 0}), {})
+    check("no position map yields no factors",
+          bh.positional_factors({"trace": trace}, {}), {})
+
+
+def test_positional_tail_uses_the_end_sample_only_when_it_is_identifiable(bh, tmpdir):
+    """The tail bracket is the end sample -- unless the labels cannot be trusted.
+
+    Mid-suite sampling stops at the last multiple of `CANARY_SAMPLE_EVERY`, so
+    the final few benchmarks of every suite lie past all positioned samples.
+    The `end` endpoint is their only right-hand bracket.
+
+    Both endpoints printed `end:` before the kernel gave them separate
+    sentinels, and with a failed calibration only one endpoint is recorded --
+    and it is the *end*, sitting in the slot a reader would take for the start.
+    So neither label nor ordinal identifies an endpoint in such a log, and the
+    model must fall back to holding flat rather than anchor the suite's tail to
+    a measurement that may predate the suite.
+    """
+    body = ((0, 500), (8, 500), (16, 500))
+    positions = {"a": 0, "b": 8, "c": 16, "d": 20, "e": 24}
+
+    labelled = _trace(*body, ("start", 500), ("end", 900))
+    check("the tail is bracketed by the end sample when it is named",
+          bh.interpolate_trace(labelled, 20, last_pos=24), 700.0)
+    check("and the benchmark at the very end reads the end sample itself",
+          bh.interpolate_trace(labelled, 24, last_pos=24), 900.0)
+    check("so the tail benchmarks carry a factor above 1",
+          [round(bh.positional_factors({"trace": labelled}, positions)[n], 2)
+           for n in ("c", "d", "e")], [1.0, 1.4, 1.8])
+
+    # The pre-change shape: two samples both claiming to be the end.
+    ambiguous = _trace(*body, ("end", 500), ("end", 900))
+    check("two samples claiming 'end' means the labels are untrustworthy",
+          bh.trace_edge(ambiguous, "end"), None)
+    check("...so the tail holds flat instead of guessing",
+          bh.interpolate_trace(ambiguous, 24, last_pos=24), 500.0)
+
+    # A start with no end must not be pressed into service as the tail.
+    check("a start sample is never used as the tail bracket",
+          bh.interpolate_trace(_trace(*body, ("start", 900)), 24, last_pos=24),
+          500.0)
+    check("the start sample is readable in its own right",
+          bh.trace_edge(_trace(*body, ("start", 900)), "start"), 900)
+
+    # Endpoints must stay out of the baseline: the start measures the host
+    # before a single benchmark has run, so it describes a moment the model
+    # makes no claim about.
+    check("endpoints do not enter the baseline median",
+          bh.trace_reference(_trace((0, 500), (8, 500), (16, 500),
+                                    ("start", 9000), ("end", 9000))), 500)
+
+
+def test_positional_attribution_is_silent_rather_than_reassuring(bh, tmpdir):
+    """With no model, the report says nothing -- it never prints an empty finding.
+
+    The distinction has teeth because of when this line is read. It sits
+    directly under a CONTAMINATED verdict, and a reader who has just been told
+    the run is untrustworthy is looking for something to narrow it down. An
+    empty "affected benchmarks:" list would answer that question with
+    "apparently none", which is the same class of error as the canary that
+    certified nine runs clean while measuring nothing.
+    """
+    positions = {"a": 0, "b": 8, "c": 16, "d": 24}
+    quiet = _trace((0, 500), (8, 500), (16, 500), (24, 500))
+    burst = _trace((0, 500), (8, 500), (16, 1500), (24, 500))
+
+    out, _ = capture(bh.report_positional_attribution, {"trace": burst},
+                     positions)
+    check("a burst names the benchmarks in its interval", "c" in out, True)
+    check("...with the factor that reached them", "3.00x" in out, True)
+    check("...and the resolution caveat, every time",
+          "not ones shown to be affected" in out, True)
+
+    out, _ = capture(bh.report_positional_attribution, {"trace": quiet},
+                     positions)
+    check("a quiet trace says so explicitly", "no stretch of the suite" in out,
+          True)
+
+    # No trace, no model, no output. Not "0 benchmarks affected".
+    out, ret = capture(bh.report_positional_attribution, {}, positions)
+    check("no trace prints nothing at all", out.strip(), "")
+    check("...and returns no flagged set", ret, {})
+    out, _ = capture(bh.report_positional_attribution,
+                     {"trace": _trace((0, 500), (8, 900))}, {"a": 0, "b": 8})
+    check("too few samples prints nothing either", out.strip(), "")
+
+
 def test_canary_broken_is_not_contamination(bh, tmpdir):
     """A failed measurement must not be reported as a busy host.
 
@@ -427,6 +945,168 @@ def test_canary_broken_is_not_contamination(bh, tmpdir):
                bh.CANARY_CLEAN}), 4)
 
 
+def test_the_resolution_floor_is_applied_in_the_records_own_unit(bh, tmpdir):
+    """A fast guest must not be mistaken for a dead instrument.
+
+    This is the regression test for
+    B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT. The kernel's
+    resolution floor was derived when the per-access figure was a whole number
+    of cycles and was never re-derived when `CENTI` made it hundredths, so it
+    rejected deltas 100x larger than its own justification supported. Under TCG
+    that is invisible (~5.0 cycles clears a 0.04-cycle bound 125x over); under
+    WHPX it is total (~0.87 cycles, refused outright), and all six arms of the
+    2026-08-19 WHPX layout sweep recorded `samples: 0, invalid: 13`.
+
+    This file had the mirror of the same defect: it judged `min`, which is
+    rounded to whole cycles, against the whole-cycle bound. A real 0.87
+    cycles/access rounds to `min == 0`, which is bit-for-bit what a dead
+    instrument writes. Fixing only the kernel would have moved the failure here
+    and changed nothing observable -- the sweep would still have been
+    ungradeable, for a freshly-stated reason.
+    """
+    v = bh.canary_verdict
+
+    # Both bounds are derived from the tolerance, not chosen, and they are
+    # numerically EQUAL while meaning different things -- 4 cycles and 4
+    # centicycles. That coincidence is why the kernel bug survived: the constant
+    # still looked right after its unit changed underneath it. Asserting the
+    # derivation rather than the number is what keeps the two independent.
+    check("the whole-cycle bound follows from the tolerance",
+          bh.CANARY_MIN_RESOLVABLE, math.ceil(100 / bh.CANARY_TOLERANCE_PCT))
+    check("the centicycle bound follows from the same tolerance",
+          bh.CANARY_MIN_RESOLVABLE_CENTI,
+          math.ceil(100 / bh.CANARY_TOLERANCE_PCT))
+
+    # 1. TCG scale: ~5.04 cycles/access. The case that always worked, kept as
+    #    the control -- a fix that broke this would be trading one platform for
+    #    the other.
+    tcg = {"start": 5, "end": 5, "pct": 100, "min": 5, "max": 5, "spread": 1,
+           "samples": 12, "invalid": 0, "min_centi": 504, "max_centi": 509}
+    check("a TCG-scale record is clean", v(tcg), bh.CANARY_CLEAN)
+
+    # 2. WHPX scale: 0.87 cycles/access, so `min` rounds to 0 while `min_centi`
+    #    carries the real figure. THIS is the case that was broken.
+    whpx = {"start": 0, "end": 0, "pct": 100, "min": 0, "max": 0, "spread": 3,
+            "samples": 12, "invalid": 0, "min_centi": 87, "max_centi": 90}
+    check("a WHPX-scale record is clean, not broken", v(whpx), bh.CANARY_CLEAN)
+    check("...and is not blamed on the host either",
+          bh.canary_is_contaminated(whpx), False)
+    # The whole point: the rounded field alone cannot tell these apart.
+    dead = dict(whpx, min_centi=0, max_centi=0, spread=0)
+    check("a genuinely dead instrument at the same `min` is still broken",
+          v(dead), bh.CANARY_BROKEN)
+    # The same unit bug a THIRD time, in the zero-start fallback. `start` is
+    # rounded to whole cycles too, so a WHPX endpoint of 0.87 cycles writes
+    # `start = 0` -- which the pre-`invalid` heuristic reads as a failed endpoint
+    # measurement. That inference is only available when the record does not
+    # count its own failures, and the two cases must stay separable.
+    check("a legacy record with no failure count still falls back on start",
+          v({"start": 0, "end": 200, "pct": 0}), bh.CANARY_BROKEN)
+    check("...but a record that counted its own failures is judged by that",
+          v(dict(whpx, start=0, end=0, invalid=0)), bh.CANARY_CLEAN)
+    check("...including when the count is non-zero",
+          v(dict(whpx, start=0, end=0, invalid=2)), bh.CANARY_BROKEN)
+
+    # 3. A pre-`CENTI` record has no centicycle extremes, so the whole-cycle
+    #    bound must still govern it. Relaxing that would re-admit the 15:57 and
+    #    16:16 release records the constant exists to reject.
+    historical = {"start": 3, "end": 3, "pct": 100, "min": 3, "max": 3,
+                  "spread": 0, "samples": 10}
+    check("a pre-CENTI record is still judged in whole cycles",
+          v(historical), bh.CANARY_BROKEN)
+
+    # 4. The centicycle boundary, from both sides.
+    #
+    #    DEVIATION from build/canary-fix-plan.md, which put this boundary at
+    #    `CANARY_MIN_RESOLVABLE_CENTI` itself. That was one quantum short. The
+    #    spread is `(hi - lo) / lo` across two independently-quantised samples,
+    #    so it carries a quantum from each end: at a minimum of `m` centi, the
+    #    worst case is `200/m` percent, not `100/m`. The whole-cycle branch has
+    #    reasoned that way since P18 measured it; the plan simply did not carry
+    #    the doubling down with the unit. Numerically it changes no record yet
+    #    written -- TCG resolves ~500 centi and WHPX ~87, against a bound of 8.
+    bound = 2 * bh.CANARY_MIN_RESOLVABLE_CENTI
+    quiet = {"start": 1, "end": 1, "pct": 100, "min": 0, "max": 0, "spread": 0,
+             "samples": 9, "invalid": 0}
+    check("exactly at the doubled centicycle bound, a verdict is supportable",
+          v(dict(quiet, min_centi=bound, max_centi=bound)), bh.CANARY_CLEAN)
+    check("one centicycle under it, it is not",
+          v(dict(quiet, min_centi=bound - 1, max_centi=bound)),
+          bh.CANARY_BROKEN)
+
+    # 5. The whole-cycle boundary, with the control that says WHICH bound
+    #    rejected it. `min = CANARY_MIN_RESOLVABLE` clears the single-quantum
+    #    test and is caught by the doubled one; `min = 2 *` clears both. Without
+    #    the second assertion a future change could delete either bound and this
+    #    test would go on passing on the strength of the other.
+    check("a whole-cycle record at the single bound is caught by the doubling",
+          v(dict(quiet, min=bh.CANARY_MIN_RESOLVABLE,
+                 max=bh.CANARY_MIN_RESOLVABLE)),
+          bh.CANARY_BROKEN)
+    check("...and at twice it, both bounds are satisfied",
+          v(dict(quiet, min=2 * bh.CANARY_MIN_RESOLVABLE,
+                 max=2 * bh.CANARY_MIN_RESOLVABLE)),
+          bh.CANARY_CLEAN)
+
+
+def test_below_floor_failures_do_not_hide_an_excursion(bh, tmpdir):
+    """A sample refused for being *small* cannot have been the big thing.
+
+    `invalid` counts every reference measurement that produced no per-access
+    figure, and the UNKNOWN verdict rests on "a failed sample is not a quiet one
+    -- it could have been the excursion". That argument holds for a sample whose
+    arms inverted and fails for one that resolved a cost below the instrument's
+    floor: an excursion is *large* and would have cleared the floor comfortably.
+
+    Without this split, correcting the kernel's floor would have bought nothing.
+    Every WHPX run would have gone on being ungradeable -- not because it
+    measured nothing, but because the leftover rejections still counted against
+    it.
+    """
+    v = bh.canary_verdict
+
+    # The eleventh wire field, and the tenth-field line that predates it.
+    eleven = bh.parse_canary(write(
+        tmpdir, "canary-below-floor.txt",
+        "[bench] CANARY 5 5 100 5 5 1 9 4 504 509 4\n"))
+    check("the below_floor count parses", eleven.get("below_floor"), 4)
+    ten = bh.parse_canary(write(
+        tmpdir, "canary-no-below-floor.txt",
+        "[bench] CANARY 5 5 100 5 5 1 9 4 504 509\n"))
+    # ABSENCE, not zero. A record written before the kernel could tell the two
+    # failure kinds apart has failures of genuinely unknown kind; storing 0
+    # would assert they were all separation failures, which nobody measured.
+    check("an older record carries no below_floor key at all",
+          "below_floor" in ten, False)
+    check("...and is judged as though its failures could have hidden something",
+          v(ten), bh.CANARY_BROKEN)
+
+    # All four failures accounted for as below-floor: nothing is left that could
+    # have hidden an excursion, so the quiet samples are allowed to speak.
+    check("failures that were all below-floor do not veto a quiet spread",
+          v(eleven), bh.CANARY_CLEAN)
+    # One unaccounted-for failure is enough to put it back to UNKNOWN.
+    check("a single unresolved failure among them still does",
+          v(dict(eleven, below_floor=3)), bh.CANARY_BROKEN)
+
+    # Nothing measured at all outranks the split entirely -- this is the exact
+    # shape of all six 2026-08-19 WHPX sweep arms, and it stays BROKEN. The fix
+    # stops such a run happening; it does not retroactively grade one.
+    check("zero valid samples is broken even when every failure is explained",
+          v({"start": 0, "end": 0, "pct": 0, "min": 0, "max": 0, "spread": 0,
+             "samples": 0, "invalid": 13, "below_floor": 13}),
+          bh.CANARY_BROKEN)
+
+    # And a measured over-tolerance spread still outranks both: below-floor
+    # rejections are evidence for neither side, so they must not soften a
+    # positive finding into an UNKNOWN.
+    check("an over-tolerance spread is contamination whatever the failures were",
+          v({"start": 5, "end": 9, "pct": 180, "min": 5, "max": 9,
+             "spread": 62, "samples": 9, "invalid": 4, "below_floor": 4,
+             "min_centi": 504, "max_centi": 820}),
+          bh.CANARY_CONTAMINATED)
+
+
 def test_dispersion(bh, tmpdir):
     """A benchmark's own mean/min catches stalls the canary certifies as clean.
 
@@ -497,23 +1177,37 @@ def test_profile_isolation(bh, tmpdir):
     # The load-bearing case: a release run must NOT pick up a debug baseline,
     # even though it is the most recent record for this host.
     check("a release run finds no baseline among debug-only records",
-          bh.previous_for_host([debug_old, debug_new], "H", "release"), None)
+          bh.previous_for_host([debug_old, debug_new], "H", "release", None),
+          None)
     check("a debug run does not pick up a release baseline",
-          bh.previous_for_host([debug_old, release], "H", "debug"), debug_old)
+          bh.previous_for_host([debug_old, release], "H", "debug", None),
+          debug_old)
     check("a release run finds the release record past a later debug one",
-          bh.previous_for_host([release, debug_new], "H", "release"), release)
+          bh.previous_for_host([release, debug_new], "H", "release", None),
+          release)
     check("legacy profile-less records are still matched by a debug run",
-          bh.previous_for_host([debug_old], "H", "debug"), debug_old)
+          bh.previous_for_host([debug_old], "H", "debug", None), debug_old)
     check("the host filter still applies within a profile",
-          bh.previous_for_host([other_host], "H", "release"), None)
+          bh.previous_for_host([other_host], "H", "release", None), None)
     check("the newest same-profile record wins",
-          bh.previous_for_host([debug_old, debug_new], "H", "debug"), debug_new)
+          bh.previous_for_host([debug_old, debug_new], "H", "debug", None),
+          debug_new)
 
-    # The default must stay "debug" so an old caller that passes no --profile
-    # keeps comparing against the legacy records rather than silently finding
-    # nothing.
-    check("the profile argument defaults to debug",
-          bh.previous_for_host([debug_old], "H"), debug_old)
+    # Neither window selector may be defaulted. `profile` used to default to
+    # `debug`, on the reasoning that an old caller passing no --profile should
+    # keep finding the legacy records. There is no such caller, and a selector
+    # that silently picks a population when the caller forgets to name one is
+    # the exact failure the accelerator filter was added to prevent: on this
+    # host the unnamed accelerator bucket holds sixty runs, so the wrong answer
+    # looks like a full and healthy history.
+    for fn in (bh.previous_for_host, bh.comparable_records):
+        try:
+            fn([debug_old], "H", "debug")
+        except TypeError:
+            pass
+        else:
+            check(fn.__name__ + " must not default its accelerator",
+                  False, True)
 
 
 def test_missing_log(bh, tmpdir):
@@ -613,7 +1307,8 @@ def _run_position(bh, records, current, previous, host="h", profile="debug"):
     import contextlib
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        bh.report_run_position(records, host, profile, current, previous)
+        bh.report_run_position(records, host, profile, None, current,
+                               previous)
     return buf.getvalue()
 
 
@@ -1191,10 +1886,12 @@ def test_loaded_control_runs_are_never_a_baseline(bh):
     records = [good_old, control, good_new]
 
     check("a loaded control is excluded from the comparable window",
-          [r["commit"] for r in bh.comparable_records(records, "H", "release")],
+          [r["commit"] for r in
+           bh.comparable_records(records, "H", "release", None)],
           ["old", "new"])
     check("the previous-run baseline skips it",
-          bh.previous_for_host(records[:2], "H", "release")["commit"], "old")
+          bh.previous_for_host(records[:2], "H", "release", None)["commit"],
+          "old")
     check("an unlabelled record is still comparable",
           bh.record_host_load(good_old), bh.HOST_LOAD_UNKNOWN)
     check("a nonsense label reads as unknown rather than crashing",
@@ -1487,14 +2184,14 @@ def test_level_shift_catches_a_regression_the_other_checks_cannot_see(bh):
     stable = [1000] * 6
     # Eleven prior runs: eight flat (the reference), then three elevated.
     persisted = _shift_history(bh, stable + [1000, 1000] + [3000, 3000])
-    rows = bh.level_shifts(persisted, "H", "release",
+    rows = bh.level_shifts(persisted, "H", "release", None,
                            dict(persisted[-1]["entries"], v=3000))
     names = [r[0] for r in rows]
     check("a step that persisted is reported", names, ["v"])
 
     # Same current value, but the run before it was back at baseline.
     blipped = _shift_history(bh, stable + [1000, 1000] + [1000, 1000])
-    rows = bh.level_shifts(blipped, "H", "release",
+    rows = bh.level_shifts(blipped, "H", "release", None,
                            dict(blipped[-1]["entries"], v=3000))
     check("a one-run excursion of the same size is not",
           [r[0] for r in rows], [])
@@ -1502,13 +2199,13 @@ def test_level_shift_catches_a_regression_the_other_checks_cannot_see(bh):
     # And a flat history reports nothing at all.
     flat = _shift_history(bh, stable + [1000] * 4)
     check("a flat history is silent",
-          bh.level_shifts(flat, "H", "release",
+          bh.level_shifts(flat, "H", "release", None,
                           dict(flat[-1]["entries"], v=1000)), [])
 
     # Too little history is silence, not a finding: same rule as the bands.
     thin = _shift_history(bh, [1000, 1000, 1000])
     check("too little history cannot manufacture a shift",
-          bh.level_shifts(thin, "H", "release",
+          bh.level_shifts(thin, "H", "release", None,
                           dict(thin[-1]["entries"], v=9999)), [])
 
     # The percent threshold, pinned deliberately, because on the recorded
@@ -1522,9 +2219,9 @@ def test_level_shift_catches_a_regression_the_other_checks_cannot_see(bh):
     small = _shift_history(bh, stable + [1000, 1000] + [1100, 1100])
     current = dict(small[-1]["entries"], v=1100)
     check("a persistent move below the threshold is not reported",
-          bh.level_shifts(small, "H", "release", current), [])
+          bh.level_shifts(small, "H", "release", None, current), [])
     check("...and the same move is reported once the threshold allows it",
-          [r[0] for r in bh.level_shifts(small, "H", "release", current,
+          [r[0] for r in bh.level_shifts(small, "H", "release", None, current,
                                          threshold_pct=5.0)], ["v"])
 
 
@@ -1576,6 +2273,7 @@ def test_level_shift_replays_the_real_history_without_crying_wolf(bh):
     for i, record in enumerate(records):
         rows = bh.level_shifts(records[:i], record.get("host"),
                                bh.record_profile(record),
+                               bh.record_accel(record),
                                record.get("entries", {}))
         if rows:
             fired.append((i, [r[0] for r in rows]))
@@ -1780,7 +2478,7 @@ def test_mode_structure_separates_binaries_from_runs(bh):
         ("aaa", 6000), ("aaa", 6200),      # always below
         ("bbb", 11000), ("bbb", 12500),    # always above
     ])
-    verdict = bh.mode_structure(structured, "H", "release", "b", 7500)
+    verdict = bh.mode_structure(structured, "H", "release", None, "b", 7500)
     check("a split no repeat crosses is mode-structured",
           verdict.verdict, bh.MODE_STRUCTURED)
     check("...and it names both sides",
@@ -1791,7 +2489,7 @@ def test_mode_structure_separates_binaries_from_runs(bh):
         ("aaa", 6000), ("aaa", 6200),
         ("bbb", 6500), ("bbb", 12500),     # same commit, both sides
     ])
-    verdict = bh.mode_structure(noisy, "H", "release", "b", 7500)
+    verdict = bh.mode_structure(noisy, "H", "release", None, "b", 7500)
     check("a single commit spanning the split is run noise",
           verdict.verdict, bh.MODE_RUN_NOISE)
 
@@ -1811,14 +2509,14 @@ def test_mode_structure_abstains_without_evidence(bh):
     """
     single = _mode_records([("aaa", 6000), ("bbb", 12000)])
     check("one measurement per commit decides nothing",
-          bh.mode_structure(single, "H", "release", "b", 7500).verdict,
+          bh.mode_structure(single, "H", "release", None, "b", 7500).verdict,
           bh.MODE_UNDECIDED)
 
     one_sided = _mode_records([
         ("aaa", 6000), ("aaa", 6200),
         ("bbb", 6100), ("bbb", 6300),
     ])
-    verdict = bh.mode_structure(one_sided, "H", "release", "b", 7500)
+    verdict = bh.mode_structure(one_sided, "H", "release", None, "b", 7500)
     check("repeats all on one side decide nothing", verdict.verdict,
           bh.MODE_UNDECIDED)
     # Guard: this really is the one-sided shape, not an empty-repeats accident.
@@ -1831,7 +2529,7 @@ def test_mode_structure_abstains_without_evidence(bh):
               {"host": "H", "profile": "debug", "commit": "bbb",
                "entries": {"b": 12400}}]
     check("another profile's repeats are not evidence here",
-          bh.mode_structure(mixed, "H", "release", "b", 7500).verdict,
+          bh.mode_structure(mixed, "H", "release", None, "b", 7500).verdict,
           bh.MODE_UNDECIDED)
 
 
@@ -1854,7 +2552,8 @@ def test_mode_structure_on_the_real_history(bh):
         return
 
     http = bh.mode_structure(
-        records, "Logoplex3", "release", "http_build_response_1KiB", 7500)
+        records, "Logoplex3", "release", None,
+        "http_build_response_1KiB", 7500)
     check("the real bimodal series is mode-structured",
           http.verdict, bh.MODE_STRUCTURED)
     # Guard: the verdict must rest on real repeat evidence, not on an empty set.
@@ -1862,7 +2561,7 @@ def test_mode_structure_on_the_real_history(bh):
           len(http.repeats) >= 3, True)
 
     vfs = bh.mode_structure(
-        records, "Logoplex3", "release", "vfs_stat_root", 4200)
+        records, "Logoplex3", "release", None, "vfs_stat_root", 4200)
     check("the continuously-spread series is NOT mode-structured",
           vfs.verdict == bh.MODE_STRUCTURED, False)
 
@@ -1884,7 +2583,8 @@ def test_mode_split_search_finds_what_a_fixed_fence_misses(bh):
     if not records:
         check("the frozen history fixture is present", False, True)
         return
-    args = (records, "Logoplex3", "release", "http_build_response_1KiB")
+    args = (records, "Logoplex3", "release", None,
+            "http_build_response_1KiB")
 
     # Guard: the fence really must give the wrong answer, or this test is
     # asserting nothing and would keep passing if the search were deleted.
@@ -1903,7 +2603,7 @@ def test_mode_split_search_finds_what_a_fixed_fence_misses(bh):
 
     # A series that is not mode-structured must yield no split at all.
     none_found = bh.mode_split_search(
-        records, "Logoplex3", "release", "vfs_stat_root", 3600, 4488)
+        records, "Logoplex3", "release", None, "vfs_stat_root", 3600, 4488)
     check("no split is invented for a non-bimodal series",
           none_found, None)
 
@@ -1965,7 +2665,8 @@ def _repl_history(bh, earlier, earlier_commit, earlier_profile="release",
     return [first] + rest
 
 
-def _repl_report(bh, history, current_b0, commit):
+def _repl_report(bh, history, current_b0, commit,
+                 changed_files=None, bench_subsystems=None):
     """Run `report()` over `history` with `b0` at `current_b0`. -> (out, failed)."""
     import io
     import contextlib
@@ -1977,7 +2678,9 @@ def _repl_report(bh, history, current_b0, commit):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         failed = bh.report(previous, current, 25.0, records=history, host="H",
-                           profile="release", commit=commit)
+                           profile="release", commit=commit,
+                           changed_files=changed_files,
+                           bench_subsystems=bench_subsystems)
     return buf.getvalue(), failed
 
 
@@ -2024,8 +2727,23 @@ def test_replication_promotes_what_every_run_of_the_commit_shows(bh):
 
     check("a replicated movement fails the build", failed, True)
     check("...and gets the confirmed heading", "  REGRESSED (" in out, True)
-    check("...which says what was replicated",
-          "every recorded run of this commit shows it" in out, True)
+    # "image", not "commit". The gate is `same_image`, and its own docstring
+    # says keying it on the commit made it blind to the very re-run it asks the
+    # reader to perform -- so a heading saying "commit" describes a check this
+    # harness deliberately does not implement.
+    check("...which says what was replicated, in the unit it was replicated in",
+          "every recorded run of this same kernel image shows it" in out, True)
+    check("...and does not claim the commit was that unit",
+          "every recorded run of this commit" in out, False)
+    # The heading is the strongest label the harness emits, and it must not read
+    # as "confirmed as a code effect". Replication is a within-image test while
+    # the comparison it decorates is between two *different* images, so a
+    # relinking artifact -- being deterministic -- replicates exactly as
+    # perfectly as a real regression and arrives wearing this same heading.
+    check("...and says what replication does NOT rule out",
+          "'replicated' rules out noise, not layout" in out, True)
+    check("...and names the check that settles it",
+          "straddle-check.py --compare" in out, True)
     check("...and is not withdrawn", "NOT REPLICATED" in out, False)
 
 
@@ -2078,13 +2796,208 @@ def test_replication_evidence_must_be_the_same_binary_on_the_same_terms(bh):
     check("another host's run is not evidence here", failed, True)
 
     # And the unit-level statement of the same rule, so a refactor that moves
-    # the filtering out of `values_for_commit` is caught here too.
+    # the filtering out of `values_for_binary` is caught here too.
     history = _repl_history(bh, 500, "xxx")
-    check("values_for_commit finds the repeat",
-          bh.values_for_commit(history, "H", "release", "b0", "xxx"), [500])
+    check("values_for_binary finds the repeat",
+          bh.values_for_binary(history, "H", "release", None, "b0",
+                               {"commit": "xxx"}), [500])
     check("...and refuses to match the unknown sentinel",
-          bh.values_for_commit(history, "H", "release", "b0",
-                               bh.UNKNOWN_COMMIT), [])
+          bh.values_for_binary(history, "H", "release", None, "b0",
+                               {"commit": bh.UNKNOWN_COMMIT}), [])
+    check("...and refuses to match on no identity at all",
+          bh.values_for_binary(history, "H", "release", None, "b0", None),
+          [])
+
+
+def test_binary_identity_is_the_image_not_the_commit(bh, tmpdir):
+    """The gate must key on the kernel image, because the commit both over-
+    and under-identifies it.
+
+    This is a measured failure, not a hypothetical. On 2026-08-19 a run flagged
+    `page_alloc_zeroed_free` +83% as REGRESSED, UNREPLICATED and printed its
+    standard advice: re-run WITHOUT rebuilding to confirm. That was done --
+    `--no-build --no-stage`, a byte-identical image -- but a commit had been
+    made in between, so the re-run was filed under a new commit. The gate,
+    keyed on commit, could not see the confirmation; the A/A banner, keyed on
+    commit, stayed silent; and the re-run was instead judged as a fresh
+    commit's first measurement, manufacturing four new "REGRESSED,
+    UNREPLICATED" claims (`sched_pick_next_d1` +62%, `vfs_stat_breakdown_ns`
+    +45%, both gzip benchmarks ~+30%) out of an image that had not changed by
+    one byte.
+
+    The converse holds too and is in the same record: the flagged run carried
+    `dirty: true`, so its commit label named a tree that was never built. Two
+    such runs share a label while measuring different code.
+    """
+    sha_a, sha_b = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
+
+    check("the hash wins when present",
+          bh.binary_identity({"kernel_sha": sha_a, "commit": "c1"}),
+          f"sha:{sha_a}")
+    check("...even on a dirty tree, which is the case it exists for",
+          bh.binary_identity({"kernel_sha": sha_a, "commit": "c1",
+                              "dirty": True}), f"sha:{sha_a}")
+    check("a clean commit still identifies a legacy record",
+          bh.binary_identity({"commit": "c1"}), "commit:c1")
+    check("a dirty commit identifies nothing -- its tree was never built",
+          bh.binary_identity({"commit": "c1", "dirty": True}), None)
+    check("an unreadable HEAD identifies nothing",
+          bh.binary_identity({"commit": bh.UNKNOWN_COMMIT}), None)
+    check("and neither does a record with no fields at all",
+          bh.binary_identity({}), None)
+
+    # The two directions the commit gets wrong, stated through the relation the
+    # rest of the gate is built on. Note these are *not* expressible as an
+    # equality between the identity strings above in every case -- which is why
+    # `same_image` exists and is what the gate calls.
+    check("one image under two commits is one binary",
+          bh.same_image({"kernel_sha": sha_a, "commit": "c1"},
+                        {"kernel_sha": sha_a, "commit": "c2"}), True)
+    check("two images under one commit are not",
+          bh.same_image({"kernel_sha": sha_a, "commit": "c1"},
+                        {"kernel_sha": sha_b, "commit": "c1"}), False)
+
+    # The transition case, and the reason identity cannot be a string: a hashed
+    # run against a legacy record of the same clean commit. Neither `sha:` nor
+    # `commit:` label matches the other, yet they are the same image and the
+    # history is full of the unhashed side.
+    check("a hashed run matches an older unhashed run of the same clean commit",
+          bh.same_image({"commit": "c1"},
+                        {"kernel_sha": sha_a, "commit": "c1"}), True)
+    check("...in either order -- the relation is symmetric",
+          bh.same_image({"kernel_sha": sha_a, "commit": "c1"},
+                        {"commit": "c1"}), True)
+    check("...but a dirty unhashed run matches nothing, hashed or not",
+          bh.same_image({"commit": "c1", "dirty": True},
+                        {"kernel_sha": sha_a, "commit": "c1"}), False)
+    # Asymmetric in strength, not in argument order: two hashes settle the
+    # question between themselves and a commit label cannot overrule them. This
+    # project has measured function *placement* moving a benchmark several-fold
+    # with identical source, so "same commit" is not a licence to ignore a hash.
+    check("two differing hashes are not rescued by a matching clean commit",
+          bh.same_image({"kernel_sha": sha_a, "commit": "c1"},
+                        {"kernel_sha": sha_b, "commit": "c1"}), False)
+    check("two unidentifiable records are never the same image",
+          bh.same_image({"commit": "c1", "dirty": True},
+                        {"commit": "c1", "dirty": True}), False)
+    check("and neither are two unreadable HEADs",
+          bh.same_image({"commit": bh.UNKNOWN_COMMIT},
+                        {"commit": bh.UNKNOWN_COMMIT}), False)
+
+    # Unidentifiable must never match unidentifiable. `values_for_binary` is
+    # where that would leak, because None is a perfectly good dict value.
+    unknowns = [{"host": "H", "profile": "release", "commit": "c1",
+                 "dirty": True, "entries": {"b0": 500}}]
+    check("two unidentifiable runs are not evidence about each other",
+          bh.values_for_binary(unknowns, "H", "release", None, "b0",
+                               {"commit": "c1", "dirty": True}), [])
+    check("...and no `this_run` at all finds nothing rather than everything",
+          bh.values_for_binary(unknowns, "H", "release", None, "b0", None),
+          [])
+
+    # And the hash itself: same bytes, same value; different bytes, different.
+    one = os.path.join(tmpdir, "k1")
+    two = os.path.join(tmpdir, "k2")
+    three = os.path.join(tmpdir, "k3")
+    with open(one, "wb") as handle:
+        handle.write(b"kernel-image-bytes")
+    with open(two, "wb") as handle:
+        handle.write(b"kernel-image-bytes")
+    with open(three, "wb") as handle:
+        handle.write(b"kernel-image-byteS")
+    check("identical images hash alike", bh.kernel_sha(one), bh.kernel_sha(two))
+    check("a one-bit difference does not",
+          bh.kernel_sha(one) == bh.kernel_sha(three), False)
+    check("an unreadable image is 'unknown', not a shared sentinel",
+          bh.kernel_sha(os.path.join(tmpdir, "no-such-kernel")), None)
+
+
+def test_a_no_rebuild_rerun_confirms_across_a_commit(bh):
+    """End to end: the re-run the gate asks for is counted even if HEAD moved.
+
+    The regression this locks down is the whole point of `binary_identity`. Two
+    records of one image, different commits: the second must be recognised as
+    an A/A comparison and must not fail the build. Before the fix this printed
+    a regression.
+    """
+    import io
+    import contextlib
+
+    sha = "0123456789abcdef"
+    stable = {f"b{i}": 1000 for i in range(1, 20)}
+    history = [{"host": "H", "profile": "release", "commit": f"h{i}",
+                "kernel_sha": f"old{i:012d}", "entries": dict(stable, b0=value)}
+               for i, value in enumerate(_QUIET)]
+    # The flagged run: this image's first appearance, filed under a dirty tree.
+    history.append({"host": "H", "profile": "release", "commit": "c1",
+                    "dirty": True, "kernel_sha": sha,
+                    "entries": dict(stable, b0=500)})
+
+    previous = history[-1]
+    current = {name: (value, 10000, "OK", None, None)
+               for name, value in previous["entries"].items()}
+    current["b0"] = (3000, 10000, "OK", None, None)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        failed = bh.report(previous, current, 25.0, records=history, host="H",
+                           profile="release", commit="c2",
+                           this_run={"kernel_sha": sha, "commit": "c2"})
+    out = buf.getvalue()
+    check("a no-rebuild re-run across a commit is seen as A/A",
+          "A/A COMPARISON" in out, True)
+    check("...and names the image rather than the commit",
+          f"sha:{sha}" in out, True)
+    check("...and does not fail the build", failed, False)
+
+    # The same pair without hashes -- a legacy record -- must not claim A/A,
+    # but must not let the reader infer it from the header's matching commit
+    # either.
+    legacy_prev = {"host": "H", "profile": "release", "commit": "c1",
+                   "dirty": True, "entries": dict(stable, b0=500)}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(legacy_prev, current, 25.0, records=history + [legacy_prev],
+                  host="H", profile="release", commit="c1",
+                  this_run={"commit": "c1", "dirty": True})
+    out = buf.getvalue()
+    check("an unhashed dirty pair is not called A/A",
+          "A/A COMPARISON" in out, False)
+    check("...but the reader is told the image is unknown",
+          "SAME COMMIT" in out and "UNKNOWN IMAGE" in out, True)
+
+    # The third state, which is neither A/A nor unknown: both sides hashed,
+    # hashes differ, commit label the same. That is *known different* code, and
+    # calling it "unknown" would understate what the record says.
+    hashed_prev = {"host": "H", "profile": "release", "commit": "c1",
+                   "kernel_sha": "ffffffffffffffff",
+                   "entries": dict(stable, b0=500)}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(hashed_prev, current, 25.0, records=history + [hashed_prev],
+                  host="H", profile="release", commit="c1",
+                  this_run={"kernel_sha": sha, "commit": "c1"})
+    out = buf.getvalue()
+    check("two hashed runs of one commit that differ are not called A/A",
+          "A/A COMPARISON" in out, False)
+    check("...nor merely unknown -- the record says they differ",
+          "DIFFERENT IMAGE" in out and "UNKNOWN IMAGE" not in out, True)
+    check("...and both hashes are named so the reader can check",
+          "ffffffffffffffff" in out and sha in out, True)
+
+    # A legacy pair with no hashes and a *clean* commit is still A/A: that is
+    # the entire pre-hash history, and refusing to judge it would retire the
+    # check on every record written before today.
+    clean_prev = {"host": "H", "profile": "release", "commit": "c1",
+                  "entries": dict(stable, b0=500)}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report(clean_prev, current, 25.0, records=history + [clean_prev],
+                  host="H", profile="release", commit="c1",
+                  this_run={"commit": "c1"})
+    out = buf.getvalue()
+    check("two clean unhashed runs of one commit are still A/A",
+          "A/A COMPARISON" in out, True)
 
 
 def test_an_aa_comparison_is_named_and_cannot_fail_the_build(bh):
@@ -2103,7 +3016,13 @@ def test_an_aa_comparison_is_named_and_cannot_fail_the_build(bh):
 
     check("an A/A comparison cannot fail the build", failed, False)
     check("...and says so before any list", "A/A COMPARISON" in out, True)
-    check("...naming the shared commit", "SAME commit (xxx)" in out, True)
+    # Named as an *image*, and the identity printed is the one the gate keyed
+    # on -- here derived from the commit, because these legacy-shaped records
+    # carry no hash. The wording matters: "same commit" was the claim that was
+    # wrong in both directions (see `binary_identity`), so the banner must not
+    # go on making it.
+    check("...naming the shared image", "SAME kernel image (commit:xxx)" in out,
+          True)
     check("...and pointing at the measurement",
           "5 of 83 benchmarks" in out, True)
 
@@ -2114,6 +3033,120 @@ def test_an_aa_comparison_is_named_and_cannot_fail_the_build(bh):
     check("an ordinary comparison is not called A/A",
           "A/A COMPARISON" in out, False)
     check("...and still fails the build", failed, True)
+
+
+def test_an_aa_comparison_prints_no_verdict_heading_at_all(bh):
+    """The A/A banner and a `REGRESSED` list may not be emitted together.
+
+    Both were, and the heading won. On 2026-08-19 `lock_uncontended` was written
+    up as `REGRESSED ... replicated` out of a run whose own banner, four lines
+    above, said no movement in it could have been caused by code -- and whose
+    `--fail-on-regression` had already declined to count it. Its two samples
+    were 280 and 486 ns.
+
+    A report that contradicts itself is decided by whichever half the reader
+    happens to weigh, which is not a property a measuring instrument may have.
+    Only the *claim* is dropped: the movements are still listed, because the
+    spread of an A/A pair is the most useful thing it produces.
+    """
+    history = _repl_history(bh, 500, "xxx")
+    history[-1]["commit"] = "xxx"          # baseline IS the current commit
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("an A/A comparison still cannot fail the build", failed, False)
+    check("...and prints no confirmed-regression heading",
+          "  REGRESSED (" in out, False)
+    # Asserted heading by heading rather than on the bare word, because
+    # "REGRESSED" is a substring of three different headings and a loose check
+    # would pass while two of them still printed.
+    for heading in ("  REGRESSED, UNREPLICATED", "  REGRESSED, UNCONFIRMED",
+                    "  IMPROVED (", "  IMPROVED, UNCONFIRMED",
+                    "  NOT REPLICATED"):
+        check(f"...nor {heading.strip()}", heading in out, False)
+    # The movement itself is not hidden -- that would throw away the one number
+    # an A/A pair exists to produce.
+    check("...but the movement is still shown", "b0" in out, True)
+    check("...under a heading that says what it is",
+          "A/A MOVEMENT" in out, True)
+    check("...and says it is neither a regression nor an improvement",
+          "NOT a regression and NOT an improvement" in out, True)
+    check("...and tells the reader what the number is for",
+          "per-benchmark noise floor" in out, True)
+
+
+def test_an_aa_listing_keeps_the_per_benchmark_repeat_samples(bh):
+    """The A/A heading must not swallow the per-benchmark detail.
+
+    "This binary produced 500 and 3000 ns" is a measured noise floor for *this*
+    benchmark on this host, and it is the number that decides whether any
+    smaller movement in it is judgeable at all. A collective heading cannot say
+    that per benchmark, so the row detail is kept under the new heading rather
+    than dropped with the claim.
+    """
+    history = _repl_history(bh, 500, "xxx")
+    history[-1]["commit"] = "xxx"
+    out, _failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("the contradicting sample is still quoted",
+          "-> b0: another run of this same binary" in out, True)
+    check("...and the spread is still stated as a noise floor",
+          "500% spread with no code change" in out, True)
+
+
+def test_direction_histogram_fires_only_on_a_mixed_comparison(bh):
+    """A mixed direction histogram is evidence about the set, not about a row.
+
+    A code change moves what it touched, in the direction it pushed. Relinking
+    moves whatever lands badly, in whichever direction each one lands -- so
+    movement out of band in *both* directions at once is the signature of
+    placement rather than code, and it is a fact no per-benchmark statistic can
+    supply. On 2026-08-19 a scheduler-only commit produced thirteen perfectly
+    replicating movers of which ten were *faster*; read one at a time, there was
+    no way to see it.
+
+    It must stay silent on a one-directional comparison, or it would be advice
+    printed on every report and read on none.
+    """
+    import io
+    import contextlib
+
+    # Twenty stable benchmarks so the whole-suite drift median does not move,
+    # plus b0 slow and b1 fast against a long quiet history of both.
+    stable = {f"b{i}": 1000 for i in range(2, 22)}
+    history = [{"host": "H", "profile": "release", "commit": f"h{i}",
+                "kernel_sha": f"old{i:012d}",
+                "entries": dict(stable, b0=v, b1=v)}
+               for i, v in enumerate(_QUIET)]
+    previous = history[-1]
+
+    def run(b0, b1):
+        current = {name: (value, 10 ** 9, "OK", None, None)
+                   for name, value in previous["entries"].items()}
+        current["b0"] = (b0, 10 ** 9, "OK", None, None)
+        current["b1"] = (b1, 10 ** 9, "OK", None, None)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bh.report(previous, current, 25.0, records=history, host="H",
+                      profile="release", commit="new",
+                      this_run={"kernel_sha": "newimage", "commit": "new"})
+        return buf.getvalue()
+
+    mixed = run(3000, 100)
+    check("a mixed comparison prints the histogram",
+          "DIRECTION HISTOGRAM" in mixed, True)
+    check("...counting both directions",
+          "1 benchmark(s) left their own range slower and 1 left it faster"
+          in mixed, True)
+    check("...and names the check that settles it",
+          "straddle-check.py --compare" in mixed, True)
+    # Not a verdict: an optimisation commit legitimately produces a mixed
+    # histogram, so this is an observation with its own falsifier attached.
+    check("...without withdrawing the regression",
+          "  REGRESSED" in mixed, True)
+
+    slower_only = run(3000, 1000)
+    check("a one-directional comparison prints no histogram",
+          "DIRECTION HISTOGRAM" in slower_only, False)
 
 
 def test_replication_declines_the_measured_false_positives(bh):
@@ -2151,7 +3184,8 @@ def test_replication_declines_the_measured_false_positives(bh):
     run_b = records[at[1]]
     host, profile = run_b["host"], bh.record_profile(run_b)
     prior = records[:at[1]]
-    previous = bh.previous_for_host(prior, host, profile)
+    previous = bh.previous_for_host(prior, host, profile,
+                                    bh.record_accel(run_b))
     current = {name: (value, 10 ** 9, "OK", None, None)
                for name, value in run_b["entries"].items()}
 
@@ -2171,6 +3205,2583 @@ def test_replication_declines_the_measured_false_positives(bh):
             continue
         check(f"...{name} is withdrawn by name",
               f"-> {name}: another run of this same binary" in out, True)
+
+
+# --- hot-symbol addresses -----------------------------------------------------
+#
+# `elf_symbol_addresses` exists because a 4x swing in the SHA-256 benchmarks was
+# caused by `crypto::compress` changing address with its machine code
+# byte-identical (known-issues.md, A-A-4x-CRYPTO-"REGRESSION").  Recording the
+# address next to the timing is what makes a repeat recognisable without a
+# bisect, so the parser has to work on a *real* kernel ELF -- which is built by
+# either of Rust's two mangling schemes depending on the toolchain channel.  The
+# investigation itself accidentally produced one build of each, and the parser
+# initially appeared to fail on one of them (it was a path problem, not a
+# parsing one), which is precisely why both schemes are pinned here.
+#
+# The ELFs are synthesised rather than taken from `target/`, so the tests run in
+# a bare checkout where nothing has been built.
+
+def _synth_elf(path, symbols, *, ident_class=2, ident_data=1, magic=b"\x7fELF"):
+    """Write a minimal ELF64 with a .symtab/.strtab holding `symbols`.
+
+    `symbols` is a list of `(name, value)`.  Only the fields
+    `elf_symbol_addresses` actually reads are populated; everything else is
+    zero, which is the point -- the parser must not depend on more than it
+    needs.
+    """
+    import struct
+
+    strtab = bytearray(b"\x00")
+    offsets = []
+    for name, _ in symbols:
+        offsets.append(len(strtab))
+        strtab += name.encode() + b"\x00"
+
+    symtab = bytearray()
+    for (_, value), noff in zip(symbols, offsets):
+        ent = bytearray(24)
+        struct.pack_into("<I", ent, 0, noff)
+        struct.pack_into("<Q", ent, 8, value)
+        symtab += ent
+
+    ehdr_len = 64
+    sym_off = ehdr_len
+    str_off = sym_off + len(symtab)
+    sh_off = str_off + len(strtab)
+
+    ehdr = bytearray(ehdr_len)
+    ehdr[0:4] = magic
+    ehdr[4] = ident_class
+    ehdr[5] = ident_data
+    struct.pack_into("<Q", ehdr, 0x28, sh_off)
+    struct.pack_into("<H", ehdr, 0x3A, 64)
+    struct.pack_into("<H", ehdr, 0x3C, 3)
+
+    def shdr(sh_type, off, size, link=0, entsize=0):
+        s = bytearray(64)
+        struct.pack_into("<I", s, 0x04, sh_type)
+        struct.pack_into("<Q", s, 0x18, off)
+        struct.pack_into("<Q", s, 0x20, size)
+        struct.pack_into("<I", s, 0x28, link)
+        struct.pack_into("<Q", s, 0x38, entsize)
+        return s
+
+    blob = bytes(ehdr) + bytes(symtab) + bytes(strtab)
+    blob += bytes(shdr(0, 0, 0))
+    blob += bytes(shdr(2, sym_off, len(symtab), link=2, entsize=24))
+    blob += bytes(shdr(3, str_off, len(strtab)))
+    with open(path, "wb") as fh:
+        fh.write(blob)
+    return path
+
+
+def test_hot_symbols_read_legacy_mangling(bh, tmpdir):
+    elf = _synth_elf(os.path.join(tmpdir, "legacy.elf"), [
+        ("_ZN4sha28compress17h8234a763022d2833E", 0xffffffff80afce00),
+        ("_ZN6kernel6crypto15sha512_compress17hff0d9f03de4c6bb2E",
+         0xffffffff80af5580),
+    ])
+    got = bh.elf_symbol_addresses(elf)
+    check("legacy mangling: compress address is read",
+          got.get("crypto::compress"), "0xffffffff80afce00")
+    check("legacy mangling: sha512_compress is read",
+          got.get("crypto::sha512_compress"), "0xffffffff80af5580")
+
+
+def test_hot_symbols_read_v0_mangling(bh, tmpdir):
+    elf = _synth_elf(os.path.join(tmpdir, "v0.elf"), [
+        ("_RNvCsjQArNW8oxTF_4sha28compress", 0xffffffff80364980),
+    ])
+    got = bh.elf_symbol_addresses(elf)
+    check("v0 mangling: the same pattern still matches",
+          got.get("crypto::compress"), "0xffffffff80364980")
+
+
+def test_hot_symbols_ignore_unrelated_compress_functions(bh, tmpdir):
+    """`fs::compress` and `mm::compress` must not be mistaken for the crypto one.
+
+    The kernel has more than fifty symbols containing the word "compress"
+    (deflate, lz4, zstd, bzip2, the swap compressor).  The `6crypto` length
+    prefix is the whole of what keeps them out, so it is asserted rather than
+    assumed.
+    """
+    elf = _synth_elf(os.path.join(tmpdir, "noise.elf"), [
+        ("_RNvNtNtCsjQArNW8oxTF_6kernel2fs8compress7deflate", 0x1111),
+        ("_RNvNtNtCsjQArNW8oxTF_6kernel2mm8compress8compress", 0x2222),
+        ("_ZN6kernel2fs9fcompress13compress_data17habcdE", 0x3333),
+    ])
+    got = bh.elf_symbol_addresses(elf)
+    check("unrelated compress symbols are not reported",
+          {k: v for k, v in got.items() if v is not None}, {})
+
+
+def test_hot_symbols_prefer_the_function_over_a_wrapper(bh, tmpdir):
+    """A monomorphised wrapper mentions the function and is not the function.
+
+    Real output contains entries like
+    `drop_in_place<Vec<kernel::fs::fcompress::CompressionRule>>` that embed
+    another symbol's name.  Shortest-match is how the function itself is
+    picked; if that rule broke, the recorded address would silently become some
+    unrelated thunk's, which is worse than recording nothing.
+    """
+    elf = _synth_elf(os.path.join(tmpdir, "wrap.elf"), [
+        ("_RINvNtCsg3_4core3ptr13drop_in_placeNtCsjQ_4sha28compressEB1j_",
+         0xdead0000),
+        ("_RNvCsjQArNW8oxTF_4sha28compress", 0xffffffff80364980),
+    ])
+    got = bh.elf_symbol_addresses(elf)
+    check("the shorter (real) symbol wins over the wrapper",
+          got.get("crypto::compress"), "0xffffffff80364980")
+
+
+def test_hot_symbols_skip_undefined_symbols(bh, tmpdir):
+    """A st_value of 0 is an undefined symbol, not an address of zero."""
+    elf = _synth_elf(os.path.join(tmpdir, "undef.elf"), [
+        ("_RNvCsjQArNW8oxTF_4sha28compress", 0),
+    ])
+    got = bh.elf_symbol_addresses(elf)
+    check("an undefined symbol contributes no address",
+          {k: v for k, v in got.items() if v is not None}, {})
+
+
+def test_hot_symbols_degrade_quietly_on_bad_input(bh, tmpdir):
+    """Never raise: this is bookkeeping bolted to a 9-minute measurement.
+
+    A completed benchmark run must be written even if the ELF is absent,
+    truncated, 32-bit, big-endian or not an ELF at all.  Losing the record to
+    an exception in the diagnostic would cost far more than the diagnostic is
+    worth.
+    """
+    missing = os.path.join(tmpdir, "nope.elf")
+    check("absent file yields {}", bh.elf_symbol_addresses(missing), {})
+
+    notelf = os.path.join(tmpdir, "plain.txt")
+    with open(notelf, "w", encoding="utf-8") as fh:
+        fh.write("this is not an ELF file, it is a note about one\n")
+    check("non-ELF yields {}", bh.elf_symbol_addresses(notelf), {})
+
+    trunc = os.path.join(tmpdir, "trunc.elf")
+    with open(trunc, "wb") as fh:
+        fh.write(b"\x7fELF\x02\x01" + b"\x00" * 20)
+    check("truncated ELF yields {}", bh.elf_symbol_addresses(trunc), {})
+
+    elf32 = _synth_elf(os.path.join(tmpdir, "elf32.elf"),
+                       [("_ZN4sha28compress17hE", 0x1000)],
+                       ident_class=1)
+    check("32-bit ELF yields {}", bh.elf_symbol_addresses(elf32), {})
+
+
+def test_experiment_runs_are_recorded_but_never_a_baseline(bh, tmpdir):
+    """A probe run must be kept and must never become the yardstick.
+
+    The five runs of the placement investigation are the motivating case: three
+    read ~8085 ns for `crypto_sha256_64B` and two read ~1936 for *the same
+    source*, built with a different symbol-mangling scheme. Landing all five in
+    one 8-run window would push that benchmark's outlier fence past 4x and
+    silently blind the detector for it. Deleting them was the wrong answer --
+    they are the evidence for the finding -- so they are labelled instead.
+    """
+    import io
+    import json
+    import contextlib
+
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "[bench] SCORE crypto_sha256_64B 8085 - TRACK 2000 1000",
+        "[bench] CANARY 8 8 100 8 9 12 11 0 800 900",
+    ]) + "\n")
+    history = os.path.join(tmpdir, "history.jsonl")
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        bh.main(["--serial", log, "--history", history, "--profile", "release",
+                 "--experiment", "QEMU tb-size probe, test arm"])
+    record = json.loads(open(history, encoding="utf-8").read().strip())
+    check("the reason is stored verbatim",
+          record["experiment"], "QEMU tb-size probe, test arm")
+    check("...and the run says so, since the exclusion is otherwise invisible",
+          "excluded from every future baseline" in buf.getvalue(), True)
+
+    check("an experiment record is not comparable history",
+          bh.comparable_records([record], record["host"], "release", None),
+          [])
+    check("...and so cannot be the previous run",
+          bh.previous_for_host([record], record["host"], "release", None),
+          None)
+
+    # An ordinary run alongside it is still found, so the filter excludes the
+    # probe rather than merely emptying the window.
+    ordinary = dict(record)
+    ordinary.pop("experiment")
+    ordinary["timestamp"] = "2026-08-18T16:00:00+00:00"
+    window = bh.comparable_records([record, ordinary], record["host"],
+                                   "release", None)
+    check("the ordinary run beside it is still eligible", len(window), 1)
+    check("...and it is the one without the label",
+          window[0]["timestamp"], "2026-08-18T16:00:00+00:00")
+
+    check("an ordinary run carries no experiment key at all",
+          "experiment" in ordinary, False)
+    check("...which reads as the empty reason", bh.record_experiment(ordinary), "")
+    check("a non-string label is not trusted to exclude",
+          bh.record_experiment({"experiment": 1}), "")
+
+
+def test_committed_history_keeps_the_probe_runs_labelled(bh):
+    """The real history must carry the labels, not just the code that reads them.
+
+    A guard, not a unit test: the five probe records were labelled by hand
+    after the fact, and nothing else would notice if a future merge or rewrite
+    dropped the field and quietly re-admitted them to the baseline.
+    """
+    import json
+
+    path = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "bench", "history.jsonl")
+    if not os.path.exists(path):
+        check("history file exists to be checked", True, True)
+        return
+    records = [json.loads(l) for l in
+               open(path, encoding="utf-8").read().splitlines() if l.strip()]
+    labelled = {r["timestamp"] for r in records if bh.record_experiment(r)}
+    expected = {
+        "2026-08-18T12:58:40+00:00",
+        "2026-08-18T13:02:07+00:00",
+        "2026-08-18T15:06:22+00:00",
+        "2026-08-18T15:33:15+00:00",
+        "2026-08-18T15:46:49+00:00",
+    }
+    check("every placement-probe run is still labelled an experiment",
+          expected - labelled, set())
+
+
+def test_hot_symbols_absent_and_empty_mean_different_things(bh, tmpdir):
+    """`hot_symbols` absent = nobody looked; `{}` = looked, found nothing.
+
+    Collapsing the two would let a reader who finds no addresses next to a 4x
+    swing conclude the addresses did not move, when in fact no ELF was passed.
+    That is the same mistake this field exists to prevent, one level up, so the
+    distinction is asserted rather than left to the comment that states it.
+    """
+    import io
+    import json
+    import contextlib
+
+    serial = "\n".join([
+        "[bench] SCORE crypto_sha256_64B 1935 - TRACK 2000 1000",
+        "[bench] CANARY 8 8 100 8 9 12 11 0 800 900",
+    ]) + "\n"
+
+    def run(extra, history_name):
+        log = write(tmpdir, "serial-" + history_name, serial)
+        history = os.path.join(tmpdir, history_name)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bh.main(["--serial", log, "--history", history,
+                     "--profile", "release"] + extra)
+        line = [l for l in open(history, encoding="utf-8").read().splitlines()
+                if l.strip()][-1]
+        return json.loads(line)
+
+    no_elf = run([], "none.jsonl")
+    check("no --kernel-elf leaves the field out entirely",
+          "hot_symbols" in no_elf, False)
+
+    blank = _synth_elf(os.path.join(tmpdir, "blank.elf"),
+                       [("_ZN6kernel2mm5alloc17habcE", 0x2000)])
+    looked = run(["--kernel-elf", blank], "blank.jsonl")
+    check("an ELF with none of the hot functions names them all as null",
+          looked.get("hot_symbols"),
+          {k: None for k in bh.HOT_SYMBOLS})
+
+    real = _synth_elf(os.path.join(tmpdir, "real.elf"),
+                      [("_RNvCsjQArNW8oxTF_4sha28compress",
+                        0xffffffff80afce00)])
+    found = run(["--kernel-elf", real], "real.jsonl")
+    expected = {k: None for k in bh.HOT_SYMBOLS}
+    expected["crypto::compress"] = "0xffffffff80afce00"
+    check("the address reaches the history record",
+          found.get("hot_symbols"), expected)
+
+
+def test_hot_symbols_report_a_stale_pattern_as_null_not_absence(bh, tmpdir):
+    """A pattern that stops matching must be visible, not silently dropped.
+
+    `HOT_SYMBOLS` keys on the length-prefixed module path, so a function that
+    changes module stops matching. This is not hypothetical: `compress` was
+    `kernel::crypto`'s until `kernel/src/crypto.rs` was moved onto the shared
+    `sha2` crate, at which point `6crypto8compress` matched nothing and the
+    pattern had to become `4sha28compress`.
+
+    The symbol used here is therefore the *pre-migration* one, which is exactly
+    what a stale pattern looks like from the current pattern's point of view.
+    Dropping the key on a miss would hide that -- and hide it at the worst
+    moment, since the change that breaks the pattern is the one that relocates
+    the function and so is the most likely to swing the benchmark.
+    """
+    moved = _synth_elf(os.path.join(tmpdir, "moved.elf"), [
+        # Where `compress` lived before the sha2 adoption. The current pattern
+        # must NOT match it -- if this ever starts matching, the pattern has
+        # been widened enough to catch unrelated modules too.
+        ("_RNvNtCsjQArNW8oxTF_6kernel6crypto8compress", 0xffffffff80364980),
+    ])
+    got = bh.elf_symbol_addresses(moved)
+    check("a symbol from the function's old module no longer matches",
+          got.get("crypto::compress"), None)
+    check("...but the key is still there, so the miss is legible",
+          "crypto::compress" in got, True)
+
+    # An unparseable binary says nothing at all, and must not be confused with
+    # a binary that said "this symbol is gone".
+    check("a binary that told us nothing is empty, not all-null",
+          bh.elf_symbol_addresses(os.path.join(tmpdir, "absent.elf")), {})
+
+
+# ---------------------------------------------------------------------------
+# Which accelerator the kernel ran on (`[hypervisor]` banner -> `accel`)
+# ---------------------------------------------------------------------------
+
+
+def test_bare_metal_is_its_own_accelerator_not_an_absent_one(bh, tmpdir):
+    """Three platforms, three answers -- and the third used to be missing.
+
+    `kernel/src/hypervisor.rs` prints `Detected: <name> (signature: ...)` when
+    it is running under something, and `Running on bare metal (no hypervisor
+    detected)` when it is not. The parser knew only the first, so a bare-metal
+    boot returned `None` -- the value defined to mean "this kernel predates the
+    banner and cannot say".
+
+    That fold is the one design-decisions.md §237 exists to forbid, and the
+    argument is not about tidiness: two platforms sharing a value share a
+    grouping key, arms from different platforms then form one band, and a band
+    is a range used to *dismiss* movements. One spanning bare metal and TCG
+    would dismiss essentially every regression this harness exists to catch --
+    silently, and the group it produced would look entirely plausible.
+
+    Nor is bare metal a hypothetical platform. It is Q53 option D and the
+    fallback in Q54, and it is the only option on the table that fully restores
+    CLAUDE.md's 10% threshold, because the layout noise behind that threshold
+    is a TCG artefact. The first artefact that work produces is a log this
+    parser must not mislabel.
+    """
+    # The literals below are copied from the kernel, not paraphrased. A
+    # paraphrase tests the test's idea of the banner rather than the banner,
+    # which is how the bare-metal sentence went unread in the first place.
+    virt = write(tmpdir, "virt.txt", "\n".join([
+        "=== Kernel booting ===",
+        '[hypervisor] Detected: QEMU TCG (signature: "TCGTCGTCGTCG")',
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+    metal = write(tmpdir, "metal.txt", "\n".join([
+        "=== Kernel booting ===",
+        "[hypervisor] Running on bare metal (no hypervisor detected)",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+    old = write(tmpdir, "old.txt", "\n".join([
+        "=== Kernel booting ===",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+
+    check("a hypervisor boot still reports its vendor label",
+          bh.parse_accel(virt), "QEMU TCG")
+    check("a bare-metal boot reports bare metal",
+          bh.parse_accel(metal), bh.ACCEL_BARE_METAL)
+    check("a pre-banner log still says None",
+          bh.parse_accel(old), None)
+
+    # Each assertion above is satisfiable by a parser that gets the
+    # *relationship* between the three wrong, so state the relationship too.
+    check("...and bare metal is not the same answer as 'cannot say'",
+          bh.parse_accel(metal) == bh.parse_accel(old), False)
+    check("...nor the same answer as TCG",
+          bh.parse_accel(metal) == bh.parse_accel(virt), False)
+
+    # The vocabulary is the kernel's own (`Hypervisor::name()`'s None variant),
+    # so the field never carries a token that exists only in the harness.
+    check("the token is the kernel's own word for it",
+          bh.ACCEL_BARE_METAL, "bare metal")
+
+
+def test_the_two_hypervisor_patterns_cannot_read_each_others_lines(bh, tmpdir):
+    """Neither pattern may fire on the line meant for the other.
+
+    They are mutually exclusive by construction -- the kernel emits exactly one
+    per boot, and the literals diverge immediately after `[hypervisor] `. But
+    "by construction" is an argument, and an argument is precisely what
+    `CANARY_MIN_RESOLVABLE`'s derivation and commit-as-source-identity both
+    were, right up until they turned out to be false. Cheaper to assert it.
+
+    The failure ruled out here is worse than the bug being fixed: if `ACCEL_RE`
+    could match the bare-metal sentence it would capture some fragment of it as
+    a vendor name, and the run would be filed under an accelerator that does
+    not exist -- a value that is not even recognisable as wrong, where `None`
+    at least announced that something was unknown.
+    """
+    virt_line = ('[hypervisor] Detected: Hyper-V/WHPX '
+                 '(signature: "Microsoft Hv")')
+    metal_line = "[hypervisor] Running on bare metal (no hypervisor detected)"
+
+    check("the Detected pattern ignores the bare-metal sentence",
+          bh.ACCEL_RE.search(metal_line), None)
+    check("the bare-metal pattern ignores the Detected line",
+          bh.BARE_METAL_RE.search(virt_line), None)
+
+    # Anchored at line start, like its sibling: a line that merely quotes the
+    # sentence -- a log message, a test name, this docstring echoed into a
+    # serial log -- is not the kernel reporting its platform.
+    quoted = write(tmpdir, "quoted.txt", "\n".join([
+        "[test] checking: [hypervisor] Running on bare metal "
+        "(no hypervisor detected)",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+    check("a quoted banner mid-line is not a platform report",
+          bh.parse_accel(quoted), None)
+
+
+def test_a_bare_metal_arm_does_not_band_with_a_pre_banner_one(bh):
+    """The consequence, at the level where it would have done damage.
+
+    The test above proves the parser returns three values; this proves the
+    three values do the work. The saving grace before the fix was only that the
+    grouping key also carries source identity, so an old absent-accel record
+    and a bare-metal one at *different* commits did not in fact collide. That
+    was luck, not design: it fails the moment anyone benchmarks a commit that
+    also has pre-banner history -- which is every commit before 2026-08-19.
+
+    So the case constructed here is exactly that one: identical source, three
+    arms from real hardware and three from a pre-banner kernel. It is the case
+    that used to merge, and merging it would produce a band from two platforms
+    whose ratio is unbounded.
+    """
+    metal = _sweep_arms({0: 500, 1024: 600, 2048: 550},
+                        accel=bh.ACCEL_BARE_METAL)
+    # Same commit, same pads, same numbers, no accelerator recorded at all:
+    # that is what a pre-banner kernel's rows look like.
+    unknown = [{k: v for k, v in r.items() if k != "accel"} for r in metal]
+
+    groups = bh.layout_arms(metal + unknown, "H", "release")
+    check("bare metal and 'cannot say' are two groups, not one",
+          len(groups), 2)
+    accels = {key[1] for key in groups}
+    check("...one keyed by bare metal, by name", bh.ACCEL_BARE_METAL in accels,
+          True)
+    check("...the other still keyed by 'cannot say'", None in accels, True)
+
+
+# ---------------------------------------------------------------------------
+# Layout padding (`SLATEOS_TEXT_PAD` -> `textpad=` in the boot banner)
+# ---------------------------------------------------------------------------
+
+
+def test_the_pad_is_read_from_the_banner(bh, tmpdir):
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "=== Kernel booting ===",
+        "[boot] build profile: sanitizer=none textpad=3072",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+    check("the pad is an int, taken from the kernel's own report",
+          bh.parse_text_pad(log), 3072)
+
+
+def test_no_banner_is_none_not_zero(bh, tmpdir):
+    """The distinction the whole field exists to preserve.
+
+    Every record on disk before this landed was written by a kernel with no
+    `textpad=` in its banner. If absence read as 0, all of them would join the
+    unpadded arm of a layout comparison, and the resulting "band" would be the
+    spread between builds that may or may not have differed in placement -- a
+    number with no defined meaning, used to *dismiss* regressions.
+    """
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "=== Kernel booting ===",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+    ]) + "\n")
+    got = bh.parse_text_pad(log)
+    check("a pre-banner log says None", got, None)
+    check("...and None does not compare equal to 0", got == 0, False)
+
+
+def test_an_explicit_zero_is_zero(bh, tmpdir):
+    log = write(tmpdir, "serial.txt",
+                "[boot] build profile: sanitizer=none textpad=0\n")
+    got = bh.parse_text_pad(log)
+    check("an unpadded build reports 0", got, 0)
+    check("...and 0 is not None", got is None, False)
+
+
+def test_the_pad_survives_another_key_being_appended(bh, tmpdir):
+    """The banner is matched on its key, not on the whole line.
+
+    `sanitizer=` was added first and `textpad=` second; whatever is added third
+    must not silently stop either being read.
+    """
+    log = write(tmpdir, "serial.txt",
+                "[boot] build profile: sanitizer=none textpad=1024 lto=thin\n")
+    check("a third key does not hide the second", bh.parse_text_pad(log), 1024)
+
+
+def test_a_missing_log_says_nothing_rather_than_zero(bh, tmpdir):
+    check("an unreadable log cannot report a pad",
+          bh.parse_text_pad(os.path.join(tmpdir, "absent.txt")), None)
+
+
+def test_the_record_carries_the_pad_the_kernel_reported(bh, tmpdir):
+    import io
+    import json
+    import contextlib
+
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "[boot] build profile: sanitizer=none textpad=2048",
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+        "[bench] CANARY 8 8 100 8 9 12 11 0 800 900",
+    ]) + "\n")
+    history = os.path.join(tmpdir, "history.jsonl")
+    with contextlib.redirect_stdout(io.StringIO()):
+        bh.main(["--serial", log, "--history", history, "--profile", "release"])
+    record = json.loads(open(history, encoding="utf-8").read().strip())
+    check("the record stores the pad the kernel reported",
+          record.get("text_pad"), 2048)
+
+
+def test_a_pre_banner_record_carries_no_pad_key_at_all(bh, tmpdir):
+    """Absent, not null.
+
+    Every other optional key in bench-history follows the same convention, for
+    the same reason: an explicit `text_pad: null` is a claim that somebody
+    looked, which invites a later reader to charitably treat it as a measured 0.
+    """
+    import io
+    import json
+    import contextlib
+
+    log = write(tmpdir, "serial.txt", "\n".join([
+        "[bench] SCORE syscall_dispatch 120 200 PASS 130 1000",
+        "[bench] CANARY 8 8 100 8 9 12 11 0 800 900",
+    ]) + "\n")
+    history = os.path.join(tmpdir, "history.jsonl")
+    with contextlib.redirect_stdout(io.StringIO()):
+        bh.main(["--serial", log, "--history", history, "--profile", "release"])
+    record = json.loads(open(history, encoding="utf-8").read().strip())
+    check("no key, rather than a null one", "text_pad" in record, False)
+
+
+# ---------------------------------------------------------------------------
+# Layout-sensitivity calibration (scripts/layout-sweep.py -> layout_bands)
+#
+# The claim under test is narrow and worth stating plainly, because every test
+# below is an attempt to break it in one specific direction:
+#
+#   A movement may be dismissed as "code placement" ONLY when this exact
+#   benchmark has been directly measured, on this host and profile, across at
+#   least three deliberate .text offsets of one clean commit, and moved at
+#   least that far with no source change at all.
+#
+# Every clause in that sentence is load-bearing, and every one of them fails in
+# the same direction when it is dropped: a band that is too easily granted, or
+# too wide, dismisses a real regression. So the tests are deliberately
+# lopsided -- most of them assert that some *plausible-looking* evidence is
+# refused, and only two assert that a band is granted at all.
+# ---------------------------------------------------------------------------
+
+#: A benchmark suite that is identical in every sweep arm, so the only thing
+#: that can differ between arms is `b0`. Nineteen entries because
+#: `speed_factor` needs `MIN_SAMPLES_FOR_DRIFT` (8) ratios before it will
+#: report one at all -- with fewer, every arm would be uncorrectable and every
+#: group voided, and the band tests would pass for the wrong reason.
+_SWEEP_STABLE = {f"b{i}": 1000 for i in range(1, 20)}
+
+
+def _sweep_arms(pads, commit="xxx", host="H", profile="release", **overrides):
+    """One layout-sweep record per pad. `pads` maps pad bytes -> this arm's b0.
+
+    The arms are `experiment`-tagged exactly as `layout-sweep.py` tags them,
+    which is the whole point: it is what makes them invisible to
+    `comparable_records`, and therefore what a naive implementation of
+    `layout_arms` would have silently skipped.
+    """
+    return [
+        {
+            "host": host,
+            "profile": profile,
+            "commit": commit,
+            "text_pad": pad,
+            "experiment": f"layout sweep: textpad={pad} (identical source)",
+            "timestamp": f"2026-08-19T0{index}:00:00",
+            "entries": dict(_SWEEP_STABLE, b0=value),
+            **overrides,
+        }
+        for index, (pad, value) in enumerate(sorted(pads.items()))
+    ]
+
+
+def test_a_layout_band_is_the_peak_to_peak_of_the_arms(bh):
+    """Three layouts of one commit, spanning 500-600ns, is a 20% band.
+
+    Peak-to-peak over the *smallest*, not a deviation from the median, because
+    of what the band is compared against: a run-over-run percentage change
+    between two arbitrary layouts. The largest change placement alone can
+    produce between two of them is exactly (max - min) / min, so any narrower
+    summary would under-state the very quantity being used to excuse movements.
+    """
+    bands = bh.layout_bands(_sweep_arms({0: 500, 1024: 600, 2048: 550}),
+                            "H", "release")
+
+    check("the swept benchmark gets a band", "b0" in bands, True)
+    check("...whose width is peak-to-peak over the smallest",
+          round(bands["b0"][0], 6), 20.0)
+    check("...and which records how many layouts it rests on",
+          bands["b0"][1], 3)
+    check("...and which commit was swept", bands["b0"][2], "xxx")
+    # A benchmark that placement did not move must come back as a *measured*
+    # zero, not as absent: absent means "unswept", which is a different verdict
+    # with a different consequence downstream.
+    check("a benchmark placement did not move is a measured zero, not absent",
+          round(bands["b1"][0], 6), 0.0)
+
+
+def test_sweep_arms_are_read_even_though_they_are_experiments(bh):
+    """The guard against a calibration that cannot fire.
+
+    Every arm of a layout sweep is `experiment`-tagged, and `comparable_records`
+    -- the filter every other historical judgement in this file uses -- drops
+    experiments on purpose, because a padded kernel is not a kernel any checkout
+    reproduces and must never become the baseline an honest run is judged
+    against. Reusing that filter here would have been the obvious thing to do
+    and would have made `layout_arms` return nothing, forever, silently: a
+    calibration that cannot fire, presenting as a calibration that found no
+    sensitivity. This test asserts both halves, so that a later tidy-up which
+    "unifies the filtering" fails here instead of going unnoticed.
+    """
+    arms = _sweep_arms({0: 500, 1024: 600, 2048: 550})
+
+    check("the shared filter does refuse them (that part is correct)",
+          bh.comparable_records(arms, "H", "release", None), [])
+    # The key is `(commit, accel)`, not a bare commit: the accelerator is part
+    # of the grouping key so that arms which ran on different accelerators
+    # cannot land in one band at all. `None` here is "these records predate the
+    # field", which is its own key and is never folded into TCG.
+    check("...but the layout calibration reads them anyway",
+          list(bh.layout_arms(arms, "H", "release")), [("xxx", None)])
+
+
+def test_two_layouts_are_not_a_band(bh):
+    """Two points define an interval containing both, by construction.
+
+    A two-point spread has no residual and no way to be wrong, so it cannot be
+    shown to be unrepresentative of the layouts nobody sampled -- and this
+    number's job is to *dismiss* movements, the direction where an
+    over-confident estimate hides real regressions. Same reasoning, and the same
+    floor of three, as `MIN_SAMPLES_FOR_POSITIONAL_MODEL`.
+    """
+    check("two arms yield no band",
+          bh.layout_bands(_sweep_arms({0: 500, 4096: 5000}), "H", "release"),
+          {})
+    check("...and three of the same spread do",
+          "b0" in bh.layout_bands(
+              _sweep_arms({0: 500, 4096: 5000, 1024: 900}), "H", "release"),
+          True)
+
+
+def test_a_record_with_no_pad_is_not_counted_as_an_unpadded_arm(bh):
+    """Absent `text_pad` means "placement unknown", never "placement zero".
+
+    ~70 historical records predate the `textpad=` banner. Folding absent into 0
+    would enrol every one of them into the unpadded arm of a comparison they
+    were never part of -- their spread is ordinary run-to-run noise plus months
+    of unrelated code change, and it would be reported as the amount placement
+    alone can move a benchmark. That is a wide band manufactured out of nothing,
+    in the direction that dismisses regressions.
+    """
+    arms = _sweep_arms({1024: 600, 2048: 550})
+    legacy = dict(_sweep_arms({0: 500})[0])
+    del legacy["text_pad"]
+
+    check("a pre-banner record does not make up the third arm",
+          bh.layout_bands(arms + [legacy], "H", "release"), {})
+
+
+def test_arms_from_two_accelerators_cannot_form_one_band(bh):
+    """A band spanning two emulators measures the emulators, not the placement.
+
+    Measured 2026-08-19 on one byte-identical kernel (`kernel_sha 7a17cf6be2a1`)
+    run under both accelerators: the median benchmark is 3.5x faster under WHPX
+    and the fastest 10.4x. Grouping by commit alone, a sweep that happened to
+    straddle a change of accelerator would report that ratio as "how much code
+    placement can move this benchmark" -- a band of several hundred percent,
+    which then dismisses *every* regression it is consulted about. Silently,
+    and in the direction that hides faults.
+
+    So the accelerator is part of the grouping *key*, not something checked for
+    agreement afterwards: no arrangement of records can produce a mixed band,
+    rather than none being produced as long as someone remembers to look.
+
+    The counterfactual below is the point of the test. The same seven records,
+    with the accelerator stripped, are exactly what the old code saw -- and they
+    do form the 500% band. The numbers are not incidental to the assertion; they
+    are the failure this key exists to make unreachable.
+
+    The two halves use *disjoint* pads because that is what the real failure
+    looks like: a sweep interrupted and resumed after the accelerator changed
+    continues the pad sequence rather than repeating it. Overlapping pads would
+    also produce a ruinous band (243% for these numbers) but a smaller one, the
+    per-pad median having averaged a TCG arm together with a WHPX one -- which
+    would understate what is being guarded against.
+    """
+    tcg = _sweep_arms({0: 500, 1024: 600, 2048: 550},
+                      accel="QEMU TCG", timestamp="2026-08-19T01:00:00")
+    whpx = _sweep_arms({3072: 100, 4096: 120, 5120: 110, 6144: 105},
+                       accel="Hyper-V/WHPX", timestamp="2026-08-19T02:00:00")
+
+    check("each accelerator is its own group, at the same commit",
+          sorted(bh.layout_arms(tcg + whpx, "H", "release")),
+          [("xxx", "Hyper-V/WHPX"), ("xxx", "QEMU TCG")])
+
+    bands = bh.layout_bands(tcg + whpx, "H", "release")
+    check("the band is the spread *within* one accelerator",
+          round(bands["b0"][0], 6), 20.0)
+    check("...over only that accelerator's arms", bands["b0"][1], 4)
+    check("...and it names which one, so a reader can discount it",
+          bands["b0"][3], "Hyper-V/WHPX")
+
+    # Same records, same values, accelerator removed: the mixed band appears.
+    # If this stops being 500% the test above has stopped proving anything.
+    blind = [{k: v for k, v in r.items() if k != "accel"}
+             for r in tcg + whpx]
+    check("...whereas blind to the accelerator they are one 500% band",
+          round(bh.layout_bands(blind, "H", "release")["b0"][0], 6), 500.0)
+
+
+def test_a_dirty_arm_is_not_a_layout_sample(bh):
+    """The construction rests on the arms sharing identical source.
+
+    `commit` is only a statement about the source when the tree is clean. A
+    dirty arm may differ from its siblings in *code*, and its contribution to
+    the spread would then be attributed to placement -- which is precisely the
+    confound the sweep exists to remove, reintroduced inside the instrument
+    meant to measure it.
+    """
+    arms = (_sweep_arms({0: 500, 1024: 600})
+            + _sweep_arms({2048: 5000}, dirty=True))
+
+    check("a dirty arm does not count toward the three",
+          bh.layout_bands(arms, "H", "release"), {})
+    check("...and it is the dirt, not the pad, that disqualified it",
+          "b0" in bh.layout_bands(
+              _sweep_arms({0: 500, 1024: 600, 2048: 5000}), "H", "release"),
+          True)
+
+
+def test_the_arm_predicate_is_the_one_layout_arms_actually_applies(bh):
+    """`layout_arm_rejection` exists so a sweep can ask, mid-run, whether the
+    arm it just spent twenty minutes on will be counted. That is only worth
+    anything if it is the *same* rule `layout_arms` applies -- a second copy
+    would agree today, drift on the next edit to either, and then certify every
+    arm of a sweep that produces no band. Which is exactly the outcome it is
+    there to prevent, so a drifted copy is worse than no check at all.
+
+    Asserted as an equivalence over a matrix rather than case by case: the
+    property is "for every record, keeping it and having no rejection reason
+    are the same statement", and that is what has to survive future edits.
+
+    Honest about its own reach, because a test that cannot fail is this
+    project's signature bug and this one is *nearly* one: while `layout_arms`
+    delegates, the equivalence holds by construction, and mutating the shared
+    predicate moves both sides together (verified -- doing so is caught by the
+    semantic tests above, not by this one). What it does catch is the failure
+    it is actually for: someone re-inlining the rule into `layout_arms` and
+    dropping a clause. Mutation-checked by re-inlining the pre-refactor body
+    without its `dirty` check, which this test fails on.
+    """
+    host, profile = "H", "release"
+    cases = {
+        "clean": {},
+        "dirty": {"dirty": True},
+        "other host": {"host": "OTHER"},
+        "other profile": {"profile": "debug"},
+        "loaded host": {"host_load": bh.HOST_LOAD_LOADED},
+        "no pad": {"text_pad": None},
+        "bool pad": {"text_pad": True},
+        "no commit": {"commit": None},
+    }
+    for label, override in cases.items():
+        record = _sweep_arms({1024: 500}, **override)[0]
+        kept = bool(bh.layout_arms(_distinct_pads(record), host, profile))
+        rejected = bh.layout_arm_rejection(record, host, profile)
+        check(f"{label}: kept by layout_arms iff no rejection reason",
+              kept, rejected is None)
+        if rejected is not None:
+            check(f"...and {label} explains itself in prose",
+                  len(rejected) > 20, True)
+
+
+def _distinct_pads(record):
+    """The record under test, plus two siblings, at three distinct pads.
+
+    `layout_arms` needs `MIN_PADS_FOR_LAYOUT_BAND` distinct pads before it
+    returns a commit at all, so a single record can never be "kept" no matter
+    how valid it is. The siblings are unimpeachable and share its commit, so
+    whether the group survives is decided by the record under test alone --
+    unless the override *is* the commit or the pad, in which case the record
+    genuinely cannot join any group, which is the correct answer too.
+    """
+    siblings = _sweep_arms({4096 + 1: 500, 4096 + 2: 500},
+                           commit=record.get("commit") or "xxx",
+                           host="H", profile="release")
+    return siblings + [record]
+
+
+def test_a_docs_commit_mid_sweep_does_not_split_the_arms(bh):
+    """The bug that voided a six-arm, ~4.5-hour WHPX sweep.
+
+    An arm takes ~75 minutes, so anything committed while a sweep runs lands
+    later arms on a different `commit`. Grouping on the commit hash then turns
+    six arms into six one-pad groups, `MIN_PADS_FOR_LAYOUT_BAND` rejects every
+    one, and the sweep reports no band at all -- silently, with no error and
+    nothing to attribute it to. The real sweep of 2026-08-19 spanned six
+    commits, every one of them documentation.
+
+    The arms are given *real* commits from this repository, because the
+    property under test is precisely that the digest resolves two different
+    spellings to one identity; synthetic hashes would fall through to the
+    unresolvable path and the test would pass without exercising anything.
+    """
+    import subprocess
+
+    try:
+        short = subprocess.run(
+            ["git", "-C", bh.REPO_ROOT, "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        full = subprocess.run(
+            ["git", "-C", bh.REPO_ROOT, "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        print("SKIP  docs-commit grouping (git unavailable)")
+        return
+
+    arms = (_sweep_arms({0: 500}, commit=short)
+            + _sweep_arms({1024: 600}, commit=full)
+            + _sweep_arms({2048: 550}, commit=short))
+    check("arms recorded under different commit spellings form one group",
+          len(bh.layout_arms(arms, "H", "release")), 1)
+    bands = bh.layout_bands(arms, "H", "release")
+    if not check("...so a band is produced where the commit proxy produced "
+                 "none", "b0" in bands, True):
+        # Degrade to a reported failure rather than a KeyError: an exception
+        # here would abort the whole suite and take every unrelated test with
+        # it, turning one regression into no information at all.
+        return
+    check("...and the provenance names commits, not an opaque digest",
+          short in bands["b0"][2], True)
+
+
+def test_an_untagged_run_is_not_a_sweep_arm(bh):
+    """The contamination the digest fix would otherwise have introduced.
+
+    `text_pad` is parsed from the kernel's own banner, so *every* run reports
+    one, and an ordinary unpadded run truthfully reports 0. Once arms are
+    grouped by source rather than by commit, such a run stops being isolated by
+    its differing commit hash and lands in a real sweep's group.
+
+    That is not hypothetical. The 16:15 run of 2026-08-19 was the WHPX-vs-TCG
+    probe: unpadded, on a kernel predating the accelerator banner (so `accel`
+    absent, reading exactly like a TCG arm), and built from source identical to
+    the TCG sweep (so it shared that sweep's digest). Every field that might
+    have separated it was blind. It would have joined the TCG band as a seventh
+    arm, contributing hardware-virtualised timings -- a median 3.5x faster --
+    to a band whose only purpose is to be compared against TCG runs.
+    """
+    arms = _sweep_arms({0: 500, 1024: 600, 2048: 550})
+    intruder = dict(arms[0], text_pad=0, entries=dict(_SWEEP_STABLE, b0=50),
+                    experiment="WHPX vs TCG: hardware virtualisation probe",
+                    timestamp="2026-08-19T09:00:00")
+
+    rejection = bh.layout_arm_rejection(intruder, "H", "release")
+    check("an untagged pad-bearing run is rejected as an arm",
+          rejection is not None, True)
+    check("...naming the reason rather than merely failing",
+          "not an arm of a layout sweep" in (rejection or ""), True)
+    check("...so it cannot widen a genuine sweep's band",
+          bh.layout_bands(arms + [intruder], "H", "release")["b0"][0],
+          bh.layout_bands(arms, "H", "release")["b0"][0])
+
+
+def test_a_recorded_digest_outranks_commit_and_survives_a_dirty_tree(bh):
+    """A row that measured its own source needs neither `commit` nor `dirty`.
+
+    `dirty` is computed with `git diff --quiet HEAD`, which cannot see
+    untracked files -- and the kernel `include_bytes!`s six gitignored service
+    binaries. A recorded `src_digest` covers those, so it asserts strictly more
+    than `commit` + `dirty` ever did, and a dirty tree stops being a reason to
+    discard a well-identified arm. That matters because the harness's own
+    writes are exactly what make later arms dirty.
+    """
+    arms = _sweep_arms({0: 500, 1024: 600, 2048: 550})
+    for index, arm in enumerate(arms):
+        arm["src_digest"] = "full:deadbeefdeadbeef"
+        arm["commit"] = f"unrelated{index}"
+        arm["dirty"] = True
+
+    check("a dirty arm carrying a digest is still an arm",
+          bh.layout_arm_rejection(arms[0], "H", "release"), None)
+    check("...and digest-identical arms band despite unrelated commits",
+          "b0" in bh.layout_bands(arms, "H", "release"), True)
+
+    # The two flavours must not be interchangeable: a row whose artifacts are
+    # unknown cannot be shown to share a build with one whose artifacts are
+    # pinned.
+    other = _sweep_arms({4096: 500}, commit="whatever")
+    other[0]["src_digest"] = "tracked:deadbeefdeadbeef"
+    check("a tracked: digest never groups with a full: one",
+          len(bh.layout_arms(arms + other, "H", "release")), 1)
+
+
+def test_an_uncorrectable_arm_voids_the_whole_group(bh):
+    """No drift correction is worse than no band, so the group is dropped.
+
+    The arms are separate boots minutes to hours apart, and TCG is CPU-bound, so
+    whatever else the host was doing scales a whole arm at once. If one arm's
+    `speed_factor` cannot be computed, the tempting fallback is an uncorrected
+    1.0 -- but uncorrected host drift *inflates* the spread, and a wider band
+    dismisses more movements. The convenient fallback fails in the one direction
+    that hides real regressions, so the group is voided instead, which yields
+    "unmeasured", under which a movement stays a regression.
+    """
+    arms = _sweep_arms({0: 500, 1024: 600, 2048: 550})
+    # Too few benchmarks for `speed_factor` (MIN_SAMPLES_FOR_DRIFT = 8), so
+    # this arm's host speed is unknowable rather than merely unusual.
+    arms[2]["entries"] = {"b0": 550, "b1": 1000}
+
+    check("one uncorrectable arm voids every band in the group",
+          bh.layout_bands(arms, "H", "release"), {})
+
+
+def test_a_band_is_measured_on_the_host_and_profile_that_asked(bh):
+    """A sweep on another machine says nothing about this one.
+
+    The page-straddle penalty is a property of the emulator and the build, so a
+    debug-profile sweep, or one from a different host, is not evidence about a
+    release run here -- and admitting it would be admitting a band nobody
+    measured for the thing being judged.
+    """
+    arms = (_sweep_arms({0: 500, 1024: 600})
+            + _sweep_arms({2048: 5000}, host="OTHER"))
+    check("an arm from another host does not complete the sweep",
+          bh.layout_bands(arms, "H", "release"), {})
+
+    arms = (_sweep_arms({0: 500, 1024: 600})
+            + _sweep_arms({2048: 5000}, profile="debug"))
+    check("nor does one from another profile",
+          bh.layout_bands(arms, "H", "release"), {})
+
+
+def test_split_by_layout_excuses_only_on_positive_evidence(bh):
+    """Three-way, not two-way: explained / unexplained / *unmeasured*.
+
+    The two-way version is the bug. With no band for a benchmark there is no
+    evidence either way, and the only safe reading is that nobody looked. An
+    excuse granted by absence would silence the check in the ordinary case --
+    the case where nothing has been swept at all -- which is the same failure as
+    a check that cannot fire. Same asymmetry as `replication_verdict` and
+    `MODE_UNDECIDED`: only a positively evidenced verdict may excuse a finding.
+    """
+    rows = [
+        ("inside", 100, 110, 10.0, 10.0, None),
+        ("outside", 100, 200, 100.0, 100.0, None),
+        ("unswept", 100, 200, 100.0, 100.0, None),
+        # Equal to the band, not merely under it: the band is a measurement of
+        # what placement *did* do, so a movement of exactly that size is one
+        # placement has been shown to produce.
+        ("exactly", 100, 120, 20.0, 20.0, None),
+        # Improvements are excused on the same evidence as regressions. A band
+        # is a spread, not a direction -- the same relink that can slow a
+        # benchmark by 20% can speed it up by 20%, and excusing only the
+        # regressions would quietly turn layout noise into a stream of
+        # "improvements" nobody made.
+        ("faster", 100, 80, -20.0, -20.0, None),
+    ]
+    bands = {"inside": (20.0, 3, "xxx"), "outside": (20.0, 3, "xxx"),
+             "exactly": (20.0, 3, "xxx"), "faster": (20.0, 3, "xxx")}
+    unexplained, explained, unmeasured = bh.split_by_layout(rows, bands)
+
+    check("a movement inside a measured band is explained",
+          [r[0] for r in explained], ["inside", "exactly", "faster"])
+    check("a movement past its band is not explained",
+          [r[0] for r in unexplained], ["outside"])
+    check("a benchmark nobody swept is unmeasured, not explained",
+          [r[0] for r in unmeasured], ["unswept"])
+
+
+def test_a_movement_inside_a_measured_band_stops_being_a_regression(bh):
+    """End to end: the sweep withdraws a movement it can account for.
+
+    This is the measured failure the whole mechanism exists for. Under TCG a
+    loop whose backward branch crosses a guest page costs ~1.7x per iteration,
+    and whether it crosses is a property of the loop's *address*; relinking --
+    which every commit does -- re-rolls that for every function after the edited
+    file. The resulting movement replicates perfectly on every re-run, so it
+    arrived wearing the harness's strongest label. Here the same source, built
+    at three offsets, is shown to move `b0` further than the commit did.
+    """
+    history = (_sweep_arms({0: 500, 1024: 5000, 2048: 1000})
+               + _repl_history(bh, 2900, "xxx"))
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("a movement placement can account for does not fail the build",
+          failed, False)
+    check("...and is shown, under a heading that says what accounts for it",
+          "EXPLAINED BY CODE PLACEMENT" in out, True)
+    check("...and is not called a regression", "  REGRESSED (" in out, False)
+    check("...and the band that excused it is quoted, with its size",
+          "placement alone moves it 900% (3 layouts of xxx, "
+          "accelerator not recorded; 3/3 arms carried no host-load check)"
+          in out, True)
+    # The band is three samples out of every possible offset, so it cannot
+    # contain the worst pair among all of them. A reader who takes it as
+    # exhaustive would clear a near-miss that nothing has cleared.
+    check("...and the band is stated to be a lower bound",
+          "the band is a LOWER bound" in out, True)
+    check("...and the reader is told how to widen it",
+          "scripts/layout-sweep.py" in out, True)
+
+    # Same withdrawal, same band, but the diff edits code `b0` provably runs.
+    # The verdict must not move -- placement still fully accounts for the
+    # movement -- but the silence must, because a second explanation is now
+    # live and this measurement cannot separate the two.
+    loud, loud_failed = _repl_report(
+        bh, history, 3000, "xxx",
+        bench_subsystems={"b0": {"kernel/src/sched/"}},
+        changed_files=["kernel/src/sched/rr.rs"])
+    check("...and when the diff edits the benchmark's own subsystem, it says so",
+          "provably runs" in loud, True)
+    check("...without turning into a build failure", loud_failed, False)
+    check("...and still under the same heading",
+          "EXPLAINED BY CODE PLACEMENT" in loud, True)
+
+
+def test_a_movement_past_its_band_is_still_a_regression(bh):
+    """The other half, or the gate is indistinguishable from deleting the check.
+
+    A dismissal that only ever dismisses is not a check. Same construction as
+    above with the arms tightened to a 20% spread, so placement demonstrably
+    cannot account for a ~500% movement, and the finding must survive.
+    """
+    history = (_sweep_arms({0: 500, 1024: 600, 2048: 550})
+               + _repl_history(bh, 2900, "xxx"))
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("a movement past the measured band still fails the build",
+          failed, True)
+    check("...and keeps the confirmed heading", "  REGRESSED (" in out, True)
+    check("...and is not filed under code placement",
+          "EXPLAINED BY CODE PLACEMENT" in out, False)
+
+
+def test_an_unswept_benchmark_keeps_its_regression_and_says_so(bh):
+    """Unmeasured is not innocent -- but the reader must be told which it is.
+
+    The arms here carry `b1`-`b19` and no `b0`, so a band exists for the suite
+    but not for the benchmark that moved. The movement must survive, and the
+    report must say the verdict rests on nobody having looked rather than on
+    anybody having shown it -- otherwise "REGRESSED" reads as though placement
+    had been ruled out, which is exactly the over-claim that taught readers to
+    stop believing this instrument.
+    """
+    arms = _sweep_arms({0: 0, 1024: 0, 2048: 0})
+    for arm in arms:
+        arm["entries"] = dict(_SWEEP_STABLE)
+    history = arms + _repl_history(bh, 2900, "xxx")
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("an unswept movement still fails the build", failed, True)
+    check("...and is still called a regression", "  REGRESSED (" in out, True)
+    check("...and the report says placement was not ruled out for it",
+          "have no measured layout band" in out, True)
+    check("...and says the verdict rests on nobody having looked",
+          "not because anybody has shown it" in out, True)
+    check("...and gives the command that would settle it",
+          "layout-sweep.py --pads" in out, True)
+
+
+def test_the_most_recent_sweep_wins_over_the_best_sampled_one(bh):
+    """Recency beats arm count, and the reason is categorical, not statistical.
+
+    More sampled layouts really is a better lower bound of the true placement
+    sensitivity, so "most arms wins" is the tempting rule. It is still wrong: a
+    band is evidence about the hot loops that *exist*, and a sweep of a commit
+    whose code has since been rewritten is evidence about code that no longer
+    runs. Preferring it lets a wide, well-sampled, obsolete band dismiss a real
+    regression in today's code.
+
+    The converse error -- a barely-above-floor recent sweep giving a band too
+    narrow to excuse a genuine artifact -- fails the safe way: the movement
+    stays a regression and a human looks at it.
+    """
+    old = _sweep_arms({0: 500, 1024: 5000, 2048: 1000, 512: 700},
+                      commit="ancient")
+    for arm in old:
+        arm["timestamp"] = "2026-01-01T00:00:00"
+    new = _sweep_arms({0: 500, 1024: 600, 2048: 550}, commit="today")
+    for arm in new:
+        arm["timestamp"] = "2026-08-19T12:00:00"
+
+    # Deliberately fed oldest-last, so a rule that merely takes the final group
+    # would also pass; only the ordering is under test here.
+    bands = bh.layout_bands(new + old, "H", "release")
+
+    check("the recent 3-arm sweep beats the ancient 4-arm one",
+          bands["b0"][2], "today")
+    check("...so the band is the narrow recent one, not the wide stale one",
+          round(bands["b0"][0], 6), 20.0)
+    check("...and the reader is told which commit it came from",
+          "3 layouts of today" in bh.describe_layout_band(bands["b0"]), True)
+
+    # Arm count still decides between sweeps of equal recency -- there the
+    # categorical objection does not apply and more samples is simply better.
+    for arm in old:
+        arm["timestamp"] = "2026-08-19T12:00:00"
+    tied = bh.layout_bands(new + old, "H", "release")
+    check("at equal recency the better-sampled sweep wins",
+          tied["b0"][2], "ancient")
+
+
+def test_a_band_reports_whether_its_arms_could_check_the_host(bh):
+    """A band whose arms could not verify their own conditions must say so.
+
+    The failure this pins is a real one, not a hypothetical. Every arm of the
+    2026-08-19 WHPX sweep returned `samples: 0, invalid: 13` -- the canary
+    rejected all thirteen of its own measurements, so it could not tell whether
+    the host was idle -- and the band those six arms produced printed exactly as
+    confidently as one measured on a verified-quiet machine. A band is a licence
+    to dismiss a movement as noise, so the reader is entitled to know that the
+    instrument behind it failed.
+
+    `absent` is caveated alongside `broken` deliberately. A record with no
+    canary at all is not a record that passed; it is one nobody checked, and
+    the two are only distinguishable if the output refuses to treat silence as
+    a pass. Only an all-clean band prints nothing, so the caveat's *presence*
+    carries the information.
+    """
+    clean = {"samples": 10, "start": 100, "min": 40, "spread": 3.0,
+             "invalid": 0}
+    broken = {"samples": 0, "start": 0, "min": 0, "spread": 0, "invalid": 13,
+              "min_centi": 0}
+
+    all_clean = bh.layout_bands(
+        _sweep_arms({0: 500, 1024: 600, 2048: 550}, canary=clean),
+        "H", "release")
+    check("a band records the canary verdicts of its arms",
+          all_clean["b0"][4], {bh.CANARY_CLEAN: 3})
+    check("...and says nothing when every one of them was clean",
+          bh.describe_canary_mix(all_clean["b0"][4]), "")
+    check("...so an unqualified band means the arms really were checked",
+          bh.describe_layout_band(all_clean["b0"]),
+          "placement alone moves it 20% (3 layouts of xxx, "
+          "accelerator not recorded)")
+
+    all_broken = bh.layout_bands(
+        _sweep_arms({0: 500, 1024: 600, 2048: 550}, canary=broken),
+        "H", "release")
+    check("the six-WHPX-arm shape is classified broken, not clean",
+          all_broken["b0"][4], {bh.CANARY_BROKEN: 3})
+    check("...and the band says so in words a reader need not decode",
+          "3/3 arms could not measure host load"
+          in bh.describe_layout_band(all_broken["b0"]), True)
+    check("...while still reporting the band rather than voiding it",
+          round(all_broken["b0"][0], 6), 20.0)
+
+    # A count, not an adjective: "1 of 3" and "3 of 3" warrant different
+    # reactions and no single word separates them.
+    mixed = _sweep_arms({0: 500, 1024: 600, 2048: 550}, canary=clean)
+    mixed[1] = dict(mixed[1], canary=broken)
+    mixed_bands = bh.layout_bands(mixed, "H", "release")
+    check("a partly-broken sweep is counted, not collapsed to one word",
+          mixed_bands["b0"][4], {bh.CANARY_CLEAN: 2, bh.CANARY_BROKEN: 1})
+    check("...and the count reaches the reader",
+          "1/3 arms could not measure host load"
+          in bh.describe_layout_band(mixed_bands["b0"]), True)
+
+    # Worst-first ordering: the part that undermines the band must not sit
+    # behind the reassuring part, where a skimming reader stops early.
+    contaminated = {"samples": 10, "start": 100, "min": 40, "spread": 90.0,
+                    "invalid": 0}
+    order = bh.describe_canary_mix({bh.CANARY_CLEAN: 1, bh.CANARY_BROKEN: 1,
+                                    bh.CANARY_CONTAMINATED: 1})
+    check("the worst verdict is stated first",
+          order.startswith("1/3 arms measured host load"), True)
+    check("...and the clean arms last", order.endswith("1/3 arms clean"), True)
+    check("a measured-contamination canary is classified as such",
+          bh.canary_verdict(contaminated), bh.CANARY_CONTAMINATED)
+
+    # An arm with no canary field at all is unchecked, not passing.
+    unchecked = bh.layout_bands(_sweep_arms({0: 500, 1024: 600, 2048: 550}),
+                                "H", "release")
+    check("an arm that carried no canary is absent, not clean",
+          unchecked["b0"][4], {bh.CANARY_ABSENT: 3})
+    check("...and is caveated too, so silence cannot mean 'nobody looked'",
+          "3/3 arms carried no host-load check"
+          in bh.describe_layout_band(unchecked["b0"]), True)
+
+
+def test_an_aa_pair_is_never_explained_by_placement(bh):
+    """The one comparison where placement provably cannot be the cause.
+
+    An A/A pair is the same kernel image twice, so the code sits at *identical*
+    addresses in both runs and placement is the single thing that cannot differ
+    between them. Filing an A/A movement under "explained by code placement" is
+    a false statement about the only case that is certain.
+
+    It also did a worse, quieter harm, and that is what this test really pins.
+    Rows the layout split claims are removed from the regressed/improved lists,
+    so they never reached the A/A MOVEMENT section either -- and that section
+    exists to print exactly this: the spread of an A/A pair, which is this
+    host's measurement noise, measured, and the single most useful number such
+    a run produces. The band was silently deleting it.
+
+    The general shape is worth recognising elsewhere: a filter that is correct
+    for the ordinary case, applied to the one case whose premise it violates.
+    """
+    import io
+    import contextlib
+
+    history = (_sweep_arms({0: 500, 1024: 5000, 2048: 1000})
+               + _repl_history(bh, 2900, "xxx"))
+    previous = dict(history[-1], kernel_sha="deadbeef", commit="xxx")
+    history[-1] = previous
+    current = {name: (value, 10000, "OK", None, None)
+               for name, value in previous["entries"].items()}
+    current["b0"] = (3000, 10000, "OK", None, None)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        failed = bh.report(
+            previous, current, 25.0, records=history, host="H",
+            profile="release", commit="xxx",
+            this_run={"kernel_sha": "deadbeef", "commit": "xxx"})
+    out = buf.getvalue()
+
+    check("an A/A movement is not attributed to placement",
+          "EXPLAINED BY CODE PLACEMENT" in out, False)
+    check("...and still reaches the A/A section it belongs in",
+          "A/A MOVEMENT" in out, True)
+    check("...where the noise-floor spread is actually printed",
+          "b0: 503ns -> 3000ns" in out, True)
+    check("...and an A/A pair still cannot fail the build", failed, False)
+
+
+def _bands_view(bh, tmpdir, records, profile="release"):
+    """Run `--layout-bands` over a written history. -> stdout."""
+    import io
+    import json
+    import contextlib
+    import platform
+
+    path = os.path.join(tmpdir, "history.jsonl")
+    host = platform.node() or "unknown"
+    with open(path, "w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(dict(record, host=host)) + "\n")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.cmd_layout_bands(path, profile)
+    return buf.getvalue()
+
+
+def test_the_bands_view_distinguishes_unswept_from_insensitive(bh, tmpdir):
+    """Silence means two opposite things, and the reader must be told which.
+
+    A band is otherwise only visible as a side effect of a comparison, and only
+    for benchmarks that moved far enough to be listed. So "swept, and this
+    benchmark barely cares about placement" and "never swept, nothing is known"
+    both present as nothing at all -- while calling for opposite responses.
+    """
+    empty = _bands_view(bh, tmpdir, _repl_history(bh, 500, "xxx"))
+    check("an unswept history says so in as many words",
+          "no sweep has ever been run" in empty, True)
+    check("...and names the command that would fix it",
+          "layout-sweep.py --pads" in empty, True)
+    check("...and does not let the reader read silence as zero sensitivity",
+          "judged as code because nobody has measured otherwise" in empty, True)
+
+    swept = _bands_view(bh, tmpdir, _sweep_arms({0: 500, 1024: 600, 2048: 550}))
+    check("a swept history reports the band as a number",
+          "20.0%" in swept, True)
+    check("...and a benchmark placement barely moves as a measured near-zero",
+          "0.0%" in swept, True)
+    check("...and says over how many layouts, of which commit",
+          "3 layouts of xxx" in swept, True)
+    check("...and repeats that it is a lower bound",
+          "lower bounds" in swept, True)
+
+
+def test_the_bands_view_says_which_kind_of_nothing_it_found(bh, tmpdir):
+    """Three ways to have no band, three different actions.
+
+    Reporting only the conclusion is how a sweep that ran but silently failed to
+    qualify -- wrong profile, dirty tree, a voided arm -- would look exactly
+    like a sweep nobody ever ran, and the reader would re-run the sweep they
+    already have instead of fixing whatever disqualified it.
+    """
+    # Swept, but on the other profile.
+    wrong = _bands_view(bh, tmpdir,
+                        _sweep_arms({0: 500, 1024: 600, 2048: 550},
+                                    profile="debug"))
+    check("a sweep on another profile is not reported as 'never swept'",
+          "no sweep has ever been run" in wrong, False)
+    check("...it is reported as not qualifying, with the pads it does have",
+          "none qualify here" in wrong and "[0, 1024, 2048]" in wrong, True)
+
+    # Swept, qualifying, but one arm cannot be drift-corrected.
+    arms = _sweep_arms({0: 500, 1024: 600, 2048: 550})
+    arms[2]["entries"] = {"b0": 550, "b1": 1000}
+    voided = _bands_view(bh, tmpdir, arms)
+    check("a voided group is not reported as 'never swept'",
+          "no sweep has ever been run" in voided, False)
+    check("...it says the arms exist and the band was voided",
+          "every band was voided" in voided, True)
+
+
+def test_no_sweep_at_all_changes_nothing(bh):
+    """The ordinary case: no arms, no bands, and every finding stands.
+
+    Almost every history in this repo has never been swept. If the absence of a
+    sweep altered any verdict, the mechanism would have silently rewritten the
+    judgement of every run that predates it.
+    """
+    history = _repl_history(bh, 2900, "xxx")
+    out, failed = _repl_report(bh, history, 3000, "xxx")
+
+    check("no sweep leaves the regression intact", failed, True)
+    check("...and prints no placement heading",
+          "EXPLAINED BY CODE PLACEMENT" in out, False)
+    check("...and no band is computed from an unswept history",
+          bh.layout_bands(history, "H", "release"), {})
+
+
+def _shift_with_sweep(bh, sweep, shift_to=3000, kernel_sha=None):
+    """A history holding BOTH a persisted level shift in `v` and a layout sweep.
+
+    The two halves must coexist in one list because that is how they arrive in
+    reality -- `report` is handed a single history and has to draw the shift
+    from the honest runs and the band from the sweep arms. The sweep arms carry
+    `experiment`, so `comparable_records` keeps them out of the shift's window
+    while `layout_arms` deliberately reads them; a helper that built the two
+    halves separately would never exercise that separation.
+
+    Nine stable companions per record, not the six `_shift_history` uses, for
+    the reason that helper gives *plus* one it does not need: with only the
+    benchmark under test present, `speed_factor` *is* that benchmark's own
+    ratio and every correction cancels the very thing being measured -- and
+    below `MIN_SAMPLES_FOR_DRIFT` benchmarks it declines to answer at all,
+    which `level_shifts` absorbs as a 1.0 fallback but `layout_bands`
+    deliberately treats as "no band". Seven benchmarks therefore produce a
+    silently unswept history, and every layout assertion here would pass by
+    measuring nothing.
+    """
+    stable = {f"stable{i}": 1000 for i in range(9)}
+    history = []
+    for value in [1000] * 8 + [shift_to, shift_to]:
+        record = {"host": "H", "profile": "release",
+                  "entries": dict(stable, v=value)}
+        if kernel_sha:
+            record["kernel_sha"] = kernel_sha
+            record["commit"] = "aaa"
+        history.append(record)
+    history += [
+        {"host": "H", "profile": "release", "commit": "sweptcommit",
+         "text_pad": pad, "experiment": f"layout sweep: textpad={pad}",
+         "timestamp": f"2026-08-19T0{index}:00:00",
+         "entries": dict(stable, v=value)}
+        for index, (pad, value) in enumerate(sorted(sweep.items()))
+    ]
+    return history
+
+
+def _shift_report(bh, history, shift_to=3000, this_run=None,
+                  changed_files=None, bench_subsystems=None):
+    """Run `report` over a `_shift_with_sweep` history. -> (stdout, failed)."""
+    import io, contextlib
+    previous = history[9]
+    current = {name: (value, 10000, "OK", None, None)
+               for name, value in previous["entries"].items()}
+    current["v"] = (shift_to, 10000, "OK", None, None)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        failed = bh.report(previous, current, 25.0, records=history,
+                           host="H", profile="release",
+                           this_run=this_run or {"kernel_sha": "now"},
+                           changed_files=changed_files,
+                           bench_subsystems=bench_subsystems)
+    return buf.getvalue(), failed
+
+
+def test_a_sustained_shift_inside_a_measured_layout_band_is_not_bisectable(bh):
+    """The second path to a build failure, closed the same way as the first.
+
+    `level_shifts` is wired into `--fail-on-regression` independently of the
+    run-over-run lists, and the layout band was not consulted there at all. The
+    gap is visible in that function's own reasoning: "host disturbance is
+    random per run, while a code regression is in every run after the commit."
+    True, and incomplete -- a code *placement* artifact is also in every run
+    after the commit, because the addresses are a property of the image and
+    every re-run of that image reproduces them exactly. So persistence
+    separates {code OR layout} from host noise and cannot say which it holds.
+
+    `mode_structure` does not close this. It needs the benchmark to have been
+    *seen* at both modes across binaries in the recorded history, so the first
+    commit whose relink lands a hot loop across a page boundary is
+    MODE_UNDECIDED -- and MODE_UNDECIDED fails the build, correctly, on the
+    evidence it has. A sweep knows the same thing before the artifact has ever
+    repeated, which is the whole reason to run one.
+    """
+    wide = _shift_with_sweep(bh, {0: 1000, 1024: 4000, 2048: 2000})
+    out, failed = _shift_report(bh, wide)
+    check("the sustained shift is still reported", "SUSTAINED SHIFT" in out,
+          True)
+    check("...and named as placement, not as a code finding",
+          "NOT a code finding: code placement alone covers this shift" in out,
+          True)
+    check("...and the band's provenance is printed with it",
+          "3 layouts of sweptcommit" in out, True)
+    check("...so it does not fail the build", failed, False)
+    check("...and the reader is told the band is a lower bound",
+          "LOWER" in out and "not 'proven harmless'" in out, True)
+    # The advice reads "rule out code layout before reading the diff". Under a
+    # shift the sweep has *already* attributed to layout it would send the
+    # reader to establish what the line above it just established.
+    check("...and is not told to go and rule out what was just ruled out",
+          "straddle-check.py --compare" in out, False)
+
+    # Same shift, same everything, a band too narrow to cover it.
+    narrow = _shift_with_sweep(bh, {0: 1000, 1024: 1100, 2048: 1050})
+    out, failed = _shift_report(bh, narrow)
+    check("a shift larger than its measured band is not explained",
+          "NOT a code finding" in out, False)
+    check("...and still fails the build", failed, True)
+    check("...and the straddle-check advice is printed for it",
+          "straddle-check.py --compare" in out, True)
+
+    # And the ordinary case: nothing swept, nothing excused.
+    unswept = _shift_with_sweep(bh, {})
+    out, failed = _shift_report(bh, unswept)
+    check("an unswept benchmark keeps its sustained shift",
+          "NOT a code finding" in out, False)
+    check("...and it still fails the build", failed, True)
+
+
+def test_a_sustained_shift_across_one_fixed_image_is_never_placement(bh):
+    """The A/A mistake in its other costume, refused before it can be made.
+
+    Placement can only explain a shift if placement could have *changed* across
+    the runs the shift is drawn from. When every one of them is provably the
+    same kernel image, the addresses are identical throughout and layout is the
+    one hypothesis ruled out by arithmetic rather than weighed against the
+    numbers -- exactly as in an A/A pair. A band wide enough to cover the shift
+    must not excuse it here, however well measured it is.
+
+    What such a series actually is, for the record: a host-level change
+    (thermal, background load) that persisted. Reporting it is right; calling
+    it code placement would be a false statement.
+    """
+    fixed = _shift_with_sweep(bh, {0: 1000, 1024: 4000, 2048: 2000},
+                              kernel_sha="frozen")
+    out, failed = _shift_report(bh, fixed, this_run={"kernel_sha": "frozen",
+                                                     "commit": "aaa"})
+    check("a band that would otherwise cover it does not excuse it",
+          "NOT a code finding" in out, False)
+    check("...and the shift still fails the build", failed, True)
+    check("...and the run-over-run half still sees the A/A pair",
+          "A/A COMPARISON" in out, True)
+
+    # The predicate itself, at its two ends.
+    check("all-one-image is proof placement could not differ",
+          bh.placement_is_constant(fixed, "H", "release", None,
+                                   {"kernel_sha": "frozen"}), True)
+    unknown = _shift_with_sweep(bh, {0: 1000, 1024: 4000, 2048: 2000})
+    check("...and unidentifiable runs are NOT proof of that",
+          bh.placement_is_constant(unknown, "H", "release", None,
+                                   {"kernel_sha": "now"}), False)
+    check("...nor is a run that cannot name its own image",
+          bh.placement_is_constant(fixed, "H", "release", None, None), False)
+
+
+def test_the_layout_veto_reads_the_same_window_the_shift_was_drawn_from(bh):
+    """`level_shift_window` has two callers and they must not drift apart.
+
+    A veto computed over a different window than the finding it vetoes is a
+    check that appears to fire on the evidence and does not -- this file's
+    recurring failure in yet another form. The windows are asserted
+    behaviourally rather than by re-deriving the slice arithmetic, which would
+    only restate the implementation.
+    """
+    history = _shift_with_sweep(bh, {})
+    reference, recent = bh.level_shift_window(history, "H", "release", None)
+    honest = [r for r in history if "text_pad" not in r]
+
+    check("the corroborating runs are the newest honest ones",
+          [id(r) for r in recent],
+          [id(r) for r in honest[-bh.LEVEL_SHIFT_PERSIST:]])
+    check("the baseline and the corroboration share no run",
+          set(map(id, reference)) & set(map(id, recent)), set())
+    check("no sweep arm is ever part of either window",
+          any("text_pad" in r for r in reference + recent), False)
+
+    current = dict(honest[-1]["entries"])
+    check("the shift is found to begin with",
+          [r[0] for r in bh.level_shifts(history, "H", "release", None, current)],
+          ["v"])
+
+    # Put one corroborating run back at baseline: the finding must vanish.
+    recent[0]["entries"] = dict(recent[0]["entries"], v=1000)
+    check("a run inside the corroboration window decides the verdict",
+          bh.level_shifts(history, "H", "release", None, current), [])
+    recent[0]["entries"] = dict(recent[0]["entries"], v=3000)
+
+    # The one run in neither window must not: that buffer is why
+    # LEVEL_SHIFT_PERSIST < LEVEL_SHIFT_SKIP.
+    buffer_run = honest[-bh.LEVEL_SHIFT_SKIP]
+    check("the buffer run really is in neither window",
+          id(buffer_run) in set(map(id, reference + recent)), False)
+    buffer_run["entries"] = dict(buffer_run["entries"], v=99999)
+    check("...and changing it changes nothing",
+          [r[0] for r in bh.level_shifts(history, "H", "release", None, current)],
+          ["v"])
+
+
+def test_the_benchmark_subsystem_map_is_read_out_of_bench_rs(bh, tmpdir):
+    """Derived from the source, over-attributing, and never a denylist.
+
+    Three properties, each of which is the safe direction of a choice that
+    could have gone the other way:
+
+    * The module list comes from `os.listdir` of `kernel/src`, not a table. A
+      table is a second place the truth lives, and when a module is renamed it
+      does not fail -- it silently stops recognising the module, which reads
+      exactly like a benchmark that touches nothing.
+    * `core::`, `u64::` and every other non-module `x::` fall out because they
+      are not in that listing. No denylist to keep current.
+    * A body that merely *mentions* a module counts. That over-attributes, and
+      over-attribution costs a human one look; the opposite costs a missed
+      escalation nobody ever hears about.
+    """
+    import os as _os
+    src = _os.path.join(tmpdir, "kernel", "src")
+    _os.makedirs(_os.path.join(src, "sched"))
+    _os.makedirs(_os.path.join(src, "mm"))
+    for leaf in ("lib.rs", "tlb.rs"):
+        open(_os.path.join(src, leaf), "w").close()
+    bench_rs = _os.path.join(tmpdir, "bench.rs")
+    with open(bench_rs, "w", encoding="utf-8") as handle:
+        handle.write(
+            "fn bench_pick_next() {\n"
+            "    let t = sched::spawn();\n"
+            "    let n = core::hint::black_box(t);\n"
+            "    score(\"pick_next\", n);\n"
+            "}\n"
+            "pub unsafe fn bench_fault() {\n"
+            "    mm::map(); tlb::flush();\n"
+            "    score(\"page_fault\", 1);\n"
+            "    score(\"page_fault_cow\", 2);\n"
+            "}\n"
+            "fn helper_with_no_score() {\n"
+            "    sched::yield_now();\n"
+            "}\n")
+
+    got = bh.benchmark_subsystems(bench_rs, src)
+    check("a benchmark is attributed to the module its body calls",
+          got.get("pick_next"), {"kernel/src/sched/", "kernel/src/bench.rs"})
+    check("...including every module it mentions, not just the first",
+          got.get("page_fault"),
+          {"kernel/src/mm/", "kernel/src/tlb.rs", "kernel/src/bench.rs"})
+    check("two scores in one body share that body's attribution",
+          got.get("page_fault_cow"), got.get("page_fault"))
+    check("`core::` is not a kernel module and does not become one",
+          any("core" in path for paths in got.values() for path in paths),
+          False)
+    check("a function that scores nothing is not a benchmark",
+          "helper_with_no_score" in got, False)
+    check("the harness itself reaches every benchmark by definition",
+          all("kernel/src/bench.rs" in paths for paths in got.values()), True)
+
+    # And against the real tree, because a map that is correct on a fixture and
+    # empty on `kernel/src/bench.rs` is a check that cannot fire.
+    real = bh.benchmark_subsystems()
+    check("the real bench.rs yields a non-trivial map", len(real) > 30, True)
+    check("...and pick_next still lands in the scheduler",
+          "kernel/src/sched/" in real.get("pick_next", set()), True)
+
+
+def test_a_layout_excused_movement_says_so_when_the_diff_edits_its_subsystem(bh):
+    """The hole in the layout excuse: a wide band can cover a real regression.
+
+    A measured band says "two builds of *identical source* moved this
+    benchmark at least this far". That is a true statement about placement and
+    it never becomes false. What it is not is a statement about the diff -- so
+    when the diff also edits code the benchmark provably runs, placement and
+    the diff are both live explanations and the measurement cannot separate
+    them. Withdrawing the movement is still right; withdrawing it in silence
+    is not, because the reader is never told the second explanation exists.
+
+    The escalation is asserted to be exactly that -- prose. `failed` must not
+    change, or this would have become a way for a *diff* to cause a build
+    failure that the evidence does not support.
+    """
+    wide = _shift_with_sweep(bh, {0: 1000, 1024: 4000, 2048: 2000})
+    subsystems = {"v": {"kernel/src/sched/", "kernel/src/bench.rs"}}
+
+    quiet, quiet_failed = _shift_report(bh, wide, bench_subsystems=subsystems,
+                                        changed_files=["kernel/src/mm/vma.rs"])
+    check("a diff elsewhere leaves the excuse unannotated",
+          "provably runs" in quiet, False)
+    check("...and does not fail the build", quiet_failed, False)
+
+    loud, loud_failed = _shift_report(
+        bh, wide, bench_subsystems=subsystems,
+        changed_files=["kernel/src/sched/rr.rs", "docs/notes.md"])
+    check("a diff inside the benchmark's own subsystem is called out",
+          "provably runs" in loud, True)
+    check("...naming the file, so the reader knows where to look",
+          "kernel/src/sched/rr.rs" in loud, True)
+    check("...and saying the two explanations cannot be told apart",
+          "BOTH live explanations" in loud and "them apart" in loud, True)
+    check("...while the unrelated file stays out of it",
+          "docs/notes.md" in loud, False)
+    check("...and it is still not counted as a regression",
+          loud_failed, False)
+    check("...and the movement is still withdrawn as placement",
+          "NOT a code finding" in loud, True)
+
+
+def test_the_diff_escalation_can_only_ever_escalate(bh):
+    """Every way of not knowing must produce silence, never an excuse.
+
+    This is the direction-of-failure argument that made the whole feature
+    tractable. `known-issues.md`'s standing fix is phrased "label it MOVED
+    *unless* the changed files plausibly reach the benchmark", which needs
+    proof of NON-reachability -- and nothing here can supply that, because the
+    map cannot see through helpers, trait objects, inlining or LTO. Phrased as
+    an escalation instead, every unknown resolves to "said nothing", and the
+    movement keeps whatever verdict the measurement gave it.
+    """
+    check("no map at all escalates nothing",
+          bh.diff_touches("v", None, ["kernel/src/sched/rr.rs"]), [])
+    check("no diff at all escalates nothing",
+          bh.diff_touches("v", {"v": {"kernel/src/sched/"}}, None), [])
+    check("an unmapped benchmark escalates nothing",
+          bh.diff_touches("other", {"v": {"kernel/src/sched/"}},
+                          ["kernel/src/sched/rr.rs"]), [])
+    check("a directory does not match a sibling that shares its prefix",
+          bh.diff_touches("v", {"v": {"kernel/src/sched/"}},
+                          ["kernel/src/scheduler_notes.md"]), [])
+    check("a file entry matches only itself",
+          bh.diff_touches("v", {"v": {"kernel/src/tlb.rs"}},
+                          ["kernel/src/tlb.rs", "kernel/src/tlbx.rs"]),
+          ["kernel/src/tlb.rs"])
+    check("windows separators in git output do not defeat the match",
+          bh.diff_touches("v", {"v": {"kernel/src/sched/"}},
+                          ["kernel\\src\\sched\\rr.rs"]),
+          ["kernel/src/sched/rr.rs"])
+    check("describe_diff_touch is silent when there is nothing to say",
+          bh.describe_diff_touch("v", {"v": {"kernel/src/sched/"}}, []), None)
+
+    # `changed_paths` must distinguish "nothing changed" from "never asked".
+    check("no base commit is not-established, not an empty diff",
+          bh.changed_paths(None), None)
+    check("an unknown commit is not-established either",
+          bh.changed_paths("0" * 40), None)
+    check("...and so is the placeholder the recorder writes",
+          bh.changed_paths(bh.UNKNOWN_COMMIT), None)
+
+
+# ---------------------------------------------------------------------------
+# `--accel-compare`
+#
+# Every test below is a published-and-wrong table turned into an assertion. Q53
+# was built by an analysis that enumerated records itself and looked right; Q54
+# published x3.53 as "the" speedup when it was the lowest of six values spanning
+# x3.53-x3.97, with a different benchmark winning "best case" in four of them.
+# The command exists so those tables are pasted output rather than transcribed
+# output; these tests exist so the command cannot quietly acquire either defect.
+# ---------------------------------------------------------------------------
+
+#: A canary that resolves its own quantity and finds nothing. `min` has to clear
+#: `2 * CANARY_MIN_RESOLVABLE` or `canary_verdict` returns `broken` -- correctly,
+#: but it would then put a caveat under every table in this section and hide the
+#: one test that is actually about the caveat.
+_ACCEL_CLEAN_CANARY = {"start": 200, "end": 204, "pct": 102, "samples": 10,
+                       "min": 200, "max": 204, "spread": 2}
+
+_ACCEL_WANTED = ("QEMU TCG", "Hyper-V/WHPX")
+
+
+def _accel_run(accel=None, sha="a" * 16, when="2026-08-19T01:00:00+00:00",
+               entries=None, **overrides):
+    """One bench record shaped as an accelerator comparison needs it.
+
+    `accel=None` is written as a *missing key*, not as a null, because that is
+    what the 19 pre-2026-08-19 runs in the real history look like -- the field
+    did not exist. A test that wrote `"accel": None` would be testing a record
+    shape that has never occurred.
+    """
+    record = {
+        "host": "H",
+        "profile": "release",
+        "commit": "cccccccccc1",
+        "timestamp": when,
+        "kernel_sha": sha,
+        "canary": dict(_ACCEL_CLEAN_CANARY),
+        "entries": dict(entries or {"a": 1000.0, "b": 1000.0, "c": 1000.0}),
+    }
+    if accel is not None:
+        record["accel"] = accel
+    record.update(overrides)
+    return record
+
+
+def _accel_sel(bh, records, assume="", pin=""):
+    """`accel_selection` over TCG -> WHPX on host H, release."""
+    return bh.accel_selection(records, "H", "release", *_ACCEL_WANTED,
+                              assume, pin)
+
+
+def _accel_view(bh, tmpdir, records, spec="tcg:whpx", **kwargs):
+    """Run `--accel-compare` over a written history. -> (stdout, exit code).
+
+    Rewrites every record's host to this machine's, because `cmd_accel_compare`
+    resolves the host itself -- the comparison is only ever meaningful within
+    one machine, so there is deliberately no flag to override it.
+    """
+    import json
+    import platform
+
+    path = os.path.join(tmpdir, "history.jsonl")
+    host = platform.node() or "unknown"
+    with open(path, "w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(dict(record, host=host)) + "\n")
+    return capture(bh.cmd_accel_compare, path, "release", spec, **kwargs)
+
+
+def test_the_accel_predicate_shares_the_layout_predicates_universal_filters(bh):
+    """Two selection rules, one copy of the part they agree on.
+
+    sec 240 rule 2 says an analysis that groups records must call the real
+    predicate rather than restate it, and this is the first place two callers
+    needed the same three filters -- wrong host, wrong profile, deliberately
+    loaded host. Restating them would agree today and drift on the next edit to
+    either, which is how a band certifies arms it should have thrown out.
+
+    The equivalence is asserted over a matrix rather than case by case, and the
+    final clause is the one with teeth: it reads `MISMATCH_*` off the module and
+    fails if a fourth filter is added without a case here. Without it this test
+    could not distinguish "the shared predicate grew a clause nobody exercises"
+    from "there are three clauses and all three are checked".
+
+    Mutation-checked by re-inlining the `host` comparison into
+    `accel_run_rejection` and dropping it from `measurement_mismatch`: the
+    matrix still passes (both sides still reject) but the layout predicate stops
+    rejecting a foreign host, which the second row catches.
+    """
+    host, profile = "H", "release"
+    cases = {
+        "other host": {"host": "OTHER"},
+        "other profile": {"profile": "debug"},
+        "loaded host": {"host_load": bh.HOST_LOAD_LOADED},
+    }
+    seen = []
+    for label, override in cases.items():
+        record = dict(_sweep_arms({1024: 500}, **override)[0],
+                      accel="QEMU TCG", kernel_sha="a" * 16)
+        seen.append(bh.measurement_mismatch(record, host, profile))
+        check(f"{label}: both predicates reject it",
+              (bh.layout_arm_rejection(record, host, profile) is None,
+               bh.accel_run_rejection(record, host, profile,
+                                      _ACCEL_WANTED) is None),
+              (False, False))
+        check(f"{label}: ...and each words it for its own reader",
+              bh.layout_arm_rejection(record, host, profile)
+              == bh.accel_run_rejection(record, host, profile, _ACCEL_WANTED),
+              False)
+
+    clean = dict(_sweep_arms({1024: 500})[0],
+                 accel="QEMU TCG", kernel_sha="a" * 16)
+    check("a run that fails none of the three passes both predicates",
+          (bh.measurement_mismatch(clean, host, profile),
+           bh.layout_arm_rejection(clean, host, profile),
+           bh.accel_run_rejection(clean, host, profile, _ACCEL_WANTED)),
+          (None, None, None))
+
+    codes = sorted(value for name, value in vars(bh).items()
+                   if name.startswith("MISMATCH_"))
+    check("every shared filter the module defines is exercised above",
+          codes, sorted(seen))
+
+
+def test_an_accelerator_comparison_refuses_to_guess_one(bh):
+    """A run that recorded no accelerator joins no side, ever.
+
+    This is the mistake `parse_accel` exists to prevent, one layer up. 98 of the
+    113 records in the real history predate the `accel` field, and the temptation
+    is to read "no banner" as "the default, so TCG" -- which is provably wrong
+    about at least one record here, because the *first* WHPX run predates the
+    field too. Folding those in would have relabelled a WHPX run as TCG and
+    compared it against itself for a speedup of exactly 1.
+
+    So the missing field is reported as unusable and counted, and the reader can
+    only override it by asserting the answer, which is then labelled at every
+    record it touched.
+    """
+    records = [
+        _accel_run("QEMU TCG", when="2026-08-19T01:00:00+00:00"),
+        _accel_run(None, when="2026-08-19T02:00:00+00:00",
+                   entries={"a": 500.0, "b": 500.0, "c": 500.0}),
+    ]
+    sel = _accel_sel(bh, records)
+    check("a run with no accel joins neither side",
+          [len(sel["sides"][name]) for name in _ACCEL_WANTED], [1, 0])
+    check("...and is counted as unusable rather than silently dropped",
+          len(sel["unassigned"]), 1)
+    check("...so the two runs are not a pair", len(sel["pairs"]), 0)
+
+    why = bh.accel_run_rejection(_accel_run(None), "H", "release",
+                                 _ACCEL_WANTED)
+    check("the refusal says what a missing field is NOT",
+          "NOT the same" in (why or ""), True)
+
+    sel = _accel_sel(bh, records, assume="Hyper-V/WHPX")
+    check("the reader may assert what it ran on", len(sel["pairs"]), 1)
+    check("...and the assertion is labelled at the record it was applied to",
+          sorted(source for rows in sel["sides"].values()
+                 for _record, source in rows),
+          ["assumed", "recorded"])
+
+
+def test_the_assumption_is_refused_where_the_record_contradicts_it(bh):
+    """An assumption cannot be verified. It can sometimes be falsified.
+
+    `--assume-missing-accel` is the reader's assertion, like `--host-load idle`,
+    and nothing in the data can confirm it. But a run whose own `experiment`
+    banner names a *different* accelerator is one the assertion is demonstrably
+    wrong about, and those are refused one by one rather than taken on trust.
+
+    The case that forced it is real: the 2026-08-19 16:15 probe is banner-titled
+    "WHPX vs TCG", and it names *both*, so it is refused under either
+    assumption. Refusing an ambiguous record is the safe direction -- an unusable
+    record costs a pair, a mislabelled one corrupts every figure its pair feeds.
+
+    The guard is partial by construction and the last two rows say so: a banner
+    that names nothing cannot contradict anything, and neither can a missing
+    banner. Nothing can catch a run that used a non-default accelerator and said
+    nothing about it; that record simply did not record what it did.
+    """
+    other = {"experiment": "WHPX layout sweep: textpad=1024"}
+    check("a banner naming another accelerator refuses the assumption",
+          bh.assumed_accel_refusal(other, "QEMU TCG") is None, False)
+    check("...and names which accelerator it saw",
+          "Hyper-V/WHPX" in (bh.assumed_accel_refusal(other, "QEMU TCG")
+                             or ""), True)
+    check("a banner naming the assumed accelerator does not refuse it",
+          bh.assumed_accel_refusal({"experiment": "tcg layout sweep"},
+                                   "QEMU TCG"), None)
+
+    both = {"experiment": "WHPX vs TCG: benchmark suite under hardware virt"}
+    check("a banner naming both is refused under either assumption",
+          (bh.assumed_accel_refusal(both, "QEMU TCG") is None,
+           bh.assumed_accel_refusal(both, "Hyper-V/WHPX") is None),
+          (False, False))
+
+    check("a banner naming no accelerator cannot contradict anything",
+          bh.assumed_accel_refusal({"experiment": "layout sweep: textpad=0"},
+                                   "QEMU TCG"), None)
+    check("...and neither can a run with no banner at all",
+          bh.assumed_accel_refusal({}, "QEMU TCG"), None)
+
+    # End to end: the refusal must reach the report, not just the predicate.
+    records = [
+        _accel_run("Hyper-V/WHPX", when="2026-08-19T01:00:00+00:00"),
+        _accel_run(None, when="2026-08-19T02:00:00+00:00",
+                   experiment="WHPX vs TCG: probe",
+                   entries={"a": 500.0, "b": 500.0, "c": 500.0}),
+    ]
+    sel = _accel_sel(bh, records, assume="QEMU TCG")
+    check("a refused record is listed, not merely omitted",
+          len(sel["refused"]), 1)
+    check("...and contributes no pair", len(sel["pairs"]), 0)
+
+
+def test_a_cross_accelerator_ratio_needs_both_sides_of_one_binary(bh):
+    """Two runs of two different kernels are not a measurement of an emulator.
+
+    Pairing is on `kernel_sha` -- the SHA-256 of the ELF that was measured --
+    and not on `src_digest`, because this comparison wants the same *binary*
+    run twice, where a layout band wants the same *source* built several ways.
+    A ratio taken across two different binaries measures the code and the
+    emulator at once and then reports the sum as the emulator, which is exactly
+    the error the 182%-of-placement finding says is available to be made.
+    """
+    unpaired = [_accel_run("QEMU TCG", sha="a" * 16),
+                _accel_run("Hyper-V/WHPX", sha="b" * 16,
+                           when="2026-08-19T02:00:00+00:00",
+                           entries={"a": 250.0, "b": 250.0, "c": 250.0})]
+    sel = _accel_sel(bh, unpaired)
+    check("two runs of two binaries are not a pair", len(sel["pairs"]), 0)
+    check("...and both images are reported as one-sided",
+          sorted(sel["one_sided"]), ["a" * 16, "b" * 16])
+    check("...naming which side ran each",
+          sorted(sel["one_sided"]["a" * 16]), ["QEMU TCG"])
+
+    paired = [_accel_run("QEMU TCG", sha="a" * 16),
+              _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                         when="2026-08-19T02:00:00+00:00",
+                         entries={"a": 250.0, "b": 250.0, "c": 250.0})]
+    sel = _accel_sel(bh, paired)
+    check("the same binary on both sides is one pair", len(sel["pairs"]), 1)
+    check("...over the benchmarks both sides measured",
+          sorted(sel["pairs"][0]["ratios"]), ["a", "b", "c"])
+    check("...and the ratio is baseline over candidate, so >1 means faster",
+          sel["pairs"][0]["ratios"]["a"], 4.0)
+    check("...with nothing left one-sided", sel["one_sided"], {})
+
+
+def test_one_shared_binary_is_never_presented_as_the_number(bh, tmpdir):
+    """The Q54 defect, made impossible to repeat silently.
+
+    x3.53 was published as the typical speedup. It was one layout arm's value;
+    the other five spanned it out to x3.97, and the "best case" row named a
+    different benchmark in four of the six. A single-pair comparison is that
+    same figure, and it looks identical to a six-pair one on the page -- so it
+    has to announce itself.
+    """
+    records = [_accel_run("QEMU TCG", sha="a" * 16),
+               _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                          when="2026-08-19T02:00:00+00:00",
+                          entries={"a": 250.0, "b": 250.0, "c": 250.0})]
+    out, code = _accel_view(bh, tmpdir, records)
+    check("a one-pair comparison still answers", code, 0)
+    check("...but warns that every figure is one code layout",
+          "only ONE kernel image ran on both accelerators" in out, True)
+    check("...and cites the table that already made this mistake",
+          "x3.53-x3.97" in out, True)
+    check("...and says what would produce the range instead",
+          "layout-sweep.py" in out, True)
+
+
+def test_a_range_is_reported_wherever_a_range_exists(bh, tmpdir):
+    """With several binaries shared, no row collapses to one arm's number.
+
+    Two pairs are constructed to disagree in every way the report has a row for:
+    the typical speedup differs, the count of benchmarks that got faster
+    differs, and -- the row Q54 got wrong -- the best case is a *different
+    benchmark* in each. That last one must refuse to name a benchmark rather
+    than pick one, because naming one is precisely what made the published
+    figure unreproducible against five of its six siblings.
+    """
+    records = [
+        _accel_run("QEMU TCG", sha="a" * 16, when="2026-08-19T01:00:00+00:00"),
+        _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                   when="2026-08-19T02:00:00+00:00",
+                   entries={"a": 500.0, "b": 250.0, "c": 1000.0}),
+        _accel_run("QEMU TCG", sha="b" * 16, when="2026-08-19T03:00:00+00:00"),
+        _accel_run("Hyper-V/WHPX", sha="b" * 16,
+                   when="2026-08-19T04:00:00+00:00",
+                   entries={"a": 200.0, "b": 400.0, "c": 800.0}),
+    ]
+    sel = _accel_sel(bh, records)
+    check("two shared binaries are two pairs", len(sel["pairs"]), 2)
+
+    out, code = _accel_view(bh, tmpdir, records)
+    check("the thin-pair warning is gone once a range exists",
+          "only ONE kernel image" in out, False)
+    check("the typical speedup is reported as a span",
+          "x2.00 - x2.50" in out, True)
+    check("...and so is the count of benchmarks that got faster",
+          "2-3 of 3" in out, True)
+    check("the best case refuses to name a benchmark when the pairs disagree",
+          "a DIFFERENT benchmark in 2 of 2 pairs (a, b)" in out, True)
+    check("...while a worst case the pairs agree on is named",
+          "x1.00 - x1.25  c" in out, True)
+
+    check("`_accel_span` says x3.53 for one value and a span for two",
+          (bh._accel_span([3.53]), bh._accel_span([3.53, 3.97])),
+          ("x3.53", "x3.53 - x3.97"))
+    check("...and collapses a span that rounds to one value",
+          bh._accel_span([3.531, 3.534]), "x3.53")
+
+
+def test_the_typical_speedup_is_a_median_not_a_ratio_of_totals(bh):
+    """A sum would report the accelerator as a slowdown while 95% sped up.
+
+    Totals are dominated by whichever benchmark is largest in absolute
+    nanoseconds, and under WHPX that is the device-bound handful that got ~30x
+    *slower*. The fixture reproduces that shape exactly: three benchmarks 4x
+    faster and one enormous one 30x slower. The median answers the question a
+    reader is actually asking -- what happens to a benchmark I pick -- and the
+    slow one is not hidden, it is the worst-case row.
+    """
+    base = {"slow": 1_000_000.0, "f1": 1000.0, "f2": 1000.0, "f3": 1000.0}
+    cand = {"slow": 30_000_000.0, "f1": 250.0, "f2": 250.0, "f3": 250.0}
+    sel = _accel_sel(bh, [
+        _accel_run("QEMU TCG", entries=base),
+        _accel_run("Hyper-V/WHPX", when="2026-08-19T02:00:00+00:00",
+                   entries=cand),
+    ])
+    summary = bh.summarise_accel_pair(sel["pairs"][0])
+    check("typical is the median ratio", summary["typical"], 4.0)
+    check("...where a ratio of totals would have said 'slower'",
+          sum(base.values()) / sum(cand.values()) < 1.0, True)
+    check("the benchmark that regressed is still the worst-case row",
+          summary["worst"][0], "slow")
+    check("...and is counted out of the ones that got faster",
+          (summary["faster"], summary["total"]), (3, 4))
+
+
+def test_the_host_load_caveat_describes_the_runs_the_table_came_from(bh):
+    """Computed over the paired runs, not over everything that qualified.
+
+    Those differ by a lot on the real history -- fourteen WHPX runs qualify and
+    three reach a pair -- and a caveat computed over the wider set describes
+    runs that contributed nothing to any printed number. It fails in both
+    directions: it can report broken instruments beside a table drawn entirely
+    from clean ones (which it did, printing "6/15 arms" under a three-run
+    table), or hide a broken one among clean runs that were never used.
+
+    It matters more here than anywhere else in this file, because the canary's
+    resolution floor is a TCG-only instrument -- see
+    `B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT` -- so a WHPX column
+    can be one that no contamination check was watching.
+    """
+    paired = [_accel_run("QEMU TCG", sha="a" * 16),
+              _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                         when="2026-08-19T02:00:00+00:00",
+                         entries={"a": 250.0, "b": 250.0, "c": 250.0})]
+    unused = _accel_run("Hyper-V/WHPX", sha="z" * 16, canary=None,
+                        when="2026-08-19T03:00:00+00:00")
+    mix = bh._accel_canary_mix(_accel_sel(bh, paired + [unused]))
+    check("a qualifying run that reached no pair is not in the caveat",
+          bh.describe_canary_mix(mix, "runs"), "")
+
+    blind = [paired[0], dict(paired[1], canary=None)]
+    text = bh.describe_canary_mix(
+        bh._accel_canary_mix(_accel_sel(bh, blind)), "runs")
+    check("a run behind the table with no host-load check is named",
+          text, "1/2 runs carried no host-load check; 1/2 runs clean")
+    check("...and is called a run, because nothing here is an arm of anything",
+          "arms" in text, False)
+
+
+def test_the_selection_says_whether_the_missing_field_is_what_makes_it_thin(bh):
+    """Thin for want of runs, or thin for want of a field they forgot to write.
+
+    Those two call for opposite responses -- go and measure, versus go and
+    remember what you already measured -- and `recoverable` is the number that
+    tells them apart.
+
+    It counts only kernel images that are already present on one side, because
+    an unassigned run of a binary nobody else measured would not become a pair
+    however well it was labelled. Counting those would inflate the figure into a
+    promise that recording the field cannot keep.
+    """
+    records = [
+        _accel_run("QEMU TCG", sha="a" * 16, when="2026-08-19T01:00:00+00:00"),
+        _accel_run("Hyper-V/WHPX", sha="b" * 16,
+                   when="2026-08-19T02:00:00+00:00"),
+        # Same binary as the WHPX run above: labelling this would make a pair.
+        _accel_run(None, sha="b" * 16, when="2026-08-19T03:00:00+00:00"),
+        # A binary nothing else ran: labelling this would make nothing.
+        _accel_run(None, sha="z" * 16, when="2026-08-19T04:00:00+00:00"),
+        # Would not have qualified anyway, so it is not evidence about `accel`.
+        _accel_run(None, sha="b" * 16, profile="debug",
+                   when="2026-08-19T05:00:00+00:00"),
+    ]
+    sel = _accel_sel(bh, records)
+    check("only runs that would otherwise have qualified count as unassigned",
+          len(sel["unassigned"]), 2)
+    check("...and only those whose binary the other side ran are recoverable",
+          sel["recoverable"], 1)
+
+    lines = "\n".join(bh._accel_unusable_lines(sel))
+    check("the report says how many pairs the missing field is costing",
+          "would add 1 more pair(s)" in lines, True)
+    check("...and points at the flag that asserts it",
+          "--assume-missing-accel" in lines, True)
+    check("a same-day span is widened to minutes rather than reading 'X to X'",
+          bh._accel_stamp_span(["2026-08-19T03:40:00+00:00",
+                                "2026-08-19T16:15:00+00:00"]),
+          "2026-08-19T03:40 to 2026-08-19T16:15")
+    check("...while a multi-day span stays at whole days",
+          bh._accel_stamp_span(["2026-08-14T03:40:00+00:00",
+                                "2026-08-19T16:15:00+00:00"]),
+          "2026-08-14 to 2026-08-19")
+
+
+def test_an_accelerator_name_resolves_or_fails_two_different_ways(bh, tmpdir):
+    """"KVM has no runs here" and "you typed KVN" need opposite responses.
+
+    Go and produce the runs, versus fix the spelling. A tool that answers both
+    with one message sends half its readers the wrong way, so the catalogue is
+    the union of what the history recorded and what the kernel can detect, and
+    an unmatched name prints both lists.
+    """
+    records = [_accel_run("QEMU TCG"),
+               _accel_run("Hyper-V/WHPX", when="2026-08-19T02:00:00+00:00")]
+    check("an exact name resolves",
+          bh.resolve_accel_name(records, "QEMU TCG"), ("QEMU TCG", None))
+    check("...case-insensitively",
+          bh.resolve_accel_name(records, "qemu tcg"), ("QEMU TCG", None))
+    check("a unique substring reaches a name with a slash in it",
+          bh.resolve_accel_name(records, "whpx"), ("Hyper-V/WHPX", None))
+
+    name, error = bh.resolve_accel_name(records, "v")
+    check("an ambiguous fragment names the candidates instead of guessing",
+          (name, "matches" in (error or "")), (None, True))
+    check("an accelerator the kernel knows but the history lacks is a name",
+          bh.resolve_accel_name(records, "kvm"), ("KVM", None))
+    name, error = bh.resolve_accel_name(records, "nope")
+    check("...while an unknown one prints both catalogues",
+          (name, "Recorded in this history" in (error or ""),
+           "Known to the kernel" in (error or "")),
+          (None, True, True))
+
+    out, code = _accel_view(bh, tmpdir, records, spec="tcg")
+    check("a spec with no colon is a usage error, with an example",
+          (code, "--accel-compare tcg:whpx" in out), (2, True))
+    out, code = _accel_view(bh, tmpdir, records, spec="tcg:qemu tcg")
+    check("comparing an accelerator with itself is a usage error", code, 2)
+    out, code = _accel_view(bh, tmpdir, records, spec="nope:whpx")
+    check("an unresolvable name is a usage error", code, 2)
+
+    out, code = _accel_view(bh, tmpdir, records, spec="tcg:kvm")
+    check("but 'no run of one binary exists on both' is an ANSWER, not an error",
+          (code, "nothing to divide" in out), (0, True))
+
+
+def test_the_accel_pin_holds_the_comparison_to_one_source(bh):
+    """`--accel-pin` narrows the selection to one binary, by either identity.
+
+    `kernel_sha` is what pairs, but the pin also accepts a `src_digest` prefix,
+    because a reader who wants "the runs from that source" has the digest in
+    front of them and should not have to translate it into an ELF hash first.
+    """
+    records = [
+        _accel_run("QEMU TCG", sha="a" * 16),
+        _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                   when="2026-08-19T02:00:00+00:00",
+                   entries={"a": 250.0, "b": 250.0, "c": 250.0}),
+        _accel_run("QEMU TCG", sha="b" * 16, when="2026-08-19T03:00:00+00:00",
+                   src_digest="full:beef"),
+        _accel_run("Hyper-V/WHPX", sha="b" * 16,
+                   when="2026-08-19T04:00:00+00:00", src_digest="full:beef",
+                   entries={"a": 500.0, "b": 500.0, "c": 500.0}),
+    ]
+    check("unpinned, both binaries pair", len(_accel_sel(bh, records)["pairs"]),
+          2)
+    sel = _accel_sel(bh, records, pin="b" * 8)
+    check("a kernel_sha prefix selects one binary",
+          [pair["kernel_sha"] for pair in sel["pairs"]], ["b" * 16])
+    sel = _accel_sel(bh, records, pin="full:beef")
+    check("...and so does a src_digest prefix",
+          [pair["kernel_sha"] for pair in sel["pairs"]], ["b" * 16])
+    check("...with the runs it excluded reported, not silently gone",
+          sum(sel["rejected"].values()), 2)
+    check("a pin nothing matches yields no pairs and no crash",
+          len(_accel_sel(bh, records, pin="deadbeef")["pairs"]), 0)
+
+
+def test_positive_entries_is_a_median_that_drops_missing_measurements(bh):
+    """A zero is a benchmark the scorecard did not resolve, not a fast one.
+
+    Kept and guarded at the division it would become an infinity; kept and
+    divided *into* it would become a zero ratio and drag the worst-case row onto
+    a benchmark that was never measured. Dropping it is the only reading that
+    matches what the recorder meant.
+
+    The median is for the side that was sampled more than once -- a pad measured
+    on two days -- so that one bad run does not swing a side, while a side
+    sampled once is left exactly as it was.
+    """
+    check("a zero is dropped rather than divided by",
+          bh.positive_entries([{"entries": {"a": 0, "b": 10}}]), {"b": 10.0})
+    check("...and so is a negative",
+          bh.positive_entries([{"entries": {"a": -5, "b": 10}}]), {"b": 10.0})
+    check("a bool is not a measurement",
+          bh.positive_entries([{"entries": {"a": True, "b": 5}}]), {"b": 5.0})
+    check("one sample is left alone",
+          bh.positive_entries([{"entries": {"a": 7}}]), {"a": 7.0})
+    check("several samples of one side are combined by median, not mean",
+          bh.positive_entries([{"entries": {"a": 10}}, {"entries": {"a": 20}},
+                               {"entries": {"a": 900}}]), {"a": 20.0})
+    check("a record with no entries at all contributes nothing",
+          bh.positive_entries([{}, {"entries": {"a": 4}}]), {"a": 4.0})
+
+
+def test_the_accel_report_is_ascii_and_carries_its_own_reproduce_line(bh,
+                                                                     tmpdir):
+    """sec 240's rule is only satisfied if the next reader can re-run it.
+
+    A table pasted into `open-questions.md` outlives the shell it was produced
+    in, so the flags that produced it travel *inside* the report rather than in
+    prose above it -- including the assumption, which is the one flag that
+    changes what the numbers mean.
+
+    ASCII throughout, in both forms. This prints to a Windows console whose code
+    page is not UTF-8, where a multiplication sign is mojibake; `x3.53` pastes
+    into a document just as well.
+    """
+    records = [
+        _accel_run("Hyper-V/WHPX", sha="a" * 16,
+                   entries={"a": 250.0, "b": 250.0, "c": 250.0}),
+        _accel_run(None, sha="a" * 16, when="2026-08-19T02:00:00+00:00"),
+    ]
+    out, code = _accel_view(bh, tmpdir, records, assume="tcg")
+    check("the assumption makes the pair", (code, "1 pair(s)" in out), (0, True))
+    check("...and the report is ASCII", out.isascii(), True)
+    check("...and says the figures rest on an assertion, not a measurement",
+          "That is your assertion, not a measurement" in out, True)
+    check("...and repeats the flag that produced it",
+          '--assume-missing-accel "QEMU TCG"' in out, True)
+    check("...and shows which runs went in, one line each",
+          out.count("recorded") >= 1 and out.count("assumed") >= 1, True)
+
+    out, code = _accel_view(bh, tmpdir, records, assume="tcg", markdown=True)
+    check("the markdown form is ASCII too", out.isascii(), True)
+    check("...and is a table, so it is pasted rather than transcribed",
+          "|" in out, True)
+    check("...and carries the --markdown flag in its own reproduce line",
+          "--markdown" in out, True)
+
+
+# ---------------------------------------------------------------------------
+# The accelerator partition, and the wall-clock axis it unblinded
+# ---------------------------------------------------------------------------
+
+_TCG = "QEMU TCG"
+_WHPX = "Hyper-V/WHPX"
+
+
+def _release_records(bh):
+    """The real release records, or `[]` if the history is missing."""
+    if not os.path.exists(HISTORY):
+        return []
+    return [r for r in bh.load_history(HISTORY)
+            if bh.record_profile(r) == "release"]
+
+
+def test_a_history_window_never_mixes_accelerators(bh):
+    """A run is judged only against runs on the same accelerator.
+
+    This is the same rule the build profile has always had, for a stronger
+    reason. `previous_for_host` argues that debug-vs-release is "a multiple
+    rather than a percentage" and that the drift correction cannot rescue it
+    because the ratio is not uniform across the suite. Both are true of the
+    accelerator and by more: WHPX is ~3.5x faster than TCG on the median
+    benchmark and ~30x *slower* on the device-bound ones, so a mixed window is
+    not a wider distribution, it is two of them.
+    """
+    tcg_old = _record(commit="tcg-old", accel=_TCG)
+    whpx = _record(commit="whpx", accel=_WHPX)
+    tcg_new = _record(commit="tcg-new", accel=_TCG)
+    legacy = _record(commit="legacy")
+    records = [tcg_old, whpx, tcg_new, legacy]
+
+    check("a TCG window holds only the TCG runs",
+          [r["commit"] for r in
+           bh.comparable_records(records, "H", "release", _TCG)],
+          ["tcg-old", "tcg-new"])
+    check("a WHPX window holds only the WHPX run",
+          [r["commit"] for r in
+           bh.comparable_records(records, "H", "release", _WHPX)],
+          ["whpx"])
+    check("the baseline skips across the boundary, not through it",
+          bh.previous_for_host(records, "H", "release", _TCG)["commit"],
+          "tcg-new")
+    check("...and a WHPX run's baseline is the WHPX one",
+          bh.previous_for_host(records, "H", "release", _WHPX)["commit"],
+          "whpx")
+
+
+def test_an_unrecorded_accelerator_is_a_value_not_an_assumption(bh):
+    """Absent must not be folded into TCG. It is its own bucket.
+
+    The module says so where `ACCEL_RE` is defined, and the reason is not
+    stylistic: the first WHPX run on this host was recorded *before* the field
+    existed, so an absent value is demonstrably not evidence of TCG. Folding
+    the two would pull that run into the TCG baseline, where a 3.5x population
+    would sit inside a band that then dismisses every regression under it.
+
+    The cost is real and is accepted: the first labelled TCG run finds no
+    history at all, and both banded axes correctly abstain. Abstaining loudly
+    beats certifying quietly -- the whole reason this file's verdict is
+    three-valued.
+    """
+    legacy = _record(commit="legacy")
+    blank = _record(commit="blank", accel="")
+    tcg = _record(commit="tcg", accel=_TCG)
+
+    check("a record with no accel field reads as unrecorded",
+          bh.record_accel(legacy), bh.ACCEL_UNRECORDED)
+    check("...and so does an empty string, rather than becoming its own value",
+          bh.record_accel(blank), bh.ACCEL_UNRECORDED)
+    check("a labelled record reads as itself", bh.record_accel(tcg), _TCG)
+
+    check("an unrecorded run is NOT admitted to the TCG window",
+          bh.comparable_records([legacy, blank], "H", "release", _TCG), [])
+    check("...and the TCG run is not admitted to the unrecorded one",
+          [r["commit"] for r in bh.comparable_records(
+              [legacy, blank, tcg], "H", "release", bh.ACCEL_UNRECORDED)],
+          ["legacy", "blank"])
+
+
+def test_the_partition_is_reported_when_it_empties_a_window(bh):
+    """A window the partition emptied must say so, and only then.
+
+    Without this the first labelled run after the schema change reads "too few
+    comparable runs (0 < 6)" beside a history file holding dozens of them --
+    a true sentence that describes a missing history rather than a deliberate
+    split, and the reader has no way to tell which.
+    """
+    legacy = [_record(commit=f"old{i}") for i in range(9)]
+    whpx = [_record(commit="w", accel=_WHPX)]
+    records = legacy + whpx
+
+    note = bh.accel_thinning_note(records, "H", "release", _TCG)
+    check("a window the partition emptied explains itself", note is not None,
+          True)
+    check("...naming the runs that predate the field",
+          "9 that predate the `accel` field" in (note or ""), True)
+    check("...and the runs on the other accelerator",
+          "1 on a different accelerator" in (note or ""), True)
+    check("...in ASCII, like everything else this file prints",
+          (note or "").isascii(), True)
+
+    # And it must stay quiet when the partition changed nothing, or it becomes
+    # a line that is always there and therefore never read. Note that this case
+    # keeps the excluded neighbours: a window that is long enough must stay
+    # silent *even though* there are runs next door, which is the only version
+    # of this check that can tell the length guard from the neighbour guard.
+    plenty = [_record(commit=f"t{i}", accel=_TCG) for i in range(6)]
+    check("a window with its own history says nothing about the neighbours",
+          bh.accel_thinning_note(plenty + records, "H", "release", _TCG), None)
+    check("nor does a short one with no neighbours to exclude",
+          bh.accel_thinning_note(plenty[:1], "H", "release", _TCG), None)
+
+    # The count must be of runs the *accelerator* filter removed, and nothing
+    # else. A record on another machine, in another profile, or under a
+    # deliberate load was never a candidate for this window, so counting it
+    # here would tell the reader that a run is sitting just the other side of
+    # the accelerator line when in fact it is the other side of three of them.
+    # That is not a cosmetic overcount: the note's whole claim is "these runs
+    # would be usable if you stayed on one accelerator", and for these it is
+    # false. Only the count can catch this -- the note fires either way.
+    strangers = [
+        _record(commit="elsewhere", host="OtherHost"),
+        _record(commit="debug", profile="debug"),
+        _record(commit="loaded", host_load="loaded"),
+        _record(commit="tagged", experiment="layout-sweep"),
+    ]
+    check("neighbours are counted, strangers are not",
+          bh.accel_window_thinning(records + strangers, "H", "release", _TCG),
+          bh.accel_window_thinning(records, "H", "release", _TCG))
+    check("...and the strangers really were there to be miscounted",
+          len(strangers), 4)
+
+
+def test_the_wall_band_fires_on_the_real_history(bh):
+    """Positive control: the wall axis is a detector, not just a recorder.
+
+    `known-issues.md` B-CANARY-IS-BLIND-TO-HOST-DESCHEDULING shipped this axis
+    with an explicit caveat -- "until six timed runs exist, the wall axis is a
+    recorder, not a detector" -- because no stored record carried
+    `wall_seconds` at the time. Sixty-one now do, so the caveat has expired and
+    the claim it was standing in for has to be demonstrated rather than assumed.
+
+    Judged exactly as the tool judges: the *causal* window (records preceding
+    each run), which is what `--list` and the boot-time verdict both use, so
+    this control cannot pass on a band no printed verdict ever sees.
+
+    Both halves are asserted. A band that fires on nothing is indistinguishable
+    from no band; a band that fires on everything is indistinguishable from a
+    broken instrument, and would be the shape of the bug this test was written
+    while looking for -- a pooled window whose median comes from the wrong
+    population.
+    """
+    if not os.path.exists(HISTORY):
+        check("history.jsonl exists for the positive control", False, True)
+        return
+    records = bh.load_history(HISTORY)
+    fired = clean = 0
+    for index, record in enumerate(records):
+        wall = record.get("wall_seconds")
+        if not isinstance(wall, (int, float)):
+            continue
+        prior = bh.comparable_records(records[:index], record.get("host"),
+                                      bh.record_profile(record),
+                                      bh.record_accel(record))
+        history = [w for r in prior
+                   if isinstance(w := r.get("wall_seconds"), (int, float))]
+        verdict, _ = bh.wall_axis(wall, history)
+        if verdict == bh.RUN_CONTAMINATED:
+            fired += 1
+        elif verdict == bh.RUN_CLEAN:
+            clean += 1
+    check("the wall band condemns at least one real run", fired >= 1, True)
+    check("...and clears more than it condemns", clean > fired, True)
+
+
+def test_the_listing_rejudges_each_row_on_its_own_accelerator(bh, tmpdir):
+    """`--list` must use the same partition the boot-time verdict uses.
+
+    It is a separate code path with its own window construction, and it is the
+    one a reader actually browses: it re-judges every stored record rather than
+    printing the verdict that was filed with it, precisely so that a moved band
+    shows up on the old rows too. A pooled window here would condemn every WHPX
+    row against a TCG band -- the same defect, in the view most likely to be
+    believed, and invisible to any test of `comparable_records` alone.
+    """
+    walls = [128, 131, 129, 133, 130, 132, 131]
+    history = [_record(commit=f"t{i}", accel=_TCG, wall_seconds=w,
+                       timestamp=f"2026-08-19T0{i}:00:00+00:00",
+                       canary={"start": 200, "end": 202, "pct": 101,
+                               "samples": 10, "min": 200, "max": 202,
+                               "spread": 1})
+               for i, w in enumerate(walls)]
+    # A perfectly ordinary run on the other accelerator, whose wall time is
+    # simply what that accelerator costs. Judged against its own (empty)
+    # history it is `unknown`; judged against the TCG band it is condemned.
+    history.append(_record(commit="w", accel=_WHPX, wall_seconds=175,
+                           timestamp="2026-08-19T09:00:00+00:00",
+                           canary={"start": 200, "end": 202, "pct": 101,
+                                   "samples": 10, "min": 200, "max": 202,
+                                   "spread": 1}))
+    path = os.path.join(tmpdir, "history.jsonl")
+    with open(path, "w", encoding="utf-8") as handle:
+        for record in history:
+            handle.write(json.dumps(record) + "\n")
+
+    out, code = capture(bh.cmd_list, path)
+    check("the listing runs", code, 0)
+    rows = [ln for ln in out.splitlines() if "2026-08-19T" in ln]
+    check("every record is listed", len(rows), len(history))
+    check("...each naming the accelerator that selected its window",
+          all(("accel " + _TCG) in r for r in rows[:-1]), True)
+    check("the last TCG row was judged clean by its own band",
+          rows[-2].endswith("run clean"), True)
+    check("the WHPX row is not condemned by the TCG band",
+          rows[-1].endswith("run contaminated"), False)
+    check("...it abstains instead, having no history of its own",
+          rows[-1].endswith("run unknown"), True)
+
+
+def test_the_two_accelerators_are_measurably_different_populations(bh):
+    """The filter's premise, measured on this repo's own records.
+
+    Stated as a test rather than a comment because it is the one thing that
+    could make the partition wrong: if the two accelerators ever became
+    comparable, splitting the window would be throwing away history for no
+    reason, and this would be the check that noticed.
+
+    The wall-clock comparison uses the layout-sweep arms specifically, because
+    those are the only runs where the *same* pads were swept under both
+    accelerators -- an ordinary TCG run's wall time also carries whatever the
+    host was doing, and two of them ran past 400s.
+    """
+    records = _release_records(bh)
+    if not records:
+        check("history.jsonl exists for the population check", False, True)
+        return
+    tag = bh.LAYOUT_SWEEP_TAG
+    arms = [r for r in records if tag in (r.get("experiment") or "")]
+    tcg_wall = [r["wall_seconds"] for r in arms
+                if bh.record_accel(r) is bh.ACCEL_UNRECORDED
+                and isinstance(r.get("wall_seconds"), (int, float))]
+    whpx_wall = [r["wall_seconds"] for r in arms
+                 if bh.record_accel(r) == _WHPX
+                 and isinstance(r.get("wall_seconds"), (int, float))]
+    if not tcg_wall or not whpx_wall:
+        check("both accelerators swept the same pads", False, True)
+        return
+    check("the sweeps' wall times do not overlap at all",
+          max(tcg_wall) < min(whpx_wall), True)
+
+    # And the per-benchmark difference is a multiple, in both directions --
+    # which is why the drift correction cannot rescue a mixed window.
+    tcg = [r for r in records if bh.record_accel(r) == _TCG]
+    whpx = [r for r in records if bh.record_accel(r) == _WHPX]
+    ratios = []
+    for name, value in (tcg[0]["entries"].items() if tcg else ()):
+        others = [r["entries"][name] for r in whpx if name in r["entries"]]
+        if others and value:
+            ratios.append(statistics.median(others) / value)
+    check("both accelerators appear in the history at all", bool(ratios), True)
+    if ratios:
+        check("some benchmarks are several times faster on the other side",
+              min(ratios) < 0.5, True)
+        check("...and some are several times slower, so no single factor "
+              "describes the move", max(ratios) > 2.0, True)
+
+
+def test_no_unlabelled_run_in_the_window_is_hardware_virtualised(bh):
+    """The one assumption the partition still makes, checked against the data.
+
+    Grouping the ninety-odd records that predate the `accel` field with each
+    other assumes they are one population. That assumption is not free: one
+    record in this history is provably an unlabelled WHPX run (the 2026-08-19
+    probe that produced the field in the first place), and it is kept out of
+    every window only because it also carries an `experiment` tag -- a property
+    of how that probe was run, not something the window logic relies on.
+
+    So the assumption is checked rather than asserted, using a discriminator
+    built from the *labelled* records rather than a hand-picked benchmark: any
+    benchmark whose slowest labelled TCG reading is more than 4x faster than
+    the fastest labelled WHPX one separates the two by construction. Those come
+    out to be the device-bound ones -- an HPET read or an ARP lookup costs a VM
+    exit under hardware virtualisation and is emulated inline under TCG -- so
+    this is a structural signature, not a speed threshold.
+
+    The test proves it can fire before it reports that it did not: the known
+    unlabelled WHPX run must be flagged. Without that half, a discriminator
+    that silently became empty would read exactly like a clean history.
+    """
+    records = _release_records(bh)
+    if not records:
+        check("history.jsonl exists for the assumption check", False, True)
+        return
+    tcg = [r for r in records if bh.record_accel(r) == _TCG]
+    whpx = [r for r in records if bh.record_accel(r) == _WHPX]
+    if not tcg or not whpx:
+        check("both accelerators are labelled somewhere in the history",
+              False, True)
+        return
+
+    ceilings = {}
+    for name in set(tcg[0].get("entries", {})):
+        here = [r["entries"][name] for r in tcg if name in r["entries"]]
+        there = [r["entries"][name] for r in whpx if name in r["entries"]]
+        if here and there and min(there) > 4 * max(here):
+            ceilings[name] = max(here)
+    check("the labelled runs yield a discriminator at all",
+          bool(ceilings), True)
+
+    def virtualised(record):
+        """Benchmarks on which this record reads like a hardware-virtualised run."""
+        entries = record.get("entries", {})
+        return [n for n, ceiling in ceilings.items()
+                if isinstance(entries.get(n), (int, float))
+                and entries[n] > 4 * ceiling]
+
+    unlabelled = [r for r in records
+                  if bh.record_accel(r) is bh.ACCEL_UNRECORDED]
+    flagged = [r for r in unlabelled if virtualised(r)]
+    # Positive control, and the reason this test is worth having: the one
+    # unlabelled run we independently know ran under WHPX must be caught.
+    check("the discriminator catches the known unlabelled WHPX run",
+          [r.get("timestamp") for r in flagged],
+          ["2026-08-19T16:15:09+00:00"])
+    check("...and that run is excluded from every window anyway",
+          all(bh.record_experiment(r) for r in flagged), True)
+
+    # The claim itself: nothing that a window would actually use looks like it
+    # ran on the other accelerator.
+    window = bh.comparable_records(records, "Logoplex3", "release",
+                                   bh.ACCEL_UNRECORDED)
+    check("no run in the unlabelled window is hardware-virtualised",
+          [r.get("timestamp") for r in window if virtualised(r)], [])
 
 
 def main():
@@ -2199,9 +5810,9 @@ def main():
     ]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes, which is the bug this docstring is about. Assert a floor.
-    if len(tests) < 40:
+    if len(tests) < 133:
         print(f"FATAL: test discovery found only {len(tests)} tests; the "
-              f"suite has at least 40. Discovery is broken, not the code.")
+              f"suite has at least 133. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

@@ -547,8 +547,30 @@ Known-issues (open, kernel-owned):
   the nearest preceding symbol). A bytes-at-RIP dump is now emitted on kernel
   `#PF` (`5431facbd`) so the next occurrence settles it.
 - `B-FORKEXEC-BOOT-HANG` — intermittent hang at the glibc fork+exec self-test
-- `B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` — re-run with
-  `--hard-lockup-watchdog`
+- ~~`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`~~ — **NOT A
+  KERNEL BUG, closed 2026-08-19.** The "wedge" was never real: the instrumented
+  boot was healthy and simply slower than the harness budget. Three instrumented
+  boots have now reached `BOOT_OK` (1063 s, 881 s, 951 s). ~~with **zero KASAN
+  reports** — so the heap corruption this profile was built to hunt did not
+  reproduce either.~~ **Correction 2026-08-19: the "zero KASAN reports" claim
+  was false.** It was checked with a matcher (`BUG: KASAN`, `__asan_report`)
+  that this kernel never emits, so it could not have failed. The third boot in
+  fact produced 64 `[kasan] CRITICAL: use-after-free` reports — all spurious,
+  all on one 20-byte span — which exhausted the 64-report budget at line 26035
+  of 27701 and silently suppressed any *genuine* report after that. Root-caused
+  and fixed as `B-KASAN-STALE-POISON-ON-LIVE-SLOT`; the corruption hunt has
+  therefore still not had a clean instrumented run to draw a conclusion from.
+  The closure of *this* bug is unaffected — it rested on the boots reaching
+  `BOOT_OK` at all, not on their report counts.
+  Three separate constants had to be fixed to get there, each
+  hidden behind the previous because the boot never got far enough to reach it:
+  `BENCH_TIMEOUT`, then `KASAN_BOOT_TIMEOUT` (whose expiry sampled a perfectly
+  healthy guest's RIP inside the shadow checker and reported it as
+  `Wedged RIP = kasan::byte_bad` — the "mid-print page fault" of the bug's
+  name), then the kernel's own `LIVENESS_ALERT_COUNT`. Fixing the third exposed
+  a genuine latent kernel bug — the liveness watchdog counted its own
+  breadcrumbs as kernel progress, capping the stall counter at 5 and making any
+  threshold above 6 unreachable. See `known-issues.md` (last two entries).
 - ~~`TD-FRAME-OWNER-1GIB`~~ — **RESOLVED 2026-08-14**: the owner array is no
   longer a fixed 65536-entry static (1 GiB at 16 KiB pages); it is carved from
   the frame-allocator metadata region alongside `page_info`/`refcount`/`cgroup`
@@ -5786,8 +5808,25 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
           makes it a compile error to reach the frame list without saying which
           case you handle, `free_backing` now returns `NotSupported` for VRAM,
           and the self-test asserts the refusal rather than trusting it.
-- [ ] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
-- [ ] `[A]` NVIDIA: defer until open-source driver matures, or use Linux compat layer later
+- [~] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
+      — **blocked by `open-questions.md` Q50** (operator decision), not by effort.
+      There is no device to write it against: `qemu-system-x86_64 -device help`
+      lists sixteen display devices (`ati-vga`, `bochs-display`, `cirrus-vga`,
+      `isa-cirrus-vga`, `isa-vga`, `qxl`, `qxl-vga`, `secondary-vga`, `VGA`,
+      `virtio-gpu-device`, `virtio-gpu-gl-device`, `virtio-gpu-gl-pci`,
+      `virtio-gpu-pci`, `virtio-vga`, `virtio-vga-gl`, `vmware-svga`) and not one
+      of them is an Intel iGPU — re-measured 2026-08-18. That is the difference
+      between this item and the ATI one above, which the boot test exercises
+      every run via `-device ati-vga,model=rv100`. `design-decisions.md` §217
+      already rejected "target Intel instead" for exactly this reason. Writing
+      it anyway is Q50's option B and would tick a box for a driver nobody has
+      ever seen initialise; the unblocking work is Q50's option C or D (bare
+      metal, or a Linux host with GVT-g/VFIO passthrough), both of which are
+      operator calls about hardware and setup, not code.
+- [~] `[A]` NVIDIA: defer until open-source driver matures, or use Linux compat layer later
+      — blocked for the same reason and more so: QEMU emulates no NVIDIA display
+      device either, and the item's own text defers it by design. Nothing to do
+      until Q49/Q50 settle the testability question for GPUs generally.
 
 ### 3.2 Graphics stack
 - [x] DRM/KMS equivalent (kernel mode setting, GPU memory management)
@@ -5815,8 +5854,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [-] `[C]` Vulkan loader and basic GPU command submission
   - [x] virtio-gpu DRM driver-specific uAPI ABI layer (`kernel/src/drm/virtgpu_uapi.rs`): byte-exact `virtgpu_drm.h` struct mirrors + `DRM_IOCTL_VIRTGPU_*` numbers + `VIRTGPU_PARAM_*`/capset/blob/context-param constants + GETPARAM policy + exhaustive self-test. Pure ABI (no device state/unsafe), mirroring the DRM/KMS `uapi.rs` shim. Foundation for routing render-node ioctls (GETPARAM/GET_CAPS/RESOURCE_CREATE/CONTEXT_INIT/EXECBUFFER/TRANSFER_*/WAIT/MAP) into the virtio-gpu driver's 3D/virgl path.
   - [x] Boot test attaches `-device virtio-gpu-pci` so the virtio-gpu 2D device bring-up path is exercised on real hardware (DRM device 1 = virtio-gpu, promoted to primary; live pixel write/read + flush_rect self-test).
+  - [x] `[A]` **Scanout works on the GL-capable device too** (`SLATE_GPU=virtio-gpu-gl-pci ./scripts/boot-test.sh`, which also switches the display backend to `egl-headless` and marks the run an experiment). On a device offering `VIRTIO_GPU_F_VIRGL` the framebuffer is created with `RESOURCE_CREATE_3D` + the `SCANOUT` bind, because QEMU's `RESOURCE_CREATE_2D` hardcodes `bind = RENDER_TARGET` and virglrenderer will not give a non-`SCANOUT` resource the shared D3D11 texture that `SET_SCANOUT` requires on Windows — previously `ERR_INVALID_RESOURCE_ID` (0x1203) and no primary display. design-decisions.md §243; known-issues.md 2026-08-19 RESOLVED. The default device is unchanged.
   - [x] `/dev/dri/card0` + `renderD128` bound to the primary GPU device (`drm::primary_device`), so a libdrm/Mesa client's render node targets the GPU rather than the fallback dumb framebuffer.
-  - [~] **Acceleration payoff gated on Q18** (open-questions.md): real 3D/virgl needs a virgl-capable test env (`virtio-gpu-gl` + host GL/display + virglrenderer — the headless CI is 2D-only) **and** the Mesa port (§4583, a large external C port needing operator go-ahead). Next kernel-side step (render-ioctl dispatch with honest no-3D reporting) is option B in Q18, available on request.
+  - [~] **Acceleration payoff gated on Q18** (open-questions.md): real 3D/virgl needs a virgl-capable test env (`virtio-gpu-gl` + host GL/display + virglrenderer — ~~the headless CI is 2D-only~~ **no longer true as of 2026-08-19: `SLATE_GPU=virtio-gpu-gl-pci` boots the GL device green under `egl-headless`, see the entry two lines above**) **and** the Mesa port (§4583, a large external C port needing operator go-ahead). So only the Mesa half of this gate is still standing. Next kernel-side step (render-ioctl dispatch with honest no-3D reporting) is option B in Q18, available on request. Note the driver still issues no `CTX_CREATE`/`SUBMIT_3D` — it uses one 3D command to allocate a scannable framebuffer and nothing else, so "the GL device boots" is not "3D renders".
 - [ ] `[C]` OpenGL via Mesa (port Mesa's Vulkan and OpenGL drivers)
 - [-] `[C]` 2D drawing library: Vello (Rust-native, GPU compute shaders) + HarfBuzz via FFI for complex text shaping
   - [x] **Font engine** (`gui/font/src/{sfnt,raster,scaled}.rs`) — the GPU-independent half. sfnt/TrueType container parser (`head`/`hhea`/`maxp`/`hmtx`/`loca`/`glyf`/`cmap` formats 0/4/12, composite glyphs), anti-aliased signed-area rasterizer (analytic coverage, non-zero winding, bounds-clipped because font files are untrusted input), and `ScaledFont` — glyph cache, derived metrics, `measure`/`wrap`/`draw_text` plus an 8-bit-coverage blitter. Replaces the single procedural 8x16 bitmap face the entire UI was capped at. Verified three ways: synthetic fixture, 556 host fonts (538 opened, 18 CFF rejected cleanly, 563k outlines walked, 68k glyphs rasterized at two sizes, zero panics), and ASCII-art rendering that proves letters look like letters (an ink count cannot tell a correct 'o' from a scrambled one). Tradeoffs in design-decisions.md §438.

@@ -24,6 +24,24 @@ netring = { path = "../netring" }
 # kernel from disagreeing with userspace about what time it is. no_std,
 # allocation-free and dependency-free, so it builds for the bare-metal target.
 tzrules = { path = "../tzrules" }
+# The shared SHA-256. `kernel/src/crypto.rs` used to carry its own; SHA-256 was
+# hand-written in 26 files across this tree, and a wrong round constant still
+# returns 32 plausible bytes, so the failure mode is silent everywhere that is
+# not covered by known-answer vectors. no_std with no `alloc` and no
+# dependencies -- the digest is a [u8; 32] and the streaming state is
+# fixed-size -- which is what lets the kernel link it. See requests/
+# c-a-sha2-crate-exists-now.md and the reply beside it.
+sha2 = { path = "../sha2" }
+
+# build.rs computes the Ada prebuilt-object stamp and had a *third* copy of
+# SHA-256, hand-written again. It runs on the host, so it can take the crate
+# directly. Adopting it here also turns an existing check into a continuous
+# test of the crate: kernel/ada/regen-prebuilt.py computes the same stamp with
+# Python's hashlib and writes it to stamp.txt, and build.rs fails the build if
+# the two digests disagree -- so every build on every machine now cross-checks
+# sha2 against a vetted implementation.
+[build-dependencies]
+sha2 = { path = "../sha2" }
 
 [lints]
 workspace = true

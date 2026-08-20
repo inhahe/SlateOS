@@ -16,6 +16,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, FlexLayout, SizeConstraint};
 #[allow(unused_imports)]
 use guitk::render::RenderTree;
+use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 #[allow(unused_imports)]
@@ -215,7 +216,17 @@ pub struct MixerState {
     pub input_dropdown_open: bool,
     /// Simulated tick counter for peak meter animation.
     pub tick_counter: u64,
+    /// The stream the simulated peak levels are drawn from.
+    rng: SeededRng,
 }
+
+/// Seed used when the system has no entropy to offer.
+///
+/// A simulated peak meter is novelty randomness, not a secret, so losing
+/// entropy must not stop the mixer from drawing. The constant is per-crate
+/// ("MIXER!!!") so that two programs falling back on the same boot do not then
+/// agree with each other.
+const FALLBACK_SEED: u64 = 0x4D49_5845_5221_2121;
 
 impl MixerState {
     /// Create a new mixer state with stub data.
@@ -326,6 +337,7 @@ impl MixerState {
             output_dropdown_open: false,
             input_dropdown_open: false,
             tick_counter: 0,
+            rng: seeded_from_system(FALLBACK_SEED),
         }
     }
 
@@ -405,16 +417,26 @@ impl MixerState {
     }
 
     /// Simulate peak meter updates (called on tick events).
+    ///
+    /// The levels used to come from `(id * 7 + tick * 13) % 100`, which is not
+    /// pseudo-randomness at all -- it is a sawtooth. Measured, stream 1's meter
+    /// read 20, 33, 46, 59, 72, 85, 98, 11, 24, ... : a straight ramp of 13
+    /// hundredths per tick with a period of exactly 100 ticks. Every stream ran
+    /// the identical ramp offset by 7 per id, so all the meters climbed in
+    /// lockstep and reset together. A peak meter that marches up a straight
+    /// line and snaps back is visibly not measuring audio.
     pub fn update_peak_meters(&mut self) {
         self.tick_counter = self.tick_counter.wrapping_add(1);
 
-        for stream in &mut self.streams {
+        // The draw is lifted out of the loop body's borrow of `self.streams` by
+        // taking all of them first; `self.rng` and `self.streams` are disjoint
+        // fields but the closure form below would not convince the borrowck.
+        let draws: Vec<f32> = (0..self.streams.len()).map(|_| self.rng.unit_f32()).collect();
+
+        for (stream, &draw) in self.streams.iter_mut().zip(draws.iter()) {
             if stream.playing && !stream.muted {
-                // Simulate fluctuating peak levels using simple pseudo-randomness.
-                let seed = stream.id as u64 * 7 + self.tick_counter * 13;
-                let pseudo_random = ((seed % 100) as f32) / 100.0;
                 // Peak oscillates around the volume level.
-                let target = stream.volume * 0.8 * pseudo_random;
+                let target = stream.volume * 0.8 * draw;
                 // Smooth towards target (attack fast, decay slow).
                 if target > stream.peak_level {
                     stream.peak_level = stream.peak_level + (target - stream.peak_level) * 0.6;
@@ -1080,7 +1102,94 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
+
+    // === Peak meter tests ===
+
+    /// Take `ticks` frames of the first stream's peak level.
+    fn peak_trace(ticks: usize) -> Vec<f32> {
+        let mut state = MixerState::new_with_stubs();
+        // The stub streams are at various volumes; only the first is needed and
+        // it is playing and unmuted.
+        (0..ticks)
+            .map(|_| {
+                state.update_peak_meters();
+                state.streams[0].peak_level
+            })
+            .collect()
+    }
+
+    /// The peak meter must not be a sawtooth.
+    ///
+    /// The regression test for `(id * 7 + tick * 13) % 100`. That expression
+    /// steps by exactly 13 hundredths per tick and wraps every 100 ticks, so
+    /// the meter's *target* took only 100 distinct values in a fixed repeating
+    /// order forever. Measured, stream 1's targets began 20, 33, 46, 59, 72,
+    /// 85, 98, 11, 24 -- a visible straight climb.
+    ///
+    /// The level itself is smoothed towards the target, so the assertion is on
+    /// the sequence repeating: a period-100 driver makes tick t and tick t+100
+    /// approach the same value, which independent draws do not.
+    #[test]
+    fn the_peak_meter_does_not_repeat_every_hundred_ticks() {
+        let trace = peak_trace(240);
+        let matches = (0..140)
+            .filter(|&t| (trace[t] - trace[t + 100]).abs() < 0.001)
+            .count();
+        assert!(
+            matches < 20,
+            "{matches} of 140 ticks matched the tick 100 later -- the meter is periodic"
+        );
+    }
+
+    /// Two streams' meters must not move in lockstep.
+    ///
+    /// Under the old expression every stream ran the same ramp offset by `7 *
+    /// id`, so all the targets rose on the same ticks and wrapped within a few
+    /// ticks of each other. Two real streams disagree about half the time.
+    ///
+    /// Counting *disagreements in direction* rather than the spread of the
+    /// difference: the smoothing is asymmetric (attack 0.6, decay 0.15), so
+    /// even a constant offset between two targets produces a varying offset
+    /// between two levels -- an earlier version of this test asked about that
+    /// spread and passed on the broken code for exactly that reason.
+    #[test]
+    fn different_streams_have_independent_peak_levels() {
+        let mut state = MixerState::new_with_stubs();
+        let playing: Vec<usize> = (0..state.streams.len())
+            .filter(|&i| state.streams[i].playing && !state.streams[i].muted)
+            .collect();
+        assert!(playing.len() >= 2, "the stub data needs two live streams");
+        let (a, b) = (playing[0], playing[1]);
+
+        let mut prev = (state.streams[a].peak_level, state.streams[b].peak_level);
+        let mut disagreements = 0;
+        const TICKS: usize = 120;
+        for _ in 0..TICKS {
+            state.update_peak_meters();
+            let now = (state.streams[a].peak_level, state.streams[b].peak_level);
+            if (now.0 > prev.0) != (now.1 > prev.1) {
+                disagreements += 1;
+            }
+            prev = now;
+        }
+        assert!(
+            disagreements >= TICKS / 5,
+            "the two meters moved the same way on all but {disagreements} of {TICKS} ticks -- lockstep"
+        );
+    }
 
     // === Volume calculation tests ===
 

@@ -1310,44 +1310,45 @@ fn render_toolbar(tree: &mut RenderTree, app: &PartitionManagerApp) {
 // ============================================================================
 
 fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
-    let top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
-    let bottom = app.height - STATUS_BAR_HEIGHT;
-    let sidebar_height = bottom - top;
+    let geom = DiskSidebar::of(app);
+    let top = geom.panel_top;
+    let bottom = geom.bottom;
 
     // Sidebar background
     tree.push(RenderCommand::FillRect {
-        x: 0.0,
+        x: geom.left,
         y: top,
-        width: SIDEBAR_WIDTH,
-        height: sidebar_height,
+        width: geom.width,
+        height: geom.height(),
         color: COLOR_MANTLE,
         corner_radii: CornerRadii::ZERO,
     });
 
     // "Disks" header
     tree.push(RenderCommand::Text {
-        x: 12.0,
+        x: geom.text_x(),
         y: top + 8.0,
         text: String::from("Disks"),
         color: COLOR_SUBTEXT0,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
-        max_width: Some(SIDEBAR_WIDTH - 24.0),
+        max_width: Some(geom.text_max_width()),
         overflow: TextOverflow::Ellipsis,
     });
 
-    let list_top = top + 28.0;
-
     // Clip sidebar content
     tree.push(RenderCommand::PushClip {
-        x: 0.0,
-        y: list_top,
-        width: SIDEBAR_WIDTH,
-        height: bottom - list_top,
+        x: geom.left,
+        y: geom.data_top,
+        width: geom.width,
+        height: geom.viewport_height(),
     });
 
     for (i, disk) in app.disks.iter().enumerate() {
-        let ry = list_top + (i as f32) * SIDEBAR_DISK_ROW_HEIGHT;
+        // The row tops come from `row_y`, which is what `row_at` inverts --
+        // walking the arithmetic here separately is how the partition list
+        // below ended up painting rows no click could reach.
+        let (rx, ry, rw, rh) = geom.row_paint_rect(i);
         let selected = i == app.selected_disk;
         let hovered = app.hovered_sidebar_disk == Some(i);
 
@@ -1360,43 +1361,43 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
         };
 
         tree.push(RenderCommand::FillRect {
-            x: 4.0,
+            x: rx,
             y: ry,
-            width: SIDEBAR_WIDTH - 8.0,
-            height: SIDEBAR_DISK_ROW_HEIGHT - 2.0,
+            width: rw,
+            height: rh,
             color: bg,
             corner_radii: CornerRadii::all(4.0),
         });
 
         // Disk name
         tree.push(RenderCommand::Text {
-            x: 12.0,
+            x: geom.text_x(),
             y: ry + 6.0,
             text: disk.name.clone(),
             color: if selected { COLOR_TEXT } else { COLOR_SUBTEXT1 },
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(SIDEBAR_WIDTH - 24.0),
+            max_width: Some(geom.text_max_width()),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Disk model + size
         let info = format!("{} - {}", disk.model, format_size(disk.total_size_bytes));
         tree.push(RenderCommand::Text {
-            x: 12.0,
+            x: geom.text_x(),
             y: ry + 22.0,
             text: info,
             color: COLOR_SUBTEXT0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(SIDEBAR_WIDTH - 24.0),
+            max_width: Some(geom.text_max_width()),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Health indicator dot
         let health_color = disk.smart_health.color();
         tree.push(RenderCommand::FillRect {
-            x: SIDEBAR_WIDTH - 20.0,
+            x: geom.right() - 20.0,
             y: ry + 18.0,
             width: 8.0,
             height: 8.0,
@@ -1409,9 +1410,9 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
 
     // Right border of sidebar
     tree.push(RenderCommand::Line {
-        x1: SIDEBAR_WIDTH,
+        x1: geom.right(),
         y1: top,
-        x2: SIDEBAR_WIDTH,
+        x2: geom.right(),
         y2: bottom,
         color: COLOR_SURFACE1,
         width: 1.0,
@@ -1616,6 +1617,161 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
 // ============================================================================
 // Rendering -- partition list
 // ============================================================================
+
+/// Where the sidebar's disk rows go: one answer for the renderer, the click
+/// and the hover.
+///
+/// The third and last list in this file to have been described from memory by
+/// each of its consumers. `top + 28.0` — the "Disks" caption's height — was
+/// written out three times, and `((y - list_top) / SIDEBAR_DISK_ROW_HEIGHT)
+/// as usize` twice, once in the click and once in the hover, with no shared
+/// definition of either. Unlike [`PartitionList`] and [`QueueList`] the three
+/// spellings had not yet drifted apart, and the cast is reached only through
+/// an enclosing `y >= top && y < bottom` test, which happens to close the NaN
+/// path that bit the queue's hover. But *happens to* is the operative phrase:
+/// nothing held the three together, and nothing stopped the next edit to one
+/// of them from moving it out from under the other two.
+///
+/// Two things this type states that the loose spellings only implied:
+///
+/// - **A row owns its full pitch and the sidebar's full width.** The 4 px
+///   horizontal inset and the 2 px gap under each row are *decoration* — they
+///   make the selected row read as a rounded chip — not a boundary. A click
+///   in the gap under a row still belongs to that row, which is what the
+///   pointer paths already did. [`Self::row_paint_rect`] is where the inset
+///   lives, so a change to it cannot silently become a change to the hit
+///   test. (This is the opposite of `notif_pane`, where the gutter between
+///   cards belongs to no card and the hit test had to be taught to refuse it.
+///   The difference is real, so it is written down rather than inferred.)
+/// - **The column consumes the pointer even where no row answers.** A click
+///   on the "Disks" caption, or below the last disk, must not fall through to
+///   the disk map behind it, so [`Self::contains_column`] is a separate and
+///   wider question than [`Self::contains`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DiskSidebar {
+    /// Left edge of the column, and of every row in it.
+    left: f32,
+    /// Width of the column, and of every row in it.
+    width: f32,
+    /// Top of the "Disks" caption — the column's own top edge.
+    panel_top: f32,
+    /// Top of row 0.
+    data_top: f32,
+    /// One past the last pixel a row may occupy.
+    bottom: f32,
+}
+
+impl DiskSidebar {
+    /// Height of the "Disks" caption strip above the first row.
+    const HEADING_HEIGHT: f32 = 28.0;
+    /// How far in from each side of the column a row is painted. Decoration:
+    /// see the type's docs. The hit test does not use it.
+    const ROW_INSET_X: f32 = 4.0;
+    /// Blank strip left under each painted row, so the rows read as separate
+    /// chips. Decoration, exactly as `ROW_INSET_X` is: the row above owns it.
+    const ROW_GAP_Y: f32 = 2.0;
+    /// How far in from each side of the column a row's *text* is laid out.
+    /// Wider than [`Self::ROW_INSET_X`] so the text clears the rounded corner
+    /// of the chip behind it.
+    const TEXT_INSET_X: f32 = 12.0;
+
+    /// Measure the sidebar as it stands in `app`.
+    fn of(app: &PartitionManagerApp) -> Self {
+        let panel_top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
+        let data_top = panel_top + Self::HEADING_HEIGHT;
+        Self {
+            left: 0.0,
+            width: SIDEBAR_WIDTH,
+            panel_top,
+            data_top,
+            // A window short enough that the title bar, toolbar, caption and
+            // status bar between them eat the column leaves it with no rows
+            // rather than a negative number of them -- a negative-height clip
+            // is not a small clip.
+            bottom: (app.height - STATUS_BAR_HEIGHT).max(data_top),
+        }
+    }
+
+    /// Right edge of the column — one past its last pixel.
+    fn right(&self) -> f32 {
+        self.left + self.width
+    }
+
+    /// Height of the whole column, caption included.
+    fn height(&self) -> f32 {
+        self.bottom - self.panel_top
+    }
+
+    /// Height of the region rows are drawn into and answer the pointer in.
+    fn viewport_height(&self) -> f32 {
+        (self.bottom - self.data_top).max(0.0)
+    }
+
+    /// Whether `(x, y)` is anywhere in the column, caption and empty space
+    /// below the last disk included. The pointer paths consume this whole
+    /// region so nothing behind the sidebar can be reached through it.
+    fn contains_column(&self, x: f32, y: f32) -> bool {
+        x >= self.left && x < self.right() && y >= self.panel_top && y < self.bottom
+    }
+
+    /// Whether `(x, y)` is in the region the rows are painted in.
+    fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.left && x < self.right() && y >= self.data_top && y < self.bottom
+    }
+
+    /// Top of row `index`. The sidebar does not scroll, so there is no offset
+    /// to pass; if it ever does, this and [`Self::row_at`] gain one together
+    /// or neither does.
+    fn row_y(&self, index: usize) -> f32 {
+        self.data_top + (index as f32) * SIDEBAR_DISK_ROW_HEIGHT
+    }
+
+    /// The rectangle row `index` is *painted* in, inset from the rectangle it
+    /// *answers* in. Nothing but the renderer may use this: see the type docs
+    /// for why the inset is decoration and not a boundary.
+    fn row_paint_rect(&self, index: usize) -> (f32, f32, f32, f32) {
+        (
+            self.left + Self::ROW_INSET_X,
+            self.row_y(index),
+            (self.width - Self::ROW_INSET_X * 2.0).max(0.0),
+            (SIDEBAR_DISK_ROW_HEIGHT - Self::ROW_GAP_Y).max(0.0),
+        )
+    }
+
+    /// The row at `y` out of `count`, or `None` — the inverse of
+    /// [`Self::row_y`], and the only thing that answers the pointer.
+    ///
+    /// A row owns its top edge and not its bottom one, so no pixel names two
+    /// rows. The offset is checked for sign *and* finiteness before the cast
+    /// because a negative `f32` and a NaN both cast to `usize` by *saturating
+    /// to zero* in Rust rather than wrapping or trapping. Today the enclosing
+    /// bounds test makes that unreachable; it is checked here anyway, where
+    /// the cast is, so the guard cannot be lost by an edit somewhere else.
+    fn row_at(&self, y: f32, count: usize) -> Option<usize> {
+        if !(y >= self.data_top && y < self.bottom) {
+            return None;
+        }
+        let offset = y - self.data_top;
+        if !offset.is_finite() || offset < 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let index = (offset / SIDEBAR_DISK_ROW_HEIGHT) as usize;
+        (index < count).then_some(index)
+    }
+
+    /// Left edge of a row's text, and of the "Disks" caption above them.
+    /// Decoration, like [`Self::ROW_INSET_X`] -- nothing hit-tests it.
+    fn text_x(&self) -> f32 {
+        self.left + Self::TEXT_INSET_X
+    }
+
+    /// How wide a row's text may run before it is ellipsised: the column
+    /// less the same inset at both ends.
+    fn text_max_width(&self) -> f32 {
+        (self.width - Self::TEXT_INSET_X * 2.0).max(0.0)
+    }
+}
 
 /// Where the operation queue's panel and its rows go: one answer for the
 /// renderer, the header click, the row hover and the wheel.
@@ -3158,22 +3314,19 @@ fn handle_mouse(app: &mut PartitionManagerApp, mouse: &guitk::event::MouseEvent)
 
 fn handle_left_click(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResult {
     let top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
-    let bottom = app.height - STATUS_BAR_HEIGHT;
 
     // Toolbar click
     if y >= TITLE_BAR_HEIGHT && y < top {
         return handle_toolbar_click(app, x);
     }
 
-    // Sidebar click
-    if x < SIDEBAR_WIDTH && y >= top && y < bottom {
-        let list_top = top + 28.0;
-        if y >= list_top {
-            let row = ((y - list_top) / SIDEBAR_DISK_ROW_HEIGHT) as usize;
-            if row < app.disks.len() {
-                app.select_disk(row);
-                return EventResult::Consumed;
-            }
+    // Sidebar click. The whole column is consumed -- including the "Disks"
+    // caption and the blank space under the last disk -- so a click there
+    // cannot fall through to the disk map behind it.
+    let sidebar = DiskSidebar::of(app);
+    if sidebar.contains_column(x, y) {
+        if let Some(row) = sidebar.row_at(y, app.disks.len()) {
+            app.select_disk(row);
         }
         return EventResult::Consumed;
     }
@@ -3407,7 +3560,6 @@ fn handle_partition_list_click(
 
 fn handle_mouse_move(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResult {
     let top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
-    let bottom = app.height - STATUS_BAR_HEIGHT;
 
     // Reset hovers
     app.hovered_toolbar_btn = None;
@@ -3429,15 +3581,10 @@ fn handle_mouse_move(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
         return EventResult::Consumed;
     }
 
-    // Sidebar hover
-    if x < SIDEBAR_WIDTH && y >= top && y < bottom {
-        let list_top = top + 28.0;
-        if y >= list_top {
-            let row = ((y - list_top) / SIDEBAR_DISK_ROW_HEIGHT) as usize;
-            if row < app.disks.len() {
-                app.hovered_sidebar_disk = Some(row);
-            }
-        }
+    // Sidebar hover. Same region as the click, asked the same way.
+    let sidebar = DiskSidebar::of(app);
+    if sidebar.contains_column(x, y) {
+        app.hovered_sidebar_disk = sidebar.row_at(y, app.disks.len());
         return EventResult::Consumed;
     }
 
@@ -4528,6 +4675,329 @@ mod tests {
             assert_eq!(
                 scrolled, hovered,
                 "at y = {y} the wheel says {scrolled} and the hover says {hovered}"
+            );
+        }
+    }
+
+    // -- The sidebar's disk list: painted where the pointer lands --
+
+    // Same rule again: the expected values come from the rectangles
+    // `render_sidebar` actually emitted, never from a second copy of its
+    // arithmetic. `top + 28.0` was written out three times -- renderer, click,
+    // hover -- and the divide-and-cast twice.
+
+    /// More disks than the column has room for, so rows fall past its clip.
+    fn app_with_many_disks() -> PartitionManagerApp {
+        let mut app = PartitionManagerApp::new();
+        let template = app.disks[0].clone();
+        for i in 0..20u32 {
+            let mut disk = template.clone();
+            disk.id = 100 + i;
+            disk.name = format!("/dev/sdx{i}");
+            app.disks.push(disk);
+        }
+        app
+    }
+
+    /// The clip `render_sidebar` pushes around its rows, as `(top, bottom)`.
+    fn painted_sidebar_clip(app: &PartitionManagerApp) -> (f32, f32) {
+        let mut tree = RenderTree::new();
+        render_sidebar(&mut tree, app);
+        tree.commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::PushClip { y, height, .. } => Some((*y, *y + *height)),
+                _ => None,
+            })
+            .expect("the sidebar draws no clip")
+    }
+
+    /// Every disk-row background the sidebar painted *and did not clip away*,
+    /// as `(index, top)`.
+    fn visible_painted_sidebar_rows(app: &PartitionManagerApp) -> Vec<(usize, f32)> {
+        let geom = DiskSidebar::of(app);
+        let (rx, _, rw, rh) = geom.row_paint_rect(0);
+        let (clip_top, clip_bottom) = painted_sidebar_clip(app);
+        let mut tree = RenderTree::new();
+        render_sidebar(&mut tree, app);
+        tree.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                // The column background is full-width and full-height and the
+                // health dot is 8 px square, so the inset row rectangle is the
+                // only thing that matches all three of x, width and height.
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*x - rx).abs() < 0.01
+                    && (*width - rw).abs() < 0.01
+                    && (*height - rh).abs() < 0.01 =>
+                {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .filter(|y| *y >= clip_top && *y + SIDEBAR_DISK_ROW_HEIGHT <= clip_bottom)
+            .map(|y| {
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                let index = ((y - geom.row_y(0)) / SIDEBAR_DISK_ROW_HEIGHT).round() as usize;
+                (index, y)
+            })
+            .collect()
+    }
+
+    /// Click at `(x, y)` and report which disk it selected, or `None` if the
+    /// selection did not move.
+    fn click_names_sidebar_disk(
+        app: &mut PartitionManagerApp,
+        x: f32,
+        y: f32,
+    ) -> (Option<usize>, EventResult) {
+        // Park the selection somewhere no probe should land so "did not move"
+        // and "landed on 0" cannot be confused.
+        app.selected_disk = usize::MAX;
+        let result = handle_left_click(app, x, y);
+        let named = (app.selected_disk != usize::MAX).then_some(app.selected_disk);
+        (named, result)
+    }
+
+    /// Move the pointer to `(x, y)` and report which disk it highlights.
+    fn hover_names_sidebar_disk(
+        app: &mut PartitionManagerApp,
+        x: f32,
+        y: f32,
+    ) -> (Option<usize>, EventResult) {
+        let result = handle_mouse_move(app, x, y);
+        (app.hovered_sidebar_disk, result)
+    }
+
+    #[test]
+    fn every_visible_sidebar_disk_answers_exactly_where_it_was_painted() {
+        let mut app = app_with_many_disks();
+        let mid_x = DiskSidebar::of(&app).left + 20.0;
+        let rows = visible_painted_sidebar_rows(&app);
+        assert!(rows.len() >= 4, "only {} rows visible", rows.len());
+        for (index, top) in rows {
+            // Sweep the row rather than probing its middle, and include its
+            // last pixel: a hit test three pixels out of step with the paint
+            // is right in the middle of a 48 px row and wrong only at the ends.
+            for step in 0..8 {
+                let probe = top + (step as f32) * SIDEBAR_DISK_ROW_HEIGHT / 8.0;
+                assert_eq!(
+                    hover_names_sidebar_disk(&mut app, mid_x, probe).0,
+                    Some(index),
+                    "hover at y = {probe} does not name row {index} painted at {top}"
+                );
+                assert_eq!(
+                    click_names_sidebar_disk(&mut app, mid_x, probe).0,
+                    Some(index),
+                    "click at y = {probe} does not name row {index} painted at {top}"
+                );
+            }
+            let last = top + SIDEBAR_DISK_ROW_HEIGHT - 0.01;
+            assert_eq!(
+                hover_names_sidebar_disk(&mut app, mid_x, last).0,
+                Some(index),
+                "the last pixel of row {index} names another row"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clip_the_sidebar_emits_is_the_region_the_pointer_lands_in() {
+        let app = app_with_many_disks();
+        let geom = DiskSidebar::of(&app);
+        let (clip_top, clip_bottom) = painted_sidebar_clip(&app);
+        let n = app.disks.len();
+        assert_eq!(
+            geom.row_at(clip_top, n),
+            Some(0),
+            "the clip starts a row early"
+        );
+        assert_eq!(
+            geom.row_at(clip_top - 0.01, n),
+            None,
+            "the caption strip names a row"
+        );
+        assert_eq!(
+            geom.row_at(clip_bottom, n),
+            None,
+            "a pixel past the clip still names a row"
+        );
+        assert!(
+            geom.row_at(clip_bottom - 0.01, n).is_some(),
+            "the clip's last pixel names no row"
+        );
+    }
+
+    #[test]
+    fn the_inset_and_the_gap_under_a_sidebar_row_still_belong_to_that_row() {
+        // The 4 px side inset and the 2 px gap are decoration -- they make the
+        // selected row read as a rounded chip -- not a boundary. This is a
+        // deliberate difference from `notif_pane`, whose inter-card gutter
+        // belongs to no card; it is asserted here so it cannot drift into the
+        // other rule by accident.
+        let mut app = app_with_many_disks();
+        let geom = DiskSidebar::of(&app);
+        let (index, top) = visible_painted_sidebar_rows(&app)[2];
+        let (rx, _, rw, rh) = geom.row_paint_rect(index);
+        assert!(rh < SIDEBAR_DISK_ROW_HEIGHT, "there is no gap to test");
+        assert!(rx > geom.left, "there is no inset to test");
+
+        // Inside the blank gap under the painted rectangle.
+        let in_gap = top + rh + (SIDEBAR_DISK_ROW_HEIGHT - rh) / 2.0;
+        assert_eq!(
+            hover_names_sidebar_disk(&mut app, rx + 1.0, in_gap).0,
+            Some(index),
+            "the gap under row {index} names no row"
+        );
+        // Left of the painted rectangle, and right of it.
+        for x in [geom.left, rx - 0.01, rx + rw, geom.right() - 0.01] {
+            assert_eq!(
+                hover_names_sidebar_disk(&mut app, x, top + 1.0).0,
+                Some(index),
+                "x = {x} is outside row {index} but inside the column"
+            );
+        }
+    }
+
+    #[test]
+    fn the_disks_caption_consumes_the_pointer_and_names_no_disk() {
+        let mut app = app_with_many_disks();
+        let geom = DiskSidebar::of(&app);
+        let mid_x = geom.left + 20.0;
+        for y in [geom.panel_top, geom.data_top - 0.01] {
+            let (named, result) = hover_names_sidebar_disk(&mut app, mid_x, y);
+            assert_eq!(named, None, "the caption at y = {y} highlights a disk");
+            assert_eq!(
+                result,
+                EventResult::Consumed,
+                "the caption at y = {y} lets the pointer through to the disk map"
+            );
+            let (clicked, result) = click_names_sidebar_disk(&mut app, mid_x, y);
+            assert_eq!(clicked, None, "the caption at y = {y} selects a disk");
+            assert_eq!(result, EventResult::Consumed);
+        }
+    }
+
+    #[test]
+    fn nothing_right_of_the_sidebar_belongs_to_it() {
+        let mut app = app_with_many_disks();
+        let geom = DiskSidebar::of(&app);
+        let y = geom.data_top + 4.0;
+        let past_the_window = app.width + 500.0;
+        assert_eq!(
+            hover_names_sidebar_disk(&mut app, geom.right() - 0.01, y).0,
+            Some(0),
+            "the column's last pixel is not in the column"
+        );
+        assert_eq!(
+            click_names_sidebar_disk(&mut app, geom.right() - 0.01, y).0,
+            Some(0),
+            "the column's last pixel is not in the column, to a click"
+        );
+        // Both pointer paths, because both used to write the bound out for
+        // themselves and neither wrote a right-hand one at all.
+        for x in [geom.right(), geom.right() + 1.0, past_the_window] {
+            assert_eq!(
+                hover_names_sidebar_disk(&mut app, x, y).0,
+                None,
+                "the hover puts x = {x} inside the column"
+            );
+            assert_eq!(
+                click_names_sidebar_disk(&mut app, x, y).0,
+                None,
+                "the click puts x = {x} inside the column"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sidebar_row_below_the_fold_answers_nowhere() {
+        // Twenty-four disks in a column with room for twelve. The rows that do
+        // not fit are painted and clipped away; none of them may be reachable.
+        let app = app_with_many_disks();
+        let geom = DiskSidebar::of(&app);
+        let (_, clip_bottom) = painted_sidebar_clip(&app);
+        let n = app.disks.len();
+        let mut reachable = Vec::new();
+        for step in 0..2000 {
+            let y = (step as f32) * app.height / 2000.0;
+            if let Some(row) = geom.row_at(y, n) {
+                if !reachable.contains(&row) {
+                    reachable.push(row);
+                }
+            }
+        }
+        assert!(
+            reachable.len() < n,
+            "every one of {n} disks fits, so nothing is below the fold to test"
+        );
+        for row in reachable {
+            assert!(
+                geom.row_y(row) < clip_bottom,
+                "row {row} is painted entirely below the clip at {clip_bottom} \
+                 and still answers the pointer"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sidebar_walk_refuses_a_coordinate_that_is_not_in_the_list() {
+        let app = app_with_many_disks();
+        let geom = DiskSidebar::of(&app);
+        let n = app.disks.len();
+        assert_eq!(geom.row_at(geom.data_top, n), Some(0));
+        assert_eq!(
+            geom.row_at(geom.data_top - 0.01, n),
+            None,
+            "the caption names a row"
+        );
+        assert_eq!(
+            geom.row_at(geom.bottom, n),
+            None,
+            "the status bar names a row"
+        );
+        assert_eq!(geom.row_at(f32::NAN, n), None, "a NaN names a row");
+        assert_eq!(
+            geom.row_at(f32::NEG_INFINITY, n),
+            None,
+            "a point infinitely far up names a row"
+        );
+        assert_eq!(
+            geom.row_at(f32::INFINITY, n),
+            None,
+            "a point infinitely far down names a row"
+        );
+        assert_eq!(
+            geom.row_at(geom.data_top, 0),
+            None,
+            "an empty list names a row"
+        );
+    }
+
+    #[test]
+    fn the_click_and_the_hover_agree_on_where_the_sidebar_is() {
+        // They were two independent spellings of the same three numbers. Walk
+        // the whole column, caption and all, and make them answer together.
+        let mut app = app_with_many_disks();
+        let geom = DiskSidebar::of(&app);
+        let mid_x = geom.left + 20.0;
+        for step in 0..60 {
+            let y = geom.panel_top - 8.0 + (step as f32) * 12.0;
+            let hovered = hover_names_sidebar_disk(&mut app, mid_x, y);
+            let clicked = click_names_sidebar_disk(&mut app, mid_x, y);
+            assert_eq!(
+                hovered.0, clicked.0,
+                "at y = {y} the hover says {:?} and the click says {:?}",
+                hovered.0, clicked.0
+            );
+            assert_eq!(
+                hovered.1, clicked.1,
+                "at y = {y} the two disagree on whether the sidebar consumed the pointer"
             );
         }
     }

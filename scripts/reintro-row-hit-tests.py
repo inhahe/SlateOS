@@ -73,7 +73,16 @@ one rectangle described from memory by three or four separate callers.
                   times. There the wheel accepted the header while the hover
                   did not, so a notch over a *collapsed* panel (which is
                   nothing but its header) scrolled it against a zero-tall
-                  viewport, to anywhere at all
+                  viewport, to anywhere at all. Its disk sidebar is the third
+                  and quietest instance: three spellings of `top + 28.0` and
+                  two of the divide-and-cast, none of which had drifted yet.
+                  A `DiskSidebar` now holds them together and, in doing so,
+                  writes down two things the loose copies only implied -- that
+                  the 4 px inset and the 2 px gap around a painted row are
+                  decoration and not a boundary, so a row owns its full pitch
+                  and the column's full width; and that the "Disks" caption
+                  consumes the pointer even though it names no disk, so a
+                  click there cannot reach the disk map behind it
     notif_pane    the per-app settings list's click divided by the card pitch,
                   handing each inter-card gutter to the card above it, and had
                   no bottom bound -- so a click below the pane, aimed at
@@ -578,6 +587,107 @@ DEFECTS = [
         '        self.status_message = String::from("Operation queue cleared");\n'
         "        self.clamp_queue_scroll();\n",
         '        self.status_message = String::from("Operation queue cleared");\n',
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the sidebar's row walk answers above its own first row",
+        "        if !(y >= self.data_top && y < self.bottom) {\n"
+        "            return None;\n"
+        "        }\n"
+        "        let offset = y - self.data_top;\n"
+        "        if !offset.is_finite() || offset < 0.0 {\n"
+        "            return None;\n"
+        "        }\n",
+        "        if y >= self.bottom {\n"
+        "            return None;\n"
+        "        }\n"
+        "        let offset = y - self.data_top;\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the sidebar draws its disks three pixels below where they answer",
+        "            self.row_y(index),\n",
+        "            self.row_y(index) + 3.0,\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the sidebar paces its rows by the height it paints, not by their pitch",
+        "        let (rx, ry, rw, rh) = geom.row_paint_rect(i);\n",
+        "        let (rx, _, rw, rh) = geom.row_paint_rect(i);\n"
+        "        let ry = geom.data_top + (i as f32) * rh;\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the sidebar is clipped a row short of where the pointer is accepted",
+        "        x: geom.left,\n"
+        "        y: geom.data_top,\n"
+        "        width: geom.width,\n"
+        "        height: geom.viewport_height(),\n",
+        "        x: geom.left,\n"
+        "        y: geom.data_top,\n"
+        "        width: geom.width,\n"
+        "        height: geom.viewport_height() - SIDEBAR_DISK_ROW_HEIGHT,\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the sidebar click has no right-hand bound",
+        "    let sidebar = DiskSidebar::of(app);\n"
+        "    if sidebar.contains_column(x, y) {\n"
+        "        if let Some(row) = sidebar.row_at(y, app.disks.len()) {\n",
+        "    let sidebar = DiskSidebar::of(app);\n"
+        "    if y >= sidebar.panel_top && y < sidebar.bottom {\n"
+        "        if let Some(row) = sidebar.row_at(y, app.disks.len()) {\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the sidebar hover has no right-hand bound",
+        "    let sidebar = DiskSidebar::of(app);\n"
+        "    if sidebar.contains_column(x, y) {\n"
+        "        app.hovered_sidebar_disk = sidebar.row_at(y, app.disks.len());\n",
+        "    let sidebar = DiskSidebar::of(app);\n"
+        "    if y >= sidebar.panel_top && y < sidebar.bottom {\n"
+        "        app.hovered_sidebar_disk = sidebar.row_at(y, app.disks.len());\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        'a click on the "Disks" caption falls through to the disk map behind it',
+        "    let sidebar = DiskSidebar::of(app);\n"
+        "    if sidebar.contains_column(x, y) {\n"
+        "        if let Some(row) = sidebar.row_at(y, app.disks.len()) {\n",
+        "    let sidebar = DiskSidebar::of(app);\n"
+        "    if sidebar.contains(x, y) {\n"
+        "        if let Some(row) = sidebar.row_at(y, app.disks.len()) {\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the blank gap under a sidebar row is treated as a boundary, not decoration",
+        "        let index = (offset / SIDEBAR_DISK_ROW_HEIGHT) as usize;\n",
+        "        let index = (offset / SIDEBAR_DISK_ROW_HEIGHT) as usize;\n"
+        "        if offset % SIDEBAR_DISK_ROW_HEIGHT\n"
+        "            >= SIDEBAR_DISK_ROW_HEIGHT - Self::ROW_GAP_Y\n"
+        "        {\n"
+        "            return None;\n"
+        "        }\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the sidebar's side inset is treated as a boundary, not decoration",
+        "    fn contains_column(&self, x: f32, y: f32) -> bool {\n"
+        "        x >= self.left && x < self.right() && y >= self.panel_top && y < self.bottom\n",
+        "    fn contains_column(&self, x: f32, y: f32) -> bool {\n"
+        "        x >= self.left + Self::ROW_INSET_X\n"
+        "            && x < self.right() - Self::ROW_INSET_X\n"
+        "            && y >= self.panel_top\n"
+        "            && y < self.bottom\n",
     ),
     # -------------------------------------------------------------- settings
     (

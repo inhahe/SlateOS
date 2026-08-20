@@ -44457,10 +44457,115 @@ it), clippy down from 19 warnings to 11 — the test module now allows
 the 11 that remain are all `arithmetic_side_effects` on `f32` in production
 code, pre-existing.
 
-**Still open in this file:** the sidebar's disk list is the same three-spellings
-shape one more time — `render_sidebar`, the click and the hover each write
-`top + 28.0` and the click and hover each divide by
-`SIDEBAR_DISK_ROW_HEIGHT` and cast. No divergence found between the three, and
-the NaN path happens to be closed by the enclosing `y >= top && y < bottom`
-test, but nothing holds them together. Same fix shape as `PartitionList` and
-`QueueList`.
+**Then still open in this file:** the sidebar's disk list. Now fixed — see the
+next section.
+
+### partmanager's disk sidebar was described three ways — FIXED
+
+The last instance of this family in `apps/partmanager/src/main.rs`, and the
+quietest: unlike the partition list and the queue panel, **no divergence had
+happened yet**. `top + 28.0` — the height of the "Disks" caption — was written
+out three times, in `render_sidebar`, in the sidebar click and in the sidebar
+hover, and `((y - list_top) / SIDEBAR_DISK_ROW_HEIGHT) as usize` twice, once in
+each pointer path, with no shared definition of either. The three agreed.
+
+That is not a reason to leave it. The other two lists in this same file agreed
+once too. What "no divergence yet" actually describes is a defect that has not
+been *committed* yet, in a shape where committing one takes a single edit to
+any of the three copies — and where nothing in the test suite would have
+noticed, because the tests probed row centres.
+
+Two smaller things were true of it as well:
+
+- The unguarded divide-and-cast — the fault that let `credmanager` decrypt the
+  first credential from a click on a caption, because a negative `f32` cast to
+  `usize` **saturates to 0** in Rust rather than wrapping — was closed here
+  only *by accident*, by the enclosing `x < SIDEBAR_WIDTH && y >= top &&
+  y < bottom` test happening to run first. It is now closed *at the cast*, in
+  `DiskSidebar::row_at`, where an edit somewhere else cannot lose it.
+- The clip was `bottom - list_top` with nothing stopping it going negative. A
+  window short enough that the title bar, toolbar, caption and status bar
+  between them eat the column would have pushed a negative-height clip into
+  the render tree. `viewport_height()` clamps at 0, and `of()` clamps `bottom`
+  to `data_top`, the same way `PartitionList` already did.
+
+#### `DiskSidebar`, and the two things it writes down that were only implied
+
+The fix is the same collapse as `PartitionList` and `QueueList`: one
+`DiskSidebar` value with `panel_top` / `data_top` / `bottom` / `left` /
+`width`, a `row_y(i)` and a `row_at(y, count)` that is its inverse, and every
+consumer — renderer included — routed through it. `render_sidebar` no longer
+computes a single coordinate of its own.
+
+Two facts about this list were true of the code but stated nowhere, so the next
+edit could have reversed either without contradicting anything:
+
+| | The rule | Where it now lives |
+|---|---|---|
+| **The inset and the gap are decoration** | A row is *painted* inset 4 px from each side of the column and 2 px short of its own bottom, so the selected row reads as a rounded chip. It *answers* across the column's full width and its full pitch. A click in the gap belongs to the row above it. | `row_paint_rect()`, which only the renderer may call; `ROW_INSET_X` / `ROW_GAP_Y` are named and commented as decoration |
+| **The column consumes the pointer where no row answers** | A click on the "Disks" caption, or on the blank space below the last disk, must not fall through to the disk map behind it. | `contains_column()` (the whole column) is a separate and wider question from `contains()` (the rows) |
+
+A third, smaller one came out of the same pass: `render_sidebar` still held
+seven literals — three `x: 12.0`, three `max_width: Some(SIDEBAR_WIDTH - 24.0)`
+and the health dot's `x: SIDEBAR_WIDTH - 20.0`. Those are single-consumer
+decoration and were not part of the fault, but every `SIDEBAR_WIDTH` in that
+function is a second spelling of `geom.width`, which is exactly the state the
+whole collapse exists to leave. They now go through `text_x()` /
+`text_max_width()` / `right()`, and `render_sidebar` contains no occurrence of
+`SIDEBAR_WIDTH` at all.
+
+The first of the two rules above is the **opposite** of the one `notif_pane`
+needed, where the 8 px
+gutter between cards belongs to no card and the hit test had to be taught to
+refuse it. Two lists in the same tree, two different answers, both correct —
+which is exactly why neither can be left to be inferred from the arithmetic.
+Both are now asserted by a test, so a future edit that swaps one rule for the
+other fails rather than ships.
+
+#### Tests
+
+Eight, all reading their expected values from the render tree — the clip
+`render_sidebar` pushes and the row rectangles it fills — never from a second
+copy of the code under test's arithmetic:
+
+| Test | What it pins |
+|---|---|
+| `every_visible_sidebar_disk_answers_exactly_where_it_was_painted` | 8 probes across each painted row plus its last pixel, for **both** pointer paths. Probing centres cannot see a renderer 3 px out of step with a 48 px row |
+| `the_clip_the_sidebar_emits_is_the_region_the_pointer_lands_in` | The clip's first pixel names row 0; the pixel above it and the pixel past its end name nothing |
+| `the_inset_and_the_gap_under_a_sidebar_row_still_belong_to_that_row` | The decoration rule above, at four x positions and inside the gap |
+| `the_disks_caption_consumes_the_pointer_and_names_no_disk` | `Consumed` with no selection change, for click and hover |
+| `nothing_right_of_the_sidebar_belongs_to_it` | The right-hand bound neither pointer path used to have — including a point past the window's own edge |
+| `a_sidebar_row_below_the_fold_answers_nowhere` | 24 disks in a column with room for ~13: no row painted entirely below the clip is reachable from any y in the window |
+| `the_sidebar_walk_refuses_a_coordinate_that_is_not_in_the_list` | The caption, the status bar, NaN, ±∞, and an empty list |
+| `the_click_and_the_hover_agree_on_where_the_sidebar_is` | 60 probes down the whole column: the two must name the same row *and* agree on whether the sidebar consumed the pointer |
+
+127 → 135 tests, all green. rustfmt clean; clippy unchanged at 13 warnings for
+the crate with `--all-targets` (measured `git stash`-bracketed, so the number
+is a delta and not a snapshot) — all `arithmetic_side_effects` on `f32` in
+production code, pre-existing.
+
+#### One case deliberately *not* added to the reintroduction sweep
+
+`DiskSidebar::row_at` checks `!offset.is_finite() || offset < 0.0` before the
+cast, and that check is **unreachable today**: the `y >= self.data_top &&
+y < self.bottom` test immediately above it already rejects every input that
+could make the offset negative or NaN. Removing it therefore leaves the suite
+green, and a sweep entry for it would report a green that means nothing — which
+is worse than no entry. It stays in the code as a guard at the cast rather than
+a guard somewhere else, and it stays out of the sweep, and the doc comment on
+`row_at` says both. The sweep instead pins the *pair* of guards: removing both
+is caught, which is the edit that would actually reintroduce the fault.
+
+`scripts/reintro-row-hit-tests.py` is now **58 defects** (was 49), nine of them
+new here: the row walk answering above its own first row; the renderer drawing
+3 px below where rows answer; the renderer pacing rows by the height it paints
+rather than their pitch (the classic gap-vs-pitch slip, which accumulates 2 px
+per row and so is invisible at the top of the list); the clip stopping a row
+short; no right-hand bound on the click; the same on the hover; a caption click
+falling through to the disk map; and the gap and the inset each being treated
+as a boundary rather than as decoration.
+
+**With this, every list in `apps/partmanager/src/main.rs` — the partition list,
+the operation queue and the disk sidebar — has exactly one description of where
+its rows are, and each has a reintroduction case proving the suite can see it
+being undone.**

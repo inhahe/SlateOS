@@ -39342,6 +39342,23 @@ consider poisoning-on-free as a separate change with its own boot evidence.
 > would fail for a reason unrelated to the hook), then asserts the frame reads
 > `KASAN_FREE` at both ends after `free_frame` and reads addressable again if
 > the allocator hands the same frame back.
+>
+> **Post-change instrumented evidence.** A second full `kasan-build.sh --boot`,
+> *with* the hook, also passed: `BOOT_OK after 1464s`, 27588 serial lines,
+> `build: kasan-instrumented on QEMU TCG`, clean streak 12. Exactly the **same
+> three** `CRITICAL` lines as the pre-change baseline, all deliberate
+> self-tests — the two `[kasan-rt]` report-path writes at 25638/25647 and the
+> `[heap]` redzone overflow at 27135 — and `map_lock_giveups=0`. **The new hook
+> introduced zero false positives.** That the hook is doing real work rather
+> than silently no-opping is visible in the stats line: `poisoned` went from
+> 1496682224B to **3964078784B**, i.e. ~2.47 GB of additional poison, ~151k
+> frames poisoned on free. `unpoisoned` is essentially unchanged
+> (4294422947B → 4294639048B), as it must be — the alloc side was not touched.
+>
+> The delta is the right shape for a *sanity* check on the numbers, not just an
+> assertion that they went up: if `SkipLossy` were dropping most poisons the
+> figure would have barely moved, and if the sole-owner predicate were wrong in
+> the permissive direction it would have exceeded the unpoisoned total.
 
 #### Why this matters more than the report count suggests
 

@@ -423,9 +423,10 @@ fn can_move(vehicles: &[Vehicle], index: usize, delta: i32) -> bool {
                 for s in 1..=steps {
                     let check_col = v.col - s;
                     if let Some(occ) = occupancy[v.row][check_col]
-                        && occ != index {
-                            return false;
-                        }
+                        && occ != index
+                    {
+                        return false;
+                    }
                 }
             } else {
                 // Moving right
@@ -436,9 +437,10 @@ fn can_move(vehicles: &[Vehicle], index: usize, delta: i32) -> bool {
                 for s in 1..=steps {
                     let check_col = v.col + v.length - 1 + s;
                     if let Some(occ) = occupancy[v.row][check_col]
-                        && occ != index {
-                            return false;
-                        }
+                        && occ != index
+                    {
+                        return false;
+                    }
                 }
             }
             true
@@ -453,9 +455,10 @@ fn can_move(vehicles: &[Vehicle], index: usize, delta: i32) -> bool {
                 for s in 1..=steps {
                     let check_row = v.row - s;
                     if let Some(occ) = occupancy[check_row][v.col]
-                        && occ != index {
-                            return false;
-                        }
+                        && occ != index
+                    {
+                        return false;
+                    }
                 }
             } else {
                 // Moving down
@@ -466,9 +469,10 @@ fn can_move(vehicles: &[Vehicle], index: usize, delta: i32) -> bool {
                 for s in 1..=steps {
                     let check_row = v.row + v.length - 1 + s;
                     if let Some(occ) = occupancy[check_row][v.col]
-                        && occ != index {
-                            return false;
-                        }
+                        && occ != index
+                    {
+                        return false;
+                    }
                 }
             }
             true
@@ -753,46 +757,54 @@ impl RushHour {
             Key::Tab if key_event.modifiers.shift => self.select_prev(),
 
             // Movement
-            Key::Left if key_event.modifiers == Modifiers::NONE
-                && self.selected < self.vehicles.len() => {
-                    let v = &self.vehicles[self.selected];
-                    match v.orientation {
-                        Orientation::Horizontal => {
-                            self.move_selected(-1);
-                        }
-                        Orientation::Vertical => {} // can't move horizontally
+            Key::Left
+                if key_event.modifiers == Modifiers::NONE
+                    && self.selected < self.vehicles.len() =>
+            {
+                let v = &self.vehicles[self.selected];
+                match v.orientation {
+                    Orientation::Horizontal => {
+                        self.move_selected(-1);
                     }
+                    Orientation::Vertical => {} // can't move horizontally
                 }
-            Key::Right if key_event.modifiers == Modifiers::NONE
-                && self.selected < self.vehicles.len() => {
-                    let v = &self.vehicles[self.selected];
-                    match v.orientation {
-                        Orientation::Horizontal => {
-                            self.move_selected(1);
-                        }
-                        Orientation::Vertical => {}
+            }
+            Key::Right
+                if key_event.modifiers == Modifiers::NONE
+                    && self.selected < self.vehicles.len() =>
+            {
+                let v = &self.vehicles[self.selected];
+                match v.orientation {
+                    Orientation::Horizontal => {
+                        self.move_selected(1);
                     }
+                    Orientation::Vertical => {}
                 }
-            Key::Up if key_event.modifiers == Modifiers::NONE
-                && self.selected < self.vehicles.len() => {
-                    let v = &self.vehicles[self.selected];
-                    match v.orientation {
-                        Orientation::Vertical => {
-                            self.move_selected(-1);
-                        }
-                        Orientation::Horizontal => {}
+            }
+            Key::Up
+                if key_event.modifiers == Modifiers::NONE
+                    && self.selected < self.vehicles.len() =>
+            {
+                let v = &self.vehicles[self.selected];
+                match v.orientation {
+                    Orientation::Vertical => {
+                        self.move_selected(-1);
                     }
+                    Orientation::Horizontal => {}
                 }
-            Key::Down if key_event.modifiers == Modifiers::NONE
-                && self.selected < self.vehicles.len() => {
-                    let v = &self.vehicles[self.selected];
-                    match v.orientation {
-                        Orientation::Vertical => {
-                            self.move_selected(1);
-                        }
-                        Orientation::Horizontal => {}
+            }
+            Key::Down
+                if key_event.modifiers == Modifiers::NONE
+                    && self.selected < self.vehicles.len() =>
+            {
+                let v = &self.vehicles[self.selected];
+                match v.orientation {
+                    Orientation::Vertical => {
+                        self.move_selected(1);
                     }
+                    Orientation::Horizontal => {}
                 }
+            }
 
             // Undo
             Key::Z if key_event.modifiers == Modifiers::NONE => self.undo(),
@@ -806,14 +818,12 @@ impl RushHour {
             Key::Escape => {
                 self.selecting_puzzle = false;
             }
-            Key::Up
-                if self.puzzle_select_cursor > 0 => {
-                    self.puzzle_select_cursor -= 1;
-                }
-            Key::Down
-                if self.puzzle_select_cursor < PUZZLES.len() - 1 => {
-                    self.puzzle_select_cursor += 1;
-                }
+            Key::Up if self.puzzle_select_cursor > 0 => {
+                self.puzzle_select_cursor -= 1;
+            }
+            Key::Down if self.puzzle_select_cursor < PUZZLES.len() - 1 => {
+                self.puzzle_select_cursor += 1;
+            }
             Key::Enter => {
                 self.load_puzzle_at(self.puzzle_select_cursor);
             }
@@ -2559,8 +2569,7 @@ mod tests {
             for (c, cell) in row.iter().enumerate().take(GRID_SIZE) {
                 if cell.is_none() {
                     let (cx, cy) = cell_pixel_pos(r, c);
-                    let click =
-                        mouse_click(gx + cx + CELL_SIZE / 2.0, gy + cy + CELL_SIZE / 2.0);
+                    let click = mouse_click(gx + cx + CELL_SIZE / 2.0, gy + cy + CELL_SIZE / 2.0);
                     app.handle_event(&click);
                     assert_eq!(app.selected, 0); // unchanged
                     return;
@@ -2962,10 +2971,7 @@ mod tests {
                 }
             }
             let expected: usize = vehicles.iter().map(|v| v.length).sum();
-            assert_eq!(
-                cell_count, expected,
-                "Puzzle {i} has overlapping vehicles"
-            );
+            assert_eq!(cell_count, expected, "Puzzle {i} has overlapping vehicles");
         }
     }
 

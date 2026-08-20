@@ -42346,7 +42346,8 @@ proof that the doc comment is the defect.
    | remotedesktop | done, `ffd9d7b25` |
    | diskimager | done, `344301f1c` |
    | devicemanager | done, `676fa35b0` — sidebar in rows, properties panel in pixels |
-   | benchmark, sysinfo (`* 20.0`) | to do |
+   | sysinfo | done, `ffe8dad25` — both panes in rows; see the note below |
+   | benchmark (`* 20.0`) | to do |
    | spreadsheet (`* 40.0`) | to do |
    | filediff (`* SCROLL_SPEED`) | to do |
    | procexplorer, sysmonitor, terminal, settings, netscan (sign only) | to do — correct in effect, but they should stop open-coding it and pick up trackpad support |
@@ -42372,6 +42373,47 @@ traps, both of which bit:
   itself, so it cannot silently degrade.
 - **Assert a row, not a non-zero number.** `> 0.0` passes under a
   one-pixel-per-notch defect. The assertion has to be `>= row_height`.
+
+**A third trap, from sysinfo (`ffe8dad25`): the wheel is rarely the only thing
+wrong with the pane.** The grep that finds `dy * 20.0` finds one line; the
+conversion turned up five more defects in the same two panes, none of which
+the wheel fix would have addressed and none of which had a test:
+
+| Also wrong | Symptom |
+|---|---|
+| neither offset was bounded at the far end | scrolling past the last row kept the number climbing while the list stood still, and the same distance had to be scrolled back before anything moved |
+| the click and the hover each derived "which row is under the pointer" separately, and **neither subtracted the scroll offset** | after scrolling, clicking a row selected a different one, and the highlight followed the click rather than the pointer |
+| the hit test was not ranged to the pane | empty space below a short list hit-tested as a row |
+| PageDown had no bound, and stepped a fixed row count rather than the screenful showing | paging past the end ran up the same invisible debt as the wheel |
+| keyboard navigation never touched the scroll offset | arrowing past the last drawn row selected a category off screen, and the wheel was the only thing that could reveal which |
+| the row stripes were keyed on the screen slot, not the row index | the whole table's colouring inverted whenever it scrolled by an odd number of rows |
+
+The pattern to carry into the remaining conversions: **a pane whose wheel was
+wrong is a pane nobody has driven.** Budget for auditing the whole pane — its
+bounds, its hit test, its keyboard paths and its renderer — not just the line
+the grep found. Four of the six above were found by *writing the tests*, not by
+reading the code.
+
+Two of them are the divergence class in
+`C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY` below: sysinfo
+recomputed the pane rectangle and the property table's top edge from the same
+four constants at the renderer, the click handler *and* the hover handler.
+They are derived once now (`pane_top`/`property_rows_top`), with a
+`debug_assert!` in the renderer holding it to the same stack of furniture the
+scroll bound is computed from — an invariant a comment cannot enforce.
+
+**And a trap in the tests themselves.** The helper that read back "which rows
+did the renderer draw" filtered fill-rects by the row-stripe colour, and
+`COLOR_ROW_EVEN` happens to be the same RGB as `COLOR_SURFACE0`, the pane's
+own background — so it reported one row more than the table drew and made two
+*correct* page-step assertions fail by one. A test helper filtered on the
+wrong property is as wrong as the code it is checking, and it fails in the
+direction that wastes the most time: it accuses the fix.
+
+`scripts/reintro-sysinfo.py` puts each of the nine defects back one at a time
+and checks a test fails. That check is what turns "57 tests pass" into
+evidence; it found nothing missing here, but only because it was written after
+the tests rather than instead of them.
 
 **Until it is fixed:** two code comments (`apps/netscan/src/main.rs:2541` and
 `apps/settings/src/main.rs:3228`) already point here to explain why they use

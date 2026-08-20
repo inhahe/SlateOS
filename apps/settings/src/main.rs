@@ -459,6 +459,12 @@ pub struct UserAccount {
     pub login_count: u32,
     pub last_login: String,
     pub is_current: bool,
+    /// Index into [`ACCOUNT_PICTURES`] of the picture this account shows.
+    ///
+    /// An index rather than the icon itself, so the grid the user picks from
+    /// and the avatar drawn next to the account's name cannot come to offer
+    /// different sets of pictures.
+    pub picture: usize,
 }
 
 // ============================================================================
@@ -1006,6 +1012,7 @@ impl SettingsState {
                     login_count: 142,
                     last_login: "2026-05-17 09:34".into(),
                     is_current: true,
+                    picture: 2,
                 },
                 UserAccount {
                     name: "Bob".into(),
@@ -1014,6 +1021,7 @@ impl SettingsState {
                     login_count: 56,
                     last_login: "2026-05-16 18:20".into(),
                     is_current: false,
+                    picture: 1,
                 },
                 UserAccount {
                     name: "Charlie".into(),
@@ -1022,6 +1030,7 @@ impl SettingsState {
                     login_count: 23,
                     last_login: "2026-05-15 14:05".into(),
                     is_current: false,
+                    picture: 5,
                 },
             ],
             selected_account: 0,
@@ -1569,6 +1578,67 @@ fn render_theme_card(tree: &mut RenderTree, x: f32, y: f32, mode: ThemeMode, sel
     );
 }
 
+// --- Account pictures -------------------------------------------------------
+//
+// Another grid, named here for the same reason the theme cards are: the tile
+// the user sees and the tile a click resolves to are computed from one set of
+// numbers, so a tile cannot be drawn anywhere the click does not follow.
+
+/// The pictures an account may be given, in the order the grid draws them.
+///
+/// [`UserAccount::picture`] indexes this array, so one list decides both what
+/// the Login Options page offers and what the Accounts page draws.
+const ACCOUNT_PICTURES: [&str; 6] = [
+    "\u{1F464}",
+    "\u{1F468}",
+    "\u{1F469}",
+    "\u{1F474}",
+    "\u{1F475}",
+    "\u{1F476}",
+];
+
+/// Width and height of one account-picture tile.
+const PICTURE_TILE_SIZE: f32 = 48.0;
+/// Gap between one tile's right edge and the next tile's left edge.
+const PICTURE_TILE_SPACING: f32 = 12.0;
+
+/// The icon for picture `index`, falling back to the first.
+///
+/// An out-of-range index is a bug rather than a state the UI offers, and the
+/// fallback keeps it a *visible* bug: a blank square in the account list would
+/// read as "no picture chosen" instead of as something wrong.
+fn account_picture_icon(index: usize) -> &'static str {
+    match ACCOUNT_PICTURES.get(index) {
+        Some(icon) => icon,
+        None => ACCOUNT_PICTURES.first().copied().unwrap_or("?"),
+    }
+}
+
+/// How far right of the grid's left edge tile `index` is drawn.
+fn picture_tile_dx(index: usize) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    let index = index as f32;
+    index * (PICTURE_TILE_SIZE + PICTURE_TILE_SPACING)
+}
+
+/// Draw one account-picture tile with its top-left corner at (`x`, `y`).
+fn render_account_picture(tree: &mut RenderTree, x: f32, y: f32, icon: &str, selected: bool) {
+    let bg = if selected { COL_SURFACE1 } else { COL_SURFACE0 };
+    fill_rounded(tree, x, y, PICTURE_TILE_SIZE, PICTURE_TILE_SIZE, bg, 8.0);
+    if selected {
+        tree.push(RenderCommand::StrokeRect {
+            x,
+            y,
+            width: PICTURE_TILE_SIZE,
+            height: PICTURE_TILE_SIZE,
+            color: COL_ACCENT,
+            line_width: 2.0,
+            corner_radii: CornerRadii::all(8.0),
+        });
+    }
+    tree.text(x + 12.0, y + 12.0, icon, COL_TEXT, 20.0);
+}
+
 // --- Pointer size buttons ---------------------------------------------------
 
 /// How many pointer sizes the Interaction page offers.
@@ -1757,6 +1827,7 @@ enum SelectId {
     Adapter,
     Account,
     PointerSize,
+    AccountPicture,
 }
 
 /// A continuously-valued setting the pointer can drag along a track.
@@ -2908,6 +2979,7 @@ impl SettingsState {
         let control_x = s.control_x();
         for (idx, account) in self.user_accounts.iter().enumerate() {
             let selected = idx == self.selected_account;
+            let avatar = account_picture_icon(account.picture);
             s.list_row(SelectId::Account, idx, 60.0, 64.0, move |tree, x, y| {
                 let row_bg = if selected {
                     COL_SURFACE0
@@ -2927,7 +2999,7 @@ impl SettingsState {
                     COL_SURFACE2,
                     avatar_size / 2.0,
                 );
-                tree.text(x + 16.0, y + 20.0, "\u{1F464}", COL_TEXT, 16.0);
+                tree.text(x + 16.0, y + 20.0, avatar, COL_TEXT, 16.0);
 
                 text_bold(tree, x + 56.0, y + 12.0, &account.name, COL_TEXT, 14.0);
                 tree.text(x + 56.0, y + 32.0, &account.email, COL_SUBTEXT0, 12.0);
@@ -2991,45 +3063,27 @@ impl SettingsState {
         s.section("Account Picture");
         s.note("Choose a picture for your account:", 28.0);
 
-        // Picture selection grid (placeholder icons). Not yet clickable:
-        // nothing stores which picture is chosen, so the first is always the
-        // selected one. See known-issues.md.
-        let icons = [
-            "\u{1F464}",
-            "\u{1F468}",
-            "\u{1F469}",
-            "\u{1F474}",
-            "\u{1F475}",
-            "\u{1F476}",
-        ];
-        s.draw(move |tree, x, y| {
-            let icon_size = 48.0;
-            let icon_spacing = 12.0;
-            for (idx, icon) in icons.iter().enumerate() {
-                #[allow(clippy::cast_precision_loss)]
-                let ix = x + (idx as f32) * (icon_size + icon_spacing);
-                let is_selected = idx == 0;
-                let bg = if is_selected {
-                    COL_SURFACE1
-                } else {
-                    COL_SURFACE0
-                };
-                fill_rounded(tree, ix, y, icon_size, icon_size, bg, 8.0);
-                if is_selected {
-                    tree.push(RenderCommand::StrokeRect {
-                        x: ix,
-                        y,
-                        width: icon_size,
-                        height: icon_size,
-                        color: COL_ACCENT,
-                        line_width: 2.0,
-                        corner_radii: CornerRadii::all(8.0),
-                    });
-                }
-                tree.text(ix + 12.0, y + 12.0, icon, COL_TEXT, 20.0);
-            }
-        });
-        s.advance(48.0);
+        // One tile at a time, so each gets its own click band at exactly the
+        // offset it is drawn at. Drawing all six in a single closure -- which
+        // is how this started -- leaves the sink no place to hang six separate
+        // bands, which is why the grid was inert.
+        let chosen = self.current_account_picture();
+        for (idx, icon) in ACCOUNT_PICTURES.iter().copied().enumerate() {
+            let dx = picture_tile_dx(idx);
+            let (x, y) = (s.x(), s.y());
+            s.hit_rect(
+                x + dx,
+                y,
+                PICTURE_TILE_SIZE,
+                PICTURE_TILE_SIZE,
+                RowHit::Select(SelectId::AccountPicture, idx),
+            );
+            let selected = chosen == Some(idx);
+            s.draw(move |tree, x, y| {
+                render_account_picture(tree, x + dx, y, icon, selected);
+            });
+        }
+        s.advance(PICTURE_TILE_SIZE);
     }
 
     // --- Privacy page ---
@@ -4125,9 +4179,46 @@ impl SettingsState {
             RowHit::Select(SelectId::PointerSize, idx) => {
                 self.pointer_size = pointer_size_of(idx);
             }
+            RowHit::Select(SelectId::AccountPicture, idx) => {
+                self.set_current_account_picture(idx);
+            }
             RowHit::Press(ButtonId::CheckForUpdates) => {
                 self.checking_for_updates = !self.checking_for_updates;
             }
+        }
+    }
+
+    /// The picture the signed-in account is showing, or `None` if no account
+    /// is marked as the signed-in one.
+    ///
+    /// `None` is drawn as "no tile is ringed" rather than as tile 0, so a
+    /// machine with nobody signed in does not claim a choice was made.
+    fn current_account_picture(&self) -> Option<usize> {
+        self.user_accounts
+            .iter()
+            .find(|account| account.is_current)
+            .map(|account| account.picture)
+    }
+
+    /// Give the signed-in account picture `index`.
+    ///
+    /// Writes to the account marked `is_current`, not to
+    /// `user_accounts[selected_account]`: the Login Options page offers a
+    /// picture for *your* account, so which row the Accounts page happens to
+    /// have highlighted must not decide whose picture changes.
+    ///
+    /// An index past the end of [`ACCOUNT_PICTURES`] is refused rather than
+    /// stored, so the field can never name a picture that does not exist.
+    fn set_current_account_picture(&mut self, index: usize) {
+        if index >= ACCOUNT_PICTURES.len() {
+            return;
+        }
+        if let Some(account) = self
+            .user_accounts
+            .iter_mut()
+            .find(|account| account.is_current)
+        {
+            account.picture = index;
         }
     }
 
@@ -5248,6 +5339,335 @@ mod tests {
             }
         }
         assert!(checked >= 7, "only {checked} dimmed buttons were pressed");
+    }
+
+    // --- The account picture grid ------------------------------------------
+    //
+    // Six tiles that used to be painted inside one closure and hit-tested
+    // nowhere. The checks below recover the tiles from the render tree and
+    // drive them with real clicks, so where a tile is drawn and where a click
+    // lands have to agree without either being asked to describe the other.
+
+    /// Every account-picture tile the current page painted, in the order they
+    /// were drawn, as `(icon, x, y, ringed)`.
+    ///
+    /// `ringed` is the accent outline that marks the chosen picture. It is
+    /// looked up across the whole tree rather than assumed to follow its own
+    /// tile's fill, so a ring drawn over the wrong tile shows up as a mismatch
+    /// instead of being silently credited to the right one.
+    fn painted_picture_tiles(state: &SettingsState) -> Vec<(String, f32, f32, bool)> {
+        let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+        let tree = state.render();
+
+        let mut rings: Vec<(f32, f32)> = Vec::new();
+        for cmd in &tree.commands {
+            if let RenderCommand::StrokeRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } = cmd
+                && *color == COL_ACCENT
+                && close(*width, PICTURE_TILE_SIZE)
+                && close(*height, PICTURE_TILE_SIZE)
+            {
+                rings.push((*x, *y));
+            }
+        }
+
+        let mut out = Vec::new();
+        for (idx, cmd) in tree.commands.iter().enumerate() {
+            let RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } = cmd
+            else {
+                continue;
+            };
+            if !close(*width, PICTURE_TILE_SIZE) || !close(*height, PICTURE_TILE_SIZE) {
+                continue;
+            }
+            // The icon follows its own fill within a command or two -- a
+            // chosen tile has its ring in between.
+            let icon = tree
+                .commands
+                .iter()
+                .skip(idx + 1)
+                .take(2)
+                .find_map(|c| match c {
+                    RenderCommand::Text {
+                        x: tx, y: ty, text, ..
+                    } if close(*tx, x + 12.0)
+                        && close(*ty, y + 12.0)
+                        && ACCOUNT_PICTURES.contains(&text.as_str()) =>
+                    {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                });
+            let Some(icon) = icon else {
+                continue;
+            };
+            let ringed = rings
+                .iter()
+                .any(|(rx, ry)| close(*rx, *x) && close(*ry, *y));
+            out.push((icon, *x, *y, ringed));
+        }
+        out
+    }
+
+    /// The avatars drawn beside the names in the account list, row by row.
+    ///
+    /// Restricted to the content area on purpose: the sidebar draws the
+    /// Accounts category with the same person glyph at the same size, and a
+    /// scan that swept the whole window would count it as a fourth account.
+    fn account_list_avatars(state: &SettingsState) -> Vec<String> {
+        state
+            .render()
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x, text, font_size, ..
+                } if *x >= SIDEBAR_WIDTH
+                    && (*font_size - 16.0).abs() < 0.01
+                    && ACCOUNT_PICTURES.contains(&text.as_str()) =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The page that carries the picture grid.
+    fn login_options() -> SettingsState {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::LoginOptions;
+        state
+    }
+
+    /// Every tile is pressable at the place it was painted, and pressing one
+    /// moves the ring onto it and off everything else.
+    ///
+    /// This is the whole of the original complaint: the grid looked like a
+    /// choice and was not one, because six tiles drawn in a single closure
+    /// left the sink nowhere to hang six separate click bands.
+    #[test]
+    fn clicking_an_account_picture_chooses_the_one_that_was_clicked() {
+        let tiles = painted_picture_tiles(&login_options());
+        assert_eq!(
+            tiles.len(),
+            ACCOUNT_PICTURES.len(),
+            "the page painted {} tiles, not {}",
+            tiles.len(),
+            ACCOUNT_PICTURES.len()
+        );
+
+        let bands = hit_bands(&login_options())
+            .into_iter()
+            .filter(|(what, _)| matches!(what, RowHit::Select(SelectId::AccountPicture, _)))
+            .count();
+        assert_eq!(
+            bands,
+            tiles.len(),
+            "{bands} bands for {} tiles",
+            tiles.len()
+        );
+
+        // Probed at the edges as well as the middle. A band shifted off its
+        // tile still catches a click aimed at the centre -- the bands are as
+        // wide as the tiles, so a small offset leaves the middle covered --
+        // and only the corners tell whether the clickable square is the
+        // square the user can see.
+        let probes = [1.0, PICTURE_TILE_SIZE / 2.0, PICTURE_TILE_SIZE - 1.0];
+        for (icon, x, y, _) in tiles {
+            for px in probes {
+                for py in probes {
+                    let mut state = login_options();
+                    state.handle_click(x + px, y + py);
+                    let ringed: Vec<String> = painted_picture_tiles(&state)
+                        .into_iter()
+                        .filter(|(_, _, _, ringed)| *ringed)
+                        .map(|(icon, _, _, _)| icon)
+                        .collect();
+                    assert_eq!(
+                        ringed,
+                        [icon.as_str()],
+                        "clicking {px}px right and {py}px down from the {icon} tile's corner"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The tiles stand apart and the whole strip fits the content column.
+    ///
+    /// This is the one claim about the grid's geometry that reading the paint
+    /// against the click bands cannot make. Both come from
+    /// [`picture_tile_dx`], deliberately -- that is what stops a tile being
+    /// drawn where a click does not follow -- but it also means a wrong
+    /// [`picture_tile_dx`] moves them together and looks consistent. So this
+    /// checks the pixels against the *window*, which has no such shared
+    /// origin: tiles that overlapped would make the leftmost of a stack the
+    /// only reachable one, and a strip that ran past the content column would
+    /// put pictures where nothing is clipped to catch them.
+    #[test]
+    fn the_picture_tiles_stand_apart_inside_the_content_column() {
+        let state = login_options();
+        let tiles = painted_picture_tiles(&state);
+        for pair in tiles.windows(2) {
+            assert!(
+                pair[1].1 > pair[0].1 + PICTURE_TILE_SIZE,
+                "the {} tile at x={} runs into the {} tile at x={}",
+                pair[0].0,
+                pair[0].1,
+                pair[1].0,
+                pair[1].1
+            );
+        }
+        let right = tiles.last().expect("the grid painted no tiles").1 + PICTURE_TILE_SIZE;
+        assert!(
+            right <= state.window_width - CONTENT_PADDING,
+            "the picture strip reaches x={right} in a {}px window",
+            state.window_width
+        );
+    }
+
+    /// The ring sits on the picture the signed-in account actually has --
+    /// not on whichever tile happens to be drawn first, which is what it did
+    /// before there was anywhere to store the answer.
+    #[test]
+    fn the_ringed_tile_is_the_signed_in_account_s_own_picture() {
+        for index in 0..ACCOUNT_PICTURES.len() {
+            let mut state = login_options();
+            for account in &mut state.user_accounts {
+                if account.is_current {
+                    account.picture = index;
+                }
+            }
+            let ringed: Vec<String> = painted_picture_tiles(&state)
+                .into_iter()
+                .filter(|(_, _, _, ringed)| *ringed)
+                .map(|(icon, _, _, _)| icon)
+                .collect();
+            assert_eq!(ringed, [ACCOUNT_PICTURES[index].to_string()]);
+        }
+    }
+
+    /// "Choose a picture for *your* account" means the account that is signed
+    /// in. Which row the Accounts page has highlighted is a different
+    /// question and must not decide whose picture changes.
+    #[test]
+    fn choosing_a_picture_edits_the_signed_in_account_not_the_highlighted_one() {
+        let mut state = login_options();
+        state.selected_account = 1;
+
+        // The ring, too, and before any click: reading the ring from
+        // `selected_account` gives the same answer as reading it from
+        // `is_current` on a fresh state, because both are Alice. Moving the
+        // highlight is what tells the two apart.
+        let ringed: Vec<String> = painted_picture_tiles(&state)
+            .into_iter()
+            .filter(|(_, _, _, ringed)| *ringed)
+            .map(|(icon, _, _, _)| icon)
+            .collect();
+        let signed_in = state
+            .user_accounts
+            .iter()
+            .find(|a| a.is_current)
+            .expect("somebody is signed in")
+            .picture;
+        assert_eq!(
+            ringed,
+            [ACCOUNT_PICTURES[signed_in].to_string()],
+            "the ring followed the highlighted account, not the signed-in one"
+        );
+
+        let others: Vec<usize> = state
+            .user_accounts
+            .iter()
+            .filter(|a| !a.is_current)
+            .map(|a| a.picture)
+            .collect();
+
+        let (_, x, y, _) = painted_picture_tiles(&state)[3].clone();
+        state.handle_click(x + PICTURE_TILE_SIZE / 2.0, y + PICTURE_TILE_SIZE / 2.0);
+
+        assert_eq!(
+            state
+                .user_accounts
+                .iter()
+                .find(|a| a.is_current)
+                .map(|a| a.picture),
+            Some(3)
+        );
+        assert_eq!(
+            state
+                .user_accounts
+                .iter()
+                .filter(|a| !a.is_current)
+                .map(|a| a.picture)
+                .collect::<Vec<_>>(),
+            others,
+            "a click on the picture grid moved somebody else's picture"
+        );
+    }
+
+    /// The account list shows each account its own picture.
+    ///
+    /// The expected icons are spelled out rather than read back out of the
+    /// accounts, because a list that drew one hardcoded avatar three times --
+    /// which is what it did -- would otherwise pass by agreeing with itself.
+    #[test]
+    fn the_account_list_draws_each_account_s_own_picture() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::UserAccounts;
+        assert_eq!(
+            account_list_avatars(&state),
+            ["\u{1F469}", "\u{1F468}", "\u{1F476}"]
+        );
+    }
+
+    /// Choosing a picture is visible where the picture is used, not only on
+    /// the page that offers the choice.
+    #[test]
+    fn choosing_a_picture_changes_the_avatar_in_the_account_list() {
+        let mut state = login_options();
+        let (icon, x, y, _) = painted_picture_tiles(&state)[4].clone();
+        state.handle_click(x + PICTURE_TILE_SIZE / 2.0, y + PICTURE_TILE_SIZE / 2.0);
+        state.current_page = SettingsPage::UserAccounts;
+        assert_eq!(
+            account_list_avatars(&state),
+            [icon.as_str(), "\u{1F468}", "\u{1F476}"]
+        );
+    }
+
+    /// A picture index the grid does not offer is refused rather than stored,
+    /// so the field can never name a picture that does not exist -- which is
+    /// what lets the account list draw it without a fallback path that would
+    /// go untested.
+    #[test]
+    fn a_picture_the_grid_does_not_offer_is_refused() {
+        let mut state = login_options();
+        let before: Vec<usize> = state.user_accounts.iter().map(|a| a.picture).collect();
+        state.apply_row_hit(
+            RowHit::Select(SelectId::AccountPicture, ACCOUNT_PICTURES.len()),
+            0.0,
+        );
+        assert_eq!(
+            state
+                .user_accounts
+                .iter()
+                .map(|a| a.picture)
+                .collect::<Vec<_>>(),
+            before
+        );
     }
 
     /// Press the left button at (`mx`, `my`), drag to `to_x`, and release.

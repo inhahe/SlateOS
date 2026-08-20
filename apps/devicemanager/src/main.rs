@@ -26,9 +26,10 @@ use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::fold;
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::{scroll_window, wheel};
 
 use std::collections::HashMap;
 
@@ -440,7 +441,10 @@ impl ResourceView {
         // Mark shared IRQs.
         let mut irq_counts: HashMap<u32, usize> = HashMap::new();
         for a in &irqs {
-            *irq_counts.entry(a.irq).or_insert(0) += 1;
+            irq_counts
+                .entry(a.irq)
+                .and_modify(|n| *n = n.saturating_add(1))
+                .or_insert(1);
         }
         for a in &mut irqs {
             if irq_counts.get(&a.irq).copied().unwrap_or(0) > 1 {
@@ -461,7 +465,10 @@ impl ResourceView {
 
     /// Total number of resource entries.
     pub fn total_count(&self) -> usize {
-        self.irqs.len() + self.mmio_ranges.len() + self.dma_channels.len()
+        self.irqs
+            .len()
+            .saturating_add(self.mmio_ranges.len())
+            .saturating_add(self.dma_channels.len())
     }
 }
 
@@ -771,10 +778,30 @@ pub struct DeviceManagerState {
     pub resource_view: ResourceView,
     /// Driver update check results, keyed by device ID.
     pub update_checks: HashMap<u32, DriverUpdateCheck>,
-    /// Scroll offset for the tree sidebar.
-    pub tree_scroll: f32,
-    /// Scroll offset for the properties panel.
+    /// First visible row of the tree sidebar, as an index into
+    /// [`visible_tree_indices`] — not a pixel offset.
+    ///
+    /// It was pixels, and as pixels it was wrong twice over. The wheel
+    /// subtracted `dy * 20.0`, but `dy` counts wheel *notches* rather than
+    /// pixels, so a notch moved not-quite-one 24px row and the tree crept.
+    /// And nothing clamped the far end: `.max(0.0)` stops the offset going
+    /// negative and says nothing about the bottom, so scrolling past the last
+    /// device kept incrementing an offset the renderer had already run out of
+    /// rows for. The list stood still while the number climbed, and the user
+    /// then had to wind back exactly as far as they had overshot before
+    /// anything moved.
+    pub tree_scroll: usize,
+    /// Pixels the properties panel is scrolled down by.
+    ///
+    /// Pixels here and rows in the sidebar is deliberate. The properties tabs
+    /// are not a list: they stack headings, property rows of one height, event
+    /// rows of another, separators and a conditional badge, so there is no row
+    /// index that could name a position part way down one. This is the
+    /// continuous case [`wheel::pixels`] exists for. Its upper bound comes from
+    /// [`properties_content_height`], which measures the panel by rendering it.
     pub properties_scroll: f32,
+    /// Wheel remainder for the sidebar; see [`wheel::Accumulator`].
+    tree_wheel: wheel::Accumulator,
     /// Hovered tree node index.
     pub hovered_tree_index: Option<usize>,
     /// Hovered toolbar action index.
@@ -808,8 +835,9 @@ impl DeviceManagerState {
             event_history: sample_events(),
             resource_view,
             update_checks,
-            tree_scroll: 0.0,
+            tree_scroll: 0,
             properties_scroll: 0.0,
+            tree_wheel: wheel::Accumulator::default(),
             hovered_tree_index: None,
             hovered_toolbar_action: None,
             show_resource_view: false,
@@ -823,6 +851,118 @@ impl DeviceManagerState {
         let node = self.tree_nodes.get(idx)?;
         let dev_id = node.device_id?;
         self.devices.iter().find(|d| d.id == dev_id)
+    }
+
+    // -- Layout ------------------------------------------------------------
+    //
+    // The sidebar's geometry used to be spelled out at each place that needed
+    // it: the renderer computed `top`/`bottom` from the three bar heights, the
+    // click handler computed the same pair again, and the hover handler a third
+    // time. Three copies of a layout are three layouts, and they agree only
+    // until someone edits one of them. These are the one copy.
+
+    /// Top edge of the sidebar and the properties panel: below the title bar,
+    /// the toolbar and the search bar.
+    pub fn panel_top(&self) -> f32 {
+        TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT
+    }
+
+    /// Bottom edge of both panels: above the status bar.
+    pub fn panel_bottom(&self) -> f32 {
+        self.height - STATUS_BAR_HEIGHT
+    }
+
+    /// Height of the sidebar's scrollable area.
+    pub fn tree_height(&self) -> f32 {
+        self.panel_bottom() - self.panel_top()
+    }
+
+    /// Left edge of the properties panel, past the sidebar's separator line.
+    pub fn panel_x(&self) -> f32 {
+        SIDEBAR_WIDTH + 1.0
+    }
+
+    /// The tree nodes the sidebar draws, in the order it draws them.
+    ///
+    /// This is the single source of truth for "which rows exist". The rule is
+    /// not simply `node.visible`: a device row also depends on whether its
+    /// category is expanded, and a category hidden by the search filter never
+    /// gets to set that flag. The renderer, the hit-test and the up/down arrow
+    /// keys used to each carry their own copy of the rule — the first two as
+    /// the same loop written out twice, the third (`is_node_visible`) as a
+    /// backwards scan for the nearest category, which disagreed with the other
+    /// two whenever a filter hid one. Now all three walk this.
+    pub fn visible_tree_indices(&self) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.tree_nodes.len());
+        let mut parent_expanded = true;
+        for (i, node) in self.tree_nodes.iter().enumerate() {
+            if !node.visible {
+                continue;
+            }
+            if node.depth == 1 && !parent_expanded {
+                continue;
+            }
+            if node.depth == 0 {
+                parent_expanded = node.expanded;
+            }
+            out.push(i);
+        }
+        out
+    }
+
+    /// The window of sidebar rows currently on screen.
+    fn tree_rows(&self) -> scroll_window::Rows {
+        scroll_window::visible(
+            self.visible_tree_indices().len(),
+            TREE_ROW_HEIGHT,
+            self.tree_height(),
+            self.tree_scroll,
+        )
+    }
+
+    /// The largest [`tree_scroll`](Self::tree_scroll) that still shows a full
+    /// screen of rows — i.e. the offset at which the last row sits at the
+    /// bottom. Scrolling past this shows blank space below a list that has
+    /// stopped moving.
+    pub fn max_tree_scroll(&self) -> usize {
+        scroll_window::visible(
+            self.visible_tree_indices().len(),
+            TREE_ROW_HEIGHT,
+            self.tree_height(),
+            usize::MAX,
+        )
+        .start
+    }
+
+    /// Top edge of the properties panel's scrollable body.
+    ///
+    /// The tab bar is drawn only when a device is selected; in the resource
+    /// view and the empty-selection placeholder the body starts at the top of
+    /// the panel. The hit-test for the tab bar and this must agree, which is
+    /// why both read it from here.
+    pub fn properties_body_top(&self) -> f32 {
+        if self.shows_tab_bar() {
+            self.panel_top() + TAB_BAR_HEIGHT
+        } else {
+            self.panel_top()
+        }
+    }
+
+    /// Whether the properties panel currently draws its tab bar.
+    pub fn shows_tab_bar(&self) -> bool {
+        !self.show_resource_view && self.selected_device().is_some()
+    }
+
+    /// Height of the properties panel's scrollable body — the window, not the
+    /// content.
+    pub fn properties_body_height(&self) -> f32 {
+        self.panel_bottom() - self.properties_body_top()
+    }
+
+    /// How far the properties panel may be scrolled before its last line
+    /// reaches the bottom of the window. Zero when the content fits.
+    pub fn max_properties_scroll(&self) -> f32 {
+        (properties_content_height(self) - self.properties_body_height()).max(0.0)
     }
 
     /// Get the category of the selected tree node.
@@ -889,9 +1029,8 @@ impl DeviceManagerState {
         for node in &mut self.tree_nodes {
             if q.is_empty() {
                 node.visible = true;
-            } else if node.category.is_some() {
+            } else if let Some(cat) = node.category {
                 // Category nodes: visible if any child matches.
-                let cat = node.category.expect("checked above");
                 node.visible = self
                     .devices
                     .iter()
@@ -996,7 +1135,7 @@ impl DeviceManagerState {
                 }
                 report.push_str(&format!("    IRQ: {}\n", dev.format_irq()));
                 report.push_str(&format!("    MMIO: {}\n", dev.format_mmio()));
-                report.push_str(&format!("    Location: {}\n", report_field(&dev.location),));
+                report.push_str(&format!("    Location: {}\n", report_field(&dev.location)));
                 if let Some(ref drv) = dev.driver {
                     report.push_str(&format!(
                         "    Driver: {} v{} ({})\n",
@@ -1695,11 +1834,22 @@ fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
     });
 }
 
+/// Distance from the top of a scroll window down to the `slot`-th drawn row.
+///
+/// `slot` counts from the first row on screen, not from the first row in the
+/// list, so this is bounded by the window's height however far the list is
+/// scrolled. The clamp matters because the cast is saturating: a `usize` too
+/// large for an `f32` to hold exactly would otherwise turn into a coordinate
+/// that is merely nearby, and rows would drift apart as the list got longer.
+fn slot_offset(slot: usize, row_h: f32) -> f32 {
+    f32::from(u16::try_from(slot).unwrap_or(u16::MAX)) * row_h
+}
+
 /// Render the device tree sidebar.
 fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
-    let top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT;
-    let bottom = state.height - STATUS_BAR_HEIGHT;
-    let sidebar_height = bottom - top;
+    let top = state.panel_top();
+    let bottom = state.panel_bottom();
+    let sidebar_height = state.tree_height();
 
     // Sidebar background
     cmds.push(RenderCommand::FillRect {
@@ -1719,149 +1869,136 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
         height: sidebar_height,
     });
 
-    let mut y_offset = top - state.tree_scroll;
-    let mut parent_expanded = true;
+    let indices = state.visible_tree_indices();
+    let rows = state.tree_rows();
 
-    for (i, node) in state.tree_nodes.iter().enumerate() {
-        if !node.visible {
+    for (slot, &i) in indices.iter().skip(rows.start).take(rows.count).enumerate() {
+        let Some(node) = state.tree_nodes.get(i) else {
             continue;
+        };
+        let y_offset = top + slot_offset(slot, TREE_ROW_HEIGHT);
+
+        let is_selected = state.selected_tree_index == Some(i);
+        let is_hovered = state.hovered_tree_index == Some(i);
+
+        // Row background
+        let row_bg = if is_selected {
+            COLOR_SURFACE1
+        } else if is_hovered {
+            COLOR_SURFACE0
+        } else {
+            Color::TRANSPARENT
+        };
+
+        if row_bg != Color::TRANSPARENT {
+            cmds.push(RenderCommand::FillRect {
+                x: 0.0,
+                y: y_offset,
+                width: SIDEBAR_WIDTH,
+                height: TREE_ROW_HEIGHT,
+                color: row_bg,
+                corner_radii: CornerRadii::ZERO,
+            });
         }
 
-        // Device nodes are only shown if their parent category is expanded.
-        if node.depth == 1 && !parent_expanded {
-            continue;
+        // Selection indicator
+        if is_selected {
+            cmds.push(RenderCommand::FillRect {
+                x: 0.0,
+                y: y_offset,
+                width: 3.0,
+                height: TREE_ROW_HEIGHT,
+                color: COLOR_BLUE,
+                corner_radii: CornerRadii::ZERO,
+            });
         }
 
-        if node.depth == 0 {
-            parent_expanded = node.expanded;
-        }
+        let indent = node.depth as f32 * TREE_INDENT + 8.0;
 
-        // Only render visible rows.
-        if y_offset + TREE_ROW_HEIGHT > top && y_offset < bottom {
-            let is_selected = state.selected_tree_index == Some(i);
-            let is_hovered = state.hovered_tree_index == Some(i);
+        if let Some(cat) = node.category {
+            // Category node: show expand/collapse arrow and category icon
+            let arrow = if node.expanded { "v" } else { ">" };
+            cmds.push(RenderCommand::Text {
+                x: indent,
+                y: y_offset + 5.0,
+                text: arrow.to_string(),
+                font_size: 11.0,
+                color: COLOR_OVERLAY,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
 
-            // Row background
-            let row_bg = if is_selected {
-                COLOR_SURFACE1
-            } else if is_hovered {
-                COLOR_SURFACE0
-            } else {
-                Color::TRANSPARENT
-            };
+            cmds.push(RenderCommand::Text {
+                x: indent + 14.0,
+                y: y_offset + 5.0,
+                text: cat.icon().to_string(),
+                font_size: 11.0,
+                color: cat.color(),
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
 
-            if row_bg != Color::TRANSPARENT {
-                cmds.push(RenderCommand::FillRect {
-                    x: 0.0,
-                    y: y_offset,
-                    width: SIDEBAR_WIDTH,
-                    height: TREE_ROW_HEIGHT,
-                    color: row_bg,
-                    corner_radii: CornerRadii::ZERO,
-                });
-            }
-
-            // Selection indicator
-            if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: 0.0,
-                    y: y_offset,
-                    width: 3.0,
-                    height: TREE_ROW_HEIGHT,
-                    color: COLOR_BLUE,
-                    corner_radii: CornerRadii::ZERO,
-                });
-            }
-
-            let indent = node.depth as f32 * TREE_INDENT + 8.0;
-
-            if let Some(cat) = node.category {
-                // Category node: show expand/collapse arrow and category icon
-                let arrow = if node.expanded { "v" } else { ">" };
+            cmds.push(RenderCommand::Text {
+                x: indent + 40.0,
+                y: y_offset + 5.0,
+                text: node.label.clone(),
+                font_size: 12.0,
+                color: COLOR_TEXT,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(SIDEBAR_WIDTH - indent - 48.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        } else if let Some(dev_id) = node.device_id {
+            // Device node: show status icon and name
+            let dev = state.devices.iter().find(|d| d.id == dev_id);
+            if let Some(dev) = dev {
+                // Status icon
                 cmds.push(RenderCommand::Text {
-                    x: indent,
+                    x: indent + 4.0,
                     y: y_offset + 5.0,
-                    text: arrow.to_string(),
+                    text: dev.status.icon().to_string(),
                     font_size: 11.0,
-                    color: COLOR_OVERLAY,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-
-                cmds.push(RenderCommand::Text {
-                    x: indent + 14.0,
-                    y: y_offset + 5.0,
-                    text: cat.icon().to_string(),
-                    font_size: 11.0,
-                    color: cat.color(),
+                    color: dev.status.color(),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
                 });
 
+                // Device name
+                let name_color = if dev.has_problem() {
+                    dev.status.color()
+                } else if !dev.enabled {
+                    COLOR_OVERLAY
+                } else {
+                    COLOR_SUBTEXT
+                };
+
                 cmds.push(RenderCommand::Text {
-                    x: indent + 40.0,
+                    x: indent + 18.0,
                     y: y_offset + 5.0,
                     text: node.label.clone(),
-                    font_size: 12.0,
-                    color: COLOR_TEXT,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(SIDEBAR_WIDTH - indent - 48.0),
+                    font_size: 11.0,
+                    color: name_color,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(SIDEBAR_WIDTH - indent - 26.0),
                     overflow: TextOverflow::Ellipsis,
                 });
-            } else if let Some(dev_id) = node.device_id {
-                // Device node: show status icon and name
-                let dev = state.devices.iter().find(|d| d.id == dev_id);
-                if let Some(dev) = dev {
-                    // Status icon
-                    cmds.push(RenderCommand::Text {
-                        x: indent + 4.0,
-                        y: y_offset + 5.0,
-                        text: dev.status.icon().to_string(),
-                        font_size: 11.0,
-                        color: dev.status.color(),
-                        font_weight: FontWeightHint::Bold,
-                        max_width: None,
-                        overflow: TextOverflow::Clip,
+
+                // Driver update indicator
+                if dev.has_driver_update() {
+                    cmds.push(RenderCommand::FillRect {
+                        x: SIDEBAR_WIDTH - 16.0,
+                        y: y_offset + 8.0,
+                        width: 8.0,
+                        height: 8.0,
+                        color: COLOR_YELLOW,
+                        corner_radii: CornerRadii::all(4.0),
                     });
-
-                    // Device name
-                    let name_color = if dev.has_problem() {
-                        dev.status.color()
-                    } else if !dev.enabled {
-                        COLOR_OVERLAY
-                    } else {
-                        COLOR_SUBTEXT
-                    };
-
-                    cmds.push(RenderCommand::Text {
-                        x: indent + 18.0,
-                        y: y_offset + 5.0,
-                        text: node.label.clone(),
-                        font_size: 11.0,
-                        color: name_color,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(SIDEBAR_WIDTH - indent - 26.0),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-
-                    // Driver update indicator
-                    if dev.has_driver_update() {
-                        cmds.push(RenderCommand::FillRect {
-                            x: SIDEBAR_WIDTH - 16.0,
-                            y: y_offset + 8.0,
-                            width: 8.0,
-                            height: 8.0,
-                            color: COLOR_YELLOW,
-                            corner_radii: CornerRadii::all(4.0),
-                        });
-                    }
                 }
             }
         }
-
-        y_offset += TREE_ROW_HEIGHT;
     }
 
     cmds.push(RenderCommand::PopClip);
@@ -1879,11 +2016,10 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
 
 /// Render the properties panel (right side).
 fn render_properties_panel(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
-    let top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT;
-    let bottom = state.height - STATUS_BAR_HEIGHT;
-    let panel_x = SIDEBAR_WIDTH + 1.0;
+    let top = state.panel_top();
+    let panel_x = state.panel_x();
     let panel_width = state.width - panel_x;
-    let panel_height = bottom - top;
+    let panel_height = state.panel_bottom() - top;
 
     // Panel background
     cmds.push(RenderCommand::FillRect {
@@ -1895,59 +2031,106 @@ fn render_properties_panel(state: &DeviceManagerState, cmds: &mut Vec<RenderComm
         corner_radii: CornerRadii::ZERO,
     });
 
+    if state.shows_tab_bar() {
+        render_tab_bar(state, cmds, panel_x, top, panel_width);
+    }
+
+    let body_top = state.properties_body_top();
+    let body_height = state.properties_body_height();
+
+    // Clip to the body area. Everything below is drawn shifted up by the
+    // scroll offset, so without this it would spill over the tab bar above and
+    // the status bar below.
+    cmds.push(RenderCommand::PushClip {
+        x: panel_x,
+        y: body_top,
+        width: panel_width,
+        height: body_height,
+    });
+
+    render_properties_body(
+        state,
+        cmds,
+        panel_x,
+        body_top
+            - state
+                .properties_scroll
+                .clamp(0.0, state.max_properties_scroll()),
+        panel_width,
+        body_height,
+    );
+
+    cmds.push(RenderCommand::PopClip);
+}
+
+/// Draw whatever the properties panel currently shows, with its top edge at
+/// `y` — the resource overview, the empty-selection placeholder, or the
+/// selected device's active tab.
+///
+/// Split out from [`render_properties_panel`] so that
+/// [`properties_content_height`] can measure it by drawing it into a list it
+/// throws away. That is the only honest way to measure a panel that stacks
+/// sections of several different heights, some of them conditional: a separate
+/// `measure_*` function would be a second derivation of the same layout, right
+/// up until someone edited one of the two.
+fn render_properties_body(
+    state: &DeviceManagerState,
+    cmds: &mut Vec<RenderCommand>,
+    panel_x: f32,
+    y: f32,
+    panel_width: f32,
+    body_height: f32,
+) {
     if state.show_resource_view {
-        render_resource_view(state, cmds, panel_x, top, panel_width, panel_height);
+        render_resource_view(state, cmds, panel_x, y, panel_width, body_height);
         return;
     }
 
-    let dev = match state.selected_device() {
-        Some(d) => d,
-        None => {
-            // No device selected: show placeholder
-            cmds.push(RenderCommand::Text {
-                x: panel_x + 20.0,
-                y: top + panel_height / 2.0 - 10.0,
-                text: "Select a device to view its properties".to_string(),
-                font_size: 14.0,
-                color: COLOR_OVERLAY,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(panel_width - 40.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            return;
-        }
+    let Some(dev) = state.selected_device() else {
+        // No device selected: show placeholder
+        cmds.push(RenderCommand::Text {
+            x: panel_x + 20.0,
+            y: y + body_height / 2.0 - 10.0,
+            text: "Select a device to view its properties".to_string(),
+            font_size: 14.0,
+            color: COLOR_OVERLAY,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(panel_width - 40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        return;
     };
 
-    // Tab bar
-    render_tab_bar(state, cmds, panel_x, top, panel_width);
-
-    let content_top = top + TAB_BAR_HEIGHT;
-    let content_height = panel_height - TAB_BAR_HEIGHT;
-
-    // Clip to content area
-    cmds.push(RenderCommand::PushClip {
-        x: panel_x,
-        y: content_top,
-        width: panel_width,
-        height: content_height,
-    });
-
     match state.active_tab {
-        PropertiesTab::General => {
-            render_general_tab(state, dev, cmds, panel_x, content_top, panel_width);
-        }
-        PropertiesTab::Driver => {
-            render_driver_tab(state, dev, cmds, panel_x, content_top, panel_width);
-        }
-        PropertiesTab::Resources => {
-            render_resources_tab(dev, cmds, panel_x, content_top, panel_width);
-        }
-        PropertiesTab::Events => {
-            render_events_tab(state, dev, cmds, panel_x, content_top, panel_width);
-        }
+        PropertiesTab::General => render_general_tab(state, dev, cmds, panel_x, y, panel_width),
+        PropertiesTab::Driver => render_driver_tab(state, dev, cmds, panel_x, y, panel_width),
+        PropertiesTab::Resources => render_resources_tab(dev, cmds, panel_x, y, panel_width),
+        PropertiesTab::Events => render_events_tab(state, dev, cmds, panel_x, y, panel_width),
     }
+}
 
-    cmds.push(RenderCommand::PopClip);
+/// How tall the properties panel's content is, measured by drawing it.
+///
+/// Renders the body at the origin into a throwaway command list and asks
+/// [`content_bottom`] where the ink stopped. The panel has no other way to know
+/// its own height: its sections are of several different heights and some are
+/// conditional on the device (a driver badge, a status detail line, an event
+/// list of any length), so the answer is not a count times a row height.
+///
+/// A body that draws nothing measures zero, which makes
+/// [`max_properties_scroll`](DeviceManagerState::max_properties_scroll) zero
+/// and pins the panel — correct, since there is nothing below to reach.
+fn properties_content_height(state: &DeviceManagerState) -> f32 {
+    let mut scratch: Vec<RenderCommand> = Vec::new();
+    render_properties_body(
+        state,
+        &mut scratch,
+        state.panel_x(),
+        0.0,
+        state.width - state.panel_x(),
+        state.properties_body_height(),
+    );
+    content_bottom(&scratch).unwrap_or(0.0).max(0.0)
 }
 
 /// Render the tab bar for the properties panel.
@@ -2919,8 +3102,11 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
             if let Some(idx) = state.selected_tree_index {
                 // Find previous visible node
                 let mut new_idx = idx;
-                while new_idx > 0 {
-                    new_idx -= 1;
+                // `checked_sub` rather than `- 1`: the loop stops at index 0
+                // because that is where the subtraction runs out, so the bound
+                // and the step are the same fact stated once.
+                while let Some(prev) = new_idx.checked_sub(1) {
+                    new_idx = prev;
                     if is_node_visible(state, new_idx) {
                         state.select_tree_node(new_idx);
                         break;
@@ -2934,8 +3120,13 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
         Key::Down => {
             if let Some(idx) = state.selected_tree_index {
                 let mut new_idx = idx;
-                while new_idx + 1 < state.tree_nodes.len() {
-                    new_idx += 1;
+                // The `filter` carries the end-of-list bound; `checked_add`
+                // carries the (unreachable, but free) overflow one.
+                while let Some(next) = new_idx
+                    .checked_add(1)
+                    .filter(|n| *n < state.tree_nodes.len())
+                {
+                    new_idx = next;
                     if is_node_visible(state, new_idx) {
                         state.select_tree_node(new_idx);
                         break;
@@ -2993,8 +3184,14 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
             // Cycle through properties tabs
             let tabs = PropertiesTab::all();
             if let Some(pos) = tabs.iter().position(|t| *t == state.active_tab) {
-                let next = (pos + 1) % tabs.len();
-                state.active_tab = tabs[next];
+                // Wrap by comparison rather than `%`: `tabs` is a fixed array,
+                // so a remainder could never divide by zero, but saying so
+                // costs a lint suppression where this costs nothing.
+                let next = pos.saturating_add(1);
+                let next = if next < tabs.len() { next } else { 0 };
+                if let Some(tab) = tabs.get(next) {
+                    state.active_tab = *tab;
+                }
             }
             EventResult::Consumed
         }
@@ -3024,7 +3221,7 @@ fn handle_mouse_event(
             let toolbar_y = TITLE_BAR_HEIGHT;
             if my >= toolbar_y && my < toolbar_y + TOOLBAR_HEIGHT {
                 let actions = ToolbarAction::all();
-                for (i, _action) in actions.iter().enumerate() {
+                for (i, action) in actions.iter().enumerate() {
                     let btn_x = 8.0 + i as f32 * (TOOLBAR_BTN_WIDTH + 6.0);
                     let btn_y = toolbar_y + (TOOLBAR_HEIGHT - TOOLBAR_BTN_HEIGHT) / 2.0;
                     if mx >= btn_x
@@ -3032,7 +3229,7 @@ fn handle_mouse_event(
                         && my >= btn_y
                         && my < btn_y + TOOLBAR_BTN_HEIGHT
                     {
-                        state.handle_toolbar_action(actions[i]);
+                        state.handle_toolbar_action(*action);
                         return EventResult::Consumed;
                     }
                 }
@@ -3048,15 +3245,16 @@ fn handle_mouse_event(
             state.search_focused = false;
 
             // Check tree sidebar
-            let tree_top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT;
-            let tree_bottom = state.height - STATUS_BAR_HEIGHT;
-            if mx < SIDEBAR_WIDTH && my >= tree_top && my < tree_bottom {
-                let click_y = my - tree_top + state.tree_scroll;
-                if let Some(idx) = tree_hit_test(state, click_y) {
+            if mx < SIDEBAR_WIDTH && my >= state.panel_top() && my < state.panel_bottom() {
+                if let Some(idx) = tree_hit_test(state, my) {
                     if let Some(node) = state.tree_nodes.get(idx)
                         && node.category.is_some()
                     {
                         state.toggle_category(idx);
+                        // Folding a category removes rows from under the view.
+                        // Without this the offset stays where it was and the
+                        // sidebar shows blank space below a shortened list.
+                        state.tree_scroll = state.tree_scroll.min(state.max_tree_scroll());
                     }
                     state.select_tree_node(idx);
                     return EventResult::Consumed;
@@ -3064,19 +3262,15 @@ fn handle_mouse_event(
             }
 
             // Check tab bar
-            let tab_y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT;
-            let panel_x = SIDEBAR_WIDTH + 1.0;
+            let tab_y = state.panel_top();
+            let panel_x = state.panel_x();
             let panel_width = state.width - panel_x;
-            if mx > panel_x
-                && my >= tab_y
-                && my < tab_y + TAB_BAR_HEIGHT
-                && state.selected_device().is_some()
-            {
+            if mx > panel_x && my >= tab_y && my < tab_y + TAB_BAR_HEIGHT && state.shows_tab_bar() {
                 let tabs = PropertiesTab::all();
                 let tab_width = panel_width / tabs.len() as f32;
                 let tab_idx = ((mx - panel_x) / tab_width) as usize;
-                if tab_idx < tabs.len() {
-                    state.active_tab = tabs[tab_idx];
+                if let Some(tab) = tabs.get(tab_idx) {
+                    state.active_tab = *tab;
                     state.properties_scroll = 0.0;
                     return EventResult::Consumed;
                 }
@@ -3109,16 +3303,13 @@ fn handle_mouse_event(
             }
 
             // Tree hover
-            let tree_top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT;
-            let tree_bottom = state.height - STATUS_BAR_HEIGHT;
-            if mx < SIDEBAR_WIDTH && my >= tree_top && my < tree_bottom {
-                let hover_y = my - tree_top + state.tree_scroll;
-                state.hovered_tree_index = tree_hit_test(state, hover_y);
+            if mx < SIDEBAR_WIDTH && my >= state.panel_top() && my < state.panel_bottom() {
+                state.hovered_tree_index = tree_hit_test(state, my);
             }
 
             // Tab hover
-            let tab_y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT;
-            let panel_x = SIDEBAR_WIDTH + 1.0;
+            let tab_y = state.panel_top();
+            let panel_x = state.panel_x();
             let panel_width = state.width - panel_x;
             if mx > panel_x && my >= tab_y && my < tab_y + TAB_BAR_HEIGHT {
                 let tabs = PropertiesTab::all();
@@ -3132,17 +3323,25 @@ fn handle_mouse_event(
             EventResult::Consumed
         }
         MouseEventKind::Scroll { dy, .. } => {
+            // `dy` counts wheel *notches*, not pixels: 1.0 per detent of an
+            // ordinary wheel, positive away from the user, and a fraction of
+            // one from a trackpad. Both branches below used to multiply it by
+            // 20.0 on the assumption it was a distance.
+            //
             // Scroll the tree sidebar
-            let tree_top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT;
-            let tree_bottom = state.height - STATUS_BAR_HEIGHT;
-            if mx < SIDEBAR_WIDTH && my >= tree_top && my < tree_bottom {
-                state.tree_scroll = (state.tree_scroll - dy * 20.0).max(0.0);
+            if mx < SIDEBAR_WIDTH && my >= state.panel_top() && my < state.panel_bottom() {
+                let rows = state.tree_wheel.rows(*dy);
+                state.tree_scroll =
+                    scroll_window::shift(state.tree_scroll, rows).min(state.max_tree_scroll());
                 return EventResult::Consumed;
             }
 
-            // Scroll the properties panel
+            // Scroll the properties panel. Pixels rather than rows, because
+            // the tabs stack sections of several heights and there is no row
+            // index that could name a position part way down one.
             if mx >= SIDEBAR_WIDTH {
-                state.properties_scroll = (state.properties_scroll - dy * 20.0).max(0.0);
+                let moved = state.properties_scroll + wheel::pixels(*dy, PROPERTY_ROW_HEIGHT);
+                state.properties_scroll = moved.clamp(0.0, state.max_properties_scroll());
                 return EventResult::Consumed;
             }
 
@@ -3152,50 +3351,43 @@ fn handle_mouse_event(
     }
 }
 
-/// Determine which tree node index is at a given y-offset within the tree.
-fn tree_hit_test(state: &DeviceManagerState, y: f32) -> Option<usize> {
-    let mut accumulated_y: f32 = 0.0;
-    let mut parent_expanded = true;
-
-    for (i, node) in state.tree_nodes.iter().enumerate() {
-        if !node.visible {
-            continue;
-        }
-        if node.depth == 1 && !parent_expanded {
-            continue;
-        }
-        if node.depth == 0 {
-            parent_expanded = node.expanded;
-        }
-
-        if y >= accumulated_y && y < accumulated_y + TREE_ROW_HEIGHT {
-            return Some(i);
-        }
-        accumulated_y += TREE_ROW_HEIGHT;
+/// Which tree node the sidebar drew at window y-coordinate `my`, if any.
+///
+/// Takes a window coordinate rather than a tree-relative one so that the
+/// subtraction of the panel top and the addition of the scroll offset happen
+/// in exactly one place. Both callers used to do it themselves, which is two
+/// chances to get the sign of the offset wrong.
+fn tree_hit_test(state: &DeviceManagerState, my: f32) -> Option<usize> {
+    let offset = my - state.panel_top();
+    if !offset.is_finite() || offset < 0.0 || offset >= state.tree_height() {
+        return None;
     }
-    None
+    // Saturating on purpose: `offset` is bounded above by the check just made,
+    // so the cast cannot reach a slot that is not on screen.
+    let slot = (offset / TREE_ROW_HEIGHT) as usize;
+    let row = state.tree_scroll.checked_add(slot)?;
+    state.visible_tree_indices().get(row).copied()
 }
 
 /// Check if a tree node at the given index is currently visible.
+///
+/// Delegates to [`visible_tree_indices`](DeviceManagerState::visible_tree_indices)
+/// rather than re-deriving the rule, which is what it used to do: it scanned
+/// backwards for the nearest category node and returned that category's
+/// `expanded`, while the sidebar walked forwards carrying the last *visible*
+/// category's flag. The two disagree about a device whose category is hidden by
+/// the search filter — the backwards scan hides it, the forward walk does not.
+///
+/// That state was unreachable, but only because of an invariant kept in a third
+/// function: [`apply_search_filter`](DeviceManagerState::apply_search_filter)
+/// hides a category exactly when it hides all of its devices, so the disputed
+/// row was always hidden by the `visible` flag before the disagreement could
+/// matter. Nothing tied the three together, and the invariant is not one a
+/// future filter has to keep — making a category match on its own name, an
+/// obvious improvement, breaks it and lets the arrow keys land the selection on
+/// a row the sidebar is not drawing.
 fn is_node_visible(state: &DeviceManagerState, index: usize) -> bool {
-    let Some(node) = state.tree_nodes.get(index) else {
-        return false;
-    };
-    if !node.visible {
-        return false;
-    }
-    if node.depth == 0 {
-        return true;
-    }
-    // Device node: check if parent category is expanded.
-    for i in (0..index).rev() {
-        if let Some(parent) = state.tree_nodes.get(i)
-            && parent.category.is_some()
-        {
-            return parent.expanded;
-        }
-    }
-    true
+    state.visible_tree_indices().contains(&index)
 }
 
 // ============================================================================
@@ -3213,6 +3405,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // Panicking on bad data is what a test is *for*: an index that is out of
+    // range or an `Option` that is `None` should stop the run and name the
+    // line, not be handled into a pass. The lints these suppress are aimed at
+    // production code, where the same panic would be a denial of service.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // -- DeviceCategory tests ------------------------------------------------
@@ -4127,6 +4331,11 @@ mod tests {
 
     // -- Event handling tests ------------------------------------------------
 
+    // Exact comparison is the point of this test, not an oversight: `Resize`
+    // copies its integers straight into the two fields with no arithmetic in
+    // between, so anything but an exact match is a bug. A tolerance here would
+    // pass against a handler that quietly scaled the window.
+    #[allow(clippy::float_cmp)]
     #[test]
     fn test_handle_resize() {
         let mut state = DeviceManagerState::new();
@@ -4331,18 +4540,25 @@ mod tests {
 
     // -- tree_hit_test / is_node_visible tests -------------------------------
 
+    // `tree_hit_test` takes a *window* y, not a tree-relative one: the panel
+    // top and the scroll offset are its job, so that its two callers cannot
+    // apply them differently.
+
     #[test]
     fn test_tree_hit_test_first_node() {
         let state = DeviceManagerState::new();
-        let hit = tree_hit_test(&state, 5.0);
+        let hit = tree_hit_test(&state, state.panel_top() + 5.0);
         assert_eq!(hit, Some(0));
     }
 
     #[test]
     fn test_tree_hit_test_out_of_bounds() {
         let state = DeviceManagerState::new();
-        let hit = tree_hit_test(&state, 100_000.0);
-        assert!(hit.is_none());
+        assert!(tree_hit_test(&state, 100_000.0).is_none());
+        assert!(
+            tree_hit_test(&state, state.panel_top() - 1.0).is_none(),
+            "above the panel is not row 0"
+        );
     }
 
     #[test]
@@ -4511,6 +4727,682 @@ mod tests {
         ];
         for c in &colors {
             assert_eq!(c.a, 255, "Color constant has non-opaque alpha");
+        }
+    }
+
+    // -- Scrolling -----------------------------------------------------------
+    //
+    // Everything below is written in the units the bug was in. `dy` is a count
+    // of wheel *notches*; a test that asserted the offset merely "moved" would
+    // pass against `dy * 20.0`, `dy * 1.0` and every other misreading of that
+    // unit, because all of them move it. The assertions are therefore about
+    // *rows*, and the expected row counts come from `wheel::ROWS_PER_NOTCH`
+    // rather than from a literal 3 — a test that hard-codes the constant it is
+    // checking is testing itself.
+
+    /// One turn of the wheel at window point (`x`, `y`).
+    ///
+    /// `dy` is in **notches**, positive away from the user — the unit the
+    /// compositor produces and the one this app used to misread as pixels.
+    fn wheel_at(x: f32, y: f32, dy: f32) -> Event {
+        Event::Mouse(guitk::event::MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    fn click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(guitk::event::MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn move_to(x: f32, y: f32) -> Event {
+        Event::Mouse(guitk::event::MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        })
+    }
+
+    /// Rows one notch moves a list, as a `usize`.
+    fn rows_per_notch() -> usize {
+        wheel::ROWS_PER_NOTCH as usize
+    }
+
+    /// A point inside the sidebar's scrollable area.
+    fn tree_point(state: &DeviceManagerState) -> (f32, f32) {
+        (SIDEBAR_WIDTH / 2.0, state.panel_top() + 10.0)
+    }
+
+    /// A point inside the properties panel.
+    fn panel_point(state: &DeviceManagerState) -> (f32, f32) {
+        (state.panel_x() + 40.0, state.properties_body_top() + 10.0)
+    }
+
+    /// A window short enough that the device tree overflows it.
+    ///
+    /// The assertion is not decoration. A fixture that cannot overflow makes
+    /// every scroll test below vacuously true — the offset would be pinned at
+    /// zero and each assertion would be checking that nothing happened, which
+    /// is exactly what a broken wheel also produces.
+    fn app_with_scrollable_tree() -> DeviceManagerState {
+        let mut state = DeviceManagerState::new();
+        state.height = 260.0;
+        assert!(
+            state.max_tree_scroll() > 0,
+            "fixture cannot overflow, so it cannot fail"
+        );
+        state
+    }
+
+    /// The tree node indices the sidebar actually emitted a row for, read back
+    /// out of the render commands.
+    ///
+    /// Compares against the selection highlight rather than the labels: a row's
+    /// label is a category name or a device name, but the highlight is drawn at
+    /// a known `x` and height for whichever row is selected. Instead we take
+    /// the y-coordinates of the row labels, which is enough to count rows and
+    /// to tell which one is first.
+    fn drawn_row_tops(state: &DeviceManagerState) -> Vec<f32> {
+        let mut cmds = Vec::new();
+        render_sidebar(state, &mut cmds);
+        let mut tops: Vec<f32> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                // Every row draws its label at `y_offset + 5.0`, whether it is
+                // a category or a device; nothing else in the sidebar draws
+                // text at all.
+                RenderCommand::Text { y, .. } => Some(y - 5.0),
+                _ => None,
+            })
+            .collect();
+        tops.dedup();
+        tops
+    }
+
+    /// The labels the sidebar drew, in the order it drew them.
+    fn drawn_labels(state: &DeviceManagerState) -> Vec<String> {
+        let mut cmds = Vec::new();
+        render_sidebar(state, &mut cmds);
+        let known: Vec<&str> = state.tree_nodes.iter().map(|n| n.label.as_str()).collect();
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } if known.contains(&text.as_str()) => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one clip rectangle the sidebar pushes.
+    fn sidebar_clip(state: &DeviceManagerState) -> (f32, f32) {
+        let mut cmds = Vec::new();
+        render_sidebar(state, &mut cmds);
+        cmds.iter()
+            .find_map(|c| match c {
+                RenderCommand::PushClip { y, height, .. } => Some((*y, *height)),
+                _ => None,
+            })
+            .expect("the sidebar clips its rows")
+    }
+
+    // -- The sidebar's wheel -------------------------------------------------
+
+    #[test]
+    fn one_notch_scrolls_the_tree_by_whole_rows() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        assert_eq!(
+            state.tree_scroll,
+            rows_per_notch(),
+            "a notch is a whole number of rows, not a pixel distance"
+        );
+    }
+
+    #[test]
+    fn the_tree_wheel_scrolls_both_ways() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -2.0));
+        assert_eq!(state.tree_scroll, 2 * rows_per_notch());
+        handle_event(&mut state, &wheel_at(x, y, 1.0));
+        assert_eq!(state.tree_scroll, rows_per_notch());
+        handle_event(&mut state, &wheel_at(x, y, 5.0));
+        assert_eq!(state.tree_scroll, 0, "and stops at the top, not below it");
+    }
+
+    /// The bug the old `.max(0.0)` left open: it bounds the near end and says
+    /// nothing about the far one. The offset climbed while the list stood
+    /// still, and the user then had to wind back exactly as far as they had
+    /// overshot before anything moved.
+    #[test]
+    fn the_tree_wheel_cannot_scroll_into_empty_space() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        for _ in 0..100 {
+            handle_event(&mut state, &wheel_at(x, y, -1.0));
+        }
+        assert_eq!(state.tree_scroll, state.max_tree_scroll());
+
+        // And the last row is on screen at that offset, which is what makes
+        // the bound the *right* one rather than merely some bound.
+        let last = *state
+            .visible_tree_indices()
+            .last()
+            .expect("the tree has rows");
+        let drawn = drawn_labels(&state);
+        assert!(
+            drawn.contains(&state.tree_nodes[last].label),
+            "the last row must be visible at the maximum offset"
+        );
+
+        // One notch back must move the view again immediately.
+        handle_event(&mut state, &wheel_at(x, y, 1.0));
+        assert!(state.tree_scroll < state.max_tree_scroll());
+    }
+
+    #[test]
+    fn a_tree_that_fits_cannot_be_scrolled() {
+        let mut state = DeviceManagerState::new();
+        state.height = 4000.0;
+        assert_eq!(state.max_tree_scroll(), 0, "the whole tree fits");
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -10.0));
+        assert_eq!(state.tree_scroll, 0);
+    }
+
+    /// A precision trackpad sends a stream of small fractions. A converter that
+    /// rounded each one on its own would return zero every time and the device
+    /// would feel dead.
+    #[test]
+    fn a_trackpads_fractions_of_a_notch_eventually_scroll() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        for _ in 0..10 {
+            handle_event(&mut state, &wheel_at(x, y, -0.1));
+        }
+        assert_eq!(
+            state.tree_scroll,
+            rows_per_notch(),
+            "ten tenths of a notch is one notch"
+        );
+    }
+
+    #[test]
+    fn a_wheel_over_the_properties_panel_leaves_the_tree_alone() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -3.0));
+        assert_eq!(state.tree_scroll, 0, "the sidebar is not under the cursor");
+    }
+
+    // -- The sidebar's renderer and hit-test agree ---------------------------
+
+    /// A renderer that ignored its offset would pass every other render test
+    /// ever written for it, because the picture it draws is a valid picture of
+    /// the top of the list.
+    #[test]
+    fn a_scrolled_tree_draws_the_rows_the_offset_selects() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        assert!(state.tree_scroll > 0, "the fixture scrolled");
+
+        let indices = state.visible_tree_indices();
+        let rows = state.tree_rows();
+        let expected: Vec<String> = indices
+            .iter()
+            .skip(rows.start)
+            .take(rows.count)
+            .map(|&i| state.tree_nodes[i].label.clone())
+            .collect();
+        assert_eq!(drawn_labels(&state), expected);
+        assert_eq!(
+            drawn_labels(&state).len(),
+            rows.count,
+            "no more rows than the window holds"
+        );
+    }
+
+    /// The rows are drawn one row height apart starting at the top of the
+    /// panel, which is the assumption the hit-test's division makes.
+    #[test]
+    fn the_drawn_rows_are_evenly_spaced_from_the_panel_top() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        for (slot, top) in drawn_row_tops(&state).into_iter().enumerate() {
+            let want = state.panel_top() + slot as f32 * TREE_ROW_HEIGHT;
+            assert!(
+                (top - want).abs() < 0.01,
+                "row {slot} drawn at {top}, hit-test expects {want}"
+            );
+        }
+    }
+
+    /// Renderer and hit-test used to derive the sidebar's rectangle separately
+    /// — three times over, counting the hover handler. This compares the clip
+    /// the renderer actually pushed against the bounds the hit-test measures,
+    /// which needs no pixel coordinates of its own and so does not need
+    /// rewriting when the design changes.
+    #[test]
+    fn the_sidebars_clip_matches_what_the_hit_test_uses() {
+        for height in [260.0, 500.0, 900.0] {
+            let mut state = DeviceManagerState::new();
+            state.height = height;
+            let (clip_y, clip_h) = sidebar_clip(&state);
+            assert!((clip_y - state.panel_top()).abs() < 0.01, "top at {height}");
+            assert!(
+                (clip_h - state.tree_height()).abs() < 0.01,
+                "height at {height}"
+            );
+            // And the hit-test rejects exactly what the clip cuts off.
+            assert!(tree_hit_test(&state, clip_y - 0.5).is_none());
+            assert!(tree_hit_test(&state, clip_y + clip_h).is_none());
+        }
+    }
+
+    #[test]
+    fn clicking_a_device_selects_the_one_that_was_drawn_there() {
+        let mut state = app_with_scrollable_tree();
+        let indices = state.visible_tree_indices();
+        for slot in 0..state.tree_rows().count.min(4) {
+            let y = state.panel_top() + slot as f32 * TREE_ROW_HEIGHT + TREE_ROW_HEIGHT / 2.0;
+            handle_event(&mut state, &click_at(SIDEBAR_WIDTH / 2.0, y));
+            assert_eq!(
+                state.selected_tree_index,
+                Some(indices[slot]),
+                "slot {slot} selected the wrong node"
+            );
+            // Clicking a category toggles it, which changes the row list; undo
+            // that so the next slot still refers to the same node.
+            if state.tree_nodes[indices[slot]].category.is_some() {
+                state.toggle_category(indices[slot]);
+            }
+        }
+    }
+
+    /// The click handler must read the same offset the renderer did. Before,
+    /// it added a pixel offset to a pixel coordinate; the two agreed only
+    /// because both were wrong in the same way.
+    #[test]
+    fn a_scrolled_tree_selects_by_what_is_visible() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        let first_visible = state.visible_tree_indices()[state.tree_scroll];
+        let top_row = click_at(SIDEBAR_WIDTH / 2.0, state.panel_top() + 2.0);
+        handle_event(&mut state, &top_row);
+        assert_eq!(state.selected_tree_index, Some(first_visible));
+    }
+
+    #[test]
+    fn hovering_outside_the_tree_hovers_nothing() {
+        let mut state = app_with_scrollable_tree();
+        let onto_row_0 = move_to(SIDEBAR_WIDTH / 2.0, state.panel_top() + 2.0);
+        handle_event(&mut state, &onto_row_0);
+        assert!(state.hovered_tree_index.is_some(), "hovering row 0");
+        let below_the_tree = move_to(SIDEBAR_WIDTH / 2.0, state.panel_bottom() + 2.0);
+        handle_event(&mut state, &below_the_tree);
+        assert_eq!(
+            state.hovered_tree_index, None,
+            "the status bar is not a row"
+        );
+    }
+
+    /// Folding a category takes rows out from under the view. Without a clamp
+    /// the offset stays where it was and the sidebar shows blank space below a
+    /// list that has got shorter.
+    #[test]
+    fn folding_a_category_pulls_the_view_back_into_the_list() {
+        let mut state = app_with_scrollable_tree();
+        let (x, y) = tree_point(&state);
+        for _ in 0..100 {
+            handle_event(&mut state, &wheel_at(x, y, -1.0));
+        }
+        assert!(state.tree_scroll > 0, "scrolled to the bottom");
+
+        // Fold every category by clicking the first row repeatedly; each fold
+        // shortens the list.
+        let top_row = click_at(SIDEBAR_WIDTH / 2.0, state.panel_top() + 2.0);
+        for _ in 0..state.tree_nodes.len() {
+            handle_event(&mut state, &top_row);
+            assert!(
+                state.tree_scroll <= state.max_tree_scroll(),
+                "offset {} ran past the shortened list's maximum {}",
+                state.tree_scroll,
+                state.max_tree_scroll()
+            );
+        }
+    }
+
+    /// The arrow keys move the selection between rows; the rows they may land
+    /// on are exactly the ones the sidebar draws. That was two derivations —
+    /// the sidebar walked forwards carrying the last visible category's
+    /// `expanded`, `is_node_visible` scanned backwards for the nearest category
+    /// whether it was visible or not.
+    #[test]
+    fn is_node_visible_agrees_with_the_rows_the_sidebar_draws() {
+        let mut state = DeviceManagerState::new();
+        for query in ["", "audio", "nic", "zzzz"] {
+            state.search_query = query.to_string();
+            state.apply_search_filter();
+            for collapse_first in [false, true] {
+                state.tree_nodes[0].expanded = !collapse_first;
+                let drawn = state.visible_tree_indices();
+                for i in 0..state.tree_nodes.len() {
+                    assert_eq!(
+                        is_node_visible(&state, i),
+                        drawn.contains(&i),
+                        "node {i} with query {query:?}, first collapsed {collapse_first}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same equivalence for a state the search filter cannot currently
+    /// produce: a hidden category with a visible device under it.
+    ///
+    /// Built by hand rather than through `apply_search_filter`, because the
+    /// filter happens to hide a category only when it hides all of that
+    /// category's devices — and that invariant, kept in a third function, is
+    /// the only reason the two old derivations ever agreed. Letting a category
+    /// match on its own name would break it, which is an obvious enough
+    /// improvement that the contract had better be pinned first: `is_node_visible`
+    /// is true exactly when the sidebar draws the row, for *any* state.
+    #[test]
+    fn is_node_visible_agrees_even_where_the_filters_invariant_does_not_hold() {
+        let mut state = DeviceManagerState::new();
+        let cat = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.category.is_some())
+            .expect("has categories");
+        state.tree_nodes[cat].visible = false;
+        state.tree_nodes[cat].expanded = false;
+
+        let drawn = state.visible_tree_indices();
+        for i in 0..state.tree_nodes.len() {
+            assert_eq!(
+                is_node_visible(&state, i),
+                drawn.contains(&i),
+                "node {i} under a hidden, collapsed category"
+            );
+        }
+    }
+
+    // -- The properties panel's wheel ----------------------------------------
+
+    /// A device whose General tab is long enough to overflow a short window.
+    fn app_with_scrollable_panel() -> DeviceManagerState {
+        let mut state = DeviceManagerState::new();
+        state.height = 260.0;
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
+        state.select_tree_node(dev_idx);
+        state.show_resource_view = false;
+        assert!(
+            state.max_properties_scroll() > 0.0,
+            "fixture cannot overflow, so it cannot fail"
+        );
+        state
+    }
+
+    /// The properties panel is the continuous case: a notch moves the same
+    /// distance it would over a list of property rows.
+    #[test]
+    fn one_notch_scrolls_the_properties_panel_by_three_rows() {
+        let mut state = app_with_scrollable_panel();
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        let want = (wheel::ROWS_PER_NOTCH * PROPERTY_ROW_HEIGHT).min(state.max_properties_scroll());
+        assert!(
+            (state.properties_scroll - want).abs() < 0.01,
+            "moved {} px, expected {want}",
+            state.properties_scroll
+        );
+        assert!(
+            state.properties_scroll >= PROPERTY_ROW_HEIGHT,
+            "a notch must move at least one whole property row; \
+             moved {} px, a row is {PROPERTY_ROW_HEIGHT}",
+            state.properties_scroll
+        );
+    }
+
+    /// The half that was missing entirely: `properties_scroll` was written by
+    /// the wheel and read by nobody, so the panel could not scroll however far
+    /// its content ran.
+    #[test]
+    fn the_properties_body_moves_with_its_scroll_offset() {
+        let mut state = app_with_scrollable_panel();
+        let before = properties_body_tops(&state);
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        let after = properties_body_tops(&state);
+
+        assert_eq!(before.len(), after.len(), "same content, moved");
+        let moved = before[0] - after[0];
+        assert!(
+            moved >= PROPERTY_ROW_HEIGHT,
+            "the panel drew its content {moved} px higher; a scroll of {} px \
+             should have moved it at least one {PROPERTY_ROW_HEIGHT}px row",
+            state.properties_scroll
+        );
+        for (b, a) in before.iter().zip(&after) {
+            assert!(
+                ((b - a) - moved).abs() < 0.01,
+                "the whole body moves together: {b} -> {a}, expected -{moved}"
+            );
+        }
+    }
+
+    /// Top edges of the text the properties *body* draws, as the whole panel
+    /// renders it.
+    ///
+    /// Takes only what falls between the body's `PushClip` and its `PopClip`,
+    /// which is exactly the definition of "the body" that the renderer itself
+    /// uses. Filtering by y-coordinate instead quietly included the tab bar's
+    /// labels — and those do not scroll, so a renderer that ignored its offset
+    /// entirely still showed an unmoved first row and the test passed.
+    fn properties_body_tops(state: &DeviceManagerState) -> Vec<f32> {
+        let mut cmds = Vec::new();
+        render_properties_panel(state, &mut cmds);
+        let mut inside = false;
+        let mut tops = Vec::new();
+        for cmd in &cmds {
+            match cmd {
+                RenderCommand::PushClip { .. } => inside = true,
+                RenderCommand::PopClip => inside = false,
+                RenderCommand::Text { y, .. } if inside => tops.push(*y),
+                _ => {}
+            }
+        }
+        assert!(!tops.is_empty(), "the body drew no text to measure");
+        tops
+    }
+
+    #[test]
+    fn the_properties_wheel_cannot_scroll_into_empty_space() {
+        let mut state = app_with_scrollable_panel();
+        let (x, y) = panel_point(&state);
+        for _ in 0..100 {
+            handle_event(&mut state, &wheel_at(x, y, -1.0));
+        }
+        assert!(
+            (state.properties_scroll - state.max_properties_scroll()).abs() < 0.01,
+            "stopped at {} rather than {}",
+            state.properties_scroll,
+            state.max_properties_scroll()
+        );
+        handle_event(&mut state, &wheel_at(x, y, 1.0));
+        assert!(state.properties_scroll < state.max_properties_scroll());
+    }
+
+    #[test]
+    fn a_properties_panel_that_fits_cannot_be_scrolled() {
+        let mut state = DeviceManagerState::new();
+        state.height = 4000.0;
+        let dev_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.device_id.is_some())
+            .expect("has devices");
+        state.select_tree_node(dev_idx);
+        state.show_resource_view = false;
+        assert!(state.max_properties_scroll() < 0.01, "the content fits");
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -10.0));
+        assert!(state.properties_scroll < 0.01);
+    }
+
+    /// The measurement has to reach past the clip that hides the overflow,
+    /// or the panel's bound is its own window height and it never scrolls.
+    #[test]
+    fn the_measured_content_covers_the_last_line_the_panel_draws() {
+        let state = app_with_scrollable_panel();
+        let measured = properties_content_height(&state);
+        assert!(
+            measured > state.properties_body_height(),
+            "measured {measured} but the window is {} — the fixture overflows",
+            state.properties_body_height()
+        );
+
+        // Every line the body draws must sit above the measured bottom.
+        let mut cmds = Vec::new();
+        render_properties_body(
+            &state,
+            &mut cmds,
+            state.panel_x(),
+            0.0,
+            state.width - state.panel_x(),
+            state.properties_body_height(),
+        );
+        let bottom = content_bottom(&cmds).expect("the body drew something");
+        assert!((bottom - measured).abs() < 0.01);
+    }
+
+    #[test]
+    fn switching_tabs_returns_the_properties_panel_to_the_top() {
+        let mut state = app_with_scrollable_panel();
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -2.0));
+        assert!(state.properties_scroll > 0.0);
+
+        let tabs = PropertiesTab::all();
+        let tab_width = (state.width - state.panel_x()) / tabs.len() as f32;
+        let second_tab = click_at(
+            state.panel_x() + tab_width * 1.5,
+            state.panel_top() + TAB_BAR_HEIGHT / 2.0,
+        );
+        handle_event(&mut state, &second_tab);
+        assert_ne!(state.active_tab, tabs[0], "a different tab is showing");
+        assert!(
+            state.properties_scroll < 0.01,
+            "a new tab starts at its own top, not at the old tab's offset"
+        );
+    }
+
+    /// The resource overview is the panel's other long view, and it draws no
+    /// tab bar — so its body starts higher up. Both facts have to come from
+    /// the same predicate or the clip and the content disagree by 28px.
+    #[test]
+    fn the_resource_view_scrolls_and_starts_at_the_panel_top() {
+        let mut state = DeviceManagerState::new();
+        state.height = 260.0;
+        let cat_idx = state
+            .tree_nodes
+            .iter()
+            .position(|n| n.category.is_some())
+            .expect("has categories");
+        state.select_tree_node(cat_idx);
+        assert!(state.show_resource_view, "a category shows the overview");
+        assert!(!state.shows_tab_bar());
+        assert!(
+            (state.properties_body_top() - state.panel_top()).abs() < 0.01,
+            "no tab bar means the body starts at the panel top"
+        );
+        assert!(state.max_properties_scroll() > 0.0, "the overview is long");
+
+        let (x, y) = panel_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -1.0));
+        assert!(state.properties_scroll > 0.0);
+    }
+
+    /// The clip the panel pushes and the region the wheel measures against
+    /// must be the same rectangle.
+    #[test]
+    fn the_properties_clip_matches_the_body_it_measures() {
+        let mut state = app_with_scrollable_panel();
+        for height in [260.0, 500.0, 900.0] {
+            state.height = height;
+            let mut cmds = Vec::new();
+            render_properties_panel(&state, &mut cmds);
+            let (clip_y, clip_h) = cmds
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::PushClip { y, height, .. } => Some((*y, *height)),
+                    _ => None,
+                })
+                .expect("the panel clips its body");
+            assert!(
+                (clip_y - state.properties_body_top()).abs() < 0.01,
+                "top at {height}"
+            );
+            assert!(
+                (clip_h - state.properties_body_height()).abs() < 0.01,
+                "height at {height}"
+            );
+        }
+    }
+
+    /// A window so short that the panel has no room at all must not produce a
+    /// negative bound, which would clamp the offset to a negative number and
+    /// scroll the content off the top.
+    #[test]
+    fn an_impossibly_short_window_still_bounds_the_offsets() {
+        let mut state = DeviceManagerState::new();
+        state.height = 1.0;
+        assert_eq!(state.max_tree_scroll(), 0);
+        assert!(state.max_properties_scroll() >= 0.0);
+        let (x, y) = tree_point(&state);
+        handle_event(&mut state, &wheel_at(x, y, -5.0));
+        let over_the_panel = wheel_at(state.width - 5.0, y, -5.0);
+        handle_event(&mut state, &over_the_panel);
+        assert_eq!(state.tree_scroll, 0);
+        assert!(state.properties_scroll >= 0.0);
+    }
+
+    /// Input events come from outside the process. A NaN reaching either stored
+    /// offset would freeze that view for the life of the app.
+    #[test]
+    fn a_nonfinite_wheel_event_cannot_freeze_a_view() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut state = app_with_scrollable_panel();
+            let (tx, ty) = tree_point(&state);
+            let (px, py) = panel_point(&state);
+            handle_event(&mut state, &wheel_at(tx, ty, bad));
+            handle_event(&mut state, &wheel_at(px, py, bad));
+            assert_eq!(state.tree_scroll, 0, "{bad} moved the tree");
+            assert!(
+                state.properties_scroll.is_finite(),
+                "{bad} poisoned the panel"
+            );
+
+            // And the next ordinary notch still works.
+            handle_event(&mut state, &wheel_at(tx, ty, -1.0));
+            handle_event(&mut state, &wheel_at(px, py, -1.0));
+            assert_eq!(state.tree_scroll, rows_per_notch());
+            assert!(state.properties_scroll > 0.0);
         }
     }
 }

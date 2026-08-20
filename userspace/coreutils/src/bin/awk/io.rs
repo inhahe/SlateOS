@@ -483,23 +483,14 @@ impl Default for Inputs {
 /// `| getline` all pass their argument to `sh -c` rather than splitting it
 /// themselves, because the argument is a *shell* command: it may contain
 /// pipes, redirections and quoting that only the shell knows how to read.
+///
+/// The decision of *which* shell, and what to do on a host that has no
+/// `/bin/sh`, is [`coreutils::shell`]'s rather than awk's: `split --filter`
+/// has to answer it identically, and two answers that drift apart would mean
+/// one utility's filter scripts silently running under different quoting
+/// rules from the other's.
 pub fn shell(cmd: &[u8]) -> Command {
-    let text = String::from_utf8_lossy(cmd).into_owned();
-    #[cfg(unix)]
-    {
-        let mut c = Command::new("/bin/sh");
-        c.arg("-c").arg(text);
-        c
-    }
-    #[cfg(not(unix))]
-    {
-        // On the development host there is no `/bin/sh` at a fixed path, but a
-        // POSIX shell is on PATH; falling back to `cmd /c` would change the
-        // quoting rules under the script's feet, so this does not.
-        let mut c = Command::new("sh");
-        c.arg("-c").arg(text);
-        c
-    }
+    coreutils::shell::shell_bytes(cmd)
 }
 
 /// A redirection target as a path.

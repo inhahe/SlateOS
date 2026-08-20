@@ -85,6 +85,16 @@
 //!   them. It delegates `%a %e %f %g` to [`extfloat`], so one call site covers
 //!   the whole of `printf`'s directive vocabulary.
 //!
+//! The ninth is small enough to look as though it does not need sharing, and
+//! is here because the one decision inside it is invisible until it is wrong:
+//!
+//! - [`shell`] — handing a command line to `sh -c`. `awk`'s `system()` and its
+//!   two pipe forms, and `split --filter`, all take a shell *command* rather
+//!   than an argv, so none of them may tokenise it themselves; and each has to
+//!   choose what to run on a host with no `/bin/sh`, where the obvious answer —
+//!   `cmd /c` — silently changes the quoting rules the script was written
+//!   against rather than failing.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -96,5 +106,6 @@ pub mod extfloat;
 pub mod filekind;
 pub mod getopt;
 pub mod quote;
+pub mod shell;
 pub mod tabstops;
 pub mod xnum;

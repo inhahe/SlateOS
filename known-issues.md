@@ -42080,3 +42080,188 @@ in eleven of twelve entries passed both. They are now
 the calendar popup actually depends on, that month *n+1* begins exactly
 `days_in_month(n)` days after month *n* — and
 `every_month_renders_its_own_three_letter_name`.
+
+---
+
+## TD-SPLIT-GNU-HEX-SUFFIX-START-READS-OUT-OF-BOUNDS (lane B, 2026-08-18) — **upstream bug; ours diverges on purpose**
+
+**In short:** `split --hex-suffixes=FROM` is supposed to start naming its output
+files at the hexadecimal number `FROM` — so `--hex-suffixes=ff` should produce
+`xff`, `x100`, `x101`. In GNU coreutils 9.4 it does not, whenever `FROM`
+contains a *letter* (`a`–`f`): the files come out with names that are not
+consecutive and not hexadecimal at all. Ours produces the correct names. This
+entry exists so nobody "fixes" ours to match GNU, and so
+`scripts/split-diff.sh` can carry the three affected cases as declared
+expected-failures rather than quietly omitting them.
+
+**Where upstream goes wrong.** `split.c` validates the start value against the
+suffix alphabet with `strspn`, which accepts `a`–`f` for hex. It then converts
+it to a per-position index with, in effect:
+
+```c
+sufindex[i] = numeric_suffix_start[i] - '0';
+```
+
+That subtraction is right for `'0'`–`'9'` and wrong for letters: `'a' - '0'` is
+49, and `'f' - '0'` is 54. Those indices are then used to read from a 16-character
+alphabet, so every letter in the start value indexes 33–38 elements past the end
+of the array. The name that comes out is whatever bytes follow it in memory,
+carried forward by the ordinary increment.
+
+**Measured**, GNU coreutils 9.4, glibc, `LC_ALL=C`, three chunks:
+
+| Command | GNU 9.4 leaves | ours |
+|---|---|---|
+| `split -l 5 --hex-suffixes=ff` (4 pieces) | `xf3 xf4 xf5 xff` | `xff`, then `output file suffixes exhausted` |
+| `split -l 5 --hex-suffixes=a` (4 pieces) | `x0a x0e x10 x11` | `x0a x0b x0c x0d` |
+| `split -n 3 --hex-suffixes=1f` | `x13 x14 x1f` | `x1f x20 x21` |
+| `split -n 3 --hex-suffixes=bb` | **`xbb` alone**, plus `split: output file suffixes exhausted` — two thirds of the input is dropped | `xbb xbc xbd` |
+
+Two things to notice. In every row the names are out of order — `xff` is
+*followed* by `xf3` — and sort order is the one property the whole suffix
+mechanism exists to guarantee. (It is also why upstream refuses to widen the
+suffix field when a start value is given: an arbitrary start "would break sort
+order for files generated from multiple split runs". The letter case breaks it
+far more thoroughly than widening ever could.) And in the `=bb` row GNU does not
+merely misname the files, it **loses data**: it writes one piece of three and
+stops.
+
+Only a letter in the *incrementing* position misbehaves, which is why
+`--hex-suffixes=e0` looks fine (`xe0 xe1 xe2`) and `=0f` does not. That is the
+shape of an out-of-bounds read, not of a rule.
+
+Ours errors in the first row for a reason that is not a bug: `ff` is the largest
+two-digit hex suffix, an explicit start turns widening off, and a fifth piece
+therefore has nowhere to go. GNU should report the same thing there and instead
+invents four names.
+
+**Our behaviour:** the start value is converted by counting in base 16, so the
+names are the consecutive hexadecimal numbers from `FROM` upward, and
+`--hex-suffixes=ff -a 2` is the length error it should be rather than three
+garbage names. This is deliberate: reproducing an out-of-bounds read to match
+byte-for-byte would mean reproducing *this machine's* heap layout, which is not
+a specification.
+
+**Action:** none for us. Worth reporting upstream. If it is ever fixed there,
+the three `xfail_case` lines in `scripts/split-diff.sh` become ordinary
+`names_case` lines and this entry can be closed.
+
+---
+
+## TD-SH-C-IS-SPELLED-FOUR-MORE-TIMES-OUTSIDE-THE-COREUTILS-CRATE (lane B, 2026-08-18)
+
+**In short:** Four programs still build their own "hand this string to a shell"
+command instead of calling the one shared helper. Today they happen to agree;
+nothing makes them keep agreeing, and the decision they each re-make — what to
+run on a host with no `/bin/sh` — is invisible until it is wrong.
+
+`userspace/coreutils/src/shell.rs` exists (see design-decisions.md §336) because
+`awk`'s `system()` and its two pipe forms, `split --filter`, and `sh`'s `$(…)`
+substitution all take a shell *command* rather than an argv, so none of them may
+tokenise it themselves. All three now go through it. These four do not, because
+they live outside the `coreutils` crate and cannot depend on it as things stand:
+
+| Program | Line | What it writes |
+|---|---|---|
+| `userspace/crond` | `src/main.rs:494` | `Command::new("/bin/sh").arg("-c")` |
+| `userspace/make` | `src/main.rs:990` | same, for a recipe line |
+| `userspace/nc` | `src/main.rs:1351` | same, for `-e` |
+| `userspace/watch` | `src/main.rs:383` | same, via a private `const SHELL` |
+
+**Two call sites that look like this and are not.** `userspace/crond2`
+(`src/main.rs:1173`) and `userspace/sudo` (`src/main.rs:2808`, `:2817`) also
+spell `.arg("-c")`, but the program they run is the one the *user* chose — the
+crontab's `SHELL=` and the target account's login shell respectively. Running
+some other shell there would be the bug. They must keep their own
+`Command::new`, and should not be folded in when this entry is actioned.
+
+**Why it matters.** The trap the shared module was written for is that the
+obvious host fallback — `cmd /c` — does not fail on a machine without a POSIX
+shell; it *succeeds*, under completely different quoting rules than the script
+was written against. A copy that reaches for it is a copy that silently
+mis-executes rather than reporting that it cannot execute.
+
+**Proper fix:** move `shell.rs` somewhere all five can depend on — a small
+`userspace/shellcmd` crate that `coreutils` re-exports — and delete the four
+copies. Not done now because it touches four crates outside the change that
+raised it.
+
+---
+
+## [B] FIXED — `split` implemented three of its fourteen options, and corrupted the file while doing it (2026-08-18)
+
+**In short:** `split` cuts a file into numbered pieces. Ours understood `-l`,
+`-b` and `-a` and nothing else — no `-n`, no `-C`, no long options at all, not
+even `--help` — and the three it did understand it got wrong for any input that
+was not plain ASCII text: it read the input as *lines of UTF-8* and wrote them
+back with `writeln!`, so a file with CRLF endings came back with LF, a file
+whose last line had no newline gained one, and a file containing a byte that is
+not valid UTF-8 — that is, any binary file, the main thing people split —
+failed outright with `read error`. It is rewritten against GNU coreutils 9.4,
+and `scripts/split-diff.sh` now agrees with GNU on **207 of 207** behavioural
+cases, with five declared divergences.
+
+### What was missing
+
+| | |
+|---|---|
+| absent entirely | `-n`/`--number` in all four forms (`N`, `K/N`, `l/N`, `l/K/N`, `r/N`, `r/K/N`), `-C`/`--line-bytes`, `-d`/`--numeric-suffixes`, `-x`/`--hex-suffixes`, `-t`/`--separator`, `--filter`, `--additional-suffix`, `-e`/`--elide-empty-files`, `-u`/`--unbuffered`, `--verbose`, `--help`, `--version` |
+| long options | **none** — `--lines=5` was parsed as a file name |
+| suffix widening | none. Where GNU grows `x` `y` `z` into `zaaa`…, ours exited `output file suffixes exhausted` |
+| `-b`'s number grammar | `k`/`m`/`g` only, and `n * multiplier` unchecked, so a large count with a suffix panicked in a debug build. GNU reads the full `xstrtoumax` grammar — `K`/`KB`/`KiB` through `Q`, `b` = 512, and `NxM` products |
+| non-UTF-8 argv | `env::args()`, which **panics** on an argument that is not valid Unicode. A file name is bytes; see the repo rule on OS-boundary data |
+
+### The four faults in what it did implement
+
+| | what it did | what GNU does |
+|---|---|---|
+| line endings | `BufRead::lines()` (drops `\n` *and* a preceding `\r`) then `writeln!` | copies bytes; CRLF stays CRLF, and a file whose last line has no newline comes back without one |
+| binary input | `lines()` yields `Err(InvalidData)` → `split: read error` and exit 1 | splits it; `split -l` on a binary file is ordinary usage |
+| `-a 0` | rejected — `invalid suffix length: 0`, exit 1 | accepted: upstream tests the width for *truth*, so `0` reads as "not given" and the default 2 applies. Measured: `split -a 0 -l 2` writes `xaa xab xac` |
+| diagnostics | `unknown option: --lines`, `invalid line count: 0` | `unrecognized option '--lines'`, `invalid number of lines: '0'` — quoted, and worded by `getopt_long` |
+
+### How the rewrite was verified
+
+`scripts/split-diff.sh`, 210 cases, on the `csplit-diff.sh` pattern: it compares
+a **manifest of the files left behind** (`od -An -c` per file, in name order),
+not stdout, because `split`'s stdout is empty in almost every mode — a `split`
+that wrote the wrong bytes into the right names would pass a stdout-only
+comparison, and that is most of what there is to get wrong here.
+
+**Five cases are declared expected-failures**, so the harness reports `207
+passed, 0 differed, 5 differ on purpose` rather than quietly covering 205:
+
+| | why |
+|---|---|
+| `--help`, `--version` | text we do not promise to reproduce verbatim |
+| three `--hex-suffixes=` cases | GNU 9.4 reads out of bounds there; see `TD-SPLIT-GNU-HEX-SUFFIX-START-READS-OUT-OF-BOUNDS` above and design-decisions.md §336 §3 |
+
+### The part that could not be settled by probing
+
+`-n l/N` — "split into N files without splitting a record" — was implemented
+four different ways against 45 measured GNU invocations, and each formula fit
+some values of N and failed others. The behaviour is genuinely not inferable
+from the outside, because the rule is not "fill each piece up to `size/N`": the
+file is cut into the *same* partitions as `-n N`, a record belongs to the
+partition its **first byte** lands in, and a record that overruns a partition
+leaves that partition **an empty file in its place in the sequence** — not
+skipped, and not moved to the end. Three records into `-n l/5` gives record,
+record, *empty*, record, *empty*.
+
+That was settled by reading `coreutils-9.4/src/split.c` rather than by more
+probing, and reading it also corrected three *other* rules that were wrong or
+underspecified: when the suffix field is widened for `-n` (only when the start
+value parses as decimal **and** is smaller than the chunk count), how a start
+value is validated (`strspn` against the alphabet, with leading zeros stripped
+*before* the width is checked, and two different message wordings for `-d` and
+`-x`), and that `-n`'s argument skips whitespace *before* the `l/`/`r/` prefix
+is looked for, so `-n ' l/3'` is `l/3`. The lesson generalises: a differential
+harness proves agreement on the cases you thought of, and cannot tell you the
+*shape* of a rule you have not guessed.
+
+### Also in this change
+
+`sh -c` moved into `userspace/coreutils/src/shell.rs`, shared by `split
+--filter`, `awk`'s `system()` and two pipe forms, and `sh`'s `$(…)`
+substitution. Four copies remain outside the crate — see
+`TD-SH-C-IS-SPELLED-FOUR-MORE-TIMES-OUTSIDE-THE-COREUTILS-CRATE` above.

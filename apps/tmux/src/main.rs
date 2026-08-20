@@ -38,6 +38,7 @@
 
 use guitk::Color;
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -177,8 +178,12 @@ struct TerminalBuffer {
     cursor_visible: bool,
     /// Scrollback buffer (older lines scrolled off the top).
     scrollback: Vec<Vec<Cell>>,
-    /// Current scroll position in scrollback (0 = no scrollback visible).
-    scroll_offset: usize,
+    // There is deliberately no scroll position here. How far back a *view* is
+    // looking is a property of the view, not of the buffer: two panes showing
+    // one buffer would have to disagree about it, and a buffer that owned the
+    // number would be the second place to keep it in step. It lives on
+    // [`Pane::copy_scroll`], and the buffer only answers questions about lines
+    // ([`TerminalBuffer::visible_lines`]).
     /// SGR state for new characters.
     current_fg: Color,
     current_bg: Color,
@@ -203,7 +208,6 @@ impl TerminalBuffer {
             cursor_row: 0,
             cursor_visible: true,
             scrollback: Vec::new(),
-            scroll_offset: 0,
             current_fg: TEXT,
             current_bg: BASE,
             current_bold: false,
@@ -305,6 +309,64 @@ impl TerminalBuffer {
             }
             self.cells.push(vec![Cell::blank(); self.cols]);
         }
+    }
+
+    /// The lines a pane `capacity` rows tall shows when looking `back` lines
+    /// above the live view.
+    ///
+    /// `back == 0` is the live screen, which is what a pane not browsing its
+    /// scrollback always shows; larger values walk up into
+    /// [`Self::scrollback`]. Treats the scrollback and the live grid as one
+    /// sequence, because that is what the user sees: scrolling up by one line
+    /// from the live view should reveal the line that most recently left it,
+    /// not jump to a separate buffer.
+    ///
+    /// `back` is not an error when it exceeds the scrollback — it pins to the
+    /// oldest line kept, so holding Page Up stops at the top rather than
+    /// emptying the pane.
+    fn visible_lines(&self, capacity: usize, back: usize) -> Vec<&[Cell]> {
+        let rows = self.view_rows(capacity, back);
+        (rows.start..rows.end())
+            .filter_map(|i| self.line(i))
+            .collect()
+    }
+
+    /// Which lines — numbered across the scrollback and the live grid as one
+    /// sequence — a view of `capacity` rows looking `back` lines up is showing.
+    ///
+    /// Split out from [`Self::visible_lines`] so that anything drawn *into*
+    /// that window can be positioned in the same coordinates the lines were:
+    /// the cursor sits at a live-grid row, and its position on screen is only
+    /// meaningful relative to whichever line ended up at the top.
+    fn view_rows(&self, capacity: usize, back: usize) -> scroll_window::Rows {
+        let total = self.scrollback.len().saturating_add(self.cells.len());
+        // `visible_count` counts an offset from the *top*; `back` counts from
+        // the bottom, so convert through the last-page position -- which is
+        // also the position `back == 0` must land on.
+        let live = total.saturating_sub(capacity);
+        scroll_window::visible_count(total, capacity, live.saturating_sub(back))
+    }
+
+    /// One line by its combined scrollback-then-live-grid index.
+    fn line(&self, index: usize) -> Option<&[Cell]> {
+        match self.scrollback.get(index) {
+            Some(line) => Some(line.as_slice()),
+            None => self
+                .cells
+                .get(index.saturating_sub(self.scrollback.len()))
+                .map(Vec::as_slice),
+        }
+    }
+
+    /// How far back this buffer can usefully be scrolled by a view `capacity`
+    /// rows tall: far enough to put the oldest line kept at the top, and no
+    /// further. Clamping here rather than letting the number grow without
+    /// bound is what makes scrolling back down responsive — an offset that ran
+    /// past the top would need those same keystrokes back before the view
+    /// moved at all.
+    fn max_scroll_back(&self, capacity: usize) -> usize {
+        let total = self.scrollback.len().saturating_add(self.cells.len());
+        total.saturating_sub(capacity)
     }
 
     /// Clear the entire screen.
@@ -790,7 +852,9 @@ struct Pane {
     copy_start: Option<(usize, usize)>,
     /// Copy mode selection end.
     copy_end: Option<(usize, usize)>,
-    /// Copy mode scroll position.
+    /// How many lines above the live view this pane is looking, while in copy
+    /// mode. Zero is the live screen. Only consulted when `copy_mode` is set,
+    /// so leaving copy mode returns to the live view.
     copy_scroll: usize,
 }
 
@@ -843,6 +907,52 @@ impl Pane {
         self.copy_mode = false;
         self.copy_start = None;
         self.copy_end = None;
+    }
+
+    /// How far back copy mode may look: far enough to bring the oldest line
+    /// kept to the top of the pane.
+    ///
+    /// Measured against the terminal's own row count rather than the pane's
+    /// drawn height, because the pane does not know its height here — key
+    /// handling runs nowhere near layout. The two agree whenever the grid
+    /// matches the pane, which is the state the app is meant to maintain; see
+    /// `known-issues.md` "tmux panes never resize their grid", which is the
+    /// reason they can currently disagree at all. While they do, a pane drawn
+    /// shorter than its grid stops that many lines short of the very top.
+    fn max_scroll_back(&self) -> usize {
+        self.buffer.max_scroll_back(self.buffer.rows)
+    }
+
+    /// Move the copy-mode view `lines` lines further back, stopping at the
+    /// oldest line kept.
+    fn scroll_back(&mut self, lines: usize) {
+        self.copy_scroll = self
+            .copy_scroll
+            .saturating_add(lines)
+            .min(self.max_scroll_back());
+    }
+
+    /// Move the copy-mode view `lines` lines towards the live screen, stopping
+    /// at it.
+    fn scroll_forward(&mut self, lines: usize) {
+        self.copy_scroll = self.copy_scroll.saturating_sub(lines);
+    }
+
+    /// Jump to the oldest line kept.
+    fn scroll_to_top(&mut self) {
+        self.copy_scroll = self.max_scroll_back();
+    }
+
+    /// Jump back to the live screen, without leaving copy mode — the selection
+    /// keys stay available, which is why this is not `exit_copy_mode`.
+    fn scroll_to_bottom(&mut self) {
+        self.copy_scroll = 0;
+    }
+
+    /// One screenful, for the page keys. At least one line, so a degenerate
+    /// zero-row grid still scrolls rather than silently ignoring the key.
+    fn page_lines(&self) -> usize {
+        self.buffer.rows.max(1)
     }
 }
 
@@ -1282,6 +1392,16 @@ impl Multiplexer {
         self.panes.iter_mut().find(|p| p.id == id)
     }
 
+    /// The pane keystrokes are addressed to: the active window's active pane.
+    ///
+    /// Resolved through the id rather than held as a reference, so that a pane
+    /// closing or a window switching between one key and the next cannot leave
+    /// a stale borrow behind.
+    fn active_pane_mut(&mut self) -> Option<&mut Pane> {
+        let pane_id = self.active_session()?.active_window()?.active_pane;
+        self.find_pane_mut(pane_id)
+    }
+
     fn set_status(&mut self, msg: &str) {
         self.status_message = msg.to_string();
         self.status_time = self.current_time;
@@ -1572,12 +1692,38 @@ impl Multiplexer {
             }
             // Copy mode
             '[' => {
-                if let Some(session) = self.active_session()
-                    && let Some(window) = session.active_window()
-                {
-                    let pane_id = window.active_pane;
-                    if let Some(pane) = self.find_pane_mut(pane_id) {
+                if let Some(pane) = self.active_pane_mut() {
+                    pane.enter_copy_mode();
+                }
+            }
+            // Leave copy mode, back to the live screen.
+            'q' => {
+                if let Some(pane) = self.active_pane_mut() {
+                    pane.exit_copy_mode();
+                }
+            }
+            // Scrollback navigation. The keys that move *backwards* enter copy
+            // mode on their own: asking to see earlier output is unambiguous,
+            // and requiring `[` first would make the first press of Page Up do
+            // nothing, which reads as the app being broken rather than modal.
+            // The forward keys do not, because scrolling towards a screen you
+            // are already looking at is a no-op worth ignoring.
+            'k' | 'j' | 'b' | 'f' | 'g' | 'G' => {
+                let enters = matches!(key, 'k' | 'b' | 'g');
+                if let Some(pane) = self.active_pane_mut() {
+                    if enters && !pane.copy_mode {
                         pane.enter_copy_mode();
+                    }
+                    if pane.copy_mode {
+                        let page = pane.page_lines();
+                        match key {
+                            'k' => pane.scroll_back(1),
+                            'j' => pane.scroll_forward(1),
+                            'b' => pane.scroll_back(page),
+                            'f' => pane.scroll_forward(page),
+                            'g' => pane.scroll_to_top(),
+                            _ => pane.scroll_to_bottom(),
+                        }
                     }
                 }
             }
@@ -1852,49 +1998,70 @@ impl Multiplexer {
                 family: FontFamily::Mono,
             });
 
-            for row_idx in 0..visible_rows.min(pane.buffer.rows) {
-                if let Some(row) = pane.buffer.cells.get(row_idx) {
-                    for col_idx in 0..visible_cols.min(row.len()) {
-                        if let Some(cell) = row.get(col_idx)
-                            && (cell.ch != ' ' || cell.bg != BASE)
-                        {
-                            let (fg, bg) = TerminalBuffer::effective_colors(cell);
-                            let cx = content_x + col_idx as f32 * cell_w;
-                            let cy = content_y + row_idx as f32 * cell_h;
+            // Which lines the pane is looking at: the tail of the live grid
+            // normally, or a window that many lines further back while the
+            // pane is browsing its scrollback. Capacity is capped at the
+            // buffer's own row count so a pane taller than its terminal draws
+            // blank space below the grid rather than pulling extra history up
+            // into it -- what is on screen must stay what the program wrote.
+            let capacity = visible_rows.min(pane.buffer.rows);
+            let back = if pane.copy_mode { pane.copy_scroll } else { 0 };
+            let window = pane.buffer.view_rows(capacity, back);
+            for (row_idx, row) in pane.buffer.visible_lines(capacity, back).iter().enumerate() {
+                for col_idx in 0..visible_cols.min(row.len()) {
+                    if let Some(cell) = row.get(col_idx)
+                        && (cell.ch != ' ' || cell.bg != BASE)
+                    {
+                        let (fg, bg) = TerminalBuffer::effective_colors(cell);
+                        let cx = content_x + col_idx as f32 * cell_w;
+                        let cy = content_y + row_idx as f32 * cell_h;
 
-                            // Cell background (only if non-default)
-                            if bg != BASE {
-                                cmds.push(RenderCommand::FillRect {
-                                    x: cx, y: cy,
-                                    width: cell_w,
-                                    height: cell_h,
-                                    color: bg,
-                                    corner_radii: CornerRadii::ZERO,
-                                });
-                            }
+                        // Cell background (only if non-default)
+                        if bg != BASE {
+                            cmds.push(RenderCommand::FillRect {
+                                x: cx, y: cy,
+                                width: cell_w,
+                                height: cell_h,
+                                color: bg,
+                                corner_radii: CornerRadii::ZERO,
+                            });
+                        }
 
-                            // Character
-                            if cell.ch != ' ' {
-                                cmds.push(RenderCommand::Text {
-                                    x: cx,
-                                    y: cy,
-                                    text: cell.ch.to_string(),
-                                    font_size: CELL_FONT_SIZE,
-                                    color: fg,
-                                    font_weight: if cell.bold { FontWeightHint::Bold } else { FontWeightHint::Regular },
-                                    max_width: Some(cell_w),
-                                    overflow: TextOverflow::Ellipsis,
-                                });
-                            }
+                        // Character
+                        if cell.ch != ' ' {
+                            cmds.push(RenderCommand::Text {
+                                x: cx,
+                                y: cy,
+                                text: cell.ch.to_string(),
+                                font_size: CELL_FONT_SIZE,
+                                color: fg,
+                                font_weight: if cell.bold { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                                max_width: Some(cell_w),
+                                overflow: TextOverflow::Ellipsis,
+                            });
                         }
                     }
                 }
             }
 
-            // Cursor
-            if pane.buffer.cursor_visible && active && !pane.copy_mode {
+            // Cursor. Placed by the same window the lines were, not at its raw
+            // grid row: the two agree only while the whole grid is on screen,
+            // and a pane too short for its grid would otherwise draw the
+            // cursor against whichever line happened to land at that height.
+            let cursor_line = pane
+                .buffer
+                .scrollback
+                .len()
+                .saturating_add(pane.buffer.cursor_row);
+            if pane.buffer.cursor_visible
+                && active
+                && !pane.copy_mode
+                && cursor_line >= window.start
+                && cursor_line < window.end()
+            {
                 let cx = content_x + pane.buffer.cursor_col as f32 * cell_w;
-                let cy = content_y + pane.buffer.cursor_row as f32 * cell_h;
+                let cy = content_y
+                    + (cursor_line.saturating_sub(window.start)) as f32 * cell_h;
                 cmds.push(RenderCommand::FillRect {
                     x: cx, y: cy,
                     width: cell_w,
@@ -1919,7 +2086,11 @@ impl Multiplexer {
                 cmds.push(RenderCommand::Text {
                     x: x + width - 86.0,
                     y: y + 2.0,
-                    text: "[COPY MODE]".into(),
+                    // How far back the view is, not just that copy mode is on:
+                    // scrolling through lines that repeat (a build log, a
+                    // `yes` loop) otherwise looks exactly like a key doing
+                    // nothing.
+                    text: format!("[COPY -{}]", pane.copy_scroll),
                     font_size: SMALL_TEXT,
                     color: CRUST,
                     font_weight: FontWeightHint::Bold,
@@ -2267,6 +2438,16 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // Panicking on bad data is the point of a test, so the defensive lints the
+    // project enables for production code are off here.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // --- Terminal Buffer ---
@@ -3067,5 +3248,235 @@ mod tests {
             let label_end = 12.0 + text::width(name, SMALL_TEXT);
             assert!(label_end <= tab_w - 8.0, "{name:?} overflows its tab");
         }
+    }
+
+    // --- Scrollback browsing (copy mode) ---
+
+    /// The text of one line, trailing blanks trimmed.
+    fn line_text(line: &[Cell]) -> String {
+        line.iter()
+            .map(|c| c.ch)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    fn shown(buf: &TerminalBuffer, capacity: usize, back: usize) -> Vec<String> {
+        buf.visible_lines(capacity, back)
+            .iter()
+            .map(|l| line_text(l))
+            .collect()
+    }
+
+    /// A `rows`-tall terminal that has had `n` numbered lines written through
+    /// it, so everything but the last screenful has been pushed to scrollback.
+    fn buffer_with_lines(rows: usize, n: usize) -> TerminalBuffer {
+        let mut buf = TerminalBuffer::new(20, rows);
+        for i in 0..n {
+            buf.write_str(&format!("line{i}\n"));
+        }
+        buf
+    }
+
+    fn pane_with_lines(rows: usize, n: usize) -> Pane {
+        let mut pane = Pane::new(PaneId(0), 20, rows);
+        pane.buffer = buffer_with_lines(rows, n);
+        pane
+    }
+
+    /// The default view — what every pane that is not browsing its scrollback
+    /// shows — has to be exactly the grid the program wrote, or the scrollback
+    /// window has silently changed what a terminal displays.
+    #[test]
+    fn a_pane_not_browsing_its_scrollback_shows_the_live_screen() {
+        let buf = buffer_with_lines(3, 5);
+        let live: Vec<String> = buf.cells.iter().map(|r| line_text(r)).collect();
+        assert_eq!(shown(&buf, 3, 0), live);
+    }
+
+    /// Scrolling back by one has to reveal the line that most recently left
+    /// the screen — the scrollback and the live grid are one sequence to the
+    /// user, not two buffers with a seam between them.
+    #[test]
+    fn scrolling_back_reveals_the_line_that_just_left_the_screen() {
+        let buf = buffer_with_lines(3, 5);
+        assert_eq!(shown(&buf, 3, 0), ["line3", "line4", ""]);
+        assert_eq!(shown(&buf, 3, 1), ["line2", "line3", "line4"]);
+        assert_eq!(shown(&buf, 3, 2), ["line1", "line2", "line3"]);
+        assert_eq!(shown(&buf, 3, 3), ["line0", "line1", "line2"]);
+    }
+
+    /// Past the oldest line kept there is nothing to show, and the answer is
+    /// the top of the history rather than a blank pane: holding the key down
+    /// must stop, not empty the screen.
+    #[test]
+    fn scrolling_back_past_the_oldest_line_pins_to_the_top() {
+        let buf = buffer_with_lines(3, 5);
+        for back in [3, 4, 50, usize::MAX] {
+            assert_eq!(
+                shown(&buf, 3, back),
+                ["line0", "line1", "line2"],
+                "back={back} should pin to the oldest line kept"
+            );
+        }
+    }
+
+    /// A pane shorter than its own grid draws the *bottom* of it. A terminal's
+    /// interesting end is the one the prompt is on; showing the top would hide
+    /// the line the user is typing.
+    #[test]
+    fn a_view_shorter_than_the_grid_shows_the_bottom_of_it() {
+        let buf = buffer_with_lines(3, 5);
+        assert_eq!(shown(&buf, 1, 0), [""]);
+        assert_eq!(shown(&buf, 2, 0), ["line4", ""]);
+    }
+
+    /// The clamp is the buffer's, not the caller's: the pane may ask for any
+    /// number of lines back, and gets no more than there are.
+    #[test]
+    fn a_pane_cannot_scroll_further_back_than_it_has_history() {
+        let mut pane = pane_with_lines(3, 5);
+        assert_eq!(pane.max_scroll_back(), 3);
+        pane.enter_copy_mode();
+        for _ in 0..20 {
+            pane.scroll_back(1);
+        }
+        assert_eq!(pane.copy_scroll, 3);
+        // And it comes straight back down: an offset that had run past the top
+        // would need those twenty presses back before the view moved at all.
+        pane.scroll_forward(1);
+        assert_eq!(pane.copy_scroll, 2);
+    }
+
+    /// Scrolling forward stops at the live screen rather than running into
+    /// negative territory, and the jump keys reach both ends.
+    #[test]
+    fn the_two_ends_of_the_history_are_both_reachable() {
+        let mut pane = pane_with_lines(3, 5);
+        pane.enter_copy_mode();
+        pane.scroll_to_top();
+        assert_eq!(pane.copy_scroll, 3);
+        pane.scroll_to_bottom();
+        assert_eq!(pane.copy_scroll, 0);
+        pane.scroll_forward(100);
+        assert_eq!(pane.copy_scroll, 0);
+        // Still in copy mode: the jump to the live screen is a move, not an
+        // exit, so the selection keys stay available.
+        assert!(pane.copy_mode);
+    }
+
+    /// Leaving copy mode returns to the live screen even though `copy_scroll`
+    /// is left where it was — the view is only consulted while browsing, which
+    /// is what makes leaving cheap and unambiguous.
+    #[test]
+    fn leaving_copy_mode_returns_to_the_live_screen() {
+        let mut pane = pane_with_lines(3, 5);
+        pane.enter_copy_mode();
+        pane.scroll_back(2);
+        pane.exit_copy_mode();
+        let back = if pane.copy_mode { pane.copy_scroll } else { 0 };
+        assert_eq!(shown(&pane.buffer, 3, back), ["line3", "line4", ""]);
+    }
+
+    /// A degenerate grid must not swallow the key: a zero-row buffer would
+    /// otherwise page by zero lines forever.
+    #[test]
+    fn a_page_is_never_zero_lines() {
+        let pane = Pane::new(PaneId(0), 20, 0);
+        assert_eq!(pane.page_lines(), 1);
+    }
+
+    /// The keys are the feature. Asking to see earlier output enters copy mode
+    /// on its own, so the first press of the key does something visible rather
+    /// than requiring `[` that the user has no reason to know about.
+    #[test]
+    fn the_backwards_keys_enter_copy_mode_by_themselves() {
+        for key in ['k', 'b', 'g'] {
+            let mut app = Multiplexer::new();
+            for pane in &mut app.panes {
+                pane.buffer = buffer_with_lines(3, 10);
+            }
+            app.process_prefix_key(key);
+            let pane = app.active_pane_mut().expect("an active pane");
+            assert!(pane.copy_mode, "{key:?} should have entered copy mode");
+            assert!(pane.copy_scroll > 0, "{key:?} should have moved the view");
+        }
+    }
+
+    /// ...and the forward keys do not, because scrolling towards a screen you
+    /// are already looking at is a no-op worth ignoring rather than a reason
+    /// to change modes under the user.
+    #[test]
+    fn the_forwards_keys_do_not_enter_copy_mode() {
+        for key in ['j', 'f', 'G'] {
+            let mut app = Multiplexer::new();
+            app.process_prefix_key(key);
+            let pane = app.active_pane_mut().expect("an active pane");
+            assert!(!pane.copy_mode, "{key:?} should not have entered copy mode");
+        }
+    }
+
+    /// A page key moves by a screenful, and the line keys by one line — the
+    /// distinction the whole binding exists for.
+    #[test]
+    fn the_page_keys_move_a_screenful_and_the_line_keys_one_line() {
+        let mut app = Multiplexer::new();
+        for pane in &mut app.panes {
+            pane.buffer = buffer_with_lines(3, 30);
+        }
+        app.process_prefix_key('k');
+        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 1);
+        app.process_prefix_key('b');
+        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 4);
+        app.process_prefix_key('f');
+        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 1);
+        app.process_prefix_key('j');
+        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 0);
+        app.process_prefix_key('g');
+        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 28);
+        app.process_prefix_key('G');
+        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 0);
+        app.process_prefix_key('q');
+        assert!(!app.active_pane_mut().expect("pane").copy_mode);
+    }
+
+    /// The end-to-end claim: scrolling back actually changes what is drawn.
+    /// Every test above this one is about numbers; this one is about pixels,
+    /// and is the one that would have caught the original bug — a `copy_scroll`
+    /// that nothing rendered ever read.
+    #[test]
+    fn scrolling_back_changes_what_the_pane_draws() {
+        let mut app = Multiplexer::new();
+        for pane in &mut app.panes {
+            pane.buffer = buffer_with_lines(24, 200);
+        }
+        let live = drawn_text(&app);
+        assert!(live.contains("line199"), "the live screen shows the newest line");
+        assert!(!live.contains("line100"), "and not one from deep in the history");
+
+        app.process_prefix_key('g');
+        let top = drawn_text(&app);
+        assert_ne!(top, live, "scrolling to the top drew the same thing");
+        assert!(
+            !top.contains("line199"),
+            "the newest line is still on screen at the top of the history"
+        );
+
+        app.process_prefix_key('G');
+        assert_eq!(drawn_text(&app), live, "returning to the live screen differs from it");
+    }
+
+    /// Every glyph the render pass emits at cell size, concatenated. Cells are
+    /// drawn one character at a time, so this reassembles the screen as text.
+    fn drawn_text(app: &Multiplexer) -> String {
+        app.render()
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    text, font_size, ..
+                } if (font_size - CELL_FONT_SIZE).abs() < 0.01 => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }

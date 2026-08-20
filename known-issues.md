@@ -42080,3 +42080,87 @@ in eleven of twelve entries passed both. They are now
 the calendar popup actually depends on, that month *n+1* begins exactly
 `days_in_month(n)` days after month *n* — and
 `every_month_renders_its_own_three_letter_name`.
+
+---
+
+## Four dead scroll offsets, one shared root cause — fixed 2026-08-18 (lane C)
+
+**In short:** four different lists across the toolkit and three apps had a
+scroll position that *nothing that draws ever read*. The field was declared,
+initialised to zero, and then never mentioned again — so the list drew from the
+top always, and everything past the bottom edge was unreachable by any means
+the app offered.
+
+The dead-field signature is cheap to test for and worth reusing: **grep the
+field name and count the hits.** Two — a declaration and an initialiser — means
+nothing reads it. That is how all four were found, after the first turned up by
+accident.
+
+### The instances
+
+| Where | Symptom | Fix |
+|---|---|---|
+| `gui/toolkit/src/listview.rs` — `ListViewport::visible_range` | Not a dead field but the same class: the method re-derived the window itself instead of using `scroll_window`, and lacked its last-page clamp. A list that *shrank* between the call that set `first_visible` and the render that asked what to draw returned an **empty** range — a blank panel, not the last page. | `visible_range` now literally calls `scroll_window::visible_count`. The duplicate implementation is gone, so the two cannot drift again — that is a property of the code now, not of a test. |
+| `apps/diskanalyzer` — `DiskAnalyzerUI::scroll_offset` | `f32`, never read. The list view cut off at the last row that fit and offered no way to reach the rest. | Changed to `usize` (a row index — the list draws whole rows, so a pixel offset can only express positions the renderer rounds away), given `scroll_list_by`/`scroll_list_to_top`, and the row loop now windows through `scroll_window::visible`. |
+| `apps/kanban` — `KanbanApp::scroll_offset` | `f32`, never read. Worse than the others: the card loop was **unbounded**, so a column with more cards than fit drew *past the bottom of the window*, over whatever was beneath it. | Changed to `usize`; the column now windows through `scroll_window::visible_variable` and says how many cards it is hiding (`+N more`). See design-decisions.md §471 for the one-offset-for-all-columns choice. |
+| `apps/tmux` — `TerminalBuffer::scroll_offset` **and** `Pane::copy_scroll` | Two fields for one concept, both dead. `copy_scroll` was only ever *reset* to 0 by `enter_copy_mode`; nothing incremented it and nothing rendered read it. The module doc's advertised "copy mode for scrollback browsing" drew a `[COPY MODE]` badge and nothing else — the scrollback was entirely unreachable. | `TerminalBuffer::scroll_offset` **deleted**: how far back a *view* is looking is a property of the view, not of the buffer, and two panes over one buffer would have to disagree about it. `copy_scroll` survives, and is now read by `TerminalBuffer::visible_lines`/`view_rows` and written by `Pane::scroll_back`/`scroll_forward`/`scroll_to_top`/`scroll_to_bottom`, bound to `k`/`j`/`b`/`f`/`g`/`G` (and `q` to leave) in `process_prefix_key`. |
+
+### What the reintroduction checks confirmed
+
+Each fix was verified by restoring the defect and re-running:
+
+- `listview` — exactly 3 of the new tests failed;
+  `every_sequence_of_moves_leaves_the_selection_visible` correctly did **not**,
+  since `reveal` maintains the clamp under mutating calls and the bug only
+  showed when the list changed behind the viewport's back.
+- `diskanalyzer` — all 4 new tests failed.
+- `kanban` — 3 of 5 failed. The other two are aimed elsewhere (the
+  measure/draw agreement, and the shrunk-column clamp, which lives in
+  `scroll_window` and has its own tests there).
+- `tmux` — `scrolling_back_changes_what_the_pane_draws` failed, which is the
+  only one of the eleven new tests that goes through `render()`. The other ten
+  are about numbers; this one is about pixels, and it is the one that would
+  have caught the original bug.
+
+### Left over
+
+`gui/desktop`'s touchpad-gesture, Bluetooth and window-rules panels are now
+*correct* for any offset a caller sets, but still have **no input wired to set
+one** — tracked separately as
+`C-TOUCHPAD-GESTURE-LIST-DRAWS-PAST-THE-PANEL`. The panels render from `&self`
+and cannot write a position back, so this needs settings-shell plumbing rather
+than a change in the panels.
+
+---
+
+## `C-TMUX-PANES-NEVER-RESIZE-THEIR-GRID`
+
+**In short:** every tmux pane's terminal grid is a fixed 80x24 no matter how
+big or small the pane is drawn. Splitting a window four ways does not tell the
+four terminals they are now a quarter the size, so a program running in one
+still wraps its output at 80 columns and still thinks it has 24 rows.
+
+`TerminalBuffer::resize(cols, rows)` exists and is correct, but **its only
+callers are tests**. `Multiplexer::resize_pane` adjusts the *layout*
+proportions; nothing converts a pane's pixel rectangle into a cell count and
+pushes it into the buffer.
+
+**Where:** `apps/tmux/src/main.rs` — `TerminalBuffer::resize` (~line 223),
+`Multiplexer::resize_pane` (~line 1600), and the layout walk in
+`Multiplexer::render` that computes each pane's `(x, y, w, h)` bounds.
+
+**The proper fix:** the layout pass has the rectangles and the cell metrics
+(`char_width()`, `char_height()`), so it can compute `(cols, rows)` per pane.
+It runs inside `render(&self)`, which cannot write, so the resize belongs in a
+`&mut self` pass that runs before rendering — a `relayout()` called when the
+window size or the split layout changes, driving `TerminalBuffer::resize`. In a
+real terminal this would also be where `TIOCSWINSZ`/`SIGWINCH` equivalents go
+out to the child process.
+
+**What it currently costs, beyond the wrapping:** the scrollback clamp
+(`Pane::max_scroll_back`) measures against `buffer.rows` because key handling
+runs nowhere near layout and cannot know the drawn height. The two agree
+whenever the grid matches the pane — the state this issue is about restoring —
+and while they do not, a pane drawn *shorter* than its grid stops that many
+lines short of the very top of its scrollback. Fixing the resize fixes that
+clamp for free.

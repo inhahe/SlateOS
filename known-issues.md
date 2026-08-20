@@ -43720,3 +43720,39 @@ emitted clip command rather than recomputed.
 gate was already running and editing the crates would have invalidated it —
 the same reason `C-TOUCHPAD-GESTURE-LIST-DRAWS-PAST-THE-PANEL` waited a day.
 It is the next thing lane C picks up.
+
+### The same sweep, third instance: credmanager's list header selects row zero
+
+`apps/credmanager/src/main.rs` `handle_list_click` (`:5130`) has no guard of
+its own. `handle_mouse` sends it every left click in the entry-list column that
+is not in the toolbar (`:5024`), so the 32-px "N entries" header strip reaches
+it, and:
+
+```rust
+let y_start = TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT;   // 48 + 32
+let row_idx = ((my - y_start + state.list_scroll) / ROW_HEIGHT) as usize;
+```
+
+For `my` inside that strip the numerator is negative — between −32 and 0 over a
+`ROW_HEIGHT` of 52 — and a negative `f32` cast to `usize` **saturates to 0**
+rather than wrapping. So clicking the header selects the first entry and opens
+its detail panel. With the list scrolled it picks some other wrong row instead
+of none.
+
+Below the list it is safe by luck rather than by bound: `filtered_ids.get(row_idx)`
+returns `None` past the end, so an over-large index selects nothing. The fix is
+the same helper pair as the other two, which turns both the top and the bottom
+into an explicit rejection rather than one accident and one saturation.
+
+Lower severity than the process lists — the action is a selection, not a kill —
+but the same root cause, and the constant it gets wrong (`LIST_HEADER_HEIGHT`)
+is one that was *already* extracted to stop exactly this. Extracting the
+constant fixed the two spellings and left the missing bound.
+
+### Checked and clear
+
+`ebook` (library `list_top` is `TOOLBAR_HEIGHT`, matching the hit test's
+subtraction), `partmanager` (`y >= top && y < bottom` — bounded at both ends),
+`netscan` and `remotedesktop`'s profile sidebar (both already carry regression
+tests for an earlier mis-selection). Recorded so the next sweep does not
+re-derive them.

@@ -23,6 +23,7 @@ use std::collections::HashMap;
 
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 
@@ -55,7 +56,52 @@ const OVERLAY0: Color = Color::from_hex(0x6C7086);
 const WINDOW_WIDTH: f32 = 1100.0;
 const WINDOW_HEIGHT: f32 = 750.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
+
+/// Height reserved under the sidebar list for its "N more" line.
+///
+/// Reserved unconditionally, so how many rows fit does not depend on whether
+/// any are being hidden — a budget that changed with its own result could fit
+/// one more podcast, discover the line was needed, and drop it again.
+const SIDEBAR_MORE_HEIGHT: f32 = 16.0;
 const NOW_PLAYING_HEIGHT: f32 = 80.0;
+
+/// One row of the sidebar's scrolling list.
+///
+/// The sidebar is built as a flat row list rather than drawn straight down the
+/// column, because it has to scroll and a scroll needs to know what the rows
+/// are. It has to scroll because its *fixed* content alone — six library
+/// entries and twelve categories, 732px with the headers and dividers — is
+/// taller than a 600px window with no subscriptions in it at all. Nothing can
+/// be pinned in a column that cannot fit its own fixed parts, so everything
+/// below the title scrolls together and the title is the only chrome.
+enum SidebarRow {
+    /// A section heading: SUBSCRIPTIONS, CATEGORIES.
+    Header(&'static str),
+    /// The rule between sections, with the air above and below it.
+    Divider,
+    /// A selectable entry: a library view, a subscription, or a category.
+    Item {
+        label: String,
+        accent: Color,
+        selected: bool,
+    },
+}
+
+impl SidebarRow {
+    const ITEM_H: f32 = 32.0;
+    const HEADER_H: f32 = 24.0;
+    /// 12px of air, the 1px rule, 12px of air.
+    const DIVIDER_H: f32 = 25.0;
+
+    fn height(&self) -> f32 {
+        match self {
+            Self::Header(_) => Self::HEADER_H,
+            Self::Divider => Self::DIVIDER_H,
+            Self::Item { .. } => Self::ITEM_H,
+        }
+    }
+}
+
 const HEADER_HEIGHT: f32 = 48.0;
 const EPISODE_ROW_HEIGHT: f32 = 72.0;
 const SEARCH_BAR_HEIGHT: f32 = 40.0;
@@ -302,7 +348,10 @@ impl PlaybackSpeed {
         for i in 0..all.len() {
             if let Some(s) = all.get(i)
                 && (s.0 - self.0).abs() < 0.001 {
-                    let next_idx = (i + 1) % all.len();
+                    // `all` is non-empty inside this loop by construction —
+                    // we are iterating it — so the zero case is unreachable
+                    // and index 0 is the right answer for it anyway.
+                    let next_idx = i.saturating_add(1).checked_rem(all.len()).unwrap_or(0);
                     if let Some(n) = all.get(next_idx) {
                         return *n;
                     }
@@ -666,7 +715,7 @@ pub fn parse_opml(xml: &str) -> Vec<OpmlOutline> {
 fn extract_attr(tag: &str, attr_name: &str) -> Option<String> {
     let search = format!("{}=\"", attr_name);
     let start = tag.find(&search)?;
-    let val_start = start + search.len();
+    let val_start = start.saturating_add(search.len());
     let rest = tag.get(val_start..)?;
     let end = rest.find('"')?;
     rest.get(..end).map(|s| s.to_string())
@@ -835,7 +884,12 @@ pub struct PodcastApp {
     pub selected_episode_id: Option<u64>,
     pub search_query: String,
     pub search_results: Vec<(u64, u64)>, // (podcast_id, episode_id)
-    pub sidebar_scroll: f32,
+    /// Index of the first subscription drawn in the sidebar.
+    ///
+    /// A row index rather than a pixel offset: the sidebar draws whole items,
+    /// so a pixel offset could only express positions the renderer then rounds
+    /// away. A value past the end is not an error, and shows the last page.
+    pub sidebar_scroll: usize,
     pub episode_list_scroll: f32,
 
     // Disk space tracking
@@ -869,7 +923,7 @@ impl PodcastApp {
             selected_episode_id: None,
             search_query: String::new(),
             search_results: Vec::new(),
-            sidebar_scroll: 0.0,
+            sidebar_scroll: 0,
             episode_list_scroll: 0.0,
             total_disk_bytes: 10_000_000_000,
             used_disk_bytes: 0,
@@ -943,6 +997,21 @@ impl PodcastApp {
     /// Find a podcast by ID (mutable).
     pub fn find_podcast_mut(&mut self, podcast_id: u64) -> Option<&mut Podcast> {
         self.podcasts.iter_mut().find(|p| p.id == podcast_id)
+    }
+
+    /// Move the sidebar's subscription list `delta` items, negative for up.
+    ///
+    /// Not clamped at the bottom here: how far the list can scroll depends on
+    /// the window height and on how many categories are drawn below it,
+    /// neither of which this method knows. The render clamps against what it
+    /// is actually drawing, so an offset past the end shows the last page.
+    pub fn scroll_sidebar_by(&mut self, delta: isize) {
+        self.sidebar_scroll = scroll_window::shift(self.sidebar_scroll, delta);
+    }
+
+    /// Back to the first subscription.
+    pub fn scroll_sidebar_to_top(&mut self) {
+        self.sidebar_scroll = 0;
     }
 
     /// Set auto-download for a podcast.
@@ -1901,14 +1970,13 @@ impl PodcastApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let mut item_y: f32 = 12.0;
-        let item_h: f32 = 32.0;
         let indent: f32 = 16.0;
 
-        // Title.
+        // Title. This is chrome, not content: it stays put while the list
+        // below it scrolls.
         cmds.push(RenderCommand::Text {
             x: indent,
-            y: item_y,
+            y: 12.0,
             text: "Podcasts".to_string(),
             color: TEXT,
             font_size: 18.0,
@@ -1916,119 +1984,155 @@ impl PodcastApp {
             max_width: Some(SIDEBAR_WIDTH - indent * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
-        item_y += 36.0;
+        let list_y: f32 = 48.0;
 
-        // Search item.
-        let search_selected = matches!(self.main_view, MainView::Search);
-        self.render_sidebar_item(cmds, indent, item_y, "Search", BLUE, search_selected);
-        item_y += item_h;
+        // The now-playing bar is drawn *over* the bottom of the sidebar, so
+        // the sidebar's usable height ends where that bar begins, not at the
+        // window edge.
+        let bottom = if self.player_state == PlayerState::Stopped {
+            self.height
+        } else {
+            self.height - NOW_PLAYING_HEIGHT
+        };
 
-        // All Episodes.
-        let all_selected = matches!(self.sidebar_selection, SidebarSelection::AllEpisodes)
-            && matches!(self.main_view, MainView::EpisodeList);
-        self.render_sidebar_item(cmds, indent, item_y, "All Episodes", LAVENDER, all_selected);
-        item_y += item_h;
+        let rows = self.sidebar_rows();
+        let heights: Vec<f32> = rows.iter().map(SidebarRow::height).collect();
+        let window = scroll_window::visible_variable(
+            &heights,
+            bottom - list_y - SIDEBAR_MORE_HEIGHT,
+            self.sidebar_scroll,
+        );
 
-        // Queue.
+        let mut item_y = list_y;
+        for row in rows.get(window.start..window.end()).unwrap_or_default() {
+            match row {
+                SidebarRow::Header(text) => cmds.push(RenderCommand::Text {
+                    x: indent,
+                    y: item_y,
+                    text: (*text).to_string(),
+                    color: OVERLAY0,
+                    font_size: 11.0,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(SIDEBAR_WIDTH - indent * 2.0),
+                    overflow: TextOverflow::Ellipsis,
+                }),
+                SidebarRow::Divider => cmds.push(RenderCommand::FillRect {
+                    x: indent,
+                    y: item_y + 12.0,
+                    width: SIDEBAR_WIDTH - indent * 2.0,
+                    height: 1.0,
+                    color: SURFACE0,
+                    corner_radii: CornerRadii::ZERO,
+                }),
+                SidebarRow::Item {
+                    label,
+                    accent,
+                    selected,
+                } => self.render_sidebar_item(cmds, indent, item_y, label, *accent, *selected),
+            }
+            item_y += row.height();
+        }
+
+        // A sidebar hiding rows says how many. The space is reserved above
+        // whether or not the line is drawn, so how many fit does not depend on
+        // whether any are hidden.
+        let hidden = rows.len().saturating_sub(window.count);
+        if hidden > 0 {
+            cmds.push(RenderCommand::Text {
+                x: indent,
+                y: item_y,
+                text: format!("{hidden} more"),
+                color: OVERLAY0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(SIDEBAR_WIDTH - indent * 2.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
+
+    /// The sidebar's scrolling content, in order, as one flat row list.
+    ///
+    /// Built in one place so that the scroll window and the drawing loop
+    /// measure the same rows: a list whose height is computed by one function
+    /// and drawn by another drifts the moment either gains a row.
+    fn sidebar_rows(&self) -> Vec<SidebarRow> {
+        let item = |label: &str, accent: Color, selected: bool| SidebarRow::Item {
+            label: label.to_string(),
+            accent,
+            selected,
+        };
+
         let queue_count = self.play_queue.len();
         let queue_label = if queue_count > 0 {
-            format!("Queue ({})", queue_count)
+            format!("Queue ({queue_count})")
         } else {
             "Queue".to_string()
         };
-        let queue_selected = matches!(self.sidebar_selection, SidebarSelection::Queue);
-        self.render_sidebar_item(cmds, indent, item_y, &queue_label, GREEN, queue_selected);
-        item_y += item_h;
 
-        // Downloads.
-        let dl_selected = matches!(self.sidebar_selection, SidebarSelection::Downloads);
-        self.render_sidebar_item(cmds, indent, item_y, "Downloads", PEACH, dl_selected);
-        item_y += item_h;
+        let mut rows = vec![
+            item(
+                "Search",
+                BLUE,
+                matches!(self.main_view, MainView::Search),
+            ),
+            item(
+                "All Episodes",
+                LAVENDER,
+                matches!(self.sidebar_selection, SidebarSelection::AllEpisodes)
+                    && matches!(self.main_view, MainView::EpisodeList),
+            ),
+            item(
+                &queue_label,
+                GREEN,
+                matches!(self.sidebar_selection, SidebarSelection::Queue),
+            ),
+            item(
+                "Downloads",
+                PEACH,
+                matches!(self.sidebar_selection, SidebarSelection::Downloads),
+            ),
+            item(
+                "History",
+                MAUVE,
+                matches!(self.sidebar_selection, SidebarSelection::History),
+            ),
+            item(
+                "Statistics",
+                TEAL,
+                matches!(self.sidebar_selection, SidebarSelection::Statistics),
+            ),
+            SidebarRow::Divider,
+            SidebarRow::Header("SUBSCRIPTIONS"),
+        ];
 
-        // History.
-        let hist_selected = matches!(self.sidebar_selection, SidebarSelection::History);
-        self.render_sidebar_item(cmds, indent, item_y, "History", MAUVE, hist_selected);
-        item_y += item_h;
-
-        // Statistics.
-        let stats_selected = matches!(self.sidebar_selection, SidebarSelection::Statistics);
-        self.render_sidebar_item(cmds, indent, item_y, "Statistics", TEAL, stats_selected);
-        item_y += item_h + 8.0;
-
-        // Divider.
-        cmds.push(RenderCommand::FillRect {
-            x: indent,
-            y: item_y,
-            width: SIDEBAR_WIDTH - indent * 2.0,
-            height: 1.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
-        item_y += 12.0;
-
-        // Subscriptions header.
-        cmds.push(RenderCommand::Text {
-            x: indent,
-            y: item_y,
-            text: "SUBSCRIPTIONS".to_string(),
-            color: OVERLAY0,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(SIDEBAR_WIDTH - indent * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        item_y += 24.0;
-
-        // Podcast list.
         for podcast in &self.podcasts {
-            let selected = matches!(&self.sidebar_selection, SidebarSelection::Podcast(id) if *id == podcast.id);
             let unplayed = podcast.unplayed_count();
             let label = if unplayed > 0 {
                 format!("{} ({})", podcast.title, unplayed)
             } else {
                 podcast.title.clone()
             };
-            let accent = podcast
-                .categories
-                .first()
-                .map(|c| c.color())
-                .unwrap_or(BLUE);
-            self.render_sidebar_item(cmds, indent, item_y, &label, accent, selected);
-            item_y += item_h;
+            rows.push(SidebarRow::Item {
+                label,
+                accent: podcast.categories.first().map_or(BLUE, |c| c.color()),
+                selected: matches!(&self.sidebar_selection, SidebarSelection::Podcast(id) if *id == podcast.id),
+            });
         }
 
-        item_y += 12.0;
-
-        // Divider.
-        cmds.push(RenderCommand::FillRect {
-            x: indent,
-            y: item_y,
-            width: SIDEBAR_WIDTH - indent * 2.0,
-            height: 1.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
-        item_y += 12.0;
-
-        // Categories header.
-        cmds.push(RenderCommand::Text {
-            x: indent,
-            y: item_y,
-            text: "CATEGORIES".to_string(),
-            color: OVERLAY0,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(SIDEBAR_WIDTH - indent * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        item_y += 24.0;
-
+        rows.push(SidebarRow::Divider);
+        rows.push(SidebarRow::Header("CATEGORIES"));
         for cat in Category::ALL {
-            let selected = matches!(&self.sidebar_selection, SidebarSelection::Category(c) if *c == *cat);
-            self.render_sidebar_item(cmds, indent, item_y, cat.name(), cat.color(), selected);
-            item_y += item_h;
+            rows.push(SidebarRow::Item {
+                label: cat.name().to_string(),
+                accent: cat.color(),
+                selected: matches!(&self.sidebar_selection, SidebarSelection::Category(c) if *c == *cat),
+            });
         }
+
+        rows
     }
+
 
     fn render_sidebar_item(
         &self,
@@ -2668,7 +2772,7 @@ impl PodcastApp {
             cmds.push(RenderCommand::Text {
                 x: content_x + 16.0,
                 y: row_y + 10.0,
-                text: format!("{}.", idx + 1),
+                text: format!("{}.", idx.saturating_add(1)),
                 color: OVERLAY0,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
@@ -5053,4 +5157,191 @@ mod tests {
         assert_eq!(extract_attr(tag, "xmlUrl"), Some("https://example.com".to_string()));
         assert_eq!(extract_attr(tag, "missing"), None);
     }
+    // --- sidebar subscription list ---
+
+    /// An app with `n` subscriptions on top of the sample data, titled so a
+    /// failure message reads as a run of names.
+    fn app_with_subscriptions(n: usize) -> PodcastApp {
+        let mut app = PodcastApp::new(800.0, 600.0);
+        app.podcasts.clear();
+        for i in 0..n {
+            app.subscribe(&format!("P{i:03}"), "", "", "rss://x", "", vec![]);
+        }
+        app
+    }
+
+    /// Text in the sidebar column sits at one of exactly two x positions: the
+    /// indent itself for section headers and the "N more" line, and the indent
+    /// plus 8 for a selectable item, which leaves room for the accent bar
+    /// `render_sidebar_item` draws to its left. Matching only the first is how
+    /// a helper silently reports that the sidebar drew nothing.
+    fn is_sidebar_text_x(x: f32) -> bool {
+        (x - 16.0).abs() < 0.01 || (x - 24.0).abs() < 0.01
+    }
+
+    /// Just the sidebar's own commands.
+    ///
+    /// Filtering a full `render()` by x is not enough to isolate the sidebar:
+    /// the now-playing bar spans the whole window from x=0, so its labels land
+    /// in the sidebar's column too and read as rows drawn past the bottom.
+    fn sidebar_commands(app: &PodcastApp) -> Vec<RenderCommand> {
+        let mut cmds = Vec::new();
+        app.render_sidebar(&mut cmds);
+        cmds
+    }
+
+    /// Every sidebar label the render actually drew.
+    fn sidebar_labels(app: &PodcastApp) -> Vec<String> {
+        sidebar_commands(app)
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { x, text, .. } if is_sidebar_text_x(x) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn drawn_subscriptions(app: &PodcastApp) -> Vec<String> {
+        sidebar_labels(app)
+            .into_iter()
+            .filter(|t| t.starts_with('P') && t.len() == 4)
+            .collect()
+    }
+
+    /// The bug: the sidebar ran off the bottom of the window and was cut by
+    /// the window edge rather than by a scroll position, so everything below
+    /// the fold — including the whole CATEGORIES section — was unreachable.
+    #[test]
+    fn the_sidebar_stops_at_the_last_subscription_that_fits() {
+        let app = app_with_subscriptions(200);
+        let drawn = drawn_subscriptions(&app);
+        assert!(!drawn.is_empty(), "the sidebar drew no subscriptions at all");
+        assert!(
+            drawn.len() < 200,
+            "the sidebar drew all 200 subscriptions into a 600px window"
+        );
+        assert_eq!(drawn.first().map(String::as_str), Some("P000"));
+    }
+
+    /// The categories sit below the subscriptions, so a long subscription list
+    /// used to bury them past the window edge for good. They are now merely
+    /// below the fold, which is a place you can scroll to.
+    #[test]
+    fn every_category_is_reachable_past_a_long_subscription_list() {
+        let mut app = app_with_subscriptions(200);
+        app.scroll_sidebar_by(1_000);
+        let labels = sidebar_labels(&app);
+        assert!(
+            labels.iter().any(|t| t == "CATEGORIES"),
+            "the CATEGORIES header is unreachable"
+        );
+        for cat in Category::ALL {
+            assert!(
+                labels.iter().any(|t| t == cat.name()),
+                "category {:?} is unreachable",
+                cat.name()
+            );
+        }
+    }
+
+    /// Nothing draws below the bottom of the sidebar — at any scroll position,
+    /// and with the now-playing bar covering the bottom 80px or not.
+    #[test]
+    fn no_sidebar_row_is_drawn_past_the_bottom_of_the_sidebar() {
+        for playing in [false, true] {
+            for offset in [0, 5, 50, 1_000] {
+                let mut app = app_with_subscriptions(200);
+                if playing {
+                    app.player_state = PlayerState::Playing;
+                }
+                app.scroll_sidebar_by(offset);
+                let bottom = if playing {
+                    app.height - NOW_PLAYING_HEIGHT
+                } else {
+                    app.height
+                };
+                for cmd in sidebar_commands(&app) {
+                    if let RenderCommand::Text { x, y, text, .. } = cmd
+                        && is_sidebar_text_x(x)
+                    {
+                        assert!(
+                            y <= bottom,
+                            "sidebar row {text:?} drawn at y={y}, past the sidebar bottom \
+                             {bottom} (playing={playing}, offset={offset})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// ...and the rows past the fold are reachable, which is the fix.
+    #[test]
+    fn scrolling_the_sidebar_reaches_the_subscriptions_that_did_not_fit() {
+        let mut app = app_with_subscriptions(200);
+        assert!(
+            !drawn_subscriptions(&app).contains(&String::from("P199")),
+            "the last subscription should start out below the fold"
+        );
+        app.scroll_sidebar_by(200);
+        assert!(
+            drawn_subscriptions(&app).contains(&String::from("P199")),
+            "the last subscription is still unreachable after scrolling to the end"
+        );
+    }
+
+    /// An offset past the end means the last page, not a blank sidebar —
+    /// unsubscribing from most of a long list is exactly how that happens.
+    #[test]
+    fn a_sidebar_that_shrinks_under_a_stale_offset_shows_its_last_page() {
+        let mut app = app_with_subscriptions(200);
+        app.scroll_sidebar_by(199);
+        let ids: Vec<u64> = app.podcasts.iter().skip(6).map(|p| p.id).collect();
+        for id in ids {
+            app.unsubscribe(id);
+        }
+        let labels = sidebar_labels(&app);
+        assert!(!labels.is_empty(), "the sidebar must not go blank");
+        // The last page ends on the last row, which is the last category.
+        let last = Category::ALL.last().map(|c| c.name());
+        assert_eq!(labels.iter().rev().find(|t| Some(t.as_str()) == last), last.map(String::from).as_ref());
+    }
+
+    /// Scrolling up from the top stays at the top rather than wrapping.
+    #[test]
+    fn scrolling_the_sidebar_up_from_the_top_stays_at_the_top() {
+        let mut app = app_with_subscriptions(200);
+        app.scroll_sidebar_by(-10);
+        assert_eq!(app.sidebar_scroll, 0);
+        app.scroll_sidebar_by(5);
+        app.scroll_sidebar_to_top();
+        assert_eq!(app.sidebar_scroll, 0);
+    }
+
+    /// A sidebar hiding rows says how many.
+    #[test]
+    fn a_sidebar_that_is_hiding_rows_says_so() {
+        let app = app_with_subscriptions(200);
+        let shown = sidebar_labels(&app)
+            .iter()
+            .filter(|t| !t.ends_with(" more"))
+            .count();
+        // 6 library entries + 2 dividers + 2 headers + 200 subscriptions + the
+        // categories. Only the dividers are not labelled, so the labels drawn
+        // are the visible rows less those.
+        assert!(
+            sidebar_labels(&app).iter().any(|t| t.ends_with(" more")),
+            "a sidebar showing {shown} of 220-odd rows should say so"
+        );
+
+        // ...and one with room for everything says nothing. 600px cannot hold
+        // even the fixed rows, so this needs a window that can.
+        let mut app = PodcastApp::new(800.0, 1200.0);
+        app.podcasts.clear();
+        assert!(
+            !sidebar_labels(&app).iter().any(|t| t.ends_with(" more")),
+            "a complete sidebar should not claim to be hiding rows"
+        );
+    }
+
 }

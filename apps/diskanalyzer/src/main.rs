@@ -1049,11 +1049,7 @@ impl DiskAnalyzerUI {
     /// instead would mean a scroll issued while a scan is still adding rows got
     /// pinned to a list that has since grown.
     pub fn scroll_list_by(&mut self, delta: isize) {
-        self.scroll_offset = if delta >= 0 {
-            self.scroll_offset.saturating_add(delta.unsigned_abs())
-        } else {
-            self.scroll_offset.saturating_sub(delta.unsigned_abs())
-        };
+        self.scroll_offset = scroll_window::shift(self.scroll_offset, delta);
     }
 
     /// Scrolls the list view back to the first row.

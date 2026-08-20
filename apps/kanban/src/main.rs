@@ -1405,7 +1405,7 @@ const COLUMN_FOOTER_H: f32 = 14.0;
 /// A fixed count rather than "one screenful": cards are variable height, so a
 /// screenful differs per column, and a key that moved each column by a
 /// different amount would tear a board that scrolls as one.
-const BOARD_PAGE_STEP: usize = 5;
+const BOARD_PAGE_STEP: isize = 5;
 
 /// The assignee/due-date pieces of a card's metadata line, in display order.
 ///
@@ -2736,15 +2736,16 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         // drawing, so an offset past the end shows the last page rather than a
         // blank column.
         Key::Up | Key::Down | Key::PageUp | Key::PageDown if app.view == View::Board => {
-            let step = match key.key {
+            let step: isize = match key.key {
                 Key::PageUp | Key::PageDown => BOARD_PAGE_STEP,
                 _ => 1,
             };
-            if matches!(key.key, Key::Up | Key::PageUp) {
-                app.scroll_offset = app.scroll_offset.saturating_sub(step);
+            let delta = if matches!(key.key, Key::Up | Key::PageUp) {
+                -step
             } else {
-                app.scroll_offset = app.scroll_offset.saturating_add(step);
-            }
+                step
+            };
+            app.scroll_offset = scroll_window::shift(app.scroll_offset, delta);
             true
         }
 

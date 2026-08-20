@@ -171,9 +171,61 @@ pub fn visible_variable(heights: &[f32], avail_h: f32, offset: usize) -> Rows {
     Rows { start, count }
 }
 
+/// Move a row index by a signed number of rows, stopping at the top.
+///
+/// The bottom is deliberately *not* clamped here: how far a list can scroll
+/// depends on how tall the panel it is drawn into turns out to be, which the
+/// key handler that calls this does not know. An offset past the end is not an
+/// error — [`visible`] and [`visible_count`] show the last page for one — so
+/// the only end that needs guarding is zero, where an unsigned index would
+/// otherwise wrap to the far end of the list.
+///
+/// Written once here because the obvious spelling has a bug in it:
+/// `offset - (-delta) as usize` overflows for `isize::MIN`, whose negation is
+/// not representable. [`isize::unsigned_abs`] is the operation that does not.
+///
+/// ```
+/// use guitk::scroll_window::shift;
+/// assert_eq!(shift(10, 3), 13);
+/// assert_eq!(shift(10, -3), 7);
+/// assert_eq!(shift(2, -10), 0, "scrolling up past the top stays at the top");
+/// assert_eq!(shift(0, isize::MIN), 0, "and does not wrap");
+/// ```
+#[must_use]
+pub fn shift(offset: usize, delta: isize) -> usize {
+    if delta >= 0 {
+        offset.saturating_add(delta.unsigned_abs())
+    } else {
+        offset.saturating_sub(delta.unsigned_abs())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Rows, capacity, visible, visible_variable};
+    use super::{Rows, capacity, shift, visible, visible_count, visible_variable};
+
+    /// The top is the only end `shift` guards, and it guards it for every
+    /// negative delta including the one whose negation does not exist.
+    #[test]
+    fn scrolling_up_past_the_top_stays_at_the_top() {
+        for delta in [-1, -2, -1000, isize::MIN + 1, isize::MIN] {
+            assert_eq!(shift(0, delta), 0, "delta {delta}");
+            assert_eq!(shift(3, delta).min(3), shift(3, delta), "delta {delta}");
+        }
+        assert_eq!(shift(3, -2), 1);
+    }
+
+    /// The bottom is not `shift`'s to guard, and the windowing functions are
+    /// the reason it does not need to be: an offset past the end is a
+    /// last-page request, not an error, so a key handler that cannot know the
+    /// panel height is free to run the number up.
+    #[test]
+    fn an_offset_run_past_the_end_is_still_a_last_page() {
+        let far = shift(0, isize::MAX);
+        assert!(far > 100);
+        assert_eq!(visible_count(10, 4, far), Rows { start: 6, count: 4 });
+        assert_eq!(visible(10, 20.0, 80.0, far), Rows { start: 6, count: 4 });
+    }
 
     #[test]
     fn a_list_that_fits_is_shown_whole() {

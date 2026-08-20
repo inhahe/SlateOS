@@ -42083,18 +42083,37 @@ the calendar popup actually depends on, that month *n+1* begins exactly
 
 ---
 
-## Four dead scroll offsets, one shared root cause — fixed 2026-08-18 (lane C)
+## Dead scroll offsets, one shared root cause — swept 2026-08-18 (lane C)
 
-**In short:** four different lists across the toolkit and three apps had a
-scroll position that *nothing that draws ever read*. The field was declared,
+**In short:** fifteen lists across the toolkit and eleven apps had a scroll
+position that *nothing that draws ever read*. The field was declared,
 initialised to zero, and then never mentioned again — so the list drew from the
 top always, and everything past the bottom edge was unreachable by any means
-the app offered.
+the app offered. All fifteen are now fixed; this section is the record of what
+the class looks like, so the next one is recognised faster. One sixteenth
+instance was found and deliberately not fixed here, because it is a different
+shape — see `C-KANBAN-CARD-DETAIL-PANEL-HAS-A-DEAD-SCROLL-OFFSET` below.
 
 The dead-field signature is cheap to test for and worth reusing: **grep the
 field name and count the hits.** Two — a declaration and an initialiser — means
-nothing reads it. That is how all four were found, after the first turned up by
-accident.
+nothing reads it. That is how all of them were found, after the first turned up
+by accident.
+
+Two refinements the sweep added to that rule:
+
+- **A field that is *read* but never *written* is worse than a dead one**, and
+  the grep test does not catch it. radio's `station_scroll` had four hits —
+  declaration, initialiser, and two reads in the renderer — so it looked alive.
+  Nothing ever assigned it, so the list was frozen at row 0 while the selection
+  walked off the bottom: with 20 preset stations and 10 rows visible, half the
+  list was unreachable. When a grep turns up reads, check that at least one hit
+  is on the left of an `=`.
+- **Pulling on a dead field finds live ones.** settings' dead `dropdown_scroll`
+  led to the discovery that every dropdown in the app was decorative; netscan's
+  dead `sidebar_scroll` led to three further defects in the same screen. The
+  dead field is a marker for a list nobody ever exercised, and a list nobody
+  exercised usually has more than one thing wrong with it. Budget for that
+  before starting, rather than treating each find as a one-line change.
 
 ### The instances
 
@@ -42104,6 +42123,15 @@ accident.
 | `apps/diskanalyzer` — `DiskAnalyzerUI::scroll_offset` | `f32`, never read. The list view cut off at the last row that fit and offered no way to reach the rest. | Changed to `usize` (a row index — the list draws whole rows, so a pixel offset can only express positions the renderer rounds away), given `scroll_list_by`/`scroll_list_to_top`, and the row loop now windows through `scroll_window::visible`. |
 | `apps/kanban` — `KanbanApp::scroll_offset` | `f32`, never read. Worse than the others: the card loop was **unbounded**, so a column with more cards than fit drew *past the bottom of the window*, over whatever was beneath it. | Changed to `usize`; the column now windows through `scroll_window::visible_variable` and says how many cards it is hiding (`+N more`). See design-decisions.md §471 for the one-offset-for-all-columns choice. |
 | `apps/tmux` — `TerminalBuffer::scroll_offset` **and** `Pane::copy_scroll` | Two fields for one concept, both dead. `copy_scroll` was only ever *reset* to 0 by `enter_copy_mode`; nothing incremented it and nothing rendered read it. The module doc's advertised "copy mode for scrollback browsing" drew a `[COPY MODE]` badge and nothing else — the scrollback was entirely unreachable. | `TerminalBuffer::scroll_offset` **deleted**: how far back a *view* is looking is a property of the view, not of the buffer, and two panes over one buffer would have to disagree about it. `copy_scroll` survives, and is now read by `TerminalBuffer::visible_lines`/`view_rows` and written by `Pane::scroll_back`/`scroll_forward`/`scroll_to_top`/`scroll_to_bottom`, bound to `k`/`j`/`b`/`f`/`g`/`G` (and `q` to leave) in `process_prefix_key`. |
+| `apps/defrag` — file-list offset | Never read. The list measured against the raw panel height, so the overflow was cut by the *window edge* rather than by a scroll position — which is what made the hidden rows unreachable rather than merely off-screen. | Windows through `scroll_window::visible`, with an unconditionally-reserved "N more" footer per design-decisions.md §470. |
+| `apps/podcast` — sidebar offset | Never read, and the sidebar needed more than a viewport: its *fixed* content alone (six library entries, twelve categories, two headings, two dividers) is 732px, so a 600px window could not show it with **no subscriptions at all**. | The column below the title became a flat `SidebarRow` list measured by `scroll_window::visible_variable` and scrolled as one. See §472 for the tradeoff against the usual pinned-sidebar convention. |
+| `apps/podcast` — `episode_list_scroll` | Never read. The list drew rows until one *started* past the content height, so it drew that straddling row whole and past the bottom, and everything after it was cut by the window edge. | `scroll_window::visible` against the content height the caller already reduces by the now-playing bar, same reserved footer. |
+| `apps/taskscheduler` — `task_list_scroll` **and** `history_scroll` | Both never read. Both renderers took a height parameter named `_height` and **ignored it**, drawing every row at a computed y with no bound. A `PushClip` hid the overflow, which is what kept it from being obvious — but a clipped row is exactly as unreachable as one drawn off the window when there is no offset to bring it back. | Both window through `scroll_window::visible`. `recent(100)` looked like a bound and was not (a hundred rows is 3200px); it is now `HISTORY_ROWS_OFFERED`, which is what it always was — how far back the tab reaches, not a viewport. |
+| `apps/vpnmanager` — `log_scroll_offset` | Never read. The log stopped drawing at a hard-coded `py + 500.0`, a number with no relation to the panel it was drawing into: it overran a short panel and wasted a tall one. | `render_tab_log` is now handed the panel height instead of inventing one. Also fixed: the row-stripe parity was found by scanning the whole log for the row's own address with `std::ptr::eq` — O(n²) per frame over a 500-row log, with `.unwrap_or(0)` silently guessing on failure. `enumerate()` already has the index. `clear_log()` now resets the offset. |
+| `apps/netmanager` — `sidebar_scroll` | Declared `f32` with the comment `(future: scroll offset)`, read by nothing. The interface loop had **no break of any kind**, so a long list drew straight through the status bar and off the bottom of the window. | Windows through `sh` — the height `render_sidebar` already computed and threw away. The selection highlight now compares against the *absolute* row index, so it follows the selected interface as the list scrolls instead of staying on whichever row happens to be there. |
+| `apps/netscan` — `sidebar_scroll` (+ three more it exposed) | Dead. Pulling on it found three more in the same screen: the results table shifted rows by a pixel offset and drew *all* of them behind a clip, so the bottom row was sliced in half and an unclamped offset could push the table out of its own panel; the port list compared each row's y against a `dy` it was advancing *inside the same loop*, so its `break` could never fire and its `continue` skipped the advance — one notch past a row's height made the entire port list vanish; and the click hit-test computed the table's first row itself, getting a different answer from the renderer (no 26px summary bar, no scroll offset), so clicking a row on a scrolled table opened some earlier host's panel. | Table and hit-test both read `RESULTS_ROWS_TOP` and call one `results_visible_rows()`, so they cannot disagree. `sidebar_scroll` was **deleted** rather than wired up — the only scrollable thing in that sidebar is the port list, which has its own offset, so inventing a meaning for a second one would be worse than removing it. `topology_zoom`, dead for the same reason, went with it. |
+| `apps/radio` — `genre_scroll` (dead) **and** `station_scroll` (read, never written) | `station_scroll` is the read-but-never-written case above. `genre_scroll` was dead, and the genre loop bounded itself against the sidebar's bottom edge rather than against the search hint pinned 20px above it, so a window shorter than ~468px drew genres straight over the hint. The genre filter is cycled by Left/Right with no regard for what is on screen, so the highlighted genre could also sit below the fold with no key that brought it back. | Both lists now use the toolkit types written for these rules: `ListViewport` for the station list and the genre selection, `scroll_window` for the genre list's window. Every distance is a named constant and both renderers `debug_assert!` that the geometry they walk is the geometry the capacity was computed from — the two were previously spelled out twice with different values. A page is now a windowful rather than a fixed five rows. |
+| `apps/settings` — `dropdown_scroll` (+ the hit-test it exposed) | Dead, and the popup was **unbounded**: `popup_h` was `item_count * 36 + 8` with no reference to `window_height`, and the device dropdowns are built from runtime lists, so "taller than the window" is not hypothetical. Pulling on it found the larger defect — the popup's geometry existed only inside `render_open_dropdown`, so the click handler had nothing to test against and settled for `// For simplicity, any click closes the dropdown`. `apply_dropdown_selection` — correct, complete, covering all ten dropdowns — was reachable **only from tests**. | `DropdownLayout` holds the geometry, computed once by `dropdown_layout()` and used by both the renderer and the hit-test; `item_at` is the literal inverse of `row_top` and sits beside it in the same `impl`, so a change to one is a change to the other. The popup is pulled up to fit the window and scrolls when it cannot, opening a dropdown reveals the choice it already has, and a popup hiding items says how many. |
 
 ### What the reintroduction checks confirmed
 
@@ -42121,6 +42149,37 @@ Each fix was verified by restoring the defect and re-running:
   only one of the eleven new tests that goes through `render()`. The other ten
   are about numbers; this one is about pixels, and it is the one that would
   have caught the original bug.
+- `podcast` — 4 of 7 sidebar tests failed with the sidebar unbounded again; the
+  3 that did not are testing the clamp and reachability, which that particular
+  defect does not violate. The episode list: 4 of 6.
+- `taskscheduler` — 6 of 8. `vpnmanager` — 4 of 6. `netmanager` — 4 of 7 (the
+  other three test the last-page clamp and reachability, which an *unbounded*
+  list satisfies trivially — an unbounded list does reach everything, it just
+  draws it in the wrong place).
+- `netscan` — each of the four defects was reintroduced separately: 1 test for
+  the hit-test, 3 for the table window, 3 for the port loop, 1 for the topology
+  notice.
+- `radio` — three separate reintroductions: the frozen scroll fires 2, the hint
+  overdraw 1, the unfollowed genre filter 2.
+- `settings` — three separate reintroductions: the missing hit-test fires 1,
+  the unbounded popup 3, the dead scroll offset 3.
+
+### Two things the sweep settled, worth not re-deciding
+
+**Test what is *drawn*, and scope the helper by shape, not by pixel position.**
+A test that only asks what the selection index is would have passed throughout
+radio's frozen-scroll bug — the index was always right; it was the window that
+never moved. The helpers key on the text shape (`H000` hostnames, `I000`
+interfaces, the `" more"` suffix) or on command provenance (settings scopes to
+commands from the popup's `BoxShadow` onward) rather than on an x/y box,
+specifically so that moving a panel cannot silently turn a helper into a filter
+that matches nothing and a test into one that asserts about an empty list.
+
+**The strongest test of a hit-test is the renderer.** settings' best test asks
+the renderer what it drew and the hit-test what is under each drawn row, and
+requires them to agree. A hit-test checked against its own arithmetic checks
+nothing — that is exactly the bug netscan had, where hit-test and renderer each
+computed the first row and got different answers.
 
 ### Left over
 
@@ -42130,6 +42189,243 @@ one** — tracked separately as
 `C-TOUCHPAD-GESTURE-LIST-DRAWS-PAST-THE-PANEL`. The panels render from `&self`
 and cannot write a position back, so this needs settings-shell plumbing rather
 than a change in the panels.
+
+**And the larger thing this sweep walked into.** Chasing the last few offsets
+turned up *why* a scroll position can sit dead in eleven separate apps without
+anyone noticing: for most of them there is **no way to scroll at all**, because
+the app is never connected to an input source. Of the 140 app crates, 59 define
+no event handler anywhere in the crate, and `podcast` — three of this sweep's instances —
+is one of them. Its `scroll_episode_list_by` is correct, tested, and called
+only by tests. The same is true of `defrag`, `diskanalyzer`, `netmanager`,
+`taskscheduler`, `vpnmanager` and `tmux`: this sweep gave each of them a
+working viewport that no user can currently reach. (`kanban`, `netscan`,
+`radio` and `settings` do have handlers, so their fixes are reachable the
+moment an app is hosted at all.) That is tracked as
+`C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP` below, and it is the reason the fixes here
+were still worth making — the viewport logic is the part that is hard to get
+right and easy to test, and it is now right and tested in all of them.
+
+---
+
+## `C-SCROLL-DELTA-UNITS-ARE-DOCUMENTED-WRONG`
+
+**In short:** when you turn the mouse wheel one notch, the number the system
+hands the app is **1**. But the comment on that number says it is a distance in
+*pixels*, so about half the apps multiply it by 20 or 40 to turn "pixels" into
+something useful, and the other half ignore its size and just move three rows.
+The result is that one notch of the same wheel scrolls a different amount in
+every app — and in the text editor it scrolls **nothing at all**, ever.
+
+**Where:** the declaration is `gui/toolkit/src/event.rs:75` —
+
+```rust
+/// Scroll wheel (dx, dy in pixels).
+Scroll { dx: f32, dy: f32 },
+```
+
+— and the only thing in the tree that actually produces one is
+`gui/compositor/src/present/host.rs:320`, `wheel_delta()`, which returns
+`raw / WHEEL_DELTA` where `WHEEL_DELTA` is 120. That is **notches**: exactly
+`1.0` per detent, and a fraction of one for a high-resolution trackpad. The
+doc comment is simply wrong, and has been since it was written.
+
+**What each consumer currently does with one notch (`dy == 1.0`):**
+
+| Interpretation | Apps | One notch moves |
+|---|---|---|
+| `dy * 40.0` | spreadsheet | 40 px |
+| `dy * 20.0` | benchmark, devicemanager, diskimager, sysinfo | 20 px |
+| `dy * SCROLL_SPEED` | filediff | one `SCROLL_SPEED` |
+| `dy` raw | emojipicker, remotedesktop | **1 px** — visually nothing |
+| `dy / line_height * 3.0` | editor | **0 lines — the wheel is dead** (see below) |
+| sign only, 3 rows | procexplorer, sysmonitor, terminal, settings | 3 rows |
+| sign only, 1 row/step | netscan, imageviewer | 1 row / one zoom step |
+
+The editor case is the worst and is worth stating exactly, because it is a
+plain user-visible bug rather than an inconsistency:
+`apps/editor/src/input.rs:579` computes
+`let lines = (dy / self.line_height * SCROLL_LINES_PER_NOTCH) as i64;` with
+`line_height = 21.0` and `SCROLL_LINES_PER_NOTCH = 3.0`. One notch gives
+`1.0 / 21.0 * 3.0 = 0.143`, which `as i64` truncates to `0`, and the next line
+is `if lines == 0 { return EditorResponse::Idle; }`. **You would need to turn
+the wheel seven notches in one event to move a single line.** This code is the
+only consumer that reads the doc comment literally, which is what makes it the
+proof that the doc comment is the defect.
+
+**The proper fix**, in this order:
+
+1. Correct the declaration in `event.rs` to say notches, and say it loudly —
+   something like `/// Scroll wheel, in wheel notches (1.0 per detent,
+   fractional for high-resolution devices); *not* pixels.` The producer is
+   already right, so nothing in the compositor changes.
+2. Give the toolkit one shared helper that turns a notch count into a row
+   count, so no app has to pick a constant. `scroll_window` is the natural
+   home; it already owns `shift`, which every one of these consumers ends up
+   calling. Rows-per-notch of 3 is what the majority already do and matches
+   the platform default.
+3. Convert the twelve consumers above to it. The four `* 20.0` sites and the
+   two raw-`dy` sites are the ones that change behaviour most visibly; the
+   sign-only ones are already correct in effect and just stop open-coding it.
+4. The fractional case is the one to be careful of: a high-resolution wheel
+   sends e.g. `0.25`, and a helper that truncates to whole rows would make
+   such a device scroll in jumps or not at all — which is the exact bug the
+   editor has today. Accumulate the fraction across events rather than
+   truncating each one.
+
+**Until it is fixed:** two code comments (`apps/netscan/src/main.rs:2541` and
+`apps/settings/src/main.rs:3228`) already point here to explain why they use
+only the sign of `dy`. New scroll handlers should do the same rather than
+inventing another pixel constant.
+
+---
+
+## `C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`
+
+**In short:** none of the 140 apps in `apps/` can be used. Each one builds its
+picture correctly and has tests proving the picture is right, but no app is
+connected to the thing that delivers mouse clicks and keystrokes, so `fn main()`
+draws a single frame and exits. Nothing is broken *inside* the apps — the
+missing piece is the wiring between an app and the compositor (the program that
+owns the screen and the input devices).
+
+**The evidence**, from a survey of all 140 crates under `apps/` (every `.rs`
+file in each, not just `main.rs`):
+
+- **59 of 140 define no event handler anywhere in the crate** — no
+  `handle_event`, `handle_mouse` or `handle_key` in any of its `.rs` files.
+  Among them: podcast, defrag, diskanalyzer, netmanager, taskscheduler,
+  vpnmanager, tmux, explorer, notes, calendar, contacts, email.
+- **60 have a stub `fn main()`** of the form `let _app = FooApp::new();` — it
+  constructs the app and immediately drops it.
+- The rest render one frame and print about it. `apps/settings/src/main.rs`
+  says so outright: `// In a real Slate OS environment, this would enter the
+  compositor event loop. // For now, render one frame to verify the UI builds
+  correctly.`
+- There is **no `trait App`** in `gui/toolkit` — nothing defines what an app
+  must provide in order to be hosted. Each app invented its own handler
+  signature by convention, which is why three different names for the same
+  method exist across the tree.
+
+**Why this has stayed invisible:** the apps' tests call `render()` and
+`handle_event()` directly, so they pass and prove real things about the
+drawing and the state machine. What no test can currently assert is that
+anything ever *calls* those methods outside a test. That is also the root
+cause of the whole dead-scroll-offset class above: a scroll offset can sit
+unwritten for as long as you like when there is no input path that would have
+written it.
+
+**The proper fix:** define the app-side contract once in the toolkit — a trait
+with `render(&self) -> RenderTree` and `handle_event(&mut self, &Event) ->
+EventResult`, which is the shape most apps already have — and a `run()` that
+connects it to the compositor client protocol already present in
+`gui/compositor/src/lib.rs` (`ClientMouseKind` at line 2066 is the app-facing
+half and already exists). Then convert apps to it. That is a large but
+extremely mechanical change, and it wants to be done *before* many more apps
+are written, since every app added meanwhile is another one to convert.
+
+**What it costs while unfixed:** nothing regresses, because nothing runs; but
+every UI behaviour in `apps/` is unverified against a real user, and each new
+app adds more unexercised surface. Related: the crate-wide
+`#![allow(dead_code)]` entry below, which is a direct symptom.
+
+---
+
+## `C-CRATE-WIDE-ALLOW-DEAD-CODE-HIDES-UNREACHABLE-UI`
+
+**In short:** many app crates start with a line that switches off the compiler's
+"you wrote this and never used it" warning for the whole file. That warning is
+the single most useful signal for finding a feature that was built and never
+connected — it is exactly what would have flagged the dead scroll offsets — and
+these crates have it turned off everywhere rather than at the few places that
+need it.
+
+**Where:** `#![allow(dead_code)]` at the top of, among others,
+`apps/radio/src/main.rs:1` and `apps/netscan/src/main.rs:22`. netscan's is why
+`sidebar_scroll` and `topology_zoom` sat dead without a warning; radio's is why
+`genre_scroll` did.
+
+**Why it cannot simply be deleted, which is the interesting part.** Removing
+radio's produces **31 warnings**, and every one of them is downstream of a
+single fact: `fn main()` is `let _app = RadioApp::new();`, so `render()` is
+never called outside tests, so everything `render()` uses is dead too. The
+allow is not hiding sloppiness; it is hiding
+`C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`. Deleting the allow today would bury the
+one or two real findings under 30 false ones.
+
+**The proper fix** is therefore ordered: wire the apps to an event loop first;
+then the allows can come off, and what remains warned about is genuinely
+unreachable code worth deleting. Doing it in the other order produces noise
+that gets suppressed again.
+
+**In the meantime:** do not add `#![allow(dead_code)]` to a *new* crate, and
+when a specific item is legitimately unused, allow it on that item rather than
+on the crate.
+
+---
+
+## `C-THREE-SETTINGS-DROPDOWNS-HAVE-NO-OPENER`
+
+**In short:** the Settings app draws three rows that look like the other
+dropdowns and show a current value — "Input Device", "Diagnostic data
+collection" and "Verbosity" — but clicking them does nothing. Both halves of
+each one are fully written; what is missing is the single line that opens the
+popup when the row is clicked.
+
+**Where:** `apps/settings/src/main.rs`. `DropdownId` (line 793) has ten
+variants. `dropdown_layout()` has a complete arm for all ten
+(`InputDevice` at 2864, `DiagnosticLevel` at 2891, `NarratorVerbosity` at
+2939) and `apply_dropdown_selection` has a complete arm for all ten (3740,
+3752, 3767). But `show_dropdown(DropdownId::…)` has only **seven** call sites
+outside tests — Resolution, RefreshRate, Scale, OutputDevice, IpConfig,
+CursorSize, ColorFilter. The three above have none.
+
+The rows themselves *are* drawn: `render_setting_row(…, "Input Device", …)` at
+1678, `"Diagnostic data collection"` at 2345, `"Verbosity"` at 2406 with
+`self.narrator_verbosity.label()` beside it. So the user sees a control with a
+value and no way to change it.
+
+**How to confirm:** `grep -n 'show_dropdown(DropdownId::' apps/settings/src/main.rs`
+and compare the variants found against the ten in the enum.
+
+**The proper fix:** add the hit-test and `show_dropdown` call for each of the
+three, next to the row that draws it, exactly as the seven working ones do.
+Small and self-contained. Worth doing together with a test that asserts every
+`DropdownId` variant has an opener, so an eleventh dropdown cannot be added
+half-wired — the enum is the list to iterate, which makes that test cheap and
+exhaustive.
+
+---
+
+## `C-KANBAN-CARD-DETAIL-PANEL-HAS-A-DEAD-SCROLL-OFFSET`
+
+**In short:** the sixteenth instance of the dead-scroll-offset class above, left
+unfixed because it is a different shape and the fix is not the same one. The
+kanban card-detail panel has a scroll position that nothing reads, so a card
+with a long description, a long checklist and several comments draws past the
+bottom of the panel with no way to reach the rest.
+
+**Where:** `apps/kanban/src/main.rs` — `detail_scroll: f32` declared at line
+918, initialised at 952, and mentioned nowhere else (the two-hit grep
+signature). The panel is `render_card_detail` at line 1860.
+
+**Why it was not fixed with the others.** The fifteen fixed above are all
+**row lists**: uniform-height rows, so "which rows fit" is a division, and
+`scroll_window::visible` answers it. The card detail panel is free-flowing
+content — a wrapped description, then a checklist, then a comment thread —
+where each item's height depends on its text. `scroll_window::visible_variable`
+exists for that (kanban's own board columns use it), but it needs a measured
+height per item, and the detail panel currently computes its heights *while*
+drawing rather than up front. Doing this properly means the same split kanban
+already made for cards: a `detail_item_height()` that measures, used by both
+the layout pass and the renderer, so the two cannot disagree.
+
+**The proper fix:** measure the panel's content into a `Vec<f32>` of item
+heights the way `card_height` already does for the board, window it with
+`scroll_window::visible_variable`, make `detail_scroll` a `usize` item index
+(not an `f32` — the panel scrolls by whole items), and reserve the "N more"
+footer unconditionally per design-decisions.md §470. kanban does have an event
+handler, so unlike several of the fifteen this fix would be reachable as soon
+as apps are hosted at all — see `C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`.
 
 ---
 

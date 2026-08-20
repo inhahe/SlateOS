@@ -21,6 +21,7 @@ use guitk::event::{
 use guitk::layout::{FlexAlign, FlexDirection, FlexWrap, Size};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::scroll_window;
 #[allow(unused_imports)]
 use guitk::style::{CornerRadii, Edges};
 use guitk::text;
@@ -92,6 +93,14 @@ const SLIDER_HEIGHT: f32 = 6.0;
 const SLIDER_HANDLE_RADIUS: f32 = 8.0;
 const DROPDOWN_WIDTH: f32 = 200.0;
 const DROPDOWN_ITEM_HEIGHT: f32 = 36.0;
+/// Padding above the first dropdown item and below the last.
+const DROPDOWN_PADDING: f32 = 8.0;
+/// How close an open dropdown may come to the window's edge.
+const DROPDOWN_MARGIN: f32 = 8.0;
+/// Vertical space a scrolled dropdown keeps for its "N more" line.
+const LIST_MORE_HEIGHT: f32 = 16.0;
+/// How many items one wheel notch moves an open dropdown.
+const WHEEL_ROWS: isize = 3;
 
 // ============================================================================
 // Settings categories and pages
@@ -700,7 +709,83 @@ pub struct SettingsState {
 
     // Dropdown state
     pub open_dropdown: Option<DropdownId>,
-    pub dropdown_scroll: f32,
+    /// Index of the first item drawn in the open dropdown.
+    ///
+    /// A request rather than an index: an offset left over from a longer list
+    /// shows the last page instead of a blank popup, because
+    /// [`scroll_window::visible`] clamps the *result* and leaves this alone.
+    pub dropdown_scroll: usize,
+}
+
+/// Where an open dropdown's popup is, and which of its items are on screen.
+///
+/// Computed once by [`SettingsState::dropdown_layout`] and used by both the
+/// renderer and the click handler. When only the renderer knew, the click
+/// handler had nothing to test a click against, and the comment standing where
+/// the hit-test should have been read:
+///
+/// ```text
+/// // For simplicity, any click closes the dropdown
+/// // A real implementation would check if click is inside the dropdown
+/// ```
+///
+/// which is to say the dropdowns could be opened but not used —
+/// [`SettingsState::apply_dropdown_selection`] was correct, complete, and
+/// reachable only from the tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropdownLayout {
+    /// Every item in the dropdown, in order, whether on screen or not.
+    pub items: Vec<String>,
+    /// Index of the currently-chosen item, as an index into `items`.
+    pub selected: usize,
+    /// Left edge of the popup.
+    pub x: f32,
+    /// Top edge of the popup, after being pulled up to fit in the window.
+    pub y: f32,
+    /// Popup width.
+    pub width: f32,
+    /// Popup height, never more than the window can hold.
+    pub height: f32,
+    /// The items actually drawn, after clamping to the popup's height.
+    pub window: scroll_window::Rows,
+}
+
+impl DropdownLayout {
+    /// Y of the top of the `row`-th item *drawn* (not the `row`-th item).
+    #[must_use]
+    fn row_top(&self, row: usize) -> f32 {
+        self.y + DROPDOWN_PADDING / 2.0 + (row as f32) * DROPDOWN_ITEM_HEIGHT
+    }
+
+    /// The item under `(mx, my)`, as an index into [`Self::items`].
+    ///
+    /// `None` for a click anywhere else — including on the popup's padding and
+    /// on its "N more" line, neither of which names an item. The inverse of
+    /// [`Self::row_top`] by construction: both are here so that a change to
+    /// one is a change to the other.
+    #[must_use]
+    pub fn item_at(&self, mx: f32, my: f32) -> Option<usize> {
+        if mx < self.x || mx >= self.x + self.width {
+            return None;
+        }
+        let top = self.row_top(0);
+        if my < top {
+            return None;
+        }
+        // Truncating rather than rounding: a click 35.9px below the first row's
+        // top is on the first row, not adjacent to the second.
+        let row = ((my - top) / DROPDOWN_ITEM_HEIGHT) as usize;
+        if row >= self.window.count {
+            return None;
+        }
+        Some(self.window.start.saturating_add(row))
+    }
+
+    /// How many items are not on screen.
+    #[must_use]
+    pub fn hidden(&self) -> usize {
+        self.items.len().saturating_sub(self.window.count)
+    }
 }
 
 /// Identifies which dropdown is currently open.
@@ -1022,7 +1107,7 @@ impl SettingsState {
 
             // Dropdown state
             open_dropdown: None,
-            dropdown_scroll: 0.0,
+            dropdown_scroll: 0,
         }
     }
 }
@@ -2720,11 +2805,16 @@ impl SettingsState {
 
     // --- Dropdown overlay rendering ---
 
-    fn render_open_dropdown(&self, tree: &mut RenderTree) {
-        let dropdown_id = match self.open_dropdown {
-            Some(id) => id,
-            None => return,
-        };
+    /// Where the open dropdown's popup goes, or `None` if none is open.
+    ///
+    /// The single source of the popup's geometry. Both the renderer and the
+    /// click handler ask this, so a click can never land on a different item
+    /// from the one drawn under the pointer — the failure that made these
+    /// dropdowns unusable was precisely that only the renderer knew where
+    /// anything was.
+    #[must_use]
+    pub fn dropdown_layout(&self) -> Option<DropdownLayout> {
+        let dropdown_id = self.open_dropdown?;
 
         let (items, selected, dropdown_x, dropdown_y) = match dropdown_id {
             DropdownId::Resolution => {
@@ -2864,9 +2954,54 @@ impl SettingsState {
             }
         };
 
-        let item_count = items.len();
-        let popup_h = (item_count as f32) * DROPDOWN_ITEM_HEIGHT + 8.0;
         let popup_w = DROPDOWN_WIDTH + 20.0;
+        let wanted_h = (items.len() as f32) * DROPDOWN_ITEM_HEIGHT + DROPDOWN_PADDING;
+        let room = self.window_height - 2.0 * DROPDOWN_MARGIN;
+        // Whether every item fits is decidable before anything is laid out, so
+        // the "N more" line's space can be subtracted only when it is going to
+        // be drawn without the budget depending on its own result: a popup that
+        // fits whole loses no row to a footer it will not have.
+        let fits = wanted_h <= room;
+        let popup_h = if fits { wanted_h } else { room.max(0.0) };
+        let rows_h = popup_h - DROPDOWN_PADDING - if fits { 0.0 } else { LIST_MORE_HEIGHT };
+
+        // Pull the popup up rather than letting it run off the bottom, and
+        // never above the top edge. A popup drawn past the window's end is
+        // items the user can see are missing but cannot reach.
+        let lowest_top = (self.window_height - DROPDOWN_MARGIN - popup_h).max(DROPDOWN_MARGIN);
+        let dropdown_y = dropdown_y.min(lowest_top).max(DROPDOWN_MARGIN);
+
+        let window = scroll_window::visible(
+            items.len(),
+            DROPDOWN_ITEM_HEIGHT,
+            rows_h,
+            self.dropdown_scroll,
+        );
+
+        Some(DropdownLayout {
+            items,
+            selected,
+            x: dropdown_x,
+            y: dropdown_y,
+            width: popup_w,
+            height: popup_h,
+            window,
+        })
+    }
+
+    fn render_open_dropdown(&self, tree: &mut RenderTree) {
+        let Some(layout) = self.dropdown_layout() else {
+            return;
+        };
+        let DropdownLayout {
+            ref items,
+            selected,
+            x: dropdown_x,
+            y: dropdown_y,
+            width: popup_w,
+            height: popup_h,
+            window,
+        } = layout;
 
         // Shadow
         tree.push(RenderCommand::BoxShadow {
@@ -2903,8 +3038,17 @@ impl SettingsState {
         });
 
         // Items
-        for (idx, item) in items.iter().enumerate() {
-            let iy = dropdown_y + 4.0 + (idx as f32) * DROPDOWN_ITEM_HEIGHT;
+        for (row, item) in items
+            .get(window.start..window.end())
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let iy = layout.row_top(row);
+            // The tick marks the chosen item, which is an index into the whole
+            // list, so compare against the absolute position rather than the
+            // position on screen.
+            let idx = window.start.saturating_add(row);
             let is_selected = idx == selected;
 
             if is_selected {
@@ -2940,6 +3084,20 @@ impl SettingsState {
                     14.0,
                 );
             }
+        }
+
+        // A popup that is hiding items has to say so: an option that exists and
+        // is merely below the fold is otherwise indistinguishable from one the
+        // system does not offer.
+        let hidden = layout.hidden();
+        if hidden > 0 {
+            tree.text(
+                dropdown_x + 12.0,
+                layout.row_top(window.count) + 10.0,
+                &format!("{hidden} more"),
+                COL_OVERLAY0,
+                11.0,
+            );
         }
     }
 
@@ -3066,16 +3224,34 @@ impl SettingsState {
         match &evt.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(evt.x, evt.y),
             MouseEventKind::Move => self.handle_hover(evt.x, evt.y),
+            // Only the sign of `dy` is used, not its magnitude:
+            // `MouseEventKind::Scroll` documents it as pixels, but every
+            // producer in this tree sets it to a notch count instead. See
+            // known-issues.md.
+            MouseEventKind::Scroll { dy, .. } if self.open_dropdown.is_some() => {
+                let rows = if *dy > 0.0 {
+                    WHEEL_ROWS.saturating_neg()
+                } else if *dy < 0.0 {
+                    WHEEL_ROWS
+                } else {
+                    0
+                };
+                self.scroll_dropdown_by(rows);
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
 
     fn handle_click(&mut self, mx: f32, my: f32) -> EventResult {
-        // Close dropdown if clicking outside
-        if self.open_dropdown.is_some() {
-            // For simplicity, any click closes the dropdown
-            // A real implementation would check if click is inside the dropdown
-            self.open_dropdown = None;
+        // An open dropdown swallows the click: either it names one of the
+        // dropdown's items, or it dismisses the popup. It never reaches the
+        // controls underneath, which are covered by it.
+        if let Some(layout) = self.dropdown_layout() {
+            match layout.item_at(mx, my) {
+                Some(index) => self.apply_dropdown_selection(index),
+                None => self.open_dropdown = None,
+            }
             return EventResult::Consumed;
         }
 
@@ -3189,21 +3365,21 @@ impl SettingsState {
         // Resolution row
         let res_y = settings_start;
         if my >= res_y && my < res_y + ITEM_HEIGHT {
-            self.open_dropdown = Some(DropdownId::Resolution);
+            self.show_dropdown(DropdownId::Resolution);
             return;
         }
 
         // Refresh rate row
         let rate_y = res_y + ITEM_HEIGHT;
         if my >= rate_y && my < rate_y + ITEM_HEIGHT {
-            self.open_dropdown = Some(DropdownId::RefreshRate);
+            self.show_dropdown(DropdownId::RefreshRate);
             return;
         }
 
         // Scale row
         let scale_y = rate_y + ITEM_HEIGHT;
         if my >= scale_y && my < scale_y + ITEM_HEIGHT {
-            self.open_dropdown = Some(DropdownId::Scale);
+            self.show_dropdown(DropdownId::Scale);
             return;
         }
 
@@ -3220,7 +3396,7 @@ impl SettingsState {
 
         // Output device
         if my >= section_y && my < section_y + ITEM_HEIGHT {
-            self.open_dropdown = Some(DropdownId::OutputDevice);
+            self.show_dropdown(DropdownId::OutputDevice);
             return;
         }
 
@@ -3319,7 +3495,7 @@ impl SettingsState {
             + 24.0
             + 12.0;
         if my >= ip_section_y && my < ip_section_y + ITEM_HEIGHT && mx >= content_x + 350.0 {
-            self.open_dropdown = Some(DropdownId::IpConfig);
+            self.show_dropdown(DropdownId::IpConfig);
         }
     }
 
@@ -3462,7 +3638,7 @@ impl SettingsState {
                 y += ITEM_HEIGHT;
                 // Cursor size dropdown
                 if my >= y && my < y + ITEM_HEIGHT {
-                    self.open_dropdown = Some(DropdownId::CursorSize);
+                    self.show_dropdown(DropdownId::CursorSize);
                     return;
                 }
                 y += ITEM_HEIGHT;
@@ -3474,7 +3650,7 @@ impl SettingsState {
                 y += ITEM_HEIGHT + SECTION_SPACING + 24.0 + 12.0;
                 // Color filter dropdown
                 if my >= y && my < y + ITEM_HEIGHT {
-                    self.open_dropdown = Some(DropdownId::ColorFilter);
+                    self.show_dropdown(DropdownId::ColorFilter);
                     return;
                 }
                 y += ITEM_HEIGHT;
@@ -3503,6 +3679,34 @@ impl SettingsState {
         }
 
         let _ = right_x;
+    }
+
+    /// Opens `id`'s dropdown, scrolled so the current choice is on screen.
+    ///
+    /// The reveal matters for the long lists: opening the resolution dropdown
+    /// on a short window and finding no ticked item anywhere in it is not a
+    /// list of choices, it is a list of choices with the answer torn off.
+    pub fn show_dropdown(&mut self, id: DropdownId) {
+        self.open_dropdown = Some(id);
+        self.dropdown_scroll = 0;
+        // Ask for the layout now that the id is set: how far to scroll depends
+        // on how many items fit, which depends on which dropdown this is.
+        if let Some(layout) = self.dropdown_layout() {
+            let capacity = layout.window.count;
+            if capacity > 0 && layout.selected >= capacity {
+                self.dropdown_scroll = layout
+                    .selected
+                    .saturating_add(1)
+                    .saturating_sub(capacity);
+            }
+        }
+    }
+
+    /// Scrolls the open dropdown by `delta` items. No-op when none is open.
+    pub fn scroll_dropdown_by(&mut self, delta: isize) {
+        if self.open_dropdown.is_some() {
+            self.dropdown_scroll = scroll_window::shift(self.dropdown_scroll, delta);
+        }
     }
 
     /// Apply a dropdown selection.
@@ -4094,4 +4298,351 @@ mod tests {
         state.dispatch_event(&evt);
         assert_eq!(state.appearance.settings, before);
     }
+
+    // ---- Dropdowns: the popup you can see and the popup you can click ----
+    //
+    // These dropdowns could be opened but not used. The popup's geometry
+    // existed only inside `render_open_dropdown`, so the click handler had
+    // nothing to test a click against and settled for
+    //
+    //     // For simplicity, any click closes the dropdown
+    //
+    // which meant `apply_dropdown_selection` -- correct and complete -- was
+    // reachable only from the tests below it. The popup was also unbounded:
+    // `popup_h` was `item_count * 36 + 8` with no reference to the window, and
+    // `dropdown_scroll` was read by nothing, so a popup taller than the window
+    // ran off the bottom with no way to reach what was down there.
+    //
+    // Every test here asks about the geometry the *renderer* produced, because
+    // a hit-test verified against its own arithmetic verifies nothing.
+
+    /// The item labels the open dropdown actually drew, top to bottom.
+    ///
+    /// Scoped to the commands the popup itself emitted — everything from its
+    /// drop shadow onwards — rather than to an x/y box, so that moving the
+    /// popup cannot silently turn this into a filter that matches nothing.
+    fn drawn_dropdown_items(state: &SettingsState) -> Vec<String> {
+        let tree = state.render();
+        let start = tree
+            .commands
+            .iter()
+            .position(|c| matches!(c, RenderCommand::BoxShadow { .. }))
+            .expect("an open dropdown draws a shadow");
+        tree.commands
+            .get(start..)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text, font_size, ..
+                } if (font_size - 13.0).abs() < 0.01 => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The "N more" line the popup draws when it is hiding items, if any.
+    fn dropdown_more_line(state: &SettingsState) -> Option<String> {
+        let tree = state.render();
+        let start = tree
+            .commands
+            .iter()
+            .position(|c| matches!(c, RenderCommand::BoxShadow { .. }))?;
+        tree.commands
+            .get(start..)
+            .unwrap_or_default()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text, font_size, ..
+                } if (font_size - 11.0).abs() < 0.01 && text.ends_with(" more") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+    }
+
+    fn click(state: &mut SettingsState, x: f32, y: f32) -> EventResult {
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    /// The regression test for the hit-test that did not exist. Before the fix
+    /// this passed only because nothing checked what a click did.
+    #[test]
+    fn clicking_a_dropdown_item_chooses_it() {
+        for index in 0..RESOLUTIONS.len() {
+            let mut state = SettingsState::new();
+            state.resolution_index = usize::MAX; // no valid choice yet
+            state.show_dropdown(DropdownId::Resolution);
+            let layout = state.dropdown_layout().expect("a dropdown is open");
+            let row = index
+                .checked_sub(layout.window.start)
+                .expect("the whole list fits in the default window");
+            let y = layout.row_top(row) + DROPDOWN_ITEM_HEIGHT / 2.0;
+            assert_eq!(
+                click(&mut state, layout.x + 20.0, y),
+                EventResult::Consumed
+            );
+            assert_eq!(
+                state.resolution_index, index,
+                "clicking item {index} should have chosen it"
+            );
+            assert!(state.open_dropdown.is_none(), "choosing closes the popup");
+        }
+    }
+
+    /// The property the two halves of the fix exist to guarantee: whatever the
+    /// renderer drew at a row, the hit-test names that same item.
+    #[test]
+    fn the_hit_test_names_the_item_that_was_drawn_under_the_pointer() {
+        for height in [800.0_f32, 500.0, 320.0, 200.0] {
+            let mut state = SettingsState::new();
+            state.window_height = height;
+            state.show_dropdown(DropdownId::Resolution);
+            let layout = state.dropdown_layout().expect("a dropdown is open");
+            let drawn = drawn_dropdown_items(&state);
+            assert_eq!(
+                drawn.len(),
+                layout.window.count,
+                "at {height}px the popup drew {} rows but claims {}",
+                drawn.len(),
+                layout.window.count
+            );
+            for (row, label) in drawn.iter().enumerate() {
+                let y = layout.row_top(row) + DROPDOWN_ITEM_HEIGHT / 2.0;
+                let index = layout
+                    .item_at(layout.x + 20.0, y)
+                    .unwrap_or_else(|| panic!("row {row} at y={y} hit nothing"));
+                assert_eq!(
+                    layout.items.get(index),
+                    Some(label),
+                    "at {height}px, row {row} shows {label} but hit-tests to \
+                     item {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clicking_outside_an_open_dropdown_closes_it_without_choosing() {
+        let mut state = SettingsState::new();
+        state.resolution_index = 2;
+        state.show_dropdown(DropdownId::Resolution);
+        let layout = state.dropdown_layout().expect("a dropdown is open");
+        // Well to the left of the popup, over the sidebar.
+        assert_eq!(click(&mut state, 10.0, layout.y + 10.0), EventResult::Consumed);
+        assert!(state.open_dropdown.is_none());
+        assert_eq!(state.resolution_index, 2, "a dismissal is not a choice");
+    }
+
+    #[test]
+    fn clicking_the_popups_padding_chooses_nothing() {
+        let mut state = SettingsState::new();
+        state.resolution_index = 2;
+        state.show_dropdown(DropdownId::Resolution);
+        let layout = state.dropdown_layout().expect("a dropdown is open");
+        // Inside the popup's width, but above its first row.
+        assert!(layout.item_at(layout.x + 20.0, layout.y + 1.0).is_none());
+        click(&mut state, layout.x + 20.0, layout.y + 1.0);
+        assert_eq!(state.resolution_index, 2);
+        assert!(state.open_dropdown.is_none());
+    }
+
+    #[test]
+    fn a_dropdown_popup_never_runs_off_the_window() {
+        for height in [1000.0_f32, 800.0, 600.0, 400.0, 260.0, 120.0] {
+            for id in [
+                DropdownId::Resolution,
+                DropdownId::RefreshRate,
+                DropdownId::Scale,
+                DropdownId::CursorSize,
+            ] {
+                let mut state = SettingsState::new();
+                state.window_height = height;
+                state.show_dropdown(id);
+                let layout = state.dropdown_layout().expect("a dropdown is open");
+                assert!(
+                    layout.y >= 0.0,
+                    "{id:?} at {height}px starts above the window at {}",
+                    layout.y
+                );
+                assert!(
+                    layout.y + layout.height <= height,
+                    "{id:?} at {height}px reaches {} in a {height}px window",
+                    layout.y + layout.height
+                );
+                // And nothing is drawn past the popup's own bottom edge.
+                let rows_bottom = layout.row_top(layout.window.count);
+                assert!(
+                    rows_bottom <= layout.y + layout.height + 0.01,
+                    "{id:?} at {height}px draws rows to {rows_bottom}, past {}",
+                    layout.y + layout.height
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_dropdown_too_tall_for_the_window_says_what_it_is_hiding() {
+        let mut state = SettingsState::new();
+        state.window_height = 200.0;
+        state.show_dropdown(DropdownId::Resolution);
+        let layout = state.dropdown_layout().expect("a dropdown is open");
+        assert!(
+            layout.window.count < RESOLUTIONS.len(),
+            "a 200px window cannot show all {} resolutions",
+            RESOLUTIONS.len()
+        );
+        assert_eq!(
+            dropdown_more_line(&state),
+            Some(format!("{} more", layout.hidden())),
+            "a popup with items below the fold must say how many"
+        );
+    }
+
+    #[test]
+    fn a_dropdown_that_fits_says_nothing_and_shows_everything() {
+        let state = {
+            let mut s = SettingsState::new();
+            s.show_dropdown(DropdownId::Resolution);
+            s
+        };
+        assert_eq!(drawn_dropdown_items(&state).len(), RESOLUTIONS.len());
+        assert_eq!(dropdown_more_line(&state), None);
+    }
+
+    #[test]
+    fn every_dropdown_item_is_reachable_by_scrolling() {
+        let mut state = SettingsState::new();
+        state.window_height = 200.0;
+        state.show_dropdown(DropdownId::Resolution);
+
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..RESOLUTIONS.len() {
+            for label in drawn_dropdown_items(&state) {
+                if !seen.contains(&label) {
+                    seen.push(label);
+                }
+            }
+            state.scroll_dropdown_by(1);
+        }
+        let all: Vec<String> = RESOLUTIONS.iter().map(|r| r.label()).collect();
+        for label in &all {
+            assert!(seen.contains(label), "{label} was never reachable");
+        }
+    }
+
+    #[test]
+    fn a_dropdown_scrolled_past_the_end_shows_its_last_page() {
+        let mut state = SettingsState::new();
+        state.window_height = 200.0;
+        state.show_dropdown(DropdownId::Resolution);
+        let capacity = state
+            .dropdown_layout()
+            .expect("a dropdown is open")
+            .window
+            .count;
+        for offset in [RESOLUTIONS.len(), RESOLUTIONS.len() + 5, usize::MAX] {
+            state.dropdown_scroll = offset;
+            let layout = state.dropdown_layout().expect("a dropdown is open");
+            assert_eq!(
+                layout.window.count, capacity,
+                "offset {offset} left the popup part-empty"
+            );
+            assert_eq!(
+                layout.window.end(),
+                RESOLUTIONS.len(),
+                "offset {offset} should pin to the last page"
+            );
+        }
+    }
+
+    #[test]
+    fn scrolling_a_dropdown_up_from_the_top_stays_at_the_top() {
+        let mut state = SettingsState::new();
+        state.window_height = 200.0;
+        state.show_dropdown(DropdownId::Resolution);
+        state.dropdown_scroll = 0;
+        state.scroll_dropdown_by(-100);
+        assert_eq!(state.dropdown_scroll, 0);
+    }
+
+    /// Opening a dropdown whose choice is below the fold must not show a list
+    /// with nothing ticked in it.
+    #[test]
+    fn a_dropdown_opens_showing_the_choice_it_already_has() {
+        for index in 0..RESOLUTIONS.len() {
+            let mut state = SettingsState::new();
+            state.window_height = 200.0;
+            state.resolution_index = index;
+            state.show_dropdown(DropdownId::Resolution);
+            let layout = state.dropdown_layout().expect("a dropdown is open");
+            assert!(
+                (layout.window.start..layout.window.end()).contains(&index),
+                "choice {index} is outside the opened window {:?}",
+                layout.window
+            );
+            let label = RESOLUTIONS
+                .get(index)
+                .map(|r| r.label())
+                .expect("a resolution exists at this index");
+            assert!(
+                drawn_dropdown_items(&state).contains(&label),
+                "choice {index} ({label}) was not drawn"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wheel_scrolls_an_open_dropdown() {
+        let mut state = SettingsState::new();
+        state.window_height = 200.0;
+        state.show_dropdown(DropdownId::Resolution);
+        state.dropdown_scroll = 0;
+
+        let wheel = |dy: f32| {
+            Event::Mouse(MouseEvent {
+                x: 700.0,
+                y: 300.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })
+        };
+        assert_eq!(state.handle_event(&wheel(-1.0)), EventResult::Consumed);
+        assert_eq!(state.dropdown_scroll, WHEEL_ROWS.unsigned_abs());
+        state.handle_event(&wheel(1.0));
+        assert_eq!(state.dropdown_scroll, 0);
+    }
+
+    #[test]
+    fn the_wheel_is_ignored_when_no_dropdown_is_open() {
+        let mut state = SettingsState::new();
+        let wheel = Event::Mouse(MouseEvent {
+            x: 700.0,
+            y: 300.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        assert_eq!(state.handle_event(&wheel), EventResult::Ignored);
+        assert_eq!(state.dropdown_scroll, 0);
+    }
+
+    /// A click that lands on the "N more" line names no item, and must not be
+    /// rounded onto the last one that is drawn.
+    #[test]
+    fn clicking_below_the_last_drawn_item_chooses_nothing() {
+        let mut state = SettingsState::new();
+        state.window_height = 200.0;
+        state.resolution_index = 1;
+        state.show_dropdown(DropdownId::Resolution);
+        let layout = state.dropdown_layout().expect("a dropdown is open");
+        assert!(layout.hidden() > 0, "the popup should be hiding items");
+        let y = layout.row_top(layout.window.count) + 4.0;
+        assert!(layout.item_at(layout.x + 20.0, y).is_none());
+        click(&mut state, layout.x + 20.0, y);
+        assert_eq!(state.resolution_index, 1);
+    }
+
 }

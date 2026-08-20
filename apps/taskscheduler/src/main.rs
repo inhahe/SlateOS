@@ -36,6 +36,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::scroll_window;
 use guitk::text;
 
 use std::collections::BTreeMap;
@@ -69,6 +70,18 @@ const HEADER_HEIGHT: f32 = 48.0;
 const TOOLBAR_HEIGHT: f32 = 40.0;
 const TAB_BAR_HEIGHT: f32 = 36.0;
 const ROW_HEIGHT: f32 = 32.0;
+/// The status bar is drawn *over* the bottom of the content area when a
+/// message is showing, so a list has to stop above it, not at the window
+/// edge.
+const STATUS_BAR_HEIGHT: f32 = 24.0;
+/// Height reserved under a list for its "N more" line. Reserved whether
+/// or not the line is drawn, so how many rows fit does not depend on
+/// whether any are hidden.
+const LIST_MORE_HEIGHT: f32 = 16.0;
+/// How much history the History tab offers to scroll through. Not a viewport
+/// bound -- that is `scroll_window::visible`'s job -- just a limit on how far
+/// back the tab reaches.
+const HISTORY_ROWS_OFFERED: usize = 100;
 const PADDING: f32 = 12.0;
 const FONT_SIZE: f32 = 13.0;
 const FONT_SIZE_SMALL: f32 = 11.0;
@@ -1337,10 +1350,14 @@ pub struct SchedulerUI {
     pub selected_task_id: Option<u64>,
     /// Form state for add/edit dialog.
     pub form: TaskFormState,
-    /// Scroll offset for the task list.
-    pub task_list_scroll: f32,
-    /// Scroll offset for the history list.
-    pub history_scroll: f32,
+    /// First task row drawn, counted in rows rather than pixels: the list
+    /// only ever scrolls a whole row at a time, so a pixel offset could only
+    /// express positions the renderer then rounds away. A value past the end
+    /// is not an error, and shows the last page.
+    pub task_list_scroll: usize,
+    /// First history row drawn. Same units and same tolerance as
+    /// `task_list_scroll`.
+    pub history_scroll: usize,
     /// Status message displayed temporarily.
     pub status_message: Option<String>,
 }
@@ -1353,8 +1370,8 @@ impl SchedulerUI {
             scheduler: TaskScheduler::new(),
             selected_task_id: None,
             form: TaskFormState::new(),
-            task_list_scroll: 0.0,
-            history_scroll: 0.0,
+            task_list_scroll: 0,
+            history_scroll: 0,
             status_message: None,
         }
     }
@@ -1505,7 +1522,14 @@ impl SchedulerUI {
 
         // Content area.
         let content_top = HEADER_HEIGHT + TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
-        let content_height = height - content_top;
+        // The status bar is drawn over the bottom of this area when it is
+        // showing, so the content stops above it rather than under it.
+        let status_h = if self.status_message.is_some() {
+            STATUS_BAR_HEIGHT
+        } else {
+            0.0
+        };
+        let content_height = height - content_top - status_h;
 
         cmds.push(RenderCommand::PushClip {
             x: 0.0,
@@ -1702,13 +1726,7 @@ impl SchedulerUI {
         }
     }
 
-    fn render_task_list(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        width: f32,
-        top: f32,
-        _height: f32,
-    ) {
+    fn render_task_list(&self, cmds: &mut Vec<RenderCommand>, width: f32, top: f32, height: f32) {
         // Column headers.
         let header_y = top;
         cmds.push(RenderCommand::FillRect {
@@ -1749,10 +1767,28 @@ impl SchedulerUI {
             });
         }
 
-        // Task rows.
+        // Task rows. The old loop drew every task at a computed y with no
+        // bound at all: the surrounding clip hid the overflow, and with no
+        // offset to scroll by, a list longer than the window simply had rows
+        // that could not be reached.
         let tasks = self.scheduler.list_tasks();
-        for (i, task) in tasks.iter().enumerate() {
-            let row_y = top + ROW_HEIGHT + (i as f32) * ROW_HEIGHT;
+        let rows_top = top + ROW_HEIGHT;
+        let window = scroll_window::visible(
+            tasks.len(),
+            ROW_HEIGHT,
+            height - ROW_HEIGHT - LIST_MORE_HEIGHT,
+            self.task_list_scroll,
+        );
+        for (drawn, task) in tasks
+            .get(window.start..window.end())
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            // Stripe by absolute position, not by position on screen, so the
+            // banding does not invert as the list scrolls.
+            let i = window.start.saturating_add(drawn);
+            let row_y = rows_top + (drawn as f32) * ROW_HEIGHT;
             let is_selected = self.selected_task_id == Some(task.id);
 
             // Row background.
@@ -1868,6 +1904,21 @@ impl SchedulerUI {
             });
         }
 
+        // A list hiding tasks says how many.
+        let hidden = tasks.len().saturating_sub(window.count);
+        if hidden > 0 {
+            cmds.push(RenderCommand::Text {
+                x: PADDING,
+                y: rows_top + (window.count as f32) * ROW_HEIGHT,
+                text: format!("{hidden} more"),
+                color: COLOR_SUBTEXT,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         // Empty state.
         if tasks.is_empty() {
             cmds.push(RenderCommand::Text {
@@ -1883,13 +1934,7 @@ impl SchedulerUI {
         }
     }
 
-    fn render_history(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        width: f32,
-        top: f32,
-        _height: f32,
-    ) {
+    fn render_history(&self, cmds: &mut Vec<RenderCommand>, width: f32, top: f32, height: f32) {
         // Column headers.
         let header_y = top;
         cmds.push(RenderCommand::FillRect {
@@ -1927,10 +1972,29 @@ impl SchedulerUI {
             });
         }
 
-        // History rows (newest first).
-        let entries = self.scheduler.history.recent(100);
-        for (i, entry) in entries.iter().enumerate() {
-            let row_y = top + ROW_HEIGHT + (i as f32) * ROW_HEIGHT;
+        // History rows (newest first). The 100-entry cap was standing in for
+        // a viewport and is not one: a hundred rows is 3200px, so it bounded
+        // nothing and hid the rest behind the clip with no way to scroll to
+        // them. The window bounds what is drawn; the cap now only bounds how
+        // much history is offered.
+        let entries = self.scheduler.history.recent(HISTORY_ROWS_OFFERED);
+        let rows_top = top + ROW_HEIGHT;
+        let window = scroll_window::visible(
+            entries.len(),
+            ROW_HEIGHT,
+            height - ROW_HEIGHT - LIST_MORE_HEIGHT,
+            self.history_scroll,
+        );
+        for (drawn, entry) in entries
+            .get(window.start..window.end())
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            // Stripe by absolute position so the banding does not invert as
+            // the list scrolls.
+            let i = window.start.saturating_add(drawn);
+            let row_y = rows_top + (drawn as f32) * ROW_HEIGHT;
             let row_bg = if i % 2 == 0 { COLOR_BASE } else { COLOR_SURFACE0 };
             cmds.push(RenderCommand::FillRect {
                 x: 0.0,
@@ -2011,6 +2075,21 @@ impl SchedulerUI {
             }
         }
 
+        // A list hiding entries says how many.
+        let hidden = entries.len().saturating_sub(window.count);
+        if hidden > 0 {
+            cmds.push(RenderCommand::Text {
+                x: PADDING,
+                y: rows_top + (window.count as f32) * ROW_HEIGHT,
+                text: format!("{hidden} more"),
+                color: COLOR_SUBTEXT,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         // Empty state.
         if entries.is_empty() {
             cmds.push(RenderCommand::Text {
@@ -2026,6 +2105,30 @@ impl SchedulerUI {
         }
     }
 
+    /// Move the task list `delta` rows, negative for up.
+    ///
+    /// Clamped at the top only: how many rows fit depends on the window
+    /// height, which this method is not given. The render clamps against what
+    /// it is actually drawing, so an offset past the end shows the last page.
+    pub fn scroll_task_list_by(&mut self, delta: isize) {
+        self.task_list_scroll = scroll_window::shift(self.task_list_scroll, delta);
+    }
+
+    /// Back to the first task.
+    pub fn scroll_task_list_to_top(&mut self) {
+        self.task_list_scroll = 0;
+    }
+
+    /// Move the history list `delta` rows, negative for up.
+    pub fn scroll_history_by(&mut self, delta: isize) {
+        self.history_scroll = scroll_window::shift(self.history_scroll, delta);
+    }
+
+    /// Back to the newest history entry.
+    pub fn scroll_history_to_top(&mut self) {
+        self.history_scroll = 0;
+    }
+
     fn render_status_bar(
         &self,
         cmds: &mut Vec<RenderCommand>,
@@ -2033,7 +2136,7 @@ impl SchedulerUI {
         height: f32,
         message: &str,
     ) {
-        let bar_h = 24.0;
+        let bar_h = STATUS_BAR_HEIGHT;
         let y = height - bar_h;
 
         cmds.push(RenderCommand::FillRect {
@@ -3407,4 +3510,208 @@ mod tests {
     fn test_format_duration_ms_minutes() {
         assert_eq!(format_duration_ms(125000), "2m 5s");
     }
+
+    // --- list scrolling -----------------------------------------------------
+
+    /// A UI with `n` tasks, all sharing a next-run time so `list_tasks` keeps
+    /// them in insertion order and T000 is genuinely first.
+    fn ui_with_tasks(n: usize) -> SchedulerUI {
+        let mut ui = SchedulerUI::new();
+        for i in 0..n {
+            ui.scheduler.add_task(
+                &format!("T{i:03}"),
+                "/bin/true",
+                ScheduleFrequency::Hourly,
+                0,
+            );
+        }
+        ui
+    }
+
+    /// A UI on the History tab with `n` recorded runs. `recent` is newest
+    /// first, so H{n-1} is the top row and H000 the last.
+    fn ui_with_history(n: usize) -> SchedulerUI {
+        let mut ui = SchedulerUI::new();
+        for i in 0..n {
+            ui.scheduler
+                .history
+                .record_success(1, &format!("H{i:03}"), i as u64, 5);
+        }
+        ui.tab = UiTab::History;
+        ui
+    }
+
+    /// Every `T000`/`H000`-shaped label the render drew, in draw order.
+    fn drawn_rows(ui: &SchedulerUI, prefix: char) -> Vec<String> {
+        ui.render(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. }
+                    if text.len() == 4
+                        && text.starts_with(prefix)
+                        && text.get(1..).is_some_and(|d| d.chars().all(|c| c.is_ascii_digit())) =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The bug: both lists drew every row at a computed y with no bound. The
+    /// surrounding clip hid the overflow, and with no offset ever read, the
+    /// hidden rows could not be scrolled to.
+    #[test]
+    fn the_task_list_stops_at_the_last_row_that_fits() {
+        let ui = ui_with_tasks(100);
+        let drawn = drawn_rows(&ui, 'T');
+        assert!(!drawn.is_empty(), "the task list drew no rows at all");
+        assert!(
+            drawn.len() < 100,
+            "the task list drew all 100 rows into a {WINDOW_HEIGHT}px window"
+        );
+        assert_eq!(drawn.first().map(String::as_str), Some("T000"));
+    }
+
+    #[test]
+    fn the_history_list_stops_at_the_last_row_that_fits() {
+        let ui = ui_with_history(60);
+        let drawn = drawn_rows(&ui, 'H');
+        assert!(!drawn.is_empty(), "the history list drew no rows at all");
+        assert!(drawn.len() < 60, "the history list drew all 60 rows");
+        assert_eq!(
+            drawn.first().map(String::as_str),
+            Some("H059"),
+            "history is newest first"
+        );
+    }
+
+    /// No row is drawn past the bottom of the content area -- and the content
+    /// area stops above the status bar, which is drawn over it.
+    #[test]
+    fn no_list_row_is_drawn_past_the_bottom_of_the_content_area() {
+        for status in [false, true] {
+            for offset in [0, 9, 1_000] {
+                let mut ui = ui_with_tasks(100);
+                if status {
+                    ui.status_message = Some(String::from("saved"));
+                }
+                ui.scroll_task_list_by(offset);
+                let bottom = if status {
+                    WINDOW_HEIGHT - STATUS_BAR_HEIGHT
+                } else {
+                    WINDOW_HEIGHT
+                };
+                for cmd in ui.render(WINDOW_WIDTH, WINDOW_HEIGHT) {
+                    if let RenderCommand::Text { y, text, .. } = cmd
+                        && text.len() == 4
+                        && text.starts_with('T')
+                    {
+                        assert!(
+                            y + ROW_HEIGHT <= bottom,
+                            "task row {text:?} at y={y} overruns the content bottom \
+                             {bottom} (status={status}, offset={offset})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The rows past the fold are reachable, which is the fix.
+    #[test]
+    fn scrolling_reaches_the_task_rows_that_did_not_fit() {
+        let mut ui = ui_with_tasks(100);
+        assert!(!drawn_rows(&ui, 'T').contains(&String::from("T099")));
+        ui.scroll_task_list_by(100);
+        assert!(
+            drawn_rows(&ui, 'T').contains(&String::from("T099")),
+            "the last task is unreachable after scrolling to the end"
+        );
+    }
+
+    #[test]
+    fn scrolling_reaches_the_history_rows_that_did_not_fit() {
+        let mut ui = ui_with_history(60);
+        assert!(!drawn_rows(&ui, 'H').contains(&String::from("H000")));
+        ui.scroll_history_by(60);
+        assert!(
+            drawn_rows(&ui, 'H').contains(&String::from("H000")),
+            "the oldest history entry is unreachable after scrolling to the end"
+        );
+    }
+
+    /// An offset past the end means the last page, not a blank list --
+    /// deleting most of a long task list is exactly how that happens.
+    #[test]
+    fn a_task_list_that_shrinks_under_a_stale_offset_shows_its_last_page() {
+        let mut ui = ui_with_tasks(100);
+        ui.scroll_task_list_by(99);
+        let doomed: Vec<u64> = ui
+            .scheduler
+            .list_tasks()
+            .iter()
+            .skip(4)
+            .map(|t| t.id)
+            .collect();
+        for id in doomed {
+            ui.scheduler.remove_task(id);
+        }
+        let drawn = drawn_rows(&ui, 'T');
+        assert_eq!(drawn.len(), 4, "the task list must not go blank");
+        assert_eq!(drawn.last().map(String::as_str), Some("T003"));
+    }
+
+    /// Scrolling up from the top stays at the top rather than wrapping.
+    #[test]
+    fn scrolling_a_list_up_from_the_top_stays_at_the_top() {
+        let mut ui = ui_with_tasks(100);
+        ui.scroll_task_list_by(-10);
+        assert_eq!(ui.task_list_scroll, 0);
+        ui.scroll_task_list_by(5);
+        ui.scroll_task_list_to_top();
+        assert_eq!(ui.task_list_scroll, 0);
+
+        ui.scroll_history_by(-10);
+        assert_eq!(ui.history_scroll, 0);
+        ui.scroll_history_by(5);
+        ui.scroll_history_to_top();
+        assert_eq!(ui.history_scroll, 0);
+    }
+
+    /// A list hiding rows says how many.
+    #[test]
+    fn a_list_that_is_hiding_rows_says_so() {
+        let ui = ui_with_tasks(100);
+        let shown = drawn_rows(&ui, 'T').len();
+        let labels: Vec<String> = ui
+            .render(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            labels.contains(&format!("{} more", 100 - shown)),
+            "expected a \"{} more\" line",
+            100 - shown
+        );
+
+        // ...and a list with room for everything says nothing.
+        let ui = ui_with_tasks(3);
+        let labels: Vec<String> = ui
+            .render(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !labels.iter().any(|t| t.ends_with(" more")),
+            "a complete list should not claim to be hiding rows"
+        );
+    }
+
 }

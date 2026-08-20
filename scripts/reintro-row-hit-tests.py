@@ -59,6 +59,26 @@ OS inherits it. Its rows are all one height, so it uses a plain `row_at` and
 not a `RowStrip`: for a uniform list `top + i * H` and `(y - top) / H` are
 visibly each other's inverse, and the module doc of `row_strip` says as much.
 
+`partmanager` and the desktop's notification pane are the multi-consumer form:
+one rectangle described from memory by three or four separate callers.
+
+    partmanager   the partition list's renderer, click and wheel each spelled
+                  out its top and its height, and the clip already ran 22 px
+                  past the bottom a click accepted -- invisible only because
+                  the queue panel is painted afterwards and covered the
+                  overdraw, which is paint order doing a hit test's job. Its
+                  operation queue panel below is the same again with four
+                  consumers, and `28.0` -- the header height that
+                  `QUEUE_HEADER_HEIGHT` already names -- written out five
+                  times. There the wheel accepted the header while the hover
+                  did not, so a notch over a *collapsed* panel (which is
+                  nothing but its header) scrolled it against a zero-tall
+                  viewport, to anywhere at all
+    notif_pane    the per-app settings list's click divided by the card pitch,
+                  handing each inter-card gutter to the card above it, and had
+                  no bottom bound -- so a click below the pane, aimed at
+                  another window, toggled an app that was never drawn there
+
 Run from the lane-c worktree root:
     python scripts/reintro-row-hit-tests.py
 
@@ -393,7 +413,8 @@ DEFECTS = [
         "partmanager",
         PARTMANAGER,
         "the partition list is clipped 22 px below where a click is accepted",
-        "        height: geom.viewport_height(),",
+        "        width: list_width,\n        height: geom.viewport_height(),",
+        "        width: list_width,\n"
         "        height: (geom.bottom - geom.panel_top - 20.0).max(0.0),",
     ),
     (
@@ -438,15 +459,19 @@ DEFECTS = [
     (
         "partmanager",
         PARTMANAGER,
-        "row_at casts an unchecked f32 straight to usize",
+        "the partition list's row_at casts an unchecked f32 straight to usize",
         "        if !(y >= self.data_top && y < self.bottom) {\n"
         "            return None;\n"
         "        }\n"
         "        let offset = y - self.data_top + scroll;\n"
         "        if !offset.is_finite() || offset < 0.0 {\n"
         "            return None;\n"
-        "        }\n",
-        "        let offset = y - self.data_top + scroll;\n",
+        "        }\n"
+        "        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]\n"
+        "        let index = (offset / PARTITION_ROW_HEIGHT) as usize;\n",
+        "        let offset = y - self.data_top + scroll;\n"
+        "        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]\n"
+        "        let index = (offset / PARTITION_ROW_HEIGHT) as usize;\n",
     ),
     (
         "partmanager",
@@ -454,6 +479,105 @@ DEFECTS = [
         "the partition list draws its rows three pixels below where they answer",
         "        let ry = geom.row_y(i, app.partition_scroll);",
         "        let ry = geom.row_y(i, app.partition_scroll) + 3.0;",
+    ),
+    # The operation queue panel below the partition list is the same shape
+    # again, with four consumers rather than three -- renderer, header click,
+    # row hover and wheel -- and `28.0`, the header's height, written out five
+    # times even though `QUEUE_HEADER_HEIGHT` already named it.
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the queue's row_at casts an unchecked f32 straight to usize",
+        "        if !(y >= self.data_top && y < self.bottom) {\n"
+        "            return None;\n"
+        "        }\n"
+        "        let offset = y - self.data_top + scroll;\n"
+        "        if !offset.is_finite() || offset < 0.0 {\n"
+        "            return None;\n"
+        "        }\n"
+        "        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]\n"
+        "        let index = (offset / QUEUE_ROW_HEIGHT) as usize;\n",
+        "        let offset = y - self.data_top + scroll;\n"
+        "        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]\n"
+        "        let index = (offset / QUEUE_ROW_HEIGHT) as usize;\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the queue panel is clipped a row past where the pointer is accepted",
+        "        width: panel_width,\n        height: geom.viewport_height(),",
+        "        width: panel_width,\n"
+        "        height: geom.viewport_height() + QUEUE_ROW_HEIGHT,",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the queue panel draws its rows three pixels below where they answer",
+        "        let ry = geom.row_y(i, app.queue_scroll);",
+        "        let ry = geom.row_y(i, app.queue_scroll) + 3.0;",
+    ),
+    (
+        # The header and the collapsed panel are the same defect: a shut panel
+        # *is* its header, so a wheel that accepts the header scrolls a panel
+        # whose viewport is zero pixels tall -- and therefore to anywhere.
+        "partmanager",
+        PARTMANAGER,
+        "the wheel accepts the queue's header, and so a collapsed panel too",
+        "    let queue = QueueList::of(app);\n"
+        "    if queue.contains(x, y) {\n"
+        "        let max_scroll = QueueList::max_scroll(app.operation_queue.len());\n",
+        "    let queue = QueueList::of(app);\n"
+        "    if y >= queue.panel_top && y < queue.bottom && x >= SIDEBAR_WIDTH {\n"
+        "        let max_scroll = (app.operation_queue.len() as f32 * QUEUE_ROW_HEIGHT\n"
+        "            - queue.viewport_height())\n"
+        "        .max(0.0);\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the queue's scroll stop leaves the header out of the viewport",
+        "        ((count as f32) * QUEUE_ROW_HEIGHT"
+        " - (QUEUE_PANEL_HEIGHT - QUEUE_HEADER_HEIGHT)).max(0.0)",
+        "        ((count as f32) * QUEUE_ROW_HEIGHT - QUEUE_PANEL_HEIGHT).max(0.0)",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the queue's header click has no right-hand bound",
+        "    if QueueList::of(app).contains_header(x, y) {",
+        "    let q = QueueList::of(app);\n"
+        "    if y >= q.panel_top && y < q.data_top && x >= SIDEBAR_WIDTH {",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the queue's hover has no right-hand bound and divides without a guard",
+        "    let queue = QueueList::of(app);\n"
+        "    if queue.contains(x, y) {\n"
+        "        app.hovered_queue_row = "
+        "queue.row_at(y, app.queue_scroll, app.operation_queue.len());\n",
+        "    let queue = QueueList::of(app);\n"
+        "    if y >= queue.data_top && y < queue.bottom && x >= SIDEBAR_WIDTH {\n"
+        "        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]\n"
+        "        let row = ((y - queue.data_top + app.queue_scroll) / QUEUE_ROW_HEIGHT) as usize;\n"
+        "        if row < app.operation_queue.len() {\n"
+        "            app.hovered_queue_row = Some(row);\n"
+        "        }\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "undo shortens the queue without pulling the panel back onto its rows",
+        "        self.clamp_queue_scroll();\n        op\n",
+        "        op\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "clearing the queue leaves the panel scrolled past an empty list",
+        '        self.status_message = String::from("Operation queue cleared");\n'
+        "        self.clamp_queue_scroll();\n",
+        '        self.status_message = String::from("Operation queue cleared");\n',
     ),
     # -------------------------------------------------------------- settings
     (

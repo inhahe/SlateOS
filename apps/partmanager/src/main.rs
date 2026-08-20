@@ -1136,12 +1136,25 @@ impl PartitionManagerApp {
         self.operation_queue.push(op);
     }
 
+    /// Pull `queue_scroll` back into range after the queue got shorter.
+    ///
+    /// Nothing else did: the wheel is the only thing that clamps it, so
+    /// removing rows from under a scrolled panel left it parked below its own
+    /// content, showing blank space, until the user scrolled again. Every path
+    /// that shortens the queue calls this.
+    fn clamp_queue_scroll(&mut self) {
+        self.queue_scroll = self
+            .queue_scroll
+            .clamp(0.0, QueueList::max_scroll(self.operation_queue.len()));
+    }
+
     /// Remove the last queued operation (undo).
     pub fn undo_last_operation(&mut self) -> Option<PendingOperation> {
         let op = self.operation_queue.pop();
         if op.is_some() {
             self.status_message = String::from("Last operation removed from queue");
         }
+        self.clamp_queue_scroll();
         op
     }
 
@@ -1149,6 +1162,7 @@ impl PartitionManagerApp {
     pub fn clear_operations(&mut self) {
         self.operation_queue.clear();
         self.status_message = String::from("Operation queue cleared");
+        self.clamp_queue_scroll();
     }
 
     /// Apply all pending operations (stub -- in a real system this calls syscalls).
@@ -1156,6 +1170,7 @@ impl PartitionManagerApp {
         let count = self.operation_queue.len();
         self.operation_queue.clear();
         self.status_message = format!("Applied {count} operation(s) successfully");
+        self.clamp_queue_scroll();
         count
     }
 
@@ -1602,17 +1617,135 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
 // Rendering -- partition list
 // ============================================================================
 
-/// How tall the operation queue's panel is right now.
+/// Where the operation queue's panel and its rows go: one answer for the
+/// renderer, the header click, the row hover and the wheel.
 ///
-/// Collapsed it keeps its header, because the header is the thing you click to
-/// open it again. Four places chose between these two numbers by hand and one
-/// of them is the bottom edge of the partition list, so the choice is made
-/// once.
-fn queue_panel_height(app: &PartitionManagerApp) -> f32 {
-    if app.queue_expanded {
-        QUEUE_PANEL_HEIGHT
-    } else {
-        QUEUE_HEADER_HEIGHT
+/// Those four each had a spelling of their own. `28.0` — the header's height,
+/// which `QUEUE_HEADER_HEIGHT` already names — was written out five times, and
+/// the consumers had already drifted apart:
+///
+/// - The wheel accepted the header strip, which the hover does not, so a notch
+///   over the words "Pending Operations" scrolled rows the pointer was not on.
+/// - Worse, it therefore accepted a *collapsed* panel, which is nothing but
+///   that strip. A collapsed panel's viewport is zero pixels tall, so the
+///   wheel's `max_scroll` came out as the entire content height: a notch over
+///   a shut panel scrolled it to an arbitrary place, which you then found it
+///   in when you opened it.
+/// - The hover divided and cast without checking the offset first. A NaN
+///   coordinate clears a `y >= top` bound by failing it, and `NaN as usize` is
+///   `0` in Rust, so a pointer that is nowhere at all highlighted row 0.
+/// - Neither the header click nor the hover had a right-hand bound, so both
+///   answered for the whole half-plane right of the sidebar — past the window's
+///   own edge included.
+///
+/// None of those is reachable through a number this type spells twice, because
+/// it spells each of them once.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct QueueList {
+    /// Left edge of the panel, and of every row in it.
+    left: f32,
+    /// Width of the panel, and of every row in it.
+    width: f32,
+    /// Top of the header — the panel's own top edge, and so also the bottom
+    /// edge of the partition list above it.
+    panel_top: f32,
+    /// Top of row 0 when the list is scrolled to its start.
+    ///
+    /// Equal to [`Self::bottom`] while the panel is collapsed, which is what
+    /// makes every row-region test below answer "no" without separately
+    /// asking whether the panel is open.
+    data_top: f32,
+    /// One past the last pixel a row may occupy.
+    bottom: f32,
+}
+
+impl QueueList {
+    /// Measure the panel as it stands in `app`.
+    fn of(app: &PartitionManagerApp) -> Self {
+        // Collapsed, the panel keeps its header: the header is the thing you
+        // click to open it again.
+        let height = if app.queue_expanded {
+            QUEUE_PANEL_HEIGHT
+        } else {
+            QUEUE_HEADER_HEIGHT
+        };
+        let bottom = app.height - STATUS_BAR_HEIGHT;
+        let panel_top = bottom - height;
+        Self {
+            left: SIDEBAR_WIDTH,
+            width: (app.width - SIDEBAR_WIDTH).max(0.0),
+            panel_top,
+            data_top: panel_top + QUEUE_HEADER_HEIGHT,
+            bottom,
+        }
+    }
+
+    /// Right edge of the panel — one past its last pixel.
+    fn right(&self) -> f32 {
+        self.left + self.width
+    }
+
+    /// Height of the whole panel, header included.
+    fn height(&self) -> f32 {
+        self.bottom - self.panel_top
+    }
+
+    /// Height of the region rows are drawn into and answer the pointer in.
+    /// Zero while the panel is collapsed.
+    fn viewport_height(&self) -> f32 {
+        (self.bottom - self.data_top).max(0.0)
+    }
+
+    /// Whether `(x, y)` is on the header — the strip that opens and shuts the
+    /// panel.
+    fn contains_header(&self, x: f32, y: f32) -> bool {
+        x >= self.left && x < self.right() && y >= self.panel_top && y < self.data_top
+    }
+
+    /// Whether `(x, y)` is in the region the rows are painted in. Always
+    /// `false` while the panel is collapsed, because then there is no such
+    /// region.
+    fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.left && x < self.right() && y >= self.data_top && y < self.bottom
+    }
+
+    /// Top of row `index` at scroll offset `scroll`.
+    fn row_y(&self, index: usize, scroll: f32) -> f32 {
+        self.data_top + (index as f32) * QUEUE_ROW_HEIGHT - scroll
+    }
+
+    /// The row at `y` out of `count`, or `None` — the inverse of
+    /// [`Self::row_y`], and the only thing that answers the pointer.
+    ///
+    /// A row owns its top edge and not its bottom one, so no pixel names two
+    /// rows. The offset is checked for sign *and* finiteness before the cast
+    /// because a negative `f32` and a NaN both cast to `usize` by *saturating
+    /// to zero* in Rust rather than wrapping or trapping — a pointer above the
+    /// list, or one that is not a number at all, would otherwise name row 0.
+    fn row_at(&self, y: f32, scroll: f32, count: usize) -> Option<usize> {
+        if !(y >= self.data_top && y < self.bottom) {
+            return None;
+        }
+        let offset = y - self.data_top + scroll;
+        if !offset.is_finite() || offset < 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let index = (offset / QUEUE_ROW_HEIGHT) as usize;
+        (index < count).then_some(index)
+    }
+
+    /// Furthest the list may scroll: far enough to bring the last row's bottom
+    /// edge onto the viewport's bottom edge, and no further.
+    ///
+    /// Measured against the viewport the panel has when it is *open*, not the
+    /// one it has right now, which is why this takes no `self`. Using the
+    /// current viewport would let a collapsed panel — zero pixels of it — hold
+    /// a scroll position of the whole content height, a position the open
+    /// panel refuses; and it would snap the list to the top every time the
+    /// panel was shut.
+    fn max_scroll(count: usize) -> f32 {
+        ((count as f32) * QUEUE_ROW_HEIGHT - (QUEUE_PANEL_HEIGHT - QUEUE_HEADER_HEIGHT)).max(0.0)
     }
 }
 
@@ -1670,10 +1803,11 @@ impl PartitionList {
                 .max(0.0),
             panel_top,
             data_top,
-            // A window short enough that the queue panel and the status bar
-            // between them eat the list leaves it with no rows rather than a
-            // negative number of them.
-            bottom: (app.height - STATUS_BAR_HEIGHT - queue_panel_height(app)).max(data_top),
+            // The list stops where the queue panel starts, asked rather than
+            // recomputed. A window short enough that the queue panel and the
+            // status bar between them eat the list leaves it with no rows
+            // rather than a negative number of them.
+            bottom: QueueList::of(app).panel_top.max(data_top),
         }
     }
 
@@ -2129,17 +2263,16 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
 // ============================================================================
 
 fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
-    let queue_h = queue_panel_height(app);
-    let top = app.height - STATUS_BAR_HEIGHT - queue_h;
-    let left = SIDEBAR_WIDTH;
-    let panel_width = app.width - SIDEBAR_WIDTH;
+    let geom = QueueList::of(app);
+    let left = geom.left;
+    let panel_width = geom.width;
 
     // Background
     tree.push(RenderCommand::FillRect {
         x: left,
-        y: top,
+        y: geom.panel_top,
         width: panel_width,
-        height: queue_h,
+        height: geom.height(),
         color: COLOR_SURFACE0,
         corner_radii: CornerRadii::ZERO,
     });
@@ -2147,9 +2280,9 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
     // Top border
     tree.push(RenderCommand::Line {
         x1: left,
-        y1: top,
-        x2: left + panel_width,
-        y2: top,
+        y1: geom.panel_top,
+        x2: geom.right(),
+        y2: geom.panel_top,
         color: COLOR_SURFACE1,
         width: 1.0,
     });
@@ -2164,7 +2297,7 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let expand_icon = if app.queue_expanded { "v" } else { ">" };
     tree.push(RenderCommand::Text {
         x: left + 12.0,
-        y: top + 7.0,
+        y: geom.panel_top + 7.0,
         text: format!("{expand_icon} {header_text}"),
         color: COLOR_TEXT,
         font_size: 11.0,
@@ -2177,18 +2310,18 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         return;
     }
 
-    let list_top = top + 28.0;
-    let list_h = queue_h - 28.0;
-
     tree.push(RenderCommand::PushClip {
         x: left,
-        y: list_top,
+        y: geom.data_top,
         width: panel_width,
-        height: list_h,
+        height: geom.viewport_height(),
     });
 
     for (i, op) in app.operation_queue.iter().enumerate() {
-        let ry = list_top + (i as f32) * QUEUE_ROW_HEIGHT - app.queue_scroll;
+        // The row tops come from `row_y`, which is what `row_at` inverts —
+        // walking the arithmetic here separately is how the partition list
+        // above ended up painting rows no click could reach.
+        let ry = geom.row_y(i, app.queue_scroll);
         let hovered = app.hovered_queue_row == Some(i);
 
         let bg = if hovered {
@@ -3056,15 +3189,13 @@ fn handle_left_click(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
     }
 
     // Partition list click
-    let queue_h = queue_panel_height(app);
     let list = PartitionList::of(app);
     if list.contains(x, y) {
         return handle_partition_list_click(app, y, list);
     }
 
     // Queue panel toggle
-    let queue_top = app.height - STATUS_BAR_HEIGHT - queue_h;
-    if y >= queue_top && y < queue_top + 28.0 && x >= SIDEBAR_WIDTH {
+    if QueueList::of(app).contains_header(x, y) {
         app.queue_expanded = !app.queue_expanded;
         return EventResult::Consumed;
     }
@@ -3343,15 +3474,9 @@ fn handle_mouse_move(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
     }
 
     // Queue hover
-    let queue_h = queue_panel_height(app);
-    let queue_top = app.height - STATUS_BAR_HEIGHT - queue_h;
-    if y >= queue_top + 28.0 && y < app.height - STATUS_BAR_HEIGHT && x >= SIDEBAR_WIDTH {
-        if app.queue_expanded {
-            let row = ((y - queue_top - 28.0 + app.queue_scroll) / QUEUE_ROW_HEIGHT) as usize;
-            if row < app.operation_queue.len() {
-                app.hovered_queue_row = Some(row);
-            }
-        }
+    let queue = QueueList::of(app);
+    if queue.contains(x, y) {
+        app.hovered_queue_row = queue.row_at(y, app.queue_scroll, app.operation_queue.len());
         return EventResult::Consumed;
     }
 
@@ -3359,13 +3484,13 @@ fn handle_mouse_move(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
 }
 
 fn handle_scroll(app: &mut PartitionManagerApp, x: f32, y: f32, dy: f32) -> EventResult {
-    let queue_h = queue_panel_height(app);
-    let queue_top = app.height - STATUS_BAR_HEIGHT - queue_h;
-
-    // Queue panel scroll
-    if y >= queue_top && y < app.height - STATUS_BAR_HEIGHT && x >= SIDEBAR_WIDTH {
-        let max_scroll =
-            (app.operation_queue.len() as f32 * QUEUE_ROW_HEIGHT - (queue_h - 28.0)).max(0.0);
+    // Queue panel scroll. The region is the one the rows are in, not the whole
+    // panel: a notch over the header used to scroll the list, and since a
+    // collapsed panel is nothing but its header, a notch over a shut panel
+    // scrolled it too -- against a zero-tall viewport, so anywhere at all.
+    let queue = QueueList::of(app);
+    if queue.contains(x, y) {
+        let max_scroll = QueueList::max_scroll(app.operation_queue.len());
         // Pixel offsets, so `wheel::pixels` rather than an accumulator --
         // a fraction of a notch is showable here. Each list passes its own
         // row height so a notch crosses three of *its* rows, which the flat
@@ -3381,9 +3506,8 @@ fn handle_scroll(app: &mut PartitionManagerApp, x: f32, y: f32, dy: f32) -> Even
     if list.contains(x, y) {
         let region_count = app.current_disk().map_or(0, |d| d.regions().len());
         let max_scroll = list.max_scroll(region_count);
-        app.partition_scroll = (app.partition_scroll
-            + wheel::pixels(dy, PARTITION_ROW_HEIGHT))
-        .clamp(0.0, max_scroll);
+        app.partition_scroll =
+            (app.partition_scroll + wheel::pixels(dy, PARTITION_ROW_HEIGHT)).clamp(0.0, max_scroll);
         return EventResult::Consumed;
     }
 
@@ -3753,10 +3877,18 @@ mod tests {
     // Exact float comparison is the point in the wheel tests below: they assert
     // that a computed offset equals the row height it was built from, and an
     // epsilon there would weaken the assertion rather than strengthen it.
+    //
+    // `unwrap`/`expect`/`panic` are allowed here for the reason CLAUDE.md
+    // gives: in a test, panicking on data that should not occur *is* the
+    // failure report, where in production code it would be a denial of
+    // service. They stay denied outside this module.
     #![allow(
         clippy::float_cmp,
         clippy::arithmetic_side_effects,
-        clippy::indexing_slicing
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic
     )]
 
     use super::*;
@@ -3794,8 +3926,12 @@ mod tests {
     /// A point inside the partition list: right of the sidebar, left of the
     /// detail panel, below the disk map and above the queue panel.
     const LIST_POINT: (f32, f32) = (400.0, 300.0);
-    /// A point inside the expanded operation queue.
-    const QUEUE_POINT: (f32, f32) = (400.0, 600.0);
+    /// A point inside the expanded operation queue's *rows*.
+    ///
+    /// It used to be `600.0`, which is in the panel's header rather than its
+    /// list — the wheel accepted the header and the hover did not, so this
+    /// point exercised a region no other consumer agreed was part of the list.
+    const QUEUE_POINT: (f32, f32) = (400.0, 650.0);
 
     #[test]
     fn one_notch_crosses_three_rows_of_whichever_list_is_under_the_pointer() {
@@ -3829,7 +3965,10 @@ mod tests {
             handle_scroll(&mut app, LIST_POINT.0, LIST_POINT.1, -1.0);
             handle_scroll(&mut app, QUEUE_POINT.0, QUEUE_POINT.1, -1.0);
         }
-        assert!(app.partition_scroll > 0.0, "the list must have room to move");
+        assert!(
+            app.partition_scroll > 0.0,
+            "the list must have room to move"
+        );
         assert!(app.queue_scroll > 0.0, "the queue must have room to move");
         let stopped = (app.partition_scroll, app.queue_scroll);
         handle_scroll(&mut app, LIST_POINT.0, LIST_POINT.1, -1.0);
@@ -4093,6 +4232,304 @@ mod tests {
             app.partition_scroll > 0.0,
             "the list's own left edge does not scroll it"
         );
+    }
+
+    // -- Operation queue panel geometry tests --
+    //
+    // Same rule as the partition list above: the expected values come from the
+    // rectangles `render_queue_panel` actually emitted, never from a second
+    // copy of its arithmetic. Four consumers described this panel from memory
+    // — the renderer, the header click, the row hover and the wheel — and
+    // `28.0`, the header's height, was written out five times.
+
+    /// The clip `render_queue_panel` pushes around its rows, as
+    /// `(top, bottom)`.
+    fn painted_queue_clip(app: &PartitionManagerApp) -> (f32, f32) {
+        let mut tree = RenderTree::new();
+        render_queue_panel(&mut tree, app);
+        tree.commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::PushClip { y, height, .. } => Some((*y, *y + *height)),
+                _ => None,
+            })
+            .expect("the queue panel draws no clip")
+    }
+
+    /// Every queue row background the panel painted *and did not clip away*,
+    /// as `(index, top)`.
+    fn visible_painted_queue_rows(app: &PartitionManagerApp) -> Vec<(usize, f32)> {
+        let geom = QueueList::of(app);
+        let (clip_top, clip_bottom) = painted_queue_clip(app);
+        let mut tree = RenderTree::new();
+        render_queue_panel(&mut tree, app);
+        tree.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                // The panel's own background is the same width and left edge,
+                // so the row height is what tells the two apart.
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*x - geom.left).abs() < 0.01
+                    && (*width - geom.width).abs() < 0.01
+                    && (*height - QUEUE_ROW_HEIGHT).abs() < 0.01 =>
+                {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .filter(|y| *y >= clip_top && *y + QUEUE_ROW_HEIGHT <= clip_bottom)
+            .map(|y| {
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                let index =
+                    ((y - geom.row_y(0, app.queue_scroll)) / QUEUE_ROW_HEIGHT).round() as usize;
+                (index, y)
+            })
+            .collect()
+    }
+
+    /// Move the pointer to `(x, y)` and report which queue row it highlights.
+    fn hover_names_queue_row(
+        app: &mut PartitionManagerApp,
+        x: f32,
+        y: f32,
+    ) -> (Option<usize>, EventResult) {
+        let result = handle_mouse_move(app, x, y);
+        (app.hovered_queue_row, result)
+    }
+
+    #[test]
+    fn every_visible_queue_row_answers_exactly_where_it_was_painted() {
+        let mut app = app_with_long_lists();
+        // A half-row scroll offset, so a renderer that drifts from the hover
+        // by a whole row cannot hide behind a coincidence at offset zero.
+        app.queue_scroll = 3.5 * QUEUE_ROW_HEIGHT;
+        let mid_x = QueueList::of(&app).left + 20.0;
+        let rows = visible_painted_queue_rows(&app);
+        assert!(rows.len() >= 4, "only {} rows visible", rows.len());
+        for (index, top) in rows {
+            // Sweep the row rather than probing its middle, and include its
+            // last pixel: a hit test three pixels out of step with the paint
+            // is right in the middle of a 22 px row and wrong only at the ends.
+            for step in 0..8 {
+                let probe = top + (step as f32) * QUEUE_ROW_HEIGHT / 8.0;
+                assert_eq!(
+                    hover_names_queue_row(&mut app, mid_x, probe).0,
+                    Some(index),
+                    "row {index} was painted at {top} but {probe} highlights something else"
+                );
+            }
+            assert_eq!(
+                hover_names_queue_row(&mut app, mid_x, top + QUEUE_ROW_HEIGHT - 0.01).0,
+                Some(index),
+                "row {index}'s last pixel does not belong to it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clip_the_queue_panel_emits_is_the_region_the_pointer_lands_in() {
+        let mut app = app_with_long_lists();
+        let mid_x = QueueList::of(&app).left + 20.0;
+        let (clip_top, clip_bottom) = painted_queue_clip(&app);
+        assert!(
+            hover_names_queue_row(&mut app, mid_x, clip_top).0.is_some(),
+            "the clip's first pixel row highlights nothing"
+        );
+        assert!(
+            hover_names_queue_row(&mut app, mid_x, clip_bottom - 0.01)
+                .0
+                .is_some(),
+            "the clip's last pixel row highlights nothing"
+        );
+        assert!(
+            hover_names_queue_row(&mut app, mid_x, clip_top - 0.01)
+                .0
+                .is_none(),
+            "a pixel above the clip highlights a row"
+        );
+        assert!(
+            hover_names_queue_row(&mut app, mid_x, clip_bottom)
+                .0
+                .is_none(),
+            "a pixel below the clip highlights a row"
+        );
+    }
+
+    #[test]
+    fn the_queue_panels_header_toggles_it_and_highlights_no_row() {
+        let mut app = app_with_long_lists();
+        let geom = QueueList::of(&app);
+        let mid_x = geom.left + 20.0;
+        for probe in [
+            geom.panel_top,
+            geom.panel_top + QUEUE_HEADER_HEIGHT / 2.0,
+            geom.data_top - 0.01,
+        ] {
+            assert_eq!(
+                hover_names_queue_row(&mut app, mid_x, probe).0,
+                None,
+                "{probe} is on the header but highlights a row"
+            );
+            let was = app.queue_expanded;
+            assert_eq!(
+                handle_left_click(&mut app, mid_x, probe),
+                EventResult::Consumed,
+                "{probe} is on the header but the click fell through"
+            );
+            assert_ne!(app.queue_expanded, was, "{probe} did not toggle the panel");
+            app.queue_expanded = was;
+        }
+    }
+
+    #[test]
+    fn nothing_right_of_the_window_belongs_to_the_queue_panel() {
+        // Neither the header click nor the hover had a right-hand bound: both
+        // answered for the whole half-plane right of the sidebar.
+        let mut app = app_with_long_lists();
+        let geom = QueueList::of(&app);
+        let outside = geom.right();
+        assert_eq!(
+            handle_left_click(&mut app, outside, geom.panel_top + 4.0),
+            EventResult::Ignored,
+            "a click past the window's right edge landed on the header"
+        );
+        assert!(
+            app.queue_expanded,
+            "a click past the window's right edge shut the panel"
+        );
+        let (row, result) = hover_names_queue_row(&mut app, outside, geom.data_top + 4.0);
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(row, None, "a pointer past the window's right edge hovers");
+    }
+
+    #[test]
+    fn a_collapsed_queue_panel_neither_scrolls_nor_highlights() {
+        // Collapsed, the panel is nothing but its header, and its viewport is
+        // zero pixels tall. The wheel used to accept the header, so a notch
+        // over a shut panel scrolled it against a zero-tall viewport — which
+        // is to say, to anywhere at all. You found it there on reopening.
+        let mut app = app_with_long_lists();
+        for _ in 0..200 {
+            handle_scroll(&mut app, QUEUE_POINT.0, QUEUE_POINT.1, -1.0);
+        }
+        let parked = app.queue_scroll;
+        assert!(parked > 0.0, "the queue must have room to move");
+
+        app.queue_expanded = false;
+        let geom = QueueList::of(&app);
+        let mid_x = geom.left + 20.0;
+        for probe in [geom.panel_top, geom.bottom - 0.01] {
+            assert_eq!(
+                handle_scroll(&mut app, mid_x, probe, -1.0),
+                EventResult::Ignored,
+                "{probe} scrolled a shut panel"
+            );
+            assert_eq!(hover_names_queue_row(&mut app, mid_x, probe).0, None);
+        }
+        assert_eq!(
+            app.queue_scroll, parked,
+            "a shut panel moved under the wheel"
+        );
+
+        app.queue_expanded = true;
+        assert_eq!(
+            app.queue_scroll, parked,
+            "reopening the panel moved the list"
+        );
+    }
+
+    #[test]
+    fn shortening_the_queue_pulls_the_panel_back_onto_its_rows() {
+        // `queue_scroll` was clamped by the wheel and by nothing else, so undo,
+        // clear and apply each shortened the list out from under a scrolled
+        // panel and left it parked below its own last row, showing blank space.
+        let mut app = app_with_long_lists();
+        for _ in 0..400 {
+            handle_scroll(&mut app, QUEUE_POINT.0, QUEUE_POINT.1, -1.0);
+        }
+        assert!(app.queue_scroll > 0.0, "the queue must have room to move");
+        for _ in 0..20 {
+            app.undo_last_operation();
+        }
+        let (_, clip_bottom) = painted_queue_clip(&app);
+        let rows = visible_painted_queue_rows(&app);
+        assert!(
+            !rows.is_empty(),
+            "the panel is scrolled past every row it has and shows blank space"
+        );
+        let last_bottom = rows
+            .iter()
+            .map(|(_, top)| top + QUEUE_ROW_HEIGHT)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            last_bottom >= clip_bottom - 0.01,
+            "there is still a {} px blank strip below the last row",
+            clip_bottom - last_bottom
+        );
+
+        // And clearing it outright puts the list back at its start.
+        app.clear_operations();
+        assert_eq!(app.queue_scroll, 0.0, "an empty queue is still scrolled");
+    }
+
+    #[test]
+    fn the_queue_row_walk_refuses_a_coordinate_that_is_not_in_the_list() {
+        // `row_at` is the published inverse of `row_y`; the hover happens to
+        // gate it with `contains` first, but the guards below are what stop a
+        // future caller — or a rewrite back into a bare divide-and-cast —
+        // from turning a coordinate that is nowhere into row 0. Both a NaN and
+        // a negative `f32` cast to `usize` by saturating to zero.
+        let app = app_with_long_lists();
+        let geom = QueueList::of(&app);
+        let n = app.operation_queue.len();
+        assert_eq!(geom.row_at(geom.data_top, 0.0, n), Some(0));
+        assert_eq!(
+            geom.row_at(geom.data_top - 0.01, 0.0, n),
+            None,
+            "the header names a row"
+        );
+        assert_eq!(
+            geom.row_at(geom.bottom, 0.0, n),
+            None,
+            "the status bar names a row"
+        );
+        assert_eq!(geom.row_at(f32::NAN, 0.0, n), None, "a NaN names a row");
+        assert_eq!(
+            geom.row_at(geom.data_top + 1.0, f32::NAN, n),
+            None,
+            "a NaN scroll offset names a row"
+        );
+        assert_eq!(
+            geom.row_at(geom.data_top + 1.0, -1000.0, n),
+            None,
+            "a row scrolled off the top of the list still names itself"
+        );
+    }
+
+    #[test]
+    fn the_wheel_and_the_hover_agree_on_where_the_queue_is() {
+        // The wheel accepted the header strip and the hover did not, so a
+        // notch over the words "Pending Operations" scrolled rows the pointer
+        // was nowhere near.
+        let mut app = app_with_long_lists();
+        let geom = QueueList::of(&app);
+        let mid_x = geom.left + 20.0;
+        for step in 0..40 {
+            let y = geom.panel_top - 4.0 + (step as f32) * 4.0;
+            app.queue_scroll = 0.0;
+            handle_scroll(&mut app, mid_x, y, -1.0);
+            let scrolled = app.queue_scroll > 0.0;
+            let hovered = hover_names_queue_row(&mut app, mid_x, y).0.is_some();
+            assert_eq!(
+                scrolled, hovered,
+                "at y = {y} the wheel says {scrolled} and the hover says {hovered}"
+            );
+        }
     }
 
     // -- Size formatting tests --

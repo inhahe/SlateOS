@@ -44228,11 +44228,9 @@ partition list's bottom edge.
 All six verified by reintroduction — each defect put back one at a time, each
 pinned by the test named for it. partmanager 113 → 119 tests.
 
-**Still open here:** the *queue* panel has the same three-spellings shape
-(`render_queue_panel`, the hover in `handle_mouse_move`, and the wheel each
-compute `queue_top` and the row offset themselves). No divergence was found
-between them, but nothing holds them together either. The fix is the same
-shape as `PartitionList` and is not yet done.
+**The queue panel, noted here as still open, is now done too** — and it did
+have divergences, four of them. See "partmanager's operation queue panel was
+described four ways" below.
 
 ### Two hit tests let a NaN select the first row — FIXED
 
@@ -44375,3 +44373,94 @@ warning, failing — on a `manual_contains` lint in a pre-existing test, so
 `cargo clippy -p desktop` had been red for however long since the toolchain
 picked that lint up. Fixed in passing; the crate now emits 77 warnings and no
 errors, down from 79 and one.
+
+### partmanager's operation queue panel was described four ways — FIXED
+
+The last site logged as still-open from the earlier partmanager entry, and it
+was not the quiet one that note assumed. Four consumers — `render_queue_panel`,
+the header click in `handle_left_click`, the row hover in `handle_mouse_move`,
+and the wheel in `handle_scroll` — each recomputed the panel's top and its
+rows' offsets, and `28.0` (the header's height, which `QUEUE_HEADER_HEIGHT`
+already named) was written out five times.
+
+| what | region it accepted | how it placed a row |
+|---|---|---|
+| renderer | `top + 28` down `queue_h - 28` | `list_top + i * 22 - scroll` |
+| header click | `queue_top` to `queue_top + 28`, `x >= SIDEBAR_WIDTH`, no right edge | — |
+| hover | `queue_top + 28` to `height - STATUS_BAR`, `x >= SIDEBAR_WIDTH`, no right edge | `((y - queue_top - 28 + scroll) / 22) as usize`, unguarded |
+| wheel | `queue_top` to `height - STATUS_BAR` — the header **included** | viewport as `queue_h - 28` |
+
+What that cost, worst first:
+
+- **A notch over a *collapsed* panel scrolled it to an arbitrary place.** The
+  wheel accepted the header; a shut panel is nothing *but* its header. Shut,
+  `queue_h` is 28, so the wheel's viewport term `queue_h - 28` is zero and its
+  maximum scroll became the entire content height. You could park a closed
+  panel anywhere — and then find it there, showing blank space, when you
+  opened it.
+- **`queue_scroll` was clamped by the wheel and by nothing else.**
+  `undo_last_operation`, `clear_operations` and `apply_operations` all shorten
+  the queue out from under a scrolled panel; none touched the offset. Undo
+  twenty operations from a scrolled-to-the-end panel and it stayed parked below
+  its own last row.
+- **A notch over the words "Pending Operations" scrolled rows the pointer was
+  not on**, because the wheel accepted a strip the hover refused.
+- **The hover divided and cast with no guard on the offset.** A NaN clears a
+  `y >= queue_top + 28.0` bound *by failing it*, and `NaN as usize` is `0`, so
+  a pointer that is nowhere at all highlighted row 0.
+- **Neither the header click nor the hover had a right-hand bound.** Both
+  answered for the whole half-plane right of the sidebar, the region past the
+  window's own right edge included.
+
+`QueueList` now holds left, width, panel top, data top and bottom; `row_at()`
+is `row_y()` inverted; `contains_header()` and `contains()` are the two regions,
+and the second is empty by construction while the panel is collapsed, so no
+consumer has to ask separately whether it is open. `queue_panel_height()` is
+gone — `PartitionList::of` now takes its bottom edge from
+`QueueList::of(app).panel_top` rather than recomputing the same subtraction,
+which is the one number the two panels genuinely share.
+
+`QueueList::max_scroll` deliberately takes **no `self`**: it measures against
+the viewport the panel has when *open*, not the one it has right now. Using the
+current viewport is what let a zero-tall collapsed panel hold a scroll position
+the open panel refuses, and it would also snap the list to the top every time
+the panel was shut.
+
+| test | pins |
+|---|---|
+| `every_visible_queue_row_answers_exactly_where_it_was_painted` | eight probes across every row the renderer emitted and did not clip away, plus its last pixel, at a deliberate half-row scroll offset |
+| `the_clip_the_queue_panel_emits_is_the_region_the_pointer_lands_in` | the clip's own top and bottom edge, read out of the `PushClip` command |
+| `the_queue_panels_header_toggles_it_and_highlights_no_row` | the header is a button and not a row, at both its edges |
+| `nothing_right_of_the_window_belongs_to_the_queue_panel` | the missing right-hand bound, through the click and the hover |
+| `a_collapsed_queue_panel_neither_scrolls_nor_highlights` | the wheel against a shut panel, and that reopening does not move the list |
+| `shortening_the_queue_pulls_the_panel_back_onto_its_rows` | undo and clear, checked as "is there a blank strip below the last painted row" rather than against a recomputed offset |
+| `the_queue_row_walk_refuses_a_coordinate_that_is_not_in_the_list` | `row_at` directly: the header, the status bar, a NaN coordinate, a NaN scroll, a negative offset |
+| `the_wheel_and_the_hover_agree_on_where_the_queue_is` | forty probes down through the panel, asserting the two consumers answer the same at every one |
+
+Two notes on building those:
+
+- **The wheel's own existing test was probing the header.** `QUEUE_POINT` was
+  `(400, 600)`, which in a 750 px window is 28 px above the first row — inside
+  the strip only the wheel thought was part of the list. It passed *because* of
+  the defect. Moved to `(400, 650)`, and the reason recorded next to it.
+- **The blank-strip assertion had to come from the render tree, not from
+  `max_scroll`.** Asserting `queue_scroll == QueueList::max_scroll(n)` after an
+  undo would have compared the code under test with itself. What the test
+  actually asks is whether the bottom-most row the renderer painted still
+  reaches the bottom of the clip it painted, which is the thing a user sees.
+
+Verified by reintroduction: all nine new entries in
+`scripts/reintro-row-hit-tests.py` put their defect back and go red.
+partmanager 119 → 127 tests, rustfmt clean (two pre-existing diffs cleared with
+it), clippy down from 19 warnings to 11 — the test module now allows
+`unwrap_used`/`expect_used`/`panic`, which CLAUDE.md says belongs there, and
+the 11 that remain are all `arithmetic_side_effects` on `f32` in production
+code, pre-existing.
+
+**Still open in this file:** the sidebar's disk list is the same three-spellings
+shape one more time — `render_sidebar`, the click and the hover each write
+`top + 28.0` and the click and hover each divide by
+`SIDEBAR_DISK_ROW_HEIGHT` and cast. No divergence found between the three, and
+the NaN path happens to be closed by the enclosing `y >= top && y < bottom`
+test, but nothing holds them together. Same fix shape as `PartitionList` and
+`QueueList`.

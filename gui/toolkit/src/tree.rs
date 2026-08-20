@@ -308,10 +308,44 @@ impl TreeView {
         None
     }
 
+    /// The visible row at `y`, measured from the tree widget's own origin.
+    ///
+    /// The renderer draws row `idx` at `idx * row_height - scroll_offset`, so
+    /// this is that arithmetic inverted, and it is the *only* place the
+    /// inversion is written down: `handle_click` and `handle_context_menu`
+    /// each used to carry their own copy of
+    ///
+    /// ```text
+    /// ((y + self.scroll_offset) / self.config.row_height) as usize
+    /// ```
+    ///
+    /// which answered row 0 for any point *above* the tree. A negative `f32`
+    /// cast to `usize` saturates to zero in Rust — it does not wrap and it
+    /// does not trap — and so does a NaN, so a click a few pixels above the
+    /// first row, or at a coordinate some caller failed to compute, selected
+    /// the first node rather than nothing. `row_height` is a public config
+    /// field, so a zero there did the same to every click in the tree.
+    ///
+    /// Returns `None` above the first row, past the last one, and for any
+    /// coordinate or row height that is not a positive finite number.
+    fn row_at(&self, y: f32) -> Option<usize> {
+        let row_h = self.config.row_height;
+        if !row_h.is_finite() || row_h <= 0.0 {
+            return None;
+        }
+        let content_y = y + self.scroll_offset;
+        if !content_y.is_finite() || content_y < 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let idx = (content_y / row_h) as usize;
+        (idx < self.visible_nodes().len()).then_some(idx)
+    }
+
     /// Handle a mouse click at position (x, y) relative to the tree widget origin.
     /// `double` indicates a double-click.
     pub fn handle_click(&mut self, x: f32, y: f32, double: bool) -> Option<TreeEvent> {
-        let row_index = ((y + self.scroll_offset) / self.config.row_height) as usize;
+        let row_index = self.row_at(y)?;
         let visible = self.visible_nodes_ids();
 
         let node_id = visible.get(row_index).copied()?;
@@ -357,7 +391,7 @@ impl TreeView {
 
     /// Handle a right-click at position (x, y) for context menu.
     pub fn handle_context_menu(&mut self, x: f32, y: f32) -> Option<TreeEvent> {
-        let row_index = ((y + self.scroll_offset) / self.config.row_height) as usize;
+        let row_index = self.row_at(y)?;
         let visible = self.visible_nodes_ids();
         let node_id = visible.get(row_index).copied()?;
         self.select(node_id);
@@ -655,6 +689,159 @@ mod tests {
             ),
             TreeNode::leaf(5, "Root B"),
         ]
+    }
+
+    // ── Row geometry: does a click land on the row that was drawn? ───────
+
+    /// The `(top, height)` of every row background the tree painted, in the
+    /// order it painted them, in widget-relative coordinates.
+    ///
+    /// These are read out of the commands `render` actually emitted rather
+    /// than recomputed from `row_height`: a test that recomputes the
+    /// renderer's arithmetic and checks the hit test against *that* is
+    /// worthless, because the two drift together.
+    fn painted_rows(tree: &TreeView, height: f32) -> Vec<(f32, f32)> {
+        let (ox, oy, w) = (0.0, 0.0, 200.0);
+        tree.render(ox, oy, w, height)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                // Exact equality on purpose: these are the very floats the
+                // renderer pushed, not a measurement of them. The full-width
+                // rect is a row background; the viewport fill behind them all
+                // is the one with the viewport's own height.
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height: h,
+                    ..
+                } if x == ox && width == w && h != height => Some((y - oy, h)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A tree with every node expanded, so the visible list is long enough to
+    /// scroll and every row is reachable.
+    fn expanded_tree() -> TreeView {
+        let mut tree = TreeView::new(TreeConfig::default());
+        tree.set_nodes(sample_tree());
+        tree.expand(1);
+        tree.expand(3);
+        tree
+    }
+
+    #[test]
+    fn every_row_answers_exactly_where_it_was_painted() {
+        let mut tree = expanded_tree();
+        // Select every row in turn so each one paints a background to measure.
+        let ids = tree.visible_nodes_ids();
+        assert!(ids.len() >= 4, "need several rows to sweep");
+        for (idx, &id) in ids.iter().enumerate() {
+            tree.select(id);
+            let rows = painted_rows(&tree, 400.0);
+            let &(top, h) = rows
+                .first()
+                .unwrap_or_else(|| panic!("row {idx} painted no background to measure"));
+            // Sweep the painted row rather than probing its middle. A drift of
+            // a few pixels is invisible at the centre of a 24-px row and
+            // obvious at its edges — which is where the user aims.
+            for step in 0..8 {
+                let probe = top + (step as f32) * h / 8.0;
+                assert_eq!(
+                    tree.row_at(probe),
+                    Some(idx),
+                    "row {idx} was painted at {top}..{} but {probe} answers otherwise",
+                    top + h
+                );
+            }
+            // A row owns its top edge and not its bottom one.
+            assert_ne!(tree.row_at(top + h), Some(idx));
+            if idx > 0 {
+                assert_ne!(tree.row_at(top - 0.001), Some(idx));
+            }
+        }
+    }
+
+    #[test]
+    fn a_point_above_the_first_row_selects_nothing_rather_than_the_first_node() {
+        // This is the fault the two hand-written copies had: a negative `f32`
+        // cast to `usize` saturates to zero in Rust, so `-5.0 / 24.0` became
+        // row 0 and a click a few pixels above the tree selected its first
+        // node. Nothing about that is visible to the user, who sees a
+        // selection appear under a pointer that is not over it.
+        let mut tree = expanded_tree();
+        assert_eq!(tree.row_at(-0.001), None);
+        assert_eq!(tree.row_at(-5.0), None);
+        assert_eq!(tree.row_at(-1000.0), None);
+        assert_eq!(tree.handle_click(0.0, -5.0, false), None);
+        assert_eq!(tree.handle_context_menu(0.0, -5.0), None);
+        assert!(
+            !tree.visible_nodes().iter().any(|n| n.selected),
+            "nothing should have been selected"
+        );
+    }
+
+    #[test]
+    fn a_coordinate_that_is_not_a_number_selects_nothing() {
+        // NaN casts to zero too, so an unchecked coordinate had exactly the
+        // same effect as a click on the first row.
+        let mut tree = expanded_tree();
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(tree.row_at(bad), None, "{bad} named a row");
+            assert_eq!(tree.handle_click(0.0, bad, false), None);
+            assert_eq!(tree.handle_context_menu(0.0, bad), None);
+        }
+        assert!(!tree.visible_nodes().iter().any(|n| n.selected));
+    }
+
+    #[test]
+    fn a_row_height_of_zero_selects_nothing_rather_than_everything() {
+        // `row_height` is a public config field. Zero made the division
+        // infinite or NaN, and both ends of that cast land on a real row.
+        let mut tree = expanded_tree();
+        tree.config.row_height = 0.0;
+        assert_eq!(tree.row_at(0.0), None);
+        assert_eq!(tree.row_at(50.0), None);
+        assert_eq!(tree.handle_click(0.0, 50.0, false), None);
+        tree.config.row_height = f32::NAN;
+        assert_eq!(tree.row_at(50.0), None);
+        tree.config.row_height = -24.0;
+        assert_eq!(tree.row_at(50.0), None);
+    }
+
+    #[test]
+    fn nothing_past_the_last_row_answers() {
+        let tree = expanded_tree();
+        let n = tree.visible_nodes().len();
+        let h = tree.config.row_height;
+        assert_eq!(tree.row_at((n as f32) * h - 0.001), Some(n - 1));
+        assert_eq!(tree.row_at((n as f32) * h), None);
+        assert_eq!(tree.row_at((n as f32) * h + 1000.0), None);
+        // An empty tree answers for no point at all.
+        let empty = TreeView::new(TreeConfig::default());
+        assert_eq!(empty.row_at(0.0), None);
+        assert_eq!(empty.row_at(10.0), None);
+    }
+
+    #[test]
+    fn scrolling_moves_the_rows_and_the_answers_together() {
+        let mut tree = expanded_tree();
+        tree.set_viewport_height(48.0);
+        let ids = tree.visible_nodes_ids();
+        let last = ids.len() - 1;
+        tree.select(ids[last]);
+        tree.ensure_visible(last);
+        assert!(tree.scroll_offset > 0.0, "the list should have scrolled");
+        // The last row is now painted somewhere inside the viewport; the hit
+        // test must follow it there rather than staying where it was drawn
+        // before the scroll.
+        let rows = painted_rows(&tree, 48.0);
+        let &(top, h) = rows.first().expect("the selected row must still paint");
+        for step in 0..8 {
+            let probe = top + (step as f32) * h / 8.0;
+            assert_eq!(tree.row_at(probe), Some(last));
+        }
     }
 
     #[test]

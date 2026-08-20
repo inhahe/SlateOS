@@ -457,6 +457,7 @@ pub mod wintiling;
 pub mod wqstat;
 pub mod writeback;
 pub mod xz;
+pub mod zfs;
 pub mod zip;
 pub mod zramstat;
 pub mod zstd;

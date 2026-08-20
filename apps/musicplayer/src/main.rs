@@ -22,6 +22,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::wheel;
 
 use std::path::PathBuf;
 
@@ -2286,7 +2287,15 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
                     }
                     _ => 0.0,
                 };
-                state.scroll_offset = (state.scroll_offset - dy * 30.0).clamp(0.0, max_scroll);
+                // A pixel offset, so `wheel::pixels` rather than an
+                // accumulator: a trackpad's fifth of a notch can be shown as a
+                // fifth of a notch here. The `30.0` it replaces was one of a
+                // dozen private guesses at what a notch is worth -- the tree
+                // held 1, 20, 30 and 40 px per notch at once, and this list's
+                // rows are 36 px tall, so 30 was not even a row.
+                state.scroll_offset = (state.scroll_offset
+                    + wheel::pixels(*dy, TRACK_ROW_HEIGHT))
+                .clamp(0.0, max_scroll);
                 return true;
             }
             false
@@ -2503,6 +2512,97 @@ mod tests {
     )]
 
     use super::*;
+
+    // -- Wheel scrolling --
+
+    /// A player whose library is far longer than the track pane.
+    fn player_with_library(len: usize) -> PlayerState {
+        let mut state = PlayerState::new();
+        for i in 0..len {
+            let mut t = Track::from_path(PathBuf::from(format!("{i}.wav")));
+            t.title = format!("track {i}");
+            state.add_track(t);
+        }
+        state.active_tab = Tab::Library;
+        state
+    }
+
+    fn wheel(state: &mut PlayerState, dy: f32) -> bool {
+        handle_mouse(
+            state,
+            &MouseEvent {
+                x: 100.0,
+                // Inside the track pane: below the tab bar, above the controls.
+                y: TAB_BAR_HEIGHT + 10.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            },
+        )
+    }
+
+    #[test]
+    fn one_wheel_notch_crosses_three_rows() {
+        // Not three pixels, and not the flat 30.0 this handler used to add --
+        // which was less than one of its own 36 px rows.
+        let mut state = player_with_library(400);
+        assert!(wheel(&mut state, -1.0));
+        assert_eq!(state.scroll_offset, 3.0 * TRACK_ROW_HEIGHT);
+        assert!(wheel(&mut state, 1.0));
+        assert_eq!(state.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn a_fraction_of_a_notch_moves_now_rather_than_being_banked() {
+        // The offset is in pixels, so there is nothing an accumulator could
+        // buy: it would only sit on movement this list can already show.
+        let mut state = player_with_library(400);
+        wheel(&mut state, -0.1);
+        assert_eq!(state.scroll_offset, 0.3 * TRACK_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn the_wheel_stops_at_both_ends_of_the_library() {
+        let mut state = player_with_library(400);
+        for _ in 0..500 {
+            wheel(&mut state, -1.0);
+        }
+        let content_height = state.height - TAB_BAR_HEIGHT - CONTROLS_HEIGHT;
+        let total = 400.0 * TRACK_ROW_HEIGHT;
+        assert_eq!(
+            state.scroll_offset,
+            (total - content_height + TRACK_ROW_HEIGHT).max(0.0)
+        );
+        for _ in 0..500 {
+            wheel(&mut state, 1.0);
+        }
+        assert_eq!(state.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_the_list() {
+        // An infinity added to the offset clamps to the far end and never
+        // comes back; `wheel::pixels` turns one into no movement at all.
+        let mut state = player_with_library(400);
+        wheel(&mut state, f32::NAN);
+        wheel(&mut state, f32::NEG_INFINITY);
+        assert_eq!(state.scroll_offset, 0.0);
+        wheel(&mut state, -1.0);
+        assert_eq!(state.scroll_offset, 3.0 * TRACK_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn the_wheel_is_ignored_outside_the_track_pane() {
+        let mut state = player_with_library(400);
+        let handled = handle_mouse(
+            &mut state,
+            &MouseEvent {
+                x: 100.0,
+                y: 4.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+            },
+        );
+        assert!(!handled, "the tab bar does not scroll");
+        assert_eq!(state.scroll_offset, 0.0);
+    }
 
     /// A player with `len` one-second tracks, shuffle on, sitting on track 0.
     fn shuffling_player(seed: u64, len: usize) -> PlayerState {

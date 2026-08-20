@@ -41,6 +41,7 @@ use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextO
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
 use guitk::textfind;
+use guitk::wheel;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 
@@ -204,9 +205,6 @@ fn visible_range(scroll: f32, content_height: f32, item_count: usize) -> core::o
 
 /// Maximum number of search results to track.
 const MAX_SEARCH_RESULTS: usize = 10_000;
-
-/// Scroll speed multiplier.
-const SCROLL_SPEED: f32 = 3.0;
 
 /// Padding inside panels.
 const PANEL_PADDING: f32 = 4.0;
@@ -1305,7 +1303,14 @@ impl FileDiffApp {
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
         match &mouse.kind {
             MouseEventKind::Scroll { dy, .. } => {
-                let delta = -dy * SCROLL_SPEED;
+                // `wheel::rows_f`, not an `Accumulator`: these offsets are
+                // fractional row counts, so a trackpad's 0.2 of a notch can be
+                // shown as 0.6 of a row straight away rather than banked until
+                // it rounds. It replaces a local `SCROLL_SPEED` that happened
+                // to hold the same 3.0 -- one more private copy of a constant
+                // the toolkit already owns, and the reason twelve handlers here
+                // once disagreed about what a notch was worth.
+                let delta = wheel::rows_f(*dy);
                 let max = self.max_scroll();
 
                 // Determine which panel was scrolled based on x position
@@ -3440,6 +3445,90 @@ mod tests {
         let result = app.handle_event(&Event::Key(key));
         assert_eq!(result, EventResult::Consumed);
         assert!(app.scroll_left > 0.0);
+    }
+
+    // --- Wheel scrolling ---
+
+    /// A diff long enough that both panels have room to scroll.
+    fn long_diff() -> FileDiffApp {
+        let mut app = FileDiffApp::new();
+        let left: String = (0..400)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("
+");
+        let mut right_lines: Vec<String> = (0..400).map(|i| format!("line{i}")).collect();
+        right_lines[399] = "changed".to_string();
+        app.load_files("a", &left, "b", &right_lines.join("
+"));
+        app
+    }
+
+    fn wheel_at(app: &mut FileDiffApp, x: f32, dy: f32) {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y: 200.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        }));
+    }
+
+    #[test]
+    fn one_wheel_notch_moves_three_rows() {
+        let mut app = long_diff();
+        wheel_at(&mut app, 100.0, -1.0);
+        assert_eq!(app.scroll_left, 3.0, "one detent is three rows");
+        wheel_at(&mut app, 100.0, 1.0);
+        assert_eq!(app.scroll_left, 0.0, "and back the other way");
+    }
+
+    #[test]
+    fn a_fraction_of_a_notch_moves_now_rather_than_being_banked() {
+        // The offset is an `f32`, so there is nothing an accumulator could buy
+        // -- it would only sit on movement this view is able to show.
+        let mut app = long_diff();
+        wheel_at(&mut app, 100.0, -0.2);
+        assert_eq!(app.scroll_left, 0.6);
+    }
+
+    #[test]
+    fn scrolling_stops_at_the_last_page_and_at_the_top() {
+        let mut app = long_diff();
+        let max = app.max_scroll();
+        assert!(max > 0.0, "the fixture must be longer than the viewport");
+        for _ in 0..500 {
+            wheel_at(&mut app, 100.0, -1.0);
+        }
+        assert_eq!(app.scroll_left, max);
+        for _ in 0..500 {
+            wheel_at(&mut app, 100.0, 1.0);
+        }
+        assert_eq!(app.scroll_left, 0.0);
+    }
+
+    #[test]
+    fn unsynced_panels_scroll_independently() {
+        let mut app = long_diff();
+        app.view_mode = ViewMode::SideBySide;
+        app.sync_scroll = false;
+        wheel_at(&mut app, 10.0, -1.0);
+        assert_eq!(app.scroll_left, 3.0);
+        assert_eq!(app.scroll_right, 0.0, "the right panel was not under the pointer");
+        let right_x = app.width - 10.0;
+        wheel_at(&mut app, right_x, -2.0);
+        assert_eq!(app.scroll_left, 3.0);
+        assert_eq!(app.scroll_right, 6.0);
+    }
+
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_the_view() {
+        // An infinity stored into the offset would clamp to `max` and never
+        // come back; `wheel::rows_f` turns one into no movement at all.
+        let mut app = long_diff();
+        wheel_at(&mut app, 100.0, f32::NAN);
+        wheel_at(&mut app, 100.0, f32::INFINITY);
+        assert_eq!(app.scroll_left, 0.0);
+        wheel_at(&mut app, 100.0, -1.0);
+        assert_eq!(app.scroll_left, 3.0, "and later scrolls still work");
     }
 
     #[test]

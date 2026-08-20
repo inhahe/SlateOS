@@ -18,7 +18,9 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::history::SampleHistory;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::table::{Column, Fit, Table};
+use guitk::scroll_window;
 use guitk::text;
+use guitk::wheel;
 
 use std::collections::HashMap;
 
@@ -567,6 +569,14 @@ pub struct ProcessExplorerState {
     pub view_mode: ViewMode,
     /// Scroll offset (number of rows scrolled).
     pub scroll_offset: usize,
+    /// Carries the fraction of a row a precision device sends.
+    ///
+    /// `scroll_offset` is a whole row index and cannot hold a fraction, so
+    /// something has to. Without this the handler could only read the *sign*
+    /// of `dy` and moved three rows for any non-zero value: a trackpad's
+    /// stream of 0.2-notch events scrolled fifteen times too far, and there
+    /// was no way to move by a single row at all.
+    wheel: wheel::Accumulator,
 
     // -- Search / filter -----------------------------------------------------
     /// Filter text (search box content).
@@ -635,6 +645,7 @@ impl ProcessExplorerState {
             sort_direction: SortDirection::Descending,
             view_mode: ViewMode::List,
             scroll_offset: 0,
+            wheel: wheel::Accumulator::default(),
             filter_text: String::new(),
             filter_focused: false,
             context_menu: None,
@@ -1181,13 +1192,18 @@ impl ProcessExplorerState {
 
             // Scroll wheel — scroll the process list
             MouseEventKind::Scroll { dy, .. } => {
-                if *dy < 0.0 {
-                    self.scroll_offset = self.scroll_offset.saturating_add(3);
-                } else if *dy > 0.0 {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                }
-                // Clamp scroll offset.
-                let max_scroll = self.visible_indices.len().saturating_sub(1);
+                let rows = self.wheel.rows(*dy);
+                self.scroll_offset = scroll_window::shift(self.scroll_offset, rows);
+                // Stop with the last row at the *bottom*, not at the top. The
+                // bound used to be `len - 1`, which let a thousand-process list
+                // scroll until one row sat above forty blank ones. `len -
+                // capacity` is the policy `scroll_window::visible` already
+                // applies to what it draws, so the stored offset now agrees
+                // with what the renderer would have shown anyway.
+                let max_scroll = self
+                    .visible_indices
+                    .len()
+                    .saturating_sub(self.visible_row_count().max(1));
                 if self.scroll_offset > max_scroll {
                     self.scroll_offset = max_scroll;
                 }
@@ -2977,6 +2993,84 @@ mod tests {
 
     use super::*;
     use guitk::event::MouseEvent;
+
+    // --- The wheel ---
+
+    /// A list of `n` processes, already filtered so `visible_indices` is
+    /// populated, with the window at its default height.
+    fn app_with_processes(n: usize) -> ProcessExplorerState {
+        let mut app = ProcessExplorerState::new();
+        app.processes = (0..n)
+            .map(|i| {
+                make_demo_process(
+                    (i as u32).saturating_add(1),
+                    0,
+                    &format!("proc{i}"),
+                    ProcessStatus::Running,
+                    0.0,
+                    0,
+                    1,
+                    0,
+                    "user",
+                )
+            })
+            .collect();
+        app.rebuild_visible_list();
+        app
+    }
+
+    fn wheel(app: &mut ProcessExplorerState, dy: f32) {
+        app.handle_mouse(&MouseEvent {
+            x: 100.0,
+            y: 300.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        });
+    }
+
+    /// One detent is three rows, in the direction the delta reports.
+    #[test]
+    fn one_wheel_notch_moves_three_rows() {
+        let mut app = app_with_processes(500);
+        wheel(&mut app, -1.0);
+        assert_eq!(app.scroll_offset, 3);
+        wheel(&mut app, 1.0);
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    /// A precision device sends fractions of a notch. Reading only the sign --
+    /// which is what this did -- moved three rows for each of them, so a
+    /// trackpad ran five times too fast and could not move a single row.
+    #[test]
+    fn a_trackpads_fractions_add_up_instead_of_scrolling_five_times_too_far() {
+        let mut app = app_with_processes(500);
+        for _ in 0..5 {
+            wheel(&mut app, -0.2);
+        }
+        assert_eq!(app.scroll_offset, 3);
+    }
+
+    /// The list stops with its last row at the *bottom* of the pane. The bound
+    /// used to be `len - 1`, which let a long list scroll until one row sat
+    /// above a screenful of nothing.
+    #[test]
+    fn scrolling_to_the_end_leaves_a_full_pane_of_rows() {
+        let mut app = app_with_processes(500);
+        let capacity = app.visible_row_count();
+        assert!(capacity > 1, "the default window must fit several rows");
+        for _ in 0..500 {
+            wheel(&mut app, -1.0);
+        }
+        assert_eq!(app.scroll_offset, 500usize.saturating_sub(capacity));
+    }
+
+    /// A list shorter than the pane cannot scroll at all -- `len - capacity`
+    /// must saturate rather than underflow.
+    #[test]
+    fn a_list_shorter_than_the_pane_does_not_scroll() {
+        let mut app = app_with_processes(3);
+        wheel(&mut app, -1.0);
+        assert_eq!(app.scroll_offset, 0);
+    }
 
     // --- Table cells stay in their columns ---
 

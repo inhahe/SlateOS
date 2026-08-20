@@ -35,6 +35,7 @@ use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::wheel;
 
 use std::collections::VecDeque;
 
@@ -105,8 +106,6 @@ const RESULTS_ROWS_TOP: f32 = TITLE_BAR_HEIGHT
     + PADDING
     + SUMMARY_BAR_HEIGHT
     + TABLE_HEADER_HEIGHT;
-/// How many rows one notch of the scroll wheel moves a list.
-const WHEEL_ROWS: isize = 3;
 /// How many host nodes the topology view draws before it gives up and says how
 /// many it left out. A radial diagram of 256 nodes is not a diagram.
 const MAX_TOPOLOGY_NODES: usize = 24;
@@ -2144,6 +2143,17 @@ pub struct NetScanApp {
     /// one row's height, because the loop compared each row against a `dy` it
     /// was itself advancing.
     pub detail_port_scroll: usize,
+    /// The fraction of a row each list has earned but not yet been moved by.
+    ///
+    /// Two of them, one per list, because they must not share: the accumulator
+    /// holds a remainder, and a remainder earned by dragging over the table
+    /// would otherwise be spent moving the sidebar's port list.
+    ///
+    /// They replace a hand-rolled `WHEEL_ROWS` step applied to the *sign* of
+    /// `dy` alone, which moved three rows for a 0.05-notch trackpad event and
+    /// three for a full detent alike.
+    results_wheel: wheel::Accumulator,
+    ports_wheel: wheel::Accumulator,
     pub config_field_focus: usize,
 }
 
@@ -2170,6 +2180,8 @@ impl Default for NetScanApp {
             history_compare_idx: None,
             scan_id_counter: 1,
             detail_port_scroll: 0,
+            results_wheel: wheel::Accumulator::default(),
+            ports_wheel: wheel::Accumulator::default(),
             config_field_focus: 0,
         }
     }
@@ -2253,6 +2265,10 @@ impl NetScanApp {
         self.selected_host_idx = None;
         self.results_scroll = 0;
         self.detail_port_scroll = 0;
+        // The lists they belong to have been replaced, so a fraction earned
+        // scrolling the old scan must not deliver a row in the new one.
+        self.results_wheel.reset();
+        self.ports_wheel.reset();
         self.is_scanning = false;
     }
 
@@ -2537,21 +2553,12 @@ impl NetScanApp {
             }
             MouseEventKind::Scroll { dy, .. } => {
                 if self.active_tab == ViewTab::Results {
-                    // Only the sign of `dy` is used, not its magnitude.
-                    // `MouseEventKind::Scroll` documents `dy` as pixels but
-                    // every caller in this tree sets it to a notch count, so a
-                    // magnitude would mean three rows per notch on one path
-                    // and sixty on another. See known-issues.md.
-                    let rows = if *dy > 0.0 {
-                        WHEEL_ROWS.saturating_neg()
-                    } else if *dy < 0.0 {
-                        WHEEL_ROWS
-                    } else {
-                        0
-                    };
+                    // Each list keeps its own remainder -- see the two fields.
                     if mx < WINDOW_WIDTH - SIDEBAR_WIDTH {
+                        let rows = self.results_wheel.rows(*dy);
                         self.results_scroll = scroll_window::shift(self.results_scroll, rows);
                     } else {
+                        let rows = self.ports_wheel.rows(*dy);
                         self.detail_port_scroll =
                             scroll_window::shift(self.detail_port_scroll, rows);
                     }
@@ -6188,9 +6195,15 @@ mod tests {
         );
     }
 
-    /// The wheel moves the list by whole rows and stops at the top. Only the
-    /// sign of `dy` is used, because the event documents it as pixels while
-    /// every producer in this tree sets it to a notch count.
+    /// How many rows one detent moves a list, asked of the toolkit rather
+    /// than restated here -- a local `3` would keep passing if the shared
+    /// constant changed, which is the whole reason this app stopped carrying
+    /// its own `WHEEL_ROWS`.
+    fn one_notch() -> usize {
+        wheel::Accumulator::default().rows(-1.0).unsigned_abs()
+    }
+
+    /// The wheel moves the list by whole rows and stops at the top.
     #[test]
     fn the_wheel_scrolls_the_results_table_by_rows() {
         let mut app = app_with_hosts(80, 0);
@@ -6201,8 +6214,8 @@ mod tests {
         });
         assert_eq!(
             app.results_scroll,
-            WHEEL_ROWS.unsigned_abs(),
-            "one notch down is WHEEL_ROWS rows"
+            one_notch(),
+            "one notch down is a toolkit notch's worth of rows"
         );
         app.handle_mouse(&MouseEvent {
             x: 10.0,
@@ -6219,6 +6232,48 @@ mod tests {
         assert_eq!(app.results_scroll, 0);
     }
 
+    /// A precision device sends fractions of a notch. Five of them are one
+    /// notch and must move one notch's worth of rows -- not nothing (which is
+    /// what rounding each event alone gives) and not five notches (which is
+    /// what reading only the sign gave before).
+    #[test]
+    fn a_trackpads_fractions_add_up_instead_of_scrolling_five_times_too_far() {
+        let mut app = app_with_hosts(80, 0);
+        for _ in 0..5 {
+            app.handle_mouse(&MouseEvent {
+                x: 10.0,
+                y: 400.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -0.2 },
+            });
+        }
+        assert_eq!(app.results_scroll, one_notch());
+    }
+
+    /// The two lists must not share a remainder. Four fifths of a notch over
+    /// the table is not yet a whole row; if the sidebar could spend it, one
+    /// small event over the sidebar would jump the port list by three.
+    #[test]
+    fn a_fraction_earned_over_the_table_cannot_move_the_port_list() {
+        let mut app = app_with_hosts(80, 60);
+        app.selected_host_idx = Some(0);
+        for _ in 0..4 {
+            app.handle_mouse(&MouseEvent {
+                x: 10.0,
+                y: 400.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -0.2 },
+            });
+        }
+        app.handle_mouse(&MouseEvent {
+            x: WINDOW_WIDTH - 20.0,
+            y: 400.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -0.2 },
+        });
+        assert_eq!(
+            app.detail_port_scroll, 0,
+            "the port list only earned 0.6 of a row of its own"
+        );
+    }
+
     /// The wheel over the sidebar moves the port list, not the table.
     #[test]
     fn the_wheel_over_the_sidebar_scrolls_the_port_list() {
@@ -6229,7 +6284,7 @@ mod tests {
             y: 400.0,
             kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
         });
-        assert_eq!(app.detail_port_scroll, WHEEL_ROWS.unsigned_abs());
+        assert_eq!(app.detail_port_scroll, one_notch());
         assert_eq!(app.results_scroll, 0, "the table must not have moved");
     }
 

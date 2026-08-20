@@ -26,6 +26,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::wheel;
 
 use std::collections::VecDeque;
 
@@ -331,6 +332,14 @@ pub struct TerminalState {
     /// Scroll offset for viewing scrollback (0 = bottom, >0 = scrolled up).
     pub scroll_offset: usize,
 
+    /// Carries the fraction of a line a precision device sends.
+    ///
+    /// `scroll_offset` counts whole lines and cannot hold a fraction. Without
+    /// this the wheel handler could only read the *sign* of `dy` and moved
+    /// three lines for any non-zero value, so a trackpad's stream of
+    /// 0.2-notch events flew fifteen times too fast through the scrollback.
+    wheel: wheel::Accumulator,
+
     /// Output buffer — bytes to send back to the child process (e.g., cursor
     /// position reports, keyboard input translated to escape sequences).
     pub output_buffer: Vec<u8>,
@@ -403,6 +412,7 @@ impl TerminalState {
             bell_flash_remaining: 0,
             selection: None,
             scroll_offset: 0,
+            wheel: wheel::Accumulator::default(),
             output_buffer: Vec::new(),
             origin_mode: false,
             auto_wrap: true,
@@ -2209,10 +2219,17 @@ impl TerminalState {
                 self.selection_end();
             }
             MouseEventKind::Scroll { dy, .. } => {
-                if *dy > 0.0 {
-                    self.scroll_viewport_up(3);
-                } else if *dy < 0.0 {
-                    self.scroll_viewport_down(3);
+                // `scroll_offset` runs *backwards* here -- it counts lines up
+                // into the scrollback, where every other list in the tree
+                // counts rows down from the top. So the accumulator's "towards
+                // the end" is this view's "towards the bottom", and the two
+                // arms are swapped relative to a list. Spelling that out
+                // because the obvious transcription is silently inverted.
+                let rows = self.wheel.rows(*dy);
+                if rows < 0 {
+                    self.scroll_viewport_up(rows.unsigned_abs());
+                } else {
+                    self.scroll_viewport_down(rows.unsigned_abs());
                 }
             }
             _ => {}
@@ -2275,4 +2292,94 @@ fn main() {
     //     terminal.render(&mut render_tree);
     //     compositor.submit_frame(&render_tree);
     // }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it -- that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{TerminalConfig, TerminalState};
+    use guitk::event::{MouseEvent, MouseEventKind};
+
+    /// A terminal with `lines` lines already pushed off the top, so there is
+    /// something to scroll back into.
+    fn scrolled_terminal(lines: usize) -> TerminalState {
+        let mut term = TerminalState::new(TerminalConfig {
+            rows: 4,
+            ..TerminalConfig::default()
+        });
+        for i in 0..lines {
+            term.feed(format!("line {i}
+").as_bytes());
+        }
+        term
+    }
+
+    fn wheel(term: &mut TerminalState, dy: f32) {
+        term.handle_mouse(&MouseEvent {
+            x: 10.0,
+            y: 10.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        });
+    }
+
+    /// One detent moves three lines, and `dy` positive -- away from the user --
+    /// goes *back* into the scrollback. The offset here counts upwards, which
+    /// is the opposite of every list in the tree, so the direction is worth
+    /// pinning rather than assuming.
+    #[test]
+    fn one_wheel_notch_moves_three_lines_of_scrollback() {
+        let mut term = scrolled_terminal(50);
+        wheel(&mut term, 1.0);
+        assert_eq!(term.scroll_offset, 3, "away from the user scrolls back");
+        wheel(&mut term, -1.0);
+        assert_eq!(term.scroll_offset, 0, "and towards the user returns");
+    }
+
+    /// Scrolling forward from the live view stays there rather than
+    /// underflowing into the far end of the scrollback.
+    #[test]
+    fn scrolling_forward_from_the_bottom_stays_at_the_bottom() {
+        let mut term = scrolled_terminal(50);
+        for _ in 0..5 {
+            wheel(&mut term, -1.0);
+        }
+        assert_eq!(term.scroll_offset, 0);
+    }
+
+    /// A precision device sends fractions of a notch. Five fifths must be one
+    /// notch -- not five (which is what reading only the sign gave) and not
+    /// zero (which is what rounding each event alone would give).
+    #[test]
+    fn a_trackpads_fractions_add_up_to_one_notch() {
+        let mut term = scrolled_terminal(50);
+        for _ in 0..5 {
+            wheel(&mut term, 0.2);
+        }
+        assert_eq!(term.scroll_offset, 3);
+    }
+
+    /// Input arrives from outside the process; a NaN that reached the residue
+    /// would stop the terminal scrolling for the life of the session.
+    #[test]
+    fn a_nonfinite_delta_does_not_break_later_scrolling() {
+        let mut term = scrolled_terminal(50);
+        wheel(&mut term, f32::NAN);
+        assert_eq!(term.scroll_offset, 0);
+        wheel(&mut term, 1.0);
+        assert_eq!(term.scroll_offset, 3);
+    }
 }

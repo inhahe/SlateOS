@@ -26,6 +26,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::wheel;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -3263,7 +3264,13 @@ fn handle_scroll(app: &mut PartitionManagerApp, x: f32, y: f32, dy: f32) -> Even
     if y >= queue_top && y < app.height - STATUS_BAR_HEIGHT && x >= SIDEBAR_WIDTH {
         let max_scroll =
             (app.operation_queue.len() as f32 * QUEUE_ROW_HEIGHT - (queue_h - 28.0)).max(0.0);
-        app.queue_scroll = (app.queue_scroll - dy * 20.0).clamp(0.0, max_scroll);
+        // Pixel offsets, so `wheel::pixels` rather than an accumulator --
+        // a fraction of a notch is showable here. Each list passes its own
+        // row height so a notch crosses three of *its* rows, which the flat
+        // `20.0` did not: it was less than one row in the queue panel and not
+        // quite one in the partition list.
+        app.queue_scroll =
+            (app.queue_scroll + wheel::pixels(dy, QUEUE_ROW_HEIGHT)).clamp(0.0, max_scroll);
         return EventResult::Consumed;
     }
 
@@ -3274,7 +3281,9 @@ fn handle_scroll(app: &mut PartitionManagerApp, x: f32, y: f32, dy: f32) -> Even
         let region_count = app.current_disk().map(|d| d.regions().len()).unwrap_or(0);
         let max_scroll =
             (region_count as f32 * PARTITION_ROW_HEIGHT - (queue_top - list_top - 40.0)).max(0.0);
-        app.partition_scroll = (app.partition_scroll - dy * 20.0).clamp(0.0, max_scroll);
+        app.partition_scroll = (app.partition_scroll
+            + wheel::pixels(dy, PARTITION_ROW_HEIGHT))
+        .clamp(0.0, max_scroll);
         return EventResult::Consumed;
     }
 
@@ -3641,7 +3650,121 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
+    // Exact float comparison is the point in the wheel tests below: they assert
+    // that a computed offset equals the row height it was built from, and an
+    // epsilon there would weaken the assertion rather than strengthen it.
+    #![allow(
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects,
+        clippy::indexing_slicing
+    )]
+
     use super::*;
+
+    // -- Wheel scrolling --
+
+    /// An app whose partition list and operation queue are both longer than
+    /// the panes that show them, so either can actually scroll.
+    fn app_with_long_lists() -> PartitionManagerApp {
+        let mut app = PartitionManagerApp::new();
+        // Forty more partitions packed in after the sample ones. `regions()`
+        // derives the rows from these, so this is what lengthens the list.
+        let template = app.disks[0].partitions[0].clone();
+        let mut start = 856_686_592u64;
+        for i in 0..40u32 {
+            let mut part = template.clone();
+            part.index = 100 + i;
+            part.label = format!("extra{i}");
+            part.start_sector = start;
+            part.end_sector = start + 999;
+            part.mount_point = None;
+            app.disks[0].partitions.push(part);
+            start += 1000;
+        }
+        for i in 0..40u32 {
+            app.enqueue_operation(PendingOperation::DeletePartition {
+                disk_id: 0,
+                partition_index: i,
+                partition_label: format!("p{i}"),
+            });
+        }
+        app
+    }
+
+    /// A point inside the partition list: right of the sidebar, left of the
+    /// detail panel, below the disk map and above the queue panel.
+    const LIST_POINT: (f32, f32) = (400.0, 300.0);
+    /// A point inside the expanded operation queue.
+    const QUEUE_POINT: (f32, f32) = (400.0, 600.0);
+
+    #[test]
+    fn one_notch_crosses_three_rows_of_whichever_list_is_under_the_pointer() {
+        // Each list passes its own row height, which the flat `20.0` this
+        // replaced did not: 20 px was less than one 22 px queue row and not
+        // quite one 24 px partition row, so a detent moved neither list by a
+        // whole row in either pane.
+        let mut app = app_with_long_lists();
+        handle_scroll(&mut app, LIST_POINT.0, LIST_POINT.1, -1.0);
+        assert_eq!(app.partition_scroll, 3.0 * PARTITION_ROW_HEIGHT);
+        assert_eq!(app.queue_scroll, 0.0, "the queue was not under the pointer");
+
+        handle_scroll(&mut app, QUEUE_POINT.0, QUEUE_POINT.1, -1.0);
+        assert_eq!(app.queue_scroll, 3.0 * QUEUE_ROW_HEIGHT);
+        assert_eq!(app.partition_scroll, 3.0 * PARTITION_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn a_fraction_of_a_notch_moves_now_rather_than_being_banked() {
+        // Both offsets are pixels, so there is nothing an accumulator could
+        // buy -- it would only sit on movement these panes can already show.
+        let mut app = app_with_long_lists();
+        handle_scroll(&mut app, LIST_POINT.0, LIST_POINT.1, -0.1);
+        assert_eq!(app.partition_scroll, 0.3 * PARTITION_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn both_lists_stop_at_their_own_ends() {
+        let mut app = app_with_long_lists();
+        for _ in 0..200 {
+            handle_scroll(&mut app, LIST_POINT.0, LIST_POINT.1, -1.0);
+            handle_scroll(&mut app, QUEUE_POINT.0, QUEUE_POINT.1, -1.0);
+        }
+        assert!(app.partition_scroll > 0.0, "the list must have room to move");
+        assert!(app.queue_scroll > 0.0, "the queue must have room to move");
+        let stopped = (app.partition_scroll, app.queue_scroll);
+        handle_scroll(&mut app, LIST_POINT.0, LIST_POINT.1, -1.0);
+        handle_scroll(&mut app, QUEUE_POINT.0, QUEUE_POINT.1, -1.0);
+        assert_eq!((app.partition_scroll, app.queue_scroll), stopped);
+
+        for _ in 0..200 {
+            handle_scroll(&mut app, LIST_POINT.0, LIST_POINT.1, 1.0);
+            handle_scroll(&mut app, QUEUE_POINT.0, QUEUE_POINT.1, 1.0);
+        }
+        assert_eq!(app.partition_scroll, 0.0);
+        assert_eq!(app.queue_scroll, 0.0);
+    }
+
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_either_pane() {
+        // An infinity added to the offset clamps to the far end and never
+        // comes back; `wheel::pixels` turns one into no movement at all.
+        let mut app = app_with_long_lists();
+        handle_scroll(&mut app, LIST_POINT.0, LIST_POINT.1, f32::NAN);
+        handle_scroll(&mut app, QUEUE_POINT.0, QUEUE_POINT.1, f32::INFINITY);
+        assert_eq!(app.partition_scroll, 0.0);
+        assert_eq!(app.queue_scroll, 0.0);
+        handle_scroll(&mut app, LIST_POINT.0, LIST_POINT.1, -1.0);
+        assert_eq!(app.partition_scroll, 3.0 * PARTITION_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn the_sidebar_does_not_scroll_either_list() {
+        let mut app = app_with_long_lists();
+        let r = handle_scroll(&mut app, SIDEBAR_WIDTH / 2.0, LIST_POINT.1, -1.0);
+        assert_eq!(r, EventResult::Ignored);
+        assert_eq!(app.partition_scroll, 0.0);
+        assert_eq!(app.queue_scroll, 0.0);
+    }
 
     // -- Size formatting tests --
 

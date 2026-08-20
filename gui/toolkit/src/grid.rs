@@ -26,6 +26,7 @@ use crate::event::{
 };
 use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
+use crate::wheel;
 
 // --- Catppuccin Mocha palette ---
 // Used for selection highlights, hover, and chrome.
@@ -920,6 +921,9 @@ impl GridView {
                 self.handle_double_click(mouse.x, mouse.y)
             }
             MouseEventKind::Press(MouseButton::Right) => self.handle_right_click(mouse.x, mouse.y),
+            // `dx` is dropped deliberately: an item grid wraps its items into
+            // rows and is only ever taller than its viewport, never wider, so
+            // there is no horizontal offset for a tilt to move.
             MouseEventKind::Scroll { dx: _, dy } => self.handle_scroll(*dy),
             _ => EventResult::Ignored,
         }
@@ -1098,7 +1102,15 @@ impl GridView {
     }
 
     fn handle_scroll(&mut self, dy: f32) -> EventResult {
-        self.scroll_target_y -= dy;
+        // A notch crosses three *rows*, not three pixels. This used to be
+        // `-= dy`, i.e. one pixel per detent, on a grid whose rows are the
+        // better part of a hundred pixels tall -- the wheel worked, in the
+        // sense that a determined user could turn it forty times to move one
+        // row. The offset is continuous, so `wheel::pixels` rather than an
+        // accumulator: a trackpad's fraction of a notch moves the grid now.
+        self.ensure_layout();
+        let row_h = self.layout().cell_height + self.config.gap_y;
+        self.scroll_target_y += wheel::pixels(dy, row_h);
         if !self.config.smooth_scroll {
             self.scroll_y = self.scroll_target_y;
         }
@@ -1877,6 +1889,80 @@ mod tests {
         grid.set_scroll_y(99999.0);
         let max = (grid.content_height() - 600.0).max(0.0);
         assert!((grid.scroll_y() - max).abs() < 0.01);
+    }
+
+    /// One detent must cross three rows, not one pixel.
+    ///
+    /// It crossed one pixel for as long as this widget existed -- the handler
+    /// was `scroll_target_y -= dy` on a grid whose rows are a hundred pixels
+    /// tall, so a detent moved the view one hundredth of a row and no test
+    /// noticed, because every scroll test set the offset directly instead of
+    /// sending the event that a user would.
+    #[test]
+    fn one_wheel_notch_crosses_three_rows() {
+        let mut grid = GridView::with_config(GridConfig {
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 100.0,
+            },
+            gap_x: 0.0,
+            gap_y: 0.0,
+            padding: 0.0,
+            smooth_scroll: false,
+            ..GridConfig::default()
+        });
+        grid.set_items(make_items(300));
+        grid.set_container_size(300.0, 200.0);
+
+        let consumed = grid.handle_event(&Event::Mouse(MouseEvent {
+            x: 10.0,
+            y: 10.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        }));
+        assert_eq!(consumed, EventResult::Consumed);
+        assert!(
+            (grid.scroll_y() - 300.0).abs() < 0.01,
+            "one notch down is three 100px rows, got {}",
+            grid.scroll_y()
+        );
+
+        // And back up again: the axis is not one-way.
+        grid.handle_event(&Event::Mouse(MouseEvent {
+            x: 10.0,
+            y: 10.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        }));
+        assert!((grid.scroll_y()).abs() < 0.01, "got {}", grid.scroll_y());
+    }
+
+    /// A trackpad sends fractions of a notch, and this offset is continuous,
+    /// so a fraction must move the view *now* rather than being banked.
+    #[test]
+    fn a_fraction_of_a_notch_moves_a_fraction_of_the_distance() {
+        let mut grid = GridView::with_config(GridConfig {
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 100.0,
+            },
+            gap_x: 0.0,
+            gap_y: 0.0,
+            padding: 0.0,
+            smooth_scroll: false,
+            ..GridConfig::default()
+        });
+        grid.set_items(make_items(300));
+        grid.set_container_size(300.0, 200.0);
+
+        grid.handle_event(&Event::Mouse(MouseEvent {
+            x: 10.0,
+            y: 10.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -0.1 },
+        }));
+        assert!(
+            (grid.scroll_y() - 30.0).abs() < 0.01,
+            "a tenth of a notch is a tenth of three rows, got {}",
+            grid.scroll_y()
+        );
     }
 
     #[test]

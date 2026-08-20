@@ -39,7 +39,9 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::history::SampleHistory;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::scroll_window;
 use guitk::text;
+use guitk::wheel;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -555,6 +557,14 @@ pub struct SysMonitorState {
     pub sort_column: ProcessColumn,
     pub sort_direction: SortDirection,
     pub scroll_offset: usize,
+    /// Carries the fraction of a row a precision device sends.
+    ///
+    /// `scroll_offset` is a whole row index and cannot hold a fraction, so
+    /// something has to. Without it the handler could only read the *sign* of
+    /// `dy` and moved three rows for any non-zero value, so a trackpad's
+    /// stream of 0.2-notch events scrolled fifteen times too far and a single
+    /// row could not be reached at all.
+    wheel: wheel::Accumulator,
     pub filter_text: String,
     pub filter_focused: bool,
     pub context_menu: Option<ContextMenu>,
@@ -612,6 +622,7 @@ impl SysMonitorState {
             sort_column: ProcessColumn::Cpu,
             sort_direction: SortDirection::Descending,
             scroll_offset: 0,
+            wheel: wheel::Accumulator::default(),
             filter_text: String::new(),
             filter_focused: false,
             context_menu: None,
@@ -1122,12 +1133,17 @@ impl SysMonitorState {
             }
 
             MouseEventKind::Scroll { dy, .. } => {
-                if *dy < 0.0 {
-                    self.scroll_offset = self.scroll_offset.saturating_add(3);
-                } else if *dy > 0.0 {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
-                }
-                let max_scroll = self.visible_indices.len().saturating_sub(1);
+                let rows = self.wheel.rows(*dy);
+                self.scroll_offset = scroll_window::shift(self.scroll_offset, rows);
+                // Stop with the last row at the *bottom*. The bound used to be
+                // `len - 1`, which let a long process list scroll until one
+                // row sat above a screenful of blank ones; `len - capacity` is
+                // the policy `scroll_window::visible` already applies to what
+                // it draws.
+                let max_scroll = self
+                    .visible_indices
+                    .len()
+                    .saturating_sub(self.visible_row_count().max(1));
                 if self.scroll_offset > max_scroll {
                     self.scroll_offset = max_scroll;
                 }
@@ -4190,6 +4206,77 @@ mod tests {
         s.active_tab = Tab::Overview;
         let tree = s.render();
         assert!(!tree.is_empty());
+    }
+
+    // -- Wheel scrolling --
+
+    /// A monitor showing `n` processes, with the visible list rebuilt so the
+    /// scroll bound has something to clamp against.
+    fn app_with_processes(n: usize) -> SysMonitorState {
+        let mut app = SysMonitorState::new();
+        app.processes = (0..n)
+            .map(|i| {
+                make_demo_process(
+                    (i as u32).saturating_add(1),
+                    &format!("proc{i}"),
+                    ProcessStatus::Running,
+                    0.0,
+                    0,
+                    1,
+                    0,
+                )
+            })
+            .collect();
+        app.rebuild_visible_list();
+        app
+    }
+
+    fn wheel(app: &mut SysMonitorState, dy: f32) {
+        app.handle_mouse(&MouseEvent {
+            x: 50.0,
+            y: 200.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        });
+    }
+
+    #[test]
+    fn one_wheel_notch_moves_three_rows() {
+        let mut app = app_with_processes(500);
+        wheel(&mut app, -1.0);
+        assert_eq!(app.scroll_offset, 3, "one detent is three rows");
+        wheel(&mut app, 1.0);
+        assert_eq!(app.scroll_offset, 0, "and back the other way");
+    }
+
+    #[test]
+    fn a_trackpads_fractions_add_up_instead_of_scrolling_three_rows_each() {
+        // Five 0.2-notch events are one notch, not five. The handler used to
+        // read only the sign of `dy` and moved three rows for each of them.
+        let mut app = app_with_processes(500);
+        for _ in 0..5 {
+            wheel(&mut app, -0.2);
+        }
+        assert_eq!(app.scroll_offset, 3);
+    }
+
+    #[test]
+    fn scrolling_to_the_end_leaves_a_full_pane_of_rows() {
+        // The old bound was `len - 1`, which let the list run on until a
+        // single row sat above a screenful of blank space.
+        let mut app = app_with_processes(500);
+        let capacity = app.visible_row_count();
+        assert!(capacity > 1, "the default window must show several rows");
+        for _ in 0..500 {
+            wheel(&mut app, -1.0);
+        }
+        assert_eq!(app.scroll_offset, 500usize.saturating_sub(capacity));
+    }
+
+    #[test]
+    fn a_list_shorter_than_the_pane_does_not_scroll() {
+        let mut app = app_with_processes(3);
+        wheel(&mut app, -10.0);
+        assert_eq!(app.scroll_offset, 0);
     }
 
     #[test]

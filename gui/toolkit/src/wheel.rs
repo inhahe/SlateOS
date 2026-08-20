@@ -51,13 +51,19 @@
 //! assert_eq!(acc.rows(-0.2), 1, "0.4 notches is 1.2 rows");
 //! ```
 //!
-//! # Pixels, when the view really is continuous
+//! # When the offset is already continuous
 //!
-//! A few views scroll by pixels rather than rows — a zoomed image, a canvas.
-//! [`pixels`] is for those, and takes the row height so that a notch moves the
-//! same *distance* it would in a list of that row height. Prefer rows wherever
-//! the content has rows: a pixel offset can only express positions the renderer
-//! then rounds away.
+//! Some views hold an offset that is *not* a row index but is still continuous:
+//! a fractional row count (a list that can sit half a row down), or a pixel
+//! offset into a zoomed image or a canvas. These must **not** use an
+//! accumulator — banking a fraction until it rounds is exactly the wrong thing
+//! for an offset that could have shown the fraction. A fifth of a notch should
+//! move a fifth of a notch, immediately.
+//!
+//! [`rows_f`] is the fractional-row conversion and [`pixels`] the pixel one;
+//! `pixels(dy, row_h)` is just `rows_f(dy) * row_h`. Prefer whole rows wherever
+//! the content really has rows and the renderer rounds to them anyway: a
+//! continuous offset can only express positions that are then rounded away.
 //!
 //! [`MouseEventKind::Scroll`]: crate::event::MouseEventKind::Scroll
 //! [`scroll_window`]: crate::scroll_window
@@ -144,11 +150,47 @@ impl Accumulator {
     }
 }
 
+/// Notches to **fractional rows**, for a view whose offset is a row count that
+/// need not be whole.
+///
+/// This is [`Accumulator::rows`] without the accumulator, and choosing between
+/// them is a question about the *offset*, not about the device. An accumulator
+/// exists to stop a trackpad's `0.2`-notch events rounding to zero forever — a
+/// hazard that only arises because the offset it drives is an integer and
+/// cannot hold the fraction. An offset that is already an `f32` can, so banking
+/// the fraction would be strictly worse: it would sit on movement the view was
+/// perfectly able to show, and make a precision device feel stepped when the
+/// whole point of one is that it is not.
+///
+/// Sign matches [`Accumulator::rows`]: positive means "towards the end of the
+/// list", i.e. a larger offset. Non-finite input gives `0.0`.
+///
+/// ```
+/// use guitk::wheel::rows_f;
+/// assert_eq!(rows_f(-1.0), 3.0, "one notch down is three rows");
+/// assert_eq!(rows_f(-0.2), 0.6, "and a fifth of a notch really moves");
+/// assert_eq!(rows_f(f32::NAN), 0.0);
+/// ```
+#[must_use]
+pub fn rows_f(dy: f32) -> f32 {
+    if !dy.is_finite() {
+        return 0.0;
+    }
+    // Negated for the same reason as `Accumulator::rows_at`: `dy` is positive
+    // away from the user, which scrolls the view towards row 0.
+    let out = -dy * ROWS_PER_NOTCH;
+    // A finite `dy` near `f32::MAX` still overflows the product to infinity,
+    // and an infinity added to a stored offset freezes the view for good.
+    if out.is_finite() { out } else { 0.0 }
+}
+
 /// Notches to pixels, for a view that really is continuous.
 ///
 /// `row_h` is what a "row" would be in this view — a line height for text, a
 /// sensible step for a canvas. A notch moves [`ROWS_PER_NOTCH`] of them, so the
-/// wheel travels the same distance here as it does over a list.
+/// wheel travels the same distance here as it does over a list. It is exactly
+/// [`rows_f`] scaled by `row_h`, and is written that way so the two conversions
+/// cannot drift apart.
 ///
 /// Sign matches [`Accumulator::rows`]: positive result means "towards the end",
 /// i.e. a larger pixel offset.
@@ -166,7 +208,7 @@ pub fn pixels(dy: f32, row_h: f32) -> f32 {
     if !dy.is_finite() || !row_h.is_finite() {
         return 0.0;
     }
-    let out = -dy * ROWS_PER_NOTCH * row_h;
+    let out = rows_f(dy) * row_h;
     if out.is_finite() { out } else { 0.0 }
 }
 
@@ -211,7 +253,7 @@ pub fn pixels_x(dx: f32, col_w: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Accumulator, ROWS_PER_NOTCH, pixels, pixels_x};
+    use super::{Accumulator, ROWS_PER_NOTCH, pixels, pixels_x, rows_f};
 
     /// The ordinary case: a detent is a full three-row step, both ways.
     #[test]
@@ -347,6 +389,55 @@ mod tests {
         assert_eq!(pixels(f32::NAN, 20.0), 0.0);
         assert_eq!(pixels(1.0, f32::NAN), 0.0);
         assert_eq!(pixels(f32::MAX, f32::MAX), 0.0);
+    }
+
+    /// The point of the continuous converter, and the one thing an accumulator
+    /// cannot do: a fifth of a notch moves a fifth of a notch *now*, rather
+    /// than four events later.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn a_fraction_of_a_notch_moves_a_fraction_of_a_row() {
+        assert_eq!(rows_f(-0.2), 0.6);
+        let mut acc = Accumulator::default();
+        assert_eq!(acc.rows(-0.2), 0, "the integer offset has to wait");
+    }
+
+    /// The two continuous converters must agree, which they do by construction
+    /// — `pixels` is written in terms of `rows_f`. This pins that it stays so.
+    // Exact: 3 * 0.25 * 16.0 = 12.0, representable to the bit.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn pixels_is_rows_f_scaled_by_the_row_height() {
+        for dy in [-1.0, 1.0, -0.25, 2.5, 0.0] {
+            assert_eq!(pixels(dy, 16.0), rows_f(dy) * 16.0, "dy = {dy}");
+        }
+    }
+
+    /// `rows_f` and the accumulator must travel the same distance over a whole
+    /// number of notches; they differ in *when* the movement lands, not in how
+    /// far it goes.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn rows_f_and_the_accumulator_agree_over_whole_notches() {
+        let mut acc = Accumulator::default();
+        let mut whole = 0isize;
+        let mut continuous = 0.0_f32;
+        for dy in [-1.0, -2.0, 1.0, -3.0] {
+            whole += acc.rows(dy);
+            continuous += rows_f(dy);
+        }
+        assert_eq!(continuous, whole as f32);
+    }
+
+    /// Same non-finite guard as the rest of the module. The overflow case is
+    /// the one worth naming: `dy` is finite but `dy * 3.0` is not.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn rows_f_rejects_nonfinite_input_and_overflow() {
+        assert_eq!(rows_f(f32::NAN), 0.0);
+        assert_eq!(rows_f(f32::INFINITY), 0.0);
+        assert_eq!(rows_f(f32::NEG_INFINITY), 0.0);
+        assert_eq!(rows_f(f32::MAX), 0.0, "finite input, infinite product");
     }
 
     /// The whole reason `pixels_x` exists. `WM_MOUSEWHEEL` is positive away

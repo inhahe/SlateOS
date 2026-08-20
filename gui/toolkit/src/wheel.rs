@@ -178,7 +178,11 @@ mod tests {
     #[test]
     fn one_notch_is_three_rows() {
         let mut acc = Accumulator::default();
-        assert_eq!(acc.rows(-1.0), 3, "away from the user scrolls down the list");
+        assert_eq!(
+            acc.rows(-1.0),
+            3,
+            "away from the user scrolls down the list"
+        );
         assert_eq!(acc.rows(1.0), -3, "towards the user scrolls back up");
     }
 

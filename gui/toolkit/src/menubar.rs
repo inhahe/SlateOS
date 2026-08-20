@@ -12,6 +12,7 @@ use crate::color::Color;
 use crate::cycle;
 use crate::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
+use crate::row_strip::RowStrip;
 use crate::style::CornerRadii;
 
 // ─── Re-export the shared item-id type from the context-menu module ────────
@@ -1008,14 +1009,34 @@ fn find_deepest(sub: &OpenSubmenu) -> &OpenSubmenu {
     }
 }
 
+/// How tall one dropdown row is. The single spelling of the rule.
+///
+/// This match used to appear four times in this file — once summing the
+/// heights for [`dropdown_content_height`], once placing the rows in
+/// [`render_entries`], once subtracting them back off in [`item_index_at_y`],
+/// and once adding them up again in [`y_offset_for_index`] to position a
+/// submenu. Four walks of one list is four chances for three of them to be
+/// right; when they disagree the user clicks one row and gets the one above.
+const fn entry_height(entry: &MenuBarEntry) -> f32 {
+    match entry {
+        MenuBarEntry::Separator => SEPARATOR_HEIGHT,
+        _ => ITEM_HEIGHT,
+    }
+}
+
+/// Where every dropdown row sits, measured from `content_top`.
+///
+/// Hit tests pass `0.0` and work in the panel-relative coordinates their
+/// callers already subtract [`DROPDOWN_VPAD`] into; the renderer passes the
+/// panel's real content top. The two differ by exactly that origin and by
+/// nothing else, which is the property that keeps the drawn row and the
+/// answering row the same row.
+fn entry_strip(entries: &[MenuBarEntry], content_top: f32) -> RowStrip {
+    RowStrip::new(content_top, entries.iter().map(entry_height))
+}
+
 fn dropdown_content_height(entries: &[MenuBarEntry]) -> f32 {
-    entries
-        .iter()
-        .map(|e| match e {
-            MenuBarEntry::Separator => SEPARATOR_HEIGHT,
-            _ => ITEM_HEIGHT,
-        })
-        .sum()
+    entry_strip(entries, 0.0).total_height()
 }
 
 fn calculate_dropdown_width(entries: &[MenuBarEntry]) -> f32 {
@@ -1055,38 +1076,26 @@ fn calculate_dropdown_width(entries: &[MenuBarEntry]) -> f32 {
 
 /// Which entry index does a y-offset (relative to first item, after
 /// vertical padding) land on? Returns `None` for separators.
+///
+/// A separator has a place and a height like anything else, so the strip
+/// names it; whether it is *selectable* is the menu bar's rule rather than
+/// the layout's, and the answer is no.
 fn item_index_at_y(entries: &[MenuBarEntry], rel_y: f32) -> Option<usize> {
-    let mut cur = 0.0_f32;
-    for (i, entry) in entries.iter().enumerate() {
-        let h = match entry {
-            MenuBarEntry::Separator => SEPARATOR_HEIGHT,
-            _ => ITEM_HEIGHT,
-        };
-        if rel_y >= cur && rel_y < cur + h {
-            if matches!(entry, MenuBarEntry::Separator) {
-                return None;
-            }
-            return Some(i);
-        }
-        cur += h;
+    let idx = entry_strip(entries, 0.0).index_at(rel_y)?;
+    match entries.get(idx) {
+        Some(MenuBarEntry::Separator) | None => None,
+        Some(_) => Some(idx),
     }
-    None
 }
 
 /// Y offset of the item at `target` index relative to the panel's content
 /// origin (after vertical padding).
+///
+/// An index past the end reports the offset one past the last row, which is
+/// what the hand-written walk this replaced fell through to.
 fn y_offset_for_index(entries: &[MenuBarEntry], target: usize) -> f32 {
-    let mut offset = 0.0_f32;
-    for (i, entry) in entries.iter().enumerate() {
-        if i == target {
-            return offset;
-        }
-        offset += match entry {
-            MenuBarEntry::Separator => SEPARATOR_HEIGHT,
-            _ => ITEM_HEIGHT,
-        };
-    }
-    offset
+    let strip = entry_strip(entries, 0.0);
+    strip.top(target).unwrap_or_else(|| strip.bottom())
 }
 
 /// Whether an entry can take the hover highlight.
@@ -1194,8 +1203,14 @@ fn render_entries(
     panel_w: f32,
     hover: Option<usize>,
 ) {
-    let mut cur_y = panel_y + DROPDOWN_VPAD;
+    // Draw from the same strip the hit test reads. Advancing a running
+    // `cur_y` here is what let this walk drift away from the three others
+    // that used to exist.
+    let strip = entry_strip(entries, panel_y + DROPDOWN_VPAD);
     for (i, entry) in entries.iter().enumerate() {
+        let Some(cur_y) = strip.top(i) else {
+            continue;
+        };
         match entry {
             MenuBarEntry::Separator => {
                 let line_y = cur_y + SEPARATOR_HEIGHT / 2.0;
@@ -1207,7 +1222,6 @@ fn render_entries(
                     color: SEPARATOR_COLOR,
                     width: 1.0,
                 });
-                cur_y += SEPARATOR_HEIGHT;
             }
 
             MenuBarEntry::Action {
@@ -1253,8 +1267,6 @@ fn render_entries(
                         overflow: TextOverflow::Clip,
                     });
                 }
-
-                cur_y += ITEM_HEIGHT;
             }
 
             MenuBarEntry::Check { label, checked, .. } => {
@@ -1294,8 +1306,6 @@ fn render_entries(
                     max_width: None,
                     overflow: TextOverflow::Clip,
                 });
-
-                cur_y += ITEM_HEIGHT;
             }
 
             MenuBarEntry::SubMenu { label, .. } => {
@@ -1334,8 +1344,6 @@ fn render_entries(
                     max_width: None,
                     overflow: TextOverflow::Clip,
                 });
-
-                cur_y += ITEM_HEIGHT;
             }
         }
     }
@@ -1474,6 +1482,222 @@ mod tests {
             y,
             kind: MouseEventKind::Move,
         }
+    }
+
+    // ── Dropdown geometry: does a click land on the row that was drawn? ──
+    //
+    // These read the rectangle `render()` actually emitted and probe *its*
+    // edges. A test that recomputes the renderer's arithmetic and checks the
+    // hit test against that is worthless: the two drift together, and the
+    // whole failure mode being guarded here is a renderer and a hit test that
+    // agree only by coincidence.
+
+    /// A bar whose every dropdown row is enabled, so every row paints a hover
+    /// highlight and can therefore be measured. Mixed heights on purpose.
+    fn geometry_bar() -> MenuBar {
+        fn action(id: u64, label: &str) -> MenuBarEntry {
+            MenuBarEntry::Action {
+                label: label.to_string(),
+                shortcut: None,
+                enabled: true,
+                id,
+            }
+        }
+        MenuBar::new(vec![MenuBarItem {
+            label: "&File".to_string(),
+            children: vec![
+                action(1, "New"),
+                action(2, "Open"),
+                MenuBarEntry::Separator,
+                MenuBarEntry::SubMenu {
+                    label: "Recent".to_string(),
+                    children: vec![action(31, "a.txt")],
+                },
+                MenuBarEntry::Check {
+                    label: "Read only".to_string(),
+                    checked: false,
+                    id: 4,
+                },
+                MenuBarEntry::Separator,
+                action(5, "Quit"),
+            ],
+        }])
+    }
+
+    /// Open the first dropdown and report its panel rectangle.
+    fn open_first_dropdown(bar: &mut MenuBar) -> (f32, f32, f32, f32) {
+        bar.handle_mouse_event(&click(10.0, BAR_HEIGHT / 2.0));
+        assert!(bar.is_open(), "the bar should have opened a dropdown");
+        bar.dropdown_rect(0)
+    }
+
+    /// The `(top, height)` of the hover highlight painted when the pointer is
+    /// over dropdown row `idx` — moved there through the real pointer path.
+    fn painted_dropdown_row(bar: &mut MenuBar, idx: usize) -> Option<(f32, f32)> {
+        let (dd_x, dd_y, dd_w, _) = bar.dropdown_rect(0);
+        let children = children_of(&bar.items, 0);
+        // Park the pointer using the layout's own answer for where the row is.
+        // That is not circular: the *highlight it then paints* is what these
+        // tests compare against the hit test, so a disagreement still shows.
+        let probe = dd_y + DROPDOWN_VPAD + y_offset_for_index(children, idx) + 1.0;
+        bar.handle_mouse_event(&mouse_move(dd_x + 10.0, probe));
+        let (x, w) = (dd_x + 4.0, dd_w - 8.0);
+        bar.render(800).into_iter().find_map(|cmd| match cmd {
+            // Exact equality on purpose: these are the very floats the
+            // renderer pushed, not a measurement of them.
+            RenderCommand::FillRect {
+                x: rx,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if rx == x && width == w && color == HOVER_COLOR => Some((y, height)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn every_dropdown_row_is_selectable_exactly_where_it_was_painted() {
+        let mut bar = geometry_bar();
+        let (_, dd_y, _, _) = open_first_dropdown(&mut bar);
+        let count = children_of(&bar.items, 0).len();
+        for idx in 0..count {
+            if matches!(children_of(&bar.items, 0)[idx], MenuBarEntry::Separator) {
+                continue;
+            }
+            let (top, height) = painted_dropdown_row(&mut bar, idx)
+                .unwrap_or_else(|| panic!("row {idx} painted no highlight to measure"));
+            let children = children_of(&bar.items, 0);
+            // The hit test works in panel-relative coordinates; every caller
+            // subtracts the same panel top and padding, so subtract them here
+            // too rather than inventing a second convention.
+            let rel = |abs: f32| abs - dd_y - DROPDOWN_VPAD;
+            // Sweep the painted row rather than probing its middle. A three
+            // pixel drift is invisible at the centre of a 28-px row and
+            // obvious at its edges — which is where the user aims.
+            for step in 0..8 {
+                let probe = top + (step as f32) * height / 8.0;
+                assert_eq!(
+                    item_index_at_y(children, rel(probe)),
+                    Some(idx),
+                    "row {idx} was painted at {top}..{} but {probe} answers otherwise",
+                    top + height
+                );
+            }
+            // A row owns its top edge and not its bottom one, so the two sides
+            // of a boundary never both answer for it.
+            assert_ne!(item_index_at_y(children, rel(top - 0.001)), Some(idx));
+            assert_ne!(item_index_at_y(children, rel(top + height)), Some(idx));
+        }
+    }
+
+    #[test]
+    fn a_dropdown_separator_is_drawn_inside_the_run_it_reserves_space_in() {
+        let mut bar = geometry_bar();
+        let (dd_x, dd_y, _, _) = open_first_dropdown(&mut bar);
+        let children = children_of(&bar.items, 0).to_vec();
+        // The bar's own bottom border is drawn in the separator colour too,
+        // so key on the panel's left inset as well — that is the x the
+        // renderer actually pushed for a dropdown separator and nothing else.
+        let sep_x = dd_x + DROPDOWN_HPAD;
+        let lines: Vec<f32> = bar
+            .render(800)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Line { x1, y1, color, .. }
+                    if color == SEPARATOR_COLOR && x1 == sep_x =>
+                {
+                    Some(y1)
+                }
+                _ => None,
+            })
+            .collect();
+        let sep_indices: Vec<usize> = children
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, MenuBarEntry::Separator))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(lines.len(), sep_indices.len());
+        let strip = entry_strip(&children, 0.0);
+        for (&idx, &line_y) in sep_indices.iter().zip(&lines) {
+            let rel = line_y - dd_y - DROPDOWN_VPAD;
+            let top = strip.top(idx).unwrap();
+            let height = strip.height(idx).unwrap();
+            assert!(
+                rel >= top && rel < top + height,
+                "separator {idx} reserves {top}..{} but its line is drawn at {rel}",
+                top + height
+            );
+            // A separator has a place and a height like anything else; what it
+            // does not have is selectability. That is the menu bar's rule, not
+            // the strip's, and it is the one thing `item_index_at_y` adds.
+            assert_eq!(item_index_at_y(&children, rel), None);
+            assert_eq!(item_index_at_y(&children, top), None);
+        }
+    }
+
+    #[test]
+    fn a_submenu_hangs_off_the_dropdown_row_it_belongs_to() {
+        // `y_offset_for_index` is what positions an opening submenu. It used
+        // to be its own walk of the heights; if it disagrees with the
+        // renderer the submenu appears beside a different row than the one
+        // the user is pointing at.
+        let mut bar = geometry_bar();
+        let (_, dd_y, _, _) = open_first_dropdown(&mut bar);
+        let count = children_of(&bar.items, 0).len();
+        for idx in 0..count {
+            if matches!(children_of(&bar.items, 0)[idx], MenuBarEntry::Separator) {
+                continue;
+            }
+            let (top, _) = painted_dropdown_row(&mut bar, idx).unwrap();
+            let children = children_of(&bar.items, 0);
+            assert_eq!(
+                dd_y + DROPDOWN_VPAD + y_offset_for_index(children, idx),
+                top,
+                "row {idx} is painted at {top} but a submenu would hang elsewhere"
+            );
+        }
+        // Past the end there is no row; the offset is one past the last, so a
+        // caller measuring downwards from it stays below the dropdown.
+        let children = children_of(&bar.items, 0);
+        assert_eq!(
+            y_offset_for_index(children, count),
+            dropdown_content_height(children)
+        );
+    }
+
+    #[test]
+    fn a_dropdown_is_exactly_as_tall_as_the_rows_it_holds() {
+        let mut bar = geometry_bar();
+        let (_, dd_y, _, dd_h) = open_first_dropdown(&mut bar);
+        let count = children_of(&bar.items, 0).len();
+        let (top, height) = painted_dropdown_row(&mut bar, count - 1).unwrap();
+        assert_eq!(
+            dd_y + dd_h,
+            top + height + DROPDOWN_VPAD,
+            "the panel must reach exactly one padding past the last row it \
+             paints, or it clips a row or floats a gap"
+        );
+    }
+
+    #[test]
+    fn nothing_outside_the_dropdown_run_selects_a_row() {
+        let bar = geometry_bar();
+        let children = children_of(&bar.items, 0);
+        // The panel's own padding is its border, not row zero.
+        assert_eq!(item_index_at_y(children, -0.001), None);
+        // Past the last row.
+        assert_eq!(
+            item_index_at_y(children, dropdown_content_height(children)),
+            None
+        );
+        assert_eq!(item_index_at_y(children, f32::NAN), None);
+        assert_eq!(item_index_at_y(children, f32::INFINITY), None);
+        // An empty dropdown answers for nothing at all.
+        assert_eq!(item_index_at_y(&[], 0.0), None);
+        assert_eq!(dropdown_content_height(&[]), 0.0);
     }
 
     // ── Mnemonic parsing ────────────────────────────────────────────────

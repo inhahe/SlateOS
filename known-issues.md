@@ -32396,6 +32396,17 @@ After that, `cargo fmt --check` becomes a usable gate.
 **Severity.** Low for correctness - formatting changes nothing that runs. Medium
 for friction, because it makes every `cargo fmt` a trap and therefore makes the
 documented pre-commit step something an agent learns to skip.
+
+**Progress.** Chipped away at opportunistically, one crate per commit, whenever
+a task leaves a file otherwise untouched:
+
+| Crate / file | Diffs cleared | Commit |
+|---|---|---|
+| `apps/tmux/src/main.rs` | 47 | `fc1ff70b1` (2026-08-20) |
+
+Still outstanding: `osfont`, `guitk`, `gui/desktop`, `apps/hexeditor`
+(24 diffs), and the rest of `apps/**`.
+
 ## A-VFS-READ-256-STEPPED-3X-WITH-BYTE-IDENTICAL-VFS-SOURCE (lane A, 2026-08-17)
 
 **Status: RESOLVED 2026-08-17 — not a regression. A QEMU/TCG code-layout

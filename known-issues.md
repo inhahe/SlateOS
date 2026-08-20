@@ -43660,3 +43660,63 @@ left strictly alone — another agent may have a run in flight in any of them,
 and the script only ever prunes the worktree it is invoked from. If the
 operator wants the whole drive swept, each lane should run the script in its
 own worktree.
+
+## C-TWO-PROCESS-LISTS-HIT-TEST-UNDER-THEIR-OWN-STATUS-BAR (lane C, 2026-08-20) — **found, not yet fixed**
+
+**Where:** `apps/sysmonitor/src/main.rs` (hit tests at ~1099, ~1116, ~1157) and
+`apps/procexplorer/src/main.rs` (~1159, ~1174, ~1216).
+
+The same defect as the speed test's stats strip
+(`C-A-SPEED-TEST-HISTORY-DRAWN-UPSIDE-DOWN-RELATIVE-TO-ITS-HIT-TEST`, fault
+family 2), in the two apps whose whole purpose is a long clickable list of
+processes. Both were found by the query that family suggests: an app that both
+handles a mouse event and *divides* by a row height somewhere, then checking
+whether the divisor's base and bound match the renderer's.
+
+Both apps paint an **opaque** status bar across the bottom of the window:
+
+| | sysmonitor | procexplorer |
+|---|---|---|
+| status bar | `y = window_height - 24`, `CRUST` (`:1386`) | `y = window_height - 24`, `COLOR_STATUS_BG` (`:1505`) |
+| renderer's row area | `content_h = window_height - TAB_BAR_HEIGHT - 24` (`:1724`) | `content_h = window_height - content_y - 24` (`:1517`) |
+| rows clipped to | `tree.clip(0, rows_y, w, row_area_h)` (`:1830`) | `row_area_h = content_h - HEADER_HEIGHT` (`:1568`) |
+| scroll bound | `visible_row_count` subtracts `STATUS_BAR_HEIGHT` (`:1276`) | `content_h` subtracts it (`:1334`) |
+| **hit test** | **`if my >= rows_start`** — no lower bound | **`if my >= content_y + HEADER_HEIGHT`** — no lower bound |
+
+So in each app the renderer, the clip *and* the scroll bound all know the list
+stops 24 px above the bottom of the window, and the hit test is the one place
+that does not. With `ROW_HEIGHT` at 22 in both, the 24-px status bar covers
+**just over one full row**: clicking the status bar selects a process that is
+not on screen, and moving the pointer across it highlights one. In sysmonitor
+the right-click path does it too, so the context menu — *Kill process* among its
+actions — can open against a row the user cannot see.
+
+That last point is why this is filed as a defect rather than a cosmetic
+mismatch: the selection it makes is invisible, and the action offered on it is
+destructive.
+
+**Why the tests miss it.** Both suites probe row *centres*, computed from the
+same `content_y + HEADER_HEIGHT` base the hit test uses, so they cannot observe
+a bound the hit test never applies. The lesson is the one already recorded for
+the speed test: read the row positions out of the `RenderCommand`s the renderer
+actually emits, and probe the *edges* of each rectangle rather than its middle.
+
+**What the proper fix looks like.** Identical in both, and identical to the fix
+already landed in `apps/speedtest`: one description of the row area — a
+`rows_top()` and a `rows_height()` on the app — read by the renderer, by
+`visible_row_count`, and by all three hit tests, with the hit test rejecting
+`my >= rows_top() + rows_height()`. sysmonitor additionally spells the same
+number two ways (`content_y = TAB_BAR_HEIGHT` then `+ HEADER_HEIGHT` in the
+left-click arm; `content_y = TAB_BAR_HEIGHT + HEADER_HEIGHT` in the right-click
+and move arms), which is not itself a bug but is the state a list is in
+immediately before two copies drift apart — the helpers remove it.
+
+Tests should assert, for each app and each of the three pointer paths, that a
+click at `rows_top() + rows_height() - 0.5` still selects and one at
+`rows_top() + rows_height()` does not, with the row area's extent read from the
+emitted clip command rather than recomputed.
+
+**Not fixed in the commit that found it** only because that commit's workspace
+gate was already running and editing the crates would have invalidated it —
+the same reason `C-TOUCHPAD-GESTURE-LIST-DRAWS-PAST-THE-PANEL` waited a day.
+It is the next thing lane C picks up.

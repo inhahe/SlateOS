@@ -44111,6 +44111,65 @@ screen is drawn past the bottom edge and the rows below it can be neither seen
 nor reached. `RowStrip` is the right shape to build that on — a scroll offset
 is just a different `origin` — but no caller needs it yet.
 
+*(Fixed 2026-08-20 — see "Neither menu scrolled" below.)*
+
+### Neither menu scrolled — FIXED
+
+The paragraph directly above, made good. Both toolkit menus now scroll, in
+`53cf09c34` (`menu.rs`) and `9e85a16a9` (`menubar.rs`).
+
+The live fault was worst in `ContextMenu::show`, which placed a popup with
+
+```rust
+self.y = if y + total_height > 1080.0 { (y - total_height).max(0.0) } else { y };
+```
+
+A 120-item menu has `total_height == 3368`, so `y - total_height` is negative,
+the `.max(0.0)` clamps it to zero, and the menu is drawn from the top of the
+screen running 2288 px off the bottom of it. Every row past the display edge
+was painted where no pointer can go. The menu bar's dropdowns had the same
+shape with `dropdown_rect` supplying the height.
+
+Three things about the fix are worth carrying to the next scrollable list:
+
+**A scroll offset is just a different origin — provided it is subtracted
+exactly once.** Both menus subtract it in one place, the origin handed to
+`RowStrip::new`, so `index_at` remains the renderer's placement inverted for
+free. A second subtraction anywhere else is a second description of where the
+rows are, which is the whole fault family this sweep exists to remove.
+
+**A scrolled list needs two heights and two tests where an unscrolled one
+needs one of each.** `content_height` is the rows; `panel_height` is what fits
+on screen, and the old code had only the first. Likewise the strip says which
+row owns a `y` *in the list*, and a visible-region bound says whether that part
+of the list is *on screen*. Without a scroll offset those two coincide, which
+is exactly why one of them used to be enough — with one, the list extends into
+the panel's own padding and the strip alone cheerfully names a row scrolled out
+of sight.
+
+**A non-finite offset must be refused, not clamped.** `NaN` compares false
+against both ends of a `clamp`, so a clamp passes it straight through to the
+strip's origin and every row's position becomes `NaN` at once — a menu that
+answers for no pointer at all. Both `set_scroll` and `clamped_scroll` return
+early on `!is_finite()`, and `reintro-row-hit-tests.py` pins it.
+
+Along the way, `menubar.rs`'s five independent descriptions of one panel
+rectangle (`dropdown_rect`, `click_in_submenu_chain`, `hover_in_submenu_chain`,
+`render_submenu_chain`, and the renderer adding `DROPDOWN_VPAD` back on in a
+fifth place) became one `DropdownPanel` value — there was otherwise nowhere to
+put a scroll offset that all five would see. `item_index_at_y` and
+`y_offset_for_index` were deleted rather than left as dead copies of the
+geometry, and their tests rewritten against `DropdownPanel`.
+
+One performance fault fell out of it. `calculate_dropdown_width` widens a panel
+to fit its widest label, which means measuring every label, which means shaping
+every label through the font. `dropdown_panel` is consulted by the hit test, the
+renderer *and* every wheel notch, so a 200-row dropdown was shaping 200 labels
+several times per mouse move. It is now computed where the entries change and
+cached. The guitk suite went from 92 s to 7.4 s.
+
+1000 → 1015 guitk tests; the sweep grew from 58 defects to 67.
+
 ### The tree widget selected its first node for a click above it — FIXED
 
 Found while migrating the menus, by asking which *other* toolkit widget
@@ -44569,3 +44628,78 @@ as a boundary rather than as decoration.
 the operation queue and the disk sidebar — has exactly one description of where
 its rows are, and each has a reintroduction case proving the suite can see it
 being undone.**
+
+## C-A-NESTED-SUBMENU-BELOW-THE-FIRST-LEVEL-RESOLVES-THE-WRONG-ENTRIES (lane C, 2026-08-20)
+
+**In short:** In a menu-bar dropdown, a submenu inside a submenu — `View →
+Zoom → Advanced → …` — shows the wrong list of commands, usually an empty one.
+Only the first level of nesting works. Found while making the dropdowns scroll;
+it is not caused by that change and predates it.
+
+`gui/toolkit/src/menubar.rs`. An open submenu is tracked by an `OpenSubmenu`
+node holding a `parent_index`, and the chain of them is a singly-linked list
+from the dropdown downwards. To draw or hit-test a node you need its *entries*,
+which `resolve_submenu_entries(root_children, sub)` is supposed to supply. Its
+entire body is:
+
+```rust
+match root_children.get(sub.parent_index) {
+    Some(MenuBarEntry::SubMenu { children, .. }) => children.clone(),
+    _ => Vec::new(),
+}
+```
+
+`parent_index` indexes into *the entries of the level above this node*. That is
+`root_children` only for the first submenu. For a node at depth 2 it indexes
+into the depth-1 submenu's children, so looking it up in `root_children` reads
+an unrelated entry — which is normally not a `SubMenu` at all, giving
+`Vec::new()` and a submenu that draws nothing and activates nothing. If the
+root happens to have a `SubMenu` at that index, it silently shows *that* menu's
+commands instead.
+
+All six call sites pass the root children, including the four chain walkers
+(`click_in_submenu_chain`, `hover_in_submenu_chain`, `scroll_in_submenu_chain`,
+`render_submenu_chain`) which recurse into `sub.child` while passing
+`root_children` through unchanged. So every path is wrong at depth ≥ 2, not
+just one of them.
+
+The function knows. Its doc comment claims "we build the path by collecting
+parent indices from the root submenu down to the target", which the body does
+not do, and 45 lines of comment inside the body talk the problem in a circle —
+"the only reliable approach is to walk the chain from the very first submenu
+node … but we don't have the root submenu pointer" — before giving up on a
+lookup that is right only at depth 1.
+
+**The proper fix** is smaller than the comment: every walker already recurses
+from the top of the chain downwards, so each level has its own entries in hand
+by the time it recurses. Resolve before recursing and pass *this level's*
+resolved entries as the child's parent entries, rather than passing
+`root_children` down untouched. `resolve_submenu_entries` then takes "the
+entries of the level above" and its body is already correct for that. The
+keyboard paths, which grab the deepest node with `deepest_submenu_mut` and have
+no chain to descend, need a combined `deepest_with_entries` helper that walks
+down accumulating entries and returns both.
+
+**Until then:** submenus one level deep — which is all the toolkit's own
+fixtures and, as far as a grep shows, all its callers — behave correctly.
+
+## C-A-SUBMENU-NEAR-THE-RIGHT-EDGE-IS-DRAWN-OFF-THE-SCREEN (lane C, 2026-08-20)
+
+**In short:** A dropdown submenu always opens to the right of its parent panel.
+For a menu near the right edge of the display the child is drawn past the edge,
+where its rows can be neither seen nor clicked. The horizontal twin of the
+vertical overflow fixed in "Neither menu scrolled" above.
+
+`gui/toolkit/src/menubar.rs`. `ContextMenu::show` flips horizontally when a
+popup would overflow the right edge; the menu bar's submenus never do. The
+child's x is decided in three places — `MenuBar::submenu_at`, the `OpenChild`
+arm of `click_in_submenu_chain`, and the hover path — and all three say
+`panel.right()` unconditionally.
+
+**The proper fix:** one `DropdownPanel::child_origin(child_width, row_top)`
+that all three go through, returning `self.right()` normally and
+`(self.x - child_width).max(0.0)` when the former would run past
+`DEFAULT_VIEWPORT_WIDTH` — which the file will need to gain, having only
+`DEFAULT_VIEWPORT_HEIGHT` today. Three places deciding one thing is the same
+duplication shape the `DropdownPanel` collapse removed everywhere else in the
+file, so the fix is the collapse rather than three edits.

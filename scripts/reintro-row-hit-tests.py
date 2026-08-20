@@ -344,6 +344,42 @@ DEFECTS = [
         "        }\n"
         "        offset\n",
     ),
+    (
+        "guitk",
+        MENU,
+        "a menu taller than the screen is given its full height and runs off it",
+        "        self.scroll = 0.0;\n        let panel_height = self.panel_height();\n",
+        "        self.scroll = 0.0;\n        let panel_height = self.content_height();\n",
+    ),
+    (
+        "guitk",
+        MENU,
+        "index_at_y drops its visible-region bound and names scrolled-away rows",
+        "        if !(py >= self.viewport_top() && py < self.viewport_bottom()) {\n"
+        "            return None;\n"
+        "        }\n"
+        "        let idx = self.strip().index_at(py)?;\n",
+        "        let idx = self.strip().index_at(py)?;\n",
+    ),
+    (
+        "guitk",
+        MENU,
+        "arrowing down a tall menu no longer brings the selected row into view",
+        "        if let Some(idx) = self.hover_index {\n"
+        "            self.scroll_index_into_view(idx);\n"
+        "        }\n",
+        "",
+    ),
+    (
+        "guitk",
+        MENU,
+        "a NaN scroll offset is clamped rather than refused, poisoning every row",
+        "        if !value.is_finite() {\n"
+        "            return;\n"
+        "        }\n"
+        "        self.scroll = value.clamp(0.0, self.max_scroll());\n",
+        "        self.scroll = value.clamp(0.0, self.max_scroll());\n",
+    ),
     # --------------------------------------------------------- guitk/menubar
     (
         "guitk",
@@ -355,42 +391,89 @@ DEFECTS = [
     (
         "guitk",
         MENUBAR,
-        "item_index_at_y keeps its own walk and sizes a separator as an item",
-        "    let idx = entry_strip(entries, 0.0).index_at(rel_y)?;\n",
-        "    let mut cur = 0.0_f32;\n"
-        "    let mut idx = entries.len();\n"
-        "    for (i, entry) in entries.iter().enumerate() {\n"
-        "        let h = match entry {\n"
-        "            MenuBarEntry::Separator => ITEM_HEIGHT,\n"
-        "            _ => ITEM_HEIGHT,\n"
-        "        };\n"
-        "        if rel_y >= cur && rel_y < cur + h {\n"
-        "            idx = i;\n"
-        "            break;\n"
+        "the dropdown hit test keeps its own walk and sizes a separator as an item",
+        "        let idx = self.strip(entries).index_at(my)?;\n",
+        "        let mut cur = self.viewport_top() - self.scroll;\n"
+        "        let mut idx = entries.len();\n"
+        "        for (i, entry) in entries.iter().enumerate() {\n"
+        "            let h = match entry {\n"
+        "                MenuBarEntry::Separator => ITEM_HEIGHT,\n"
+        "                _ => ITEM_HEIGHT,\n"
+        "            };\n"
+        "            if my >= cur && my < cur + h {\n"
+        "                idx = i;\n"
+        "                break;\n"
+        "            }\n"
+        "            cur += h;\n"
         "        }\n"
-        "        cur += h;\n"
-        "    }\n"
-        "    if idx >= entries.len() {\n"
-        "        return None;\n"
-        "    }\n",
+        "        if idx >= entries.len() {\n"
+        "            return None;\n"
+        "        }\n",
     ),
     (
         "guitk",
         MENUBAR,
-        "the dropdown's y_offset_for_index walks again and forgets separators",
-        "    let strip = entry_strip(entries, 0.0);\n"
-        "    strip.top(target).unwrap_or_else(|| strip.bottom())\n",
-        "    let mut offset = 0.0_f32;\n"
-        "    for (i, entry) in entries.iter().enumerate() {\n"
-        "        if i == target {\n"
-        "            return offset;\n"
+        "a submenu's row_top walks again and forgets separators take space",
+        "        self.strip(entries).top(index)\n",
+        "        let mut offset = self.viewport_top() - self.scroll;\n"
+        "        for (i, entry) in entries.iter().enumerate() {\n"
+        "            if i == index {\n"
+        "                return Some(offset);\n"
+        "            }\n"
+        "            offset += match entry {\n"
+        "                MenuBarEntry::Separator => 0.0,\n"
+        "                _ => ITEM_HEIGHT,\n"
+        "            };\n"
         "        }\n"
-        "        offset += match entry {\n"
-        "            MenuBarEntry::Separator => 0.0,\n"
-        "            _ => ITEM_HEIGHT,\n"
-        "        };\n"
-        "    }\n"
-        "    offset\n",
+        "        None\n",
+    ),
+    (
+        "guitk",
+        MENUBAR,
+        "a dropdown taller than the screen is given its full height and runs off it",
+        "        let panel_height = content_height.min(available);\n",
+        "        let panel_height = content_height;\n",
+    ),
+    (
+        "guitk",
+        MENUBAR,
+        "the dropdown hit test drops its visible-region bound",
+        "        if !(my >= self.viewport_top() && my < self.viewport_bottom()) {\n"
+        "            return None;\n"
+        "        }\n"
+        "        let idx = self.strip(entries).index_at(my)?;\n",
+        "        let idx = self.strip(entries).index_at(my)?;\n",
+    ),
+    (
+        "guitk",
+        MENUBAR,
+        "arrowing down a tall dropdown no longer brings the selected row into view",
+        "        if let Some(idx) = hover {\n"
+        "            let panel = self.dropdown_panel(top_idx);\n"
+        "            self.dropdown_scroll = panel.scroll_showing("
+        "children_of(&self.items, top_idx), idx);\n"
+        "        }\n",
+        "",
+    ),
+    (
+        "guitk",
+        MENUBAR,
+        "a NaN dropdown scroll is clamped rather than refused, poisoning every row",
+        "        if value.is_finite() {\n"
+        "            value.clamp(0.0, self.max_scroll())\n"
+        "        } else {\n"
+        "            self.scroll\n"
+        "        }\n",
+        "        value.clamp(0.0, self.max_scroll())\n",
+    ),
+    (
+        "guitk",
+        MENUBAR,
+        "the renderer clips to the panel rather than to the region that answers",
+        "        y: view_top,\n        width: panel_w,\n"
+        "        height: panel.viewport_height(),\n",
+        "        y: panel.y,\n        width: panel_w,\n"
+        "        height: panel.content_height,\n",
     ),
     # ------------------------------------------------------------ guitk/tree
     (

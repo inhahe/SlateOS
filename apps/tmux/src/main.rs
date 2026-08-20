@@ -644,12 +644,18 @@ impl AnsiParser {
     fn process_csi_char(&mut self, ch: char, buf: &mut TerminalBuffer) {
         match ch {
             '0'..='9' => {
-                self.current_param = self.current_param.saturating_mul(10)
+                self.current_param = self
+                    .current_param
+                    .saturating_mul(10)
                     .saturating_add(ch as u16 - u16::from(b'0'));
                 self.has_param = true;
             }
             ';' => {
-                self.params.push(if self.has_param { self.current_param } else { 0 });
+                self.params.push(if self.has_param {
+                    self.current_param
+                } else {
+                    0
+                });
                 self.current_param = 0;
                 self.has_param = false;
             }
@@ -659,7 +665,11 @@ impl AnsiParser {
             _ => {
                 // Final byte — push last param and dispatch
                 if self.has_param || !self.params.is_empty() {
-                    self.params.push(if self.has_param { self.current_param } else { 0 });
+                    self.params.push(if self.has_param {
+                        self.current_param
+                    } else {
+                        0
+                    });
                 }
                 self.dispatch_csi(ch, buf);
                 self.state = ParseState::Normal;
@@ -750,7 +760,7 @@ impl AnsiParser {
         }
     }
 
-    #[allow(clippy::unused_self)]  // kept as method for symmetry with other CSI handlers
+    #[allow(clippy::unused_self)] // kept as method for symmetry with other CSI handlers
     fn apply_sgr(&self, params: &[u16], buf: &mut TerminalBuffer) {
         let mut i = 0;
         while i < params.len() {
@@ -760,11 +770,14 @@ impl AnsiParser {
                 2 => buf.current_dim = true,
                 4 => buf.current_underline = true,
                 7 => buf.current_reverse = true,
-                22 => { buf.current_bold = false; buf.current_dim = false; }
+                22 => {
+                    buf.current_bold = false;
+                    buf.current_dim = false;
+                }
                 24 => buf.current_underline = false,
                 27 => buf.current_reverse = false,
                 // Standard foreground colors
-                30 => buf.current_fg = Color::from_hex(0x45475A),  // Black → Surface1
+                30 => buf.current_fg = Color::from_hex(0x45475A), // Black → Surface1
                 31 => buf.current_fg = RED,
                 32 => buf.current_fg = GREEN,
                 33 => buf.current_fg = YELLOW,
@@ -772,7 +785,7 @@ impl AnsiParser {
                 35 => buf.current_fg = MAUVE,
                 36 => buf.current_fg = TEAL,
                 37 => buf.current_fg = TEXT,
-                39 => buf.current_fg = TEXT,  // Default fg
+                39 => buf.current_fg = TEXT, // Default fg
                 // Standard background colors
                 40 => buf.current_bg = CRUST,
                 41 => buf.current_bg = RED,
@@ -782,7 +795,7 @@ impl AnsiParser {
                 45 => buf.current_bg = MAUVE,
                 46 => buf.current_bg = TEAL,
                 47 => buf.current_bg = TEXT,
-                49 => buf.current_bg = BASE,  // Default bg
+                49 => buf.current_bg = BASE, // Default bg
                 // Bright foreground
                 90 => buf.current_fg = OVERLAY0,
                 91 => buf.current_fg = RED,
@@ -869,9 +882,21 @@ fn color_256(n: u16) -> Color {
             let g_val = ((idx / 6) % 6) as u8;
             let r = (idx / 36) as u8;
             Color::rgb(
-                if r == 0 { 0 } else { r.saturating_mul(40).saturating_add(55) },
-                if g_val == 0 { 0 } else { g_val.saturating_mul(40).saturating_add(55) },
-                if b == 0 { 0 } else { b.saturating_mul(40).saturating_add(55) },
+                if r == 0 {
+                    0
+                } else {
+                    r.saturating_mul(40).saturating_add(55)
+                },
+                if g_val == 0 {
+                    0
+                } else {
+                    g_val.saturating_mul(40).saturating_add(55)
+                },
+                if b == 0 {
+                    0
+                } else {
+                    b.saturating_mul(40).saturating_add(55)
+                },
             )
         }
         // 232-255: grayscale ramp
@@ -1047,23 +1072,44 @@ enum LayoutNode {
 
 impl LayoutNode {
     /// Compute the absolute bounds for each pane in this layout tree.
-    fn compute_bounds(&self, x: f32, y: f32, width: f32, height: f32) -> Vec<(PaneId, f32, f32, f32, f32)> {
+    fn compute_bounds(
+        &self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Vec<(PaneId, f32, f32, f32, f32)> {
         match self {
             Self::Leaf(id) => vec![(*id, x, y, width, height)],
-            Self::Split { direction, ratio, first, second } => {
+            Self::Split {
+                direction,
+                ratio,
+                first,
+                second,
+            } => {
                 let mut result = Vec::new();
                 match direction {
                     SplitDir::Horizontal => {
                         let first_h = (height * ratio).max(MIN_PANE_SIZE);
                         let second_h = (height - first_h - PANE_BORDER_WIDTH).max(MIN_PANE_SIZE);
                         result.extend(first.compute_bounds(x, y, width, first_h));
-                        result.extend(second.compute_bounds(x, y + first_h + PANE_BORDER_WIDTH, width, second_h));
+                        result.extend(second.compute_bounds(
+                            x,
+                            y + first_h + PANE_BORDER_WIDTH,
+                            width,
+                            second_h,
+                        ));
                     }
                     SplitDir::Vertical => {
                         let first_w = (width * ratio).max(MIN_PANE_SIZE);
                         let second_w = (width - first_w - PANE_BORDER_WIDTH).max(MIN_PANE_SIZE);
                         result.extend(first.compute_bounds(x, y, first_w, height));
-                        result.extend(second.compute_bounds(x + first_w + PANE_BORDER_WIDTH, y, second_w, height));
+                        result.extend(second.compute_bounds(
+                            x + first_w + PANE_BORDER_WIDTH,
+                            y,
+                            second_w,
+                            height,
+                        ));
                     }
                 }
                 result
@@ -1097,7 +1143,12 @@ impl LayoutNode {
     fn adjust_ratio(&mut self, pane: PaneId, delta: f32) -> bool {
         match self {
             Self::Leaf(_) => false,
-            Self::Split { ratio, first, second, .. } => {
+            Self::Split {
+                ratio,
+                first,
+                second,
+                ..
+            } => {
                 let first_ids = first.pane_ids();
                 let second_ids = second.pane_ids();
                 if first_ids.contains(&pane) || second_ids.contains(&pane) {
@@ -1651,7 +1702,8 @@ impl Multiplexer {
         if let Some(session) = self.active_session_mut()
             && !session.windows.is_empty()
         {
-            session.active_window = (session.active_window.saturating_add(1)) % session.windows.len();
+            session.active_window =
+                (session.active_window.saturating_add(1)) % session.windows.len();
         }
     }
 
@@ -1757,7 +1809,11 @@ impl Multiplexer {
         {
             let ids = window.layout.pane_ids();
             if let Some(pos) = ids.iter().position(|id| *id == window.active_pane) {
-                let prev = if pos == 0 { ids.len().saturating_sub(1) } else { pos.saturating_sub(1) };
+                let prev = if pos == 0 {
+                    ids.len().saturating_sub(1)
+                } else {
+                    pos.saturating_sub(1)
+                };
                 if let Some(id) = ids.get(prev) {
                     window.active_pane = *id;
                 }
@@ -1948,16 +2004,14 @@ impl Multiplexer {
             "new-window" | "neww" => {
                 self.new_window();
             }
-            "select-layout" | "layout" => {
-                match arg {
-                    "even-horizontal" => self.apply_layout(LayoutPreset::EvenHorizontal),
-                    "even-vertical" => self.apply_layout(LayoutPreset::EvenVertical),
-                    "main-horizontal" => self.apply_layout(LayoutPreset::MainHorizontal),
-                    "main-vertical" => self.apply_layout(LayoutPreset::MainVertical),
-                    "tiled" => self.apply_layout(LayoutPreset::Tiled),
-                    _ => self.set_status(&format!("Unknown layout: {arg}")),
-                }
-            }
+            "select-layout" | "layout" => match arg {
+                "even-horizontal" => self.apply_layout(LayoutPreset::EvenHorizontal),
+                "even-vertical" => self.apply_layout(LayoutPreset::EvenVertical),
+                "main-horizontal" => self.apply_layout(LayoutPreset::MainHorizontal),
+                "main-vertical" => self.apply_layout(LayoutPreset::MainVertical),
+                "tiled" => self.apply_layout(LayoutPreset::Tiled),
+                _ => self.set_status(&format!("Unknown layout: {arg}")),
+            },
             "attach" | "attach-session" => {
                 if let Ok(idx) = arg.parse::<usize>() {
                     self.attach(idx);
@@ -1967,12 +2021,18 @@ impl Multiplexer {
                 self.detach();
             }
             "list-sessions" | "ls" => {
-                let msg = self.sessions.iter().enumerate()
-                    .map(|(i, s)| format!("{i}: {} ({} windows{})",
-                        s.name,
-                        s.windows.len(),
-                        if s.attached { " (attached)" } else { "" }
-                    ))
+                let msg = self
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        format!(
+                            "{i}: {} ({} windows{})",
+                            s.name,
+                            s.windows.len(),
+                            if s.attached { " (attached)" } else { "" }
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(" | ");
                 self.set_status(&msg);
@@ -2055,7 +2115,7 @@ impl Multiplexer {
         cmds
     }
 
-    #[allow(clippy::unused_self)]  // kept as method for symmetry with other render_* dispatch
+    #[allow(clippy::unused_self)] // kept as method for symmetry with other render_* dispatch
     fn render_tab_bar(&self, cmds: &mut Vec<RenderCommand>, session: &Session) {
         // Tab bar background
         cmds.push(RenderCommand::FillRect {
@@ -2109,7 +2169,11 @@ impl Multiplexer {
                 text: label.clone(),
                 font_size: SMALL_TEXT,
                 color: tab_color,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_w - 16.0),
                 overflow: TextOverflow::Ellipsis,
             });
@@ -2118,12 +2182,23 @@ impl Multiplexer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]  // render_pane needs all of: target, pane id, geometry, focus state
-    fn render_pane(&self, cmds: &mut Vec<RenderCommand>, pane_id: PaneId,
-                    x: f32, y: f32, width: f32, height: f32, active: bool) {
+    #[allow(clippy::too_many_arguments)] // render_pane needs all of: target, pane id, geometry, focus state
+    fn render_pane(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        pane_id: PaneId,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        active: bool,
+    ) {
         // Pane background
         cmds.push(RenderCommand::FillRect {
-            x, y, width, height,
+            x,
+            y,
+            width,
+            height,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -2131,7 +2206,10 @@ impl Multiplexer {
         // Pane border
         let border_color = if active { BLUE } else { SURFACE1 };
         cmds.push(RenderCommand::StrokeRect {
-            x, y, width, height,
+            x,
+            y,
+            width,
+            height,
             color: border_color,
             line_width: PANE_BORDER_WIDTH,
             corner_radii: CornerRadii::ZERO,
@@ -2179,7 +2257,8 @@ impl Multiplexer {
                         // Cell background (only if non-default)
                         if bg != BASE {
                             cmds.push(RenderCommand::FillRect {
-                                x: cx, y: cy,
+                                x: cx,
+                                y: cy,
                                 width: cell_w,
                                 height: cell_h,
                                 color: bg,
@@ -2195,7 +2274,11 @@ impl Multiplexer {
                                 text: cell.ch.to_string(),
                                 font_size: CELL_FONT_SIZE,
                                 color: fg,
-                                font_weight: if cell.bold { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                                font_weight: if cell.bold {
+                                    FontWeightHint::Bold
+                                } else {
+                                    FontWeightHint::Regular
+                                },
                                 max_width: Some(cell_w),
                                 overflow: TextOverflow::Ellipsis,
                             });
@@ -2220,10 +2303,10 @@ impl Multiplexer {
                 && cursor_line < window.end()
             {
                 let cx = content_x + pane.buffer.cursor_col as f32 * cell_w;
-                let cy = content_y
-                    + (cursor_line.saturating_sub(window.start)) as f32 * cell_h;
+                let cy = content_y + (cursor_line.saturating_sub(window.start)) as f32 * cell_h;
                 cmds.push(RenderCommand::FillRect {
-                    x: cx, y: cy,
+                    x: cx,
+                    y: cy,
                     width: cell_w,
                     height: cell_h,
                     color: Color::rgba(205, 214, 244, 128),
@@ -2262,7 +2345,8 @@ impl Multiplexer {
             // Bell indicator
             if pane.buffer.bell {
                 cmds.push(RenderCommand::FillRect {
-                    x, y,
+                    x,
+                    y,
                     width: 16.0,
                     height: 16.0,
                     color: RED,
@@ -2303,7 +2387,11 @@ impl Multiplexer {
             let is_active = i == session.active_window;
             let label = format!("{}:{}", window.index, window.name);
             let color = if is_active { CRUST } else { MANTLE };
-            let weight = if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular };
+            let weight = if is_active {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            };
 
             if is_active {
                 cmds.push(RenderCommand::Text {
@@ -2356,7 +2444,7 @@ impl Multiplexer {
         });
     }
 
-    #[allow(clippy::unused_self)]  // kept as method for symmetry with other render_* dispatch
+    #[allow(clippy::unused_self)] // kept as method for symmetry with other render_* dispatch
     fn render_detached(&self, cmds: &mut Vec<RenderCommand>) {
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -2407,12 +2495,18 @@ impl Multiplexer {
         });
 
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
+            x,
+            y,
+            width: w,
+            height: h,
             color: BASE,
             corner_radii: CornerRadii::all(8.0),
         });
         cmds.push(RenderCommand::StrokeRect {
-            x, y, width: w, height: h,
+            x,
+            y,
+            width: w,
+            height: h,
             color: SURFACE1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
@@ -2457,7 +2551,11 @@ impl Multiplexer {
                 text: label,
                 font_size: SMALL_TEXT,
                 color: if is_active { TEXT } else { SUBTEXT0 },
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
@@ -2465,7 +2563,9 @@ impl Multiplexer {
     }
 
     fn render_window_chooser(&self, cmds: &mut Vec<RenderCommand>) {
-        let Some(session) = self.active_session() else { return };
+        let Some(session) = self.active_session() else {
+            return;
+        };
 
         let w = 300.0;
         let h = (session.windows.len() as f32 * 24.0 + 40.0).min(400.0);
@@ -2482,12 +2582,18 @@ impl Multiplexer {
         });
 
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
+            x,
+            y,
+            width: w,
+            height: h,
             color: BASE,
             corner_radii: CornerRadii::all(8.0),
         });
         cmds.push(RenderCommand::StrokeRect {
-            x, y, width: w, height: h,
+            x,
+            y,
+            width: w,
+            height: h,
             color: SURFACE1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
@@ -2527,7 +2633,11 @@ impl Multiplexer {
                 text: label,
                 font_size: SMALL_TEXT,
                 color: if is_active { TEXT } else { SUBTEXT0 },
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
@@ -2557,13 +2667,14 @@ impl Multiplexer {
         });
     }
 
-    #[allow(clippy::unused_self)]  // kept as method for symmetry with other render_* dispatch
+    #[allow(clippy::unused_self)] // kept as method for symmetry with other render_* dispatch
     fn render_prefix_indicator(&self, cmds: &mut Vec<RenderCommand>) {
         // Show a small indicator that prefix key was pressed
         let x = WINDOW_WIDTH - 100.0;
         let y = TAB_BAR_HEIGHT;
         cmds.push(RenderCommand::FillRect {
-            x, y,
+            x,
+            y,
             width: 100.0,
             height: 20.0,
             color: YELLOW,
@@ -2679,7 +2790,7 @@ mod tests {
     fn test_set_cursor() {
         let mut buf = TerminalBuffer::new(80, 24);
         buf.set_cursor(5, 10);
-        assert_eq!(buf.cursor_row, 4);  // 1-indexed → 0-indexed
+        assert_eq!(buf.cursor_row, 4); // 1-indexed → 0-indexed
         assert_eq!(buf.cursor_col, 9);
     }
 
@@ -3108,12 +3219,27 @@ mod tests {
     fn test_mux_next_prev_pane() {
         let mut mux = Multiplexer::new();
         mux.split_pane(SplitDir::Vertical);
-        let p1 = mux.active_session().unwrap().active_window().unwrap().active_pane;
+        let p1 = mux
+            .active_session()
+            .unwrap()
+            .active_window()
+            .unwrap()
+            .active_pane;
         mux.prev_pane();
-        let p2 = mux.active_session().unwrap().active_window().unwrap().active_pane;
+        let p2 = mux
+            .active_session()
+            .unwrap()
+            .active_window()
+            .unwrap()
+            .active_pane;
         assert_ne!(p1, p2);
         mux.next_pane();
-        let p3 = mux.active_session().unwrap().active_window().unwrap().active_pane;
+        let p3 = mux
+            .active_session()
+            .unwrap()
+            .active_window()
+            .unwrap()
+            .active_pane;
         assert_eq!(p1, p3);
     }
 
@@ -3132,7 +3258,10 @@ mod tests {
     fn test_mux_rename_window() {
         let mut mux = Multiplexer::new();
         mux.rename_window("my-window");
-        assert_eq!(mux.active_session().unwrap().active_window().unwrap().name, "my-window");
+        assert_eq!(
+            mux.active_session().unwrap().active_window().unwrap().name,
+            "my-window"
+        );
     }
 
     #[test]
@@ -3164,7 +3293,13 @@ mod tests {
     fn test_mux_process_command_split() {
         let mut mux = Multiplexer::new();
         mux.process_command(":split-window -h");
-        let pane_count = mux.active_session().unwrap().active_window().unwrap().layout.pane_count();
+        let pane_count = mux
+            .active_session()
+            .unwrap()
+            .active_window()
+            .unwrap()
+            .layout
+            .pane_count();
         assert_eq!(pane_count, 2);
     }
 
@@ -3173,7 +3308,12 @@ mod tests {
         let mut mux = Multiplexer::new();
         mux.split_pane(SplitDir::Vertical);
         mux.process_command(":select-layout even-vertical");
-        let preset = mux.active_session().unwrap().active_window().unwrap().preset;
+        let preset = mux
+            .active_session()
+            .unwrap()
+            .active_window()
+            .unwrap()
+            .preset;
         assert_eq!(preset, LayoutPreset::EvenVertical);
     }
 
@@ -3181,14 +3321,23 @@ mod tests {
     fn test_mux_process_command_rename() {
         let mut mux = Multiplexer::new();
         mux.process_command(":rename-window test-name");
-        assert_eq!(mux.active_session().unwrap().active_window().unwrap().name, "test-name");
+        assert_eq!(
+            mux.active_session().unwrap().active_window().unwrap().name,
+            "test-name"
+        );
     }
 
     #[test]
     fn test_mux_prefix_split_horizontal() {
         let mut mux = Multiplexer::new();
         mux.process_prefix_key('"');
-        let pane_count = mux.active_session().unwrap().active_window().unwrap().layout.pane_count();
+        let pane_count = mux
+            .active_session()
+            .unwrap()
+            .active_window()
+            .unwrap()
+            .layout
+            .pane_count();
         assert_eq!(pane_count, 2);
     }
 
@@ -3196,7 +3345,13 @@ mod tests {
     fn test_mux_prefix_split_vertical() {
         let mut mux = Multiplexer::new();
         mux.process_prefix_key('%');
-        let pane_count = mux.active_session().unwrap().active_window().unwrap().layout.pane_count();
+        let pane_count = mux
+            .active_session()
+            .unwrap()
+            .active_window()
+            .unwrap()
+            .layout
+            .pane_count();
         assert_eq!(pane_count, 2);
     }
 
@@ -3212,7 +3367,15 @@ mod tests {
         let mut mux = Multiplexer::new();
         mux.split_pane(SplitDir::Vertical);
         mux.process_prefix_key('x');
-        assert_eq!(mux.active_session().unwrap().active_window().unwrap().layout.pane_count(), 1);
+        assert_eq!(
+            mux.active_session()
+                .unwrap()
+                .active_window()
+                .unwrap()
+                .layout
+                .pane_count(),
+            1
+        );
     }
 
     #[test]
@@ -3611,8 +3774,14 @@ mod tests {
             pane.buffer = buffer_with_lines(24, 200);
         }
         let live = drawn_text(&mut app);
-        assert!(live.contains("line199"), "the live screen shows the newest line");
-        assert!(!live.contains("line100"), "and not one from deep in the history");
+        assert!(
+            live.contains("line199"),
+            "the live screen shows the newest line"
+        );
+        assert!(
+            !live.contains("line100"),
+            "and not one from deep in the history"
+        );
 
         app.process_prefix_key('g');
         let top = drawn_text(&mut app);
@@ -3623,7 +3792,11 @@ mod tests {
         );
 
         app.process_prefix_key('G');
-        assert_eq!(drawn_text(&mut app), live, "returning to the live screen differs from it");
+        assert_eq!(
+            drawn_text(&mut app),
+            live,
+            "returning to the live screen differs from it"
+        );
     }
 
     // --- Pane sizing ---

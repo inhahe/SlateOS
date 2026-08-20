@@ -412,9 +412,11 @@ impl Board {
             let to = Pos::new(pos.row + 2 * dr, pos.col + 2 * dc);
             if to.is_valid()
                 && let Some(mid_piece) = self.get(mid)
-                    && mid_piece.side != piece.side && self.get(to).is_none() {
-                        jumps.push(CheckersMove::jump(pos, to, mid));
-                    }
+                && mid_piece.side != piece.side
+                && self.get(to).is_none()
+            {
+                jumps.push(CheckersMove::jump(pos, to, mid));
+            }
         }
         jumps
     }
@@ -448,16 +450,16 @@ impl Board {
                     continue;
                 }
                 if let Some(mid_piece) = self.get(mid)
-                    && mid_piece.side != piece.side {
-                        // Landing square must be empty. It reads as occupied
-                        // if it's the origin square (piece logically left),
-                        // so treat that as empty.
-                        let landing_empty = self.get(to).is_none()
-                            || (origin == Some(to));
-                        if landing_empty {
-                            jumps.push(CheckersMove::jump(pos, to, mid));
-                        }
+                    && mid_piece.side != piece.side
+                {
+                    // Landing square must be empty. It reads as occupied
+                    // if it's the origin square (piece logically left),
+                    // so treat that as empty.
+                    let landing_empty = self.get(to).is_none() || (origin == Some(to));
+                    if landing_empty {
+                        jumps.push(CheckersMove::jump(pos, to, mid));
                     }
+                }
             }
         }
         jumps
@@ -500,8 +502,7 @@ impl Board {
             }
         }
 
-        let next_jumps =
-            self.generate_jumps_for_chain(pos, piece, captured, Some(origin));
+        let next_jumps = self.generate_jumps_for_chain(pos, piece, captured, Some(origin));
 
         if next_jumps.is_empty() {
             if current_chain.is_empty() {
@@ -518,8 +519,7 @@ impl Board {
             if let Some(cap) = jmp.captured {
                 new_captured.push(cap);
             }
-            let sub =
-                self.build_jump_sequences(jmp.to, &new_chain, &new_captured, is_king, origin);
+            let sub = self.build_jump_sequences(jmp.to, &new_chain, &new_captured, is_king, origin);
             sequences.extend(sub);
         }
         sequences
@@ -540,8 +540,7 @@ impl Board {
                         continue;
                     }
                     // Try jumps
-                    let jump_seqs =
-                        self.build_jump_sequences(pos, &[], &[], piece.is_king, pos);
+                    let jump_seqs = self.build_jump_sequences(pos, &[], &[], piece.is_king, pos);
                     all_jumps.extend(jump_seqs);
 
                     // Collect simple moves only if we might need them
@@ -578,9 +577,11 @@ impl Board {
             for col in 0..8i8 {
                 let pos = Pos::new(row, col);
                 if let Some(piece) = self.get(pos)
-                    && piece.side == side && !self.generate_jumps_for(pos).is_empty() {
-                        return true;
-                    }
+                    && piece.side == side
+                    && !self.generate_jumps_for(pos).is_empty()
+                {
+                    return true;
+                }
             }
         }
         false
@@ -677,11 +678,7 @@ impl Board {
             for col in 0..8i8 {
                 let pos = Pos::new(row, col);
                 if let Some(piece) = self.get(pos) {
-                    let base = if piece.is_king {
-                        KING_VALUE
-                    } else {
-                        MAN_VALUE
-                    };
+                    let base = if piece.is_king { KING_VALUE } else { MAN_VALUE };
 
                     // Position bonuses
                     let mut bonus = 0i32;
@@ -878,10 +875,11 @@ impl CheckersApp {
 
             // Clicked on a different own piece? Select it instead.
             if let Some(piece) = self.board.get(pos)
-                && piece.side == Side::Red {
-                    self.select_piece(pos);
-                    return;
-                }
+                && piece.side == Side::Red
+            {
+                self.select_piece(pos);
+                return;
+            }
 
             // Clicked elsewhere: deselect
             self.selected = None;
@@ -889,9 +887,10 @@ impl CheckersApp {
         } else {
             // No piece selected: try to select one
             if let Some(piece) = self.board.get(pos)
-                && piece.side == Side::Red {
-                    self.select_piece(pos);
-                }
+                && piece.side == Side::Red
+            {
+                self.select_piece(pos);
+            }
         }
     }
 
@@ -1861,7 +1860,11 @@ mod tests {
         // All chains from this piece should end at row 7
         for jm in &jump_from {
             assert_eq!(jm.to_pos().row, 7, "Chain should stop at promotion row");
-            assert_eq!(jm.steps.len(), 1, "Should be a single jump (stops at promotion)");
+            assert_eq!(
+                jm.steps.len(),
+                1,
+                "Should be a single jump (stops at promotion)"
+            );
         }
     }
 
@@ -1892,7 +1895,10 @@ mod tests {
         ));
         board.apply_move_in_place(&mv);
         assert!(board.get(Pos::new(2, 1)).is_none());
-        assert!(board.get(Pos::new(3, 2)).is_none(), "Captured piece removed");
+        assert!(
+            board.get(Pos::new(3, 2)).is_none(),
+            "Captured piece removed"
+        );
         assert!(board.get(Pos::new(4, 3)).is_some());
     }
 
@@ -2076,14 +2082,17 @@ mod tests {
         place(&mut board, 4, 5, Side::Black, false);
         place(&mut board, 0, 1, Side::Red, false);
         let score = board.evaluate();
-        assert!(score > 0, "Black should have positive score with more pieces");
+        assert!(
+            score > 0,
+            "Black should have positive score with more pieces"
+        );
     }
 
     #[test]
     fn test_evaluate_king_worth_more() {
         let mut board = Board::empty();
         place(&mut board, 4, 3, Side::Black, true); // king
-        place(&mut board, 0, 1, Side::Red, false);  // man
+        place(&mut board, 0, 1, Side::Red, false); // man
         let score = board.evaluate();
         assert!(
             score > MAN_VALUE,
@@ -2213,7 +2222,10 @@ mod tests {
         let mut app = CheckersApp::new();
         app.game_result = GameResult::RedWins;
         app.click_square(Pos::new(2, 1));
-        assert!(app.selected.is_none(), "Should not select when game is over");
+        assert!(
+            app.selected.is_none(),
+            "Should not select when game is over"
+        );
     }
 
     #[test]
@@ -2318,9 +2330,9 @@ mod tests {
         let mut app = CheckersApp::new();
         app.click_square(Pos::new(2, 1)); // select a red piece
         let commands = app.render();
-        let has_selection = commands.iter().any(|c| {
-            matches!(c, RenderCommand::StrokeRect { color, .. } if *color == SELECTED_SQUARE)
-        });
+        let has_selection = commands.iter().any(
+            |c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == SELECTED_SQUARE),
+        );
         assert!(has_selection, "Should render selected square highlight");
     }
 
@@ -2331,9 +2343,9 @@ mod tests {
         let commands = app.render();
         let dot_count = commands
             .iter()
-            .filter(|c| {
-                matches!(c, RenderCommand::FillRect { color, .. } if *color == LEGAL_MOVE_DOT)
-            })
+            .filter(
+                |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == LEGAL_MOVE_DOT),
+            )
             .count();
         assert!(
             dot_count >= 1,
@@ -2345,9 +2357,9 @@ mod tests {
     fn test_render_cursor_highlight() {
         let app = CheckersApp::new();
         let commands = app.render();
-        let has_cursor = commands.iter().any(|c| {
-            matches!(c, RenderCommand::StrokeRect { color, .. } if *color == YELLOW)
-        });
+        let has_cursor = commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == YELLOW));
         assert!(has_cursor, "Should render cursor highlight");
     }
 
@@ -2671,8 +2683,14 @@ mod tests {
             CheckersMove::jump(Pos::new(2, 3), Pos::new(4, 5), Pos::new(3, 4)),
         ]);
         board.apply_move_in_place(&mv);
-        assert!(board.get(Pos::new(1, 2)).is_none(), "First captured removed");
-        assert!(board.get(Pos::new(3, 4)).is_none(), "Second captured removed");
+        assert!(
+            board.get(Pos::new(1, 2)).is_none(),
+            "First captured removed"
+        );
+        assert!(
+            board.get(Pos::new(3, 4)).is_none(),
+            "Second captured removed"
+        );
         assert!(board.get(Pos::new(4, 5)).is_some(), "Piece at destination");
         assert!(board.get(Pos::new(0, 1)).is_none(), "Origin cleared");
     }

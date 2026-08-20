@@ -629,7 +629,8 @@ pub struct SettingsState {
     pub refresh_rate_index: usize,
     pub scale: ScalePercent,
     pub night_light_enabled: bool,
-    pub night_light_temperature: f32, // 0.0 (warm) to 1.0 (cool)
+    /// Warm at 0.0, cool at 1.0. Range stated by [`SliderId::range`].
+    pub night_light_temperature: f32,
     pub monitor_count: u8,
 
     // Sound settings
@@ -678,7 +679,8 @@ pub struct SettingsState {
     pub diagnostic_level: DiagnosticLevel,
 
     // Accessibility settings
-    pub text_size_percent: u16, // 50-250
+    /// Range stated by [`SliderId::range`], not repeated here.
+    pub text_size_percent: u16,
     pub high_contrast: bool,
     pub cursor_size: CursorSize,
     pub reduce_animations: bool,
@@ -693,7 +695,8 @@ pub struct SettingsState {
     pub pointer_size: u8, // 1-5
     pub mouse_keys: bool,
     pub narrator_enabled: bool,
-    pub narrator_rate: f32, // 0.0-1.0
+    /// Slow at 0.0, fast at 1.0. Range stated by [`SliderId::range`].
+    pub narrator_rate: f32,
     pub narrator_verbosity: NarratorVerbosity,
 
     // Update settings
@@ -723,6 +726,15 @@ pub struct SettingsState {
     /// only the *sign* of `dy`, so a twentieth of a notch and a hard flick of
     /// the wheel both moved the list by the same three items.
     dropdown_wheel: wheel::Accumulator,
+    /// The slider the pointer is dragging, if a button is down on one.
+    ///
+    /// A slider is the only control here that is not finished by the press
+    /// that starts it: the pointer keeps carrying the value until it is
+    /// released. Holding the *name* rather than a rectangle means a drag
+    /// survives the page redrawing underneath it — the track is re-derived
+    /// from the page on every move, so the value follows the same track the
+    /// user can see.
+    dragging: Option<SliderId>,
 }
 
 /// Where an open dropdown's popup is, and which of its items are on screen.
@@ -1147,6 +1159,7 @@ impl SettingsState {
             open_dropdown: None,
             dropdown_scroll: 0,
             dropdown_wheel: wheel::Accumulator::default(),
+            dragging: None,
         }
     }
 }
@@ -1229,10 +1242,39 @@ fn render_toggle(tree: &mut RenderTree, x: f32, y: f32, enabled: bool) {
     );
 }
 
+/// The track of a slider drawn at (`x`, `y`), as `(x, y)`.
+///
+/// The only place a slider's track is positioned. The bar that is painted, the
+/// band the pointer grabs, and the origin a drag measures from all come from
+/// here — a slider whose visible track and draggable range differ is the same
+/// class of defect the page-sink split exists to prevent, and this is the same
+/// remedy [`pill_rect`] applies to pills.
+fn slider_track(x: f32, y: f32) -> (f32, f32) {
+    (x, y + (ITEM_HEIGHT - SLIDER_HEIGHT) / 2.0)
+}
+
+/// The band in which a slider drawn at (`x`, `y`) can be grabbed, as
+/// `(x, y, width, height)`.
+///
+/// Wider than the track by a handle's radius at each end, so the handle is
+/// still grabbable when it sits at either extreme, and as tall as the whole
+/// row, because a six-pixel-high drag target is not one a pointer can hit. It
+/// deliberately stops short of the row's label: a press anywhere in the band
+/// jumps the value to the pointer, and a press on the words "Text Size" should
+/// not slam the text size to its minimum.
+fn slider_band(x: f32, y: f32) -> (f32, f32, f32, f32) {
+    (
+        x - SLIDER_HANDLE_RADIUS,
+        y,
+        SLIDER_WIDTH + SLIDER_HANDLE_RADIUS * 2.0,
+        ITEM_HEIGHT,
+    )
+}
+
 /// Render a horizontal slider at the given position.
 /// Returns nothing; slider_value should be 0.0..=1.0.
 fn render_slider(tree: &mut RenderTree, x: f32, y: f32, value: f32) {
-    let track_y = y + (ITEM_HEIGHT - SLIDER_HEIGHT) / 2.0;
+    let (x, track_y) = slider_track(x, y);
 
     // Track background
     fill_rounded(
@@ -1370,9 +1412,28 @@ fn render_pill_row(tree: &mut RenderTree, x: f32, y: f32, items: &[(&str, bool)]
     }
 }
 
-/// A 0–100 percentage as the 0.0–1.0 fraction [`render_slider`] takes.
-fn percent_norm(percent: u8) -> f32 {
-    f32::from(percent) / 100.0
+/// `value` rounded to the nearest `u8`.
+///
+/// Callers pass a value already clamped to the slider's range, so the
+/// saturation below is belt-and-braces; it is written out because a float that
+/// escaped its range would otherwise wrap silently to the wrong end of the
+/// scale, and a volume that reads 3% when the handle is at the far right is
+/// worse than one that reads 100%.
+fn round_u8(value: f32) -> u8 {
+    // Float-to-integer `as` saturates at the bounds and maps NaN to 0 in Rust,
+    // which is exactly the behaviour wanted for a pointer-derived value.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        value.round().clamp(0.0, f32::from(u8::MAX)) as u8
+    }
+}
+
+/// `value` rounded to the nearest `u16`. See [`round_u8`].
+fn round_u16(value: f32) -> u16 {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        value.round().clamp(0.0, f32::from(u16::MAX)) as u16
+    }
 }
 
 // --- Buttons and text fields ----------------------------------------------
@@ -1668,6 +1729,94 @@ enum SelectId {
     PointerSize,
 }
 
+/// A continuously-valued setting the pointer can drag along a track.
+///
+/// Named rather than addressed by coordinates for the same reason
+/// [`ToggleId`] is: the mapping between a control and the field behind it is
+/// written once, in [`SliderId::range`] and
+/// [`SettingsState::set_slider_fraction`], instead of being re-derived
+/// wherever the slider happens to be drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SliderId {
+    NightLightTemperature,
+    OutputVolume,
+    InputVolume,
+    /// The volume of `app_volumes[index]`.
+    AppVolume(usize),
+    NarratorRate,
+    TextSize,
+    DeferFeatureDays,
+    DeferQualityDays,
+}
+
+impl SliderId {
+    /// Every slider whose identity does not depend on a list index.
+    ///
+    /// The per-application volumes are left out because how many of them there
+    /// are is state, not a constant; a test that wants those enumerates
+    /// `app_volumes` instead. Exists so a test can walk the rest and check each
+    /// one is draggable, the way [`DropdownId::ALL`] does for dropdowns.
+    #[cfg(test)]
+    const FIXED: [Self; 7] = [
+        Self::NightLightTemperature,
+        Self::OutputVolume,
+        Self::InputVolume,
+        Self::NarratorRate,
+        Self::TextSize,
+        Self::DeferFeatureDays,
+        Self::DeferQualityDays,
+    ];
+
+    /// The lowest and highest value this slider can hold, in the units the
+    /// state stores it in — percent for the volumes, days for the deferrals,
+    /// a bare 0–1 fraction for the two that have no natural unit.
+    ///
+    /// Written here once so that the position the handle is drawn at and the
+    /// value a drag produces are exact inverses; `test_every_slider_round_trips`
+    /// holds them to it.
+    fn range(self) -> (f32, f32) {
+        match self {
+            Self::NightLightTemperature | Self::NarratorRate => (0.0, 1.0),
+            Self::OutputVolume | Self::InputVolume | Self::AppVolume(_) => (0.0, 100.0),
+            Self::TextSize => (50.0, 250.0),
+            Self::DeferFeatureDays => (0.0, 365.0),
+            Self::DeferQualityDays => (0.0, 30.0),
+        }
+    }
+
+    /// The text printed beside the track, given the slider's value in stored
+    /// units — or `None` for the two whose ends are labelled ("Warm"/"Cool",
+    /// "Slow"/"Fast") because the number itself would mean nothing.
+    ///
+    /// Derived from the same value the handle is drawn at, so the figure beside
+    /// a slider cannot disagree with where its handle is.
+    fn readout(self, value: f32) -> Option<String> {
+        let whole = round_u16(value);
+        match self {
+            Self::NightLightTemperature | Self::NarratorRate => None,
+            Self::OutputVolume | Self::InputVolume | Self::AppVolume(_) | Self::TextSize => {
+                Some(format!("{whole}%"))
+            }
+            Self::DeferFeatureDays | Self::DeferQualityDays => Some(format!("{whole} days")),
+        }
+    }
+}
+
+/// A thing whose drawn position some other part of the window needs to know:
+/// a dropdown's popup must open under its own button, and a slider drag must
+/// measure from its own track.
+///
+/// Both answers come from walking the page rather than from a table of
+/// coordinates kept beside it, which is what stops a popup opening away from
+/// its button or a drag measuring from a track that is not there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnchorId {
+    /// The top-left of a dropdown's closed button.
+    Dropdown(DropdownId),
+    /// The left end of a slider's track.
+    Slider(SliderId),
+}
+
 /// A push button that does something when pressed.
 ///
 /// Only buttons with an effect are listed. The rest of the page's buttons —
@@ -1688,6 +1837,11 @@ enum RowHit {
     Pill(PillId, usize),
     Select(SelectId, usize),
     Press(ButtonId),
+    /// The grab band of a slider. Which value the press means is not recorded
+    /// here — it depends on where along the track the pointer landed, and the
+    /// track's origin is asked of the page via [`AnchorId::Slider`] rather
+    /// than carried alongside the name.
+    Slider(SliderId),
 }
 
 /// The one description of a settings page, interpreted either as drawing or as
@@ -1763,14 +1917,15 @@ trait PageSink {
         self.advance(height);
     }
 
-    /// Note where a dropdown's closed button sits, so its popup can be drawn
-    /// against it. Only [`AnchorSink`] records this; the default ignores it.
-    fn dropdown_anchor(&mut self, _id: DropdownId, _x: f32, _y: f32) {}
+    /// Note where a named control was drawn, so something outside the page can
+    /// be positioned against it. Only [`AnchorSink`] records this; the default
+    /// ignores it, which is why it costs a draw or a hit-test nothing.
+    fn anchor(&mut self, _id: AnchorId, _x: f32, _y: f32) {}
 
     /// A row whose control is a closed dropdown button.
     fn dropdown_row(&mut self, label: &str, id: DropdownId, value: &str) {
         let (cx, y) = (self.control_x(), self.y());
-        self.dropdown_anchor(id, cx, y);
+        self.anchor(AnchorId::Dropdown(id), cx, y);
         self.row(
             label,
             Some(RowHit::Dropdown(id)),
@@ -1807,20 +1962,29 @@ trait PageSink {
         self.advance(height);
     }
 
-    /// A row whose control is a slider, with an optional readout beside it.
-    /// Sliders are not draggable yet, so the row registers no click target.
-    fn slider_row(&mut self, label: &str, value: f32, readout: Option<&str>) {
-        self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
+    /// A row whose control is a draggable slider, plus whatever else the page
+    /// wants drawn beside it. `extra` is given the render tree and the control
+    /// column's `(x, y)` — the same origin the track is drawn from.
+    ///
+    /// `value` is the handle's position along the track, 0.0–1.0. Pages do not
+    /// call this directly; they go through [`SettingsState::slider`], which
+    /// takes the position from [`SettingsState::slider_fraction`] so that what
+    /// is drawn and what a drag produces are one mapping read in each
+    /// direction.
+    fn slider_row(
+        &mut self,
+        label: &str,
+        id: SliderId,
+        value: f32,
+        extra: impl FnOnce(&mut RenderTree, f32, f32),
+    ) {
+        let (track_x, track_y) = slider_track(self.control_x(), self.y());
+        self.anchor(AnchorId::Slider(id), track_x, track_y);
+        let (bx, by, bw, bh) = slider_band(track_x, self.y());
+        self.hit_rect(bx, by, bw, bh, RowHit::Slider(id));
+        self.row(label, None, ITEM_HEIGHT, move |tree, cx, y| {
             render_slider(tree, cx, y, value);
-            if let Some(readout) = readout {
-                tree.text(
-                    cx + SLIDER_WIDTH + 12.0,
-                    y + 14.0,
-                    readout,
-                    COL_SUBTEXT0,
-                    12.0,
-                );
-            }
+            extra(tree, cx, y);
         });
     }
 
@@ -1942,14 +2106,15 @@ impl PageSink for HitSink {
     }
 }
 
-/// The sink that answers "where was this dropdown's button drawn?".
+/// The sink that answers "where was this control drawn?".
 ///
 /// The popup used to carry its own table of anchor coordinates — a third copy
 /// of each page's arithmetic, and the one that decided *where the list appears*
 /// rather than merely where a click lands. Walking the page for the answer
-/// means a popup cannot open somewhere other than under its own button.
+/// means a popup cannot open somewhere other than under its own button, and a
+/// slider drag cannot measure from a track other than the one on screen.
 struct AnchorSink {
-    want: DropdownId,
+    want: AnchorId,
     x: f32,
     y: f32,
     found: Option<(f32, f32)>,
@@ -1967,7 +2132,7 @@ impl PageSink for AnchorSink {
     }
     fn draw(&mut self, _f: impl FnOnce(&mut RenderTree, f32, f32)) {}
     fn hit_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _what: RowHit) {}
-    fn dropdown_anchor(&mut self, id: DropdownId, x: f32, y: f32) {
+    fn anchor(&mut self, id: AnchorId, x: f32, y: f32) {
         if self.found.is_none() && id == self.want {
             self.found = Some((x, y));
         }
@@ -2301,6 +2466,46 @@ impl SettingsState {
         self.build_page(&mut sink);
     }
 
+    /// Emit a slider row for `id`.
+    ///
+    /// A page names the slider and nothing else. Its handle position and the
+    /// figure beside it both come from the state, through one mapping, so a
+    /// page cannot draw a handle somewhere other than where a drag would put
+    /// it — which is what the call sites used to invite by spelling out
+    /// `(f32::from(self.text_size_percent) - 50.0) / 200.0` for themselves.
+    /// Nothing is drawn if the slider has no value, which happens only for a
+    /// per-application volume whose row is gone.
+    fn slider<S: PageSink>(&self, s: &mut S, label: &str, id: SliderId) {
+        self.slider_with(s, label, id, |_, _, _| {});
+    }
+
+    /// [`slider`](Self::slider) with something drawn after the readout, for the
+    /// per-application rows that also mark themselves muted.
+    fn slider_with<S: PageSink>(
+        &self,
+        s: &mut S,
+        label: &str,
+        id: SliderId,
+        extra: impl FnOnce(&mut RenderTree, f32, f32),
+    ) {
+        let (Some(raw), Some(value)) = (self.slider_raw(id), self.slider_fraction(id)) else {
+            return;
+        };
+        let readout = id.readout(raw);
+        s.slider_row(label, id, value, move |tree, cx, y| {
+            if let Some(readout) = &readout {
+                tree.text(
+                    cx + SLIDER_WIDTH + 12.0,
+                    y + 14.0,
+                    readout,
+                    COL_SUBTEXT0,
+                    12.0,
+                );
+            }
+            extra(tree, cx, y);
+        });
+    }
+
     /// What the page control at (`mx`, `my`) is, if the point is on one.
     fn row_at(&self, mx: f32, my: f32) -> Option<RowHit> {
         let mut sink = HitSink {
@@ -2347,7 +2552,7 @@ impl SettingsState {
         );
 
         if self.night_light_enabled {
-            s.slider_row("Color Temperature", self.night_light_temperature, None);
+            self.slider(s, "Color Temperature", SliderId::NightLightTemperature);
             // Range labels, sitting on the row boundary beneath the slider.
             s.draw(|tree, x, y| {
                 let cx = x + CONTROL_COLUMN_DX;
@@ -2410,11 +2615,7 @@ impl SettingsState {
             .map_or("None", |d| d.name.as_str());
         s.dropdown_row("Output Device", DropdownId::OutputDevice, output_name);
 
-        s.slider_row(
-            "Volume",
-            percent_norm(self.output_volume),
-            Some(&format!("{}%", self.output_volume)),
-        );
+        self.slider(s, "Volume", SliderId::OutputVolume);
         s.toggle_row("Mute", ToggleId::OutputMuted, self.output_muted);
         s.gap();
 
@@ -2425,11 +2626,7 @@ impl SettingsState {
             .map_or("None", |d| d.name.as_str());
         s.dropdown_row("Input Device", DropdownId::InputDevice, input_name);
 
-        s.slider_row(
-            "Input Volume",
-            percent_norm(self.input_volume),
-            Some(&format!("{}%", self.input_volume)),
-        );
+        self.slider(s, "Input Volume", SliderId::InputVolume);
         s.gap();
 
         s.section("System Sounds");
@@ -2441,21 +2638,18 @@ impl SettingsState {
         s.gap();
 
         s.section("Per-Application Volume");
-        for app_vol in &self.app_volumes {
-            s.row(&app_vol.app_name, None, ITEM_HEIGHT, move |tree, cx, y| {
-                render_slider(tree, cx, y, percent_norm(app_vol.volume));
-                let label = format!("{}%", app_vol.volume);
-                tree.text(
-                    cx + SLIDER_WIDTH + 12.0,
-                    y + 14.0,
-                    &label,
-                    COL_SUBTEXT0,
-                    12.0,
-                );
-                if app_vol.muted {
-                    tree.text(cx + SLIDER_WIDTH + 50.0, y + 14.0, "(muted)", COL_RED, 11.0);
-                }
-            });
+        for (index, app_vol) in self.app_volumes.iter().enumerate() {
+            let muted = app_vol.muted;
+            self.slider_with(
+                s,
+                &app_vol.app_name,
+                SliderId::AppVolume(index),
+                move |tree, cx, y| {
+                    if muted {
+                        tree.text(cx + SLIDER_WIDTH + 50.0, y + 14.0, "(muted)", COL_RED, 11.0);
+                    }
+                },
+            );
         }
     }
 
@@ -2976,7 +3170,7 @@ impl SettingsState {
         );
 
         if self.narrator_enabled {
-            s.slider_row("Voice Rate", self.narrator_rate, None);
+            self.slider(s, "Voice Rate", SliderId::NarratorRate);
             s.draw(|tree, x, y| {
                 let cx = x + CONTROL_COLUMN_DX;
                 tree.text(cx, y - 12.0, "Slow", COL_SUBTEXT0, 11.0);
@@ -3065,12 +3259,7 @@ impl SettingsState {
     fn build_visual_accessibility_page<S: PageSink>(&self, s: &mut S) {
         s.section("Display");
 
-        let text_size_norm = (f32::from(self.text_size_percent) - 50.0) / 200.0;
-        s.slider_row(
-            "Text Size",
-            text_size_norm,
-            Some(&format!("{}%", self.text_size_percent)),
-        );
+        self.slider(s, "Text Size", SliderId::TextSize);
         // Range labels, on the boundary between this row and the next.
         s.draw(|tree, x, y| {
             let cx = x + CONTROL_COLUMN_DX;
@@ -3195,15 +3384,15 @@ impl SettingsState {
         s.gap();
 
         s.section("Advanced");
-        s.slider_row(
+        self.slider(
+            s,
             "Defer feature updates (days)",
-            f32::from(self.defer_feature_days) / 365.0,
-            Some(&format!("{} days", self.defer_feature_days)),
+            SliderId::DeferFeatureDays,
         );
-        s.slider_row(
+        self.slider(
+            s,
             "Defer quality updates (days)",
-            f32::from(self.defer_quality_days) / 30.0,
-            Some(&format!("{} days", self.defer_quality_days)),
+            SliderId::DeferQualityDays,
         );
         s.gap();
 
@@ -3342,9 +3531,9 @@ impl SettingsState {
 
     // --- Dropdown overlay rendering ---
 
-    /// Where the closed button for `id` sits on the current page, or `None` if
-    /// the page does not have that dropdown on it.
-    fn dropdown_button_at(&self, id: DropdownId) -> Option<(f32, f32)> {
+    /// Where `id` was drawn on the current page, or `None` if the page does
+    /// not show that control.
+    fn anchor_at(&self, id: AnchorId) -> Option<(f32, f32)> {
         let mut sink = AnchorSink {
             want: id,
             x: Self::content_x(),
@@ -3371,7 +3560,7 @@ impl SettingsState {
         let dropdown_id = self.open_dropdown?;
         // No anchor means the page moved out from under an open dropdown. Draw
         // nothing rather than guess a position; the next click closes it.
-        let (dropdown_x, dropdown_y) = self.dropdown_button_at(dropdown_id)?;
+        let (dropdown_x, dropdown_y) = self.anchor_at(AnchorId::Dropdown(dropdown_id))?;
 
         let (items, selected) = match dropdown_id {
             DropdownId::Resolution => {
@@ -3742,6 +3931,17 @@ impl SettingsState {
         match &evt.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(evt.x, evt.y),
             MouseEventKind::Move => self.handle_hover(evt.x, evt.y),
+            // A drag ends wherever the button comes up, on the control or not.
+            // Releasing outside is the ordinary way to finish a slider gesture,
+            // so this must not be conditional on the pointer still being over
+            // the track.
+            MouseEventKind::Release(MouseButton::Left) => {
+                if self.dragging.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             // Only the sign of `dy` is used, not its magnitude:
             // `dy` is in notches; `wheel::rows` turns it into whole items and
             // banks the fraction. What was here read only the *sign* of `dy`,
@@ -3804,20 +4004,31 @@ impl SettingsState {
         // Content area clicks — ask the page itself what is under the pointer,
         // rather than a per-page handler that re-derives the row positions.
         if let Some(hit) = self.row_at(mx, my) {
-            self.apply_row_hit(hit);
+            self.apply_row_hit(hit, mx);
         }
 
         EventResult::Consumed
     }
 
-    /// Apply the effect of clicking `hit`.
+    /// Apply the effect of clicking `hit` at horizontal position `mx`.
     ///
     /// Nothing here knows where anything was drawn — that is the whole point of
     /// the split. [`row_at`](Self::row_at) turns a point into a named control,
-    /// and this turns a named control into a state change.
-    fn apply_row_hit(&mut self, hit: RowHit) {
+    /// and this turns a named control into a state change. `mx` is the one
+    /// exception, and only the sliders read it: their value *is* a position
+    /// along a track, so unlike every other control here the name alone does
+    /// not say what the press meant. Even they do not do their own arithmetic —
+    /// the track is asked of the page, in [`drag_slider_to`](Self::drag_slider_to).
+    fn apply_row_hit(&mut self, hit: RowHit, mx: f32) {
         match hit {
             RowHit::Dropdown(id) => self.show_dropdown(id),
+            RowHit::Slider(id) => {
+                // A press both jumps the handle to the pointer and takes hold
+                // of it: the same gesture that sets a value coarsely is the one
+                // that then adjusts it, without a separate grab on the handle.
+                self.dragging = Some(id);
+                self.drag_slider_to(id, mx);
+            }
             RowHit::Toggle(id) => {
                 if let Some(flag) = self.toggle_mut(id) {
                     *flag = !*flag;
@@ -3862,6 +4073,78 @@ impl SettingsState {
         }
     }
 
+    /// Move `id`'s handle to the pointer's horizontal position `mx`.
+    ///
+    /// The track's left edge is asked of the page rather than recomputed, so a
+    /// drag measures from the very bar the user can see. If the page no longer
+    /// shows this slider — the pointer left, the page changed under a held
+    /// button — the drag simply does nothing rather than writing a value
+    /// derived from a track that is not on screen.
+    fn drag_slider_to(&mut self, id: SliderId, mx: f32) {
+        let Some((track_x, _)) = self.anchor_at(AnchorId::Slider(id)) else {
+            return;
+        };
+        self.set_slider_fraction(id, (mx - track_x) / SLIDER_WIDTH);
+    }
+
+    /// The current value of `id`, in the units the state stores it in.
+    ///
+    /// `None` when the slider is a per-application volume whose index no longer
+    /// exists; the list is editable in principle and a stale index must not
+    /// panic.
+    fn slider_raw(&self, id: SliderId) -> Option<f32> {
+        Some(match id {
+            SliderId::NightLightTemperature => self.night_light_temperature,
+            SliderId::NarratorRate => self.narrator_rate,
+            SliderId::OutputVolume => f32::from(self.output_volume),
+            SliderId::InputVolume => f32::from(self.input_volume),
+            SliderId::AppVolume(index) => f32::from(self.app_volumes.get(index)?.volume),
+            SliderId::TextSize => f32::from(self.text_size_percent),
+            SliderId::DeferFeatureDays => f32::from(self.defer_feature_days),
+            SliderId::DeferQualityDays => f32::from(self.defer_quality_days),
+        })
+    }
+
+    /// How far along its track `id`'s handle sits, 0.0–1.0.
+    ///
+    /// The only way a page turns a stored setting into a handle position; the
+    /// pages used to spell out `(f32::from(self.text_size_percent) - 50.0) /
+    /// 200.0` at the call site, which is a second copy of a range that
+    /// [`SliderId::range`] already states.
+    fn slider_fraction(&self, id: SliderId) -> Option<f32> {
+        let (lo, hi) = id.range();
+        Some(((self.slider_raw(id)? - lo) / (hi - lo)).clamp(0.0, 1.0))
+    }
+
+    /// Set `id` from a position along its track, clamped to 0.0–1.0.
+    ///
+    /// The exact inverse of [`slider_fraction`](Self::slider_fraction), up to
+    /// the rounding the integer-valued settings impose.
+    fn set_slider_fraction(&mut self, id: SliderId, fraction: f32) {
+        // A position that is not a number names no point on the track. Leave
+        // the setting alone rather than store a NaN, which would then poison
+        // the handle's drawn position and never wash out.
+        if fraction.is_nan() {
+            return;
+        }
+        let (lo, hi) = id.range();
+        let value = (hi - lo).mul_add(fraction.clamp(0.0, 1.0), lo);
+        match id {
+            SliderId::NightLightTemperature => self.night_light_temperature = value,
+            SliderId::NarratorRate => self.narrator_rate = value,
+            SliderId::OutputVolume => self.output_volume = round_u8(value),
+            SliderId::InputVolume => self.input_volume = round_u8(value),
+            SliderId::AppVolume(index) => {
+                if let Some(app) = self.app_volumes.get_mut(index) {
+                    app.volume = round_u8(value);
+                }
+            }
+            SliderId::TextSize => self.text_size_percent = round_u16(value),
+            SliderId::DeferFeatureDays => self.defer_feature_days = round_u16(value),
+            SliderId::DeferQualityDays => self.defer_quality_days = round_u16(value),
+        }
+    }
+
     /// The field behind a named boolean setting.
     ///
     /// One match for every switch on every page, so a new toggle is wired by
@@ -3903,6 +4186,16 @@ impl SettingsState {
     }
 
     fn handle_hover(&mut self, mx: f32, my: f32) -> EventResult {
+        // A held slider follows the pointer anywhere, including off the track
+        // and out over the sidebar. Dropping the value the moment the pointer
+        // strays above or below a six-pixel bar would make the control
+        // unusable; every other toolkit lets the grab outlive the hover, and
+        // the gesture ends on release rather than on leaving.
+        if let Some(id) = self.dragging {
+            self.drag_slider_to(id, mx);
+            return EventResult::Consumed;
+        }
+
         // Sidebar hover
         if mx < SIDEBAR_WIDTH {
             self.sidebar_hovered = Self::category_at(mx, my);
@@ -4687,13 +4980,29 @@ mod tests {
         state
     }
 
-    /// A state sitting on the page that draws `id`'s row, or `None` if no page
-    /// draws it at all.
-    fn state_showing(id: DropdownId) -> Option<SettingsState> {
+    /// A state sitting on the page that draws `what`'s band, or `None` if no
+    /// page draws it at all.
+    fn state_showing(what: RowHit) -> Option<SettingsState> {
         all_pages()
             .into_iter()
             .map(fully_expanded)
-            .find(|s| center_of(s, RowHit::Dropdown(id)).is_some())
+            .find(|s| center_of(s, what).is_some())
+    }
+
+    /// Press the left button at (`mx`, `my`), drag to `to_x`, and release.
+    ///
+    /// Goes through `handle_event` rather than the individual handlers so the
+    /// test exercises the same three events the compositor delivers; a slider
+    /// that only worked when its press and move were called directly would be
+    /// a slider that does not work.
+    fn drag(state: &mut SettingsState, mx: f32, my: f32, to_x: f32) {
+        for (x, kind) in [
+            (mx, MouseEventKind::Press(MouseButton::Left)),
+            (to_x, MouseEventKind::Move),
+            (to_x, MouseEventKind::Release(MouseButton::Left)),
+        ] {
+            state.handle_event(&Event::Mouse(MouseEvent { x, y: my, kind }));
+        }
     }
 
     #[test]
@@ -4702,8 +5011,8 @@ mod tests {
         // handler stopped short of them. Walking the enum rather than a list
         // written by hand is what makes this catch the eleventh as well.
         for id in DropdownId::ALL {
-            let mut state =
-                state_showing(id).unwrap_or_else(|| panic!("no page draws a row for {id:?}"));
+            let mut state = state_showing(RowHit::Dropdown(id))
+                .unwrap_or_else(|| panic!("no page draws a row for {id:?}"));
             let (cx, cy) = center_of(&state, RowHit::Dropdown(id)).expect("just found it");
             state.handle_click(cx, cy);
             assert_eq!(
@@ -4721,8 +5030,8 @@ mod tests {
         // The popup used to carry a hand-written anchor per dropdown, so it
         // could open several rows away from the button that was pressed.
         for id in DropdownId::ALL {
-            let mut state =
-                state_showing(id).unwrap_or_else(|| panic!("no page draws a row for {id:?}"));
+            let mut state = state_showing(RowHit::Dropdown(id))
+                .unwrap_or_else(|| panic!("no page draws a row for {id:?}"));
             let (cx, cy) = center_of(&state, RowHit::Dropdown(id)).expect("just found it");
             state.handle_click(cx, cy);
             let layout = state
@@ -4740,6 +5049,254 @@ mod tests {
                 layout.y
             );
         }
+    }
+
+    #[test]
+    fn test_every_slider_has_a_page_that_draws_it_draggable() {
+        // All eight sliders painted correctly and none of them moved: the pages
+        // registered no click band for a slider at all. Walking the enum is what
+        // makes this catch the ninth as well.
+        for id in SliderId::FIXED {
+            assert!(
+                state_showing(RowHit::Slider(id)).is_some(),
+                "no page offers a grab band for {id:?}"
+            );
+        }
+        // The per-application volumes are indexed, so they are checked against
+        // the list the Sound page actually shows rather than a constant.
+        let state = fully_expanded(SettingsPage::Sound);
+        assert!(
+            !state.app_volumes.is_empty(),
+            "the Sound page has no per-app volumes to check"
+        );
+        for index in 0..state.app_volumes.len() {
+            assert!(
+                center_of(&state, RowHit::Slider(SliderId::AppVolume(index))).is_some(),
+                "per-app volume {index} has no grab band"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_press_on_the_painted_track_grabs_the_slider() {
+        // The band and the bar are two readings of `slider_track`, and this is
+        // what holds them together: it presses a point that is unambiguously on
+        // the *painted* bar — taken from the anchor the renderer draws from, not
+        // from the band — and requires that the press take hold.
+        //
+        // Without it, a band that drifted a row down from its own track would
+        // pass every other slider test here, because those measure from the
+        // band and so drift with it. The user would see a slider that does
+        // nothing and a row below it that jumps when brushed.
+        for id in SliderId::FIXED {
+            let mut state =
+                state_showing(RowHit::Slider(id)).unwrap_or_else(|| panic!("{id:?} is not drawn"));
+            let (track_x, track_y) = state
+                .anchor_at(AnchorId::Slider(id))
+                .expect("a drawn slider has a track");
+            for along in [0.0, 0.5, 1.0] {
+                state.dragging = None;
+                state.handle_click(
+                    SLIDER_WIDTH.mul_add(along, track_x),
+                    track_y + SLIDER_HEIGHT / 2.0,
+                );
+                assert_eq!(
+                    state.dragging,
+                    Some(id),
+                    "a press {along} of the way along {id:?}'s painted track did not grab it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_dragging_a_slider_to_each_end_reaches_its_limits() {
+        // Both ends, because a mapping that is off by its offset still moves
+        // the handle — it just never reaches one extreme. Text Size is the case
+        // that would slip past a from-zero check: its range starts at 50.
+        for id in SliderId::FIXED {
+            let mut state =
+                state_showing(RowHit::Slider(id)).unwrap_or_else(|| panic!("{id:?} is not drawn"));
+            let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("just found it");
+            let (track_x, _) = state
+                .anchor_at(AnchorId::Slider(id))
+                .expect("a drawn slider has a track");
+            let (lo, hi) = id.range();
+
+            drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
+            assert_eq!(
+                state.slider_raw(id),
+                Some(hi),
+                "{id:?} dragged to the right end did not reach its maximum"
+            );
+
+            drag(&mut state, track_x + SLIDER_WIDTH, cy, track_x);
+            assert_eq!(
+                state.slider_raw(id),
+                Some(lo),
+                "{id:?} dragged to the left end did not reach its minimum"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_slider_drag_follows_the_pointer_past_the_track() {
+        // The pointer routinely leaves the six-pixel bar mid-gesture. A drag
+        // that stopped there — or that clamped to the wrong end — would make
+        // the control unusable in exactly the way a user would first try it.
+        let id = SliderId::OutputVolume;
+        let mut state = state_showing(RowHit::Slider(id)).expect("Sound draws the volume slider");
+        let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("just found it");
+        let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
+
+        // Press in the middle, then wander far above the row and off to the
+        // right. The value should follow x and ignore y entirely.
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: track_x + SLIDER_WIDTH / 2.0,
+            y: cy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(
+            state.output_volume, 50,
+            "the press did not jump to midpoint"
+        );
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: track_x + SLIDER_WIDTH * 4.0,
+            y: 0.0,
+            kind: MouseEventKind::Move,
+        }));
+        assert_eq!(
+            state.output_volume, 100,
+            "the drag did not follow past the end"
+        );
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: track_x + SLIDER_WIDTH / 4.0,
+            y: 10_000.0,
+            kind: MouseEventKind::Move,
+        }));
+        assert_eq!(state.output_volume, 25, "the drag stopped following");
+
+        // After release the pointer moves freely again.
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: track_x,
+            y: cy,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        }));
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: track_x,
+            y: cy,
+            kind: MouseEventKind::Move,
+        }));
+        assert_eq!(state.output_volume, 25, "a released slider still followed");
+    }
+
+    #[test]
+    fn test_a_slider_handle_is_drawn_where_a_drag_would_put_it() {
+        // The fraction the page draws at and the value a drag produces are one
+        // mapping read in each direction. If they ever part, the handle sits
+        // somewhere other than under the pointer that placed it.
+        for id in SliderId::FIXED {
+            let mut state =
+                state_showing(RowHit::Slider(id)).unwrap_or_else(|| panic!("{id:?} is not drawn"));
+            let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("just found it");
+            let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
+
+            for tenth in 0_u8..=10 {
+                let wanted = f32::from(tenth) / 10.0;
+                drag(
+                    &mut state,
+                    track_x,
+                    cy,
+                    SLIDER_WIDTH.mul_add(wanted, track_x),
+                );
+                let drawn = state
+                    .slider_fraction(id)
+                    .unwrap_or_else(|| panic!("{id:?} has no value"));
+                // Rounding to a whole percent or a whole day moves the handle by
+                // at most half a step, which is what this tolerance allows for.
+                let (lo, hi) = id.range();
+                let step = 1.0 / (hi - lo);
+                assert!(
+                    (drawn - wanted).abs() <= step / 2.0 + 0.001,
+                    "{id:?} dragged to {wanted} draws its handle at {drawn}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_a_slider_readout_agrees_with_its_handle() {
+        // The number beside the track used to be formatted at the call site
+        // from the same field the fraction was computed from by hand, so the
+        // two could drift apart. Now both come from one value; this holds them
+        // to it at the ends, where a drifted mapping shows up first.
+        let id = SliderId::TextSize;
+        let mut state = state_showing(RowHit::Slider(id)).expect("drawn on Visual accessibility");
+        let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("just found it");
+        let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
+
+        drag(&mut state, track_x, cy, track_x);
+        assert_eq!(
+            id.readout(state.slider_raw(id).unwrap()).as_deref(),
+            Some("50%")
+        );
+        drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
+        assert_eq!(
+            id.readout(state.slider_raw(id).unwrap()).as_deref(),
+            Some("250%")
+        );
+    }
+
+    #[test]
+    fn test_a_press_on_a_row_label_does_not_move_its_slider() {
+        // The grab band deliberately stops short of the label. A whole-row band
+        // — which is what every other control here uses — would mean brushing
+        // the words "Text Size" slammed it to 50%.
+        let id = SliderId::TextSize;
+        let mut state = state_showing(RowHit::Slider(id)).expect("drawn on Visual accessibility");
+        let before = state.text_size_percent;
+        let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("just found it");
+        state.handle_click(SettingsState::content_x() + 4.0, cy);
+        assert_eq!(
+            state.text_size_percent, before,
+            "clicking the label moved the slider"
+        );
+        assert!(
+            state.dragging.is_none(),
+            "clicking the label started a drag"
+        );
+    }
+
+    #[test]
+    fn test_dragging_one_per_app_volume_leaves_the_others_alone() {
+        // Indexed controls are where a shared handler goes wrong quietly: every
+        // row looks right, and the wrong application gets muted.
+        let id = SliderId::AppVolume(1);
+        let mut state = fully_expanded(SettingsPage::Sound);
+        assert!(
+            state.app_volumes.len() >= 2,
+            "need two apps to tell them apart"
+        );
+        let others: Vec<u8> = state
+            .app_volumes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, a)| a.volume)
+            .collect();
+        let (_, cy) = center_of(&state, RowHit::Slider(id)).expect("app 1 has a band");
+        let (track_x, _) = state.anchor_at(AnchorId::Slider(id)).expect("has a track");
+
+        drag(&mut state, track_x, cy, track_x + SLIDER_WIDTH);
+        assert_eq!(state.app_volumes[1].volume, 100);
+        let after: Vec<u8> = state
+            .app_volumes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, a)| a.volume)
+            .collect();
+        assert_eq!(after, others, "dragging one app's volume moved another's");
     }
 
     #[test]
@@ -5274,7 +5831,8 @@ mod tests {
                 // On the page that actually draws it: the popup is anchored to
                 // its own button, so opening it from elsewhere has no position
                 // to be checked against.
-                let mut state = state_showing(id).unwrap_or_else(|| panic!("no page draws {id:?}"));
+                let mut state = state_showing(RowHit::Dropdown(id))
+                    .unwrap_or_else(|| panic!("no page draws {id:?}"));
                 state.window_height = height;
                 state.show_dropdown(id);
                 let layout = state.dropdown_layout().expect("a dropdown is open");

@@ -25,6 +25,7 @@ use guitk::render::{FontWeightHint, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::wheel;
 #[allow(unused_imports)]
 use guitk::{Color, Event, KeyEvent, MouseButton, MouseEvent, RenderCommand, RenderTree};
 
@@ -409,6 +410,33 @@ impl Default for CenterState {
     }
 }
 
+/// One row of the notification centre's scrollable list, in draw order.
+///
+/// See [`NotificationDaemon::center_rows`] for why the list is described once
+/// as data rather than walked separately by each of the three things that
+/// needs its geometry.
+enum CenterRow<'a> {
+    /// A group's header line: the app it groups, how many it holds, and
+    /// whether its items are hidden.
+    GroupHeader {
+        app_name: String,
+        count: usize,
+        collapsed: bool,
+    },
+    /// One notification within a group.
+    Item(&'a Notification),
+}
+
+impl CenterRow<'_> {
+    /// How tall this row is drawn.
+    const fn height(&self) -> f32 {
+        match self {
+            Self::GroupHeader { .. } => CENTER_GROUP_HEADER_HEIGHT,
+            Self::Item(_) => CENTER_ITEM_HEIGHT,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main daemon struct
 // ---------------------------------------------------------------------------
@@ -521,6 +549,8 @@ impl NotificationDaemon {
     pub fn set_viewport(&mut self, width: f32, height: f32) {
         self.viewport_width = width;
         self.viewport_height = height;
+        // A taller panel shows more of the list, which lowers the scroll bound.
+        self.clamp_center_scroll();
     }
 
     // -----------------------------------------------------------------------
@@ -640,11 +670,13 @@ impl NotificationDaemon {
     /// Clear all notifications in the center for a specific app.
     pub fn clear_app_history(&mut self, app_name: &str) {
         self.history.retain(|n| n.app_name != app_name);
+        self.clamp_center_scroll();
     }
 
     /// Clear all notifications.
     pub fn clear_all_history(&mut self) {
         self.history.clear();
+        self.clamp_center_scroll();
     }
 
     /// Mark a notification as read.
@@ -783,8 +815,7 @@ impl NotificationDaemon {
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Key(key) => self.handle_key(key),
             Event::Resize { width, height } => {
-                self.viewport_width = *width as f32;
-                self.viewport_height = *height as f32;
+                self.set_viewport(*width as f32, *height as f32);
                 None
             }
             _ => None,
@@ -806,7 +837,13 @@ impl NotificationDaemon {
             }
             MouseEventKind::Scroll { dy, .. } => {
                 if self.center.visible {
-                    self.center.scroll_offset = (self.center.scroll_offset - dy).max(0.0);
+                    // `dy` is in notches, not pixels. Subtracting it from a
+                    // pixel offset moved the list by *one pixel* per detent —
+                    // a seventy-second of an item, so spinning the wheel looked
+                    // like nothing was happening. A notch is three rows, and a
+                    // row here is a notification. No accumulator: the offset is
+                    // an `f32` and holds a trackpad's fraction directly.
+                    self.scroll_center_by(wheel::pixels(*dy, CENTER_ITEM_HEIGHT));
                 }
                 None
             }
@@ -900,37 +937,35 @@ impl NotificationDaemon {
             return Some(DaemonAction::AllCleared);
         }
 
-        // Items in the scrollable area.
-        let content_y = center_y + CENTER_HEADER_HEIGHT - self.center.scroll_offset;
-        let mut item_y = content_y;
+        // Items in the scrollable area. The renderer clips to below the header
+        // and translates by the scroll offset; both are applied here so a row
+        // that has been scrolled *under* the header — drawn nowhere — cannot be
+        // clicked. It could be before: the walk ignored the clip entirely, so a
+        // click in the header of a scrolled list opened whatever invisible row
+        // happened to lie beneath it.
+        let list_top = center_y + CENTER_HEADER_HEIGHT;
+        let content_y = center_y - self.center.scroll_offset;
 
-        let groups = self.grouped_history();
-        // Pre-collect collapsed state and flatten hit targets to avoid borrow conflicts.
+        // Pre-collect collapsed state: the walk below borrows `self`, so the
+        // mutations it decides on have to wait until the borrow ends.
         let collapsed: Vec<String> = self.center.collapsed_groups.clone();
 
         // First pass: find what was clicked without mutating self.
         let mut toggle_group: Option<String> = None;
         let mut click_notif: Option<(u64, Option<String>)> = None;
 
-        for (app_name, notifications) in &groups {
-            if my >= item_y && my < item_y + CENTER_GROUP_HEADER_HEIGHT {
-                toggle_group = Some(app_name.clone());
-                break;
-            }
-            item_y += CENTER_GROUP_HEADER_HEIGHT;
-
-            if collapsed.contains(app_name) {
-                continue;
-            }
-
-            for notif in notifications {
-                if my >= item_y && my < item_y + CENTER_ITEM_HEIGHT {
-                    click_notif = Some((notif.id, notif.actions.first().map(|a| a.id.clone())));
-                    break;
+        if my >= list_top {
+            for (top, row) in self.center_rows() {
+                let y = content_y + top;
+                if my < y || my >= y + row.height() {
+                    continue;
                 }
-                item_y += CENTER_ITEM_HEIGHT;
-            }
-            if click_notif.is_some() {
+                match row {
+                    CenterRow::GroupHeader { app_name, .. } => toggle_group = Some(app_name),
+                    CenterRow::Item(notif) => {
+                        click_notif = Some((notif.id, notif.actions.first().map(|a| a.id.clone())));
+                    }
+                }
                 break;
             }
         }
@@ -942,6 +977,8 @@ impl NotificationDaemon {
             } else {
                 self.center.collapsed_groups.push(name.clone());
             }
+            // Collapsing a group hides its items, which shortens the list.
+            self.clamp_center_scroll();
             return Some(DaemonAction::GroupToggled(name));
         }
 
@@ -966,6 +1003,82 @@ impl NotificationDaemon {
             }
         }
         groups
+    }
+
+    /// The rows of the notification centre's scrollable list, each paired with
+    /// the top edge it is drawn at — in *content* coordinates, before the
+    /// scroll offset is subtracted.
+    ///
+    /// The renderer, the click hit test and the scroll bound all read this one
+    /// walk. They used to each repeat the arithmetic, and the same arithmetic
+    /// written three times is three things that drift: the notification *shade*
+    /// had exactly this shape and its two copies ended up 76 px apart, so every
+    /// click there landed on the card above the one under the pointer.
+    fn center_rows(&self) -> Vec<(f32, CenterRow<'_>)> {
+        let mut rows = Vec::new();
+        let mut y = CENTER_HEADER_HEIGHT;
+        for (app_name, notifications) in self.grouped_history() {
+            let collapsed = self.center.collapsed_groups.contains(&app_name);
+            let count = notifications.len();
+            rows.push((
+                y,
+                CenterRow::GroupHeader {
+                    app_name,
+                    count,
+                    collapsed,
+                },
+            ));
+            y += CENTER_GROUP_HEADER_HEIGHT;
+            if collapsed {
+                continue;
+            }
+            for notif in notifications {
+                rows.push((y, CenterRow::Item(notif)));
+                y += CENTER_ITEM_HEIGHT;
+            }
+        }
+        rows
+    }
+
+    /// The bottom edge of the last row, or the top of the list when empty.
+    fn center_content_height(&self) -> f32 {
+        self.center_rows()
+            .last()
+            .map_or(CENTER_HEADER_HEIGHT, |(top, row)| top + row.height())
+    }
+
+    /// The furthest the centre list can scroll: zero when it fits.
+    ///
+    /// This could not exist before, because nothing in the state knew how tall
+    /// the panel was — so the wheel handler clamped one end with `.max(0.0)`
+    /// and left the other open, and the list could be scrolled off the top of
+    /// the panel indefinitely with no way back but scrolling all the way up.
+    /// `viewport_height` arrives on `Event::Resize`, which is what makes the
+    /// bound derivable at all.
+    pub fn max_center_scroll(&self) -> f32 {
+        (self.center_content_height() - self.viewport_height).max(0.0)
+    }
+
+    /// Pull the centre's offset back inside the list.
+    ///
+    /// Anything that makes the list shorter or the panel taller — clearing a
+    /// group, collapsing one, a resize — can strand the offset past the new
+    /// end, leaving the panel showing blank space with nothing to scroll back
+    /// to but the top.
+    fn clamp_center_scroll(&mut self) {
+        self.center.scroll_offset = self
+            .center
+            .scroll_offset
+            .clamp(0.0, self.max_center_scroll());
+    }
+
+    /// Move the centre list by `delta` pixels, staying inside it.
+    fn scroll_center_by(&mut self, delta: f32) {
+        if !delta.is_finite() {
+            return;
+        }
+        self.center.scroll_offset += delta;
+        self.clamp_center_scroll();
     }
 
     // -----------------------------------------------------------------------
@@ -1271,15 +1384,15 @@ impl NotificationDaemon {
             dy: -self.center.scroll_offset,
         });
 
-        // Render grouped notifications.
-        let mut item_y = CENTER_HEADER_HEIGHT;
-        let groups = self.grouped_history();
+        // Render grouped notifications. `center_rows` is the one description of
+        // where each row goes; the hit test reads the same one.
+        let rows = self.center_rows();
 
-        if groups.is_empty() {
+        if rows.is_empty() {
             // Empty state.
             cmds.push(RenderCommand::Text {
                 x: center_x + CENTER_WIDTH / 2.0 - 60.0,
-                y: item_y + 40.0,
+                y: CENTER_HEADER_HEIGHT + 40.0,
                 text: String::from("No notifications"),
                 color: OVERLAY0,
                 font_size: 14.0,
@@ -1289,56 +1402,50 @@ impl NotificationDaemon {
             });
         }
 
-        for (app_name, notifications) in &groups {
-            // Group header.
-            cmds.push(RenderCommand::FillRect {
-                x: center_x,
-                y: item_y,
-                width: CENTER_WIDTH,
-                height: CENTER_GROUP_HEADER_HEIGHT,
-                color: SURFACE0,
-                corner_radii: CornerRadii::ZERO,
-            });
+        for (item_y, row) in &rows {
+            let item_y = *item_y;
+            match row {
+                CenterRow::GroupHeader {
+                    app_name,
+                    count,
+                    collapsed,
+                } => {
+                    cmds.push(RenderCommand::FillRect {
+                        x: center_x,
+                        y: item_y,
+                        width: CENTER_WIDTH,
+                        height: CENTER_GROUP_HEADER_HEIGHT,
+                        color: SURFACE0,
+                        corner_radii: CornerRadii::ZERO,
+                    });
 
-            let collapse_indicator = if self.center.collapsed_groups.contains(app_name) {
-                ">"
-            } else {
-                "v"
-            };
-            cmds.push(RenderCommand::Text {
-                x: center_x + 12.0,
-                y: item_y + 10.0,
-                text: format!("{collapse_indicator} {app_name}"),
-                color: TEXT,
-                font_size: 13.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+                    let collapse_indicator = if *collapsed { ">" } else { "v" };
+                    cmds.push(RenderCommand::Text {
+                        x: center_x + 12.0,
+                        y: item_y + 10.0,
+                        text: format!("{collapse_indicator} {app_name}"),
+                        color: TEXT,
+                        font_size: 13.0,
+                        font_weight: FontWeightHint::Bold,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
 
-            // Group notification count.
-            let count_text = format!("{}", notifications.len());
-            cmds.push(RenderCommand::Text {
-                x: center_x + CENTER_WIDTH - 40.0,
-                y: item_y + 10.0,
-                text: count_text,
-                color: OVERLAY0,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            item_y += CENTER_GROUP_HEADER_HEIGHT;
-
-            // Skip items if collapsed.
-            if self.center.collapsed_groups.contains(app_name) {
-                continue;
-            }
-
-            for notif in notifications {
-                self.render_center_item(&mut cmds, center_x, item_y, notif);
-                item_y += CENTER_ITEM_HEIGHT;
+                    // Group notification count.
+                    cmds.push(RenderCommand::Text {
+                        x: center_x + CENTER_WIDTH - 40.0,
+                        y: item_y + 10.0,
+                        text: format!("{count}"),
+                        color: OVERLAY0,
+                        font_size: 12.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: None,
+                        overflow: TextOverflow::Clip,
+                    });
+                }
+                CenterRow::Item(notif) => {
+                    self.render_center_item(&mut cmds, center_x, item_y, notif);
+                }
             }
         }
 
@@ -1562,7 +1669,11 @@ impl NotificationDaemon {
 // ---------------------------------------------------------------------------
 
 /// Actions emitted when the user interacts with notifications.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` is derived so a test can name the exact action a click must
+/// produce — "*that* notification", not "some notification" — which is what
+/// makes renderer-versus-hit-test agreement assertable at all.
+#[derive(Clone, Debug, PartialEq)]
 pub enum DaemonAction {
     /// A notification was dismissed (by close button or auto-timeout).
     Dismissed(u64),
@@ -1625,6 +1736,10 @@ mod tests {
         clippy::panic,
         clippy::arithmetic_side_effects
     )]
+    // The scrolling tests assert a float equals the exact literal the code
+    // under test was handed. That is the assertion meant: a tolerance would let
+    // a value that has drifted pass as one that has not.
+    #![allow(clippy::float_cmp)]
 
     use super::*;
 
@@ -1684,6 +1799,246 @@ mod tests {
             group_key: None,
             read: false,
         }
+    }
+
+    // ========================================================================
+    // Notification centre: layout, hit testing and scrolling
+    // ========================================================================
+
+    /// The panel is only 400 px tall here so a list of twenty genuinely
+    /// overflows it; on the 1080 the other tests use, nothing would scroll.
+    const TEST_VIEWPORT_H: f32 = 400.0;
+    const TEST_VIEWPORT_W: f32 = 1920.0;
+
+    /// A daemon with its centre open on `n` notifications from one app — one
+    /// group header, so the arithmetic below stays legible.
+    fn center_with(n: u64) -> NotificationDaemon {
+        let mut daemon = NotificationDaemon::new(TEST_VIEWPORT_W, TEST_VIEWPORT_H);
+        for id in 0..n {
+            let mut notif = make_test_notification(id, NotificationPriority::Normal);
+            notif.title = format!("N{id}");
+            daemon.push_history(notif);
+        }
+        daemon.center.visible = true;
+        daemon
+    }
+
+    fn wheel_over_center(daemon: &mut NotificationDaemon, dy: f32) {
+        daemon.handle_event(&Event::Mouse(MouseEvent {
+            x: TEST_VIEWPORT_W - 100.0,
+            y: 200.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        }));
+    }
+
+    /// Clicking where a row is drawn must select *that* row.
+    ///
+    /// The renderer and the hit test each walked the group list themselves,
+    /// with their own copy of the same arithmetic. Two copies of a layout are
+    /// two things that drift — the notification *shade* had exactly this shape
+    /// and its copies ended up 76 px apart, so every click there landed on the
+    /// card above the one under the pointer.
+    #[test]
+    fn clicking_a_row_where_it_is_drawn_selects_that_row() {
+        let mut daemon = center_with(6);
+        let rows: Vec<(f32, u64)> = daemon
+            .center_rows()
+            .iter()
+            .filter_map(|(top, row)| match row {
+                CenterRow::Item(notif) => Some((*top, notif.id)),
+                CenterRow::GroupHeader { .. } => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 6);
+
+        for (top, id) in rows {
+            // The middle of the row, positioned exactly as the renderer does.
+            let y = top + CENTER_ITEM_HEIGHT / 2.0 - daemon.center.scroll_offset;
+            assert_eq!(
+                daemon.hit_test_center(TEST_VIEWPORT_W - 100.0, y),
+                Some(DaemonAction::ActionInvoked {
+                    notification_id: id,
+                    action_id: None,
+                }),
+                "click at y={y} should select notification {id}"
+            );
+        }
+    }
+
+    /// The group header is a row too, and comes out of the same walk.
+    #[test]
+    fn clicking_a_group_header_where_it_is_drawn_collapses_that_group() {
+        let mut daemon = center_with(3);
+        let (top, name) = match &daemon.center_rows()[0] {
+            (top, CenterRow::GroupHeader { app_name, .. }) => (*top, app_name.clone()),
+            (_, CenterRow::Item(_)) => panic!("the first row of a centre is a group header"),
+        };
+        let y = top + CENTER_GROUP_HEADER_HEIGHT / 2.0;
+        assert_eq!(
+            daemon.hit_test_center(TEST_VIEWPORT_W - 100.0, y),
+            Some(DaemonAction::GroupToggled(name))
+        );
+    }
+
+    /// The renderer clips the list to below the header. The hit test did not,
+    /// so once the list was scrolled, a click on the header opened whichever
+    /// invisible row happened to have slid under it.
+    #[test]
+    fn a_row_scrolled_under_the_header_cannot_be_clicked() {
+        let mut daemon = center_with(20);
+        wheel_over_center(&mut daemon, -1.0);
+        assert!(daemon.center.scroll_offset > 0.0);
+        // Inside the panel header, left of the "Clear all" button.
+        let y = CENTER_HEADER_HEIGHT / 2.0;
+        let x = TEST_VIEWPORT_W - CENTER_WIDTH + 10.0;
+        assert_eq!(daemon.hit_test_center(x, y), None);
+    }
+
+    /// `dy` is in notches. This handler subtracted it from a pixel offset, so a
+    /// full detent moved the list by one pixel — a seventy-second of an item,
+    /// indistinguishable from the list not moving at all.
+    #[test]
+    fn one_wheel_notch_moves_three_notifications() {
+        let mut daemon = center_with(20);
+        // Negative `dy` is towards the user, which moves towards the end.
+        wheel_over_center(&mut daemon, -1.0);
+        assert_eq!(daemon.center.scroll_offset, 3.0 * CENTER_ITEM_HEIGHT);
+        wheel_over_center(&mut daemon, 1.0);
+        assert_eq!(daemon.center.scroll_offset, 0.0);
+    }
+
+    /// `.max(0.0)` clamps one end only, so the wheel walked the list off the
+    /// top of the panel indefinitely and left it blank, with no way back but
+    /// scrolling all the way up again.
+    #[test]
+    fn the_wheel_stops_with_the_last_row_on_screen() {
+        let mut daemon = center_with(20);
+        for _ in 0..200 {
+            wheel_over_center(&mut daemon, -1.0);
+        }
+        assert!(
+            daemon.max_center_scroll() > 0.0,
+            "the fixture must overflow"
+        );
+        assert_eq!(daemon.center.scroll_offset, daemon.max_center_scroll());
+        // The last row's bottom sits exactly at the bottom of the panel.
+        assert_eq!(
+            daemon.center_content_height() - daemon.center.scroll_offset,
+            TEST_VIEWPORT_H
+        );
+    }
+
+    /// A list shorter than the panel cannot scroll at all.
+    #[test]
+    fn a_list_shorter_than_the_panel_does_not_scroll() {
+        let mut daemon = center_with(1);
+        assert_eq!(daemon.max_center_scroll(), 0.0);
+        wheel_over_center(&mut daemon, -5.0);
+        assert_eq!(daemon.center.scroll_offset, 0.0);
+    }
+
+    /// The offset is an `f32`, so a trackpad's fraction of a notch moves the
+    /// list now rather than being rounded away or banked for later.
+    #[test]
+    fn a_fraction_of_a_notch_moves_the_center_now() {
+        let mut daemon = center_with(20);
+        wheel_over_center(&mut daemon, -0.5);
+        assert_eq!(daemon.center.scroll_offset, 1.5 * CENTER_ITEM_HEIGHT);
+    }
+
+    /// A hidden centre has nothing to scroll.
+    #[test]
+    fn the_wheel_does_nothing_while_the_center_is_hidden() {
+        let mut daemon = center_with(20);
+        daemon.center.visible = false;
+        wheel_over_center(&mut daemon, -1.0);
+        assert_eq!(daemon.center.scroll_offset, 0.0);
+    }
+
+    /// Collapsing a group hides its items, which shortens the list and can
+    /// strand the offset past the new end — leaving the panel showing blank
+    /// space that cannot be scrolled away from.
+    ///
+    /// Two groups, because collapsing the only one leaves nothing above the
+    /// header to have been scrolled in the first place.
+    #[test]
+    fn collapsing_a_group_pulls_the_view_back_inside() {
+        let mut daemon = NotificationDaemon::new(TEST_VIEWPORT_W, TEST_VIEWPORT_H);
+        for (app, base) in [("AppA", 0_u64), ("AppB", 100_u64)] {
+            for id in 0..20 {
+                let mut notif = make_test_notification(base + id, NotificationPriority::Normal);
+                notif.app_name = String::from(app);
+                daemon.push_history(notif);
+            }
+        }
+        daemon.center.visible = true;
+
+        // Scroll until AppB's header is on screen but the list is still well
+        // short of its end, so there is a real offset to be stranded.
+        // History is newest-first, so which app leads depends on push order;
+        // take the *second* header whatever it is called.
+        let (b_top, b_name) = daemon
+            .center_rows()
+            .iter()
+            .filter_map(|(top, row)| match row {
+                CenterRow::GroupHeader { app_name, .. } => Some((*top, app_name.clone())),
+                CenterRow::Item(_) => None,
+            })
+            .nth(1)
+            .expect("two apps make two headers");
+        daemon.scroll_center_by(b_top - CENTER_HEADER_HEIGHT);
+        let stranded = daemon.center.scroll_offset;
+        assert!(stranded > 0.0);
+        assert!(stranded < daemon.max_center_scroll());
+
+        // Click the header exactly where it is drawn.
+        let y = b_top - stranded + CENTER_GROUP_HEADER_HEIGHT / 2.0;
+        assert_eq!(
+            daemon.hit_test_center(TEST_VIEWPORT_W - 100.0, y),
+            Some(DaemonAction::GroupToggled(b_name))
+        );
+        assert!(
+            daemon.center.scroll_offset < stranded,
+            "the list got shorter, so the view must come back inside it"
+        );
+        assert_eq!(daemon.center.scroll_offset, daemon.max_center_scroll());
+    }
+
+    /// Clearing the history empties the list entirely.
+    #[test]
+    fn clearing_the_history_pulls_the_view_back_inside() {
+        let mut daemon = center_with(20);
+        for _ in 0..200 {
+            wheel_over_center(&mut daemon, -1.0);
+        }
+        assert!(daemon.center.scroll_offset > 0.0);
+        daemon.clear_all_history();
+        assert_eq!(daemon.center.scroll_offset, 0.0);
+    }
+
+    /// A taller panel shows more of the list, which lowers the scroll bound.
+    #[test]
+    fn a_taller_panel_pulls_a_scrolled_list_back_inside_it() {
+        let mut daemon = center_with(20);
+        for _ in 0..200 {
+            wheel_over_center(&mut daemon, -1.0);
+        }
+        let short = daemon.center.scroll_offset;
+        daemon.set_viewport(TEST_VIEWPORT_W, TEST_VIEWPORT_H * 2.0);
+        assert!(daemon.center.scroll_offset < short);
+        assert_eq!(daemon.center.scroll_offset, daemon.max_center_scroll());
+    }
+
+    /// Input events come from outside the process, and an infinity stored in
+    /// the offset would blank the panel for the rest of the run.
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_the_center() {
+        let mut daemon = center_with(20);
+        wheel_over_center(&mut daemon, f32::NAN);
+        wheel_over_center(&mut daemon, f32::INFINITY);
+        assert_eq!(daemon.center.scroll_offset, 0.0);
+        wheel_over_center(&mut daemon, -1.0);
+        assert_eq!(daemon.center.scroll_offset, 3.0 * CENTER_ITEM_HEIGHT);
     }
 
     /// A daemon showing one notification whose body is `body`.

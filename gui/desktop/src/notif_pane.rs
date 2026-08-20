@@ -35,6 +35,7 @@ use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEve
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::wheel;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -86,14 +87,45 @@ const NOTIF_CARD_HEIGHT: f32 = 80.0;
 /// Spacing between notification cards.
 const NOTIF_CARD_SPACING: f32 = 8.0;
 
-/// Height of the quick settings section.
-const QUICK_SETTINGS_HEIGHT: f32 = 200.0;
+/// Height of the quick settings section: a section title, one row per toggle,
+/// a gap, then the volume and brightness sliders.
+///
+/// Derived rather than declared, because it was declared once and was wrong.
+/// `render_quick_settings` walks the rows and returns what it actually drew;
+/// the two hit tests used this constant instead, and the two answers were 276
+/// and 200. Every notification card was therefore hit-tested 76 px — most of a
+/// card — from where it had been painted, so clicking a notification opened its
+/// neighbour and the hover highlight sat under the pointer's card rather than
+/// on it. Keeping the arithmetic in one place is what stops that recurring.
+const QUICK_SETTINGS_HEIGHT: f32 = QS_TITLE_HEIGHT
+    + QuickSetting::COUNT as f32 * QS_ROW_HEIGHT
+    + QS_SLIDER_GAP
+    + 2.0 * QS_ROW_HEIGHT;
+
+/// Height of the "Quick Settings" caption above the toggle rows.
+const QS_TITLE_HEIGHT: f32 = 20.0;
+
+/// Gap between the last toggle row and the first slider.
+const QS_SLIDER_GAP: f32 = 4.0;
+
+/// Space between the quick-settings block and the list below it: a gap, the
+/// separator rule, and a matching gap.
+const QS_SEPARATOR_HEIGHT: f32 = 16.0;
 
 /// Height of the header row (title + clear all).
 const HEADER_HEIGHT: f32 = 44.0;
 
 /// Height of a time-group header ("Today", "Yesterday", etc.).
 const GROUP_HEADER_HEIGHT: f32 = 28.0;
+
+/// How far one arrow-key press scrolls the list.
+const ARROW_KEY_STEP: f32 = 40.0;
+
+/// Viewport height assumed before the pane has been told a real one.
+///
+/// Only ever used by a pane that has never been rendered or hit-tested, which
+/// is a pane the user cannot yet have scrolled.
+const DEFAULT_SCREEN_HEIGHT: f32 = 1080.0;
 
 /// Corner radius for cards.
 const CARD_RADIUS: f32 = 8.0;
@@ -233,7 +265,7 @@ impl QuickSetting {
         }
     }
 
-    fn all() -> &'static [Self] {
+    const fn all() -> &'static [Self] {
         &[
             Self::DoNotDisturb,
             Self::NightLight,
@@ -242,6 +274,14 @@ impl QuickSetting {
             Self::FocusMode,
         ]
     }
+
+    /// How many toggles the quick-settings block draws.
+    ///
+    /// Taken from [`all`](Self::all) rather than written out, so that adding a
+    /// toggle moves the list below it by exactly one row instead of leaving
+    /// `QUICK_SETTINGS_HEIGHT` behind and putting the hit test back out of step
+    /// with the renderer.
+    const COUNT: usize = Self::all().len();
 }
 
 /// Per-app notification settings.
@@ -283,7 +323,12 @@ pub enum SettingValue {
 }
 
 /// Events emitted by the notification pane.
-#[derive(Clone, Debug)]
+///
+/// `PartialEq` is derived so a test can state the whole expected drain in a
+/// single `assert_eq!` rather than picking one variant apart by hand — which is
+/// what lets the layout tests below assert "this click selects *that* card"
+/// instead of merely "some card was selected".
+#[derive(Clone, Debug, PartialEq)]
 pub enum NotifPaneEvent {
     /// User clicked a notification (wants to open the related app/action).
     NotificationClicked(u64),
@@ -418,6 +463,16 @@ pub struct NotificationPane {
     show_settings: bool,
     /// Animation speed (fraction per second).
     anim_speed: f32,
+    /// Height of the screen the pane was last drawn on, or last handed for a
+    /// hit test.
+    ///
+    /// The pane is as tall as the screen, so this is also the height of its
+    /// scrolling viewport — and without it there is no upper bound to clamp
+    /// `scroll_offset` against. It used to arrive only as a parameter of
+    /// `render` and `handle_mouse_event` and be forgotten immediately, which is
+    /// *why* the wheel and the arrow keys could scroll the list past its end
+    /// into unbounded empty space with no way back but Home.
+    screen_height: f32,
 }
 
 impl NotificationPane {
@@ -435,6 +490,7 @@ impl NotificationPane {
             hovered_notif: None,
             show_settings: false,
             anim_speed: 5.0, // complete slide in ~0.2s
+            screen_height: DEFAULT_SCREEN_HEIGHT,
         }
     }
 
@@ -544,6 +600,9 @@ impl NotificationPane {
         if !self.state.is_visible() {
             return EventResult::Ignored;
         }
+        // The viewport height arrives here and nowhere else on the input path,
+        // so this is where the scroll bound learns about it.
+        self.note_screen_height(screen_height);
 
         let vis = self.state.visibility();
         let pane_x = screen_width - PANE_WIDTH * vis;
@@ -567,7 +626,12 @@ impl NotificationPane {
                 EventResult::Consumed
             }
             MouseEventKind::Scroll { dy, .. } => {
-                self.scroll_offset = (self.scroll_offset - dy * 30.0).max(0.0);
+                // `dy` is in notches, not pixels. This was `dy * 30.0` -- a
+                // private pixels-per-notch constant, one of the twelve
+                // different ones `MouseEventKind::Scroll` was invented to put
+                // an end to. A notch is three rows, and a row here is a card.
+                self.scroll_offset += wheel::pixels(*dy, NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING);
+                self.clamp_scroll();
                 EventResult::Consumed
             }
             MouseEventKind::Move => {
@@ -592,20 +656,27 @@ impl NotificationPane {
         // Scroll with arrow keys.
         if event.pressed {
             match event.key {
+                // Each of these four used to clamp at one end only -- the
+                // two that scrolled towards the end clamped at neither -- so
+                // holding Down walked the list into empty space indefinitely.
                 Key::Down => {
-                    self.scroll_offset += 40.0;
+                    self.scroll_offset += ARROW_KEY_STEP;
+                    self.clamp_scroll();
                     return EventResult::Consumed;
                 }
                 Key::Up => {
-                    self.scroll_offset = (self.scroll_offset - 40.0).max(0.0);
+                    self.scroll_offset -= ARROW_KEY_STEP;
+                    self.clamp_scroll();
                     return EventResult::Consumed;
                 }
                 Key::PageDown => {
-                    self.scroll_offset += 200.0;
+                    self.scroll_offset += self.list_height();
+                    self.clamp_scroll();
                     return EventResult::Consumed;
                 }
                 Key::PageUp => {
-                    self.scroll_offset = (self.scroll_offset - 200.0).max(0.0);
+                    self.scroll_offset -= self.list_height();
+                    self.clamp_scroll();
                     return EventResult::Consumed;
                 }
                 _ => {}
@@ -658,6 +729,103 @@ impl NotificationPane {
     // ========================================================================
     // Rendering
     // ========================================================================
+
+    // ========================================================================
+    // Layout
+    //
+    // One definition each, because there used to be three: the renderer walked
+    // the sections adding up measured heights, while `handle_click` and
+    // `update_hover` each rebuilt the same total from constants, and the
+    // totals disagreed. Anything that needs to know where a card sits asks
+    // here.
+    // ========================================================================
+
+    /// Where the scrolling list begins, in pane-local coordinates.
+    const fn list_start_y() -> f32 {
+        PANE_PADDING + HEADER_HEIGHT + QUICK_SETTINGS_HEIGHT + QS_SEPARATOR_HEIGHT
+    }
+
+    /// Height of the scrolling viewport.
+    fn list_height(&self) -> f32 {
+        (self.screen_height - Self::list_start_y()).max(0.0)
+    }
+
+    /// The top of each notification card, relative to the start of the list
+    /// and before scrolling, in the order the cards are drawn.
+    ///
+    /// A card is not simply `idx * (height + spacing)`: a time-group header is
+    /// inserted wherever the group changes, so the offsets depend on the
+    /// timestamps. That is precisely the arithmetic the renderer and the two
+    /// hit tests each used to carry a copy of.
+    fn card_tops(&self) -> Vec<f32> {
+        let mut tops = Vec::with_capacity(self.notifications.len());
+        let mut y = 0.0_f32;
+        let mut current_group: Option<TimeGroup> = None;
+        for notif in &self.notifications {
+            let group = TimeGroup::classify(notif.timestamp, self.current_time);
+            if current_group != Some(group) {
+                current_group = Some(group);
+                y += GROUP_HEADER_HEIGHT;
+            }
+            tops.push(y);
+            y += NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING;
+        }
+        tops
+    }
+
+    /// Total height of the list's contents, headers included.
+    fn content_height(&self) -> f32 {
+        match self.card_tops().last() {
+            // The trailing spacing is not content: it would let the list scroll
+            // eight pixels past its own last card.
+            Some(&last) => last + NOTIF_CARD_HEIGHT,
+            None => 0.0,
+        }
+    }
+
+    /// The index of the card at `local_y`, measured from the start of the list
+    /// with the scroll offset already added back.
+    ///
+    /// `None` for a point in a group header or in the gap between two cards —
+    /// which is the honest answer, and the one the old walks gave by falling
+    /// out of their loops.
+    fn card_at(&self, content_y: f32) -> Option<usize> {
+        self.card_tops()
+            .iter()
+            .position(|&top| content_y >= top && content_y < top + NOTIF_CARD_HEIGHT)
+    }
+
+    /// The furthest the list can scroll and still end on its last card.
+    fn max_scroll(&self) -> f32 {
+        (self.content_height() - self.list_height()).max(0.0)
+    }
+
+    /// Pull the offset back inside the list.
+    ///
+    /// Called after anything that can change either term: a scroll, a resize,
+    /// a dismissal, or a new notification arriving.
+    fn clamp_scroll(&mut self) {
+        self.scroll_offset = self.scroll_offset.clamp(0.0, self.max_scroll());
+    }
+
+    /// Tell the pane how tall the screen is, so the scroll bound can be
+    /// computed from it.
+    ///
+    /// Mouse events carry the height and call this themselves. A shell that
+    /// drives the pane from the keyboard alone should call it on resize:
+    /// `handle_key_event` has no height to work from, so without it the arrow
+    /// keys clamp against `DEFAULT_SCREEN_HEIGHT` rather than the real one.
+    pub fn set_screen_height(&mut self, screen_height: f32) {
+        self.note_screen_height(screen_height);
+    }
+
+    /// Note the viewport height, so the scroll bound can be computed from it.
+    fn note_screen_height(&mut self, screen_height: f32) {
+        if screen_height.is_finite() && screen_height > 0.0 {
+            self.screen_height = screen_height;
+            self.clamp_scroll();
+        }
+    }
 
     /// Render the pane. Returns draw commands in screen space.
     // The render body builds up its command list incrementally with helper
@@ -718,26 +886,22 @@ impl NotificationPane {
             dy: 0.0,
         });
 
-        // Render sections.
-        let mut y = PANE_PADDING;
+        // Render sections. The offsets come from the same helpers the hit
+        // tests use, rather than from adding up what each renderer reports
+        // having drawn -- that is how the two drifted 76 px apart.
+        self.render_header(&mut cmds, PANE_PADDING);
+        self.render_quick_settings(&mut cmds, PANE_PADDING + HEADER_HEIGHT);
 
-        // Header.
-        y += self.render_header(&mut cmds, y);
-
-        // Quick settings.
-        y += self.render_quick_settings(&mut cmds, y);
-
-        // Separator.
-        y += 8.0;
+        // Separator, centred in the gap above the list.
+        let y = Self::list_start_y();
         cmds.push(RenderCommand::Line {
             x1: PANE_PADDING,
-            y1: y,
+            y1: y - QS_SEPARATOR_HEIGHT / 2.0,
             x2: PANE_WIDTH - PANE_PADDING,
-            y2: y,
+            y2: y - QS_SEPARATOR_HEIGHT / 2.0,
             color: theme::SURFACE1,
             width: 1.0,
         });
-        y += 8.0;
 
         if self.show_settings {
             self.render_app_settings(&mut cmds, y, screen_height - y);
@@ -1019,19 +1183,24 @@ impl NotificationPane {
             return;
         }
 
-        let mut y = start_y - self.scroll_offset;
+        // `card_tops` is the single definition of where each card sits; the
+        // renderer only turns those into screen coordinates.
+        let tops = self.card_tops();
+        let origin = start_y - self.scroll_offset;
         let mut current_group: Option<TimeGroup> = None;
 
-        for (idx, notif) in self.notifications.iter().enumerate() {
+        for ((idx, notif), &top) in self.notifications.iter().enumerate().zip(&tops) {
+            let y = origin + top;
             let group = TimeGroup::classify(notif.timestamp, self.current_time);
 
             // Render group header if changed.
             if current_group != Some(group) {
                 current_group = Some(group);
-                if y + GROUP_HEADER_HEIGHT > start_y - 20.0 {
+                let header_y = y - GROUP_HEADER_HEIGHT;
+                if header_y + GROUP_HEADER_HEIGHT > start_y - 20.0 {
                     cmds.push(RenderCommand::Text {
                         x: PANE_PADDING,
-                        y: y + 6.0,
+                        y: header_y + 6.0,
                         text: group.label().to_string(),
                         color: theme::SUBTEXT0,
                         font_size: 11.0,
@@ -1040,12 +1209,10 @@ impl NotificationPane {
                         overflow: TextOverflow::Ellipsis,
                     });
                 }
-                y += GROUP_HEADER_HEIGHT;
             }
 
             // Skip rendering if above visible area.
             if y + NOTIF_CARD_HEIGHT < start_y {
-                y += NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING;
                 continue;
             }
             // Stop rendering if below visible area.
@@ -1054,7 +1221,6 @@ impl NotificationPane {
             }
 
             self.render_notification_card(cmds, idx, notif, PANE_PADDING, y);
-            y += NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING;
         }
 
         cmds.push(RenderCommand::PopClip);
@@ -1356,14 +1522,14 @@ impl NotificationPane {
             self.handle_quick_settings_click(rx, ry - y);
             return;
         }
-        y = qs_end + 16.0; // separator
+        let list_top = Self::list_start_y();
 
         if self.show_settings {
             // App settings: each card is 108px tall.
-            self.handle_app_settings_click(rx, ry - y);
+            self.handle_app_settings_click(rx, ry - list_top);
         } else {
             // Notifications area.
-            self.handle_notification_click(rx, ry, y, screen_height);
+            self.handle_notification_click(rx, ry, list_top, screen_height);
         }
     }
 
@@ -1414,37 +1580,29 @@ impl NotificationPane {
         _screen_height: f32,
     ) {
         let adjusted_y = ry - content_start + self.scroll_offset;
-        let mut y: f32 = 0.0;
-        let mut current_group: Option<TimeGroup> = None;
+        let Some(idx) = self.card_at(adjusted_y) else {
+            return;
+        };
+        let Some(&top) = self.card_tops().get(idx) else {
+            return;
+        };
+        let Some(id) = self.notifications.get(idx).map(|n| n.id) else {
+            return;
+        };
 
-        for (idx, notif) in self.notifications.iter().enumerate() {
-            let group = TimeGroup::classify(notif.timestamp, self.current_time);
-            if current_group != Some(group) {
-                current_group = Some(group);
-                y += GROUP_HEADER_HEIGHT;
-            }
-
-            if adjusted_y >= y && adjusted_y < y + NOTIF_CARD_HEIGHT {
-                // Check if dismiss button was clicked.
-                let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
-                let btn_x = PANE_PADDING + card_width - DISMISS_BTN_SIZE - 8.0;
-                if rx >= btn_x
-                    && rx <= btn_x + DISMISS_BTN_SIZE
-                    && (adjusted_y - y) < DISMISS_BTN_SIZE + 6.0
-                {
-                    let id = notif.id;
-                    self.dismiss_notification(idx);
-                    self.events.push(NotifPaneEvent::NotificationDismissed(id));
-                } else {
-                    // Click on notification body.
-                    let id = notif.id;
-                    self.notifications[idx].read = true;
-                    self.events.push(NotifPaneEvent::NotificationClicked(id));
-                }
-                return;
-            }
-
-            y += NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING;
+        // Check if dismiss button was clicked.
+        let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
+        let btn_x = PANE_PADDING + card_width - DISMISS_BTN_SIZE - 8.0;
+        if rx >= btn_x
+            && rx <= btn_x + DISMISS_BTN_SIZE
+            && (adjusted_y - top) < DISMISS_BTN_SIZE + 6.0
+        {
+            self.dismiss_notification(idx);
+            self.events.push(NotifPaneEvent::NotificationDismissed(id));
+        } else if let Some(notif) = self.notifications.get_mut(idx) {
+            // Click on notification body.
+            notif.read = true;
+            self.events.push(NotifPaneEvent::NotificationClicked(id));
         }
     }
 
@@ -1479,32 +1637,12 @@ impl NotificationPane {
 
     fn update_hover(&mut self, _rx: f32, ry: f32, _screen_height: f32) {
         // Determine which notification card is hovered (simplified).
-        let content_start = PANE_PADDING + HEADER_HEIGHT + QUICK_SETTINGS_HEIGHT + 16.0;
+        let content_start = Self::list_start_y();
         if ry < content_start || self.show_settings {
             self.hovered_notif = None;
             return;
         }
-
-        let adjusted_y = ry - content_start + self.scroll_offset;
-        let mut y: f32 = 0.0;
-        let mut current_group: Option<TimeGroup> = None;
-
-        for (idx, notif) in self.notifications.iter().enumerate() {
-            let group = TimeGroup::classify(notif.timestamp, self.current_time);
-            if current_group != Some(group) {
-                current_group = Some(group);
-                y += GROUP_HEADER_HEIGHT;
-            }
-
-            if adjusted_y >= y && adjusted_y < y + NOTIF_CARD_HEIGHT {
-                self.hovered_notif = Some(idx);
-                return;
-            }
-
-            y += NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING;
-        }
-
-        self.hovered_notif = None;
+        self.hovered_notif = self.card_at(ry - content_start + self.scroll_offset);
     }
 
     // ========================================================================
@@ -1521,6 +1659,10 @@ impl NotificationPane {
     fn dismiss_notification(&mut self, idx: usize) {
         if idx < self.notifications.len() {
             self.notifications.remove(idx);
+            // The list just got shorter, which can put the offset past its new
+            // end -- dismissing the last few cards would otherwise leave the
+            // pane showing blank space.
+            self.clamp_scroll();
             // Adjust hover if needed.
             if let Some(h) = self.hovered_notif
                 && h >= self.notifications.len()
@@ -1600,6 +1742,345 @@ mod tests {
             read: false,
             action: None,
         }
+    }
+
+    /// A pane showing `n` notifications, all in one time group, on a screen
+    /// short enough that the list genuinely overflows.
+    fn scrollable_pane(n: usize) -> NotificationPane {
+        let mut pane = NotificationPane::new();
+        pane.show();
+        pane.state = PaneState::Visible;
+        for i in 0..n {
+            // One timestamp for all of them, so exactly one group header is
+            // inserted and the arithmetic below stays legible.
+            pane.push_notification(make_notif("App", &format!("N{i}"), 1000));
+        }
+        pane.current_time = 1000;
+        pane.set_screen_height(TEST_SCREEN_H);
+        pane
+    }
+
+    const TEST_SCREEN_H: f32 = 800.0;
+
+    fn wheel_at(pane: &mut NotificationPane, dy: f32) -> EventResult {
+        let event = MouseEvent {
+            x: SCREEN_W - 100.0,
+            y: 400.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        };
+        pane.handle_mouse_event(&event, SCREEN_W, TEST_SCREEN_H)
+    }
+
+    const SCREEN_W: f32 = 1920.0;
+
+    fn press_key(pane: &mut NotificationPane, key: Key) {
+        pane.handle_key_event(&KeyEvent {
+            key,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: None,
+        });
+    }
+
+    // ========================================================================
+    // Layout: the renderer and the hit tests must agree
+    // ========================================================================
+
+    /// Clicking where a card is drawn must select *that* card.
+    ///
+    /// `render_quick_settings` walks its rows and returns what it drew: 276 px.
+    /// The two hit tests used `QUICK_SETTINGS_HEIGHT`, which said 200. So every
+    /// card was hit-tested 76 px from where it was painted — and a card is 80 px
+    /// tall with 8 px between, so a click landed on the card *above* the one
+    /// under the pointer, or in the gap and on nothing at all.
+    /// Where the renderer actually painted each card's background, read out of
+    /// the render commands themselves.
+    ///
+    /// The point of going through `render` rather than through `card_tops` is
+    /// that a test which asks the layout helper where the cards are cannot
+    /// catch the renderer and the hit test disagreeing — they would both be
+    /// wrong together and the test would still pass. Only the drawn output is
+    /// independent evidence.
+    fn painted_card_tops(pane: &NotificationPane) -> Vec<f32> {
+        let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
+        pane.render(SCREEN_W, TEST_SCREEN_H)
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if *x == PANE_PADDING && *width == card_width && *height == NOTIF_CARD_HEIGHT => {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What clicking at `y` inside the pane selects, if anything.
+    fn click_at(pane: &mut NotificationPane, y: f32) -> Option<u64> {
+        pane.events.clear();
+        let event = MouseEvent {
+            x: SCREEN_W - PANE_WIDTH + PANE_PADDING + 10.0,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+        pane.handle_mouse_event(&event, SCREEN_W, TEST_SCREEN_H);
+        match pane.events.first() {
+            Some(&NotifPaneEvent::NotificationClicked(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn clicking_a_card_where_it_is_drawn_selects_that_card() {
+        let mut pane = scrollable_pane(6);
+        let ids: Vec<u64> = pane.notifications.iter().map(|n| n.id).collect();
+        let painted = painted_card_tops(&pane);
+        // Not all six need fit; the renderer stops at the bottom of the pane.
+        assert!(painted.len() >= 4, "only {} cards drawn", painted.len());
+
+        for (idx, &top) in painted.iter().enumerate() {
+            // The middle of the card, at the y the renderer put it at. The pane
+            // is drawn under a translate in x only, so this y is the same y the
+            // hit test is handed.
+            let y = top + NOTIF_CARD_HEIGHT / 2.0;
+            assert_eq!(
+                click_at(&mut pane, y),
+                Some(ids[idx]),
+                "click at y={y} should select card {idx}"
+            );
+        }
+    }
+
+    /// The hit rectangle must be the *painted* rectangle — the whole of it and
+    /// nothing beyond it. A test that only probes card centres passes just as
+    /// happily when both regions are shifted together; probing each edge is
+    /// what makes the two independent.
+    ///
+    /// Scrolled, so the offset has to be applied identically by both.
+    #[test]
+    fn a_cards_hit_rectangle_is_exactly_the_rectangle_it_is_painted_in() {
+        let mut pane = scrollable_pane(40);
+        wheel_at(&mut pane, -2.0);
+        assert!(pane.scroll_offset > 0.0);
+
+        let painted = painted_card_tops(&pane);
+        assert!(painted.len() >= 4, "only {} cards drawn", painted.len());
+        let list_top = NotificationPane::list_start_y();
+
+        for &top in &painted {
+            // Only cards drawn wholly inside the list, so the clip does not
+            // account for a miss.
+            if top < list_top || top + NOTIF_CARD_HEIGHT > TEST_SCREEN_H {
+                continue;
+            }
+            let inside_top = click_at(&mut pane, top + 1.0);
+            let middle = click_at(&mut pane, top + NOTIF_CARD_HEIGHT / 2.0);
+            let inside_bottom = click_at(&mut pane, top + NOTIF_CARD_HEIGHT - 1.0);
+            assert!(middle.is_some(), "nothing painted at y={top} is clickable");
+            assert_eq!(
+                inside_top, middle,
+                "the card's top edge is not where it is drawn"
+            );
+            assert_eq!(
+                inside_bottom, middle,
+                "the card's bottom edge is not where it is drawn"
+            );
+            // The gap below it belongs to no card.
+            let gap = top + NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING / 2.0;
+            assert_eq!(
+                click_at(&mut pane, gap),
+                None,
+                "the gap under the card at y={top} selected something"
+            );
+        }
+    }
+
+    /// The quick-settings block's height is derived from what it draws, so a
+    /// click just below the last slider falls into the list rather than into
+    /// 76 px of no-man's-land that both regions thought belonged to the other.
+    #[test]
+    fn the_quick_settings_block_is_as_tall_as_what_it_draws() {
+        let mut pane = NotificationPane::new();
+        pane.state = PaneState::Visible;
+        let mut cmds = Vec::new();
+        let drawn = pane.render_quick_settings(&mut cmds, 0.0);
+        assert_eq!(
+            drawn, QUICK_SETTINGS_HEIGHT,
+            "the constant the hit test uses must be what the renderer draws"
+        );
+    }
+
+    /// Hover must land on the same card a click would.
+    #[test]
+    fn hover_and_click_agree_on_which_card_is_under_the_pointer() {
+        let mut pane = scrollable_pane(6);
+        let tops = pane.card_tops();
+        for (idx, &top) in tops.iter().enumerate() {
+            let y = NotificationPane::list_start_y() + top + NOTIF_CARD_HEIGHT / 2.0
+                - pane.scroll_offset;
+            let event = MouseEvent {
+                x: SCREEN_W - PANE_WIDTH + PANE_PADDING + 10.0,
+                y,
+                kind: MouseEventKind::Move,
+            };
+            pane.handle_mouse_event(&event, SCREEN_W, TEST_SCREEN_H);
+            assert_eq!(pane.hovered_notif, Some(idx));
+        }
+    }
+
+    /// The gap between two cards belongs to neither of them.
+    #[test]
+    fn a_point_in_the_gap_between_cards_names_no_card() {
+        let pane = scrollable_pane(3);
+        let tops = pane.card_tops();
+        let gap = tops[0] + NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING / 2.0;
+        assert_eq!(pane.card_at(gap), None);
+    }
+
+    // ========================================================================
+    // Scrolling
+    // ========================================================================
+
+    /// `dy` is in notches. This handler multiplied it by a private `30.0`, one
+    /// of the dozen different pixels-per-notch constants the notch convention
+    /// exists to abolish. A notch is three rows; here a row is a card.
+    #[test]
+    fn one_wheel_notch_moves_three_cards() {
+        let mut pane = scrollable_pane(40);
+        // Negative `dy` is towards the user, which moves towards the end.
+        wheel_at(&mut pane, -1.0);
+        assert_eq!(
+            pane.scroll_offset,
+            3.0 * (NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING)
+        );
+        wheel_at(&mut pane, 1.0);
+        assert_eq!(pane.scroll_offset, 0.0);
+    }
+
+    /// The offset had no upper bound at all: `.max(0.0)` clamps one end only,
+    /// so the wheel walked the list off into empty space indefinitely and the
+    /// pane went blank with no way back but scrolling all the way up again.
+    #[test]
+    fn the_wheel_stops_with_the_last_card_on_screen() {
+        let mut pane = scrollable_pane(40);
+        for _ in 0..200 {
+            wheel_at(&mut pane, -1.0);
+        }
+        assert_eq!(pane.scroll_offset, pane.max_scroll());
+        assert!(
+            pane.max_scroll() > 0.0,
+            "the fixture must actually overflow"
+        );
+        // The last card's bottom is exactly at the bottom of the viewport.
+        let last = *pane.card_tops().last().unwrap();
+        assert_eq!(
+            last + NOTIF_CARD_HEIGHT - pane.scroll_offset,
+            pane.list_height()
+        );
+    }
+
+    /// A list shorter than the pane cannot scroll at all.
+    #[test]
+    fn a_list_shorter_than_the_pane_does_not_scroll() {
+        let mut pane = scrollable_pane(1);
+        assert_eq!(pane.max_scroll(), 0.0);
+        wheel_at(&mut pane, -5.0);
+        assert_eq!(pane.scroll_offset, 0.0);
+    }
+
+    /// The arrow keys clamped at one end only, and Page/Down at neither.
+    #[test]
+    fn the_arrow_keys_stop_at_both_ends() {
+        let mut pane = scrollable_pane(40);
+        for _ in 0..500 {
+            press_key(&mut pane, Key::Down);
+        }
+        assert_eq!(pane.scroll_offset, pane.max_scroll());
+        for _ in 0..500 {
+            press_key(&mut pane, Key::Up);
+        }
+        assert_eq!(pane.scroll_offset, 0.0);
+
+        for _ in 0..500 {
+            press_key(&mut pane, Key::PageDown);
+        }
+        assert_eq!(pane.scroll_offset, pane.max_scroll());
+        for _ in 0..500 {
+            press_key(&mut pane, Key::PageUp);
+        }
+        assert_eq!(pane.scroll_offset, 0.0);
+    }
+
+    /// A page is the pane's own height, not a constant that happens to be near
+    /// it — otherwise the step is wrong on every screen but one.
+    #[test]
+    fn a_page_is_the_panes_own_height() {
+        let mut pane = scrollable_pane(40);
+        press_key(&mut pane, Key::PageDown);
+        assert_eq!(pane.scroll_offset, pane.list_height());
+    }
+
+    /// Dismissing cards shortens the list, which can strand the offset past the
+    /// new end and leave the pane showing blank space.
+    #[test]
+    fn dismissing_the_last_cards_pulls_the_view_back_inside() {
+        let mut pane = scrollable_pane(40);
+        for _ in 0..200 {
+            wheel_at(&mut pane, -1.0);
+        }
+        assert!(pane.scroll_offset > 0.0);
+        while pane.notifications.len() > 1 {
+            pane.dismiss_notification(pane.notifications.len() - 1);
+        }
+        assert_eq!(pane.max_scroll(), 0.0);
+        assert_eq!(pane.scroll_offset, 0.0);
+    }
+
+    /// A shrinking screen shrinks the viewport, which raises the scroll bound.
+    #[test]
+    fn a_shorter_screen_pulls_a_scrolled_list_back_inside_it() {
+        let mut pane = scrollable_pane(40);
+        for _ in 0..200 {
+            wheel_at(&mut pane, -1.0);
+        }
+        let tall = pane.scroll_offset;
+        pane.set_screen_height(TEST_SCREEN_H * 2.0);
+        assert!(
+            pane.scroll_offset < tall,
+            "a taller screen shows more, so the furthest offset is smaller"
+        );
+        assert_eq!(pane.scroll_offset, pane.max_scroll());
+    }
+
+    /// Input events come from outside the process, and an infinity stored in
+    /// the offset would blank the pane for the rest of the run.
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_the_pane() {
+        let mut pane = scrollable_pane(40);
+        wheel_at(&mut pane, f32::NAN);
+        wheel_at(&mut pane, f32::INFINITY);
+        assert_eq!(pane.scroll_offset, 0.0);
+        wheel_at(&mut pane, -1.0);
+        assert_eq!(
+            pane.scroll_offset,
+            3.0 * (NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING)
+        );
+    }
+
+    /// A nonsense screen height must not become the scroll bound.
+    #[test]
+    fn a_nonfinite_screen_height_is_ignored() {
+        let mut pane = scrollable_pane(40);
+        let before = pane.list_height();
+        pane.set_screen_height(f32::NAN);
+        pane.set_screen_height(0.0);
+        pane.set_screen_height(-100.0);
+        assert_eq!(pane.list_height(), before);
     }
 
     // ========================================================================

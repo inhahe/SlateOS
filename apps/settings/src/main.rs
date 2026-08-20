@@ -25,6 +25,7 @@ use guitk::scroll_window;
 #[allow(unused_imports)]
 use guitk::style::{CornerRadii, Edges};
 use guitk::text;
+use guitk::wheel;
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -99,8 +100,6 @@ const DROPDOWN_PADDING: f32 = 8.0;
 const DROPDOWN_MARGIN: f32 = 8.0;
 /// Vertical space a scrolled dropdown keeps for its "N more" line.
 const LIST_MORE_HEIGHT: f32 = 16.0;
-/// How many items one wheel notch moves an open dropdown.
-const WHEEL_ROWS: isize = 3;
 
 // ============================================================================
 // Settings categories and pages
@@ -715,6 +714,15 @@ pub struct SettingsState {
     /// shows the last page instead of a blank popup, because
     /// [`scroll_window::visible`] clamps the *result* and leaves this alone.
     pub dropdown_scroll: usize,
+    /// Fractions of an item left over from previous wheel events.
+    ///
+    /// [`dropdown_scroll`](Self::dropdown_scroll) counts whole items, so a
+    /// trackpad's tenth-of-a-notch has nowhere to go the moment it is
+    /// converted. Banking the remainder is what lets ten small pushes cross
+    /// three items exactly as one detent does; the handler this replaced read
+    /// only the *sign* of `dy`, so a twentieth of a notch and a hard flick of
+    /// the wheel both moved the list by the same three items.
+    dropdown_wheel: wheel::Accumulator,
 }
 
 /// Where an open dropdown's popup is, and which of its items are on screen.
@@ -1108,6 +1116,7 @@ impl SettingsState {
             // Dropdown state
             open_dropdown: None,
             dropdown_scroll: 0,
+            dropdown_wheel: wheel::Accumulator::default(),
         }
     }
 }
@@ -3225,17 +3234,12 @@ impl SettingsState {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(evt.x, evt.y),
             MouseEventKind::Move => self.handle_hover(evt.x, evt.y),
             // Only the sign of `dy` is used, not its magnitude:
-            // `MouseEventKind::Scroll` documents it as pixels, but every
-            // producer in this tree sets it to a notch count instead. See
-            // known-issues.md.
+            // `dy` is in notches; `wheel::rows` turns it into whole items and
+            // banks the fraction. What was here read only the *sign* of `dy`,
+            // so a trackpad's twitch moved three items just as a hard flick of
+            // the wheel did, and a three-notch spin also moved three.
             MouseEventKind::Scroll { dy, .. } if self.open_dropdown.is_some() => {
-                let rows = if *dy > 0.0 {
-                    WHEEL_ROWS.saturating_neg()
-                } else if *dy < 0.0 {
-                    WHEEL_ROWS
-                } else {
-                    0
-                };
+                let rows = self.dropdown_wheel.rows(*dy);
                 self.scroll_dropdown_by(rows);
                 EventResult::Consumed
             }
@@ -3689,6 +3693,9 @@ impl SettingsState {
     pub fn show_dropdown(&mut self, id: DropdownId) {
         self.open_dropdown = Some(id);
         self.dropdown_scroll = 0;
+        // The offset is being set from scratch, so the fraction that was
+        // pushing the last dropdown's offset must not survive into this one.
+        self.dropdown_wheel.reset();
         // Ask for the layout now that the id is set: how far to scroll depends
         // on how many items fit, which depends on which dropdown this is.
         if let Some(layout) = self.dropdown_layout() {
@@ -4612,9 +4619,108 @@ mod tests {
             })
         };
         assert_eq!(state.handle_event(&wheel(-1.0)), EventResult::Consumed);
-        assert_eq!(state.dropdown_scroll, WHEEL_ROWS.unsigned_abs());
+        assert_eq!(state.dropdown_scroll, 3, "one notch is three items");
         state.handle_event(&wheel(1.0));
         assert_eq!(state.dropdown_scroll, 0);
+    }
+
+    /// A trackpad sends fractions of a notch. `dropdown_scroll` counts whole
+    /// items and cannot hold one, so the remainder has to be banked.
+    ///
+    /// The handler this replaced read only `dy`'s sign, which is the same bug
+    /// seen from the other side: it could not tell a twentieth of a notch from
+    /// a hard flick, so both moved the list three items and a genuine
+    /// three-notch spin moved three items as well.
+    #[test]
+    fn a_trackpads_fractions_add_up_instead_of_each_moving_three_items() {
+        let mut state = SettingsState::new();
+        state.window_height = 200.0;
+        state.show_dropdown(DropdownId::Resolution);
+        state.dropdown_scroll = 0;
+        let wheel = |dy: f32| {
+            Event::Mouse(MouseEvent {
+                x: 700.0,
+                y: 300.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })
+        };
+        // A tenth of a notch is three tenths of an item: nothing yet.
+        state.handle_event(&wheel(-0.1));
+        assert_eq!(state.dropdown_scroll, 0, "a twitch is not three items");
+        for _ in 0..9 {
+            state.handle_event(&wheel(-0.1));
+        }
+        assert_eq!(
+            state.dropdown_scroll, 3,
+            "ten tenths of a notch is one notch, which is three items"
+        );
+    }
+
+    /// How hard the wheel is turned has to matter.
+    #[test]
+    fn three_notches_move_three_times_as_far_as_one() {
+        let mut state = SettingsState::new();
+        state.window_height = 200.0;
+        state.show_dropdown(DropdownId::Resolution);
+        state.dropdown_scroll = 0;
+        let wheel = |dy: f32| {
+            Event::Mouse(MouseEvent {
+                x: 700.0,
+                y: 300.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })
+        };
+        state.handle_event(&wheel(-3.0));
+        assert_eq!(state.dropdown_scroll, 9);
+    }
+
+    /// A fraction earned scrolling one dropdown must not step the next one.
+    #[test]
+    fn opening_a_dropdown_forgets_the_leftover_fraction() {
+        let mut state = SettingsState::new();
+        state.window_height = 200.0;
+        state.show_dropdown(DropdownId::Resolution);
+        state.dropdown_scroll = 0;
+        let wheel = |dy: f32| {
+            Event::Mouse(MouseEvent {
+                x: 700.0,
+                y: 300.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })
+        };
+        // Two tenths of a notch: 0.6 of an item owed, none delivered.
+        state.handle_event(&wheel(-0.1));
+        state.handle_event(&wheel(-0.1));
+        assert_eq!(state.dropdown_scroll, 0);
+
+        state.show_dropdown(DropdownId::Resolution);
+        state.dropdown_scroll = 0;
+        // Were the 0.6 still banked, this 0.6 would complete an item.
+        state.handle_event(&wheel(-0.1));
+        state.handle_event(&wheel(-0.1));
+        assert_eq!(state.dropdown_scroll, 0);
+    }
+
+    /// Input events come from outside the process, and a `NaN` in the residue
+    /// would stop the dropdown scrolling for the rest of the run.
+    #[test]
+    fn a_nonfinite_delta_does_not_freeze_the_dropdown() {
+        let mut state = SettingsState::new();
+        state.window_height = 200.0;
+        state.show_dropdown(DropdownId::Resolution);
+        state.dropdown_scroll = 0;
+        let wheel = |dy: f32| {
+            Event::Mouse(MouseEvent {
+                x: 700.0,
+                y: 300.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })
+        };
+        state.handle_event(&wheel(f32::NAN));
+        state.handle_event(&wheel(f32::INFINITY));
+        assert_eq!(state.dropdown_scroll, 0);
+        state.handle_event(&wheel(-1.0));
+        assert_eq!(state.dropdown_scroll, 3, "an ordinary notch still works");
     }
 
     #[test]

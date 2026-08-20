@@ -424,9 +424,11 @@ impl Board {
         for row in 0..8 {
             for col in 0..8 {
                 if let Some(p) = self.squares[row][col]
-                    && p.side == side && p.kind == PieceKind::King {
-                        return Some(Pos::new(row as i8, col as i8));
-                    }
+                    && p.side == side
+                    && p.kind == PieceKind::King
+                {
+                    return Some(Pos::new(row as i8, col as i8));
+                }
             }
         }
         None
@@ -447,9 +449,11 @@ impl Board {
         ] {
             let p = Pos::new(pos.row + dr, pos.col + dc);
             if let Some(piece) = self.get(p)
-                && piece.side == attacker && piece.kind == PieceKind::Knight {
-                    return true;
-                }
+                && piece.side == attacker
+                && piece.kind == PieceKind::Knight
+            {
+                return true;
+            }
         }
 
         // Check king attacks (adjacent squares)
@@ -460,9 +464,11 @@ impl Board {
                 }
                 let p = Pos::new(pos.row + dr, pos.col + dc);
                 if let Some(piece) = self.get(p)
-                    && piece.side == attacker && piece.kind == PieceKind::King {
-                        return true;
-                    }
+                    && piece.side == attacker
+                    && piece.kind == PieceKind::King
+                {
+                    return true;
+                }
             }
         }
 
@@ -471,9 +477,11 @@ impl Board {
         for &dc in &[-1i8, 1] {
             let p = Pos::new(pos.row + pawn_dir, pos.col + dc);
             if let Some(piece) = self.get(p)
-                && piece.side == attacker && piece.kind == PieceKind::Pawn {
-                    return true;
-                }
+                && piece.side == attacker
+                && piece.kind == PieceKind::Pawn
+            {
+                return true;
+            }
         }
 
         // Check sliding piece attacks (rook/queen on ranks/files)
@@ -1154,16 +1162,17 @@ impl ChessApp {
 
         // Select a piece (must be own piece)
         if let Some(piece) = self.board.get(pos)
-            && piece.side == Side::White {
-                self.selected = Some(pos);
-                self.legal_moves_for_selected = self
-                    .board
-                    .generate_legal_moves()
-                    .into_iter()
-                    .filter(|m| m.from == pos)
-                    .collect();
-                return;
-            }
+            && piece.side == Side::White
+        {
+            self.selected = Some(pos);
+            self.legal_moves_for_selected = self
+                .board
+                .generate_legal_moves()
+                .into_iter()
+                .filter(|m| m.from == pos)
+                .collect();
+            return;
+        }
 
         // Clicked empty square or opponent piece without selection
         self.selected = None;
@@ -1454,16 +1463,17 @@ impl ChessApp {
 
                 // Last move highlight
                 if let Some(last) = self.last_move
-                    && (pos == last.from || pos == last.to) {
-                        commands.push(RenderCommand::FillRect {
-                            x: sx,
-                            y: sy,
-                            width: SQUARE_SIZE,
-                            height: SQUARE_SIZE,
-                            color: LAST_MOVE_HIGHLIGHT,
-                            corner_radii: CornerRadii::ZERO,
-                        });
-                    }
+                    && (pos == last.from || pos == last.to)
+                {
+                    commands.push(RenderCommand::FillRect {
+                        x: sx,
+                        y: sy,
+                        width: SQUARE_SIZE,
+                        height: SQUARE_SIZE,
+                        color: LAST_MOVE_HIGHLIGHT,
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
 
                 // Check highlight on king
                 if in_check && king_pos == Some(pos) {

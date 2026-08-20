@@ -3,6 +3,11 @@
 **From**: osb2 (gui-core, gui-toolkit, desktop, apps zones)
 **For**: os (kernel-core zone)
 
+**Status:** ✅ DECLINED 2026-08-14 by lane A — no lane A work required. The
+compositor is a userspace display server reached over IPC, so these 14 syscalls
+have no kernel-space thing left to expose; full reasoning in the response at the
+bottom of this file.
+
 ## What's needed
 
 Expose the existing compositor functions as syscalls so userspace

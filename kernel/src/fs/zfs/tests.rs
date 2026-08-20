@@ -1497,7 +1497,7 @@ const fn dirent(ty: u64, obj: u64) -> u64 {
 }
 
 /// The pool configuration nvlist a vdev label carries.
-fn build_config(vdev_type: &[u8]) -> Vec<u8> {
+fn build_config(vdev_type: &[u8], id: u64, is_log: u64) -> Vec<u8> {
     let mut vdev = Vec::new();
     // A nested list carries its own version and nvflag, but no encoding byte —
     // it inherits the outer list's.
@@ -1509,6 +1509,12 @@ fn build_config(vdev_type: &[u8]) -> Vec<u8> {
         1,
         &xdr_string(vdev_type),
     ));
+    // Written unconditionally, including in the ordinary `id: 0, is_log: 0`
+    // case: a real label always carries both, and a builder that emitted them
+    // only when interesting would leave the mounting path never once reading
+    // the shape it will actually meet on disk.
+    vdev.extend_from_slice(&nv_pair_u64(b"id", id));
+    vdev.extend_from_slice(&nv_pair_u64(b"is_log", is_log));
     vdev.extend_from_slice(&nv_pair_u64(b"ashift", IMG_ASHIFT));
     vdev.extend_from_slice(&nv_pair_u64(b"asize", u64::try_from(IMG_LEN).unwrap_or(0)));
     vdev.extend_from_slice(&0u32.to_be_bytes()); // terminator
@@ -2000,7 +2006,7 @@ fn build_pool() -> Pool {
 
     // --- Labels ----------------------------------------------------------
 
-    let config = build_config(b"disk");
+    let config = build_config(b"disk", 0, 0);
     let nvlist_at = usize::try_from(VDEV_LABEL_NVLIST_OFFSET).unwrap_or(0);
     let ub_array_at = usize::try_from(VDEV_LABEL_UBERBLOCK_OFFSET).unwrap_or(0);
     let label_stride = usize::try_from(VDEV_LABEL_SIZE).unwrap_or(0);
@@ -2299,8 +2305,12 @@ fn test_pool_damage(c: &mut Checks) -> KernelResult<()> {
     // A mirror or raidz top-level vdev. One `SectorSource` is one device, and
     // a raidz child's DVAs are offset per-leg, so reading one leg as if it
     // were the whole thing would return plausible-looking garbage.
-    let mut bytes = pool.bytes;
-    let mirror = build_config(b"mirror");
+    //
+    // The three config cases below all overwrite the *same* bytes — the nvlist
+    // region of both front labels — so each starts from a fresh clone. Sharing
+    // one buffer would make each case's verdict depend on the one before it.
+    let mut bytes = pool.bytes.clone();
+    let mirror = build_config(b"mirror", 0, 0);
     for label in 0..2usize {
         let at = label.saturating_mul(stride).saturating_add(pool.nvlist_at);
         put_bytes(&mut bytes, at, &mirror);
@@ -2309,6 +2319,42 @@ fn test_pool_damage(c: &mut Checks) -> KernelResult<()> {
         mount(bytes).map(|_| ()),
         KernelError::NotSupported,
         "a mirror vdev is refused rather than half-read",
+    );
+
+    // A separate intent-log (SLOG) device. Everything else about this label is
+    // a valid, mountable pool — same name, same GUID, same uberblocks, type
+    // `disk`, no children — so `is_log` is the *only* thing standing between
+    // "the pool's data disk" and "a device that holds no part of the object
+    // tree". Without the check the mount gets as far as reading the meta object
+    // set off a log device and reports `IoError`, which says "this pool is
+    // corrupt" about a pool that is perfectly intact.
+    let mut bytes = pool.bytes.clone();
+    let slog = build_config(b"disk", 0, 1);
+    for label in 0..2usize {
+        let at = label.saturating_mul(stride).saturating_add(pool.nvlist_at);
+        put_bytes(&mut bytes, at, &slog);
+    }
+    c.check_err(
+        mount(bytes).map(|_| ()),
+        KernelError::NotSupported,
+        "an intent-log device is named, not misread as the pool's data disk",
+    );
+
+    // The second disk of a striped pool. Its label says `type: disk` with no
+    // children, exactly like a single-disk pool's — `id` is the only field that
+    // tells them apart. Every DVA this driver can follow names vdev 0, so on a
+    // device holding vdev 1 there is nothing readable at all, and saying so
+    // here beats failing on the first block with a checksum error.
+    let mut bytes = pool.bytes;
+    let second = build_config(b"disk", 1, 0);
+    for label in 0..2usize {
+        let at = label.saturating_mul(stride).saturating_add(pool.nvlist_at);
+        put_bytes(&mut bytes, at, &second);
+    }
+    c.check_err(
+        mount(bytes).map(|_| ()),
+        KernelError::NotSupported,
+        "a stripe's second disk is refused before it can fail a block read",
     );
 
     Ok(())

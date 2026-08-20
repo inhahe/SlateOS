@@ -78,20 +78,16 @@ const WIN_COUNT: usize = 5;
 // ── Directions for win checking (row_delta, col_delta) ──────────────
 // Horizontal, vertical, diagonal-down-right, diagonal-down-left
 const DIRECTIONS: [(i32, i32); 4] = [
-    (0, 1),   // horizontal
-    (1, 0),   // vertical
-    (1, 1),   // diagonal \
-    (1, -1),  // diagonal /
+    (0, 1),  // horizontal
+    (1, 0),  // vertical
+    (1, 1),  // diagonal \
+    (1, -1), // diagonal /
 ];
 
 // ── Star points on a 15x15 board ────────────────────────────────────
 // Traditional Go-style star points: corners at (3,3), center at (7,7),
 // and side midpoints.
-const STAR_POINTS: [(usize, usize); 5] = [
-    (3, 3), (3, 11),
-    (7, 7),
-    (11, 3), (11, 11),
-];
+const STAR_POINTS: [(usize, usize); 5] = [(3, 3), (3, 11), (7, 7), (11, 3), (11, 11)];
 
 // ── AI evaluation scores ────────────────────────────────────────────
 // Pattern scores for the AI evaluator. Higher scores = more important patterns.
@@ -243,14 +239,7 @@ impl Board {
 
     /// Count consecutive stones of the given color starting from (row, col)
     /// in the direction (dr, dc), not counting the starting position.
-    fn count_direction(
-        &self,
-        row: i32,
-        col: i32,
-        dr: i32,
-        dc: i32,
-        stone: Cell,
-    ) -> i32 {
+    fn count_direction(&self, row: i32, col: i32, dr: i32, dc: i32, stone: Cell) -> i32 {
         let mut count = 0;
         let mut r = row + dr;
         let mut c = col + dc;
@@ -265,14 +254,7 @@ impl Board {
     /// Check what is at the end of a consecutive run of `stone` in direction
     /// (dr, dc) starting from (row, col). Returns true if the end is empty
     /// (open end), false if blocked (edge or opponent stone).
-    fn is_open_end(
-        &self,
-        row: i32,
-        col: i32,
-        dr: i32,
-        dc: i32,
-        stone: Cell,
-    ) -> bool {
+    fn is_open_end(&self, row: i32, col: i32, dr: i32, dc: i32, stone: Cell) -> bool {
         let mut r = row + dr;
         let mut c = col + dc;
         while self.get(r, c) == Some(stone) {
@@ -285,14 +267,7 @@ impl Board {
     /// Evaluate a single line pattern through (row, col) in a given direction
     /// for the specified stone color. Returns a score based on the pattern
     /// (how many in a row, open/half-open ends).
-    fn evaluate_line_pattern(
-        &self,
-        row: i32,
-        col: i32,
-        dr: i32,
-        dc: i32,
-        stone: Cell,
-    ) -> i32 {
+    fn evaluate_line_pattern(&self, row: i32, col: i32, dr: i32, dc: i32, stone: Cell) -> i32 {
         let count_fwd = self.count_direction(row, col, dr, dc, stone);
         let count_bwd = self.count_direction(row, col, -dr, -dc, stone);
         let total = count_fwd + count_bwd + 1; // +1 for the stone at (row, col)
@@ -390,11 +365,7 @@ impl Board {
                         }
                         let nr = r + dr;
                         let nc = c + dc;
-                        if nr >= 0
-                            && nr < BOARD_SIZE as i32
-                            && nc >= 0
-                            && nc < BOARD_SIZE as i32
-                        {
+                        if nr >= 0 && nr < BOARD_SIZE as i32 && nc >= 0 && nc < BOARD_SIZE as i32 {
                             let nru = nr as usize;
                             let ncu = nc as usize;
                             if self.cells[nru][ncu] == Cell::Empty && !seen[nru][ncu] {
@@ -409,10 +380,7 @@ impl Board {
 
         // Sort candidates by a quick heuristic: prefer moves closer to center
         let center = BOARD_SIZE as i32 / 2;
-        moves.sort_by_key(|&(r, c)| {
-            
-            (r as i32 - center).abs() + (c as i32 - center).abs()
-        });
+        moves.sort_by_key(|&(r, c)| (r as i32 - center).abs() + (c as i32 - center).abs());
 
         moves
     }
@@ -659,7 +627,11 @@ impl GomokuApp {
         if let Some((r, c)) = find_best_move(&self.board, Cell::White) {
             let stone = Cell::White;
             self.board.set(r, c, stone);
-            self.move_history.push(MoveRecord { row: r, col: c, stone });
+            self.move_history.push(MoveRecord {
+                row: r,
+                col: c,
+                stone,
+            });
             self.move_count += 1;
             self.last_move = Some((r, c));
 
@@ -718,19 +690,21 @@ impl GomokuApp {
 
         // Undo AI move (White) if the last move was by White
         if let Some(last) = self.move_history.last()
-            && last.stone == Cell::White {
-                let record = self.move_history.pop().expect("just checked non-empty");
-                self.board.set(record.row, record.col, Cell::Empty);
-                self.move_count = self.move_count.saturating_sub(1);
-            }
+            && last.stone == Cell::White
+        {
+            let record = self.move_history.pop().expect("just checked non-empty");
+            self.board.set(record.row, record.col, Cell::Empty);
+            self.move_count = self.move_count.saturating_sub(1);
+        }
 
         // Undo player move (Black)
         if let Some(last) = self.move_history.last()
-            && last.stone == Cell::Black {
-                let record = self.move_history.pop().expect("just checked non-empty");
-                self.board.set(record.row, record.col, Cell::Empty);
-                self.move_count = self.move_count.saturating_sub(1);
-            }
+            && last.stone == Cell::Black
+        {
+            let record = self.move_history.pop().expect("just checked non-empty");
+            self.board.set(record.row, record.col, Cell::Empty);
+            self.move_count = self.move_count.saturating_sub(1);
+        }
 
         // Update current turn and last_move
         self.current_turn = Cell::Black;
@@ -741,25 +715,28 @@ impl GomokuApp {
     fn handle_key(&mut self, event: &KeyEvent) {
         match event {
             // Arrow key movement
-            KeyEvent { key: Key::Up, .. }
-                if self.cursor_row > 0 => {
-                    self.cursor_row -= 1;
-                }
-            KeyEvent { key: Key::Down, .. }
-                if self.cursor_row < BOARD_SIZE as i32 - 1 => {
-                    self.cursor_row += 1;
-                }
-            KeyEvent { key: Key::Left, .. }
-                if self.cursor_col > 0 => {
-                    self.cursor_col -= 1;
-                }
-            KeyEvent { key: Key::Right, .. }
-                if self.cursor_col < BOARD_SIZE as i32 - 1 => {
-                    self.cursor_col += 1;
-                }
+            KeyEvent { key: Key::Up, .. } if self.cursor_row > 0 => {
+                self.cursor_row -= 1;
+            }
+            KeyEvent { key: Key::Down, .. } if self.cursor_row < BOARD_SIZE as i32 - 1 => {
+                self.cursor_row += 1;
+            }
+            KeyEvent { key: Key::Left, .. } if self.cursor_col > 0 => {
+                self.cursor_col -= 1;
+            }
+            KeyEvent {
+                key: Key::Right, ..
+            } if self.cursor_col < BOARD_SIZE as i32 - 1 => {
+                self.cursor_col += 1;
+            }
 
             // Place stone
-            KeyEvent { key: Key::Enter, .. } | KeyEvent { key: Key::Space, .. } => {
+            KeyEvent {
+                key: Key::Enter, ..
+            }
+            | KeyEvent {
+                key: Key::Space, ..
+            } => {
                 self.try_place_stone();
             }
 
@@ -1709,7 +1686,11 @@ mod tests {
                     1 => (row + col + 1) % 2,
                     _ => (col / 2 + row) % 2,
                 };
-                let cell = if pattern == 0 { Cell::Black } else { Cell::White };
+                let cell = if pattern == 0 {
+                    Cell::Black
+                } else {
+                    Cell::White
+                };
                 app.board.set(row, col, cell);
             }
         }
@@ -1767,11 +1748,13 @@ mod tests {
         for c in 0..4 {
             app.board.set(0, c, Cell::Black);
         }
-        app.move_history = (0..4).map(|c| MoveRecord {
-            row: 0,
-            col: c,
-            stone: Cell::Black,
-        }).collect();
+        app.move_history = (0..4)
+            .map(|c| MoveRecord {
+                row: 0,
+                col: c,
+                stone: Cell::Black,
+            })
+            .collect();
         app.move_count = 4;
         app.place_stone(0, 4);
         assert_eq!(app.phase, GamePhase::Won);
@@ -1990,7 +1973,10 @@ mod tests {
         assert!(best.is_some());
         let (r, c) = best.expect("AI should find a move");
         assert_eq!(r, 7);
-        assert!(c == 2 || c == 7, "AI should block at row 7, col 2 or 7, got col {c}");
+        assert!(
+            c == 2 || c == 7,
+            "AI should block at row 7, col 2 or 7, got col {c}"
+        );
     }
 
     #[test]
@@ -2005,7 +1991,10 @@ mod tests {
         assert!(best.is_some());
         let (r, c) = best.expect("AI should find winning move");
         assert_eq!(r, 5);
-        assert!(c == 2 || c == 7, "AI should win at row 5, col 2 or 7, got col {c}");
+        assert!(
+            c == 2 || c == 7,
+            "AI should win at row 5, col 2 or 7, got col {c}"
+        );
     }
 
     #[test]
@@ -2060,7 +2049,10 @@ mod tests {
         let mut board = Board::new();
         board.set(7, 7, Cell::Black);
         let score = board.evaluate(Cell::Black);
-        assert!(score > 0, "Single stone should give positive score for its owner");
+        assert!(
+            score > 0,
+            "Single stone should give positive score for its owner"
+        );
     }
 
     #[test]
@@ -2080,7 +2072,10 @@ mod tests {
             board.set(5, c, Cell::Black);
         }
         let score = board.evaluate(Cell::Black);
-        assert!(score >= SCORE_FIVE, "Five in a row should score at least SCORE_FIVE");
+        assert!(
+            score >= SCORE_FIVE,
+            "Five in a row should score at least SCORE_FIVE"
+        );
     }
 
     #[test]
@@ -2193,7 +2188,9 @@ mod tests {
     fn test_render_has_background() {
         let app = fresh_app();
         let cmds = app.render();
-        let has_bg = cmds.iter().any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == BASE));
+        let has_bg = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == BASE));
         assert!(has_bg, "Render should include background rect");
     }
 
@@ -2201,7 +2198,9 @@ mod tests {
     fn test_render_has_title() {
         let app = fresh_app();
         let cmds = app.render();
-        let has_title = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Gomoku"));
+        let has_title = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Gomoku"));
         assert!(has_title, "Render should include title text");
     }
 
@@ -2209,10 +2208,16 @@ mod tests {
     fn test_render_has_grid_lines() {
         let app = fresh_app();
         let cmds = app.render();
-        let line_count = cmds.iter().filter(|c| matches!(c, RenderCommand::Line { .. })).count();
+        let line_count = cmds
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Line { .. }))
+            .count();
         // At minimum: 15 horizontal + 15 vertical = 30 grid lines,
         // plus separator lines in the panel
-        assert!(line_count >= 30, "Should have at least 30 grid lines, got {line_count}");
+        assert!(
+            line_count >= 30,
+            "Should have at least 30 grid lines, got {line_count}"
+        );
     }
 
     #[test]
@@ -2220,11 +2225,17 @@ mod tests {
         let app = fresh_app();
         let cmds = app.render();
         // Star points are rendered as small filled circles
-        let star_count = cmds.iter().filter(|c| {
-            matches!(c, RenderCommand::FillRect { color, width, .. }
+        let star_count = cmds
+            .iter()
+            .filter(|c| {
+                matches!(c, RenderCommand::FillRect { color, width, .. }
                 if *color == STAR_POINT_COLOR && *width < 20.0)
-        }).count();
-        assert_eq!(star_count, 5, "Should render 5 star points, got {star_count}");
+            })
+            .count();
+        assert_eq!(
+            star_count, 5,
+            "Should render 5 star points, got {star_count}"
+        );
     }
 
     #[test]
@@ -2233,9 +2244,9 @@ mod tests {
         app.board.set(7, 7, Cell::Black);
         let cmds = app.render();
         // Should have a black stone circle
-        let has_black_stone = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::FillRect { color, .. } if *color == BLACK_STONE)
-        });
+        let has_black_stone = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == BLACK_STONE));
         assert!(has_black_stone, "Should render a black stone");
     }
 
@@ -2243,9 +2254,9 @@ mod tests {
     fn test_render_shows_cursor() {
         let app = fresh_app();
         let cmds = app.render();
-        let has_cursor = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::StrokeRect { color, .. } if *color == CURSOR_COLOR)
-        });
+        let has_cursor = cmds.iter().any(
+            |c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == CURSOR_COLOR),
+        );
         assert!(has_cursor, "Should render cursor highlight");
     }
 
@@ -2262,9 +2273,12 @@ mod tests {
             positions: (3..8).map(|c| (5, c)).collect(),
         });
         let cmds = app.render();
-        let highlight_count = cmds.iter().filter(|c| {
-            matches!(c, RenderCommand::FillRect { color, .. } if *color == WIN_HIGHLIGHT)
-        }).count();
+        let highlight_count = cmds
+            .iter()
+            .filter(
+                |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == WIN_HIGHLIGHT),
+            )
+            .count();
         assert_eq!(highlight_count, 5, "Should highlight 5 winning positions");
     }
 
@@ -2274,9 +2288,9 @@ mod tests {
         app.phase = GamePhase::Won;
         app.winner = Cell::Black;
         let cmds = app.render();
-        let has_game_over = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text.contains("wins"))
-        });
+        let has_game_over = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("wins")));
         assert!(has_game_over, "Should show game over message");
     }
 
@@ -2284,9 +2298,9 @@ mod tests {
     fn test_render_shows_controls_panel() {
         let app = fresh_app();
         let cmds = app.render();
-        let has_controls = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "Controls")
-        });
+        let has_controls = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Controls"));
         assert!(has_controls, "Should show controls section");
     }
 
@@ -2294,9 +2308,9 @@ mod tests {
     fn test_render_shows_scores_panel() {
         let app = fresh_app();
         let cmds = app.render();
-        let has_scores = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "Scores")
-        });
+        let has_scores = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Scores"));
         assert!(has_scores, "Should show scores section");
     }
 

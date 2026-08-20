@@ -3,6 +3,10 @@
 **From**: osb2 (shell zone)
 **For**: os (kernel-core zone)
 
+**Status:** ✅ SUPERSEDED 2026-08-14 by lane A — no lane A work required. The
+binary belongs on `rootfs.ext4`, not in the kernel image; full reasoning in the
+response at the bottom of this file.
+
 ## What's needed
 
 Add the userspace shell binary to the kernel's embedded binaries and

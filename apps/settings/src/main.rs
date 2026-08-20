@@ -773,6 +773,14 @@ impl DropdownLayout {
     /// one is a change to the other.
     #[must_use]
     pub fn item_at(&self, mx: f32, my: f32) -> Option<usize> {
+        // A NaN compares false against everything, so it passes every bounds
+        // test below by failing all of them, and `NaN as usize` is 0 rather
+        // than a trap — between them that made a coordinate that is nowhere
+        // select the popup's first item. Rejected up front, where it is one
+        // condition rather than three double negatives.
+        if !mx.is_finite() || !my.is_finite() {
+            return None;
+        }
         if mx < self.x || mx >= self.x + self.width {
             return None;
         }
@@ -782,6 +790,7 @@ impl DropdownLayout {
         }
         // Truncating rather than rounding: a click 35.9px below the first row's
         // top is on the first row, not adjacent to the second.
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let row = ((my - top) / DROPDOWN_ITEM_HEIGHT) as usize;
         if row >= self.window.count {
             return None;
@@ -2097,60 +2106,60 @@ impl SettingsState {
             // Login Options sub-page
             y = render_section_header(tree, x, y, "Login Options");
 
-                render_setting_row(tree, x, y, "Auto-login on startup", 0.0);
-                render_toggle(tree, right_x, y + 12.0, self.auto_login_enabled);
-                y += ITEM_HEIGHT;
+            render_setting_row(tree, x, y, "Auto-login on startup", 0.0);
+            render_toggle(tree, right_x, y + 12.0, self.auto_login_enabled);
+            y += ITEM_HEIGHT;
 
-                // Password change button
-                render_setting_row(tree, x, y, "Password", 0.0);
-                self.render_button(tree, right_x, y + 6.0, "Change Password", COL_ACCENT);
-                y += ITEM_HEIGHT + SECTION_SPACING;
+            // Password change button
+            render_setting_row(tree, x, y, "Password", 0.0);
+            self.render_button(tree, right_x, y + 6.0, "Change Password", COL_ACCENT);
+            y += ITEM_HEIGHT + SECTION_SPACING;
 
-                // Account picture
-                y = render_section_header(tree, x, y, "Account Picture");
-                tree.text(
-                    x,
-                    y + 4.0,
-                    "Choose a picture for your account:",
-                    COL_SUBTEXT0,
-                    13.0,
-                );
-                y += 28.0;
+            // Account picture
+            y = render_section_header(tree, x, y, "Account Picture");
+            tree.text(
+                x,
+                y + 4.0,
+                "Choose a picture for your account:",
+                COL_SUBTEXT0,
+                13.0,
+            );
+            y += 28.0;
 
-                // Picture selection grid (placeholder icons)
-                let icon_size = 48.0;
-                let icon_spacing = 12.0;
-                let icons = [
-                    "\u{1F464}",
-                    "\u{1F468}",
-                    "\u{1F469}",
-                    "\u{1F474}",
-                    "\u{1F475}",
-                    "\u{1F476}",
-                ];
-                for (idx, icon) in icons.iter().enumerate() {
-                    let ix = x + (idx as f32) * (icon_size + icon_spacing);
-                    let is_selected = idx == 0; // first is default selected
-                    let bg = if is_selected {
-                        COL_SURFACE1
-                    } else {
-                        COL_SURFACE0
-                    };
-                    fill_rounded(tree, ix, y, icon_size, icon_size, bg, 8.0);
-                    if is_selected {
-                        tree.push(RenderCommand::StrokeRect {
-                            x: ix,
-                            y,
-                            width: icon_size,
-                            height: icon_size,
-                            color: COL_ACCENT,
-                            line_width: 2.0,
-                            corner_radii: CornerRadii::all(8.0),
-                        });
-                    }
-                    tree.text(ix + 12.0, y + 12.0, icon, COL_TEXT, 20.0);
+            // Picture selection grid (placeholder icons)
+            let icon_size = 48.0;
+            let icon_spacing = 12.0;
+            let icons = [
+                "\u{1F464}",
+                "\u{1F468}",
+                "\u{1F469}",
+                "\u{1F474}",
+                "\u{1F475}",
+                "\u{1F476}",
+            ];
+            for (idx, icon) in icons.iter().enumerate() {
+                let ix = x + (idx as f32) * (icon_size + icon_spacing);
+                let is_selected = idx == 0; // first is default selected
+                let bg = if is_selected {
+                    COL_SURFACE1
+                } else {
+                    COL_SURFACE0
+                };
+                fill_rounded(tree, ix, y, icon_size, icon_size, bg, 8.0);
+                if is_selected {
+                    tree.push(RenderCommand::StrokeRect {
+                        x: ix,
+                        y,
+                        width: icon_size,
+                        height: icon_size,
+                        color: COL_ACCENT,
+                        line_width: 2.0,
+                        corner_radii: CornerRadii::all(8.0),
+                    });
                 }
-                return;
+                tree.text(ix + 12.0, y + 12.0, icon, COL_TEXT, 20.0);
+            }
+            return;
         }
 
         // User account list (default UserAccounts page)
@@ -2261,105 +2270,105 @@ impl SettingsState {
         if let SettingsPage::Capabilities = self.current_page {
             // App permissions summary sub-page
             y = render_section_header(tree, x, y, "App Permissions Summary");
-                tree.text(
-                    x,
-                    y + 4.0,
-                    "Overview of which apps have access to sensitive resources:",
-                    COL_SUBTEXT0,
-                    13.0,
-                );
-                y += 32.0;
+            tree.text(
+                x,
+                y + 4.0,
+                "Overview of which apps have access to sensitive resources:",
+                COL_SUBTEXT0,
+                13.0,
+            );
+            y += 32.0;
 
-                // Summary table header
-                text_bold(tree, x, y, "App", COL_TEXT, 13.0);
-                text_bold(tree, x + 200.0, y, "Location", COL_TEXT, 13.0);
-                text_bold(tree, x + 290.0, y, "Camera", COL_TEXT, 13.0);
-                text_bold(tree, x + 370.0, y, "Mic", COL_TEXT, 13.0);
-                text_bold(tree, x + 440.0, y, "Background", COL_TEXT, 13.0);
-                y += 24.0;
+            // Summary table header
+            text_bold(tree, x, y, "App", COL_TEXT, 13.0);
+            text_bold(tree, x + 200.0, y, "Location", COL_TEXT, 13.0);
+            text_bold(tree, x + 290.0, y, "Camera", COL_TEXT, 13.0);
+            text_bold(tree, x + 370.0, y, "Mic", COL_TEXT, 13.0);
+            text_bold(tree, x + 440.0, y, "Background", COL_TEXT, 13.0);
+            y += 24.0;
 
-                // Divider
-                tree.push(RenderCommand::Line {
-                    x1: x,
-                    y1: y,
-                    x2: x + 560.0,
-                    y2: y,
-                    color: COL_SURFACE1,
-                    width: 1.0,
-                });
-                y += 8.0;
+            // Divider
+            tree.push(RenderCommand::Line {
+                x1: x,
+                y1: y,
+                x2: x + 560.0,
+                y2: y,
+                color: COL_SURFACE1,
+                width: 1.0,
+            });
+            y += 8.0;
 
-                // Build summary from all apps mentioned
-                let all_apps = [
-                    "Maps",
-                    "Weather",
-                    "Camera",
-                    "Browser",
-                    "Video Chat",
-                    "Social Media",
-                    "Voice Recorder",
-                    "Email",
-                    "Music Player",
-                ];
-                for app_name in all_apps {
-                    let loc = self.location_apps.iter().find(|a| a.app_name == app_name);
-                    let cam = self.camera_apps.iter().find(|a| a.app_name == app_name);
-                    let mic = self.microphone_apps.iter().find(|a| a.app_name == app_name);
-                    let bg = self.background_apps.iter().find(|a| a.app_name == app_name);
+            // Build summary from all apps mentioned
+            let all_apps = [
+                "Maps",
+                "Weather",
+                "Camera",
+                "Browser",
+                "Video Chat",
+                "Social Media",
+                "Voice Recorder",
+                "Email",
+                "Music Player",
+            ];
+            for app_name in all_apps {
+                let loc = self.location_apps.iter().find(|a| a.app_name == app_name);
+                let cam = self.camera_apps.iter().find(|a| a.app_name == app_name);
+                let mic = self.microphone_apps.iter().find(|a| a.app_name == app_name);
+                let bg = self.background_apps.iter().find(|a| a.app_name == app_name);
 
-                    tree.text(x, y + 4.0, app_name, COL_TEXT, 12.0);
+                tree.text(x, y + 4.0, app_name, COL_TEXT, 12.0);
 
-                    let check = "\u{2713}";
-                    let cross = "\u{2717}";
+                let check = "\u{2713}";
+                let cross = "\u{2717}";
 
-                    // Location
-                    if let Some(p) = loc {
-                        let (sym, col) = if p.allowed {
-                            (check, COL_GREEN)
-                        } else {
-                            (cross, COL_RED)
-                        };
-                        tree.text(x + 220.0, y + 4.0, sym, col, 13.0);
+                // Location
+                if let Some(p) = loc {
+                    let (sym, col) = if p.allowed {
+                        (check, COL_GREEN)
                     } else {
-                        tree.text(x + 220.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
-                    }
-                    // Camera
-                    if let Some(p) = cam {
-                        let (sym, col) = if p.allowed {
-                            (check, COL_GREEN)
-                        } else {
-                            (cross, COL_RED)
-                        };
-                        tree.text(x + 310.0, y + 4.0, sym, col, 13.0);
-                    } else {
-                        tree.text(x + 310.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
-                    }
-                    // Mic
-                    if let Some(p) = mic {
-                        let (sym, col) = if p.allowed {
-                            (check, COL_GREEN)
-                        } else {
-                            (cross, COL_RED)
-                        };
-                        tree.text(x + 385.0, y + 4.0, sym, col, 13.0);
-                    } else {
-                        tree.text(x + 385.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
-                    }
-                    // Background
-                    if let Some(p) = bg {
-                        let (sym, col) = if p.allowed {
-                            (check, COL_GREEN)
-                        } else {
-                            (cross, COL_RED)
-                        };
-                        tree.text(x + 465.0, y + 4.0, sym, col, 13.0);
-                    } else {
-                        tree.text(x + 465.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
-                    }
-
-                    y += 28.0;
+                        (cross, COL_RED)
+                    };
+                    tree.text(x + 220.0, y + 4.0, sym, col, 13.0);
+                } else {
+                    tree.text(x + 220.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
                 }
-                return;
+                // Camera
+                if let Some(p) = cam {
+                    let (sym, col) = if p.allowed {
+                        (check, COL_GREEN)
+                    } else {
+                        (cross, COL_RED)
+                    };
+                    tree.text(x + 310.0, y + 4.0, sym, col, 13.0);
+                } else {
+                    tree.text(x + 310.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+                }
+                // Mic
+                if let Some(p) = mic {
+                    let (sym, col) = if p.allowed {
+                        (check, COL_GREEN)
+                    } else {
+                        (cross, COL_RED)
+                    };
+                    tree.text(x + 385.0, y + 4.0, sym, col, 13.0);
+                } else {
+                    tree.text(x + 385.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+                }
+                // Background
+                if let Some(p) = bg {
+                    let (sym, col) = if p.allowed {
+                        (check, COL_GREEN)
+                    } else {
+                        (cross, COL_RED)
+                    };
+                    tree.text(x + 465.0, y + 4.0, sym, col, 13.0);
+                } else {
+                    tree.text(x + 465.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+                }
+
+                y += 28.0;
+            }
+            return;
         }
 
         // Location access (default Permissions page)
@@ -3764,10 +3773,7 @@ impl SettingsState {
         if let Some(layout) = self.dropdown_layout() {
             let capacity = layout.window.count;
             if capacity > 0 && layout.selected >= capacity {
-                self.dropdown_scroll = layout
-                    .selected
-                    .saturating_add(1)
-                    .saturating_sub(capacity);
+                self.dropdown_scroll = layout.selected.saturating_add(1).saturating_sub(capacity);
             }
         }
     }
@@ -4451,7 +4457,8 @@ mod tests {
             let px = 100.0 + PILL_ROW_X + (idx as f32) * PILL_PITCH + 4.0;
             state.handle_themes_click(px, y + PILL_INSET_Y + 4.0, 100.0);
             assert_eq!(
-                state.appearance.settings.transparency, *level,
+                state.appearance.settings.transparency,
+                *level,
                 "pill {idx} should select {}",
                 level.label()
             );
@@ -4495,7 +4502,8 @@ mod tests {
             let sy = grid_y + ((idx / 6) as f32) * 46.0 + 4.0;
             state.handle_colors_click(sx, sy, 100.0);
             assert_eq!(
-                state.appearance.settings.accent_color, *accent,
+                state.appearance.settings.accent_color,
+                *accent,
                 "swatch {idx} should select {}",
                 accent.label()
             );
@@ -4547,9 +4555,8 @@ mod tests {
             assert!(path.is_file(), "the click should have written {path:?}");
 
             // Read it back the way the shell does.
-            let saved = AppearanceSettings::read_from(&appearance::config::load(
-                appearance::CONFIG_NAME,
-            ));
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
             assert_eq!(saved.accent_color, AccentColor::Teal);
         });
     }
@@ -4593,6 +4600,34 @@ mod tests {
     /// drop shadow onwards — rather than to an x/y box, so that moving the
     /// popup cannot silently turn this into a filter that matches nothing.
     fn drawn_dropdown_items(state: &SettingsState) -> Vec<String> {
+        drawn_dropdown_rows(state)
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect()
+    }
+
+    /// The baseline offset the dropdown renderer draws an item's text at,
+    /// measured down from the top of the item's own row.
+    ///
+    /// This is the anchor that lets a test recover the *painted* row top from
+    /// the render tree. It is checked against a rectangle rather than trusted:
+    /// see `the_selected_rows_highlight_confirms_where_the_rows_are_painted`.
+    const DRAWN_ITEM_TEXT_BASELINE: f32 = 10.0;
+
+    /// Every item the open dropdown drew, as `(label, painted row top)`.
+    ///
+    /// Scoped to the commands the popup itself emitted — everything from its
+    /// drop shadow onwards — rather than to an x/y box, so that moving the
+    /// popup cannot silently turn this into a filter that matches nothing.
+    ///
+    /// The row top comes out of the `Text` command the renderer pushed, *not*
+    /// out of `DropdownLayout::row_top`. That distinction is the whole point:
+    /// a test that positions its probes with the same function the hit test
+    /// inverts is not testing the hit test at all — move the renderer and the
+    /// probes move with it, and the test passes through the drift it exists to
+    /// catch. This one caught nothing when `row_top` was shifted three pixels,
+    /// which is how the flaw was found.
+    fn drawn_dropdown_rows(state: &SettingsState) -> Vec<(String, f32)> {
         let tree = state.render();
         let start = tree
             .commands
@@ -4605,8 +4640,10 @@ mod tests {
             .iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
-                    text, font_size, ..
-                } if (font_size - 13.0).abs() < 0.01 => Some(text.clone()),
+                    text, y, font_size, ..
+                } if (font_size - 13.0).abs() < 0.01 => {
+                    Some((text.clone(), y - DRAWN_ITEM_TEXT_BASELINE))
+                }
                 _ => None,
             })
             .collect()
@@ -4654,10 +4691,7 @@ mod tests {
                 .checked_sub(layout.window.start)
                 .expect("the whole list fits in the default window");
             let y = layout.row_top(row) + DROPDOWN_ITEM_HEIGHT / 2.0;
-            assert_eq!(
-                click(&mut state, layout.x + 20.0, y),
-                EventResult::Consumed
-            );
+            assert_eq!(click(&mut state, layout.x + 20.0, y), EventResult::Consumed);
             assert_eq!(
                 state.resolution_index, index,
                 "clicking item {index} should have chosen it"
@@ -4675,7 +4709,7 @@ mod tests {
             state.window_height = height;
             state.show_dropdown(DropdownId::Resolution);
             let layout = state.dropdown_layout().expect("a dropdown is open");
-            let drawn = drawn_dropdown_items(&state);
+            let drawn = drawn_dropdown_rows(&state);
             assert_eq!(
                 drawn.len(),
                 layout.window.count,
@@ -4683,19 +4717,128 @@ mod tests {
                 drawn.len(),
                 layout.window.count
             );
-            for (row, label) in drawn.iter().enumerate() {
-                let y = layout.row_top(row) + DROPDOWN_ITEM_HEIGHT / 2.0;
-                let index = layout
-                    .item_at(layout.x + 20.0, y)
-                    .unwrap_or_else(|| panic!("row {row} at y={y} hit nothing"));
+            for (row, (label, top)) in drawn.iter().enumerate() {
+                // `top` is where the renderer *put* this row, recovered from
+                // the command it pushed — not `layout.row_top(row)`, which is
+                // the same arithmetic `item_at` inverts and so would move in
+                // step with any drift.
+                let top = *top;
+                // Sweep the row rather than probing its middle. A drift of a
+                // few pixels is invisible at the centre of a 36px row and
+                // shows up only at the edges, so a centre probe would pass
+                // straight through the fault it exists to catch. The last
+                // sample is the row's final pixel: a row owns its top edge and
+                // not its bottom one.
+                for step in 0..8 {
+                    let y = top + (step as f32) * DROPDOWN_ITEM_HEIGHT / 8.0;
+                    let index = layout
+                        .item_at(layout.x + 20.0, y)
+                        .unwrap_or_else(|| panic!("row {row} at y={y} hit nothing"));
+                    assert_eq!(
+                        layout.items.get(index),
+                        Some(label),
+                        "at {height}px, row {row} shows {label} but y={y} \
+                         hit-tests to item {index}"
+                    );
+                }
+                let last = top + DROPDOWN_ITEM_HEIGHT - 0.01;
                 assert_eq!(
-                    layout.items.get(index),
+                    layout
+                        .item_at(layout.x + 20.0, last)
+                        .and_then(|i| layout.items.get(i)),
                     Some(label),
-                    "at {height}px, row {row} shows {label} but hit-tests to \
-                     item {index}"
+                    "at {height}px, row {row}'s last pixel does not belong to it"
                 );
             }
         }
+    }
+
+    /// The row tops `drawn_dropdown_rows` recovers are read off a *text*
+    /// baseline, which only works if the renderer really does draw an item's
+    /// text `DRAWN_ITEM_TEXT_BASELINE` below the item's own top.
+    ///
+    /// The selected row is the one place the renderer paints a rectangle at a
+    /// row's top edge, so it is the one place that assumption can be checked
+    /// against something other than itself. Without this, moving the baseline
+    /// would quietly move every probe in
+    /// `the_hit_test_names_the_item_that_was_drawn_under_the_pointer` and turn
+    /// it back into a test of nothing.
+    #[test]
+    fn the_selected_rows_highlight_confirms_where_the_rows_are_painted() {
+        let mut state = SettingsState::new();
+        state.resolution_index = 2;
+        state.show_dropdown(DropdownId::Resolution);
+        let layout = state.dropdown_layout().expect("a dropdown is open");
+        let row_on_screen = layout
+            .window
+            .start
+            .checked_sub(0)
+            .and_then(|start| 2usize.checked_sub(start))
+            .expect("the chosen item is on screen");
+        let (_, from_text) = drawn_dropdown_rows(&state)
+            .into_iter()
+            .nth(row_on_screen)
+            .expect("the chosen row was drawn");
+
+        let tree = state.render();
+        let shadow = tree
+            .commands
+            .iter()
+            .position(|c| matches!(c, RenderCommand::BoxShadow { .. }))
+            .expect("an open dropdown draws a shadow");
+        let from_rect = tree
+            .commands
+            .get(shadow..)
+            .unwrap_or_default()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*x - (layout.x + 4.0)).abs() < 0.01
+                    && (*width - (layout.width - 8.0)).abs() < 0.01
+                    && (*height - (DROPDOWN_ITEM_HEIGHT - 2.0)).abs() < 0.01 =>
+                {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .expect("the chosen item draws a highlight at its own top edge");
+
+        assert!(
+            (from_text - from_rect).abs() < 0.01,
+            "the text baseline says the row starts at {from_text}, the \
+             highlight says {from_rect} -- the offset the test recovers row \
+             tops with is stale"
+        );
+    }
+
+    #[test]
+    fn a_dropdown_coordinate_that_is_not_a_number_chooses_nothing() {
+        // Every bounds test in `item_at` is a `<` or a `>=`, and a NaN is
+        // neither less nor greater than anything -- so it passed all of them
+        // by failing all of them, and `NaN as usize` is 0 rather than a trap.
+        // The popup's first item was chosen for a click that is nowhere.
+        let mut state = SettingsState::new();
+        state.resolution_index = 2;
+        state.show_dropdown(DropdownId::Resolution);
+        let layout = state.dropdown_layout().expect("a dropdown is open");
+        let inside_y = layout.row_top(0) + DROPDOWN_ITEM_HEIGHT / 2.0;
+        let inside_x = layout.x + 20.0;
+        for (mx, my) in [
+            (f32::NAN, inside_y),
+            (inside_x, f32::NAN),
+            (f32::NAN, f32::NAN),
+            (inside_x, f32::INFINITY),
+            (f32::NEG_INFINITY, inside_y),
+        ] {
+            assert_eq!(layout.item_at(mx, my), None, "({mx}, {my}) named an item");
+        }
+        click(&mut state, f32::NAN, f32::NAN);
+        assert_eq!(state.resolution_index, 2, "a NaN click changed the choice");
     }
 
     #[test]
@@ -4705,7 +4848,10 @@ mod tests {
         state.show_dropdown(DropdownId::Resolution);
         let layout = state.dropdown_layout().expect("a dropdown is open");
         // Well to the left of the popup, over the sidebar.
-        assert_eq!(click(&mut state, 10.0, layout.y + 10.0), EventResult::Consumed);
+        assert_eq!(
+            click(&mut state, 10.0, layout.y + 10.0),
+            EventResult::Consumed
+        );
         assert!(state.open_dropdown.is_none());
         assert_eq!(state.resolution_index, 2, "a dismissal is not a choice");
     }
@@ -5014,5 +5160,4 @@ mod tests {
         click(&mut state, layout.x + 20.0, y);
         assert_eq!(state.resolution_index, 1);
     }
-
 }

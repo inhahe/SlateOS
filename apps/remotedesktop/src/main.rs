@@ -1386,7 +1386,13 @@ impl RemoteDesktopApp {
 
     /// `y` is relative to the top of the sidebar's content area.
     fn handle_sidebar_click(&mut self, _x: f32, y: f32) -> EventResult {
-        if y < 0.0 {
+        // `y < 0.0` alone lets a NaN through, because a NaN is less than
+        // nothing -- and `NaN as usize` is 0 rather than a trap, so the
+        // ActiveSessions arm below selected the first session for a click that
+        // is nowhere at all. The Connections arm survived it by accident: it
+        // walks rows with `y < next`, which is also false for a NaN, so its
+        // loop simply ran off the end and selected nothing.
+        if !y.is_finite() || y < 0.0 {
             return EventResult::Consumed;
         }
         match self.current_view {
@@ -4207,6 +4213,31 @@ mod tests {
         app.selected_profile = None;
         app.handle_sidebar_click(10.0, 5_000.0);
         assert_eq!(app.selected_profile, None);
+    }
+
+    /// A coordinate that is not a number is not a coordinate, and must not
+    /// name the row that happens to sit at zero.
+    ///
+    /// The guard was `y < 0.0`, which a NaN passes -- a NaN is not less than
+    /// anything -- and `NaN as usize` is `0` in Rust rather than a trap or a
+    /// wrap. The session list divides, so it selected session 0; the profile
+    /// list walks its rows with `y < next`, which is also false for a NaN, so
+    /// that arm ran off the end and escaped by luck rather than by design.
+    /// Both are checked here so the luck is not what holds.
+    #[test]
+    fn a_sidebar_coordinate_that_is_not_a_number_selects_nothing() {
+        for y in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut app = RemoteDesktopApp::new();
+            app.current_view = MainView::ActiveSessions;
+            app.selected_session = None;
+            app.handle_sidebar_click(10.0, y);
+            assert_eq!(app.selected_session, None, "y={y} selected a session");
+
+            app.current_view = MainView::Connections;
+            app.selected_profile = None;
+            app.handle_sidebar_click(10.0, y);
+            assert_eq!(app.selected_profile, None, "y={y} selected a profile");
+        }
     }
 
     /// A scrolled sidebar hit-tests against what is on screen, not against

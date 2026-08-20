@@ -42203,6 +42203,27 @@ Two things about it are worth adding to the sweep's record:
   than a latent one waiting on `C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`. That is
   the second app in that position, after kanban.
 
+### Two more, found the same way — not yet fixed
+
+Turned up while surveying the rest of the scroll-delta consumers. Both are the
+plain shape: declared, initialised, written by the wheel handler, **never
+read**. Neither has been fixed yet.
+
+| App | Field | Hits | Why the sweep's grep missed it |
+|---|---|---|---|
+| `apps/diskimager` | `scroll_offset` (`main.rs:1015`, written at 1551) | 3 | Three hits, not four — it has no `.max()`/clamp helper of its own, so it falls below the signature's threshold. |
+| `apps/devicemanager` | `properties_scroll` (`main.rs:777`, written at 3145) | 5 | Five hits, not four: two extra *writes* (`= 0.0` resets at 878 and 3080) push it over. Resets look like liveness and are not. |
+
+That is the lesson worth carrying: **a hit count is a bad test for a dead
+field, in both directions.** What identifies one is the absence of a *read*,
+and both of these have zero. The reliable grep is for the field name in the
+crate's render functions, not a count over the crate.
+
+Their live siblings in the same two apps are fine and read correctly
+(`diskimager::sidebar_scroll` at 1576/1810, `devicemanager::tree_scroll` at
+1722/3054/3115), which is what makes the dead one easy to overlook: the app
+visibly scrolls, just not in that pane.
+
 ### Left over
 
 `gui/desktop`'s touchpad-gesture, Bluetooth and window-rules panels are now

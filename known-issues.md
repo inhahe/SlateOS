@@ -44179,3 +44179,199 @@ baseline is not a weaker measurement but no measurement.
 The general form, for anything else built this way: a test that proves a
 property by observing a *transition* must establish the starting state, or it
 is only observing the end state and calling it a transition.
+
+### partmanager described one rectangle four times — FIXED
+
+The partition list's geometry was spelled out independently by the renderer,
+the click handler and the wheel handler. Each was correct about something and
+none agreed with the others:
+
+| what | where rows begin | how tall the region is |
+|---|---|---|
+| renderer | `top + 18 + PARTITION_ROW_HEIGHT` | clip of `list_height - 20` |
+| click | a flat seven-term sum ending `+ PARTITION_ROW_HEIGHT + 18.0` | down to `height - STATUS_BAR - queue_h` |
+| wheel | plain `top` — the section heading's own y, 42 px too high | `queue_top - top - 40` |
+
+The consequences, in descending order of how much they matter:
+
+- **The clip ran 22 px below the bottom a click was accepted at.** Rows were
+  painted over the queue panel's header where no click could reach them. That
+  is invisible *today* only because `render_queue_panel` runs after
+  `render_partition_list` and covers the overdraw — which is paint order doing
+  a hit test's job, and stops being true the moment either panel moves.
+- **The wheel measured the viewport from the heading rather than from the
+  first row**, making it 2 px taller than it is. A viewport believed too tall
+  gives a maximum scroll that is too small, so the last row's final sliver
+  could never be brought into view.
+- **The click accepted a `DISK_MAP_PADDING`-wide strip right of the last
+  painted pixel; the wheel accepted one left of the first.** A gutter that
+  belongs to no list scrolled and selected in one.
+- **The row index came from an unguarded `as usize`.** A negative or NaN `f32`
+  cast to `usize` saturates to zero in Rust rather than wrapping or trapping,
+  so a NaN coordinate named row 0.
+
+`PartitionList` now holds the left, width, panel top, data top and bottom;
+`row_at()` is `row_y()` inverted; and the renderer, the hit test and the wheel
+all read it. `queue_panel_height()` collapses the four hand-written choices
+between `QUEUE_PANEL_HEIGHT` and a literal `28.0`, one of which *is* the
+partition list's bottom edge.
+
+| test | pins |
+|---|---|
+| `every_visible_partition_row_answers_exactly_where_it_was_painted` | eight probes across every row the renderer emitted and did not clip away, plus its last pixel |
+| `the_clip_the_renderer_emits_is_the_region_a_click_lands_in` | the clip's own top and bottom edge, read out of the `PushClip` command |
+| `nothing_beside_the_painted_list_selects_a_partition` | both horizontal gutters |
+| `a_coordinate_that_is_not_a_number_selects_nothing` | NaN, ±inf and negative, through the click path and through `row_at` directly |
+| `scrolling_to_the_end_brings_the_last_row_fully_into_view` | the wheel's idea of the viewport against the renderer's |
+| `the_wheel_and_the_click_agree_on_where_the_list_is` | the wheel's horizontal extent against the painted one |
+
+All six verified by reintroduction — each defect put back one at a time, each
+pinned by the test named for it. partmanager 113 → 119 tests.
+
+**Still open here:** the *queue* panel has the same three-spellings shape
+(`render_queue_panel`, the hover in `handle_mouse_move`, and the wheel each
+compute `queue_top` and the row offset themselves). No divergence was found
+between them, but nothing holds them together either. The fix is the same
+shape as `PartitionList` and is not yet done.
+
+### Two hit tests let a NaN select the first row — FIXED
+
+Found while sweeping the rest of lane C for the same family. Both had a bounds
+guard that looked complete and was not, for the same reason: **a NaN compares
+false against every operator, so it passes a `<`/`>=` bounds test by failing
+it**, and `NaN as usize` is `0` rather than a trap or a wrap. The two compose
+into "a coordinate that is nowhere selects row 0".
+
+- `apps/settings` `DropdownLayout::item_at` — every one of its three guards is
+  a `<` or a `>=`, so a NaN reached the divide and chose the popup's first
+  visible item.
+- `apps/remotedesktop` `handle_sidebar_click` — guarded with `y < 0.0`. Its
+  `Connections` arm survived by accident, because it walks rows with `y < next`
+  and that is false for a NaN too, so the loop ran off the end. Its
+  `ActiveSessions` arm divides, and selected session 0.
+
+Both now reject non-finite coordinates up front, where it is one condition
+rather than three double negatives.
+
+Also strengthened while there:
+`the_hit_test_names_the_item_that_was_drawn_under_the_pointer` in settings was
+probing each dropdown row's **centre**, where a drift of a few pixels is
+invisible in a 36 px row — it now sweeps eight points across each row plus the
+row's last pixel. A centre probe passes straight through the fault it exists
+to catch.
+
+**Cleared in the same sweep, no change needed:** `guitk/textview`
+(`hit_test` clamps a caret to line 0 for a click above the text, which is what
+every editor does and is not the list-selection rule), `gui/desktop/run_dialog`,
+`apps/compass`, `apps/ebook`, `apps/unitconverter`, `apps/jsonviewer`,
+`apps/sysinfo`, `apps/devicemanager`, `apps/diskimager`, `apps/benchmark` —
+the last four already carry explicit `is_finite` guards from earlier passes.
+
+### A settings test positioned its probes with the function it was testing — FIXED
+
+Found by trying to reintroduce a defect and discovering there was nothing to
+reintroduce it *into*. `the_hit_test_names_the_item_that_was_drawn_under_the_pointer`
+computed each probe as `layout.row_top(row) + …` and then asked
+`layout.item_at(…)` which item that was. But `item_at` is `row_top` inverted,
+so the probe and the answer came from the same place and agreed by
+construction. What the test could not see is the only thing worth seeing: the
+*renderer* drawing somewhere other than `row_top`. Shifting the dropdown
+renderer's `iy` three pixels — the exact fault the test is named for — left it
+passing.
+
+It now recovers each row's top from the `Text` command the renderer actually
+pushed. That anchor rests on the renderer drawing an item's label a fixed
+distance below the item's top, so a second test,
+`the_selected_rows_highlight_confirms_where_the_rows_are_painted`, checks that
+distance against the highlight rectangle the selected row paints at its own top
+edge — the one place the popup emits a rectangle aligned to a row. Without it,
+moving the baseline would silently move every probe and quietly restore the
+original flaw.
+
+Both failure modes are now in `scripts/reintro-row-hit-tests.py`. The general
+rule, which is the same one that broke the sweep script itself: **a test must
+get its expected values from somewhere other than the code under test.** A
+renderer's own arithmetic is not an independent source just because it lives in
+a different function.
+
+### The notification pane's per-app settings list described one card four ways — FIXED
+
+The pane's *notification* half was collapsed onto `card_tops` / `card_at` /
+`qs_at` in an earlier pass, and the doc comments there still narrate the 76 px
+drift that prompted it. The *per-app settings* half — the page you reach
+through the pane's "Settings" link — was left as it was, and it had every
+symptom the other half was fixed for.
+
+`render_app_settings` walked a running total; `handle_app_settings_click`
+divided by a literal. Four disagreements, in descending severity:
+
+| | Renderer paints | Click accepted |
+|---|---|---|
+| card body | `FillRect { height: 100.0 }`, then `y += 108.0` | the full 108 px pitch |
+| enabled pill, x | `enabled_x .. enabled_x + 40` | `rx >= enabled_x`, **no right edge at all** |
+| enabled pill, y | `card_top + 10 .. card_top + 32` | `card_local_y < 35.0`, i.e. `card_top .. card_top + 35` |
+| bottom of list | clipped to the pane, loop breaks at the edge | **no bottom bound whatsoever** |
+
+So: the eight-pixel gutter between two cards belonged to the card above it;
+a click anywhere to the right of the pill — including past the pane's own edge
+— switched an app's notifications off; so did a click on the app *name*, which
+is drawn in that 0..35 band; and so did a click below the pane entirely, on an
+app card that was never on screen, hitting whatever window was behind it. The
+last one is the serious one: it is a click the user aimed at something else.
+
+`content_y < 0.0` was also the only guard, and a NaN is not less than zero, so
+it passed — and `NaN as usize` is `0`, not a trap. A pointer position that is
+nowhere at all named the first app in the list. The same shape as the settings
+dropdown and the remotedesktop sidebar above.
+
+**Fixed** by the same collapse: `APP_HEADING_HEIGHT` / `APP_CARD_HEIGHT` /
+`APP_CARD_PITCH` / `APP_TOGGLE_TOP` as named constants, `app_card_top(idx)` as
+the walk, `app_card_at(local_y)` as that walk inverted and bounded by the same
+clip the renderer draws inside, and `app_toggle_rect(card_top)` returning the
+one rectangle both the renderer and the hit test use. `card_width()` replaces
+three hand-written copies of `PANE_WIDTH - 2.0 * PANE_PADDING`. The link at the
+bottom of the list is placed from `app_card_top(len)` rather than from whatever
+`y` the loop happened to leave behind.
+
+Seven tests, each reintroduction-verified:
+
+| Test | Catches |
+|---|---|
+| `every_pixel_of_a_painted_pill_toggles_its_own_app` | the pill's rectangle shrinking, or drifting from the paint |
+| `nothing_outside_a_painted_pill_toggles_anything` | the unbounded right edge and the 0..35 band |
+| `the_gutter_between_two_app_cards_names_no_card` | the pitch/height confusion |
+| `a_card_below_the_panes_bottom_edge_is_not_clickable` | the missing bottom bound |
+| `the_pills_are_painted_on_the_cards_the_walk_places` | renderer and hit test drifting *together* |
+| `an_app_settings_coordinate_that_is_not_a_number_names_no_card` | the walk going back to a divide-and-cast |
+| `the_per_app_heading_is_not_part_of_the_first_card` | the caption being absorbed into card 0 |
+
+Three notes on the tests themselves, each of which cost a failing run to learn:
+
+- **The gutter has to be asked of `app_card_at` directly, not through a
+  click.** A click in the gutter is refused twice — once for being on no card,
+  and again for being nowhere near the pill — and the second refusal hides the
+  first, so the click-level assertion passes whether the gutter is handled
+  correctly or not. It is the card *identity* that is wrong, and only the
+  identity test sees it.
+- **Filtering the render tree by shape alone is not enough here.** The
+  quick-settings block above the list paints its toggles at the same size *and
+  the same x* as an app card's pill, so a shape filter returned nine
+  rectangles for four cards and the first "pill" the test swept was a
+  quick-setting 200 px higher up. The helper now slices the command list from
+  the "Per-App Settings" caption onwards first.
+- **The NaN guard as written is not reintroducible, and pretending otherwise
+  would have been the same mistake as the settings dropdown test above.**
+  Deleting `!local_y.is_finite()` from `app_card_at` leaves the suite green,
+  because a NaN also fails both comparisons *inside* the walk, so the walk
+  refuses it on its own. The guard is real defence but it is defence against a
+  future shape, not the current one. So the entry in
+  `scripts/reintro-row-hit-tests.py` reintroduces what actually reopens the
+  hole — the walk collapsing back into `(local_y - heading) / pitch as usize`
+  — and that the test does catch. A sweep entry whose defect the suite cannot
+  see is worse than no entry: it reports a green that means nothing.
+
+**Also cleared here:** `desktop`'s clippy run was failing outright — not
+warning, failing — on a `manual_contains` lint in a pre-existing test, so
+`cargo clippy -p desktop` had been red for however long since the toolchain
+picked that lint up. Fixed in passing; the crate now emits 77 warnings and no
+errors, down from 79 and one.

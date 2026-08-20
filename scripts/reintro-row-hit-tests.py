@@ -81,6 +81,9 @@ SETTINGS = Path("apps/settings/src/main.rs")
 MENU = Path("gui/toolkit/src/menu.rs")
 MENUBAR = Path("gui/toolkit/src/menubar.rs")
 TREE = Path("gui/toolkit/src/tree.rs")
+PARTMANAGER = Path("apps/partmanager/src/main.rs")
+REMOTEDESKTOP = Path("apps/remotedesktop/src/main.rs")
+NOTIF_PANE = Path("gui/desktop/src/notif_pane.rs")
 
 # (crate, path, name, old, new) -- `old` must occur exactly once in `path`.
 DEFECTS = [
@@ -384,6 +387,169 @@ DEFECTS = [
         "the tree draws its rows three pixels below where they answer",
         "            let row_y = y + (idx as f32 * row_h) - self.scroll_offset;",
         "            let row_y = y + (idx as f32 * row_h) - self.scroll_offset + 3.0;",
+    ),
+    # ----------------------------------------------------------- partmanager
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the partition list is clipped 22 px below where a click is accepted",
+        "        height: geom.viewport_height(),",
+        "        height: (geom.bottom - geom.panel_top - 20.0).max(0.0),",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the click accepts a padding-wide strip right of the painted list",
+        "    let list = PartitionList::of(app);\n"
+        "    if list.contains(x, y) {\n"
+        "        return handle_partition_list_click(app, y, list);",
+        "    let list = PartitionList::of(app);\n"
+        "    if y >= list.data_top\n"
+        "        && y < list.bottom\n"
+        "        && x >= list.left\n"
+        "        && x < app.width - DETAIL_PANEL_WIDTH\n"
+        "    {\n"
+        "        return handle_partition_list_click(app, y, list);",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the wheel believes the viewport two pixels taller than it is",
+        "        let max_scroll = list.max_scroll(region_count);",
+        "        let max_scroll = ((region_count as f32) * PARTITION_ROW_HEIGHT\n"
+        "            - (list.bottom - list.panel_top - 40.0))\n"
+        "            .max(0.0);",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the wheel scrolls the gutter left of the list",
+        "    let list = PartitionList::of(app);\n"
+        "    if list.contains(x, y) {\n"
+        "        let region_count",
+        "    let list = PartitionList::of(app);\n"
+        "    if y >= list.data_top\n"
+        "        && y < list.bottom\n"
+        "        && x >= SIDEBAR_WIDTH\n"
+        "        && x < app.width - DETAIL_PANEL_WIDTH\n"
+        "    {\n"
+        "        let region_count",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "row_at casts an unchecked f32 straight to usize",
+        "        if !(y >= self.data_top && y < self.bottom) {\n"
+        "            return None;\n"
+        "        }\n"
+        "        let offset = y - self.data_top + scroll;\n"
+        "        if !offset.is_finite() || offset < 0.0 {\n"
+        "            return None;\n"
+        "        }\n",
+        "        let offset = y - self.data_top + scroll;\n",
+    ),
+    (
+        "partmanager",
+        PARTMANAGER,
+        "the partition list draws its rows three pixels below where they answer",
+        "        let ry = geom.row_y(i, app.partition_scroll);",
+        "        let ry = geom.row_y(i, app.partition_scroll) + 3.0;",
+    ),
+    # -------------------------------------------------------------- settings
+    (
+        "settings",
+        SETTINGS,
+        "the dropdown lets a NaN through every one of its bounds tests",
+        "        if !mx.is_finite() || !my.is_finite() {\n"
+        "            return None;\n"
+        "        }\n"
+        "        if mx < self.x",
+        "        if mx < self.x",
+    ),
+    (
+        "settings",
+        SETTINGS,
+        "the dropdown renderer drifts three pixels from its own hit test",
+        "            let iy = layout.row_top(row);",
+        "            let iy = layout.row_top(row) + 3.0;",
+    ),
+    (
+        "settings",
+        SETTINGS,
+        "the dropdown test recovers row tops with a stale baseline offset",
+        "    const DRAWN_ITEM_TEXT_BASELINE: f32 = 10.0;",
+        "    const DRAWN_ITEM_TEXT_BASELINE: f32 = 13.0;",
+    ),
+    # --------------------------------------------------------- remotedesktop
+    (
+        "remotedesktop",
+        REMOTEDESKTOP,
+        "the sidebar guard is `y < 0.0`, which a NaN passes by failing it",
+        "        if !y.is_finite() || y < 0.0 {",
+        "        if y < 0.0 {",
+    ),
+    # ------------------------------------------- desktop / notification pane
+    (
+        "desktop",
+        NOTIF_PANE,
+        "the per-app click accepts the pitch, giving each gutter to the card above",
+        "            local_y >= top && local_y < top + APP_CARD_HEIGHT",
+        "            local_y >= top && local_y < top + APP_CARD_PITCH",
+    ),
+    (
+        "desktop",
+        NOTIF_PANE,
+        "the enabled pill's hit test has no right edge",
+        "        if rx < pill_x || rx >= pill_x + pill_w || local_y < pill_y"
+        " || local_y >= pill_y + pill_h {",
+        "        if rx < pill_x || local_y < pill_y || local_y >= pill_y + pill_h {",
+    ),
+    (
+        "desktop",
+        NOTIF_PANE,
+        "the pill's y band starts at the card's top and runs 35 px",
+        "        if rx < pill_x || rx >= pill_x + pill_w || local_y < pill_y"
+        " || local_y >= pill_y + pill_h {",
+        "        if rx < pill_x || rx >= pill_x + pill_w"
+        " || local_y >= Self::app_card_top(idx) + 35.0 {",
+    ),
+    (
+        "desktop",
+        NOTIF_PANE,
+        "the app card list has no bottom bound, so a clipped card is still clickable",
+        "        if !local_y.is_finite() || local_y < 0.0 || local_y >= self.list_height() {",
+        "        if !local_y.is_finite() || local_y < 0.0 {",
+    ),
+    (
+        # The `is_finite` guard alone is not reintroducible -- the walk refuses
+        # a NaN on its own, because a NaN fails both of its comparisons. What
+        # the test is really holding down is the *shape*: the moment the walk
+        # goes back to a division and a cast, `NaN as usize` is 0 and a
+        # coordinate that is nowhere at all names the first app.
+        "desktop",
+        NOTIF_PANE,
+        "the per-app walk goes back to dividing and casting",
+        "        (0..self.app_settings.len()).find(|&idx| {\n"
+        "            let top = Self::app_card_top(idx);\n"
+        "            local_y >= top && local_y < top + APP_CARD_HEIGHT\n"
+        "        })\n",
+        "        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]\n"
+        "        let idx = ((local_y - APP_HEADING_HEIGHT) / APP_CARD_PITCH) as usize;\n"
+        "        (idx < self.app_settings.len()).then_some(idx)\n",
+    ),
+    (
+        "desktop",
+        NOTIF_PANE,
+        "the per-app renderer drifts the pill three pixels below its own hit test",
+        "            let (pill_x, pill_y, pill_w, pill_h) = Self::app_toggle_rect(y);",
+        "            let (pill_x, pill_y, pill_w, pill_h) = Self::app_toggle_rect(y + 3.0);",
+    ),
+    (
+        "desktop",
+        NOTIF_PANE,
+        "the per-app renderer walks a running total instead of asking app_card_top",
+        "            let y = start_y + Self::app_card_top(idx);",
+        "            let y = start_y + APP_HEADING_HEIGHT + (idx as f32) * (APP_CARD_PITCH + 1.0);",
     ),
 ]
 

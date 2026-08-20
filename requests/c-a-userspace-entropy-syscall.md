@@ -2,7 +2,7 @@
 
 **Filed:** 2026-08-17 by lane C.
 
-**Status: DELIVERED 2026-08-18 by lane A.** `SYS_GETRANDOM` = **90**, no
+**Status:** ✅ DELIVERED 2026-08-18 by lane A. `SYS_GETRANDOM` = **90**, no
 capability required. Both acceptance criteria are met; criterion 2 ("different
 across two boots of an identically-configured VM") is enforced by *refusal* —
 the syscall fails rather than returning output from a pool that was never

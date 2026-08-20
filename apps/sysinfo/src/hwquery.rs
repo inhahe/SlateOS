@@ -134,7 +134,13 @@ pub trait HardwareProvider {
     /// Query startup programs.
     fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError>;
     /// Human-readable name of this provider.
-    fn provider_name(&self) -> &str;
+    ///
+    /// `&'static str` rather than a borrow of `self`: the name identifies the
+    /// *kind* of provider, not anything it holds, so tying it to the
+    /// provider's lifetime would stop a caller keeping the name in a log line
+    /// after the provider is gone -- for no gain, since every implementation
+    /// returns a literal.
+    fn provider_name(&self) -> &'static str;
 }
 
 // ============================================================================
@@ -736,7 +742,7 @@ impl HardwareProvider for SyscallProvider {
         Ok(programs)
     }
 
-    fn provider_name(&self) -> &str {
+    fn provider_name(&self) -> &'static str {
         "SyscallProvider (live hardware)"
     }
 }
@@ -1038,7 +1044,7 @@ impl HardwareProvider for StubProvider {
         }])
     }
 
-    fn provider_name(&self) -> &str {
+    fn provider_name(&self) -> &'static str {
         "StubProvider (representative data)"
     }
 }
@@ -1131,7 +1137,7 @@ impl HardwareProvider for FallbackProvider {
     fn query_startup(&self) -> Result<Vec<StartupEntry>, HwQueryError> {
         fallback_query!(self, query_startup)
     }
-    fn provider_name(&self) -> &str {
+    fn provider_name(&self) -> &'static str {
         "FallbackProvider (live → stub)"
     }
 }
@@ -1292,7 +1298,7 @@ impl RefreshManager {
     }
 
     /// Get the provider name.
-    pub fn provider_name(&self) -> &str {
+    pub fn provider_name(&self) -> &'static str {
         self.provider.provider_name()
     }
 
@@ -1779,6 +1785,17 @@ impl RefreshManager {
 
 #[cfg(test)]
 mod tests {
+    // Panicking on bad data is what a test is for: an `expect` that fires here
+    // *is* the failure report, and an index that goes out of range is the test
+    // telling you the fixture changed shape. CLAUDE.md scopes the defensive
+    // panic lints to non-test code for exactly this reason.
+    #![allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
+
     use super::*;
 
     // -- Error display --

@@ -170,9 +170,48 @@ pub fn pixels(dy: f32, row_h: f32) -> f32 {
     if out.is_finite() { out } else { 0.0 }
 }
 
+/// Notches to pixels for the **horizontal** wheel — which is *not* [`pixels`]
+/// with `dx` substituted for `dy`, because the two axes disagree about sign.
+///
+/// `WM_MOUSEWHEEL`'s delta is positive **away from the user**, and scrolling
+/// away moves the view *towards the start*, so the vertical converter negates.
+/// `WM_MOUSEHWHEEL`'s delta is positive **to the right**, and tilting right
+/// moves the view *towards the right* — towards the end. Same producer
+/// (`wheel_delta`), same units, opposite relationship to the offset it drives.
+/// So this one does not negate, and a caller who reached for [`pixels`] because
+/// the name looked right would scroll every horizontal wheel backwards.
+///
+/// That is not a hypothetical. When this was written no consumer in the tree
+/// read `dx` at all — twelve handlers, every one of them dropping it — so the
+/// first one to try had nothing to copy from and a plausible-looking wrong
+/// answer sitting next to the right one. Hence a separate function with the
+/// asymmetry in its name and its doc, rather than a comment at each call site.
+///
+/// `col_w` is what a "column" is in this view, exactly as `row_h` is a row in
+/// [`pixels`]: a notch moves [`ROWS_PER_NOTCH`] of them, so a horizontal notch
+/// travels as far across as a vertical one travels down.
+///
+/// Non-finite input gives `0.0`, for the same reason as [`pixels`].
+///
+/// ```
+/// use guitk::wheel::{pixels, pixels_x};
+/// assert_eq!(pixels_x(1.0, 20.0), 60.0, "tilt right: towards the end");
+/// assert_eq!(pixels_x(-1.0, 20.0), -60.0);
+/// assert_eq!(pixels_x(1.0, 20.0), -pixels(1.0, 20.0), "the axes disagree");
+/// assert_eq!(pixels_x(f32::NAN, 20.0), 0.0);
+/// ```
+#[must_use]
+pub fn pixels_x(dx: f32, col_w: f32) -> f32 {
+    if !dx.is_finite() || !col_w.is_finite() {
+        return 0.0;
+    }
+    let out = dx * ROWS_PER_NOTCH * col_w;
+    if out.is_finite() { out } else { 0.0 }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Accumulator, ROWS_PER_NOTCH, pixels};
+    use super::{Accumulator, ROWS_PER_NOTCH, pixels, pixels_x};
 
     /// The ordinary case: a detent is a full three-row step, both ways.
     #[test]
@@ -308,5 +347,43 @@ mod tests {
         assert_eq!(pixels(f32::NAN, 20.0), 0.0);
         assert_eq!(pixels(1.0, f32::NAN), 0.0);
         assert_eq!(pixels(f32::MAX, f32::MAX), 0.0);
+    }
+
+    /// The whole reason `pixels_x` exists. `WM_MOUSEWHEEL` is positive away
+    /// from the user (view goes *up*, offset shrinks); `WM_MOUSEHWHEEL` is
+    /// positive to the right (view goes *right*, offset grows). Both arrive
+    /// through the same `wheel_delta`, so the sign has to be undone on exactly
+    /// one axis — and this asserts it is undone on exactly one.
+    // Exact: both sides are 3 * 25.0 = 75.0, representable to the bit. An
+    // epsilon would let a sign error through if it were also a rounding error,
+    // which is precisely the bug being pinned.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn the_two_axes_take_a_positive_delta_in_opposite_directions() {
+        assert_eq!(pixels(1.0, 25.0), -75.0, "wheel away: towards the start");
+        assert_eq!(pixels_x(1.0, 25.0), 75.0, "tilt right: towards the end");
+        assert_eq!(pixels_x(1.0, 25.0), -pixels(1.0, 25.0));
+        assert_eq!(pixels_x(-1.0, 25.0), -pixels(-1.0, 25.0));
+    }
+
+    /// A horizontal notch crosses as many columns as a vertical one crosses
+    /// rows — the two axes differ in sign, not in step.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn a_horizontal_notch_is_the_same_distance_as_a_vertical_one() {
+        let unit = 100.0;
+        assert_eq!(pixels_x(1.0, unit).abs(), pixels(1.0, unit).abs());
+        assert_eq!(pixels_x(1.0, unit).abs(), ROWS_PER_NOTCH * unit);
+    }
+
+    /// Same non-finite guard as [`pixels`], for the same reason: a `NaN` that
+    /// reached a stored offset would freeze the view for good.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn pixels_x_rejects_nonfinite_input() {
+        assert_eq!(pixels_x(f32::NAN, 20.0), 0.0);
+        assert_eq!(pixels_x(1.0, f32::NAN), 0.0);
+        assert_eq!(pixels_x(f32::INFINITY, 20.0), 0.0);
+        assert_eq!(pixels_x(f32::MAX, f32::MAX), 0.0);
     }
 }

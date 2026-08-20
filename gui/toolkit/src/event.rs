@@ -88,8 +88,17 @@ pub enum MouseEventKind {
     /// fractions a trackpad sends, which rounding each event would discard), or
     /// [`wheel::pixels`] for a genuinely continuous view.
     ///
+    /// **`dx` and `dy` do not share a sign convention**, so `dx` needs
+    /// [`wheel::pixels_x`], not [`wheel::pixels`]. `dy` is positive away from
+    /// the user, which scrolls *towards the start*; `dx` is positive to the
+    /// right, which scrolls *towards the end*. Both arrive through the same
+    /// `wheel_delta()`, so the difference is in what the two Windows messages
+    /// mean, not in how either is decoded — and a handler that reaches for
+    /// `pixels` on the `dx` because the name looks right scrolls backwards.
+    ///
     /// [`wheel::Accumulator`]: crate::wheel::Accumulator
     /// [`wheel::pixels`]: crate::wheel::pixels
+    /// [`wheel::pixels_x`]: crate::wheel::pixels_x
     Scroll { dx: f32, dy: f32 },
     /// Double-click.
     DoubleClick(MouseButton),

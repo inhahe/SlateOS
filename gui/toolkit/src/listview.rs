@@ -26,6 +26,7 @@
 //! clipboard history, a search result — so the length it cached would routinely
 //! be the wrong one.
 
+use crate::scroll_window;
 use core::ops::Range;
 
 /// Where a scrolling list is looking, and which of its rows is picked.
@@ -40,8 +41,9 @@ use core::ops::Range;
 ///   window is never scrolled past the end of a list long enough to fill it.
 ///
 /// A viewport that has not been shown a `len` yet (or whose list has since
-/// grown) can violate the second on paper; [`Self::visible_range`] clamps to
-/// the `len` it is given, so nothing downstream can observe it.
+/// changed length) can violate the second on paper; [`Self::visible_range`]
+/// re-applies the clamp against the `len` it is given, so nothing downstream
+/// can observe it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ListViewport {
     /// Index of the first row drawn.
@@ -103,11 +105,18 @@ impl ListViewport {
     ///
     /// Always a valid range for a list that long, so a caller can slice with it
     /// or zip it against the rows it drew.
+    ///
+    /// Deliberately re-derived from `len` on every call rather than trusting
+    /// [`Self::first_visible`]: a list can shrink between the call that last
+    /// ran [`Self::reveal`] and the render that asks what to draw, and this is
+    /// the render's last chance to notice. Delegating to
+    /// [`scroll_window::visible_count`] is what makes "shrank underneath us"
+    /// show the *last page* rather than blank space — the same rule the
+    /// stateless panels apply, from the same three lines.
     #[must_use]
     pub fn visible_range(&self, len: usize) -> Range<usize> {
-        let start = self.first_visible.min(len);
-        let end = start.saturating_add(self.height).min(len);
-        start..end
+        let rows = scroll_window::visible_count(len, self.height, self.first_visible);
+        rows.start..rows.end()
     }
 
     /// Picks `index`, clamped into the list, and scrolls to show it.
@@ -215,6 +224,7 @@ mod tests {
     )]
 
     use super::ListViewport;
+    use crate::scroll_window;
     use randrange::{RandomSource, SeededRng};
 
     /// Both invariants, checked after every operation in every test below.
@@ -337,10 +347,11 @@ mod tests {
         view.select_prev(10);
         view.page_down(10);
         view.page_up(10);
-        assert_eq!(
-            view.visible_range(10),
-            view.first_visible()..view.first_visible()
-        );
+        // Empty, and empty *at the top*: when no row fits, where the window
+        // would have been looking is not a meaningful answer, so both this and
+        // `scroll_window::visible_count` give the one canonical empty range
+        // rather than an empty one at whatever index the selection reached.
+        assert_eq!(view.visible_range(10), 0..0);
         assert_consistent(&view, 10);
         // Growing the window brings the selection back into view.
         view.set_height(3, 10);
@@ -385,6 +396,53 @@ mod tests {
         flat.select(Some(4), 100);
         flat.page_down(100);
         assert_eq!(flat.selected(), Some(5));
+    }
+
+    #[test]
+    fn a_list_that_shrinks_without_telling_the_viewport_shows_its_last_page() {
+        // `reveal` applies the last-page clamp, but only the mutating methods
+        // call it. A list that is recomputed each frame -- a filtered clipboard
+        // history, a search result -- can shrink between the keypress that
+        // moved the selection and the render that asks what to draw, with no
+        // mutating call in between. `visible_range` used to clamp only to
+        // `len`, so it answered `9..9`: a pane that had gone blank, with a
+        // scrollbar the user could not move because nothing was writing the
+        // offset either.
+        let mut view = ListViewport::new(4);
+        view.select(Some(9), 10);
+        assert_eq!(view.visible_range(10), 6..10);
+        // Three rows remain. Nothing has told the viewport.
+        assert_eq!(view.visible_range(3), 0..3);
+        assert_eq!(
+            view.visible_range(8),
+            4..8,
+            "the last page of a shorter list"
+        );
+        // ... and the stored field is untouched, so the next mutating call
+        // still sees what the user actually scrolled to.
+        assert_eq!(view.first_visible(), 6);
+    }
+
+    #[test]
+    fn the_two_windowing_answers_are_the_same_answer() {
+        // `visible_range` delegates to `scroll_window::visible_count`, so this
+        // cannot fail by drift -- it fails if someone reimplements one of them.
+        for height in [0usize, 1, 3, 7] {
+            for len in [0usize, 1, 2, 7, 8, 50] {
+                for first in [0usize, 1, 6, 49, 50, 51, usize::MAX] {
+                    let mut view = ListViewport::new(height);
+                    // Reach `first_visible` without `reveal` clamping it: a
+                    // long list to scroll into, then ask about a shorter one.
+                    view.select(Some(first), first.saturating_add(height));
+                    let rows = scroll_window::visible_count(len, height, view.first_visible());
+                    assert_eq!(
+                        view.visible_range(len),
+                        rows.start..rows.end(),
+                        "height {height}, len {len}, first {first}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

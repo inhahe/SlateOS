@@ -28,6 +28,28 @@
 //!   arguments so that `render(&self)` can call it; the clamping is applied to
 //!   the *result*, and the caller's stored offset is left alone. A caller that
 //!   wants the stored value clamped too can use [`Rows::start`].
+//!
+//! # Which of these two do I want?
+//!
+//! [`ListViewport`] answers a *larger* question — where a keyboard-navigated
+//! list is looking **and which row is picked** — by mutating both together, so
+//! that the picked row is never off screen. Reach for it when arrow keys move a
+//! selection.
+//!
+//! This module is the stateless half: given a length, a height and an offset
+//! somebody else owns, which rows are on screen? Reach for it when the panel
+//! renders from `&self` and cannot write anything back, or when there is no
+//! selection to keep visible — a settings panel listing bound gestures, or
+//! paired Bluetooth devices.
+//!
+//! The two cannot drift, because [`ListViewport::visible_range`] is implemented
+//! in terms of [`visible_count`]: the last-page clamp below is the one they both
+//! apply. It was written here first and was missing there, which is how a
+//! `ListViewport` over a list that shrank between one render and the next came
+//! to report an empty range.
+//!
+//! [`ListViewport`]: crate::listview::ListViewport
+//! [`ListViewport::visible_range`]: crate::listview::ListViewport::visible_range
 
 /// The half-open row range `start .. start + count` that fits in the space
 /// available, given the offset the caller asked for.

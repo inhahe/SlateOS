@@ -55,6 +55,7 @@ pub mod render;
 /// `guitk::rng::SeededRng` keeps meaning what it meant.
 pub use randrange as rng;
 pub mod scaling;
+pub mod scroll_window;
 pub mod signal;
 pub mod style;
 pub mod svg;

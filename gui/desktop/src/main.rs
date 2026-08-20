@@ -105,8 +105,6 @@ mod run_dialog;
 #[allow(dead_code)]
 mod screen_capture;
 #[allow(dead_code)]
-mod scroll_window;
-#[allow(dead_code)]
 mod security_dialog;
 #[allow(dead_code)]
 mod session_mgr;
@@ -3244,7 +3242,10 @@ mod window_manager_tests {
                 0
             };
 
-            assert_eq!(l.x, wx, "the left half starts at the work area, width={screen_width}");
+            assert_eq!(
+                l.x, wx,
+                "the left half starts at the work area, width={screen_width}"
+            );
             assert_eq!(
                 r.x - l_right_edge,
                 expected_gap,
@@ -3337,9 +3338,14 @@ mod window_manager_tests {
     #[test]
     fn moving_or_resizing_a_snapped_window_ends_the_snap() {
         for (label, act) in [
-            ("move", (|s: &mut DesktopShell, id| s.move_window(id, 10, 10))
-                as fn(&mut DesktopShell, WindowId)),
-            ("resize", |s: &mut DesktopShell, id| s.resize_window(id, 300, 200)),
+            (
+                "move",
+                (|s: &mut DesktopShell, id| s.move_window(id, 10, 10))
+                    as fn(&mut DesktopShell, WindowId),
+            ),
+            ("resize", |s: &mut DesktopShell, id| {
+                s.resize_window(id, 300, 200)
+            }),
         ] {
             let mut shell = shell();
             let id = open(&mut shell, "app");
@@ -3419,8 +3425,18 @@ mod window_manager_tests {
             ));
 
             let w = shell.windows.get(&id).unwrap();
-            assert_eq!(w.x > mid_x - 1, right, "zone {zone} horizontal half: x={}", w.x);
-            assert_eq!(w.y > mid_y - 1, bottom, "zone {zone} vertical half: y={}", w.y);
+            assert_eq!(
+                w.x > mid_x - 1,
+                right,
+                "zone {zone} horizontal half: x={}",
+                w.x
+            );
+            assert_eq!(
+                w.y > mid_y - 1,
+                bottom,
+                "zone {zone} vertical half: y={}",
+                w.y
+            );
             assert!(
                 i32::try_from(w.width).unwrap() < i32::try_from(ww).unwrap(),
                 "zone {zone} must be a quadrant, not the whole width"

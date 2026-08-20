@@ -42203,16 +42203,38 @@ Two things about it are worth adding to the sweep's record:
   than a latent one waiting on `C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`. That is
   the second app in that position, after kanban.
 
-### Two more, found the same way — not yet fixed
+### Two more, found the same way — one fixed, one not
 
 Turned up while surveying the rest of the scroll-delta consumers. Both are the
 plain shape: declared, initialised, written by the wheel handler, **never
-read**. Neither has been fixed yet.
+read**.
 
-| App | Field | Hits | Why the sweep's grep missed it |
-|---|---|---|---|
-| `apps/diskimager` | `scroll_offset` (`main.rs:1015`, written at 1551) | 3 | Three hits, not four — it has no `.max()`/clamp helper of its own, so it falls below the signature's threshold. |
-| `apps/devicemanager` | `properties_scroll` (`main.rs:777`, written at 3145) | 5 | Five hits, not four: two extra *writes* (`= 0.0` resets at 878 and 3080) push it over. Resets look like liveness and are not. |
+| App | Field | Hits | Why the sweep's grep missed it | Status |
+|---|---|---|---|---|
+| `apps/diskimager` | `scroll_offset` (`main.rs:1015`, written at 1551) | 3 | Three hits, not four — it has no `.max()`/clamp helper of its own, so it falls below the signature's threshold. | **fixed, `344301f1c`** |
+| `apps/devicemanager` | `properties_scroll` (`main.rs:777`, written at 3145) | 5 | Five hits, not four: two extra *writes* (`= 0.0` resets at 878 and 3080) push it over. Resets look like liveness and are not. | to do |
+
+**diskimager turned out to be a matched pair, and that is a new shape.** Its
+`scroll_offset` was written by the wheel and read by nobody — but its ISO 9660
+file tree read `iso_scroll_offset`, which was *written* by nobody. A dead
+writer and a dead reader, in the same app, for the same list: two halves of one
+feature that were never joined. The visible result was worse than an offset
+that does nothing, because the tree is the app's whole browse tab and could
+show a few thousand files of which the user could reach one screenful.
+
+Fixing it meant deleting both fields for a single `iso_scroll: usize`, and the
+tree gained the interaction it was already *drawn* for while it was reachable:
+`expanded` was rendered as a `v`/`>` arrow but nothing could ever change it, so
+no directory below the root's own children had ever been visible either. See
+`C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY` — the same commit
+named the drive list's duplicated `64.0` row height, which the renderer and the
+hit-test each carried their own copy of.
+
+**Look for the dead-reader half too.** The sweep so far has only ever grepped
+for offsets that are written and not read. An offset that is *read and not
+written* renders a list that can never move, which looks identical to a list
+that simply fits. The grep is the mirror image: for each scroll-offset field,
+does anything outside `new()`/`Default` assign to it?
 
 That is the lesson worth carrying: **a hit count is a bad test for a dead
 field, in both directions.** What identifies one is the absence of a *read*,
@@ -42319,7 +42341,8 @@ proof that the doc comment is the defect.
    | editor | done, `453bc70b4` — the dead wheel now moves 3 lines a notch |
    | emojipicker | done, `6912e8f38` |
    | remotedesktop | done, `ffd9d7b25` |
-   | benchmark, devicemanager, diskimager, sysinfo (`* 20.0`) | to do |
+   | diskimager | done, `344301f1c` |
+   | benchmark, devicemanager, sysinfo (`* 20.0`) | to do |
    | spreadsheet (`* 40.0`) | to do |
    | filediff (`* SCROLL_SPEED`) | to do |
    | procexplorer, sysmonitor, terminal, settings, netscan (sign only) | to do — correct in effect, but they should stop open-coding it and pick up trackpad support |
@@ -42360,8 +42383,8 @@ equal-height rows — say it has group headings in it, or the order it is drawn
 in is not the order it is stored in — the code that *draws* the list and the
 code that works out *what you clicked on* are usually two separate pieces of
 arithmetic that were written to agree and do not. You click one row and a
-different row lights up. Found and fixed in remotedesktop; not yet looked for
-anywhere else, and there is no reason to think it is confined to one app.
+different row lights up. Found and fixed in remotedesktop and diskimager; the
+sweep for it is not finished.
 
 **The instance found (`apps/remotedesktop`, fixed in `ffd9d7b25`):** the
 connections sidebar draws a 22px heading for each group followed by the 52px
@@ -42425,6 +42448,44 @@ of them clicked a profile. Render tests assert the *picture* is right and
 event tests assert the *state machine* is right; nothing asserted the two
 agree about geometry. The regression test that now covers it pins the exact
 pixel layout in a doc comment and then clicks four y-coordinates.
+
+**A second instance (`apps/diskimager`, fixed in `344301f1c`)** — the milder
+form, and the one that shows the class is not confined to lists with headings
+in them. The drive sidebar's 64px row height was written out as a bare `64.0`
+in the renderer *and* as a bare `64.0` in the hit-test, and the two happened to
+agree. The bug they were one edit away from was already half-present: the
+hit-test added the scroll offset as **pixels before dividing**, which is case
+(d) above, so any list scrolled to a position that was not a whole multiple of
+64 selected the row above or below the one drawn under the pointer. The browse
+tab's ISO file tree was worse — it had no hit-test at all, so the panel's stack
+of furniture heights (`28`, `90`, `22`, `20`) existed in exactly one place and
+there was nothing for a click to disagree with, because nothing could be
+clicked.
+
+**A test that catches this class without knowing the layout.** Rather than
+pinning pixel coordinates (which remotedesktop's test does, and which has to be
+rewritten whenever the design changes), diskimager compares the two derivations
+against each other: render the app, find the list's `PushClip` command, and
+assert its rectangle equals the one the hit-test measures.
+
+```rust
+let want_y = app.content_top() + app.iso_list_offset();
+let want_h = app.iso_list_height();
+assert!(rt.commands.iter().any(|c| matches!(c,
+    RenderCommand::PushClip { y, height, .. }
+        if (y - want_y).abs() < 0.5 && (height - want_h).abs() < 0.5)));
+```
+
+That fails the moment the drawn list and the clickable list describe different
+rectangles, whatever the reason, and it needs no updating when the numbers
+change. It is worth adding to every app with a clipped, clickable list.
+
+**And the companion check, per list rather than per field:** does the draw loop
+consult a scroll offset at all? `a_scrolled_file_tree_draws_the_rows_the_offset_selects`
+scrolls, renders, and asserts the *first row drawn* is the one at the offset
+and that the loop stops at the bottom of the pane. A renderer that ignores its
+offset passes every render test ever written for it, because the picture it
+draws is a perfectly valid picture of the top of the list.
 
 ---
 

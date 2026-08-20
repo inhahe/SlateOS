@@ -2851,6 +2851,51 @@ mod tests {
     }
 
     #[test]
+    fn the_playlist_tab_agrees_with_its_own_renderer_too() {
+        // The Playlists tab is drawn by a *second* renderer with the same
+        // arithmetic in it, and the tests above only ever exercised the
+        // Library. A reintroduction sweep caught that: the snap could be put
+        // back in `render_playlist_view` alone with every test still green.
+        // Same sweep as the library, through the other renderer.
+        let mut state = player_with_library(400);
+        for i in 0..400 {
+            let mut t = Track::from_path(PathBuf::from(format!("p{i}.wav")));
+            t.title = format!("playlist track {i}");
+            state.playlist.push(t);
+        }
+        state.active_tab = Tab::Playlists;
+        state.scroll_offset = TRACK_ROW_HEIGHT / 2.0;
+
+        let painted = painted_rows(&state);
+        let (clip_y, clip_h) = rows_clip(&state);
+        assert!(painted.len() > 2, "the pane must fit several rows");
+        assert_eq!(clip_y, TAB_BAR_HEIGHT + PlayerState::rows_top());
+        assert_eq!(clip_h, state.rows_height());
+
+        for (track_idx, row_y) in painted.iter().enumerate() {
+            for step in 0..8 {
+                #[allow(clippy::cast_precision_loss)]
+                let probe = row_y + (step as f32 + 0.5) * TRACK_ROW_HEIGHT / 8.0;
+                if probe < clip_y || probe >= clip_y + clip_h {
+                    continue;
+                }
+                click(&mut state, probe);
+                assert_eq!(
+                    state.selected_index,
+                    Some(track_idx),
+                    "playlist row painted at {row_y} hit-tests as {:?} at y={probe}",
+                    state.selected_index
+                );
+            }
+        }
+
+        // And the tab's own bottom edge, which is the fault the whole sweep
+        // started from.
+        click(&mut state, clip_y + clip_h);
+        assert_eq!(state.selected_index, None);
+    }
+
+    #[test]
     fn every_row_edge_selects_the_row_the_renderer_drew_there() {
         let mut state = player_with_library(400);
         let painted = painted_rows(&state);

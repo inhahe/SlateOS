@@ -43661,7 +43661,68 @@ and the script only ever prunes the worktree it is invoked from. If the
 operator wants the whole drive swept, each lane should run the script in its
 own worktree.
 
-## C-TWO-PROCESS-LISTS-HIT-TEST-UNDER-THEIR-OWN-STATUS-BAR (lane C, 2026-08-20) — **found, not yet fixed**
+## C-TWO-PROCESS-LISTS-HIT-TEST-UNDER-THEIR-OWN-STATUS-BAR (lane C, 2026-08-20) — **FIXED**
+
+**Status:** FIXED the same day. The sweep grew from two instances to five while
+being fixed, one commit each:
+
+| Commit | App |
+|---|---|
+| `f0343e329` | `sysmonitor: the process list was hit-tested under its own status bar` |
+| `0d0c8dc1b` | `procexplorer: the process list was hit-tested under its own status bar` |
+| `a0539b77c` | `credmanager: clicking the "60 entries" caption opened the first credential` |
+| `d72793429` | `musicplayer: the track under the pointer was not the track that got played` |
+| `bea1a3bd7` | `hexeditor: clicking the status bar jumped the cursor to the end of the file` |
+
+**The fix is the same collapse in all five**: three helpers — a `const fn`
+top, a `fn …_height()` that clamps at zero, and a `fn row_at()` that is the
+renderer's arithmetic inverted — with every pointer path *and* the renderer's
+clip routed through them, so the region drawn **is** the region clicked. Where
+an app had a second renderer for a second tab (musicplayer's playlist), that
+one goes through them too.
+
+`scripts/reintro-row-hit-tests.py` puts each of the twelve resulting defects
+back one at a time and checks the suite goes red for it. All twelve are
+pinned — but only after the sweep itself found the gap: **musicplayer's
+Playlists tab is drawn by a second renderer with the same arithmetic in it,
+and the snap could be put back there alone with all 52 tests still green.**
+That is the reintroduction check earning its keep; a test count cannot see a
+duplicated renderer.
+
+**Four faults were found only while fixing, not while auditing** — worth
+noting, because the audit that opened this entry looked for exactly one shape
+and walked past these:
+
+- **musicplayer's renderer snapped to whole rows while the hit test was
+  continuous.** A wheel-only user never sees this (a notch is a whole number
+  of rows); every trackpad user plays a different track than the one they
+  pointed at.
+- **musicplayer clamped `scroll_offset` only inside the wheel handler**, so a
+  resize, a search that shortened the library, or a tab switch could leave the
+  list wound off its own end, painting nothing at all.
+- **hexeditor's wheel read only the *sign* of `dy`** and moved a flat three
+  lines per event — and read it backwards relative to every other view in the
+  tree, since `dy > 0` is away from the user and so scrolls *up*.
+- **hexeditor's click path had no *right* edge**, and the data inspector is
+  painted over the dump's right-hand side, so clicking an inspector field
+  moved the cursor in the file behind the panel. (hexeditor also carried a
+  dead second copy of `show_inspector` on `HexView`, beside the `HexEditor`
+  one that actually drives the renderer. Removed.)
+
+**Two lessons for the next sweep of this family**, both learned the expensive
+way here:
+
+1. **A test that probes row *tops* cannot catch a snapping-vs-continuous
+   divergence.** With musicplayer's old snapped renderer,
+   `from_top = (36 + i*36) - 36 + 18 = i*36 + 18`, so `idx == i` at *every*
+   top edge — the error is zero at the origin of each row and grows down it.
+   The tests now sweep eight points across each painted row. This was found by
+   patching the snap back in and watching the top-edge version stay green,
+   which is the only way to know a regression test discriminates.
+2. **A negative `f32` cast to `usize` saturates to 0 in Rust; it does not
+   wrap.** That is why credmanager's missing lower bound was *quiet*: a click
+   on the "60 entries" caption produced a negative offset, saturated to row 0,
+   and decrypted and displayed the first credential rather than crashing.
 
 **Where:** `apps/sysmonitor/src/main.rs` (hit tests at ~1099, ~1116, ~1157) and
 `apps/procexplorer/src/main.rs` (~1159, ~1174, ~1216).
@@ -43719,7 +43780,12 @@ emitted clip command rather than recomputed.
 **Not fixed in the commit that found it** only because that commit's workspace
 gate was already running and editing the crates would have invalidated it —
 the same reason `C-TOUCHPAD-GESTURE-LIST-DRAWS-PAST-THE-PANEL` waited a day.
-It is the next thing lane C picks up.
+It was the next thing lane C picked up; see the **Status** block at the top of
+this entry for the five commits that closed it. Everything from here down is
+the original write-up, kept because the *shape* of the defect — a top edge
+spelled once per pointer path plus once in the renderer, and a bottom edge
+spelled only in the renderer's clip — is worth recognising elsewhere in
+`apps/`.
 
 ### The same sweep, third instance: credmanager's list header selects row zero
 

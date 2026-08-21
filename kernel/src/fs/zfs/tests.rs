@@ -56,8 +56,8 @@ use super::label::{
     POOL_STATE_SPARE, SPA_VERSION_FEATURES, front_label_offset, parse_uberblock,
 };
 use super::nvlist::{
-    DATA_TYPE_NVLIST, DATA_TYPE_STRING, DATA_TYPE_UINT64, NV_ENCODE_NATIVE, NV_ENCODE_XDR,
-    NV_LITTLE_ENDIAN, NvList,
+    DATA_TYPE_NVLIST, DATA_TYPE_NVLIST_ARRAY, DATA_TYPE_STRING, DATA_TYPE_UINT64,
+    NV_ENCODE_NATIVE, NV_ENCODE_XDR, NV_LITTLE_ENDIAN, NvList,
 };
 use super::raw::{
     BLKPTR_LEN, DMU_OST_META, DMU_OST_ZFS, DMU_OT_DIRECTORY_CONTENTS, DMU_OT_DNODE,
@@ -1517,11 +1517,19 @@ struct ConfigSpec<'a> {
     state: u64,
     /// `version` — the SPA version.
     version: u64,
+    /// `vdev_tree.children` — `0` emits no `children` key at all, which is what
+    /// a leaf vdev's label looks like. `n > 0` emits an `nvlist_array` of `n`
+    /// leaf children, which is what a mirror's does.
+    children: u32,
+    /// Whether `ashift` is written on the *top-level* vdev. A label that
+    /// records it only on the legs is the case the child fallback exists for,
+    /// and it is reachable only by turning this off.
+    ashift_on_top: bool,
 }
 
 impl ConfigSpec<'_> {
     /// An ordinary, mountable single-disk pool. Every image builds from this,
-    /// and every rejection case below overrides one field of it.
+    /// and every case below overrides one field of it.
     const fn disk() -> Self {
         Self {
             vdev_type: b"disk",
@@ -1529,8 +1537,45 @@ impl ConfigSpec<'_> {
             is_log: 0,
             state: POOL_STATE_ACTIVE,
             version: SPA_VERSION_FEATURES,
+            children: 0,
+            ashift_on_top: true,
         }
     }
+
+    /// A two-way mirror. The image bytes are unchanged — which is the point:
+    /// a mirror leg *is* a complete copy of the pool's address space, so the
+    /// same device that mounts as a single disk must mount as a mirror leg and
+    /// read exactly the same files.
+    const fn mirror() -> Self {
+        Self {
+            vdev_type: b"mirror",
+            children: 2,
+            ..Self::disk()
+        }
+    }
+}
+
+/// One leg of a mirror, as it appears in the top-level vdev's `children`
+/// array: a leaf `disk` vdev with its own index within the mirror.
+///
+/// Each leg carries `ashift` as well. Real labels record it on the top-level
+/// vdev, but recording it here too is what lets a single flag in
+/// [`ConfigSpec`] produce the leaves-only label the fallback is for.
+fn build_leaf_vdev(id: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    // A nested list carries its own version and nvflag, but no encoding byte.
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&1u32.to_be_bytes());
+    out.extend_from_slice(&nv_pair(
+        b"type",
+        DATA_TYPE_STRING,
+        1,
+        &xdr_string(b"disk"),
+    ));
+    out.extend_from_slice(&nv_pair_u64(b"id", id));
+    out.extend_from_slice(&nv_pair_u64(b"ashift", IMG_ASHIFT));
+    out.extend_from_slice(&0u32.to_be_bytes()); // terminator
+    out
 }
 
 /// The pool configuration nvlist a vdev label carries.
@@ -1552,8 +1597,25 @@ fn build_config(spec: &ConfigSpec<'_>) -> Vec<u8> {
     // the shape it will actually meet on disk.
     vdev.extend_from_slice(&nv_pair_u64(b"id", spec.id));
     vdev.extend_from_slice(&nv_pair_u64(b"is_log", spec.is_log));
-    vdev.extend_from_slice(&nv_pair_u64(b"ashift", IMG_ASHIFT));
+    if spec.ashift_on_top {
+        vdev.extend_from_slice(&nv_pair_u64(b"ashift", IMG_ASHIFT));
+    }
     vdev.extend_from_slice(&nv_pair_u64(b"asize", u64::try_from(IMG_LEN).unwrap_or(0)));
+    if spec.children > 0 {
+        // An XDR nvlist array's value is its elements' encodings back to back,
+        // each with its own version/nvflag header and terminator — there is no
+        // pointer table, which is what the NV_ENCODE_NATIVE form would use.
+        let mut legs = Vec::new();
+        for leg in 0..spec.children {
+            legs.extend_from_slice(&build_leaf_vdev(u64::from(leg)));
+        }
+        vdev.extend_from_slice(&nv_pair(
+            b"children",
+            DATA_TYPE_NVLIST_ARRAY,
+            spec.children,
+            &legs,
+        ));
+    }
     vdev.extend_from_slice(&0u32.to_be_bytes()); // terminator
 
     let mut out = nv_header();
@@ -2357,17 +2419,91 @@ fn test_pool_damage(c: &mut Checks) -> KernelResult<()> {
         bytes
     };
 
-    // A mirror or raidz top-level vdev. One `SectorSource` is one device, and
-    // a raidz child's DVAs are offset per-leg, so reading one leg as if it
-    // were the whole thing would return plausible-looking garbage.
+    // A raidz top-level vdev. One `SectorSource` is one device, and a raidz
+    // leg holds interleaved data and parity columns, so the bytes at a DVA's
+    // offset are a stripe fragment rather than the record. Reconstruction needs
+    // every column and we have one.
     c.check_err(
         mount(reconfigured(&ConfigSpec {
-            vdev_type: b"mirror",
+            vdev_type: b"raidz",
+            children: 3,
             ..ConfigSpec::disk()
         }))
         .map(|_| ()),
         KernelError::NotSupported,
-        "a mirror vdev is refused rather than half-read",
+        "a raidz vdev is refused rather than half-read",
+    );
+
+    // A `replacing` vdev — a mirror mid-resilver. This is the case that makes
+    // the vdev-type test a whitelist and not a raidz blacklist: its shape is
+    // identical to a mirror's, a parent with replica children, so anything that
+    // reasoned "has children, children are replicas, therefore readable" would
+    // accept it. One of those children is the disk being resilvered *onto* and
+    // is not yet a complete copy of anything. We cannot tell from one label
+    // which child the device in hand is, so accepting this would be a coin flip
+    // on whether the reads are real.
+    c.check_err(
+        mount(reconfigured(&ConfigSpec {
+            vdev_type: b"replacing",
+            children: 2,
+            ..ConfigSpec::disk()
+        }))
+        .map(|_| ()),
+        KernelError::NotSupported,
+        "a resilvering `replacing` vdev is refused, mirror-shaped though it is",
+    );
+
+    // A `spare` vdev — the same shape again, a pool running on a hot spare
+    // while the original is being brought back. Same reasoning, and named
+    // separately because a whitelist that admitted it by accident would look
+    // just as correct as one that does not.
+    c.check_err(
+        mount(reconfigured(&ConfigSpec {
+            vdev_type: b"spare",
+            children: 2,
+            ..ConfigSpec::disk()
+        }))
+        .map(|_| ()),
+        KernelError::NotSupported,
+        "an in-use `spare` vdev is refused, mirror-shaped though it is",
+    );
+
+    // A mirror claiming no children. Not a shape ZFS produces: the config
+    // contradicts itself, which is a parse problem rather than an unsupported
+    // layout, so it is `InvalidArgument` and not `NotSupported`. Without this
+    // the ashift fallback would descend into a `children` list that is not
+    // there.
+    c.check_err(
+        mount(reconfigured(&ConfigSpec {
+            vdev_type: b"mirror",
+            children: 0,
+            ..ConfigSpec::disk()
+        }))
+        .map(|_| ()),
+        KernelError::InvalidArgument,
+        "a mirror with no children is a contradiction, not a layout",
+    );
+
+    // The same contradiction from the other side: a leaf vdev that claims
+    // children. ZFS gives `children` only to parents, so this label disagrees
+    // with itself just as the childless mirror does, and it gets the same
+    // `InvalidArgument` for the same reason.
+    //
+    // This case is worth pinning because its meaning changed. Before the vdev
+    // type whitelist, "has children" *was* how a mirror or raidz was detected,
+    // and `NotSupported` was the correct answer. Now type is decided first and
+    // nothing but a malformed `disk`/`file` can reach that branch — so a future
+    // reader who sees the check and assumes it still guards raidz is wrong, and
+    // this test is what says so.
+    c.check_err(
+        mount(reconfigured(&ConfigSpec {
+            vdev_type: b"disk",
+            children: 2,
+            ..ConfigSpec::disk()
+        }))
+        .map(|_| ()),
+        KernelError::InvalidArgument,
+        "a leaf vdev that claims children is a contradiction too",
     );
 
     // A separate intent-log (SLOG) device. Everything else about this label is
@@ -2468,6 +2604,112 @@ fn test_pool_damage(c: &mut Checks) -> KernelResult<()> {
         .map(|_| ()),
         KernelError::NotSupported,
         "an SPA version past the documented ceiling is refused by name",
+    );
+
+    // --- A mirror leg reads as the complete pool it is ---------------------
+    //
+    // The decisive test for mirror support, and the reason it is done against
+    // the *unmodified* image bytes: only the config changes, from a lone disk
+    // to one leg of a two-way mirror. If a mirror leg really is a byte-
+    // identical copy of the top-level vdev's address space — the claim the
+    // whole feature rests on — then every DVA resolves to the same physical
+    // offset it did a moment ago, and this device must still read as the same
+    // pool. Asserting only that it *mounts* would be far weaker: the mount
+    // reads one uberblock, and it is the object tree underneath that would
+    // expose a wrong offset.
+    match mount(reconfigured(&ConfigSpec::mirror())) {
+        Ok(mut fs) => {
+            c.check(true, "a two-way mirror's leg mounts");
+            c.check_bytes(
+                &fs.pool_config().vdev_type,
+                b"mirror",
+                "the config reports the mirror it read",
+            );
+            c.check_u64(
+                u64::from(fs.pool_config().ashift),
+                IMG_ASHIFT,
+                "a mirror's ashift comes off the top-level vdev",
+            );
+            c.check_u64(
+                fs.uberblock().txg,
+                IMG_TXG,
+                "a mirror leg's uberblock array is the pool's",
+            );
+            match fs.read_file(Path::new(b"/hello")) {
+                Ok(text) => c.check_bytes(
+                    &text,
+                    HELLO_TEXT,
+                    "a file read through a mirror leg is byte-identical",
+                ),
+                Err(e) => {
+                    c.check(false, "a file read through a mirror leg is byte-identical");
+                    serial_println!("[zfs]   mirror read failed: {e:?}");
+                }
+            }
+        }
+        Err(e) => {
+            c.check(false, "a two-way mirror's leg mounts");
+            c.check(false, "the config reports the mirror it read");
+            c.check(false, "a mirror's ashift comes off the top-level vdev");
+            c.check(false, "a mirror leg's uberblock array is the pool's");
+            c.check(false, "a file read through a mirror leg is byte-identical");
+            serial_println!("[zfs]   mirror mount failed: {e:?}");
+        }
+    }
+
+    // The same mirror with `ashift` recorded only on its legs. OpenZFS writes
+    // it on the top-level vdev, so this label is not one we expect to meet —
+    // but the fallback that handles it is unreachable otherwise, and an
+    // unreachable fallback is an untested one. A wrong ashift is not silent:
+    // it changes the uberblock stride, and an uberblock is checksummed against
+    // the byte offset it was written at, so the failure would be a mount that
+    // finds no uberblock rather than a pool read at the wrong granularity.
+    match mount(reconfigured(&ConfigSpec {
+        ashift_on_top: false,
+        ..ConfigSpec::mirror()
+    })) {
+        Ok(fs) => {
+            c.check(
+                true,
+                "a mirror recording ashift only on its legs still mounts",
+            );
+            c.check_u64(
+                u64::from(fs.pool_config().ashift),
+                IMG_ASHIFT,
+                "ashift falls back to the first leg",
+            );
+        }
+        Err(e) => {
+            c.check(
+                false,
+                "a mirror recording ashift only on its legs still mounts",
+            );
+            c.check(false, "ashift falls back to the first leg");
+            serial_println!("[zfs]   leaves-only ashift mount failed: {e:?}");
+        }
+    }
+
+    // A mirrored separate intent log, and a mirror that is not the pool's first
+    // top-level vdev. Both are now reachable in a way they were not when every
+    // mirror was refused outright, and both must stay refused: `is_log` and
+    // `id` live on the top-level vdev, which for these *is* the mirror.
+    c.check_err(
+        mount(reconfigured(&ConfigSpec {
+            is_log: 1,
+            ..ConfigSpec::mirror()
+        }))
+        .map(|_| ()),
+        KernelError::NotSupported,
+        "a mirrored intent log is still an intent log",
+    );
+    c.check_err(
+        mount(reconfigured(&ConfigSpec {
+            id: 1,
+            ..ConfigSpec::mirror()
+        }))
+        .map(|_| ()),
+        KernelError::NotSupported,
+        "a mirror that is the stripe's second vdev is still unreachable",
     );
 
     Ok(())

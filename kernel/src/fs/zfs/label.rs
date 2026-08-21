@@ -115,16 +115,22 @@ pub const fn front_label_offset(l: u64) -> u64 {
 
 /// Read and parse the pool configuration from the first readable front label.
 ///
+/// A `disk`, `file` or `mirror` top-level vdev is accepted: in each case the
+/// one device in hand is a complete copy of that vdev's address space.
+///
 /// # Errors
 ///
-/// - [`KernelError::InvalidArgument`] if neither front label holds a
-///   decodable nvlist.
+/// - [`KernelError::InvalidArgument`] if neither front label holds a decodable
+///   nvlist, or if the config contradicts itself — a `mirror` with no
+///   `children`, a `disk`/`file` that has them, or an `ashift` outside 9..=16.
 /// - [`KernelError::NotSupported`] if the pool is not `ACTIVE` or `EXPORTED`
 ///   (a hot spare, an L2ARC cache device, or a destroyed pool), if its SPA
-///   version is above [`SPA_VERSION_FEATURES`], if the top-level vdev is a
-///   mirror/raidz, if this device is a separate intent log, or if it holds any
-///   top-level vdev but the first — this driver reads one device and cannot
-///   reconstruct a stripe it cannot see.
+///   version is above [`SPA_VERSION_FEATURES`], if the top-level vdev is any
+///   type but `disk`/`file`/`mirror` (raidz and draid interleave parity across
+///   devices; `replacing` and `spare` have a child that is mid-resilver and so
+///   not yet a replica), if this device is a separate intent log, or if it
+///   holds any top-level vdev but the first — this driver reads one device and
+///   cannot reconstruct a stripe it cannot see.
 pub fn read_config(src: &dyn SectorSource) -> KernelResult<PoolConfig> {
     let mut last_err = KernelError::InvalidArgument;
     for l in 0..2u64 {
@@ -213,33 +219,84 @@ pub fn parse_config(raw: &[u8]) -> KernelResult<PoolConfig> {
         .nested(b"vdev_tree")
         .ok_or(KernelError::InvalidArgument)?;
 
-    // `ashift` lives on the *top-level* vdev. A `disk`/`file` vdev carries it
-    // directly; anything with children we reject below anyway, so there is no
-    // need to descend for it.
+    let vdev_type = vdev_tree
+        .get_str(b"type")
+        .ok_or(KernelError::InvalidArgument)?
+        .to_vec();
+
+    // One `SectorSource` is one device, so the question every vdev type has to
+    // answer is: *is the device in hand a complete copy of this vdev's address
+    // space?* This is a whitelist rather than a raidz blacklist because the
+    // answer is "no" for every type not named here, including ones ZFS may add
+    // later, and a blacklist would silently admit those.
+    //
+    // - `disk` / `file`: the vdev *is* the device. Trivially yes.
+    // - `mirror`: every leg holds byte-identical content at identical offsets
+    //   — that is what makes a mirror a mirror, and it is why ZFS itself is
+    //   free to service a read from whichever leg is idle. A DVA names the
+    //   top-level vdev and an offset within it, so it resolves to the same
+    //   physical offset on the device in hand as on any other leg. Yes.
+    // - `raidz` / `draid`: a leg holds interleaved data and parity columns, so
+    //   the bytes at a DVA's offset on one device are a *stripe fragment*, not
+    //   the record. Reconstruction needs every column, and we have one. No.
+    // - `replacing` / `spare`: these look exactly like a mirror — a parent with
+    //   replica children — and are the dangerous case precisely because of
+    //   that. One child is mid-resilver and therefore *not yet* a complete
+    //   copy. We cannot tell which of the children is the device in hand, so
+    //   accepting these would be a coin flip on whether the reads are real. No.
+    //
+    // The per-block checksum is the backstop if any of this reasoning is wrong:
+    // a misread block fails verification and surfaces as `IoError` rather than
+    // as wrong data. It is a backstop, not the argument.
+    let is_mirror = vdev_type == b"mirror";
+    if vdev_type != b"disk" && vdev_type != b"file" && !is_mirror {
+        return Err(KernelError::NotSupported);
+    }
+
+    // A leaf vdev with children is not a shape ZFS produces; a mirror without
+    // them is not a mirror. Either way the config contradicts itself, so both
+    // are `InvalidArgument`: a self-contradictory label is a parse problem, not
+    // a layout we decline to support, and reporting `NotSupported` would send
+    // whoever reads it looking for a missing feature instead of at the label.
+    //
+    // Note this branch means something narrower than it did before the vdev
+    // type whitelist above existed. It used to be the mirror/raidz detector —
+    // "has children" was how a parent vdev was recognised, and `NotSupported`
+    // was the right answer. Type is now checked first, so the only thing that
+    // reaches here is a `disk`/`file` claiming children, which is malformed.
+    let children = vdev_tree.nested_array_len(b"children");
+    if is_mirror {
+        if children.unwrap_or(0) == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+    } else if children.is_some() {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // `ashift` is written on the *top-level* vdev — for a single disk that is
+    // the disk itself, for a mirror it is the mirror — so this reads it from
+    // the right place in both cases. The fallback into the first child covers
+    // a label that recorded it only on the leaves: `nested` returns the first
+    // element of a `children` array, which is all that is needed, since every
+    // leg of a mirror shares one ashift by construction.
+    //
+    // Getting this wrong is not silent. The uberblock stride derives from
+    // `ashift`, and an uberblock is checksummed against the byte offset it was
+    // written at, so a wrong stride finds no valid uberblock and the mount
+    // fails — rather than reading the pool at the wrong granularity.
     let ashift = vdev_tree
         .get_u64(b"ashift")
+        .or_else(|| {
+            vdev_tree
+                .nested(b"children")
+                .and_then(|first| first.get_u64(b"ashift"))
+        })
         .unwrap_or(u64::from(UBERBLOCK_SHIFT));
     let ashift = u32::try_from(ashift).map_err(|_| KernelError::InvalidArgument)?;
     if !(9..=16).contains(&ashift) {
         // Outside this range the pool is not something ZFS creates, and the
         // uberblock stride derived from it would be nonsense.
         return Err(KernelError::InvalidArgument);
-    }
-
-    let vdev_type = vdev_tree
-        .get_str(b"type")
-        .ok_or(KernelError::InvalidArgument)?
-        .to_vec();
-
-    // One `SectorSource` is one device. A mirror could in principle be read
-    // from any single leg, but the config we are holding describes the *top
-    // level*, and its children's DVAs are offset per-leg for raidz — so
-    // guessing here would read plausible-looking garbage. Refuse instead.
-    if vdev_type != b"disk" && vdev_type != b"file" {
-        return Err(KernelError::NotSupported);
-    }
-    if vdev_tree.nested_array_len(b"children").is_some() {
-        return Err(KernelError::NotSupported);
     }
 
     // A separate intent-log (SLOG) device is a full member of the pool and

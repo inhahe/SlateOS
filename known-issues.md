@@ -17573,17 +17573,21 @@ sites). Fixing it surfaced a separate divergence, logged next.
 **In short.** Every process has a set of "resource limits" — ceilings on things
 like stack size, open files, or how much priority it may ask for. Our kernel
 keeps the real ones. Our libc keeps a *second*, private copy and never consults
-the kernel's. Today they happen to agree, because both were written from the
-same Linux defaults. Nothing keeps them agreeing: if the kernel lowers a limit
-for a process, libc will keep reporting and enforcing the old one, and a
-program that checks its limit will be told something the kernel does not
-believe.
+the kernel's. **They already disagree** — so a program that asks "how many
+files may I open?" is told 1024 or 256 depending on which ABI it was compiled
+for, on the same machine, in the same process.
 
-**Where it lives.** `posix/src/resource.rs` → `mod limit_store` (around line
-174): on target a `static mut RLIMITS`, on host a `thread_local!`. Every
-`getrlimit` / `setrlimit` / `prlimit64` reads and writes *that*. The kernel's
-authoritative table is `kernel/src/proc/pcb.rs` (the `RLIMIT_*_INDEX`
-constants and its own `INIT_RLIMITS`-equivalent).
+(This entry originally said the two "happen to agree" and that the hazard was
+latent. Both were assumptions, not measurements, and both were false. See
+**Correction 2026-08-21** below.)
+
+**Where it lives.** `posix/src/resource.rs` → `mod limit_store` (line 140; the
+table itself is `RLIMITS_INIT` at line 151): on target a `static mut RLIMITS`,
+on host a `thread_local!`. Every `getrlimit` / `setrlimit` / `prlimit64` reads
+and writes *that*. The kernel's authoritative table is `DEFAULT_RLIMITS`
+(`kernel/src/proc/pcb.rs:2382`), copied into `Process::rlimits` at creation
+(`pcb.rs:1342`), inherited across `fork`, and read by the kernel's own
+`setpriority`, `sched_setscheduler`, `brk` and `write` paths.
 
 **Why libc cannot simply ask.** There is no native SlateOS syscall for
 rlimits. The kernel's table is reachable only through the Linux-compat
@@ -17594,25 +17598,81 @@ the path a *ported Linux program* takes, not the path our own libc's
 own calls through the compat numbers. Both are lane A's tree, so this needs a
 `requests/b-a-*.md` before it can be done.
 
-**Why it is not urgent.** Nothing today lowers a process's rlimits from the
-kernel side, so the two copies are still in sync — this is a latent
-correctness hazard, not a live bug. It becomes live the moment the kernel
-starts enforcing or adjusting a limit on its own (a container/namespace
-policy, an `execve` that resets limits, a service manager that sets them at
-spawn).
+**Correction 2026-08-21 — it is not latent, and it was never two rows.** This
+entry claimed the copies "are still in sync" and had drifted "on two rows."
+Neither had been checked; both were wrong. Reading `DEFAULT_RLIMITS`
+(`kernel/src/proc/pcb.rs:2382`) against `RLIMITS_INIT`
+(`posix/src/resource.rs:151`) row by row gives **three** disagreements out of
+sixteen, present today at cold start:
 
-**Proper fix.** File `requests/b-a-native-rlimit-syscalls.md` asking for a
-native rlimit get/set pair keyed on the kernel's `RLIMIT_*_INDEX` table, then
-make `limit_store` a cache-through to it (or delete the store entirely and
-call every time — rlimit reads are not a hot path). Until then, do **not** add
-more libc logic that treats the local table as authoritative beyond what
-`can_nice()` / `current_rtprio_limit()` / `check_mlock_caps()` already do.
+| # | Resource | kernel | libc |
+|---|---|---|---|
+| 7 | `RLIMIT_NOFILE` | `(1024, 4096)` | `(256, 256)` — `fdtable::MAX_FDS` |
+| 11 | `RLIMIT_SIGPENDING` | `(65_536, 65_536)` | `(INFINITY, INFINITY)` |
+| 12 | `RLIMIT_MSGQUEUE` | `(819_200, 819_200)` | `(INFINITY, INFINITY)` |
+
+Every other row matches exactly. So the "it becomes live the moment the kernel
+adjusts a limit" framing was backwards — it is live now, without the kernel
+doing anything, purely because the two tables were typed twice.
+
+Note the shape of the mistake, because it is the reusable part: the original
+entry inferred "they agree" from "both were written from the same Linux
+defaults." That is a plausible story about the code's history, not an
+observation of the code. Two hand-maintained copies of one fact do not stay
+equal because of where they came from.
+
+**Two related bugs, in lane A's tree, found while measuring the above.** Both
+are written up in the request; neither is Lane B's to fix. (i) The kernel's
+`RLIMIT_NOFILE` default of `(1024, 4096)` contradicts the kernel's own Linux fd
+table, `kernel/src/proc/linux_fd.rs:57`, which is `MAX_FDS = 256` — so the
+kernel promises ported programs a number it cannot honour, and they get
+`EMFILE` at 256. (ii) The kernel's `prlimit64` has no `sysctl_nr_open`
+equivalent: Linux rejects any `RLIMIT_NOFILE` hard limit above it
+unconditionally, but our handler (`kernel/src/syscall/linux.rs:45323`) checks
+only `cur > max`. libc *does* enforce that ceiling (`posix/src/resource.rs:407`,
+`EPERM` above `MAX_FDS`) — a third way the two ABIs answer one question
+differently.
+
+On (ii), note what the first draft of this correction got wrong, since it is
+the same failure the entry is about. I wrote that a process could therefore
+install `RLIMIT_NOFILE = (u64::MAX, u64::MAX)`. It cannot: `pcb::set_rlimit`
+(`pcb.rs:2470`) independently rejects `new_max > old_max` for every resource,
+so the reachable ceiling is the seeded hard limit, `4096`. Still 16× the
+256-entry table, still `EMFILE` for anyone who believes it — but bounded. I had
+inferred "no ceiling check on the path" from reading the `prlimit64` handler
+and not read the function it delegates to. Reading one layer and predicting the
+next is how this entry's original "they happen to agree" got written.
+
+A related asymmetry found the same way: `pcb::set_rlimit`'s blanket
+no-raise rule has *no* privileged escape (its doc: `CAP_SYS_RESOURCE` "we have
+no equivalent"), and that is accurate — the kernel defines no such constant and
+`pcb.rs:994` records that capabilities aren't enforced. libc's raise-gate keys
+on `sys_capability::CAP_SYS_RESOURCE` (`posix/src/sys_capability.rs:157`),
+which the kernel never sees, so it is self-asserted rather than authoritative.
+When the syscalls land, libc drops its local check and inherits the kernel's
+rule.
+
+**Proper fix.** ✅ `requests/b-a-native-rlimit-syscalls.md` **filed 2026-08-21**
+— asks for a native `SYS_RLIMIT_GET`/`SYS_RLIMIT_SET` pair keyed on the
+kernel's `RLIMIT_*_INDEX` numbering, modelled on `SYS_TTY_GET_TERMIOS` /
+`SYS_TTY_SET_TERMIOS` (which lane A built to fix this exact shape of bug for
+`termios` — its own doc comment says *"libc previously answered this from a
+hardcoded constant of its own"*). When it lands, **delete `limit_store`
+outright** and call through every time. Do *not* build a cache: rlimit reads
+are not a hot path, and a cache is how the same class of bug gets reintroduced
+at smaller scale. The host-build `thread_local!` half stays as the test double.
+
+Until it lands, do **not** add more libc logic that treats the local table as
+authoritative beyond what `can_nice()` / `current_rtprio_limit()` /
+`check_mlock_caps()` already do. Copying the kernel's three values across as an
+interim fix is explicitly **not** wanted — it restores the appearance of
+agreement, which is what stopped anyone checking for five days.
 
 **Found** 2026-08-16 by lane B while fixing
 TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE, on discovering
 that `RLIMITS_INIT` and `kernel/src/proc/pcb.rs` are two independent
-hand-written copies of Linux's `INIT_RLIMITS` that had already drifted apart
-on two rows.
+hand-written copies of Linux's `INIT_RLIMITS`. Re-measured 2026-08-21 while
+filing the request.
 
 ---
 
@@ -49858,20 +49918,95 @@ Two deliberate choices:
   as consent would turn every passwordless account into a root shell.
   `nopass` in `/etc/doas.conf` is the only consent that counts here.
 
-### Still open — cross-invocation rate limiting
+### Cross-invocation rate limiting — FIXED 2026-08-21
 
-`authlib`'s failure tally lives in the `Authenticator`, which for `doas` lives
-for one invocation. `sshd` and `ftpd` keep one per daemon, so their tallies
-outlive a connection; `doas` cannot, because it *is* the process. So repeated
-`doas` attempts are not rate-limited relative to each other, which is exactly
+**Was:** `authlib`'s failure tally lived in the `Authenticator`, which for
+`doas` lives for one invocation. `sshd` and `ftpd` keep one per daemon, so
+their tallies outlive a connection; `doas` cannot, because it *is* the process.
+So repeated `doas` attempts were not rate-limited relative to each other —
+every invocation started the escalating delay again at zero — which is exactly
 the shape of an attacker who already has a shell as the user and is guessing
-toward root.
+toward root. The same held for `login` and `su`, and for `passwd`'s
+`Current password:` prompt by way of a different gap (see
+`B-PASSWD-VERIFIES-WITHOUT-AUTHLIB`).
 
-The proper fix is on-disk state, and it belongs in `authlib` rather than in
-`doas`, so that `login`, `su` and `doas` share one tally per user instead of
-three. `doas` already keeps per-uid state under `/var/run/doas` for its
-`persist` timestamps, which is the shape the tally would take. Tracked here
-rather than done now because it changes `authlib`'s contract for every caller.
+**Now:** `authlib` keeps the tally on disk as well as in memory, in one shared
+table at `authlib::DEFAULT_FAILLOCK` (`/var/run/authlib/tally`), so every
+program that authenticates through `authlib::Authenticator` counts against
+*one* tally per user. Today that is `doas`, `sshd`, `ftpd` and `logind` — but
+not yet `login` or `su`, which is the remaining half of the gap and is written
+up under "Still open" below. `Authenticator::new()` uses it; `with_stores`
+stays memory-only, so a
+test suite or a chroot cannot run up a real user's failures. Every call reads
+the file fresh (a failure another program recorded a moment ago must count
+against *this* attempt), takes the field-wise maximum of the in-memory and
+on-disk rows, and writes the advanced count back to both. A write that fails is
+ignored on purpose: the in-memory tally still limits the running process, so an
+unwritable `/var/run` degrades to the old behaviour rather than refusing to
+authenticate anyone.
+
+The table's shape is `userspace/authlib/src/faillock.rs`, and three attacks
+drove it — see `design-decisions.md` §347 for the alternatives:
+
+| Attack | What stops it |
+|---|---|
+| A username from the login prompt is attacker-chosen text; a file *named* for it is a path-traversal and an unbounded-file-creation primitive | One fixed-size file, 1024 slots, usernames hex-encoded so no name can forge or corrupt a row |
+| Probing which accounts exist by watching which ones get rate-limited | An invented username takes a slot exactly as a real one does; nothing distinguishes them |
+| Flooding the table with invented names to evict the record of the account actually under attack | Eviction is by *fewest* failures, oldest first — the attacked account is evicted last |
+
+**What did not change:** a refused (rate-limited) attempt is still not counted,
+so an attacker cannot hold a real user out by refreshing their own refusal; and
+the delay is still `delay_for` — doubling from 1s once `FREE_ATTEMPTS` are
+spent, capped at `MAX_DELAY_SECS`. The state lives under `/var/run` rather than
+`/var/lib` deliberately: it describes an attack in progress, not a durable fact
+about the account, and a reboot is not something an attacker can arrange more
+cheaply than waiting out five minutes.
+
+**Tests:** `a_program_that_runs_once_inherits_the_previous_run_s_failures`
+builds a fresh `Authenticator` per attempt to stand for a short-lived process
+and asserts a brand-new one is refused *even when presenting the correct
+password*; `a_success_in_one_program_clears_the_tally_for_the_next`;
+`a_memory_only_verifier_writes_no_shared_file`;
+`combining_two_tallies_takes_the_longer_delay_from_each_field`; plus twelve in
+`faillock` covering injection, truncation, damaged rows, the slot cap, eviction
+order and the temp-file-and-rename store.
+
+### Still open — `login` and `su` do not share the tally
+
+Both reach the right *verdict* through shared code, but neither goes through
+`Authenticator`, so neither reads or writes the shared count:
+
+| Program | What it calls | Why it is not `Authenticator` |
+|---|---|---|
+| `login` | `authlib::check_stored` (`userspace/login/src/main.rs:176`) | It owns one policy `authlib` deliberately declines to rule on: an account with an empty password field is entered by pressing Enter *at the machine's own keyboard*. `Authenticator::authenticate` reports that as `NoPassword` and leaves the caller to decide, so `login` calls the checking half directly and never touches the counting half. |
+| `su` | `userdb::Record::check_password` | It predates `authlib` and reads `/etc/users.yaml` through `userdb` for other reasons anyway. |
+
+The consequence is worth stating plainly: `login` still caps a *single process*
+at `MAX_LOGIN_ATTEMPTS` and then exits, so the delay never escalates across the
+getty respawn, and failures at the console do not slow down a subsequent `doas`
+guess or vice versa. One tally per user is the point of the change, and there
+are still three tallies.
+
+The fix `login` wants is not "call `authenticate` instead" — that would take
+the console's empty-password policy away from it. It is for `authlib` to expose
+the counting half on its own, so a caller that owns its verdict can still share
+the count: a `rate_limited(user) -> Option<retry_after>` to consult before
+prompting and a `note_failure(user)` after, with the existing `reset` for
+success, and `authenticate` refactored to be exactly those two around
+`check_stored` so there is one implementation rather than two.
+
+**That change has a tradeoff that should be decided, not assumed.** Once
+`login` shares the tally, an unprivileged process running as the user can hold
+that user at a delayed console prompt by failing `doas` on purpose — which is
+`pam_faillock`'s behaviour on Linux too, and is bounded here by
+`MAX_DELAY_SECS` (five minutes, never a permanent lockout). Whether five
+minutes of console delay purchasable by any local process is the right price
+for one tally per user is a judgement call — and if `su` joins at the same
+time it is sharper still, because `su` guesses at the *target's* password, so
+any local user could hold **root** at a delayed console prompt without ever
+having had root. That is the operator's call, not mine: it is queued as
+`open-questions.md` → **B-Q6**, with four options and a recommendation.
+`design-decisions.md` §347 records it as the open half.
 
 
 ## B-PASSWD-VERIFIES-WITHOUT-AUTHLIB — 2026-08-21 — OPEN (tech debt, small)
@@ -49942,7 +50077,19 @@ while still recording to the audit log — the distinction being whether a
 failure should impede a later, different program. That is a change to
 `authlib`'s contract, so it wants doing at the same time as the on-disk tally
 described under `B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS`
-→ "Still open — cross-invocation rate limiting", not separately.
+→ "Cross-invocation rate limiting", not separately.
+
+**Update 2026-08-21 — the tally now exists, and this question folded into a
+larger one.** The on-disk shared tally landed the same day (see the entry
+above). That did not settle this; it sharpened it. The counter-argument in the
+paragraphs below — "anyone who can reach any prompt as you can stop you
+changing your password" — was hypothetical while the tally was per-process and
+is concrete now that it is per-user and persistent. It is also the *same*
+question, in a different prompt, as whether `login` should obey the shared
+tally. Both are queued together as `open-questions.md` → **B-Q6**; answer that
+and this follows from it. Do not decide this one in isolation — the two prompts
+disagreeing about whether a shared count applies to them is precisely the
+inconsistency `authlib` exists to prevent.
 
 **Not a security hole today, and worth being precise about why:** reaching this
 prompt requires already running as the account whose password is being changed.

@@ -176,8 +176,8 @@ mod limit_store {
         // Nice ceiling: 0, matching both Linux's own default
         // (include/asm-generic/resource.h gives RLIMIT_NICE {0, 0}) and our
         // kernel's, which seeds the same value in
-        // `kernel/src/proc/pcb.rs`'s RLIMITS_INIT and consults it from the
-        // Linux `setpriority` translation layer.
+        // `kernel/src/proc/pcb.rs`'s `DEFAULT_RLIMITS` and consults it from
+        // the Linux `setpriority` translation layer.
         //
         // Linux encodes this ceiling inverted: `rlim_cur = 20 - lowest
         // allowed nice`, so 0 means "nice may never go below 20" — i.e. no
@@ -762,9 +762,29 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
 ///   - If `new_limit` is non-NULL: `setrlimit` enforces `rlim_cur <=
 ///     rlim_max` and returns `EINVAL` on violation.
 ///
-/// Since our kernel doesn't track per-process resource limits, valid
-/// requests delegate to the global getrlimit/setrlimit; `pid` is
-/// otherwise ignored (single-user, single-process resource view).
+/// Valid requests delegate to this file's `getrlimit`/`setrlimit`, so
+/// `pid` is accepted and then ignored — every caller gets the calling
+/// context's limits.
+///
+/// This used to be justified by "our kernel doesn't track per-process
+/// resource limits."  That has not been true since the kernel grew
+/// `Process::rlimits` (`kernel/src/proc/pcb.rs`): it keeps a real
+/// per-process table, seeded from `DEFAULT_RLIMITS`, inherited across
+/// `fork` and edited by the Linux-ABI `prlimit64`.  What is still true
+/// is that the table is unreachable from here — it is exposed only
+/// through the Linux compatibility layer's syscall numbers, and this
+/// libc is the native ABI.  So `mod limit_store` (top of this file) is
+/// a *second* copy of a table the kernel is authoritative for, and the
+/// two have already drifted apart on three of their sixteen rows —
+/// `RLIMIT_NOFILE`, `RLIMIT_SIGPENDING` and `RLIMIT_MSGQUEUE`.
+///
+/// `requests/b-a-native-rlimit-syscalls.md` asks lane A for the native
+/// `SYS_RLIMIT_GET`/`SYS_RLIMIT_SET` pair that would let `limit_store`
+/// be deleted and `pid` be honoured for real.  Until it lands, do not
+/// add libc logic that treats the local table as authoritative beyond
+/// what `can_nice()` / `current_rtprio_limit()` / `check_mlock_caps()`
+/// already do.  See `known-issues.md`
+/// → TD-POSIX-RLIMITS-ARE-A-SHADOW-OF-THE-KERNEL'S.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn prlimit(
     pid: i32,

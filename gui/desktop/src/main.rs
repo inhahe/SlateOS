@@ -485,6 +485,13 @@ pub enum Hit {
     TaskbarButton(usize),
     /// The taskbar panel, but not one of its controls.
     TaskbarPanel,
+    /// The tray clock, which opens the calendar popup.
+    Clock,
+    /// A control of the open calendar popup — including
+    /// [`calendar::CalendarHit::Panel`], which is the popup's own inert space
+    /// and must **not** dismiss it. A point off the popup is not this variant
+    /// at all, which is how the two are told apart.
+    CalendarControl(calendar::CalendarHit),
     /// A title-bar button.
     WindowClose(WindowId),
     WindowMaximize(WindowId),
@@ -619,8 +626,25 @@ pub struct DesktopShell {
     /// the taskbar clock reads the zone *and* the three `show_*` flags, whose
     /// doc comments in [`datetime_settings::DateTimeSettings`] each say "in
     /// the taskbar clock" — and until this field existed, none of them reached
-    /// one. See [`current_time_string`](Self::current_time_string).
+    /// one. See [`current_clock_string`](Self::current_clock_string).
     pub datetime: datetime_settings::DateTimeSettings,
+    /// The calendar popup the tray clock opens.
+    ///
+    /// `calendar.rs` used to be reachable only through `mod calendar;`: it had
+    /// a month grid, a year overview, an event store and a reminder manager,
+    /// all tested, and no surface at all — nothing in the shell ever built a
+    /// `CalendarView`, so the clock was not clickable. `visible` on the view
+    /// **is** the open flag; a second `calendar_open: bool` here would be one
+    /// missed assignment away from a popup that is drawn and not clickable, or
+    /// the reverse. See `design-decisions.md` §493.
+    pub calendar: calendar::CalendarView,
+    /// The events the popup marks and lists.
+    ///
+    /// Empty until something fills it. It lives on the shell rather than
+    /// inside the view because a calendar *view* is a way of looking at events,
+    /// not a place to keep them — the reminder path and any future agenda
+    /// surface read the same store.
+    pub events: calendar::EventStore,
     /// The shell's **one** snap implementation.
     ///
     /// `snap.rs` used to be dead code — `mod snap;` was its only reference —
@@ -914,6 +938,8 @@ impl DesktopShell {
             next_z: 1,
             next_window_id: 1,
             datetime: datetime_settings::DateTimeSettings::default(),
+            calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
+            events: calendar::EventStore::new(),
             // Placeholder: the real area needs `taskbar_rect()`, which needs
             // the appearance scaling that is only set two fields up. Seeded
             // immediately below rather than left to the first snap, so that a
@@ -1388,11 +1414,31 @@ impl DesktopShell {
             }
         }
 
+        // The calendar popup, tested against the same layout it was drawn
+        // from. `hit_test` returning `None` means the point is not on the
+        // popup at all, which falls through to whatever is behind it.
+        if self.calendar.visible {
+            let (cx, cy) = self.calendar_origin();
+            if let Some(hit) =
+                self.calendar
+                    .hit_test(cx, cy, self.calendar_scale(), x, y, &self.events)
+            {
+                return Hit::CalendarControl(hit);
+            }
+        }
+
         if self.start_button_rect().contains(x, y) {
             return Hit::StartButton;
         }
 
         if self.taskbar_rect().contains(x, y) {
+            // Before the window buttons: the tray is at the far end and the
+            // buttons never reach it (`taskbar_button_width` subtracts the
+            // tray), but the order is what makes that a fact rather than a
+            // coincidence the two could stop sharing.
+            if self.clock_rect().contains(x, y) {
+                return Hit::Clock;
+            }
             for index in 0..self.visible_windows().len() {
                 if self.taskbar_button_rect(index).contains(x, y) {
                     return Hit::TaskbarButton(index);
@@ -1495,6 +1541,15 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
 
+        // Same rule for the calendar. `Hit::CalendarControl` covers the
+        // popup's inert space as well as its controls, so a click in its own
+        // margin does not close it — which is the single most irritating way
+        // for a popup to behave — while a click anywhere off it does.
+        if self.calendar.visible && !matches!(hit, Hit::Clock | Hit::CalendarControl(_)) {
+            self.calendar.set_visible(false);
+            return ShellAction::Consumed;
+        }
+
         // Only the primary button acts. The rest still cannot fall through to a
         // client when they land on the shell's own surfaces.
         if button != MouseButton::Left {
@@ -1543,6 +1598,14 @@ impl DesktopShell {
                     }
                     None => ShellAction::Consumed,
                 }
+            }
+            Hit::Clock => {
+                self.toggle_calendar();
+                ShellAction::Consumed
+            }
+            Hit::CalendarControl(control) => {
+                self.calendar.apply(control);
+                ShellAction::Consumed
             }
             Hit::StartMenuPanel | Hit::PowerMenuPanel | Hit::TaskbarPanel => ShellAction::Consumed,
             Hit::TaskbarButton(index) => {
@@ -2071,16 +2134,19 @@ impl DesktopShell {
         }
 
         match DesktopAction::for_chord(key.modifiers, key.key) {
-            Some(action) => {
-                self.run_desktop_action(action);
-                true
-            }
+            Some(action) => self.run_desktop_action(action),
             None => false,
         }
     }
 
     /// Carry out a shortcut that has already been recognised.
-    fn run_desktop_action(&mut self, action: DesktopAction) {
+    ///
+    /// Returns whether the press is consumed. Every binding but
+    /// [`DismissPopup`](DesktopAction::DismissPopup) always is; that one is
+    /// bare Escape, and a key the shell claims unconditionally is a key no
+    /// window can ever see. Closing a dialog is what Escape does far more
+    /// often than closing the start menu.
+    fn run_desktop_action(&mut self, action: DesktopAction) -> bool {
         match action {
             DesktopAction::CycleWindows => {
                 if self.alt_tab_active {
@@ -2145,7 +2211,9 @@ impl DesktopShell {
                     self.switch_desktop(target);
                 }
             }
+            DesktopAction::DismissPopup => return self.dismiss_popups(),
         }
+        true
     }
 }
 
@@ -2178,6 +2246,9 @@ enum DesktopAction {
     RestoreOrMinimize,
     PreviousDesktop,
     NextDesktop,
+    /// Close whatever popup is open. Unlike every other action here, this one
+    /// can decline: see [`DesktopShell::run_desktop_action`].
+    DismissPopup,
 }
 
 impl DesktopAction {
@@ -2210,6 +2281,14 @@ impl DesktopAction {
             (false, false, false, true, Key::Down) => Some(Self::RestoreOrMinimize),
             (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),
             (false, true, false, true, Key::Right) => Some(Self::NextDesktop),
+            // Bare Escape. The shell had no binding for it at all, so the only
+            // way to close the start menu or the calendar was to click
+            // somewhere else — and a popup that a click opened but Escape
+            // cannot close is the one every other desktop has taught the user
+            // to expect. It is claimed *conditionally*: with nothing open the
+            // press is not consumed and reaches the focused window, whose own
+            // dialog may be what the user meant to dismiss.
+            (false, false, false, false, Key::Escape) => Some(Self::DismissPopup),
             _ => None,
         }
     }
@@ -2733,6 +2812,155 @@ impl DesktopShell {
         // the tray.
         (content + padding * 3.0).max(self.scale(TRAY_MIN_WIDTH))
     }
+
+    // ========================================================================
+    // Calendar popup
+    // ========================================================================
+
+    /// The clock's clickable area at the right end of the taskbar.
+    ///
+    /// The slot plus the padding to its right, and the bar's full height: the
+    /// reading is one line of text in the middle of a 40-px bar, and a target
+    /// that was only as tall as the glyphs would miss most presses aimed at it.
+    /// Derived from the same `clock_width` and `TRAY_PADDING` the renderer
+    /// places the text with, so it cannot drift from what is drawn.
+    #[must_use]
+    pub fn clock_rect(&self) -> Rect {
+        let bar = self.taskbar_rect();
+        let padding = self.scale(TRAY_PADDING);
+        let width = self.clock_width() + padding;
+        Rect::new((bar.w - width).max(0.0), bar.y, width.min(bar.w), bar.h)
+    }
+
+    /// The scale the popup is laid out at.
+    ///
+    /// The shell's own, not the toolkit's global: the popup hangs off taskbar
+    /// chrome that [`scale`](Self::scale) has already multiplied, so a popup
+    /// laid out in logical pixels would be half-size at 200% and anchored to
+    /// the wrong pixel.
+    #[must_use]
+    pub fn calendar_scale(&self) -> f32 {
+        self.appearance.scale_factor()
+    }
+
+    /// Where the popup's top-left corner goes: above the taskbar, right-aligned
+    /// to the display edge with the tray's padding.
+    ///
+    /// Both axes are clamped to the display, and on a display too small to
+    /// hold the popup above the taskbar the clamp means it overlaps the bar
+    /// rather than running off the top. That is the right way round: the
+    /// popup's controls — the arrows, the title and the clock band — are all
+    /// in its first eighty pixels, so losing the bottom of the grid leaves it
+    /// usable while losing the top would not. A 640×480 display at 200%
+    /// scaling is the case; the popup is 480 px tall there and the space above
+    /// the taskbar is 400.
+    #[must_use]
+    pub fn calendar_origin(&self) -> (f32, f32) {
+        let scale = self.calendar_scale();
+        let size = self.calendar.popup_rect(0.0, 0.0, scale);
+        let padding = self.scale(TRAY_PADDING);
+        let x = (self.screen_width as f32 - size.w - padding).max(0.0);
+        let y = (self.taskbar_rect().y - size.h - padding).max(0.0);
+        (x, y)
+    }
+
+    /// The clock the popup's header band shows.
+    ///
+    /// This is where [`datetime_settings::AdditionalClock`] finally reaches a
+    /// surface. The field has existed since the Date & Time panel was written
+    /// — the panel can add up to four zones, name them, and hide them — and
+    /// nothing anywhere drew one, so `visible` was a flag whose only effect
+    /// was to print "Hidden" beside its own row in the panel that set it.
+    ///
+    /// The popup rather than the tray, because the tray is already the width
+    /// of its widest possible reading (see [`clock_width`](Self::clock_width))
+    /// and four more zones there would push the window buttons off the bar.
+    /// See `design-decisions.md` §493.
+    fn popup_clock(&self) -> calendar::ClockDisplay {
+        let mut clock = self.clock();
+        // The header band has room for the full reading, so it shows the date
+        // regardless of whether the *taskbar* is configured to.
+        clock.show_date = true;
+        for extra in &self.datetime.additional_clocks {
+            if !extra.visible {
+                continue;
+            }
+            // A zone the table cannot resolve is dropped rather than shown at
+            // UTC under its own label, which would be a wrong clock presented
+            // as a right one. `local_zone` refuses the same way.
+            let Some(info) = self
+                .datetime
+                .available_timezones
+                .iter()
+                .find(|tz| tz.tz_id == extra.tz_id)
+            else {
+                continue;
+            };
+            clock.extra_timezones.push(calendar::TimezoneEntry {
+                label: extra.label.clone(),
+                tz: info.rule,
+            });
+        }
+        clock
+    }
+
+    /// Open the calendar popup, or close it if it is already open.
+    pub fn toggle_calendar(&mut self) {
+        if self.calendar.visible {
+            self.calendar.set_visible(false);
+            return;
+        }
+        // Opening a popup closes the other one: two panels covering the same
+        // taskbar at once is a state the user cannot have asked for.
+        self.start_menu_open = false;
+        self.power_menu_open = false;
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let zone = self.local_zone();
+        // Today comes from the zone's *rules*, so the popup cannot open on a
+        // different day than the reading that opened it.
+        self.calendar.set_today_from_zone(now, &zone);
+        self.calendar.header = Some(calendar::ClockHeader {
+            clock: self.popup_clock(),
+            zone,
+        });
+        self.calendar.set_visible(true);
+    }
+
+    /// Close whatever popup is open. Returns whether anything was.
+    ///
+    /// The return value is what keeps Escape from being swallowed: a press
+    /// with nothing open must reach the focused window, whose own dialog may
+    /// be what the user meant to dismiss.
+    pub fn dismiss_popups(&mut self) -> bool {
+        let any = self.start_menu_open || self.power_menu_open || self.calendar.visible;
+        self.start_menu_open = false;
+        self.power_menu_open = false;
+        self.calendar.set_visible(false);
+        any
+    }
+
+    /// Render the calendar popup, if it is open.
+    #[must_use]
+    pub fn render_calendar(&self) -> Option<RenderTree> {
+        if !self.calendar.visible {
+            return None;
+        }
+        let (x, y) = self.calendar_origin();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut tree = RenderTree::new();
+        tree.commands.extend(
+            self.calendar
+                .render(x, y, self.calendar_scale(), now, &self.events),
+        );
+        Some(tree)
+    }
 }
 
 // ============================================================================
@@ -2821,6 +3049,34 @@ fn main() {
             other => println!("Power menu returned {other:?}"),
         }
     }
+
+    // Open the calendar from the tray clock, page to the next month, and shut
+    // it with Escape — the whole popup path a user takes.
+    let clock = desktop.clock_rect();
+    desktop.handle_mouse(&click(clock.x + 4.0, clock.y + clock.h / 2.0));
+    if let Some(tree) = desktop.render_calendar() {
+        println!("Calendar popup: {} commands", tree.len());
+    }
+    let (cal_x, cal_y) = desktop.calendar_origin();
+    let next =
+        calendar::MonthLayout::new(&desktop.calendar, cal_x, cal_y, desktop.calendar_scale())
+            .next_arrow();
+    desktop.handle_mouse(&click(next.x + next.w / 2.0, next.y + next.h / 2.0));
+    println!(
+        "Calendar showing {}/{}",
+        desktop.calendar.view_month, desktop.calendar.view_year
+    );
+    let escape = KeyEvent {
+        key: Key::Escape,
+        pressed: true,
+        modifiers: Modifiers::default(),
+        text: None,
+    };
+    println!(
+        "Escape closed it: {} (still open: {})",
+        desktop.handle_hotkey(&escape),
+        desktop.calendar.visible
+    );
 
     // Test window snapping
     desktop.snap_window(w1, true);

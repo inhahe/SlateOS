@@ -97,6 +97,9 @@ pub use present::{Headless, Present, Recording};
 // the wire's — the compositor is the end of that pipe, not a parallel
 // vocabulary for the same thing.
 pub use guiremote::control::CursorShape;
+// Re-exported because `Window::layer` is public and a caller reading it needs
+// to be able to name the type without depending on `guiremote` directly.
+pub use guiremote::control::Layer;
 use guiremote::control::WindowSpec;
 use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
 
@@ -536,6 +539,12 @@ pub struct Window {
     pub focused: bool,
     /// Z-order index (higher = more in front).
     pub z_order: u32,
+    /// Which band of the stacking order this window may move within.
+    ///
+    /// Fixed at creation and never changed afterwards. See [`Layer`] for why
+    /// the band is a role rather than a starting z-order: a starting depth is
+    /// something the first raise destroys.
+    pub layer: Layer,
     /// Window opacity (0.0 = fully transparent, 1.0 = fully opaque).
     pub opacity: f32,
     /// Process ID of the client that owns this window.
@@ -608,6 +617,7 @@ impl Window {
             maximized: false,
             focused: false,
             z_order: 0,
+            layer: spec.layer,
             opacity: DEFAULT_OPACITY,
             client_pid,
             render_tree: RenderTree::new(),
@@ -3367,8 +3377,7 @@ impl Compositor {
         let id = window.id;
 
         self.windows.push(window);
-        self.z_stack.push(id);
-        self.update_z_orders();
+        self.raise_within_layer(id);
 
         // Focus the new window.
         self.focus_window(id);
@@ -3389,15 +3398,25 @@ impl Compositor {
         // Mark the old area as damaged before removing.
         self.damage_window(window_id);
 
+        let closed_layer = self.layer_of(window_id);
         self.windows.remove(idx);
         self.z_stack.retain(|&id| id != window_id);
         self.update_z_orders();
 
-        // If this was the focused window, focus the topmost remaining window.
+        // If this was the focused window, focus the topmost remaining window
+        // *at or below the closed window's band*. Taking the topmost window
+        // outright would mean closing an application hands focus to the
+        // taskbar, which is in front of everything by construction and is
+        // never what the user was looking at next.
         if self.focused_window == Some(window_id) {
             self.focused_window = None;
-            if let Some(&top_id) = self.z_stack.last() {
-                self.focus_window(top_id);
+            if let Some(&next) = self
+                .z_stack
+                .iter()
+                .rev()
+                .find(|&&id| self.layer_of(id) <= closed_layer)
+            {
+                self.focus_window(next);
             }
         }
 
@@ -3713,10 +3732,10 @@ impl Compositor {
             win.dirty = true;
             self.focused_window = Some(window_id);
 
-            // Bring to top of z-stack.
-            self.z_stack.retain(|&id| id != window_id);
-            self.z_stack.push(window_id);
-            self.update_z_orders();
+            // Bring to the top of its own band — not to the top of the whole
+            // stack, which would let any application window climb over the
+            // taskbar simply by being clicked.
+            self.raise_within_layer(window_id);
 
             self.damage_window(window_id);
             self.pending_notifications
@@ -5166,6 +5185,41 @@ impl Compositor {
     /// Get a mutable reference to a window by ID.
     fn window_mut(&mut self, id: WindowId) -> Option<&mut Window> {
         self.windows.iter_mut().find(|w| w.id == id)
+    }
+
+    /// The band a window sits in, or [`Layer::Normal`] if there is no such
+    /// window.
+    ///
+    /// The fallback is unreachable for any id that is in `z_stack`, which is
+    /// the only place this is called from — every id there names a live
+    /// window. It exists because returning a `Layer` rather than an
+    /// `Option<Layer>` keeps [`Self::stack_insertion_index`] a straight count.
+    fn layer_of(&self, id: WindowId) -> Layer {
+        self.window_ref(id).map_or(Layer::Normal, |w| w.layer)
+    }
+
+    /// Where in `z_stack` a window of `layer` goes when it is raised to the top
+    /// of its own band.
+    ///
+    /// `z_stack` is kept partitioned by band, ascending, so the insertion point
+    /// is simply the number of windows in bands at or below `layer` — after all
+    /// of them, before the first window of any higher band. That partitioning
+    /// is the invariant this whole layering rests on, and it is maintained by
+    /// this function being the *only* way anything enters the stack.
+    fn stack_insertion_index(&self, layer: Layer) -> usize {
+        self.z_stack
+            .iter()
+            .filter(|&&id| self.layer_of(id) <= layer)
+            .count()
+    }
+
+    /// Put `id` at the top of its own band, removing it from wherever it was.
+    fn raise_within_layer(&mut self, id: WindowId) {
+        let layer = self.layer_of(id);
+        self.z_stack.retain(|&other| other != id);
+        let at = self.stack_insertion_index(layer);
+        self.z_stack.insert(at, id);
+        self.update_z_orders();
     }
 
     /// Update z_order fields on all windows based on their position in z_stack.
@@ -8367,5 +8421,156 @@ mod tests {
             white > 0,
             "the ellipsis was drawn in the span's colour rather than the base colour",
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Stacking layers
+    //
+    // The defect these exist for: before `Layer`, `z_stack` was one flat list
+    // and every raise went to the very top of it. A taskbar was therefore an
+    // ordinary window that the next click on any application put behind that
+    // application — which is not a cosmetic ordering complaint, it is a
+    // taskbar that vanishes the moment the desktop is used.
+    // ---------------------------------------------------------------------
+
+    /// Create a window in a named band, since `create_window` cannot say one.
+    fn layered(comp: &mut Compositor, title: &str, layer: Layer) -> WindowId {
+        let mut spec = WindowSpec::new(title, 200, 100);
+        spec.layer = layer;
+        comp.create_window_from_spec(&spec, 1)
+    }
+
+    #[test]
+    fn an_overlay_stays_above_an_application_however_often_it_is_raised() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let panel = layered(&mut comp, "Taskbar", Layer::Overlay);
+        let app = layered(&mut comp, "Editor", Layer::Normal);
+
+        // Creating the application after the panel must not have put it on top.
+        assert_eq!(
+            comp.z_stack.last(),
+            Some(&panel),
+            "a new application window was stacked over the taskbar"
+        );
+
+        // Nor may raising it, which is the operation that actually happens
+        // every time a user clicks a window.
+        comp.focus_window(app);
+        assert_eq!(
+            comp.z_stack.last(),
+            Some(&panel),
+            "clicking an application window put it over the taskbar"
+        );
+        assert_eq!(
+            comp.focused_window,
+            Some(app),
+            "the application should still have taken focus; only the stacking              is confined, not the focus"
+        );
+    }
+
+    #[test]
+    fn a_background_surface_cannot_climb_over_an_application() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let wallpaper = layered(&mut comp, "Wallpaper", Layer::Background);
+        let app = layered(&mut comp, "Editor", Layer::Normal);
+
+        comp.focus_window(wallpaper);
+        assert_eq!(
+            comp.z_stack,
+            vec![wallpaper, app],
+            "raising the wallpaper lifted it over the window it is behind"
+        );
+    }
+
+    #[test]
+    fn raising_reorders_within_a_band_exactly_as_it_always_did() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let a = layered(&mut comp, "A", Layer::Normal);
+        let b = layered(&mut comp, "B", Layer::Normal);
+        let c = layered(&mut comp, "C", Layer::Normal);
+        assert_eq!(comp.z_stack, vec![a, b, c]);
+
+        comp.focus_window(a);
+        assert_eq!(
+            comp.z_stack,
+            vec![b, c, a],
+            "confining a raise to its band must not change what a raise does              inside the band"
+        );
+    }
+
+    #[test]
+    fn the_stack_stays_partitioned_by_band_under_arbitrary_raises() {
+        // `stack_insertion_index` counts rather than searches, which is only
+        // correct while the stack is partitioned. This walks every window in
+        // turn, repeatedly, and re-checks the invariant the counting rests on.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let ids: Vec<WindowId> = [
+            Layer::Normal,
+            Layer::Overlay,
+            Layer::Background,
+            Layer::Normal,
+            Layer::Overlay,
+            Layer::Background,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| layered(&mut comp, &format!("w{i}"), l))
+        .collect();
+
+        for round in 0..3 {
+            for &id in &ids {
+                comp.focus_window(id);
+                let layers: Vec<Layer> = comp.z_stack.iter().map(|&i| comp.layer_of(i)).collect();
+                assert!(
+                    layers.windows(2).all(|w| w[0] <= w[1]),
+                    "round {round}: raising {id:?} left the stack unsorted by                      band: {layers:?}"
+                );
+                assert_eq!(
+                    comp.z_stack.len(),
+                    ids.len(),
+                    "a raise lost or duplicated a window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn closing_an_application_does_not_hand_focus_to_the_taskbar() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let panel = layered(&mut comp, "Taskbar", Layer::Overlay);
+        let behind = layered(&mut comp, "Behind", Layer::Normal);
+        let front = layered(&mut comp, "Front", Layer::Normal);
+        comp.focus_window(front);
+
+        comp.destroy_window(front).unwrap();
+        assert_eq!(
+            comp.focused_window,
+            Some(behind),
+            "closing a window focused the topmost surface outright, which is              always the shell"
+        );
+        assert!(comp.window_ref(panel).is_some(), "the panel was destroyed");
+    }
+
+    #[test]
+    fn closing_the_last_application_leaves_the_taskbar_unfocused() {
+        // The fallback has to be "nothing" rather than "whatever is left":
+        // with no application open the user is looking at the desktop, not at
+        // the taskbar's keyboard focus.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let _panel = layered(&mut comp, "Taskbar", Layer::Overlay);
+        let only = layered(&mut comp, "Only", Layer::Normal);
+        comp.focus_window(only);
+
+        comp.destroy_window(only).unwrap();
+        assert_eq!(comp.focused_window, None);
+    }
+
+    #[test]
+    fn a_window_that_never_names_a_layer_is_an_ordinary_window() {
+        // Every caller that predates `Layer` goes through here, so this is the
+        // test that the change is invisible to them.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let id = comp.create_window("Legacy".to_string(), 300, 200, 1);
+        assert_eq!(comp.window_ref(id).unwrap().layer, Layer::Normal);
     }
 }

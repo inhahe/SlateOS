@@ -20,6 +20,13 @@ sha2 = { path = "../../sha2" }
 # `tzrules` date request argues for, and the reason `textfmt` exists at all.
 textfmt = { path = "../../textfmt" }
 
+# The calendar arithmetic behind the timestamps this tool prints. Same layering
+# argument as `textfmt` above: `tzrules` is `no_std` and dependency-free, so a
+# command-line archiver can take the date algorithm without linking a widget
+# library. This file carried the last local transcription of Hinnant's
+# `civil_from_days` in the tree until `tzrules` exported it.
+tzrules = { path = "../../tzrules" }
+
 # The same crate again with its `audit` counters on, so the tests can prove the
 # store's writes really went through `safeio` and did not quietly regress to
 # `std::fs::write`/`fs::copy`. Cargo unifies this with the dependency above when

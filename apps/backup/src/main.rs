@@ -1160,63 +1160,16 @@ fn format_timestamp(ts: u64) -> String {
     let minutes = (time_of_day % 3600) / 60;
     let seconds = time_of_day % 60;
 
-    // Days since epoch to Y/M/D (simplified Gregorian calculation)
-    let (year, month, day) = days_to_ymd(days);
+    // The exact inverse of `tzrules::days_from_civil`, total over `i64` — not
+    // the "simplified Gregorian calculation" that used to live below this
+    // function, whose sibling transcription in the file manager was wrong for
+    // every date before 2000-03-01.
+    let (year, month, day) = tzrules::civil_from_days(i64::try_from(days).unwrap_or(i64::MAX));
 
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         year, month, day, hours, minutes, seconds
     )
-}
-
-/// Convert days since the Unix epoch to (year, month, day), both 1-based.
-///
-/// **This is the last local transcription of Howard Hinnant's
-/// `civil_from_days` in the tree, and it is deliberate rather than missed.**
-/// There were five; the file manager's was quietly wrong for every date before
-/// 2000-03-01, and the three GUI apps now derive the date from `guitk::date`,
-/// which derives it from `tzrules` — the same era arithmetic the libc's
-/// `localtime` and the taskbar clock use.
-///
-/// This program cannot follow them there. It is a command-line archiver that
-/// prints its dates with `println!` and does not depend on `guitk`; making a
-/// headless tool link a GUI toolkit for a calendar is the mistake `guitk`
-/// already declined to make with the RNG, which is why `randrange` exists as
-/// its own crate. The right home is `tzrules`, whose public `days_from_civil`
-/// has no public inverse even though `year_of_day` computes one internally and
-/// throws away the month and the day. That is asked for in
-/// `requests/c-b-year-of-day-computes-the-month-and-day-and-throws-them-away.md`.
-/// **When that lands, delete this function** and call
-/// `tzrules::civil_from_days`.
-///
-/// The arithmetic is written saturating rather than left to a proof about
-/// operand ranges. `days` comes from a stored backup manifest, so nothing
-/// checked here bounds it, and a proof that lives in a comment above the code
-/// it justifies is the failure mode this sweep exists to remove.
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "Hinnant's algorithm is a closed form whose intermediate terms \
-              are bounded by the era decomposition itself; saturating every \
-              step would change the result rather than protect it. The only \
-              unbounded input is `days`, clamped on entry."
-)]
-fn days_to_ymd(days: u64) -> (u64, u64, u64) {
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html.
-    // Clamping the input is what makes the rest of the closed form safe: `z`
-    // is then far below `u64::MAX` and every term derived from it is smaller
-    // still, so the `+`/`-`/`*` below cannot overflow.
-    let days = days.min(u64::from(u32::MAX));
-    let z = days + 719_468;
-    let era = z / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    (year, m, d)
 }
 
 // ============================================================================
@@ -4156,12 +4109,46 @@ mod tests {
         assert_eq!(format_size(1073741824), "1.0 GiB");
     }
 
+    /// The whole rendering, not just its first five characters.
+    ///
+    /// This used to assert `starts_with("2023-")` and `contains(":")`, which a
+    /// wrong month and a wrong day both pass — and the month and the day are
+    /// the two fields the calendar arithmetic can actually get wrong. The
+    /// sibling transcription of that arithmetic in the file manager was wrong
+    /// for every date before 2000-03-01 and went unnoticed for exactly this
+    /// reason: every value it produced was in range, so only a second opinion
+    /// could catch it, and no test asked for one.
     #[test]
     fn test_format_timestamp() {
-        // 2023-11-14 22:13:20 UTC = 1700000000
-        let ts = format_timestamp(1700000000);
-        assert!(ts.starts_with("2023-"));
-        assert!(ts.contains(":"));
+        // 2023-11-14 22:13:20 UTC.
+        assert_eq!(format_timestamp(1_700_000_000), "2023-11-14 22:13:20");
+    }
+
+    /// Dates chosen where a month estimate drifts, plus the epoch itself.
+    ///
+    /// `format_timestamp` reads UTC, so these are fixed points independent of
+    /// any zone the machine is set to.
+    #[test]
+    fn a_timestamp_names_the_day_that_contains_it() {
+        for (ts, want) in [
+            (0_u64, "1970-01-01 00:00:00"),
+            (86_399, "1970-01-01 23:59:59"),
+            (86_400, "1970-01-02 00:00:00"),
+            // 29 February of a leap year that is also a century year — the
+            // case the /4 rule alone gets right and the /100 rule alone does
+            // not.
+            (951_782_400, "2000-02-29 00:00:00"),
+            // The two dates the file manager's copy got wrong, kept by name so
+            // this reads as the regression test for that bug.
+            (489_283_200, "1985-07-04 00:00:00"),
+            (929_404_800, "1999-06-15 00:00:00"),
+            // The last second of a year, where an off-by-one rolls both the
+            // day and the year at once.
+            (1_735_689_599, "2024-12-31 23:59:59"),
+            (1_735_689_600, "2025-01-01 00:00:00"),
+        ] {
+            assert_eq!(format_timestamp(ts), want, "at ts {ts}");
+        }
     }
 
     // --- Exclusion Tests ---

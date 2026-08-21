@@ -187,11 +187,16 @@ struct XmlParser<'a> {
 pub enum XmlError {
     UnexpectedEof,
     MalformedTag(String),
-    MismatchedClose { expected: String, found: String },
+    MismatchedClose {
+        expected: String,
+        found: String,
+    },
     InvalidEntity(String),
     InvalidAttribute(String),
     /// Elements nested deeper than [`MAX_XML_DEPTH`].
-    TooDeep { limit: usize },
+    TooDeep {
+        limit: usize,
+    },
 }
 
 impl core::fmt::Display for XmlError {
@@ -946,12 +951,14 @@ const fn sample_ts(days: u64, secs: u64) -> u64 {
 // sibling app that had *not* switched that warning off reported its own
 // orphaned copy the moment its last caller left. See known-issues
 // `TD-C-DEAD-CODE-IS-ALLOWED-WHOLESALE`.
-
-/// Days from 0000-03-01 (the epoch of the shifted civil calendar) to
-/// 1970-01-01.
-const DAYS_FROM_0000_03_01_TO_EPOCH: u64 = 719_468;
-/// Days in a 400-year Gregorian era, which is a whole number of weeks.
-const DAYS_PER_ERA: u64 = 146_097;
+//
+// `DAYS_FROM_0000_03_01_TO_EPOCH` (719_468) and `DAYS_PER_ERA` (146_097) stood
+// here for a while afterwards, still documented, referenced by nothing at all —
+// the era decomposition they belonged to had left with `days_to_ymd` and only
+// its constants stayed. Lane B spotted them from the outside while replying to
+// the `civil_from_days` request; the same `#![allow(dead_code)]` that hid the
+// function then hid its leftovers. That is the debt above costing something
+// twice over the same code.
 
 /// The range of years this program will accept in a date.
 ///

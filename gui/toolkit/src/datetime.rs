@@ -259,11 +259,7 @@ impl DateTime {
     #[must_use]
     pub fn long_date(self) -> String {
         let (y, m, d) = self.date.ymd();
-        format!(
-            "{}, {} {d}, {y}",
-            self.date.weekday().name(),
-            month_name(m)
-        )
+        format!("{}, {} {d}, {y}", self.date.weekday().name(), month_name(m))
     }
 
     /// `Aug 18, 2026` — the long date's short form, for a narrow column.

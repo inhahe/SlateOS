@@ -76,7 +76,9 @@ use guiremote::client::{ClientError, Connection, Transport};
 use guiremote::control::{CursorShape, DisplayInfo, RequestBody, ResponseBody, WindowSpec};
 
 pub use guiremote::client::{ClientError as ConnectionError, Transport as ConnectionTransport};
-pub use guiremote::control::{CursorShape as Cursor, DisplayInfo as Display, WindowSpec as Spec};
+pub use guiremote::control::{
+    CursorShape as Cursor, DisplayInfo as Display, Layer, WindowSpec as Spec,
+};
 // An addressed event, as it travels. Applications never build one — they
 // receive `(window, Event)` pairs from the loop — but anything driving an
 // application synthetically does, which is what [`testing`] is for.
@@ -538,6 +540,20 @@ impl WindowBuilder {
     #[must_use]
     pub const fn transparent(mut self, transparent: bool) -> Self {
         self.spec.transparent = transparent;
+        self
+    }
+
+    /// Which band of the stacking order the window lives in.
+    ///
+    /// Almost every application wants the default, [`Layer::Normal`], and
+    /// should not call this. It exists for the surfaces that are not ordinary
+    /// windows: a wallpaper ([`Layer::Background`]) and the shell's own chrome
+    /// — taskbar, start menu, popups — which has to stay in front of
+    /// application windows however often they are clicked
+    /// ([`Layer::Overlay`]).
+    #[must_use]
+    pub const fn layer(mut self, layer: Layer) -> Self {
+        self.spec.layer = layer;
         self
     }
 

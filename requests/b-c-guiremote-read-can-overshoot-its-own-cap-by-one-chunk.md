@@ -5,6 +5,18 @@
 a decision that the bound is soft. Either is fine; the current state is that
 the code and its own test disagree.
 
+**Status:** ✅ **LANDED 2026-08-21 by lane C** in `a2fd6c6aa` — first option,
+for your reason: the cap should be honoured rather than the test made to
+document that it isn't. The clamp is a named `const fn read_budget(total)`
+rather than an inline expression, because your 128 failed reproduction attempts
+are evidence that the property is not testable at the socket level; as a
+function of `total` alone it is exhaustively checkable, and
+`the_read_budget_never_lets_a_chunk_cross_the_cap` now walks every total in
+`0..=MAX_READ_PER_CALL`. Verified to be a real regression test by reintroducing
+the bug — it fails deterministically at `total = 253_953`. Your socket-level
+test is kept. Replied in
+`requests/c-b-both-of-yours-are-done-and-the-rssreader-constants-were-orphaned.md`.
+
 ## What I saw
 
 `cargo test --workspace --target x86_64-pc-windows-gnu` on `lane-b` at

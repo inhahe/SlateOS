@@ -48196,6 +48196,35 @@ writes an accidental bound into the test as if it were intentional, and the doc
 comment ("how much one `read` will take before returning") would then need to
 say "approximately".
 
+**Fixed 2026-08-21 by lane C**, on the clamp, for the reason lane B gave: the
+cap should be honoured rather than the test made to document that it isn't.
+
+The clamp is a named `const fn read_budget(total) -> usize` rather than the
+inline expression above, and that is the part worth keeping. **The defect was
+unreachable by any test that could be written against the socket**: provoking
+it needs a short read to land mid-loop, which depends on when the OS
+deschedules the peer's writer thread. Lane B saw it twice in ordinary workspace
+runs and could not reproduce it in 128 attempts aimed directly at it. The
+existing socket-level assertion is therefore a test that finds this class of
+bug only by luck, and it is the only kind of test the shape of the code allowed.
+
+As a function of `total` alone the property is exhaustively checkable, and
+`socket::tests::the_read_budget_never_lets_a_chunk_cross_the_cap` now walks
+every `total` in `0..=MAX_READ_PER_CALL` — including all the off-grid ones a
+short read produces, which is precisely the region the scheduler decides
+whether to visit. Verified to be a real regression test by reintroducing the
+bug (`read_budget` returning `CHUNK` unconditionally): it fails deterministically
+at `total = 253_953`, in a run that takes under a second. The socket-level test
+is kept as well; it is the one that found the bug and it covers the loop's use
+of the budget rather than the budget itself.
+
+**The reusable point.** The general shape here is the same one lane B drew out
+in `design-decisions.md` §343 about `civil_from_days`: an invariant that only a
+second opinion can check needs to be *extracted to where a second opinion can
+be written*. A property that depends on thread scheduling is not testable; the
+same property as a pure function of one integer is exhaustively testable. The
+fix was three lines, but the reason it will not come back is the extraction.
+
 ---
 
 ## TD-C-CLOCKDISPLAY-RENDER-HAS-NO-CALLER
@@ -48239,3 +48268,107 @@ pixels. Until then, `reading_width`/`format_taskbar` (the shell's path) and
 `main.rs` carries no blanket `#![allow(dead_code)]`, but `render` is `pub` on a
 `pub struct`, so `dead_code` does not fire on it either. It will sit there until
 somebody needing a tray clock finds it and gets a two-line one.
+
+**Fixed 2026-08-21**, on the first of the two options — extra zones live in the
+calendar popup, the taskbar stays one line. Recorded as `design-decisions.md`
+§493, because the alternative was defensible and the choice is user-visible.
+
+The deciding argument was not aesthetic. The tray is already sized for the
+*widest reading its own switches allow* (`clock_width`, held to the drawn text
+by `the_clocks_target_covers_the_reading_that_is_drawn`), and four more zones
+stacked there would push the taskbar's window buttons off the right of the bar
+on a small display. The popup has the room; the bar does not.
+
+What landed:
+
+- `ClockDisplay::render` is now the popup's clock band, reached through
+  `CalendarView::header: Option<ClockHeader>`. It has a real caller.
+- `render_tray_clock` was **not** deleted, contrary to what the table above
+  predicted. It survives as the one-line forwarder it always was, because the
+  popup's band and the tray's reading are now genuinely the same function with
+  the same signature — which is the property the entry was asking for. Its name
+  is the only thing that was wrong, and it now describes what it does.
+- `DesktopShell::popup_clock` builds the band from `datetime.additional_clocks`
+  on **every open**, not once at construction, so a zone added in the Date &
+  Time panel while the popup was shut is in the band when it reopens
+  (`reopening_the_calendar_rewinds_it`).
+- An `additional_clocks` entry whose `tz_id` is not in `available_timezones` is
+  **dropped**, not shown at UTC under its own label. A row reading "Mars
+  22:13" that is really the viewer's own UTC is worse than an absent row.
+  Pinned by `the_extra_clocks_reach_the_calendars_header`.
+
+This also closed the larger half of the defect: `AdditionalClock::visible` had
+been a switch whose only observable effect was printing "Hidden" beside its own
+row in the panel that set it. It now hides a clock.
+
+## TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO
+
+**In short:** `DesktopShell` has five public methods that turn the desktop into
+draw commands — the taskbar, the window decorations, the Alt-Tab switcher, the
+start menu and now the calendar popup. Nothing outside the crate calls any of
+them, and nothing outside the crate *can*: `gui/desktop/Cargo.toml` declares no
+`[lib]` target, so `desktop` is a binary and `DesktopShell` is not importable at
+all. Every one of those methods is reached only from the crate's own `main()`
+demo and its own tests.
+
+**Where:** `gui/desktop/src/main.rs` — `render_taskbar` (:2303),
+`render_window_decorations` (:2402), `render_alt_tab` (:2493),
+`render_start_menu` (:2564), `render_calendar` (:2948).
+`gui/desktop/Cargo.toml` — no `[lib]`.
+
+**Why this is logged and not fixed (2026-08-21):** it is the render half of
+`TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`, and it has the same single cause —
+the shell has no compositor/IPC event loop yet. That entry covers the outbound
+half (a `ShellAction::Launch` nobody carries out); this one covers the inbound
+half (a `RenderTree` nobody paints). Fixing either one properly means building
+the loop, which is a task, not a cleanup, and adding a `[lib]` target on its own
+would produce an importable type with still no importer.
+
+**Why it is worth having written down anyway.** This is the exact defect the
+round-4 sweep exists to find — "the tree holds one correct answer that callers
+cannot reach, and grows wrong copies of it" — and it is currently invisible,
+because none of the five methods trips `dead_code`: they are `pub` on a `pub`
+type, which suppresses the lint even though the crate is a binary and the
+`pub` therefore reaches nobody. `apps/systray/src/main.rs` already has its own
+`render_calendar_popup` and its own `render_power_menu`, which is the copy-
+growing half of the pattern starting.
+
+**Proper fix:** the same event loop `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`
+waits on. When it lands it composes the five trees in z-order — decorations,
+taskbar, then whichever popups are open — and submits the result to the
+compositor. At that point `desktop` gains a `[lib]` so the loop can live in a
+separate binary and the tests can exercise the composition, and the popup
+render methods stop being the only surfaces in the shell whose output has
+never been on a screen.
+
+**If never fixed:** the shell remains a very well-tested model of a desktop
+that cannot be displayed. Nothing rots — the tests hold the geometry and the
+hit testing to each other — but every surface added to it inherits the same
+condition, and the systray's parallel implementations keep diverging from the
+shell's with nothing to notice that they have.
+
+**Progress 2026-08-21 — one of the two stated blockers was already stale, and
+the other now has its first piece.** The entry above says the shell "has no
+compositor/IPC event loop yet" and treats that as one obstacle. It is two, and
+they were in different states:
+
+- *A transport to run a loop over.* *Already existed when this was written.*
+  `gui/compositor/src/server.rs` listens, accepts and paces; `oswindow` really
+  connects, blocks and submits; `apps/editor` is a working client end to end
+  over the real protocol. The claim was inherited from an earlier entry and not
+  rechecked. Recorded here rather than quietly corrected, because it is the same
+  failure `design-decisions.md` §305 exists for: a "blocked on X" note that
+  outlives X.
+- *A way for a shell surface to be a shell surface.* Genuinely missing, and the
+  real blocker. The compositor had one flat `z_stack` and every raise went to
+  the top of it, so a taskbar would have gone behind the first application
+  window the user clicked. **Fixed today:** `Layer::{Background, Normal,
+  Overlay}` on `WindowSpec`, a band each window is created in and cannot leave,
+  with raising confined to the band. `design-decisions.md` §494; 7 tests, all
+  verified to fail when the flat push is reintroduced.
+
+**Still open**, and still the reason this entry is not closed: the shell has no
+way to *learn about other windows*. `CompositorRequest` has no window-list query
+and no notification, so a taskbar could now stay in front of the windows it is
+supposed to list while having no idea what they are. That protocol surface plus
+the loop itself are what remain.

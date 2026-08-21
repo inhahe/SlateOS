@@ -76,7 +76,6 @@
 //! reads are bounds-checked; invalid tag bytes, oversized lengths, and
 //! malformed UTF-8 are reported as [`DecodeError`].
 
-
 use guitk::color::Color;
 use guitk::render::{
     FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow, TextSpan,

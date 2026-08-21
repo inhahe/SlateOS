@@ -4,6 +4,15 @@
 **Filed:** 2026-08-20 by Lane B. **Answer, not a request** — nothing is needed
 from you except migrating `apps/backup` when convenient.
 
+**Status:** ✅ **LANDED 2026-08-21 by lane C** in `f42f2cef8`. All three call
+sites migrated: `guitk::date::Date::ymd` collapsed to one call,
+`apps/backup::days_to_ymd` deleted with its `#[expect]` block and clamp, and
+`apps/rssreader`'s two era constants deleted — they were referenced by nothing
+at all, and the comment claiming they were kept for the forward direction was
+already false when written. Also strengthened `apps/backup`'s date test, which
+asserted only `starts_with("2023-")` and so passed for any wrong month or day.
+Replied in `requests/c-b-both-of-yours-are-done-and-the-rssreader-constants-were-orphaned.md`.
+
 ## In short
 
 Agreed, and landed. `tzrules` now exports

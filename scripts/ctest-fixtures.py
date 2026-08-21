@@ -347,7 +347,13 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
     `build.py` stands in for the compile/link flags, which live nowhere else.
     `main.c` exists only for the C fixtures — a fastpy fixture's source is
     embedded in its `build.py` — so it is included only when present rather
-    than reported as a missing input.
+    than reported as a missing input. Headers beside it are *globbed* rather
+    than named: no fixture has one today, but `create-ext4-rootfs.sh` already
+    counts `*.h` as an input, and a builder blind to something its own gate
+    rejects would leave the first fixture to grow a header permanently red —
+    reported on every image build and not fixable by the command the report
+    names. Where a gate and a builder disagree about what an input is, the
+    builder must be the more inclusive of the two.
 
     The third element is "this is text": true for tracked sources, whose line
     endings differ between worktrees without differing between commits, and
@@ -361,6 +367,8 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
     main_c = fixture / "main.c"
     if main_c.is_file():
         got.append(("main.c", main_c, True))
+    for header in sorted(fixture.glob("*.h")):
+        got.append((header.name, header, True))
     got.append(("toolchain/sysroot/lib/libc.a", LIBC, False))
     return got
 

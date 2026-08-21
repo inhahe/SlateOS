@@ -1479,53 +1479,22 @@ echo "[rootfs] staged make fixtures in /usr/share/make-selftest: 01-recipe, 02-o
 # toolchain, i.e. no zig, and so cannot rebuild them).
 # ($LIBC_A is set by the sysroot-staleness check further up, which has to run
 # before anything that links libc.a is judged against it.)
+# The staleness *verdict* is not reached here any more — it is reached once, for
+# all 70 fixtures of both families, in the completeness section further down.
+# This loop only stages.
+#
+# It used to check the nine ctest fixtures inline, and nothing checked the 61
+# fastpy ones at all, which is the same coverage asymmetry the content stamps
+# had: a guard written for the family that had visibly failed, never extended to
+# the family beside it. When that was finally measured on 2026-08-21, 60 of the
+# 61 unchecked fixtures were stale in the tree at once. A per-family gate in a
+# per-family loop is how you get a per-family blind spot, so there is now one
+# loop over the tracked `build.py` recipes and no place for a family to not be
+# in it.
 CTEST_COUNT=0
-CTEST_STALE=0
 for elf in "$ROOT_DIR"/services/ctest-*/*.elf; do
     [ -e "$elf" ] || continue
     name="$(basename "$elf" .elf)"          # e.g. ctest-tls-thread
-    stale=0                                 # counts FIXTURES, not findings: one
-                                            # ELF can be stale both ways at once
-    if [ -e "$LIBC_A" ] && [ "$LIBC_A" -nt "$elf" ]; then
-        echo "[rootfs] WARNING: $name.elf is OLDER than the sysroot libc.a — it links a stale"
-        echo "[rootfs]          libc and proves nothing about the current one. Rebuild it:"
-        echo "[rootfs]            PYTHONPATH=<fastpy> python services/$name/build.py"
-        stale=1
-    fi
-    # ... and older than its OWN source, which is the same false-green arriving
-    # from the other direction and went uncaught until 2026-08-16.  The libc
-    # check above asks "does this ELF link the current library"; nothing asked
-    # "does this ELF contain the current test".  That morning lane B added 33
-    # waitid checks to services/ctest-jobctl/main.c; the .elf beside it was two
-    # days old and the libc had not moved, so the image would have staged a
-    # fixture that exits 42 without running one of the new checks — and lane A
-    # was one step from merging to main on the strength of that green.
-    #
-    # A fixture's sources are its own directory: main.c, any headers beside it,
-    # and build.py (which carries the compiler flags).  A change anywhere in
-    # there means rebuild, so it is enough to find any one of them newer than
-    # the ELF; there is no need to rank them.
-    #
-    # Compare with a plain loop, NOT `ls -t ... | head -1`.  This script runs
-    # under `set -euo pipefail` (line 34), and most fixture directories have no
-    # *.h: the unmatched glob makes `ls` exit nonzero, `pipefail` promotes that
-    # to the pipeline's status, and `set -e` then kills the script from inside
-    # the command substitution.  When that happened on 2026-08-16 the symptom
-    # was not an error — it was the rootfs build stopping silently partway
-    # through the fixture loop, writing no image, and still exiting 0.  A guard
-    # against false greens must not itself be able to produce one.
-    src_dir="$(dirname "$elf")"
-    for src in "$src_dir"/*.c "$src_dir"/*.h "$src_dir"/build.py; do
-        [ -e "$src" ] || continue          # unmatched glob expands to itself
-        [ "$src" -nt "$elf" ] || continue
-        echo "[rootfs] WARNING: $name.elf is OLDER than $(basename "$src") — it was built"
-        echo "[rootfs]          from a previous version of the test and cannot exercise any"
-        echo "[rootfs]          check added since. Rebuild it:"
-        echo "[rootfs]            PYTHONPATH=<fastpy> python services/$name/build.py"
-        stale=1
-        break                              # one report per fixture is enough
-    done
-    [ "$stale" -eq 0 ] || CTEST_STALE=$((CTEST_STALE + 1))
     cp -L "$elf" "$STAGE/tests/$name.elf"
     CTEST_COUNT=$((CTEST_COUNT + 1))
 done
@@ -1637,26 +1606,26 @@ if [ "$PY_STALE" -gt 0 ]; then
     fi
 fi
 
-# --- Content stamps: the check the mtime gate above structurally cannot make ---
+# --- Completeness: the check that replaces the retired content stamps ---------
 #
-# Everything above compares mtimes, which answers "was this rebuilt after the
-# library changed?".  That is the right question for a build directory and the
-# wrong one for a binary that is *checked into git* beside the source it was
-# built from, for two reasons (known-issues.md ->
-# B-THE-TRACKED-FIXTURE-BINARIES-DRIFT-FROM-THEIR-SOURCES):
+# There used to be a second gate here, hashing build.py + main.c + libc.a into a
+# tracked .stamp per fixture, because mtime cannot answer "was this *committed*
+# binary built from the source committed beside it?" -- a fresh checkout stamps
+# every file with one time, so in a clean clone the mtime gate is not weak, it is
+# silent.
 #
-#   1. mtime is satisfied by a local rebuild that nobody commits, so git can
-#      stay stale indefinitely while every local run reports green.  That is
-#      how commit 6c89903d0 shipped a main.c with 33 new checks alongside an
-#      ELF containing none of them, passing every boot test.
-#   2. A fresh checkout stamps every file with one time, leaving no ordering to
-#      compare -- so in a clean clone (CI, a new machine) the mtime gate is not
-#      weak, it is silent.
+# That gate is gone with the thing it guarded (design-decisions.md §355). The
+# ELFs are no longer committed, so there is no second copy to have drifted, and
+# mtime is informative again for exactly the reason it was not before: git no
+# longer writes these files, so the only thing that can reorder an ELF against
+# its inputs is a build step that did not run.
 #
-# scripts/ctest-fixtures.py compares SHA-256 of build.py (which *is* the compile
-# and link flags), main.c, and the linked libc.a against a tracked .stamp, and
-# names whichever one moved.  It needs no toolchain, so it runs everywhere the
-# image is built.  A fixture with no stamp fails rather than being skipped.
+# Note what the stamps' own record says about replacing them. They covered 9 of
+# the 70 fixtures, and when that coverage was finally measured, 60 of the 61
+# *unguarded* ones were stale in the tree at that moment. The gate was thorough
+# about the population it was made from and blind to eight times as many
+# fixtures beside it -- so widening it to 70 was never the fix; not storing the
+# binaries was.
 #
 # Probe python3 *before* python: this script is normally run under WSL Ubuntu
 # (`wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`), which ships
@@ -1665,7 +1634,7 @@ fi
 # else-branch below, which is precisely why that branch is loud rather than
 # silent.
 STAMP_PY=""
-STAMP_FAIL=0
+FIXTURE_SHORT=0
 for _cand in python3 python; do
     if command -v "$_cand" >/dev/null 2>&1; then STAMP_PY="$_cand"; break; fi
 done
@@ -1685,21 +1654,55 @@ done
 # The expected set is the tracked `build.py` recipes, which is a fact of the
 # checkout rather than a list anybody maintains -- a 71st fixture is covered the
 # day it lands, exactly as `fixtures()` globs for the same reason.
+#
+# The same loop answers the staleness question, for both families, because they
+# are two readings of one file: "is the ELF there, and is it behind its inputs".
+# A fixture's inputs are its own directory — main.c, any headers beside it, and
+# build.py, which carries the compile and link flags and *is* the whole source
+# for a fastpy fixture — plus the libc.a it statically links. A change anywhere
+# in there means rebuild, so it is enough to find any one of them newer than the
+# ELF; there is no need to rank them.
+#
+# Compare with a plain loop, NOT `ls -t ... | head -1`. This script runs under
+# `set -euo pipefail` (line 34), and most fixture directories have no *.h: the
+# unmatched glob makes `ls` exit nonzero, `pipefail` promotes that to the
+# pipeline's status, and `set -e` then kills the script from inside the command
+# substitution. When that happened on 2026-08-16 the symptom was not an error —
+# it was the rootfs build stopping silently partway through the fixture loop,
+# writing no image, and still exiting 0. A guard against false greens must not
+# itself be able to produce one.
 FIXTURE_RECIPES=0
 FIXTURE_MISSING=0
+FIXTURE_STALE=0
 MISSING_NAMES=""
+STALE_REPORT=""
 for _recipe in "$ROOT_DIR"/services/ctest-*/build.py "$ROOT_DIR"/services/fastpy-*/build.py; do
     [ -e "$_recipe" ] || continue
     _dir="$(dirname "$_recipe")"
     _name="$(basename "$_dir")"
     FIXTURE_RECIPES=$((FIXTURE_RECIPES + 1))
-    if [ ! -e "$_dir/$_name.elf" ]; then
+    _elf="$_dir/$_name.elf"
+    if [ ! -e "$_elf" ]; then
         FIXTURE_MISSING=$((FIXTURE_MISSING + 1))
         MISSING_NAMES="$MISSING_NAMES $_name"
+        continue                        # absent beats stale: it has no inputs to be behind
+    fi
+    _behind=""
+    if [ -e "$LIBC_A" ] && [ "$LIBC_A" -nt "$_elf" ]; then
+        _behind="libc.a"                # links a libc that is no longer in the tree
+    fi
+    for _src in "$_dir"/*.c "$_dir"/*.h "$_dir"/build.py; do
+        [ -e "$_src" ] || continue      # unmatched glob expands to itself
+        [ "$_src" -nt "$_elf" ] || continue
+        _behind="${_behind:+$_behind, }$(basename "$_src")"
+    done
+    if [ -n "$_behind" ]; then
+        FIXTURE_STALE=$((FIXTURE_STALE + 1))
+        STALE_REPORT="$STALE_REPORT$_name (behind $_behind)|"
     fi
 done
 if [ "$FIXTURE_MISSING" -gt 0 ]; then
-    STAMP_FAIL=1
+    FIXTURE_SHORT=1
     echo "[rootfs] ERROR: $FIXTURE_MISSING of $FIXTURE_RECIPES fixture ELFs have not been built here."
     # Named, not just counted: which ones are missing is the diagnosis. A whole
     # family missing means the toolchain never ran; one missing means one build
@@ -1712,8 +1715,8 @@ if [ "$FIXTURE_MISSING" -gt 0 ]; then
     echo "[rootfs]        resolve from inside WSL):"
     echo "[rootfs]          python scripts/ctest-fixtures.py build"
     echo "[rootfs]        then re-run this script."
-elif [ "$FIXTURE_RECIPES" -gt 0 ]; then
-    echo "[rootfs] fixture set complete: $FIXTURE_RECIPES of $FIXTURE_RECIPES built"
+elif [ "$FIXTURE_RECIPES" -gt 0 ] && [ "$FIXTURE_STALE" -eq 0 ]; then
+    echo "[rootfs] fixture set complete: $FIXTURE_RECIPES of $FIXTURE_RECIPES built and current"
 fi
 if [ -z "$STAMP_PY" ]; then
     # Kept as a note rather than dropped: the completeness gate above is pure
@@ -1725,13 +1728,18 @@ fi
 # --- The third level: the sysroot the other two are measured against ---------
 #
 # Both gates above take toolchain/sysroot/lib/libc.a as their reference — one
-# compares mtimes against it, the other hashes it into the stamp — and neither
-# can see that the reference itself is behind posix/src.  That is the worst of
-# the three cases precisely because it is invisible to the other two:
+# compares mtimes against it, the other counts ELFs that were linked against it —
+# and neither can see that the reference itself is behind posix/src.  That is the
+# worst of the three cases precisely because it is invisible to the other two:
 # *rebuilding a fixture against a stale libc.a silences both of them while
 # leaving the fixture just as wrong*.  It happened on 2026-08-16: nine ELFs
 # were relinked, every check went green, and ctest-jobctl still exited 101
 # because the libc it linked predated the waitid fix in cff19bfa2.
+#
+# `ctest-fixtures.py build` now closes that hole at the source rather than only
+# reporting it here: it refuses to build a fixture against a stale sysroot and
+# rebuilds the sysroot first, so the "relink against a libc.a that is itself
+# behind" sequence is no longer reachable from the supported command.
 if [ -n "$SYSROOT_STALE" ] && [ "${ALLOW_STALE_FIXTURES:-0}" != "1" ]; then
     echo "[rootfs] ERROR: toolchain/sysroot/lib/libc.a is STALE (older than"
     echo "[rootfs]        $SYSROOT_STALE). Rebuild the sysroot first (command"
@@ -1740,14 +1748,14 @@ elif [ -n "$SYSROOT_STALE" ]; then
     echo "[rootfs] WARNING: the sysroot libc.a is stale (see above);" \
          "continuing because ALLOW_STALE_FIXTURES=1"
 fi
-if [ "$STAMP_FAIL" -ne 0 ] && [ "${ALLOW_STALE_FIXTURES:-0}" != "1" ]; then
+if [ "$FIXTURE_SHORT" -ne 0 ] && [ "${ALLOW_STALE_FIXTURES:-0}" != "1" ]; then
     echo "[rootfs] ERROR: the fixture set is short (see the list above). An image packed"
     echo "[rootfs]        now would silently run fewer ring-3 self-tests and still pass."
-elif [ "$STAMP_FAIL" -ne 0 ]; then
+elif [ "$FIXTURE_SHORT" -ne 0 ]; then
     echo "[rootfs] WARNING: the fixture set is short (see above);" \
          "continuing because ALLOW_STALE_FIXTURES=1"
 fi
-# The deferred mtime verdict (CTEST_STALE, set by the fixture loop above).
+# The staleness verdict (FIXTURE_STALE, set by the same loop as FIXTURE_MISSING).
 #
 # This is now fatal on its own evidence, which is a change of standing that the
 # move to built-on-demand ELFs earns (design-decisions.md §355). It used to be a
@@ -1763,23 +1771,34 @@ fi
 # because the image would otherwise be packed with a binary testing a libc that
 # is not in the tree. That was incident #2 (2026-08-16), and it is the one the
 # ALLOW_STALE_FIXTURES escape hatch exists for rather than the default.
-CTEST_MTIME_FATAL=0
-if [ "$CTEST_STALE" -gt 0 ]; then
+FIXTURE_STALE_FATAL=0
+if [ "$FIXTURE_STALE" -gt 0 ]; then
     if [ "${ALLOW_STALE_FIXTURES:-0}" != "1" ]; then
-        CTEST_MTIME_FATAL=1
-        echo "[rootfs] ERROR: $CTEST_STALE of $CTEST_COUNT native C fixtures are older than"
-        echo "[rootfs]        libc.a or their own sources, so the build step has not been"
-        echo "[rootfs]        re-run since those changed. Rebuild them from Windows:"
-        echo "[rootfs]          python scripts/ctest-fixtures.py build"
-        echo "[rootfs]        (it rebuilds only what is behind, and rebuilds the sysroot"
-        echo "[rootfs]        first if libc.a is itself behind posix/src)."
+        FIXTURE_STALE_FATAL=1
+        echo "[rootfs] ERROR: $FIXTURE_STALE of $FIXTURE_RECIPES fixture ELFs are older than"
+        echo "[rootfs]        their own inputs, so the build step has not been re-run since"
+        echo "[rootfs]        those changed."
     else
-        echo "[rootfs] WARNING: $CTEST_STALE of $CTEST_COUNT fixtures are older than libc.a"
-        echo "[rootfs]          or their own sources; continuing because ALLOW_STALE_FIXTURES=1"
+        echo "[rootfs] WARNING: $FIXTURE_STALE of $FIXTURE_RECIPES fixture ELFs are behind"
+        echo "[rootfs]          their inputs; continuing because ALLOW_STALE_FIXTURES=1"
     fi
-    # If STAMP_FAIL is set the stamp gate is already reporting the real fault
-    # above with the file that actually moved; adding an mtime line would only
-    # repeat it less precisely.
+    # Named with *what* they are behind, because that is the diagnosis: every
+    # fixture behind libc.a means the sysroot moved and nothing was relinked;
+    # one fixture behind its own main.c means one test was edited and not
+    # rebuilt. The remediation is the same command either way, but what you go
+    # and look at afterwards is not.
+    printf '%s' "$STALE_REPORT" | tr '|' '\n' | while IFS= read -r _line; do
+        [ -n "$_line" ] || continue
+        echo "[rootfs]        stale: $_line"
+    done
+    echo "[rootfs]        Rebuild them from Windows:"
+    echo "[rootfs]          python scripts/ctest-fixtures.py build"
+    echo "[rootfs]        (it rebuilds only what is behind, and rebuilds the sysroot"
+    echo "[rootfs]        first if libc.a is itself behind posix/src)."
+    # This and the completeness gate can fire at once, and unlike the old
+    # stamp/mtime pair they are not two readings of one fault: "this ELF is
+    # behind its inputs" and "this ELF was never built" are different states
+    # needing the same command, so both are printed and the exit below is shared.
 fi
 
 # One exit for all three, so a tree that is stale at several levels learns all
@@ -1787,8 +1806,8 @@ fi
 # for the rebuilt fixtures to be flagged on the *next* run, costs a second cycle
 # to learn something this run already knew.
 if [ "${ALLOW_STALE_FIXTURES:-0}" != "1" ] \
-   && { [ -n "$SYSROOT_STALE" ] || [ "$STAMP_FAIL" -ne 0 ] \
-        || [ "$CTEST_MTIME_FATAL" -ne 0 ]; }; then
+   && { [ -n "$SYSROOT_STALE" ] || [ "$FIXTURE_SHORT" -ne 0 ] \
+        || [ "$FIXTURE_STALE_FATAL" -ne 0 ]; }; then
     echo "[rootfs]        (set ALLOW_STALE_FIXTURES=1 to build the image anyway)"
     exit 1
 fi

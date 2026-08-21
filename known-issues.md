@@ -24262,6 +24262,10 @@ less than no test at all.
 
 ## B-THE-TRACKED-FIXTURE-BINARIES-DRIFT-FROM-THEIR-SOURCES, AND THE STALENESS GATE CANNOT SEE IT
 
+**Status: CLOSED 2026-08-21 by removing the arrangement** (`53571a004`, design-decisions.md §355).
+The binaries are no longer stored in git at all, so there is no second copy left
+to drift. Superseded — see "How this was actually closed" at the very end.
+
 **Status: FIXED 2026-08-16** (binaries re-committed in `169d3a242`; the
 content-based gate — the part that actually matters — landed as
 `scripts/ctest-fixtures.py`, wired into `scripts/create-ext4-rootfs.sh`, and is
@@ -24395,6 +24399,108 @@ check did not run" wearing the costume of "the check passed". Now probes
 `python3` before `python`, and the remediation hint it prints uses
 `sys.executable`, so a command printed inside WSL is a command that works
 inside WSL.
+
+### How this was actually closed — 2026-08-21, `53571a004` (design-decisions.md §355)
+
+The 2026-08-16 fix above was real, and every claim it makes about the nine
+stamped fixtures is still true. It was also **partial in a way nobody measured
+at the time**, and the measurement is the whole story:
+
+| | fixtures | guarded by the stamp gate |
+|---|---|---|
+| `services/ctest-*` | 9 | 9 |
+| `services/fastpy-*` | 61 | **0** |
+| | **70** | **9** |
+
+When that coverage was finally measured on 2026-08-21, **60 of the 61
+unguarded fixtures were stale in the working tree at that moment** — the ring-3
+self-tests had been proving that binaries ran against a `libc.a` that no longer
+existed, and reporting PASS, for as long as the fastpy family had existed.
+
+The gate was built for the population that had already failed. Every fixture it
+covered was a fixture whose failure is what caused it to be written; the 61 that
+had never visibly failed were never added, and nothing about the gate's design
+would have made anyone notice. **The gate was measuring the population it was
+made from.** That is the part worth carrying forward: "verified in both
+directions" (which it was) says nothing about *how many things* were verified,
+and a coverage number is a different measurement from a correctness one.
+
+So the fix is no longer to widen the gate to 70. The second copy is gone: the
+ELFs are gitignored and built on demand from the tracked `build.py` beside each
+one, the nine `.stamp` files are deleted along with the `compute`/`stamp`/`check`
+machinery that maintained them, and `create-ext4-rootfs.sh` no longer asks "was
+this built from that?" — it asks "is any of the 70 missing?" and refuses to pack
+a short image, naming what is absent. A compiled artifact that is not stored
+cannot drift from its source, and the "which side moved?" ambiguity that made
+the old gate's remediation advice a coin flip does not arise for a build step,
+which simply rebuilds whatever is behind.
+
+The two supporting sub-bugs are closed by the same commit, without needing to be
+fixed on their own terms:
+
+- the gate's *wrong-advice* failure (it told you to relink when the correct
+  action was to rebuild the sysroot, or the reverse) — `build` now rebuilds the
+  sysroot itself rather than printing which rebuild to run;
+- mtime being uninformative on a fresh checkout — no longer relevant, because
+  git no longer writes these files at all. On a fresh clone the ELF is simply
+  *absent*, which is both the truth and the signal, and absence is exactly what
+  the new gate is built to catch.
+
+## TD-B-THE-FOUR-SPIKE-ELFS-STILL-MAKE-YOU-RUN-THE-REBUILD-BY-HAND
+
+**Status: OPEN** — logged 2026-08-21, hit once while landing §355.
+
+**In short:** four large programs on the disk image (bash, GNU make, pkgconf,
+CPython) are compiled against our own C library. When that library is rebuilt,
+those four are out of date, and the image build refuses to run until they are
+recompiled. It refuses by *printing the command you should type* rather than
+running it — so a purely mechanical fix costs a full build cycle and a human
+round-trip. The 70 test fixtures used to work exactly this way and no longer do
+(design-decisions.md §355); these four are what is left of the old pattern.
+
+**Where it lives.** `scripts/create-ext4-rootfs.sh`, the four blocks guarded by
+`BASH_STALE` / `PKGCONF_STALE` / `MAKE_STALE` / `PYTHON_STALE`. Each prints an
+`ERROR:` naming one of:
+
+| artifact | rebuild command | cost |
+|---|---|---|
+| `build/spike/bash-slateos.elf` | `bash scripts/bash-spike/slatelink.sh` | relink only, seconds |
+| `build/spike/pkgconf-slateos.elf` | `bash scripts/pkgconf-spike/run.sh` | configure + build |
+| `build/spike/make-slateos.elf` | `bash scripts/make-spike/run.sh` | configure + build |
+| `build/spike/python-slateos.elf` | `bash scripts/cpython-spike/slatelink.sh` | relink only, seconds |
+
+Measured 2026-08-21: **all four, end to end, took 83 s** — against an image
+build that takes minutes. The cost argument for not doing it automatically does
+not survive the measurement.
+
+**How to reproduce.** Rebuild the sysroot (`toolchain/build-sysroot.ps1`, or let
+`scripts/ctest-fixtures.py build` do it), then run
+`wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`. It stages everything,
+reaches the bash gate, prints the relink command and exits 1 without writing an
+image. This happened while verifying §355 and cost one full cycle for a fix the
+script already knew how to perform.
+
+**Why this is the same bug §355 closed, not a separate one.** §355's finding was
+that a *gate* has to answer "which side moved?" and cannot, whereas a *build
+step* never faces the question because it rebuilds whatever is behind in
+dependency order. These four are gates. They are also, unlike the fixtures,
+buildable from exactly where the check runs: the spike scripts are WSL bash
+scripts and `create-ext4-rootfs.sh` is already running under WSL. The reason the
+fixtures are *not* built by the rootfs script — they need Windows-side fastpy and
+`zig.exe`, which do not resolve from inside WSL — does not apply here.
+
+**The proper fix.** Have `create-ext4-rootfs.sh` run the rebuild instead of
+printing it, in dependency order (sysroot first, then the four), keeping the
+`ERROR:` path only for a rebuild that *fails*. Keep an opt-out for the host that
+cannot build them, which is what `ALLOW_STALE_FIXTURES=1` already means; consider
+a separate `NO_SPIKE_REBUILD=1` so "I know these are stale, pack anyway" stays
+distinct from "do not spend the 83 s".
+
+**Why it is not urgent.** The current behaviour is *safe* — it fails closed, and
+no stale spike can reach an image. The cost is a wasted cycle per sysroot
+rebuild, not a false green. That is why this is debt rather than a bug.
+
+---
 
 ## B-THE-BASH-RELINK-SCRIPT-HARD-CODED-ONE-WORKTREE-SO-ONLY-`main`-EVER-RAN-BASH
 

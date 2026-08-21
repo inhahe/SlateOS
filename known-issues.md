@@ -49530,3 +49530,291 @@ overwriting a status already received; a truncated `exit-status` being an error
 rather than a silent zero; unknown and malformed extended data being dropped;
 and that `EXIT_SSH_FAILURE` is 255. Clippy clean on the host and on
 `x86_64-slateos`.
+
+## B-THE-SSH-STACK-AUTHENTICATED-NOBODY — 2026-08-21 — FIXED
+
+**In short:** SlateOS's SSH server, SSH client and FTP server all performed
+authentication that could not fail. The SSH server let anyone log in who knew
+a user's *public* key — which is public, travels in the clear, and sits
+world-readable in `authorized_keys`. The SSH client never checked that the
+server it reached was the server it asked for. The FTP server did not read the
+password at all. Each of these is a full remote authentication bypass on its
+own, and all three shipped together, so a user of this tree who ran `sshd` on
+a network was running an open door with a lock painted on it.
+
+Nine defects across three programs, found in one pass — seven in the SSH key
+exchange and public-key path, two in password checking. They are listed
+together because they are one failure, not nine: at no point did anything in
+the SSH stack do the arithmetic that authentication *is*. Every place a
+signature or a hash was supposed to be checked, something cheaper was checked
+instead, and a comment explained that this was a simplification.
+
+### The seven in the key exchange and public-key path
+
+| # | Where | What it did | Effect |
+|---|---|---|---|
+| 1 | `sshd` `handle_pubkey_auth` | Matched the offered public key against `authorized_keys` and returned success **without reading the signature** | **Remote auth bypass.** Anyone who had seen the user connect, or could read `~/.ssh/id_ed25519.pub`, could log in as them |
+| 2 | `sshd` `HostKey::sign` | Returned an HMAC-SHA256 zero-padded to 64 bytes and labelled `ssh-ed25519` | No real client could ever connect; the label was a lie about the maths |
+| 3 | `sshd` `generate_dh_private` | `sha256(pid ‖ uptime_ms)` | **Session keys recoverable.** ~2^32 of search space, and both inputs are partly observable |
+| 4 | `sshd` DH | Never range-checked the client's `e` | `e = 0` or `e = 1` pins the shared secret to a value the *client* chose |
+| 5 | `sshd` host key file | Unparseable file → `sha256(first_line)` as the seed; missing file → a pid-derived key that changed at every restart | Every restart was a new host key, so `known_hosts` warned constantly and users learned to ignore it |
+| 6 | `ssh` client | `let _ = sig_blob; // Acknowledge we received it.` — the host key signature was read and discarded, and the `known_hosts` prompt ran *before* the exchange hash existed | **The entire host key mechanism was decorative.** Any machine answering on port 22 could name itself with someone else's key and be permanently trusted under it |
+| 7 | `ssh` client | The DH private exponent was `sha256` of two hard-coded 64-bit constants | Not weak — **constant**. Every connection by every copy of the binary used one exponent, so anyone with the binary could decrypt any session it made |
+
+And two more in password handling, filed under the same head because they are
+the same shape:
+
+| # | Where | What it did | Effect |
+|---|---|---|---|
+| 8 | `ftpd` `validate_password` | Took the password as `_password`, never read it, and returned `lookup_user(username).is_some()` | **Remote auth bypass.** Any password logged in any account in the world-readable `/etc/passwd`, which also served as the target list |
+| 9 | `sshd` `verify_password` | A fourth hasher disagreeing with the three in §329: `$5$`/`$6$` were checked as `sha256(password ‖ salt)` in hex, and anything unrecognised fell through to a **plaintext** comparison | A password set with `passwd` could never be used over ssh, and the failure looked exactly like a typo |
+
+### The pattern, which is the actual finding
+
+Every one of the nine was *documented*. The code said
+`(signature verification skipped in simplified implementation)`, and
+`In a real implementation this would use a CSPRNG`, and
+`simplified: accept any non-empty password for now since our OS does not yet
+have a full shadow mechanism`. Nothing was hidden. What made them dangerous is
+that each one **still returned the answer a working implementation returns** —
+`true`, `Ok(())`, a 64-byte blob of the right shape — so every test passed,
+every connection succeeded, and nothing anywhere reported that the security
+property was absent.
+
+Two lessons worth keeping:
+
+1. **A placeholder that returns success is not a placeholder, it is a bug that
+   has been written down.** Where the real check cannot be implemented yet, the
+   stub must return the *failing* answer, so the gap announces itself the first
+   time anyone relies on it. `unimplemented!()` in a daemon is better than
+   `true`.
+2. **"We cannot verify this one" must resolve to no.** Defect 9's plaintext
+   fallback and the old pubkey path's willingness to accept an algorithm it
+   did not implement are the same mistake: an unknown case routed to the
+   permissive branch. Both now refuse.
+
+Also worth noting: the shadow-hash problem had already been found once,
+between `passwd`, `login` and `chpasswd`, and fixed by centralising into
+`posix::crypt` and then `authlib` (`design-decisions.md` §329, §341). It
+recurred in `sshd` anyway, because centralising does nothing for a program
+that never looks. Two of the three daemons had their own copy at the moment
+the "one verifier" crate was being written.
+
+### The fix
+
+- **`posix::ed25519`** — a real RFC 8032 Ed25519, ~900 lines, with all four
+  §7.1 test vectors and curve constants derived rather than transcribed. It
+  went in `posix` rather than a new crate because it is a libc primitive and
+  because the top-level `sha2/` crate is lane A's.
+- **`posix::random::fill`** — the safe-Rust entry point to the existing
+  ChaCha20 CSPRNG, so a Rust binary needing key material does not have to
+  reach for a raw pointer, which is what pushed both daemons toward hashing
+  the clock in the first place.
+- **`sshd`** signs the exchange hash for real, loads and persists an OpenSSH-
+  format host key (refusing an unparseable one rather than inventing a seed
+  from it), verifies the RFC 4252 §7 publickey signed blob — binding session
+  id, user and service — answers the query phase with `SSH_MSG_USERAUTH_PK_OK`
+  instead of a failure, range-checks `e`, and takes its DH exponent from the
+  CSPRNG.
+- **`ssh`** verifies the host key signature *before* consulting `known_hosts`,
+  refuses an algorithm it cannot check rather than accepting it, requires the
+  key and signature blobs to name the same algorithm, sends a random KEXINIT
+  cookie, range-checks `f`, and takes its exponent from the CSPRNG.
+- **`sshd` and `ftpd`** hand passwords to `authlib::Authenticator`, one per
+  daemon so the per-user failure tally outlives a connection. `sshd` passes
+  the raw bytes rather than a lossy UTF-8 conversion, which was silently
+  rewriting any password containing an invalid byte.
+
+### Verification
+
+`posix` 36 new tests (RFC 8032 vectors, a 512-bit-flip rejection sweep),
+`sshd` 139, `ssh` 23 (11 new; it had 11 total before), `ftpd` 111. The
+security tests are written as the attack rather than as the API: an attacker
+holding the victim's public key and signing with its own is rejected; a
+signature from another session, another user, another service is rejected; a
+real host key replayed by a party without the private half is rejected; an
+existing account with the wrong password is rejected. Clippy and rustfmt clean
+on the host and for `x86_64-slateos`.
+
+### Still open
+
+`ftpd` sends the password in the clear — a property of FTP, not of this
+implementation, and now stated in its module documentation so that the
+authentication fix is not read as making the daemon safe to expose. The real
+answer is `sftp` over the now-working `sshd`, which is
+`TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION`'s neighbour and not yet
+built.
+
+## B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS — 2026-08-21 — FIXED
+
+**In short:** `doas` is the program that lets an ordinary user run one command
+as root after typing their password — SlateOS's equivalent of `sudo`. It
+checked that password with arithmetic of its own that no other program in the
+system used, so a password set with `passwd` could never open a `doas` prompt.
+Every attempt printed "authentication failed", which reads to the person typing
+as a forgotten password rather than as a broken program.
+
+Found by asking, after `B-THE-SSH-STACK-AUTHENTICATED-NOBODY`, which *other*
+programs in this tree still answer "is this the user's password?" themselves.
+`doas` was the only one left, and it was the one guarding root.
+
+### What it did
+
+`doas` understood exactly one stored format:
+
+```text
+$sha256$<salt>$<hex digest of sha256(salt || "$" || password)>
+```
+
+and returned `false` for anything else. `passwd` writes `$6$` SHA-crypt through
+`posix::crypt`. The two had nothing in common. The section header above the
+function read `Password hashing / verification (matches passwd utility
+format)` — a claim that was true when it was written, stopped being true when
+`passwd` was centralised (`design-decisions.md` §329), and was checked by
+nothing, because the tests hashed with `hash_password` and verified with
+`verify_password` and so agreed with themselves no matter what the format was.
+
+Three consequences, in descending order of how bad they were:
+
+| | |
+|---|---|
+| **`doas` did not work at all** | Not "worked weakly" — a correctly-typed password was refused, always. The only accounts that could escalate were ones covered by a `nopass` rule, i.e. the ones that never type a password |
+| **`/etc/users.yaml` was invisible to it** | It read `/etc/shadow` directly, so a user in the native database had no entry `doas` would even look for. Same message |
+| **No distinction between a typo and an entry nothing can recompute** | Both printed "authentication failed". The second needs an administrator and will never clear on its own; the first clears on the next attempt |
+
+### Why this is filed as a security defect and not a bug
+
+It failed *closed*, so nobody ever got root they should not have had. The
+danger is the second-order one: a privilege gate that no legitimate user can
+pass does not stay in place. It gets a `permit nopass` rule written around it,
+or it gets removed, and either way the arithmetic that was supposed to protect
+root is gone — this time on purpose, and with a comment explaining that `doas`
+"doesn't work". That is a worse position than the bug, and it is where this was
+heading.
+
+It is also the fifth instance of one root cause. §329 found three programs
+disagreeing about `/etc/shadow` and centralised them into `posix::crypt`; §341
+added `authlib` on top; `sshd` turned out to have a fourth copy while `authlib`
+was being written; `doas` is the fifth. Centralising does nothing for a program
+that never looks, and nothing in the build fails when one does not.
+
+### The fix
+
+`doas` now calls `authlib::Authenticator::authenticate`, which consults
+`/etc/users.yaml` then `/etc/shadow`, hands the stored entry to `crypt` as its
+own *setting* rather than taking it apart to find a salt, and reports `Locked`,
+`NoPassword` and `Unusable` separately from `Rejected`. `main` gates on
+`is_accepted()`, so only `Accepted` admits anyone. The `sha2` dependency existed
+solely for the private hasher and is gone.
+
+Two deliberate choices:
+
+- **The prompt now comes before the lookup.** The old order exited with a
+  distinct message for "no shadow entry" and for "locked" *before* printing a
+  prompt at all. Now every failure says the same thing, except that an entry
+  nothing can recompute additionally says so — that one is a broken system,
+  not a wrong password, and only an administrator can clear it.
+- **An account with no password set is refused.** `login` resolves the same
+  `authlib::Outcome::NoPassword` the *opposite* way, because a deliberately
+  passwordless account at the machine's own keyboard is a long-standing Unix
+  choice. Escalating to root from one is not the same statement, and reading it
+  as consent would turn every passwordless account into a root shell.
+  `nopass` in `/etc/doas.conf` is the only consent that counts here.
+
+### Still open — cross-invocation rate limiting
+
+`authlib`'s failure tally lives in the `Authenticator`, which for `doas` lives
+for one invocation. `sshd` and `ftpd` keep one per daemon, so their tallies
+outlive a connection; `doas` cannot, because it *is* the process. So repeated
+`doas` attempts are not rate-limited relative to each other, which is exactly
+the shape of an attacker who already has a shell as the user and is guessing
+toward root.
+
+The proper fix is on-disk state, and it belongs in `authlib` rather than in
+`doas`, so that `login`, `su` and `doas` share one tally per user instead of
+three. `doas` already keeps per-uid state under `/var/run/doas` for its
+`persist` timestamps, which is the shape the tally would take. Tracked here
+rather than done now because it changes `authlib`'s contract for every caller.
+
+
+## B-PASSWD-VERIFIES-WITHOUT-AUTHLIB — 2026-08-21 — OPEN (tech debt, small)
+
+**In short:** every program on this system that asks "is this your password?"
+routes through one of two shared verifiers, which count failed attempts and
+slow an attacker down. One program does not: `passwd`, when it asks for your
+*current* password before letting you set a new one. It gets the answer right —
+it uses the same underlying comparison as everything else — but it does the
+counting-and-slowing part not at all, so guesses against that one prompt are
+free and unlimited. Whether that should change is a genuine tradeoff, written
+out below.
+
+**Where:** `userspace/passwd/src/main.rs:651`, the `verify_password(&old_pw,
+&entry.hash)` call behind the `Current password:` prompt. `verify_password`
+(line 336) is a one-line wrapper over `posix::crypt::verify`.
+
+**How it got this way — not by decision.** `passwd` was moved onto
+`posix::crypt::verify` on 2026-08-17, closing
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`. `authlib` did not
+exist yet; it was built later, after `design-decisions.md` §329 and §341 found
+that several programs were each answering the password question with their own
+arithmetic. Programs written or repaired after that point adopted `authlib`.
+`passwd` was already correct by the standard of its own day, so nothing ever
+sent anyone back to it. It is debt by omission, not by choice — which is the
+only reason it is filed rather than simply fixed: the fix has a real cost.
+
+**The tradeoff.**
+
+| | Leave it | Route it through `authlib` |
+|---|---|---|
+| Guessing at the `Current password:` prompt | unlimited and free | shares the per-user tally with `login`, `su`, `doas` |
+| Someone mistypes at a `doas` prompt three times | your own `passwd` still works | your own `passwd` prompt is now delayed too |
+| Locked account (`!` prefix) | already refused outright at line 623, before any prompt | `authlib` returns `Locked`, which agrees — nothing to special-case |
+
+**A dead condition found while writing this — FIXED 2026-08-21, and it was
+load-bearing in the wrong direction.** The old-password gate read
+`if !entry.hash.is_empty() && !entry.is_locked()`. The second conjunct could
+never be false, because line 623 has already returned `1` for every locked
+account. Dead code, so removing it changes nothing today — but which way it was
+dead matters:
+
+| If someone later removes the line-623 guard | Before | After |
+|---|---|---|
+| locked account reaches the old-password gate | `is_locked()` is true, so the whole gate is skipped — **no current password is ever asked for, and the change proceeds** | gate is entered on `!hash.is_empty()` alone; the stored `!$6$…` has no recomputable method, so `crypt::verify` returns false and the change is **refused** |
+
+So the redundant conjunct was not merely noise: it was a second, silent
+implementation of the locking policy that failed *open* if the first one were
+ever touched. It now fails closed. This is the general shape of the thing —
+a guard duplicated in two places is not twice as safe, it is one guard plus one
+place for the policy to disagree with itself.
+
+The argument for leaving it is not weak. `authlib`'s tally is per *user*, not
+per program, so folding `passwd` in means anyone who can reach any prompt as
+you — a `doas` prompt in a shell you left open, a lock screen — can also stop
+you changing your password by failing at it. A password change is the one
+action you most want available to a user who suspects their password is
+compromised, and rate-limiting is the one mechanism that makes it unavailable.
+
+The argument against is that this is the only prompt in the system where an
+attacker who already has your shell can guess at your password without cost or
+trace, and "the fix would be annoying" is how every uncounted prompt stays
+uncounted.
+
+**What the proper fix looks like** (if the answer is "route it"): `authlib`
+gains a way to verify *without* consuming an attempt from the shared tally
+while still recording to the audit log — the distinction being whether a
+failure should impede a later, different program. That is a change to
+`authlib`'s contract, so it wants doing at the same time as the on-disk tally
+described under `B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS`
+→ "Still open — cross-invocation rate limiting", not separately.
+
+**Not a security hole today, and worth being precise about why:** reaching this
+prompt requires already running as the account whose password is being changed.
+An attacker there can read that account's files and act as it. What the missing
+rate limit costs is the ability to *learn the password itself* — which matters
+because users reuse passwords, and because knowing it converts shell access
+into the ability to pass a `doas` prompt. So: real, bounded, not urgent.
+
+**Found by:** the call-site scan described in the postscript to
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md` —
+`grep -rn 'crypt::verify' posix/src userspace/*/src services init`, which
+returns exactly three production call sites and requires each to be justified.

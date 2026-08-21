@@ -3,4 +3,16 @@ name = "ftpd"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS ftpd - FTP server daemon"
+
+# `authlib` for password authentication -- the one place SlateOS answers "is
+# this the user's password?". ftpd previously answered it itself, with
+# `lookup_user(username).is_some()`: the password argument was named
+# `_password` and never read, so any password logged in any user listed in the
+# world-readable /etc/passwd.
 [dependencies]
+authlib = { path = "../authlib" }
+
+# Tests only: they build a real `$6$` shadow entry with the same hasher
+# `passwd` uses, rather than pasting a constant that could drift away from it.
+[dev-dependencies]
+posix = { path = "../../posix" }

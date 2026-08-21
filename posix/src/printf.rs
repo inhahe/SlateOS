@@ -694,7 +694,7 @@ pub unsafe extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, ap: *mut VaList)
 
 /// Own archive member — gnulib replaces `vasprintf`. See `gnu_asprintf` above.
 mod gnu_vasprintf {
-    use super::{VaList, _asprintf_impl};
+    use super::{_asprintf_impl, VaList};
 
     /// `vasprintf(strp, fmt, ap)` — `asprintf` with a `va_list`.
     ///
@@ -702,11 +702,7 @@ mod gnu_vasprintf {
     /// As [`super::vprintf`]; `strp` must be a valid `char**` to receive the
     /// malloc'd result pointer.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-    pub unsafe extern "C" fn vasprintf(
-        strp: *mut *mut u8,
-        fmt: *const u8,
-        ap: *mut VaList,
-    ) -> i32 {
+    pub unsafe extern "C" fn vasprintf(strp: *mut *mut u8, fmt: *const u8, ap: *mut VaList) -> i32 {
         if ap.is_null() {
             return -1;
         }

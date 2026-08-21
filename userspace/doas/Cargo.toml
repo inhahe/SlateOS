@@ -4,7 +4,18 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS doas - lightweight privilege elevation"
 
-# `sha2` for password hashing. This crate carried its own SHA-256 under a
-# header claiming it matched the `passwd` utility -- a claim nothing checked.
+# `authlib` for password verification -- the one place SlateOS answers "is this
+# the user's password?". This crate was the fifth program to answer it with its
+# own arithmetic: it hashed `$sha256$<salt>$<digest>` and rejected every other
+# format, including the `$6$` entries `passwd` writes, so a correctly-typed
+# password could never open a `doas` prompt. The `sha2` dependency existed
+# solely for that hasher; the header above it claimed it "matched the passwd
+# utility", which nothing checked and which had stopped being true.
 [dependencies]
-sha2 = { path = "../../sha2" }
+authlib = { path = "../authlib" }
+
+# Tests only: they build a real `$6$` entry with the same hasher `passwd` uses,
+# rather than pasting a constant that could drift away from it -- which is the
+# exact way this crate's own hash came to disagree with the system's.
+[dev-dependencies]
+posix = { path = "../../posix" }

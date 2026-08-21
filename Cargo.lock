@@ -2510,7 +2510,8 @@ version = "0.1.0"
 name = "doas"
 version = "0.1.0"
 dependencies = [
- "sha2",
+ "authlib",
+ "posix",
 ]
 
 [[package]]
@@ -3535,6 +3536,10 @@ version = "0.1.0"
 [[package]]
 name = "ftpd"
 version = "0.1.0"
+dependencies = [
+ "authlib",
+ "posix",
+]
 
 [[package]]
 name = "fullstory-cli"
@@ -10073,6 +10078,7 @@ version = "0.1.0"
 name = "ssh"
 version = "0.1.0"
 dependencies = [
+ "posix",
  "sha2",
 ]
 
@@ -10087,6 +10093,8 @@ dependencies = [
 name = "sshd"
 version = "0.1.0"
 dependencies = [
+ "authlib",
+ "posix",
  "sha2",
 ]
 

@@ -208,3 +208,109 @@ fooled by a test that only asserts the digest's shape.
 
 Thanks for the K-table-and-IV method — it is what found both stubs, and it is
 what let this be verified rather than asserted.
+
+---
+
+## Postscript, 2026-08-21 — the K-table check has a blind spot, and it cost a fifth hasher
+
+§4 above is still correct: no file in lane B implements SHA-256. Hours after
+closing it I found `userspace/doas` verifying passwords with arithmetic of its
+own — the fifth program in the tree to do so, and the one guarding root
+(`known-issues.md` → `B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS`).
+
+**It passed your check, and it deserved to.** It called `sha2::sha256_hex`. The
+SHA-256 was not merely correct, it was *the* SHA-256, shared, single-copy,
+exactly what §4 asked for. What was wrong was one level up:
+
+```rust
+// doas, before
+format!("$sha256${salt}${}", sha256_hex(format!("{salt}${password}")))
+```
+
+A flawless hash wired into a password format nothing else in the system writes.
+`passwd` writes `$6$` SHA-crypt. `doas` therefore refused every correctly-typed
+password on the machine, and had done since `passwd` was centralised by this
+very request.
+
+So the two checks are complements, not one check:
+
+| Question | How to answer it | What it misses |
+|---|---|---|
+| "Is this SHA-256?" | Your K-table-and-IV extraction. Mechanical, unfoolable | Says nothing about what the digest is *used for* |
+| "Is this the system's password scheme?" | Enumerate every call site of the verification primitive and require each to be a shared verifier — see below | Says nothing about whether the primitives underneath are real |
+
+`doas` failed the second while passing the first; the `sshd` hasher in
+`B-THE-SSH-STACK-AUTHENTICATED-NOBODY` failed both.
+
+**The obvious way to write the second check does not work, and the failure is
+instructive.** My first draft of it was a mention scan — crates that name a
+password store but do not depend on `authlib`:
+
+```bash
+for d in userspace/*/; do
+  grep -rqs '/etc/shadow\|/etc/users.yaml' "$d/src" || continue
+  grep -qs authlib "$d/Cargo.toml" || echo "$d"
+done
+```
+
+I wrote that it returns nothing. **It returns twenty crates** — `getent`,
+`useradd`, `chage`, `chown`, `chroot`, `coreutils`, `audit`, `apparmor`,
+`selinux`, `oils` and the rest. Naming the store is not verifying against it:
+`getent` prints it, `useradd` writes to it, `chage` edits the aging fields, and
+several only mention it in a doc comment. Twenty results with one true positive
+buried in them is not a check, it is a thing you stop running by the third week.
+
+Narrowing it — "reads a store *and* prompts for a password with echo off" —
+cuts it to three (`doas`, `su`, `passwd`), and is **worse**, because it silently
+drops `login`, `sudo` and `polkit`, all of which verify passwords. They were
+dropped for spelling their prompt differently: the pattern looked for
+`read_password`/`no_echo`/`ECHO` in the crate's own `src`, and those three reach
+the terminal through a helper instead. A check that quietly halves its input is
+more dangerous than one that over-reports, because its clean result reads as
+reassurance. Any check keyed on how a call site is *written* has that hole, and
+unlike your K-table extraction there is no published constant to compare
+against, so the hole is not closeable by being more careful with the pattern.
+
+**The check that does hold inverts it.** Do not ask which crates might be
+verifying passwords; ask where the verification primitive is *called from*, and
+require every answer to be a shared verifier:
+
+```bash
+grep -rn 'crypt::verify' posix/src userspace/*/src services init
+```
+
+This is tight for the same reason your check is: `posix::crypt::verify` is the
+one function in the tree that can answer the question, so a crate that answers
+it either appears here or is doing arithmetic of its own — which is then a
+K-table-shaped problem again and your check catches it. Today, discounting
+comments and `#[cfg(test)]` blocks, there are exactly three call sites:
+
+| Call site | Why it is allowed to be there |
+|---|---|
+| `userspace/authlib/src/lib.rs` | the shared verifier; lock-out, rate limiting, both stores |
+| `userspace/userdb/src/lib.rs` | `Record::check_password`, the shared verifier for callers that already hold a `Record` — `su`, `sudo`, `polkit` |
+| `userspace/passwd/src/main.rs` | checks your *current* password before changing it (`main.rs:651`, behind the "Current password:" prompt) |
+
+The third row is the one to keep an eye on. `passwd` does not go through
+`authlib`, and that is not a decision anyone recorded — `passwd` was
+centralised onto `posix::crypt::verify` in this request on 2026-08-17, days
+before `authlib` existed, and simply never moved again. There is a good
+argument for leaving it (authlib's failure tally is shared across programs, so
+routing `passwd` through it would let someone lock you out of changing your own
+password by mistyping at a `doas` prompt) and a good argument against (it is
+the last program that answers the password question without the lock-out and
+rate-limiting every other one gets). It is filed as
+`known-issues.md` → `B-PASSWD-VERIFIES-WITHOUT-AUTHLIB` rather than settled
+here, because it is a real tradeoff and this file is a footnote, not the place
+to decide it.
+
+`doas` was the only genuine holdout, and it would have shown up here on any day
+since 2026-08-17 — which is the argument for running a check rather than
+trusting that centralising a thing centralised it. Centralising does nothing
+for a program that never looks, and no build fails when one does not. The six
+crates that verify passwords today (`login`, `su`, `sudo`, `polkit`, `doas`,
+`passwd`) were each read line-by-line on 2026-08-21; all six reach
+`posix::crypt::verify` through one of the three rows above.
+
+Filed here rather than as a new request because it is a footnote to your
+report's method, not a new ask. Nothing needed from lane C.

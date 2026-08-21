@@ -46519,10 +46519,10 @@ on the live `finish_pass` path under `set -euo pipefail`.
 
 ---
 
-## `apps/**` bug-hunt sweep, round 1: four live defects and two latent (lane C)
+## `apps/**` bug-hunt sweep, round 1: five live defects and two latent (lane C)
 **Status:** FIXED 2026-08-20 — `5b4dd7731` (calendar), `80dd0a5f3` (slices),
 `c989b21d0` (clipboard preview), `e1390abb1` (sticky-note columns),
-`d5a1e7eb8` + `ae3946e33` (grid column counts).
+`d5a1e7eb8` + `ae3946e33` (grid column counts), `253478bd3` (QR block structure).
 
 The roadmap asks lane C to run bug-hunt sweeps over `apps/**` between
 features; ~200 crates there have never had a systematic audit. This is the
@@ -46738,6 +46738,59 @@ rather than clipping it — a different contract, and correct as it stands.
 Migrating it would change what the user sees for no defect. Same rule as the
 `(i + 1) % len()` sites below: divergence in *correctness* is the warrant for
 extraction; divergence in *spelling*, over code that is already right, is not.
+
+### (8) `apps/qrcode` generated unscannable codes for 16 of its 40 version/EC pairs
+
+The worst of the round, and the one that shows the doctrine at full strength.
+
+`get_version_info` returns a row of a transcribed spec table that **states the
+same fact twice**: `data_capacity_bytes` is the published byte-mode capacity,
+and `total_codewords`, `num_blocks` and `ec_codewords_per_block` imply it.
+Nothing compared the two. Sixteen of the forty rows disagreed:
+
+| Rows | Table said | Capacity implies |
+|---|---|---|
+| v5-Q, v5-H, v6-Q, v6-H, v8-M, v10-L | 2 or 3 blocks | 4 |
+| v7-H, v9-M, v10-M | 2 or 3 | 5 |
+| v7-Q, v8-Q, v8-H | 2 | 6 |
+| v9-Q, v9-H, v10-Q, v10-H | 3 | 8 |
+
+Every implied count comes out an **exact integer**, which is what identifies
+the block column as the wrong one rather than the capacity column — had the
+capacity been the typo, the implied block counts would have come out
+fractional. The corrected values also match ISO/IEC 18004's own block table,
+derived independently.
+
+**Why nothing caught it.** This is not a panic and not a length error.
+`encode_data_bits` padded to `total_codewords - ec_per_block * num_blocks` —
+98 data codewords for v5-Q instead of 62 — and `apply_error_correction` then
+added exactly enough EC to reach `total_codewords`, because the two errors are
+the same quantity with opposite signs. **The symbol filled the matrix and
+rendered correctly.** It was simply not the codeword layout any conforming
+decoder de-interleaves, so it did not scan. Two of the three tests written for
+this fix pass against the *broken* table; only the one comparing the table to
+itself fails. Nothing short of a second opinion could have found it — there was
+no crash, no overflow, no out-of-range value, and the rendered image looked
+exactly like a QR code.
+
+Reachable with the default EC level (M) at 123 bytes of payload and up, and
+from **47 bytes at Q** — an ordinary URL.
+
+Fixed in `253478bd3`: the sixteen counts corrected; `byte_mode_capacity()`
+derives the payload size from the block structure and a test asserts it equals
+every row's stated capacity; both halves of the encoder read the data codeword
+count from one `data_codewords()` instead of each spelling out the subtraction.
+
+**A lint suppression whose justification did not cover the case that bit.**
+`apps/qrcode` allows `arithmetic_side_effects` and `indexing_slicing`
+file-wide, with a comment explaining that "indices are computed from QR-version
+metadata, all bounded by the matrix dimension." That is true of the matrix
+pokes and Galois-field lookups it was written for, and was never true of
+`total_data / num_blocks`, which divides by a *table column*. A file-wide
+allow inherits the reasoning of the sites the author had in mind and extends
+it silently to every site added afterwards — the same defect as finding (2)'s
+`wrapping_sub`, one scope larger. `num_blocks` is now a `NonZeroUsize` and the
+function returns `None` on a zero row rather than dividing.
 
 ### Deliberately not changed: the ~15 `(i + 1) % len()` sites
 

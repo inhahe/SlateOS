@@ -10290,6 +10290,7 @@ version = "0.1.0"
 name = "su"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "userdb",
 ]
 

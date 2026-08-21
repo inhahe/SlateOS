@@ -119,9 +119,49 @@ fn in_admin_group(record: &Record) -> bool {
 /// administrator's problem rather than a typing mistake, and reporting all of
 /// them as "authentication failure" is how an account with an unverifiable
 /// stored hash gets diagnosed as a forgotten password.
-fn authenticate(record: &Record, prompt: &str, who: &str) -> bool {
+///
+/// # The shared failed-attempt tally
+///
+/// Every guess here counts against the same `authlib` tally the console
+/// `login` prompt uses, and a delay earned at either one is honoured at both
+/// (`design-decisions.md` §354). A limit only one of them obeys is not a
+/// limit: an attacker slowed to one guess per five minutes at the login
+/// prompt would simply run `su` and guess at full speed.
+///
+/// **Only a *typed* password counts.** The three checks above the prompt —
+/// locked, no password set, unverifiable legacy hash — return without ever
+/// asking for one, and counting them would hand any local user a free denial
+/// of service: `su alice` against a locked account, run five times, would lock
+/// alice out of her own console without the attacker knowing anything at all.
+/// The tally exists to make *guessing* expensive, and a refusal that involved
+/// no guess is not an attempt.
+///
+/// A user already inside a delay is refused *before* the account-state checks,
+/// so the refusal cannot be used as an oracle for whether the account is
+/// locked or has a password set.
+fn authenticate(
+    auth: &mut authlib::Authenticator,
+    record: &Record,
+    prompt: &str,
+    who: &str,
+) -> bool {
+    let name = name_of(record);
+
+    if auth.rate_limited(&name).is_some() {
+        // `retry_after_secs` is not surfaced: telling the caller exactly how
+        // long is left tells them their guesses are landing on a real account.
+        eprintln!(
+            "{who}: {}",
+            authlib::Outcome::RateLimited {
+                retry_after_secs: 0,
+            }
+            .user_message()
+        );
+        return false;
+    }
+
     if record.is_locked() {
-        eprintln!("{who}: account '{}' is locked", name_of(record));
+        eprintln!("{who}: account '{name}' is locked");
         return false;
     }
 
@@ -129,12 +169,11 @@ fn authenticate(record: &Record, prompt: &str, who: &str) -> bool {
     // "the stored password is the empty string": the first answers
     // `NoPassword`, the second `Accepted`, and only the first is refused here.
     if record.check_password("") == Auth::NoPassword {
-        eprintln!("{who}: account '{}' has no password set", name_of(record));
+        eprintln!("{who}: account '{name}' has no password set");
         return false;
     }
 
     if record.has_legacy_password() {
-        let name = name_of(record);
         eprintln!(
             "{who}: account '{name}' has a password stored in a format this \
              system can no longer verify; run `useradm passwd {name}` as root"
@@ -145,19 +184,24 @@ fn authenticate(record: &Record, prompt: &str, who: &str) -> bool {
     let password = match read_password(prompt) {
         Ok(p) => p,
         Err(e) => {
+            // No guess was made — the terminal failed us, not the user.
             eprintln!("{who}: {e}");
             return false;
         }
     };
 
     match record.check_password(&password) {
-        Auth::Accepted => true,
+        Auth::Accepted => {
+            auth.reset(&name);
+            true
+        }
         Auth::Locked | Auth::Unusable | Auth::NoPassword | Auth::Rejected => {
             // The three non-`Rejected` cases were ruled out above and can only
             // arise from a change under our feet; they get the same message
             // because at this point the password has already been typed and a
             // detailed answer would say something about the account to whoever
             // typed it.
+            auth.note_failure(&name);
             eprintln!("{who}: authentication failure");
             false
         }
@@ -529,9 +573,12 @@ fn run_su(args: &[String]) -> i32 {
         return 1;
     }
 
-    // Authenticate unless the caller is root.
+    // Authenticate unless the caller is root. The tally is keyed by the
+    // account whose password is being guessed — here the *target*, since `su`
+    // asks for the password of the user you are becoming.
     let caller_uid = get_caller_uid(&users);
-    if caller_uid != 0 && !authenticate(target, "Password: ", "su") {
+    let mut auth = authlib::Authenticator::new();
+    if caller_uid != 0 && !authenticate(&mut auth, target, "Password: ", "su") {
         return 1;
     }
 
@@ -726,8 +773,11 @@ fn run_sudo(args: &[String]) -> i32 {
     // Authenticate: require the caller's own password (sudo convention),
     // unless the caller is root.
     if caller_uid != 0 {
+        // Keyed by the *caller* here, not the target: sudo asks for your own
+        // password, so your own failures are what accumulate.
         let prompt = format!("[sudo] password for {}: ", name_of(caller));
-        if !authenticate(caller, &prompt, "sudo") {
+        let mut auth = authlib::Authenticator::new();
+        if !authenticate(&mut auth, caller, &prompt, "sudo") {
             return 1;
         }
     }
@@ -1301,5 +1351,156 @@ users:
         ];
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.command, vec!["ls", "-la", "/tmp"]);
+    }
+
+    // --- The shared failed-attempt tally (§354) ---
+
+    /// A verifier that counts in memory and nowhere else.
+    ///
+    /// `Authenticator::with_stores` deliberately attaches no faillock file, so
+    /// running this suite cannot run up a delay against a real account on the
+    /// developer's machine — which a test that used `Authenticator::new()`
+    /// would do, silently, every time it ran.
+    fn scratch_authenticator() -> authlib::Authenticator {
+        let missing = std::path::Path::new("/nonexistent/su-tests");
+        authlib::Authenticator::with_stores(missing, missing)
+    }
+
+    /// A record with a real, verifiable password.
+    fn record_with_password(username: &str, password: &str) -> Record {
+        let mut record = Record::new();
+        record.set("username", username);
+        record
+            .set_password_with_salt(password, "0123456789abcdef")
+            .expect("a 16-character salt is storable");
+        record
+    }
+
+    /// A refusal that never asked for a password must not count against the
+    /// account, or `su` becomes a denial-of-service tool: five runs of
+    /// `su alice` against a locked account, costing the attacker nothing and
+    /// telling them nothing, would lock alice out of her own console.
+    #[test]
+    fn a_refusal_that_asked_for_no_password_is_not_an_attempt() {
+        let mut auth = scratch_authenticator();
+
+        let mut locked = record_with_password("erin", "hunter2");
+        locked.set_locked(true);
+        for _ in 0..(FREE_ATTEMPTS_HEADROOM) {
+            assert!(!authenticate(&mut auth, &locked, "Password: ", "su"));
+        }
+        assert_eq!(auth.failures("erin"), 0);
+        assert!(auth.rate_limited("erin").is_none());
+
+        // Same for an account with no password stored at all.
+        let mut passwordless = Record::new();
+        passwordless.set("username", "frank");
+        for _ in 0..(FREE_ATTEMPTS_HEADROOM) {
+            assert!(!authenticate(&mut auth, &passwordless, "Password: ", "su"));
+        }
+        assert_eq!(auth.failures("frank"), 0);
+
+        // And for an entry whose stored hash predates `posix::crypt`.
+        let mut legacy = Record::new();
+        legacy.set("username", "dave");
+        legacy.set(
+            "password_hash",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        );
+        for _ in 0..(FREE_ATTEMPTS_HEADROOM) {
+            assert!(!authenticate(&mut auth, &legacy, "Password: ", "su"));
+        }
+        assert_eq!(auth.failures("dave"), 0);
+    }
+
+    /// Enough attempts to be well past [`authlib::FREE_ATTEMPTS`].
+    const FREE_ATTEMPTS_HEADROOM: u32 = authlib::FREE_ATTEMPTS + 3;
+
+    /// A user already inside a delay is turned away without the guess being
+    /// counted a second time. Counting it would let anyone hold a real user
+    /// out indefinitely by making refused attempts that each refresh the
+    /// clock — the delay would never expire.
+    #[test]
+    fn a_delayed_user_is_refused_and_the_refusal_is_not_counted() {
+        let mut auth = scratch_authenticator();
+        let record = record_with_password("grace", "hunter2");
+
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            auth.note_failure("grace");
+        }
+        let before = auth.failures("grace");
+        let delay_before = auth
+            .rate_limited("grace")
+            .expect("past the free attempts, grace is delayed");
+
+        // The refusal happens without stdin being touched, so this returns
+        // immediately whatever the harness has connected to it.
+        assert!(!authenticate(&mut auth, &record, "Password: ", "su"));
+
+        assert_eq!(auth.failures("grace"), before, "a refusal is not an attempt");
+        let delay_after = auth
+            .rate_limited("grace")
+            .expect("still delayed, but no further");
+        assert!(
+            delay_after <= delay_before,
+            "the wait must run down, not restart: {delay_before}s then {delay_after}s"
+        );
+    }
+
+    /// The delay is checked before the account-state messages, so that being
+    /// refused for guessing cannot be told apart from being refused because
+    /// the account is locked. Otherwise the rate limit itself becomes the
+    /// oracle it exists to close.
+    #[test]
+    fn the_delay_is_checked_before_any_account_state_is_disclosed() {
+        let mut auth = scratch_authenticator();
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            auth.note_failure("heidi");
+        }
+
+        // A locked account and a healthy one are both refused, and neither
+        // refusal moves the tally — the locked-account branch was never
+        // reached, so it cannot have printed "account is locked".
+        let mut locked = record_with_password("heidi", "hunter2");
+        locked.set_locked(true);
+        let before = auth.failures("heidi");
+        assert!(!authenticate(&mut auth, &locked, "Password: ", "su"));
+        assert_eq!(auth.failures("heidi"), before);
+    }
+
+    /// `su` and the console `login` prompt share one count, so a limit reached
+    /// at either is honoured at both. This is the whole point of §354: an
+    /// attacker slowed to one guess every five minutes at the login prompt
+    /// must not be able to walk over to `su` and resume at full speed.
+    #[test]
+    fn su_and_login_share_one_tally_through_the_faillock_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "su-faillock-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
+        let faillock = dir.join("faillock");
+        let missing = std::path::Path::new("/nonexistent/su-tests");
+
+        // What `login` recorded.
+        let mut as_login = authlib::Authenticator::with_stores(missing, missing)
+            .with_faillock(&faillock);
+        for _ in 0..FREE_ATTEMPTS_HEADROOM {
+            as_login.note_failure("ivan");
+        }
+
+        // What `su` sees: a separate process, a fresh in-memory tally, the
+        // same file.
+        let mut as_su = authlib::Authenticator::with_stores(missing, missing)
+            .with_faillock(&faillock);
+        assert!(
+            as_su.rate_limited("ivan").is_some(),
+            "su must honour the delay login earned"
+        );
+        let record = record_with_password("ivan", "hunter2");
+        assert!(!authenticate(&mut as_su, &record, "Password: ", "su"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

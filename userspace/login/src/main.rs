@@ -411,8 +411,58 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 // Main login flow
 // ---------------------------------------------------------------------------
 
+/// Refuse one attempt, count it unless it was already refused, and say which.
+///
+/// The single place the two halves of §354's rule live, because they are easy
+/// to get subtly wrong apart:
+///
+/// * **A refused attempt is not counted.** Otherwise anyone who can reach the
+///   prompt could hold a user at the maximum delay forever by hammering it —
+///   each refusal refreshing the timestamp that causes the next refusal. This
+///   is the same rule [`authlib::Authenticator::authenticate`] applies, which
+///   is why `rate_limited` is asked *before* `note_failure` rather than after.
+/// * **Every other failure is counted, including a username that does not
+///   exist.** `login` must spend the same time and say the same thing for an
+///   unknown user as for a wrong password — a tally that skipped the unknown
+///   ones would reintroduce the account-enumeration oracle the discarded-
+///   password prompt exists to close, since only real accounts would ever
+///   start being delayed.
+///
+/// Returns the line to show the person typing. `login` says "Login incorrect"
+/// for every reason it refuses; being delayed is the one case where that would
+/// be actively misleading, since nothing they type next will work either.
+fn refuse_attempt(auth: &mut authlib::Authenticator, username: &str) -> &'static str {
+    if auth.rate_limited(username).is_some() {
+        return authlib::Outcome::RateLimited {
+            retry_after_secs: 0,
+        }
+        .user_message();
+    }
+    auth.note_failure(username);
+    "Login incorrect"
+}
+
+/// Run the console login conversation.
+///
+/// `auth` is the shared failure tally, passed in rather than built here so that
+/// a test cannot delay a real user by running — the same reason
+/// [`authlib::Authenticator::with_stores`] does not attach one by itself.
+/// Production hands it [`authlib::Authenticator::new`]; tests hand it a
+/// memory-only verifier over scratch files.
+///
+/// # Why the tally and not just `MAX_LOGIN_ATTEMPTS`
+///
+/// The per-process cap below is not a rate limit and never was: `login` exits
+/// after five tries and `init` respawns it immediately, with a fresh count. Fail
+/// five times, get a new prompt, repeat forever — so the console, the one prompt
+/// a human actually types a password into, was the one with no rate limit at
+/// all. §354 joins it to the tally `doas` already shares, which survives the
+/// respawn because it is a file. The per-process cap stays, because it is what
+/// stops a *single* invocation spinning; the tally is what makes the next one
+/// slower.
 fn do_login(
     cfg: &Config,
+    auth: &mut authlib::Authenticator,
     reader: &mut dyn BufRead,
     writer: &mut dyn Write,
 ) -> Result<(PasswdEntry, HashMap<String, String>), LoginError> {
@@ -454,8 +504,8 @@ fn do_login(
                     let mut _discard = String::new();
                     let _ = reader.read_line(&mut _discard);
                 }
-                writeln!(writer, "Login incorrect")
-                    .map_err(|e| LoginError::SystemError(e.to_string()))?;
+                let line = refuse_attempt(auth, &username);
+                writeln!(writer, "{line}").map_err(|e| LoginError::SystemError(e.to_string()))?;
                 record_faillog(&username, "console");
 
                 if attempts >= MAX_LOGIN_ATTEMPTS {
@@ -494,10 +544,22 @@ fn do_login(
                     .map_err(|e| LoginError::SystemError(e.to_string()))?;
                 let password = password.trim_end_matches('\n').trim_end_matches('\r');
 
-                let outcome = check_password(password, &shadow.password_hash);
+                // The tally is consulted *before* the password is looked at, so
+                // a delayed account is refused without its stored entry being
+                // recomputed — which is what makes the delay a rate limit
+                // rather than a pause. `refuse_attempt` reports it as an
+                // already-refused attempt, so this one is not counted either.
+                let outcome = if auth.rate_limited(&username).is_some() {
+                    PasswordCheck::RateLimited {
+                        retry_after_secs: 0,
+                    }
+                } else {
+                    check_password(password, &shadow.password_hash)
+                };
                 if outcome != PasswordCheck::Accepted {
                     attempts = attempts.saturating_add(1);
-                    writeln!(writer, "Login incorrect")
+                    let line = refuse_attempt(auth, &username);
+                    writeln!(writer, "{line}")
                         .map_err(|e| LoginError::SystemError(e.to_string()))?;
                     record_faillog(&username, &tty);
 
@@ -553,8 +615,8 @@ fn do_login(
             drop(password);
 
             attempts = attempts.saturating_add(1);
-            writeln!(writer, "Login incorrect")
-                .map_err(|e| LoginError::SystemError(e.to_string()))?;
+            let line = refuse_attempt(auth, &username);
+            writeln!(writer, "{line}").map_err(|e| LoginError::SystemError(e.to_string()))?;
             record_faillog(&username, &tty);
             eprintln!(
                 "login: no `/etc/shadow' entry for `{username}', so there is no password \
@@ -571,6 +633,16 @@ fn do_login(
             }
             continue;
         }
+
+        // Proving who you are clears the count everywhere, not just here —
+        // otherwise the user who just logged in successfully stays delayed at
+        // `doas` and `su` on the strength of the typo that preceded it.
+        //
+        // Reached by the `-f` forced-login path too, which is correct: `-f`
+        // means an already-authenticated caller (getty, a display manager)
+        // vouches for the user, and a vouched-for login is as much a success as
+        // a typed password.
+        auth.reset(&username);
 
         // Build environment
         let env_map = build_environment(&user, cfg.preserve_env);
@@ -643,7 +715,11 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
-    match do_login(&cfg, &mut reader, &mut writer) {
+    // The system's real stores and the system's shared tally — the whole point
+    // of §354 is that this is the *same* count `doas` and `su` consult.
+    let mut auth = authlib::Authenticator::new();
+
+    match do_login(&cfg, &mut auth, &mut reader, &mut writer) {
         Ok((user, env_map)) => {
             // In a real OS, we would:
             // 1. setuid/setgid to the user
@@ -1023,9 +1099,81 @@ mod tests {
         let input = b"";
         let mut reader = Cursor::new(input.as_slice());
         let mut writer = Vec::new();
-        let result = do_login(&cfg, &mut reader, &mut writer);
+        let mut auth = scratch_authenticator();
+        let result = do_login(&cfg, &mut auth, &mut reader, &mut writer);
         // Should fail because user doesn't exist in /etc/passwd
         assert!(result.is_err());
+    }
+
+    /// A verifier over stores that do not exist, counting **in memory only**.
+    ///
+    /// `Authenticator::with_stores` attaches no shared tally by itself, which is
+    /// exactly what a test needs: running the suite must not be able to delay a
+    /// real user at the real console. Every `do_login` test uses this rather
+    /// than `Authenticator::new`.
+    fn scratch_authenticator() -> authlib::Authenticator {
+        let missing = std::path::Path::new("/nonexistent/login-test/users.yaml");
+        authlib::Authenticator::with_stores(missing, missing)
+    }
+
+    /// §354: the console prompt honours the shared tally. A user already at the
+    /// delay is refused *without* the attempt being counted — otherwise anyone
+    /// who can reach the prompt holds them at the maximum delay forever by
+    /// hammering it.
+    #[test]
+    fn a_delayed_user_is_refused_at_the_console_and_not_counted_again() {
+        let mut auth = scratch_authenticator();
+        // Spend the free attempts, then one more to start the delay.
+        let mut expected = 0;
+        while auth.rate_limited("someone").is_none() {
+            auth.note_failure("someone");
+            expected += 1;
+            assert!(expected < 100, "the delay never engaged");
+        }
+        let before = auth.failures("someone");
+
+        let cfg = Config {
+            username: Some("someone".to_string()),
+            ..Default::default()
+        };
+        let mut reader = Cursor::new(b"whatever\n".as_slice());
+        let mut writer = Vec::new();
+        let result = do_login(&cfg, &mut auth, &mut reader, &mut writer);
+
+        assert!(result.is_err(), "a delayed user must not be admitted");
+        let shown = String::from_utf8_lossy(&writer);
+        assert!(
+            shown.contains("Too many failed attempts"),
+            "a delayed user should be told why, not told `Login incorrect'; got {shown:?}"
+        );
+        assert_eq!(
+            auth.failures("someone"),
+            before,
+            "an already-refused attempt must not extend the delay"
+        );
+    }
+
+    /// The other half: a failure the console records must be visible to every
+    /// other program, which is what makes it one tally rather than two.
+    #[test]
+    fn a_console_failure_is_counted_against_the_shared_tally() {
+        let mut auth = scratch_authenticator();
+        assert_eq!(auth.failures("ghost"), 0);
+
+        let cfg = Config {
+            username: Some("ghost".to_string()),
+            ..Default::default()
+        };
+        let mut reader = Cursor::new(b"whatever\n".as_slice());
+        let mut writer = Vec::new();
+        let _ = do_login(&cfg, &mut auth, &mut reader, &mut writer);
+
+        assert_eq!(
+            auth.failures("ghost"),
+            1,
+            "a username that does not exist must still be counted, or only real \
+             accounts would ever start being delayed and the delay would name them"
+        );
     }
 
     #[test]

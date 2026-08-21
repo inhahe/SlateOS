@@ -8,7 +8,13 @@ description = "SlateOS user switch and sudo"
 # looked for `home:` — a field neither writer of the file has ever written —
 # and its own `sha256(salt + password)`, which no writer has ever produced.
 # See `design-decisions.md` §330.
+#
+# `authlib` for the shared failed-attempt tally. `su` guesses at a password
+# just as `login` does, and a limit that only one of them honours is not a
+# limit: an attacker refused at the console simply runs `su` instead.
+# See `design-decisions.md` §354.
 [dependencies]
+authlib = { path = "../authlib" }
 userdb = { path = "../userdb" }
 
 [lints]

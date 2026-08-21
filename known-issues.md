@@ -51641,11 +51641,36 @@ keeping it.
 1. Extend `ShellControlAction` with a zone verb — `SnapToZone { preset, zone }`
    or equivalent — in `gui/remote` (lane C).
 2. Teach `gui/compositor`'s `snap_window` to resolve a preset + zone index into
-   a rectangle against its own display bounds, reusing `snap.rs`'s arithmetic
-   rather than restating it. The compositor is the only party that knows the
-   bounds, so the *rectangle* must be computed there; `snap.rs` should be
-   factored so the layout math is callable from both (lane C owns both trees).
-3. Wire the shell's zone picker (`snap.rs`'s overlay/picker render trees) to
+   a rectangle against its own display bounds. The compositor is the only party
+   that knows the bounds, so the *rectangle* must be computed there.
+
+   **The layout arithmetic has to move somewhere both crates can see it, and
+   where is an open fork.** The compositor needs it to place the window; the
+   shell needs it too, because its zone picker draws the zones the user aims
+   at — so it cannot simply be handed to the compositor and deleted from the
+   shell. `gui/compositor` does not depend on `gui/desktop` and must not start
+   to (the dependency runs the other way round conceptually, and nothing in the
+   tree depends on `desktop` today, which is a property worth keeping). The two
+   candidates:
+   - **Into `gui/remote`**, beside `Layer`, `WindowInfo` and `CursorShape` —
+     the crate that already holds the vocabulary both ends share. Fits the
+     existing pattern, no new crate. Against: `gui/remote` is a *protocol*
+     crate, and `SnapZone` carries a `String` label and returns a `Vec`, which
+     is heavier than anything else in there.
+   - **A new `gui/zones` crate.** Honest about what it is, keeps the protocol
+     crate to protocol. Against: ~300 lines of arithmetic is thin for a crate,
+     and it adds a node to the graph for one caller on each side.
+
+   Resolve this *before* writing the compositor half — picking wrong means
+   moving the code twice.
+3. Design the wire verb against `ShellControlAction`'s one-byte-per-action
+   rule (`gui/remote/src/control.rs:307`, `as_byte`/`from_byte`). The 22
+   distinct (preset, zone) pairs across the seven presets all fit in the unused
+   byte space above 6, so the rule can be kept exactly rather than bent: the
+   byte still fully determines the action, and no reader or writer of the frame
+   grows a special case. A `SnapToZone { preset, zone }` with a separately
+   encoded payload would be the thing the enum's doc explicitly warns against.
+4. Wire the shell's zone picker (`snap.rs`'s overlay/picker render trees) to
    emit that request from `handle_mouse`/`handle_hotkey`, and drop the
    snap-history bookkeeping from the shell — restoring a snapped window is
    already the compositor's (`restoring_a_snapped_window_returns_it_to_where_it_was`).

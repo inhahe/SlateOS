@@ -5,6 +5,13 @@ edition = "2024"
 description = "SlateOS Compositor — display server with window compositing and input routing"
 
 [dependencies]
+# The user's appearance settings, as a model rather than a panel. The
+# compositor draws the window frames, so it is the process that has to know
+# how round the user asked their corners to be and whether they want shadows;
+# reading the same definitions the Settings panel writes is what stops the
+# display server and the settings UI disagreeing about what "Rounded" means.
+# No cycle: `appearance` depends only on `guitk` and `yamldoc`.
+appearance = { path = "../appearance" }
 guitk = { path = "../toolkit" }
 guiremote = { path = "../remote" }
 osfont = { path = "../font" }

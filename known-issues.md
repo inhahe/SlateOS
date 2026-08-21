@@ -49109,6 +49109,55 @@ drawn with the flat primitives) nor the `drop_shadows` toggle, and it still
 draws a shadow on maximized windows. Note that `gui/appearance` depends only on
 `guitk` and `yamldoc`, so `compositor` can depend on it without a cycle.
 
+**Progress 2026-08-21 — prerequisite 2 is done, except for live reload.** ✅
+The compositor now depends on `gui/appearance` and holds an
+`AppearanceSettings` (the whole record, not the two fields it can act on — see
+`design-decisions.md` §499 for why that is the point rather than an oversight).
+All three items above are closed:
+
+- **`WindowCorners` reaches the frame.** `Compositor::decoration_radius` scales
+  the user's radius by the display factor and feeds the title bar's fill, the
+  border's stroke, the title-bar buttons and every ring of the shadow. All four
+  corner choices now produce four different windows; before this they produced
+  one. Note the radius deliberately does *not* inherit `scale_dimension`'s
+  non-zero floor: a radius of 0 is the user having chosen `Square`, not a
+  rounding accident, and must survive scaling as a square corner.
+- **`drop_shadows` is honoured.** `render_window` consults it before calling
+  `render_shadow`.
+- **A maximized window casts no shadow.** The compositor's reason is *not* the
+  shell's, and §499 records the difference: the shell suppresses a fill-based
+  `BoxShadow` that would bleed over the screen border; the compositor's
+  concentric rings cannot bleed — a maximized frame is fitted to the display
+  exactly, so every ring is either clipped off-display or drawn underneath the
+  window's own frame. It is pure overdraw on an opaque window and a dark smear
+  along the top and left on a translucent one.
+
+Ten tests, each proved a real regression test by reintroducing the bug it names
+— 10/10 caught on the first pass. Two of the ten were wrong before they were
+right, and §499 records both, because neither error would have announced
+itself: one asserted an absolute pixel count that is simply false (a "square"
+20×20 corner block also contains the border stroke and the first letters of the
+title), and one was reading `compose_frame`'s vsync gate instead of its damage
+state, so its middle assertion passed for entirely the wrong reason.
+
+**What remains is a startup-only channel, and it is the last piece before the
+deletion.** `main` reads `appearance.yaml` at startup and calls
+`set_appearance`; changing a setting in the Settings app does not reach a
+running compositor, so the user must restart it. The fix is a protocol verb and
+its shape is already decided: a `ReloadAppearance` request carrying **no data**,
+so the compositor re-reads the user's own file rather than being told what to
+draw. A setter would let any connected client restyle the whole desktop; a
+reload notification lets a hostile client at worst force a redundant re-read of
+a file it cannot write. Concretely: a new `RequestBody::ReloadAppearance` at tag
+`0x0F` in `gui/remote/src/control.rs` (variant, tag, `from_u8` arm, encode arm,
+decode arm, roundtrip test), the mapping in `to_compositor_request`
+(`gui/compositor/src/wire.rs`), and a handler arm that calls
+`AppearanceFile::load()`.
+
+After that, the deletion: `DesktopShell::render_window_decorations`
+(`gui/desktop/src/lib.rs:2367`), `window_chrome` (`:1238`), and the
+`ManagedWindow` geometry fields that exist only to feed them.
+
 ## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
 
 **In short:** `ssh host 'cat /etc/passwd'` used to come back with the text

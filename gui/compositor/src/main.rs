@@ -175,6 +175,13 @@ fn main() {
         }
     };
 
+    // The user's window-corner and drop-shadow choices. Read here rather than
+    // in `Compositor::new` so that the library has no opinion about `$HOME` and
+    // its tests do not depend on the machine running them. A missing or
+    // unreadable file yields the defaults, which is the ordinary state of a
+    // fresh install rather than something to warn about.
+    compositor.set_appearance(appearance::AppearanceFile::load().settings);
+
     let mut server = match Server::bind(&addr) {
         Ok(s) => s,
         Err(e) => {

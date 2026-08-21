@@ -40,6 +40,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+pub use appearance::{AppearanceSettings, WindowCorners};
 #[allow(unused_imports)]
 use guitk::color::Color;
 // Aliased because this crate has its own `MouseButton` and `MouseEventKind`
@@ -3875,6 +3876,16 @@ pub struct Compositor {
     render_engine: RenderEngine,
     /// Decoration theme.
     theme: DecorationTheme,
+    /// The user's appearance preferences, as far as the compositor can act on
+    /// them: how round window corners are and whether windows cast shadows.
+    ///
+    /// Held as the whole [`AppearanceSettings`] rather than as the two fields
+    /// used today, because the settings are one document with one owner
+    /// (`gui/appearance`), and copying two of its fields out into compositor-
+    /// local state is how a third independent appearance model gets started —
+    /// the exact thing that crate exists to prevent. The colours in
+    /// [`DecorationTheme`] are the next thing to come from here.
+    appearance: AppearanceSettings,
     /// Outbound event notifications for clients (stub queue).
     pending_notifications: VecDeque<EventNotification>,
     /// Reused encoding buffer for
@@ -3931,6 +3942,10 @@ impl Compositor {
             drag: None,
             render_engine: RenderEngine::new(),
             theme: DecorationTheme::default(),
+            // The defaults, not the user's file: a constructor that read
+            // `$HOME` would make every test of this crate depend on the machine
+            // running it. `main` loads the file and calls `set_appearance`.
+            appearance: AppearanceSettings::default(),
             pending_notifications: VecDeque::new(),
             window_list_scratch: Vec::new(),
             modifiers: ModifierState::new(),
@@ -3940,6 +3955,46 @@ impl Compositor {
             stream_sessions: BTreeMap::new(),
             next_stream_id: 1,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Appearance
+    // -----------------------------------------------------------------------
+
+    /// Adopt the user's appearance preferences.
+    ///
+    /// Forces a full recomposite, because the settings that reach here change
+    /// pixels *outside* any window's damage: turning shadows off leaves the old
+    /// shadow lying on the desktop until something else happens to repaint that
+    /// strip, and squaring a corner leaves the quarter-disc of frame colour that
+    /// used to fill it. Nothing marks those regions dirty — no window moved —
+    /// so the repaint has to be asked for here.
+    pub fn set_appearance(&mut self, settings: AppearanceSettings) {
+        self.appearance = settings;
+        self.full_recomposite = true;
+    }
+
+    /// The appearance preferences currently in force.
+    #[must_use]
+    pub fn appearance(&self) -> &AppearanceSettings {
+        &self.appearance
+    }
+
+    /// The corner radius for decorations on a display of the given scale.
+    ///
+    /// Scaled like every other decoration dimension, and for the same reason: a
+    /// frame that grows with the display while its corners keep an 8px curve
+    /// reads as a frame with sharper corners, not as one drawn at the same size.
+    /// Unlike [`scale_dimension`] there is no non-zero floor — a radius of 0 is
+    /// the user having chosen [`WindowCorners::Square`], which must survive
+    /// scaling as a square corner rather than becoming a 1px curve.
+    fn decoration_radius(&self, scale: f32) -> f32 {
+        let radius = self.appearance.corner_radius() * scale;
+        if radius.is_finite() && radius > 0.0 {
+            radius
+        } else {
+            0.0
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -5339,6 +5394,7 @@ impl Compositor {
                 win.buffer.is_some(),
                 win.title_bar_layout(),
                 win.transparent,
+                win.maximized,
             ),
             _ => return,
         };
@@ -5355,14 +5411,30 @@ impl Compositor {
             has_buffer,
             title_bar,
             transparent,
+            maximized,
         ) = win_data;
 
         // Undecorated and fullscreen windows get no frame: the first asked to
         // be a bare surface (a menu, a tooltip, a splash screen), the second
         // owns the whole display. Both report it by having no title bar.
         if let Some(bar) = title_bar {
-            // 1. Draw window shadow.
-            self.render_shadow(bar.frame, bar.scale, opacity);
+            // 1. Draw window shadow — if the user wants shadows, and if this
+            //    window has an edge to cast one from. A maximized window's frame
+            //    is fitted to the display exactly (`maximize_window`), so every
+            //    ring of its shadow is either clipped off the display or drawn
+            //    under the window's own frame and painted over: on an opaque
+            //    window it is invisible, and always it is a full shadow's worth
+            //    of stroking per frame for nothing — on the one window state
+            //    that is the common case. It is not merely wasted, either: a
+            //    translucent or `transparent` window does not cover what is
+            //    beneath it, so the rings show through as a dark smear along the
+            //    top and left of a maximized window and nowhere else.
+            //
+            //    Fullscreen needs no test here — `Window::has_title_bar` is
+            //    false for it, so a fullscreen window never reaches this branch.
+            if self.appearance.drop_shadows && !maximized {
+                self.render_shadow(bar.frame, bar.scale, opacity);
+            }
 
             // 2. Draw window border.
             let border_color = if focused {
@@ -5443,6 +5515,13 @@ impl Compositor {
 
     /// Render the window shadow: concentric outlines around the frame box,
     /// offset down-right and fading with distance.
+    ///
+    /// Each ring is rounded by the window's own radius *grown by that ring's
+    /// distance out*, which is what an offset curve actually is: a shadow whose
+    /// rings all shared the frame's radius would be a stack of same-shaped
+    /// outlines at increasing sizes, and its corners would bulge squarer the
+    /// further out they went until the outermost ring poked past the curve it
+    /// is supposed to be sitting behind.
     fn render_shadow(&mut self, frame: Rect, scale: f32, opacity: f32) {
         /// How far down and right the shadow is cast from the frame, at 1×.
         const SHADOW_OFFSET: u32 = 3;
@@ -5471,20 +5550,29 @@ impl Compositor {
             reason = "a scaled 3px offset cannot approach i32::MAX"
         )]
         let base = frame.offset(offset as i32, offset as i32);
+        let radius = self.decoration_radius(scale);
         for layer in 0..extent {
             let alpha = SHADOW_ALPHA
                 .saturating_sub(layer.saturating_mul(falloff))
                 .min(255);
             let ring = base.inflate(layer);
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "the layer index is bounded by the scaled shadow extent \
+                          — a handful of pixels, exact in f32"
+            )]
+            let grown = radius + layer as f32;
+            let radii = CornerRadii::all(grown);
             // Only the outline of each layer: the interior is covered by the
             // window itself or by the next layer in.
-            self.render_engine.stroke_rect(
+            self.render_engine.stroke_round_rect(
                 &mut self.backend,
                 ring.x,
                 ring.y,
                 ring.width,
                 ring.height,
                 1,
+                &radii,
                 alpha << 24,
                 opacity,
             );
@@ -5507,13 +5595,19 @@ impl Compositor {
             frame.width,
             frame.height.saturating_add(width),
         );
-        self.render_engine.stroke_rect(
+        // The border traces the outside of the frame, so it takes the frame's
+        // radius as-is — the same curve the title bar's top corners are drawn
+        // with, from the same call, which is what keeps the two from parting
+        // company by a pixel at the join.
+        let radii = CornerRadii::all(self.decoration_radius(scale));
+        self.render_engine.stroke_round_rect(
             &mut self.backend,
             border.x,
             border.y,
             border.width,
             border.height,
             width,
+            &radii,
             color,
             opacity,
         );
@@ -5537,12 +5631,17 @@ impl Compositor {
         } else {
             self.theme.title_bar_unfocused
         };
-        self.render_engine.fill_rect(
+        // Rounded across the top only: the title bar shares its lower edge with
+        // the client area, and curving that edge would cut two notches out of
+        // the middle of the window where the bar meets the content beneath it.
+        let radius = self.decoration_radius(bar.scale);
+        self.render_engine.fill_round_rect(
             &mut self.backend,
             tb_x,
             tb_y,
             tb_width,
             bar.bar.height,
+            &CornerRadii::top(radius),
             bg_color,
             opacity,
         );
@@ -5602,18 +5701,33 @@ impl Compositor {
         // Buttons: close (red), maximize (green), minimize (yellow). Each is
         // drawn exactly where the hit test will look for it, and skipped
         // entirely when the window does not have it.
+        //
+        // The buttons are round when the windows are: a square close button
+        // beside a curved corner is the mismatch, not the consistency. Capped at
+        // half the button, which is the radius at which it becomes a circle —
+        // past that the clamp inside the rasterizer would take over anyway, and
+        // capping here means the three buttons agree with each other even when
+        // they are not all the same size.
+        let button_size = scale_dimension(TITLE_BUTTON_SIZE, bar.scale);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a title-bar button is tens of pixels; exact in f32"
+        )]
+        let button_radius = radius.min(button_size as f32 / 2.0);
+        let button_radii = CornerRadii::all(button_radius);
         for (rect, color) in [
             (bar.close, self.theme.close_button),
             (bar.maximize, self.theme.maximize_button),
             (bar.minimize, self.theme.minimize_button),
         ] {
             if let Some(r) = rect {
-                self.render_engine.fill_rect(
+                self.render_engine.fill_round_rect(
                     &mut self.backend,
                     r.x,
                     r.y,
                     r.width,
                     r.height,
+                    &button_radii,
                     color,
                     opacity,
                 );
@@ -10300,5 +10414,470 @@ mod tests {
                 "a rounded fill painted ({x}, {y}), outside its clip {clip:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The user's appearance settings reaching the decorations
+    //
+    // The compositor drew its own window frames from a hardcoded
+    // `DecorationTheme` and nothing else. Two of the user's choices in the
+    // Settings app — how round window corners are, and whether windows cast
+    // shadows — had no route into the process that draws the frames, so both
+    // were ignored outright: `Square` and `ExtraRounded` produced the same
+    // square frame, and turning shadows off left every shadow exactly where it
+    // was. These tests assert on the composited pixels, because "the field is
+    // stored" is precisely what was true before and was not enough.
+    // -----------------------------------------------------------------------
+
+    /// The display these tests composite onto. Large enough that a window can
+    /// sit well inside it with room for its shadow to fall on the desktop.
+    const DECOR_W: u32 = 400;
+    /// See [`DECOR_W`].
+    const DECOR_H: u32 = 300;
+
+    /// A compositor with one decorated window at a known place, rendered once
+    /// onto a cleared desktop under the given appearance settings.
+    ///
+    /// Renders one window rather than composing a frame so that what lands in
+    /// the buffer is exactly this window's decorations over a known background
+    /// — the same idiom as `a_scaled_shadow_is_actually_drawn_to_its_scaled_extent`.
+    fn decorated(settings: AppearanceSettings) -> (Compositor, WindowId) {
+        let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+        comp.set_appearance(settings);
+        let mut spec = WindowSpec::new("Framed", 160, 120);
+        spec.position = Some((120, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.refresh_window_scales();
+        let bg = comp.theme.desktop_background;
+        comp.backend.clear(bg);
+        comp.render_window(id);
+        (comp, id)
+    }
+
+    /// Settings that differ from the defaults only in their corner style.
+    fn with_corners(corners: WindowCorners) -> AppearanceSettings {
+        AppearanceSettings {
+            window_corners: corners,
+            ..AppearanceSettings::default()
+        }
+    }
+
+    /// How many pixels of `rect`'s top-left `size`×`size` block are painted in
+    /// exactly `color`.
+    ///
+    /// A count over a block rather than a probe at one coordinate, because it
+    /// measures *how much* of the corner was cut away. That is what lets one
+    /// measurement tell `Subtle` from `ExtraRounded`, without this test carrying
+    /// a second copy of the arc arithmetic that could agree with a wrong
+    /// original. Exact equality is deliberate: the antialiased rim pixels are
+    /// blends and do not count, so what is counted is the solid interior, which
+    /// is unambiguous.
+    ///
+    /// It is a *relative* measure only. A block over a window frame also
+    /// contains the border stroke down its left edge and the first letters of
+    /// the title, neither of which is frame colour — so the count sits well
+    /// below the block's area even for a perfectly square corner (339 of 400,
+    /// when this was written). Those contaminants do not move with the corner
+    /// setting, which is why comparing two counts over the same block is sound
+    /// and asserting an absolute one is not.
+    fn corner_ink(comp: &Compositor, rect: Rect, size: u32, color: u32) -> u32 {
+        let mut count: u32 = 0;
+        for dy in 0..size {
+            for dx in 0..size {
+                #[allow(
+                    clippy::cast_sign_loss,
+                    reason = "the sampled block is inside the window, which is \
+                              inside the buffer"
+                )]
+                let (x, y) = ((rect.x + dx as i32) as u32, (rect.y + dy as i32) as u32);
+                if working_pixel(&comp.backend, x, y) == Some(color) {
+                    count = count.saturating_add(1);
+                }
+            }
+        }
+        count
+    }
+
+    /// The title bar's own rectangle and background colour, for a focused
+    /// window. Read from the window rather than recomputed, so a change to the
+    /// layout cannot leave these tests probing empty desktop.
+    fn title_bar_of(comp: &Compositor, id: WindowId) -> (Rect, u32) {
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_layout()
+            .expect("a decorated window has a title bar");
+        let focused = comp.window_ref(id).expect("window").focused;
+        let color = if focused {
+            comp.theme.title_bar_focused
+        } else {
+            comp.theme.title_bar_unfocused
+        };
+        (bar.bar, color)
+    }
+
+    /// How big a block to measure a corner over. Larger than the largest radius
+    /// the settings offer (16), so `ExtraRounded` still leaves solid pixels in
+    /// the block and the counts stay comparable.
+    const CORNER_BLOCK: u32 = 20;
+
+    #[test]
+    fn the_users_corner_setting_reaches_the_window_frame() {
+        // The bug: it did not. Every window was drawn with a square frame no
+        // matter what the user chose, because the compositor had no connection
+        // to the appearance settings at all — `Square` and `ExtraRounded` were
+        // the same picture.
+        //
+        // Probed two pixels in from the frame's top-left rather than counted
+        // over a block, because this one pixel is unambiguous: it is inside the
+        // border stroke and well clear of the title text, so the only thing
+        // that decides its colour is whether the corner was cut away. A square
+        // corner paints it; a 16px arc is still 8px away from it at that depth.
+        let corner_painted = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let (bar, color) = title_bar_of(&comp, id);
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let probe = ((bar.x + 2) as u32, (bar.y + 2) as u32);
+            working_pixel(&comp.backend, probe.0, probe.1) == Some(color)
+        };
+        assert!(
+            corner_painted(WindowCorners::Square),
+            "a square corner left its own corner pixel unpainted"
+        );
+        assert!(
+            !corner_painted(WindowCorners::ExtraRounded),
+            "the user asked for extra-rounded windows and the corner pixel was \
+             painted anyway — the setting never reached the frame"
+        );
+    }
+
+    #[test]
+    fn a_deeper_corner_setting_cuts_more_of_the_corner_away() {
+        // Not just "some rounding happened": the *amount* has to follow the
+        // setting. A compositor that rounded every window by one hardcoded
+        // radius would pass the test above and fail this one, and would ignore
+        // three of the four choices the settings panel offers.
+        let inks: Vec<(WindowCorners, u32)> = [
+            WindowCorners::Square,
+            WindowCorners::Subtle,
+            WindowCorners::Rounded,
+            WindowCorners::ExtraRounded,
+        ]
+        .into_iter()
+        .map(|corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let (bar, color) = title_bar_of(&comp, id);
+            (corners, corner_ink(&comp, bar, CORNER_BLOCK, color))
+        })
+        .collect();
+
+        for pair in inks.windows(2) {
+            let [(shallow, more), (deep, less)] = pair else {
+                unreachable!("windows(2) yields pairs")
+            };
+            assert!(
+                less < more,
+                "{deep:?} (radius {}) left {less} painted pixels, which is not fewer \
+                 than {shallow:?} (radius {}) at {more}",
+                deep.radius(),
+                shallow.radius(),
+            );
+        }
+    }
+
+    #[test]
+    fn the_border_rounds_with_the_frame_it_traces() {
+        // The border is a separate call from the title bar, so rounding one
+        // does not round the other — and a square border around a rounded frame
+        // is not a subtle defect: it is a hard rectangular outline standing off
+        // the window's curved corners with desktop showing between them.
+        let border_at_the_corner = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let frame = comp.window_ref(id).expect("window").frame_rect();
+            let width = scale_dimension(
+                BORDER_WIDTH,
+                comp.window_ref(id).expect("window").scale_factor,
+            );
+            // The border box starts one stroke above the frame; see
+            // `render_border`. Its own top-left is the pixel a square stroke
+            // paints and a rounded one leaves alone.
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let probe = (frame.x as u32, (frame.y - width as i32) as u32);
+            let focused = comp.window_ref(id).expect("window").focused;
+            let expected = if focused {
+                comp.theme.border_focused
+            } else {
+                comp.theme.border_unfocused
+            };
+            working_pixel(&comp.backend, probe.0, probe.1) == Some(expected)
+        };
+        assert!(
+            border_at_the_corner(WindowCorners::Square),
+            "a square border did not paint its own corner pixel"
+        );
+        assert!(
+            !border_at_the_corner(WindowCorners::ExtraRounded),
+            "the border stayed square while the frame rounded"
+        );
+    }
+
+    #[test]
+    fn the_shadow_rounds_with_the_window_it_falls_from() {
+        // A shadow is the window's own silhouette, offset and blurred. Rings
+        // that kept square corners under a rounded window would show as dark
+        // right angles poking diagonally out past the curve they are supposed
+        // to be sitting behind — the one place a shadow is most visible.
+        let shadow_ink = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let frame = comp.window_ref(id).expect("window").frame_rect();
+            let bg = comp.theme.desktop_background;
+            // The block diagonally off the frame's bottom-right, which is
+            // shadow and nothing else: the window does not reach it and the
+            // desktop behind it is a flat colour.
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let origin = (
+                (frame.x + frame.width as i32) as u32,
+                (frame.y + frame.height as i32) as u32,
+            );
+            let mut painted = 0u32;
+            for dy in 0..SHADOW_SIZE {
+                for dx in 0..SHADOW_SIZE {
+                    let (x, y) = (origin.0.saturating_add(dx), origin.1.saturating_add(dy));
+                    if working_pixel(&comp.backend, x, y).is_some_and(|p| p != bg) {
+                        painted = painted.saturating_add(1);
+                    }
+                }
+            }
+            painted
+        };
+        let square = shadow_ink(WindowCorners::Square);
+        let rounded = shadow_ink(WindowCorners::ExtraRounded);
+        assert!(square > 0, "no shadow was drawn at all beside the window");
+        assert!(
+            rounded < square,
+            "the shadow's corner stayed square ({rounded} painted pixels) under a \
+             rounded window; the square one painted {square}"
+        );
+    }
+
+    #[test]
+    fn the_corner_radius_grows_with_the_display_scale() {
+        // Every other decoration dimension is scaled to the display
+        // (`scale_dimension`). A radius that was not would leave a 2x window —
+        // twice the frame, twice the title bar, twice the border — wearing the
+        // same 8px curve, which reads as a window with sharper corners rather
+        // than as the same window drawn larger.
+        //
+        // Measured as the depth at which the title bar's top row starts being
+        // painted, rather than predicted from the radius: re-deriving the arc
+        // here would be a second copy of it that can agree with a wrong
+        // original.
+        let corner_depth = |scale: f32| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            if let Some(d) = comp.display_manager.displays.first_mut() {
+                d.scale_factor = scale;
+            }
+            comp.set_appearance(with_corners(WindowCorners::ExtraRounded));
+            let mut spec = WindowSpec::new("Framed", 160, 120);
+            spec.position = Some((120, 100));
+            let id = comp.create_window_from_spec(&spec, 1);
+            comp.refresh_window_scales();
+            comp.backend.clear(comp.theme.desktop_background);
+            comp.render_window(id);
+
+            let (bar, color) = title_bar_of(&comp, id);
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let row = bar.y as u32;
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let left = bar.x as u32;
+            (0..bar.width)
+                .find(|&dx| {
+                    working_pixel(&comp.backend, left.saturating_add(dx), row) == Some(color)
+                })
+                .expect("the title bar's top row is painted somewhere")
+        };
+        let single = corner_depth(1.0);
+        let double = corner_depth(2.0);
+        assert!(
+            single > 0,
+            "an extra-rounded corner cut nothing from the top row"
+        );
+        assert!(
+            double > single,
+            "the corner bit {double} pixels into the top row at 2x and {single} at \
+             1x — the radius did not scale with the display"
+        );
+    }
+
+    #[test]
+    fn the_window_buttons_round_with_the_windows() {
+        // A square close button beside a curved frame corner is the mismatch,
+        // not the consistency — and the buttons are drawn by a different call
+        // than the frame, so rounding one does not round the other.
+        let button_of = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let close = comp
+                .window_ref(id)
+                .expect("window")
+                .close_button_rect()
+                .expect("an ordinary window has a close button");
+            let ink = corner_ink(
+                &comp,
+                close,
+                close.width.min(close.height),
+                comp.theme.close_button,
+            );
+            (close, ink)
+        };
+        let (square_rect, square_ink) = button_of(WindowCorners::Square);
+        let (round_rect, round_ink) = button_of(WindowCorners::ExtraRounded);
+        assert_eq!(
+            square_rect, round_rect,
+            "the button geometry must not move, or the two counts are of different things"
+        );
+        assert!(
+            round_ink < square_ink,
+            "the close button stayed square ({round_ink} painted pixels) while the \
+             frame rounded; square's was {square_ink}"
+        );
+    }
+
+    #[test]
+    fn turning_drop_shadows_off_leaves_the_desktop_beside_the_window_bare() {
+        let settings = |drop_shadows| AppearanceSettings {
+            drop_shadows,
+            ..AppearanceSettings::default()
+        };
+        let (with, id) = decorated(settings(true));
+        let (without, _) = decorated(settings(false));
+
+        let frame = with.window_ref(id).expect("window").frame_rect();
+        let bg = with.theme.desktop_background;
+        // A row through the middle of the window, sampled to the right of the
+        // frame: shadow country, and nothing else is drawn out there.
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "the window is placed well inside the 400x300 buffer"
+        )]
+        let row = (frame.y + frame.height as i32 / 2) as u32;
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "the window is placed well inside the 400x300 buffer"
+        )]
+        let right = (frame.x + frame.width as i32) as u32;
+        let band = right..right.saturating_add(SHADOW_SIZE);
+
+        let shaded = band
+            .clone()
+            .filter(|&x| working_pixel(&with.backend, x, row) != Some(bg))
+            .count();
+        assert!(
+            shaded > 0,
+            "with shadows on, nothing was painted in the shadow band — this test \
+             cannot tell suppression from an empty band"
+        );
+        let unshaded = band
+            .filter(|&x| working_pixel(&without.backend, x, row) != Some(bg))
+            .count();
+        assert_eq!(
+            unshaded, 0,
+            "the user turned drop shadows off and {unshaded} shadow pixels were \
+             still painted beside the window"
+        );
+    }
+
+    #[test]
+    fn a_maximized_window_casts_no_shadow_it_could_only_smear_over_itself() {
+        // A maximized frame is fitted to the display exactly, so every ring of
+        // its shadow is clipped away or drawn under the window's own frame. On
+        // an opaque window that is pure overdraw; on a translucent one the
+        // rings show through as a dark smear along the top and left edges,
+        // which is what this test can see. The comparison is against the same
+        // scene with shadows turned off: if the suppression works, maximizing
+        // is indistinguishable from having asked for no shadows at all.
+        let scene = |drop_shadows| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            comp.set_appearance(AppearanceSettings {
+                drop_shadows,
+                ..AppearanceSettings::default()
+            });
+            let id = comp.create_window("Framed".to_string(), 160, 120, 1);
+            // Translucent, so the frame blends over whatever is beneath it
+            // instead of hiding it. An opaque maximized window would look
+            // identical either way and prove nothing.
+            comp.set_opacity(id, 0.5).expect("opacity");
+            comp.maximize_window(id).expect("maximize");
+            comp.refresh_window_scales();
+            comp.backend.clear(comp.theme.desktop_background);
+            comp.render_window(id);
+            comp.backend.working_pixels().to_vec()
+        };
+        assert_eq!(
+            scene(true),
+            scene(false),
+            "a maximized window was drawn differently with shadows on than with \
+             them off, which means a shadow it can only smear over itself was drawn"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_window_still_casts_one() {
+        // Non-vacuity for the test above: the comparison it makes must be
+        // capable of coming out unequal.
+        let scene = |drop_shadows| {
+            let (comp, _) = decorated(AppearanceSettings {
+                drop_shadows,
+                ..AppearanceSettings::default()
+            });
+            comp.backend.working_pixels().to_vec()
+        };
+        assert_ne!(
+            scene(true),
+            scene(false),
+            "an ordinary window looked the same with shadows on and off"
+        );
+    }
+
+    #[test]
+    fn changing_the_appearance_repaints_what_is_already_on_screen() {
+        // A settings change moves pixels that no window's damage covers: the
+        // quarter-disc a squared corner reclaims, and the strip a removed
+        // shadow vacates. Nothing marks those dirty, so without a forced
+        // recomposite the user changes the setting and the screen does not
+        // change until something else happens to repaint that area.
+        //
+        // A refresh rate past 1 MHz, because `frame_interval_for` divides into
+        // it and lands on a zero-length frame budget: `compose_frame` also
+        // declines when it is *too soon* for another frame, and at 60 Hz three
+        // calls in a row are all inside one 16 ms interval — so the assertions
+        // below would be reading the vsync gate rather than the damage state,
+        // and the middle one would pass for entirely the wrong reason.
+        let mut comp = Compositor::new(DECOR_W, DECOR_H, 2_000_000).expect("compositor");
+        comp.create_window("Framed".to_string(), 160, 120, 1);
+        assert!(comp.compose_frame(), "the first frame draws the new window");
+        assert!(
+            !comp.compose_frame(),
+            "an unchanged desktop should have nothing to redraw"
+        );
+        comp.set_appearance(with_corners(WindowCorners::Square));
+        assert!(
+            comp.compose_frame(),
+            "the corner setting changed and nothing was redrawn"
+        );
     }
 }

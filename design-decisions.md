@@ -30347,6 +30347,352 @@ cannot pass by rejecting everything. The test runs in kernel context by
 construction — the boot self-test task owns no process — so a regression
 re-panics the kernel inside a named test rather than a thousand lines later.
 
+## §261 — The shell becomes byte-clean along the *expanded word*, not along the command line
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude proposed and recommended this option; operator
+agreed)
+
+**In short:** Our shell cannot type, or tab-complete, a filename whose name is
+not valid text — a name containing a stray byte that isn't part of any
+character. The fix could either be to rewrite the entire shell (85,000 lines,
+879 function signatures) so that *everything* it handles is raw bytes, or to
+convert only the path that a filename actually travels: the word after it has
+been expanded, the path resolver, tab completion, and the commands that consume
+paths. The decision is the second one. A raw byte still cannot be *typed*
+literally — you write `$'\xff'`, exactly as in bash — but every such filename
+becomes reachable, listable and completable.
+
+### Why the smaller change is not the lesser change
+
+`known-issues.md` → `TD-KSHELL-LINE-EDITOR-IS-UTF8` originally prescribed
+converting the line editor **and** the statement executors together, on the
+argument that a partial conversion merely moves the lossy step from the keyboard
+to the parser, where it is *less* visible. That argument is correct, and it is
+not an argument against what was chosen — it targets a **layer** split (editor
+byte-clean, parser not). This is not a layer split; it is a *data-flow* split.
+One path — the path a filename takes from the user's keystrokes to the syscall —
+becomes byte-clean end to end, with no lossy step anywhere along it. The source
+line stays text, which is what it is in bash too: bash's script source is text
+and its expanded argument is a byte string.
+
+The measurement that forced the question: `kernel/src/kshell.rs` is 84,845 lines
+and 879 of its 1,024 functions take or return `&str`/`String`. The entry's
+"~1520 call sites" had counted method calls, not signatures. Option A was
+therefore a single unreviewable commit rewriting a working shell, for a defect
+the entry itself classifies as *not* data loss. Worth noting what is not
+implicated: only 6 `from_utf8_lossy` sites exist in the whole file and all six
+format file *content* (`column`, `diff`), not paths.
+
+### What A would have bought that B does not
+
+Byte-purity for non-path arguments. No known use case needs it, and the escape
+mechanism (`$'…'`, already parsed at 7 sites) reaches it anyway.
+
+### Where it lands
+
+`kernel/src/kshell.rs`: word expansion, `resolve_path` (208; 270 call sites),
+`get_cwd` (194), tab completion, and the path-consuming commands. Helpers exist
+in `kernel/src/bytestr.rs` (stage (a), commit `d19372dd4`). Completion emits the
+`$'\xff'` spelling for candidates that are not valid UTF-8.
+
+## §262 — Modern AMD graphics is out of scope until there is hardware to run it on; a driver nobody has ever started is worse than an honest gap
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended this option)
+
+**In short:** The plan asks for a driver for modern AMD graphics cards. There is
+no way to run one: the emulator we test in doesn't imitate any recent AMD card,
+and this PC has an NVIDIA card. Such a driver could be written from
+documentation but never once started — no picture, no error, no clue which of
+its many steps was wrong. The decision is to say plainly that this OS drives
+modern AMD cards through the generic fallback only, and to revisit it if
+hardware ever appears. The old-AMD driver that *does* run is unaffected and
+stays.
+
+### The operator's own framing, recorded because it is the shape of the revisit
+
+The operator's answer was "a for now, maybe someday c, but i can't afford it
+right now", and then raised a third possibility worth writing down rather than
+discarding: write the driver blind but **refuse to claim it works** — state
+explicitly in the documentation that it was written without any hardware to test
+on, and invite users (or an LLM on their machine) to debug it and send patches.
+
+That variant is not option B, and the difference matters: B's fatal defect is
+the *claim*, not the code. A roadmap that ticks "AMD support" on the strength of
+code nobody has run is a claim we would have to un-make. A file that says "this
+is untested, here is the documentation it was written from" makes no false
+claim.
+
+It was still not adopted, for the reason the operator themselves named: the
+failure mode is a black screen, and "they'd have to figure out how to fix a
+blank screen … but i guess we'd have the same problem". A contributor debugging
+a modern AMD bring-up has to get through firmware upload and a long power-up
+sequence with no output channel at all — that is not a task a patch-sized
+contribution absorbs. If bare-metal boot lands (see §263), the calculus changes,
+because then a contributor at least has serial output.
+
+### What is settled and not in question
+
+The old-card driver is done and running (§217). Its timing arithmetic is shared
+with the newer chips, so none of it is wasted whichever way this goes. Writing
+it immediately caught a genuine bug a never-run driver would have kept forever.
+
+### If this is revisited
+
+The trigger is hardware: a spare modern AMD card fitted to this machine, or the
+Linux-host passthrough setup described in Q50 option D. Until then roadmap §3.1
+records the gap rather than a promise.
+
+## §263 — SlateOS will boot on this PC's own bare metal, and the Intel iGPU driver will be written against the real chip
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended A-for-now with D over C; operator
+chose C)
+
+**In short:** Most laptops and many desktops display through Intel graphics
+built into the CPU. We can't test a driver for it in the emulator — but unlike
+the AMD case, *the chip is already inside this PC*, merely switched off in the
+firmware settings, so no purchase is needed. The decision is to switch it on,
+get SlateOS starting up on the real machine from a USB stick, and then write the
+Intel driver against real silicon. The operator will do the physical half:
+enable the iGPU in firmware, move the monitor cable to the Intel output, and
+plug in a flash drive.
+
+### Why the operator's choice overrides the recommendation, and why that is right
+
+The recommendation was A-for-now, and D (a Linux host with GVT-g/VFIO
+passthrough) over C if real support were ever wanted — on the grounds that C's
+prerequisite, *booting a real PC*, is a substantially bigger job than the driver
+it enables, and that D keeps testing **automated** rather than manual, which is
+what the rest of this project's testing depends on.
+
+Both of those remain true and neither was disputed. What they undervalue is that
+bare-metal boot is a goal in the plan **in its own right**, not merely a means to
+this driver. Charged against the driver alone it looks disproportionate; charged
+against everything it unblocks — real storage, real USB, real ACPI, a real
+monitor's EDID, a real accelerator for the benchmark suite (Q53 option D, Q54) —
+it is the highest-leverage prerequisite on the board. D would have bought one
+driver and left every one of those still unreachable.
+
+### What was measured, not assumed
+
+| Fact | Evidence |
+|---|---|
+| This PC's CPU contains Intel UHD Graphics 630 | CPU is an `Intel(R) Core(TM) i7-8700K`; that model includes UHD 630, a mainstream well-documented i915 target |
+| The chip is switched off, not absent | Windows lists only `NVIDIA GeForce RTX 4090`; **no** Intel display device enumerates on the PCI bus at all — the usual state when a separate card is fitted. Re-enabling is a firmware toggle |
+| Passthrough is unavailable on this host regardless | QEMU here accelerates via WHPX, which has no device passthrough. VFIO and Intel GVT-g are Linux-only — which is why option D needed a second OS |
+| SlateOS has never run on real hardware | Every boot to date is QEMU. **This, not the chip, is the actual gate** |
+
+### The risk, and its containment
+
+The one real hazard is a black screen on the machine the operator works at. It
+is contained by construction: boot from a **USB stick**, leave the Windows disk
+untouched, and keep the NVIDIA output available to fall back to. Nothing about
+this modifies the host installation.
+
+### Sequencing
+
+This is blocked on the operator being physically present, and they have said so
+("whenever you're ready, just wait for me"). Lane A's job is to have the
+bootable-USB path ready *before* asking: an image that a firmware will start, a
+serial or on-screen channel that reports progress, and a documented recovery
+step. The driver itself is the small half and comes last.
+
+## §264 — Mesa is on the roadmap, sequenced by what it unblocks rather than by 3D itself
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended treating this as a separate later
+call; operator decided it now)
+
+**In short:** Nothing in this OS has ever drawn a 3D image. The missing piece is
+Mesa, the library that turns 3D drawing commands into work for a graphics chip.
+The decision is that we *will* port it — it is no longer parked or
+"indefinitely deferred" — but it does not jump the queue ahead of wifi, a web
+browser, and the rest. The operator asked a sharp follow-up: does a browser need
+Mesa? The answer is that it uses it heavily but does not require it, which is
+what sets the ordering.
+
+### The question that decided the ordering
+
+> "will chromium use mesa for webgl/webgpu support? in that case, maybe do mesa
+> before chromium?"
+
+Chromium's entire GPU stack routes through Mesa on Linux: WebGL goes through
+ANGLE onto GLES/EGL or ANGLE's Vulkan backend; WebGPU goes through Dawn onto
+Vulkan; and separately from either, GPU compositing, GPU rasterization and
+VA-API video decode all do too. So Mesa is not a WebGL side-feature — it is most
+of what makes a browser feel like a browser.
+
+**But Chromium bundles SwiftShader**, a software renderer, and falls back to it
+when no GPU driver is present. So Chromium without Mesa *runs*, including WebGL;
+it is slow, it burns CPU, and WebGPU is far more likely to be disabled outright.
+That makes Mesa a **performance** prerequisite for Chromium, not a functional
+one — which is exactly the distinction that lets it be scheduled rather than
+blocking.
+
+Conclusion, and it agrees with the operator's instinct: **Mesa before Chromium**,
+because a browser is the single largest consumer of it and shipping one that
+software-renders every frame is a bad first impression that we would then have
+to re-earn. But **wifi before Mesa** — a machine that cannot get on a network
+has nothing for the browser to display.
+
+### What is already done, and what "3D works" would still require
+
+Option A of the original question is **built and tested** (§243): the 3D-capable
+emulated device boots green, full display bring-up, and the `SET_SCANOUT:
+resp=0x1203` regression is fixed. `SLATE_GPU=virtio-gpu-gl-pci ./scripts/boot-test.sh`
+is the flag.
+
+The caveat must be restated because A's completion makes it easy to over-read:
+**nothing renders 3D.** The driver issues exactly one command from the 3D set —
+the one that allocates the framebuffer — and never creates a rendering context
+or submits a command stream. `3D_FEATURES = 0` and the empty capset list in
+`kernel/src/drm/virtgpu_uapi.rs` are still correct and still untouched. "The 3D
+device boots" is not "3D works".
+
+### Lane note
+
+Mesa lands in `gui/**`, which is **lane C's** zone; it competes with the
+compositor and desktop queue, not with kernel work. Lane A's contribution is
+done. §59's stale premise — that no 3D test environment exists — is superseded
+by this entry.
+
+## §265 — The contamination-canary check gets a measured noise distribution before its tolerance is touched
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended this option; operator: "i'll go
+with your recommendation")
+
+**In short:** We have a tool that watches for the machine getting busy while
+benchmarks run, so that a benchmark slowed by *other work on the PC* isn't
+mistaken for a real regression. The check that verifies this tool works fails it
+if it points anywhere unexpected at all — zero tolerance — and we have now
+measured that the machine hiccups on its own in 2 runs out of 5 with nothing
+running. So the check can fail a perfectly good tool on a coin flip. The
+decision is to run 20+ idle benchmark rounds first and set the rule from the
+resulting distribution, then replace zero-tolerance with a rule that fails on a
+*shifted band* rather than on isolated spikes.
+
+### Why not just relax it now
+
+Because five runs is enough to prove the assumption is wrong and far too few to
+calibrate anything — picking a number from 5 samples is exactly how the original
+zero got there. The 20-run sweep costs about 45 minutes of machine time.
+
+### Why a band, not a count
+
+An isolated spike and a wrongly-placed window are different faults. "Reported a
+stray hiccup somewhere" is the tool working correctly on a noisy host; "found
+the window but in the wrong place" is the fault the check exists to catch. A
+count-based tolerance cannot tell them apart; a band-shift rule can. It is more
+code, and the band/spike boundary needs its own justification from the sweep.
+
+### The conflict-of-interest note, kept deliberately
+
+The rule being relaxed is the one that returned `FAILED` on my own experiment
+three hours before the question was filed. Changing a gate immediately after it
+fails you is indistinguishable from moving the goalposts however sound the
+reasoning, which is why this went to the operator rather than being decided
+unilaterally. The part with no such hazard was already done: the grader prints
+the measured idle-host rate beside the count. **No verdict was changed.**
+
+Evidence: `known-issues.md` RESULT P23, RESULT P24.
+
+## §266 — The "10% regression" rule is restated against each benchmark's measured band, and real hardware is booked as the fix that makes it mean something again
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended this option; operator: "i'll go
+with your recommendation")
+
+**In short:** `CLAUDE.md` says to investigate any benchmark that gets more than
+10% slower. We measured what a *no-op rebuild* does — same code, same machine,
+just recompiled — and 71% of benchmarks move by more than 10% from nothing at
+all. The median is 26%; the worst is 182%; and the hot paths the document
+singles out as critical are among the *worst*. So the rule as written points at
+phantoms, and — much worse — teaches a reader to shrug off a real 15% regression
+as "probably layout". The decision is to restate the rule as "larger than that
+benchmark's measured band, or 10% if no band has been measured", **and** to book
+running the suite on real hardware as the change that actually restores the
+guarantee.
+
+### Why the restatement alone is not enough
+
+Because it is an admission, not a solution. It concedes in writing that we
+cannot detect a **100% regression in `pick_next`**, which is not an acceptable
+end state for a scheduler hot path. `page_alloc_free` 92%, `page_fault` 85%,
+`ipc_channel` 83%, `syscall_dispatch` 42% — these are tight hot loops, which is
+precisely what the emulator's page-straddle penalty acts on. That is not bad
+luck; it is the mechanism.
+
+### Why not simply raise the flat number
+
+A single higher threshold (say 30%, just above the median band) is wrong in both
+directions at once: far too loose for the 25 quiet benchmarks, still far too
+tight for the 26 that move ≥50%.
+
+### What makes the hardware half reachable now
+
+When this question was filed, "run the benchmarks on real hardware" was
+infrastructure we did not have and had no plan for. **§263 changes that** —
+bare-metal boot is now a decided, sequenced piece of work. Two caveats come with
+it and are recorded so they are not discovered afterwards: every assumption that
+breaks under a hardware accelerator breaks on bare metal too, and a bare-metal
+run currently records its accelerator as *absent*
+(`TD-A-A-BARE-METAL-RUN-RECORDS-ITS-ACCELERATOR-AS-ABSENT`).
+
+Scope note: the sweep behind these numbers is **release-profile only** on one
+host. The `debug` profile — which is what the majority of historical benchmark
+records were taken under — has no band measured at all.
+
+## §267 — The benchmark suite tries the faster accelerator before splitting; the correctness gate never leaves TCG
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended this option; operator: "i'll go
+with your recommendation")
+
+**In short:** The emulator we test in has a second, much faster mode (3.5×) that
+would roughly halve the benchmark-noise problem in §266 — but it silently
+switches off three CPU security features the kernel is built around. The
+decision is: first spend one boot per candidate measuring whether the fast mode
+actually removes the noise (it might make the whole question disappear); if it
+does, **split** — benchmarks run on the fast accelerator, the correctness gate
+stays on the slow one that still exercises the security features. Never simply
+switch everything over.
+
+### Why splitting is safe here specifically
+
+The two accelerators' weaknesses are disjoint *by purpose*. Losing SMEP/SMAP/UMIP
+coverage matters for the **correctness** gate, where a missing `stac` shows up as
+a fault. The instruction-layout artefact matters only for **benchmarks**, where
+it is currently making 71% of the suite unreadable. Splitting puts each weakness
+where it does not bite. The infrastructure already exists: §237 made the
+accelerator part of the comparison key precisely so two series can coexist
+without contaminating each other.
+
+Switching wholesale was rejected outright: giving up the only place SMEP, SMAP
+and UMIP are ever exercised, in order to make a benchmark faster, trades a
+security property for a convenience.
+
+### The bill that comes with the fast accelerator, stated up front
+
+Fixing the contamination floor restores the *measurement*, not automatically the
+*verdict*. Under the fast accelerator the 25% tolerance would apply to a
+0.85-cycle quantity whose real variation has never been observed there — a store
+costs 0.85 cycles on the real CPU against 5.16 under emulation. And a second
+check in the same family (the scattered-access scale test) asserts something
+that is simply **false on real hardware**: that a per-access cost cannot depend
+on how many pages the loop walks, which ignores caches entirely. So the true
+cost is *re-establishing the benchmark suite's self-validation on a platform
+where its assumptions do not hold*.
+
+Separately and regardless of this decision: the canary's floor threshold is
+**100× too strict** — its stated derivation yields 4 hundredths of a cycle at
+the precision the code has used since 2026-08-14, and TCG itself was clearing it
+by only 29%. That is a defect under TCG too and is being fixed either way. Full
+arithmetic in `known-issues.md` →
+`B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`.
+
 ## 499. The compositor reads the user's appearance settings from the shared model, and reads the whole of it
 
 **Date:** 2026-08-21

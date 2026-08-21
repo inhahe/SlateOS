@@ -56,6 +56,7 @@
 //! bits, oversized counts and non-UTF-8 strings are all [`DecodeError`]s
 //! naming what was wrong.
 
+use crate::reserve::PanelEdge;
 use crate::zones::SnapSlot;
 use crate::{DecodeError, Reader, capacity_hint, write_f32, write_string, write_u32, write_u64};
 
@@ -593,6 +594,41 @@ pub enum RequestBody {
         window: u64,
         action: ShellControlAction,
     },
+    /// Reserve `size` pixels along one edge of a monitor for a panel, so that
+    /// tiled and maximized windows stop short of it instead of sliding beneath.
+    ///
+    /// The window named is the panel's *own* — a taskbar reserving the strip it
+    /// sits in — and it answers two questions at once that would otherwise need
+    /// asking separately: **which monitor** (the one that window is on, by the
+    /// same largest-overlap rule everything else uses) and **for how long**
+    /// (until that window is destroyed, hidden, or hangs up). Tying the claim to
+    /// a window is what stops a crashed panel carving a permanent strip out of
+    /// the desktop with nothing left on screen to release it.
+    ///
+    /// A `size` of zero releases. A second reservation for the same window
+    /// replaces the first rather than adding to it, so a panel that changes
+    /// height sends the new number and does not have to release the old one.
+    /// Reservations from *different* windows on the same edge do add — see
+    /// [`crate::reserve`] for why that, and not X11's side-by-side spans.
+    ///
+    /// Answered with [`ResponseBody::WorkArea`]: what the caller actually got,
+    /// which need not be what it asked for, because a claim is clamped to
+    /// [`MAX_RESERVED_FRACTION`](crate::reserve::MAX_RESERVED_FRACTION) of the
+    /// monitor. Returning the area rather than `Ok` is deliberate — a panel
+    /// needs the number to place itself, and a client that had to ask again in a
+    /// second request could be told something different by an intervening
+    /// hotplug.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell` in the compositor: this
+    /// request shrinks the tiling of every *other* client on the machine, so an
+    /// unprivileged one could take a third of each edge and make snapping
+    /// useless desktop-wide. See that function for why the gate does not yet
+    /// answer.
+    ReserveEdge {
+        window: u64,
+        edge: PanelEdge,
+        size: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -614,6 +650,7 @@ enum RequestTag {
     SubscribeWindowList = 0x0E,
     ReloadAppearance = 0x0F,
     ShellControl = 0x10,
+    ReserveEdge = 0x11,
 }
 
 impl RequestTag {
@@ -635,6 +672,7 @@ impl RequestTag {
             0x0E => Self::SubscribeWindowList,
             0x0F => Self::ReloadAppearance,
             0x10 => Self::ShellControl,
+            0x11 => Self::ReserveEdge,
             _ => return None,
         })
     }
@@ -677,6 +715,26 @@ pub enum ResponseBody {
     Error { message: String },
     /// Answer to [`RequestBody::GetDisplayInfo`].
     Display(DisplayInfo),
+    /// Answer to [`RequestBody::ReserveEdge`]: the usable rectangle that is left
+    /// on the panel's monitor once every reservation on it has been taken out —
+    /// including, but not only, the caller's own.
+    ///
+    /// In **virtual-desktop coordinates**, not relative to the monitor, so that
+    /// a panel on the second screen gets an origin it can pass straight back to
+    /// [`RequestBody::Move`] rather than one it has to add an offset to that
+    /// this protocol never told it. Signed origin for the same reason: a monitor
+    /// arranged to the left of the primary starts at a negative x.
+    ///
+    /// Whole pixels rather than the `f32` of [`WorkArea`](crate::zones::WorkArea)
+    /// because a window can only be placed at a whole pixel; the fractional form
+    /// exists for the zone arithmetic that divides an area up, which is not what
+    /// a client does with this.
+    WorkArea {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -686,6 +744,7 @@ enum ResponseTag {
     Ok = 0x02,
     Error = 0x03,
     Display = 0x04,
+    WorkArea = 0x05,
 }
 
 impl ResponseTag {
@@ -695,6 +754,7 @@ impl ResponseTag {
             0x02 => Self::Ok,
             0x03 => Self::Error,
             0x04 => Self::Display,
+            0x05 => Self::WorkArea,
             _ => return None,
         })
     }
@@ -858,6 +918,12 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             write_u64(out, *window);
             out.push(action.as_byte());
         }
+        RequestBody::ReserveEdge { window, edge, size } => {
+            out.push(RequestTag::ReserveEdge as u8);
+            write_u64(out, *window);
+            out.push(edge.as_byte());
+            write_u32(out, *size);
+        }
     }
 }
 
@@ -878,6 +944,18 @@ fn encode_response_body(out: &mut Vec<u8>, body: &ResponseBody) {
             write_u32(out, info.height);
             write_u32(out, info.refresh_rate);
             write_f32(out, info.scale_factor);
+        }
+        ResponseBody::WorkArea {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            out.push(ResponseTag::WorkArea as u8);
+            write_i32(out, *x);
+            write_i32(out, *y);
+            write_u32(out, *width);
+            write_u32(out, *height);
         }
     }
 }
@@ -1089,6 +1167,16 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 action: ShellControlAction::from_byte(b).ok_or(DecodeError::BadShellAction(b))?,
             }
         }
+        RequestTag::ReserveEdge => {
+            let window = r.read_u64()?;
+            let b = r.read_u8()?;
+            let edge = PanelEdge::from_byte(b).ok_or(DecodeError::BadTag(b))?;
+            RequestBody::ReserveEdge {
+                window,
+                edge,
+                size: r.read_u32()?,
+            }
+        }
     })
 }
 
@@ -1114,6 +1202,18 @@ fn decode_response_body(r: &mut Reader<'_>) -> Result<ResponseBody, DecodeError>
                 refresh_rate,
                 scale_factor,
             })
+        }
+        ResponseTag::WorkArea => {
+            let x = read_i32(r)?;
+            let y = read_i32(r)?;
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            ResponseBody::WorkArea {
+                x,
+                y,
+                width,
+                height,
+            }
         }
     })
 }
@@ -1716,5 +1816,87 @@ mod tests {
         assert!(s.decorations);
         assert!(!s.transparent);
         assert_eq!(s.position, None, "placement is the compositor's job");
+    }
+
+    #[test]
+    fn every_panel_edge_survives_the_wire_with_its_thickness() {
+        let reqs: Vec<Request> = [
+            PanelEdge::Left,
+            PanelEdge::Right,
+            PanelEdge::Top,
+            PanelEdge::Bottom,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, edge)| {
+            Request::new(
+                u32::try_from(i).expect("small"),
+                RequestBody::ReserveEdge {
+                    window: 9,
+                    edge,
+                    size: 40 + u32::try_from(i).expect("small"),
+                },
+            )
+        })
+        .collect();
+        assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    #[test]
+    fn a_release_is_a_reservation_of_zero_and_not_a_second_request() {
+        // The idiom the protocol relies on instead of a `ReleaseEdge` tag: a
+        // client that had to send a different request to release would have a
+        // second code path to the same state, and the compositor a second
+        // place to forget to re-tile.
+        let req = Request::new(
+            3,
+            RequestBody::ReserveEdge {
+                window: 9,
+                edge: PanelEdge::Bottom,
+                size: 0,
+            },
+        );
+        assert_eq!(round_trip_requests(std::slice::from_ref(&req)), vec![req]);
+    }
+
+    #[test]
+    fn a_reserve_reply_carries_a_signed_origin_so_a_left_hand_monitor_survives() {
+        // A monitor arranged to the left of the primary starts at a negative x.
+        // An unsigned origin would decode it as two billion and put the panel
+        // somewhere no display reaches.
+        let resp = Response::new(
+            4,
+            ResponseBody::WorkArea {
+                x: -1920,
+                y: -12,
+                width: 1920,
+                height: 1040,
+            },
+        );
+        assert_eq!(
+            round_trip_responses(std::slice::from_ref(&resp)),
+            vec![resp]
+        );
+    }
+
+    #[test]
+    fn a_reserve_edge_byte_that_names_no_edge_is_rejected_rather_than_defaulted() {
+        // Hand-built because no encoder will produce it: tag, seq, window, a
+        // bad edge byte, size.
+        let mut bytes = encode_requests(&[Request::new(
+            1,
+            RequestBody::ReserveEdge {
+                window: 9,
+                edge: PanelEdge::Bottom,
+                size: 40,
+            },
+        )]);
+        let edge_at = bytes.len() - 5;
+        assert_eq!(bytes[edge_at], PanelEdge::Bottom.as_byte());
+        bytes[edge_at] = 0xFE;
+        assert!(
+            decode_requests(&bytes).is_err(),
+            "an edge byte naming nothing decoded to an edge anyway"
+        );
     }
 }

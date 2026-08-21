@@ -105,6 +105,14 @@ pub use guiremote::control::Layer;
 // building that request must be able to name it.
 pub use guiremote::control::ShellControlAction;
 use guiremote::control::WindowSpec;
+// Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
+// holds one and `reserve_edge` takes one, and a panel that has to reach past the
+// compositor to name the edge it is anchored to is naming a different type from
+// the one it is talking to. The rules that go with it — how strips add up and
+// how far a client may push — live in `guiremote::reserve`, so that a panel and
+// the compositor cannot disagree about what a reservation means.
+pub use guiremote::reserve::PanelEdge;
+use guiremote::reserve::ReservedEdges;
 use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
 // Same reason: `window_list` returns these, and a shell reading one should not
 // have to reach past the compositor to name what it got.
@@ -786,6 +794,25 @@ pub struct Window {
     pub fs_restore_rect: Option<Rect>,
     /// Position and size before maximizing *or snapping* (for restore).
     pub restore_rect: Option<Rect>,
+    /// The strip along a monitor edge this window has reserved for itself, if
+    /// any: a taskbar or dock keeping tiled windows out of the pixels it sits
+    /// in. `None` for the overwhelming majority of windows, which are not
+    /// panels.
+    ///
+    /// **Stored on the window rather than in a table beside it** for the same
+    /// reason [`SnapTarget`] is: the two questions a reservation raises are
+    /// *which monitor* and *for how long*, and a window already answers both.
+    /// The monitor is the one it overlaps most, by the same rule everything
+    /// else uses; the lifetime is the window's own, so a panel that is
+    /// destroyed or whose client hangs up releases its claim with no bookkeeping
+    /// that could be forgotten. A separate `HashMap<WindowId, _>` would be a
+    /// second lifetime to keep in step with this one, and the failure mode of
+    /// getting it wrong is a permanent strip of unusable desktop with nothing
+    /// left on screen to release it from.
+    ///
+    /// Counted only while the window is visible and not minimized — see
+    /// [`Compositor::reserved_on`].
+    pub reserved_edge: Option<(PanelEdge, u32)>,
     /// What this window is snapped to, if anything.
     ///
     /// A separate state from [`maximized`](Self::maximized) rather than a
@@ -898,6 +925,7 @@ impl Window {
             fullscreen: false,
             fs_restore_rect: None,
             restore_rect: None,
+            reserved_edge: None,
             snapped: None,
             dirty: true,
             decorations: spec.decorations,
@@ -2602,6 +2630,20 @@ pub enum CompositorRequest {
         window_id: WindowId,
         action: ShellControlAction,
     },
+    /// Reserve a strip along an edge of the monitor a panel window is on, so
+    /// that tiling stops short of it. Answered with
+    /// [`CompositorResponse::WorkArea`].
+    ///
+    /// Named against the *panel's own* window, so unlike
+    /// [`ShellControl`](Self::ShellControl) it is resolved against the sender's
+    /// windows in the ordinary way. It is nonetheless privileged, because its
+    /// effect lands on everybody else's tiling rather than on the window it
+    /// names — see [`guiremote::control::RequestBody::ReserveEdge`].
+    ReserveEdge {
+        window_id: WindowId,
+        edge: PanelEdge,
+        size: u32,
+    },
 }
 
 /// Responses from the compositor to clients.
@@ -2624,6 +2666,15 @@ pub enum CompositorResponse {
     StreamStarted { stream_id: u64 },
     /// An encoded draw-command stream frame (see [`stream`] wire format).
     StreamFrame { data: Vec<u8> },
+    /// The usable rectangle left on a monitor after every reservation on it,
+    /// in whole pixels and in virtual-desktop coordinates. Answer to
+    /// [`CompositorRequest::ReserveEdge`].
+    WorkArea {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
 }
 
 /// Notifications sent from the compositor to clients (events).
@@ -4621,6 +4672,22 @@ impl Compositor {
             self.work_area_of_window(window_id)
                 .ok_or(CompositorError::WindowNotFound(window_id))?,
         );
+        self.snap_window_within(window_id, edge, bounds)
+    }
+
+    /// Snap a window to one half of a work area chosen by the caller.
+    ///
+    /// Split out for [`retile_for_work_area_change`](Self::retile_for_work_area_change),
+    /// which must halve the monitor whose reservation changed rather than
+    /// whichever one the window is found on part-way through being moved. The
+    /// same reasoning as [`maximize_window_within`](Self::maximize_window_within);
+    /// see that method.
+    fn snap_window_within(
+        &mut self,
+        window_id: WindowId,
+        edge: SnapEdge,
+        bounds: Rect,
+    ) -> CompositorResult<()> {
         // Halve by splitting at the midpoint rather than by giving each side
         // `width / 2`: on an odd width the latter leaves a one-pixel column
         // belonging to neither half, which is a permanently visible seam down
@@ -4712,19 +4779,161 @@ impl Compositor {
     /// no notice to anything here. A cached copy would be one hotplug away
     /// from tiling a screen that no longer exists, and would do it silently.
     ///
-    /// It is currently the whole of that monitor: the compositor has no notion
-    /// of a panel reserving a strip along an edge, so nothing subtracts the
-    /// taskbar's. That is `TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR`, and this
-    /// method is the one place a fix for it has to land.
+    /// These are the monitor's *whole* bounds. What a tiled window may actually
+    /// have is [`work_area_for`](Self::work_area_for), which is this minus the
+    /// strips any panel on the monitor has reserved.
     fn work_bounds_for(&self, rect: Rect) -> Rect {
         self.display_manager
             .display_for(&rect)
             .map_or_else(|| self.display_manager.virtual_bounds(), Display::bounds)
     }
 
-    /// [`work_bounds_for`](Self::work_bounds_for), as `guiremote::zones` wants it.
+    /// The usable part of the monitor `rect` is on: its bounds, minus the strips
+    /// panels have reserved along its edges.
+    ///
+    /// **This, not [`work_bounds_for`](Self::work_bounds_for), is what tiling
+    /// divides up.** A window snapped to the left half used to fill exactly half
+    /// the monitor including the rows the taskbar occupied, so its bottom — a
+    /// status line, the last row of a list, a scrollbar's arrow — was covered by
+    /// the bar. Subtracting here fixes maximize, both half-snaps, every zone
+    /// slot and the edge-drag drop at once, because all of them resolve their
+    /// rectangle from a [`WorkArea`] and this is where every one of those comes
+    /// from.
+    ///
+    /// Derived on every call rather than cached, so a taskbar that changes
+    /// height or moves to another edge is followed with no invalidation step to
+    /// forget. Already-tiled windows are a separate matter — they hold a
+    /// rectangle, not a rule — and are re-placed by
+    /// [`retile_for_work_area_change`](Self::retile_for_work_area_change).
     fn work_area_for(&self, rect: Rect) -> WorkArea {
-        work_area_of(self.work_bounds_for(rect))
+        let bounds = self.work_bounds_for(rect);
+        self.reserved_on(bounds).apply(work_area_of(bounds))
+    }
+
+    /// Everything reserved along the edges of the monitor with these bounds.
+    ///
+    /// A hidden or minimized panel reserves nothing. A strip is kept clear so
+    /// that what sits in it stays visible, and nothing is sitting in it while
+    /// the window is not on screen — so counting it would shrink the desktop
+    /// with no visible cause, which is precisely the confusing failure the
+    /// clamp in [`ReservedEdges::apply`] exists to bound.
+    ///
+    /// O(windows) per call rather than a maintained total. The alternative is a
+    /// per-monitor sum updated on every reservation *and* every window move,
+    /// hide, destroy and display hotplug — five places to forget — to save a
+    /// walk over a list that is short by construction and is already walked on
+    /// every frame.
+    fn reserved_on(&self, bounds: Rect) -> ReservedEdges {
+        let mut reserved = ReservedEdges::none();
+        for window in &self.windows {
+            let Some((edge, size)) = window.reserved_edge else {
+                continue;
+            };
+            if size == 0 || !window.visible || window.minimized {
+                continue;
+            }
+            if self.work_bounds_for(window.frame_rect()) == bounds {
+                reserved.add(edge, size);
+            }
+        }
+        reserved
+    }
+
+    /// Reserve a strip along one edge of the monitor `window_id` is on, and
+    /// answer with the work area that leaves.
+    ///
+    /// This is what a taskbar or dock calls so that tiled windows stop short of
+    /// it. `size` is a thickness in pixels; zero releases a reservation made
+    /// earlier. A second call for the same window **replaces** its previous
+    /// claim rather than adding to it — a panel that changes height sends the
+    /// new number and nothing else — while claims from *different* windows on
+    /// the same edge add up. See `guiremote::reserve` for why that, and not
+    /// X11's side-by-side spans.
+    ///
+    /// The area returned is what was actually granted, which may be less than
+    /// was asked for: a claim is clamped to
+    /// [`MAX_RESERVED_FRACTION`](guiremote::reserve::MAX_RESERVED_FRACTION) of
+    /// the monitor so that no client can shrink everyone's tiling to nothing.
+    /// It also accounts for *other* panels on the same monitor, which is the
+    /// honest answer to "where may I put myself" and is not derivable from the
+    /// caller's own request.
+    ///
+    /// Windows already tiled on the affected monitor are re-placed, because a
+    /// tiled window holds a rectangle rather than a rule — see
+    /// [`retile_for_work_area_change`](Self::retile_for_work_area_change).
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist.
+    pub fn reserve_edge(
+        &mut self,
+        window_id: WindowId,
+        edge: PanelEdge,
+        size: u32,
+    ) -> CompositorResult<WorkArea> {
+        // Read before the write: the monitor is the one the panel is on *now*,
+        // and a release has to re-tile the monitor it is giving pixels back to
+        // rather than whichever one a later lookup happens to find.
+        let bounds = self.work_bounds_for(
+            self.window_ref(window_id)
+                .ok_or(CompositorError::WindowNotFound(window_id))?
+                .frame_rect(),
+        );
+
+        let before = self.work_area_for(bounds);
+        self.window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?
+            .reserved_edge = (size > 0).then_some((edge, size));
+        let after = self.work_area_for(bounds);
+
+        if after != before {
+            self.retile_for_work_area_change(bounds);
+        }
+        Ok(after)
+    }
+
+    /// Re-place every tiled window on the monitor whose work area just changed.
+    ///
+    /// A window that is maximized or snapped holds a *rectangle*, not the rule
+    /// that produced it, so a taskbar appearing or growing leaves every
+    /// already-tiled window exactly where it was — underneath the bar, which is
+    /// the bug the reservation existed to prevent. Re-running the same request
+    /// against the new area is the whole fix, and it works because
+    /// [`SnapTarget`] and `maximized` store what was *asked for*.
+    ///
+    /// Errors from the re-place are dropped deliberately: the only ones
+    /// reachable are `WindowNotFound` for a window taken from this very list a
+    /// moment ago, and `NotResizable` for a window that could not have been
+    /// snapped in the first place. Neither is something the caller — a panel
+    /// asking for pixels — can act on, and failing its reservation because some
+    /// unrelated window declined to move would be the wrong answer to both.
+    fn retile_for_work_area_change(&mut self, bounds: Rect) {
+        let affected: Vec<(WindowId, Option<SnapTarget>)> = self
+            .windows
+            .iter()
+            .filter(|w| w.maximized || w.snapped.is_some())
+            .filter(|w| self.work_bounds_for(w.frame_rect()) == bounds)
+            .map(|w| (w.id, w.snapped))
+            .collect();
+
+        for (id, target) in affected {
+            // Deliberately the `_within` forms against `bounds`. The public
+            // forms would re-derive the monitor from the window, and today they
+            // would agree — the filter above only kept windows already on
+            // `bounds` — so this is not fixing an observable bug. It is
+            // refusing to *depend* on that agreement: this loop moves the very
+            // windows the re-derivation would measure, so the public forms
+            // would make each re-place correct only because of the order the
+            // ones before it happened to leave the list in. `bounds` was read
+            // once, before any of it, and cannot drift.
+            let area = self.work_area_for(bounds);
+            let outcome = match target {
+                None => self.maximize_window_within(id, work_rect(area)),
+                Some(SnapTarget::Zone(slot)) => self.snap_window_to_zone_within(id, slot, area),
+                Some(SnapTarget::Half(edge)) => self.snap_window_within(id, edge, work_rect(area)),
+            };
+            drop(outcome);
+        }
     }
 
     /// The work area of the monitor the pointer is over.
@@ -6724,6 +6933,24 @@ impl Compositor {
                     },
                 }
             }
+            CompositorRequest::ReserveEdge {
+                window_id,
+                edge,
+                size,
+            } => match self.reserve_edge(window_id, edge, size) {
+                Ok(area) => {
+                    let rect = work_rect(area);
+                    CompositorResponse::WorkArea {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    }
+                }
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
             CompositorRequest::StreamStart => {
                 let stream_id = self.start_stream();
                 CompositorResponse::StreamStarted { stream_id }
@@ -13709,5 +13936,388 @@ mod tests {
                 "the work area of {bounds:?} did not come back as itself"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge reservations -- TD-C-COMPOSITOR-TILES-UNDER-THE-TASKBAR
+    // -----------------------------------------------------------------------
+
+    /// A panel window sitting in the bottom `height` pixels of `screen`.
+    ///
+    /// Placed where a real taskbar would be rather than anywhere on the
+    /// monitor, because `reserved_on` finds it by asking which monitor it
+    /// overlaps most: a panel parked in the corner of the wrong screen would
+    /// reserve out of that one, and a test that placed it carelessly would pass
+    /// for the wrong reason.
+    fn add_panel(comp: &mut Compositor, screen: Rect, height: u32) -> WindowId {
+        let mut spec = WindowSpec::new("Taskbar", screen.width, height);
+        spec.decorations = false;
+        spec.position = Some((
+            screen.x,
+            screen.y + i32::try_from(screen.height.saturating_sub(height)).unwrap_or(0),
+        ));
+        comp.create_window_from_spec(&spec, 99)
+    }
+
+    #[test]
+    fn a_maximized_window_stops_at_the_taskbar_instead_of_going_under_it() {
+        // The bug: every tiling path divided the *whole* monitor, so the bottom
+        // 40 rows of a maximized window were behind the bar. Nothing in the
+        // compositor knew a panel existed to leave room for.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+
+        let mut spec = WindowSpec::new("App", 200, 150);
+        spec.position = Some((50, 50));
+        let app = comp.create_window_from_spec(&spec, 1);
+
+        comp.maximize_window(app).expect("maximize");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect().bottom(),
+            screen.bottom(),
+            "without a reservation, maximizing should still reach the screen edge"
+        );
+
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        comp.maximize_window(app).expect("maximize again");
+        let framed = comp.window_ref(app).expect("window").frame_rect();
+        assert_eq!(
+            framed.bottom(),
+            screen.bottom() - 40,
+            "the maximized window still reaches under the taskbar"
+        );
+        assert_eq!(framed.y, screen.y, "the top of the screen was lost too");
+        assert_eq!(framed.width, screen.width, "the width changed as well");
+    }
+
+    #[test]
+    fn a_reservation_answers_with_the_area_it_left() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        let area = comp
+            .reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        assert_eq!(
+            work_rect(area),
+            Rect::new(screen.x, screen.y, screen.width, screen.height - 40),
+            "the reply did not describe the area the reservation actually left"
+        );
+    }
+
+    #[test]
+    fn releasing_a_reservation_gives_the_strip_back() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+
+        let mut spec = WindowSpec::new("App", 200, 150);
+        spec.position = Some((50, 50));
+        let app = comp.create_window_from_spec(&spec, 1);
+
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        comp.maximize_window(app).expect("maximize");
+        // Zero is the release: there is deliberately no second request for it,
+        // so that a panel has one code path to "how much do I need" rather than
+        // two, and the compositor one place to re-tile from.
+        let area = comp
+            .reserve_edge(panel, PanelEdge::Bottom, 0)
+            .expect("release");
+        assert_eq!(
+            work_rect(area),
+            screen,
+            "releasing did not give the whole monitor back"
+        );
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect().bottom(),
+            screen.bottom(),
+            "the already-maximized window was not re-grown into the freed strip"
+        );
+    }
+
+    #[test]
+    fn a_second_reservation_from_one_panel_replaces_rather_than_adds() {
+        // A taskbar that grew from 40 to 56 sends 56, not 16. If the two added,
+        // a panel that changed height a few times would eat the desktop.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        let area = comp
+            .reserve_edge(panel, PanelEdge::Bottom, 56)
+            .expect("re-reserve");
+        assert_eq!(
+            work_rect(area).height,
+            screen.height - 56,
+            "two reservations from one panel added up instead of replacing"
+        );
+    }
+
+    #[test]
+    fn two_panels_on_one_monitor_both_get_their_strip() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let bar = add_panel(&mut comp, screen, 40);
+
+        let mut spec = WindowSpec::new("Menu bar", screen.width, 24);
+        spec.decorations = false;
+        spec.position = Some((screen.x, screen.y));
+        let menu = comp.create_window_from_spec(&spec, 98);
+
+        comp.reserve_edge(bar, PanelEdge::Bottom, 40).expect("bar");
+        let area = comp.reserve_edge(menu, PanelEdge::Top, 24).expect("menu");
+        assert_eq!(
+            work_rect(area),
+            Rect::new(screen.x, screen.y + 24, screen.width, screen.height - 64),
+            "the two panels did not each get their own strip"
+        );
+    }
+
+    #[test]
+    fn a_panel_reserves_only_out_of_its_own_monitor() {
+        // The multi-monitor half of the same question the union-of-displays bug
+        // asked: a taskbar on the second screen must not shrink tiling on the
+        // first.
+        let (mut comp, app, screens) = two_monitors(0);
+        let panel = add_panel(&mut comp, screens[1], 40);
+
+        // Maximized *before* the reservation as well as after, because the two
+        // ask different questions. Before: does the re-tile leave alone the
+        // windows on the monitor that did not change? After: does a fresh
+        // tiling on the first monitor measure the first monitor?
+        comp.maximize_window(app).expect("maximize");
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect(),
+            screens[0],
+            "the second monitor's panel re-tiled a window on the first"
+        );
+
+        comp.maximize_window(app).expect("maximize again");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect(),
+            screens[0],
+            "a panel on the second monitor shrank tiling on the first"
+        );
+        assert_eq!(
+            work_rect(comp.work_area_for(screens[1])).height,
+            screens[1].height - 40,
+            "the panel did not reserve out of its own monitor either"
+        );
+    }
+
+    #[test]
+    fn a_hidden_panel_reserves_nothing() {
+        // A strip is kept clear so what sits in it stays visible. Nothing is
+        // sitting in it while the panel is hidden, so holding the strip would
+        // shrink the desktop with nothing on screen to explain why.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        assert_eq!(
+            work_rect(comp.work_area_for(screen)).height,
+            screen.height - 40
+        );
+
+        comp.set_visible(panel, false).expect("hide");
+        assert_eq!(
+            work_rect(comp.work_area_for(screen)),
+            screen,
+            "a hidden panel kept its strip"
+        );
+        comp.set_visible(panel, true).expect("show");
+        assert_eq!(
+            work_rect(comp.work_area_for(screen)).height,
+            screen.height - 40,
+            "showing the panel again did not take its strip back"
+        );
+    }
+
+    #[test]
+    fn destroying_a_panel_releases_its_reservation() {
+        // The reason the claim lives on the window rather than in a table: a
+        // panel that crashes must not carve a permanent strip out of the
+        // desktop with nothing left on screen to release it.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        comp.destroy_window(panel).expect("destroy");
+        assert_eq!(
+            work_rect(comp.work_area_for(screen)),
+            screen,
+            "a destroyed panel's strip outlived it"
+        );
+    }
+
+    #[test]
+    fn a_greedy_reservation_is_clamped_rather_than_erasing_the_desktop() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        let area = comp
+            .reserve_edge(panel, PanelEdge::Bottom, 100_000)
+            .expect("reserve");
+        assert!(
+            area.height > 0.0,
+            "a client asking for the whole screen left no work area at all"
+        );
+        let kept = work_area_of(screen).height * (1.0 - guiremote::reserve::MAX_RESERVED_FRACTION);
+        assert!(
+            (area.height - kept).abs() < 1.0,
+            "the clamp left {} of {}, not two thirds",
+            area.height,
+            screen.height
+        );
+    }
+
+    #[test]
+    fn every_tiling_route_respects_the_reservation_and_not_just_maximize() {
+        // The point of putting the subtraction in `work_area_for`: the half
+        // snap, each zone slot and the edge drop all resolve from a `WorkArea`,
+        // so one place fixes all of them. Walking each route is what proves the
+        // funnel is real rather than assumed.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        comp.set_double_click_ms(2000);
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        let usable = screen.bottom() - 40;
+
+        let mut spec = WindowSpec::new("App", 200, 150);
+        spec.position = Some((50, 50));
+        let app = comp.create_window_from_spec(&spec, 1);
+
+        comp.snap_window(app, SnapEdge::Left).expect("snap left");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect().bottom(),
+            usable,
+            "a half snap still reached under the taskbar"
+        );
+
+        let zone = slot(SnapLayoutPreset::TwoEqualHalves, 1);
+        comp.snap_window_to_zone(app, zone).expect("snap to zone");
+        assert!(
+            comp.window_ref(app).expect("window").frame_rect().bottom() <= usable,
+            "a zone snap still reached under the taskbar"
+        );
+
+        // And the drop preview, which is drawn from the same area.
+        comp.restore_window(app).expect("restore");
+        let bar = comp
+            .window_ref(app)
+            .expect("window")
+            .title_bar_rect()
+            .expect("the app is decorated");
+        comp.handle_mouse_button(MouseButton::Left, true, bar.x + 10, bar.y + 5);
+        comp.handle_mouse_move(2, 300);
+        let previewed = previewed_rect(&comp);
+        assert!(
+            previewed.bottom() <= usable,
+            "the edge-drop preview promised {previewed:?}, which reaches under the taskbar"
+        );
+        comp.handle_mouse_button(MouseButton::Left, false, 2, 300);
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect(),
+            previewed,
+            "the drop did not land where the preview promised"
+        );
+    }
+
+    #[test]
+    fn a_taskbar_appearing_re_tiles_the_windows_that_are_already_tiled() {
+        // A tiled window holds a *rectangle*, not the rule that produced it, so
+        // a panel appearing after the tiling leaves every such window exactly
+        // where it was -- underneath the bar, which is the bug the reservation
+        // exists to prevent.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+
+        let mut spec = WindowSpec::new("Maxed", 200, 150);
+        spec.position = Some((50, 50));
+        let maxed = comp.create_window_from_spec(&spec, 1);
+        let mut spec = WindowSpec::new("Halved", 200, 150);
+        spec.position = Some((60, 60));
+        let halved = comp.create_window_from_spec(&spec, 1);
+        let mut spec = WindowSpec::new("Zoned", 200, 150);
+        spec.position = Some((70, 70));
+        let zoned = comp.create_window_from_spec(&spec, 1);
+        let mut spec = WindowSpec::new("Loose", 200, 150);
+        spec.position = Some((80, 400));
+        let loose = comp.create_window_from_spec(&spec, 1);
+
+        comp.maximize_window(maxed).expect("maximize");
+        comp.snap_window(halved, SnapEdge::Left).expect("snap");
+        comp.snap_window_to_zone(zoned, slot(SnapLayoutPreset::TwoEqualHalves, 1))
+            .expect("zone");
+        let loose_before = comp.window_ref(loose).expect("window").frame_rect();
+
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+
+        let usable = screen.bottom() - 40;
+        for (id, what) in [
+            (maxed, "maximized"),
+            (halved, "half-snapped"),
+            (zoned, "zoned"),
+        ] {
+            assert!(
+                comp.window_ref(id).expect("window").frame_rect().bottom() <= usable,
+                "the already-{what} window was not re-placed and still reaches under the bar"
+            );
+        }
+        assert_eq!(
+            comp.window_ref(loose).expect("window").frame_rect(),
+            loose_before,
+            "an untiled window was moved by a reservation it has nothing to do with"
+        );
+    }
+
+    #[test]
+    fn re_tiling_for_a_reservation_keeps_the_restore_rectangle() {
+        // The re-place goes back through `maximize_window_within`, which records
+        // `restore_rect` only for a window that was not already tiled. If that
+        // guard were missed, a taskbar appearing would overwrite every tiled
+        // window's memory of where it came from with the tile it is sitting in.
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+
+        let mut spec = WindowSpec::new("App", 200, 150);
+        spec.position = Some((50, 50));
+        let app = comp.create_window_from_spec(&spec, 1);
+        let home = comp.window_ref(app).expect("window").frame_rect();
+
+        comp.maximize_window(app).expect("maximize");
+        comp.reserve_edge(panel, PanelEdge::Bottom, 40)
+            .expect("reserve");
+        comp.restore_window(app).expect("restore");
+        assert_eq!(
+            comp.window_ref(app).expect("window").frame_rect(),
+            home,
+            "the reservation's re-tile overwrote where the window came from"
+        );
+    }
+
+    #[test]
+    fn reserving_against_a_window_that_is_gone_is_an_error_and_not_a_panic() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let screen = comp.display_manager.displays()[0].bounds();
+        let panel = add_panel(&mut comp, screen, 40);
+        comp.destroy_window(panel).expect("destroy");
+        assert!(
+            comp.reserve_edge(panel, PanelEdge::Bottom, 40).is_err(),
+            "reserving against a destroyed window succeeded"
+        );
     }
 }

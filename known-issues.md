@@ -48931,9 +48931,15 @@ the first, which is how this was found.
 | Title bar height | `TITLE_BAR_HEIGHT = 30` | `TITLE_BAR_HEIGHT = 30.0` |
 | Display scaling | none | every dimension via `self.scale(…)` |
 | Rounded corners | none | `corner_radii()`, from the user's `WindowCorners` setting |
-| Drop shadow | none | yes |
+| Drop shadow | `render_shadow`, `SHADOW_SIZE = 8`, 8 layers | yes, its own |
 | Colours | `self.theme.title_bar_focused` / `close_button` / … | its own constants |
 | Is it on screen? | **yes** | no — no caller but the demo |
+
+*(Corrected: an earlier revision of this table claimed the compositor drew no
+shadow. It does — `Window::shadow_extent` and `Compositor::render_shadow`. The
+error is worth leaving visible here because it was made the same way the bugs
+in this entry were: by reading one side carefully and asserting something about
+the other without checking.)*
 
 **This is the sweep's recurring shape once more**, and the third instance
 found in two days: the tree held one correct answer that callers could not
@@ -48952,21 +48958,37 @@ tracking, and fullscreen's decoration suppression. Moving those to the shell
 would mean moving input routing to the shell, which contradicts the
 architecture. The shell's copy is the one to delete.
 
-**But deleting it plainly would lose three real features**, which is the actual
+**But deleting it plainly would lose two real features**, which is the actual
 work in this entry:
 
-1. **Display scaling.** The shell scales every decoration dimension by the
-   user's scale factor; the compositor hardcodes pixels. On a HiDPI display the
-   compositor's title bar is 30 physical pixels — a sliver. The scale factor
-   lives in `AppearanceSettings` and has to reach the compositor.
-2. **Corner radius.** The user's `WindowCorners` setting (`Square`/`Rounded`/…)
-   is honoured only by the shell's version.
-3. **Shadows.**
+1. **Display scaling.** ✅ **Done 2026-08-21.** *(Original text kept below; the
+   note at the end of this entry records what was built.)* The shell scales
+   every decoration dimension by the user's scale factor; the compositor
+   hardcodes pixels. On a 2× display the compositor's title bar is 30 physical
+   pixels — half the height it should be, with 20px buttons inside it.
 
-So the sequence is: teach the compositor the two settings it is missing, port
-the shadow, *then* delete `render_window_decorations` and `window_chrome` and
-the geometry fields on `ManagedWindow` that exist only to feed them. Not the
-other order — deleting first ships a visible regression on every HiDPI display.
+   The sharp part: **the compositor already knows the scale factor and does not
+   use it.** `Display::scale_factor` exists, is set per display, and is reported
+   out to clients over the wire (`wire.rs:357`) — and the only reads in the
+   whole crate are that report. The compositor tells every client how to scale
+   and then does not scale itself. So this is not "thread a setting in from the
+   shell"; the value is already in the struct next to the code that ignores it.
+
+   There is one chokepoint to change, which is why this is tractable:
+   `Window::frame_insets` is documented as the single place the geometry derives
+   from, precisely so decoration cannot be right in one place and wrong in
+   another — "hit testing, damage and drag detection included". Scaling there
+   carries the whole system. The one piece of design needed is how a `Window`
+   learns *which* display it is on, since `frame_insets` takes only `&self`.
+2. **Corner radius.** The user's `WindowCorners` setting (`Square`/`Rounded`/…)
+   is honoured only by the shell's version. Unlike the scale factor this genuinely
+   is not in the compositor yet and has to arrive from `AppearanceSettings`.
+
+So the sequence is: scale the compositor's decorations off the value it already
+holds, bring the corner-radius setting across, *then* delete
+`render_window_decorations` and `window_chrome` and the geometry fields on
+`ManagedWindow` that exist only to feed them. Not the other order — deleting
+first ships a visible regression on every HiDPI display.
 
 **Why this blocks the event loop** (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`):
 that entry says the loop should "re-render the five trees and submit them". Four
@@ -48991,6 +49013,81 @@ on another lane — `gui/compositor` and `gui/desktop` are both lane C's.
 because nothing exercises it, and the first person to wire the loop up
 naively gets doubled title bars and reasonably concludes the compositor is
 broken.
+
+
+**Progress 2026-08-21 — prerequisite 1 (display scaling) is done.** The
+compositor now scales its own decorations. See `design-decisions.md` §497 for
+the three decisions this needed; the mechanics, in brief:
+
+- `Window::scale_factor` (decorations only — never the client area, which is the
+  client's own pixels) is applied inside `Window::frame_insets`, the documented
+  chokepoint, so hit testing, damage and drag detection all moved with the
+  drawing rather than lagging it.
+- `DisplayManager::display_for` / `scale_for` answer "which display is this
+  window on" by largest intersection, not by which display holds the top-left
+  corner.
+- `Compositor::refresh_window_scales` recomputes every window's scale at the top
+  of `compose_frame` and of `handle_input`, rather than the six placement sites
+  each remembering to bump it.
+- Four things sat *outside* `frame_insets` and each was its own bug:
+  `render_shadow`'s layer count and its alpha falloff, `window_drawn_extent`'s
+  damage allowance, and the title font size. All four are now scaled; 1×
+  rendering is bit-identical to before.
+
+Nine new tests, each proved a real regression test by reintroducing the bug it
+guards (ten reintroductions in all, every one failing deterministically and
+naming the right test).
+
+**What is left in this entry is now prerequisite 2 and the deletion**: bring
+`WindowCorners` across from `AppearanceSettings` into the compositor, then
+delete `DesktopShell::render_window_decorations`, `window_chrome`, and the
+`ManagedWindow` geometry fields that exist only to feed them. The ordering
+argument above is unchanged — corner radius first, deletion second, because
+deleting while the compositor still draws square corners ships a visible
+regression for anyone who set `Rounded`.
+
+**Correction 2026-08-21 — there is a *third* feature, and the count above was
+wrong.** The entry has said since it was written that deleting the shell's
+renderer "would lose two real features". Re-reading
+`render_window_decorations` line by line before deleting it — which is the only
+way to be sure — turned up a third, and the same reading found that
+prerequisite 2 is not the narrow job the name "corner radius" suggests.
+
+3. **Two shadow behaviours the compositor does not have.**
+   - **The `drop_shadows` user toggle.** `AppearanceSettings::drop_shadows`
+     (`gui/appearance/src/lib.rs:621`) is a real, YAML-persisted, settings-UI
+     exposed switch (`gui/desktop/src/appearance_settings.rs:715`), and the
+     shell honours it in four places, window decorations among them
+     (`gui/desktop/src/lib.rs:2384`). The compositor's `render_window` calls
+     `render_shadow` unconditionally for every window that has a title bar. So
+     a user who turns drop shadows off today would see them turn off
+     everywhere the shell draws and stay on around every window — and after
+     the deletion, stay on everywhere, with the setting doing nothing at all.
+   - **No shadow on a maximized window.** The shell suppresses it because a
+     maximized window "has no edge to cast from — there is nothing beside it
+     for a shadow to fall on, and one drawn anyway would bleed over the screen
+     border". The compositor keeps `maximized` and `fullscreen` deliberately
+     distinct (`gui/compositor/src/lib.rs:562`): fullscreen drops the title bar
+     and so drops the shadow with it, but **maximized keeps its decorations**,
+     and therefore gets a shadow drawn into the screen edge. Half of this is
+     already right by accident; the maximized half is not.
+
+**Consequently prerequisite 2 is "the appearance settings the compositor
+ignores", not "corner radius".** Both remaining items — `WindowCorners` and
+`drop_shadows` — are fields of the same `AppearanceSettings` struct that the
+compositor has no connection to at all. The work is one channel carrying both,
+not two unrelated features, and building the channel for corner radius alone
+and then discovering `drop_shadows` needs the same channel is exactly the
+band-aid accumulation `CLAUDE.md` warns about. Do them together.
+
+**And the corner-radius half is not plumbing.** The compositor's render engine
+*already receives* corner radii and throws them away: `execute_command`
+destructures `corner_radii: _` on both `RenderCommand::FillRect` and
+`StrokeRect` (`gui/compositor/src/lib.rs:2923`, `2938`, and again at `3055`).
+Every rounded rectangle any client or the shell has ever submitted has been
+rasterised square. So this needs rounded-rectangle fill and stroke implemented
+in the rasteriser first — which also fixes a silent, tree-wide bug of its own,
+independent of window decorations.
 
 
 ## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED

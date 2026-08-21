@@ -28,6 +28,56 @@ use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
 use crate::wheel;
 
+/// How many `cell`-wide columns, separated by `gap`, fit across `avail`
+/// pixels — never fewer than one.
+///
+/// This is the arithmetic every swatch, thumbnail and tile strip in the tree
+/// performs before writing `i % columns` and `i / columns`, and the floor of
+/// one is what makes those two divisions safe. A container too narrow for a
+/// whole cell shows one cell clipped rather than none, which is both the more
+/// useful rendering and the only answer that is not a panic.
+///
+/// It is public because it was not, and the tree grew five spellings of it as
+/// a result — `.max(1.0)` before the cast in three apps, `.max(1)` after it in
+/// a fourth, `if cols > 0` in a fifth, and in `apps/colorpicker::render_history`
+/// no guard at all next to a sibling function sixty lines below that had one.
+/// A grid that is only ever *nearly* divided by zero is a grid whose next
+/// caller divides by zero.
+///
+/// # Edge cases
+///
+/// A NaN or negative `avail` saturates to zero on the cast and lands on the
+/// floor of one. A cell with no width is the other degenerate case, and it is
+/// keyed off `cell` rather than off the pitch on purpose: zero-width cells
+/// separated by an 8px gap would otherwise "fit" once per gap, which counts
+/// the separators as though they were content.
+///
+/// ```
+/// use core::num::NonZeroUsize;
+/// use guitk::grid::columns_across;
+///
+/// // 376px of room, 100px cells, 8px gaps: (376 + 8) / (100 + 8) = 3.
+/// assert_eq!(columns_across(376.0, 100.0, 8.0).get(), 3);
+/// // Narrower than a single cell, and the degenerate inputs, all floor to one.
+/// assert_eq!(columns_across(10.0, 100.0, 8.0).get(), 1);
+/// assert_eq!(columns_across(f32::NAN, 100.0, 8.0).get(), 1);
+/// assert_eq!(columns_across(376.0, 0.0, 8.0).get(), 1);
+/// ```
+#[must_use]
+pub fn columns_across(avail: f32, cell: f32, gap: f32) -> NonZeroUsize {
+    let pitch = cell + gap;
+    // `cell` and the pitch are both tested: a cell with no width fits any
+    // number of times, and a non-positive pitch would divide by zero or by a
+    // negative. Neither has an answer more useful than a single clipped cell.
+    if cell <= 0.0 || pitch <= 0.0 {
+        return NonZeroUsize::MIN;
+    }
+    // A float-to-integer `as` cast saturates rather than wrapping, so a
+    // negative or NaN `avail` gives 0 here and not a huge column count.
+    let fitting = ((avail + gap) / pitch) as usize;
+    NonZeroUsize::new(fitting).unwrap_or(NonZeroUsize::MIN)
+}
+
 // --- Catppuccin Mocha palette ---
 // Used for selection highlights, hover, and chrome.
 mod catppuccin {
@@ -463,13 +513,10 @@ impl LayoutCache {
         // Number of columns that fit. A container too narrow for one whole
         // cell still shows one, clipped, rather than none — so the floor is
         // one, and saying so as a `NonZeroUsize` is what lets every later
-        // division by it be written without a guard.
-        let columns = if cell_width <= 0.0 {
-            NonZeroUsize::MIN
-        } else {
-            let fitting = ((usable_width + config.gap_x) / (cell_width + config.gap_x)).floor();
-            NonZeroUsize::new(fitting.max(1.0) as usize).unwrap_or(NonZeroUsize::MIN)
-        };
+        // division by it be written without a guard. Shared with the apps that
+        // lay out their own swatch grids, so the widget and they cannot
+        // disagree about how many cells a width holds.
+        let columns = columns_across(usable_width, cell_width, config.gap_x);
 
         let total_rows = if item_count == 0 {
             0
@@ -1531,6 +1578,73 @@ mod tests {
     // -------------------------------------------------------------------------
     // Layout calculation tests
     // -------------------------------------------------------------------------
+
+    #[test]
+    fn columns_across_counts_whole_cells_and_the_gaps_between_them() {
+        // n cells occupy n*cell + (n-1)*gap, so n fits iff avail + gap >= n*(cell + gap).
+        // With 100px cells and 8px gaps, three cells need 316px and four need 424px.
+        assert_eq!(columns_across(315.0, 100.0, 8.0).get(), 2);
+        assert_eq!(columns_across(316.0, 100.0, 8.0).get(), 3);
+        assert_eq!(columns_across(423.0, 100.0, 8.0).get(), 3);
+        assert_eq!(columns_across(424.0, 100.0, 8.0).get(), 4);
+        // No gap: a plain division.
+        assert_eq!(columns_across(100.0, 25.0, 0.0).get(), 4);
+    }
+
+    #[test]
+    fn columns_across_floors_at_one_for_every_degenerate_input() {
+        // Each of these produced a zero divisor in some app's hand-rolled copy
+        // of this arithmetic, which is a panic at the `i % columns` that
+        // follows — not an empty row.
+        for (avail, cell, gap) in [
+            (0.0_f32, 100.0_f32, 8.0_f32),
+            (10.0, 100.0, 8.0),
+            (-1.0, 100.0, 8.0),
+            (-1.0e30, 100.0, 8.0),
+            (f32::NAN, 100.0, 8.0),
+            (f32::NEG_INFINITY, 100.0, 8.0),
+            // A cell with no width fits any number of times; one is the only
+            // useful answer, and it must not be read off the gaps.
+            (376.0, 0.0, 8.0),
+            (376.0, 0.0, 0.0),
+            (376.0, -5.0, 1.0),
+        ] {
+            assert_eq!(
+                columns_across(avail, cell, gap).get(),
+                1,
+                "columns_across({avail}, {cell}, {gap}) should floor to one"
+            );
+        }
+        // An infinite width saturates rather than wrapping, and stays usable
+        // as a divisor either way.
+        assert!(columns_across(f32::INFINITY, 100.0, 8.0).get() >= 1);
+    }
+
+    #[test]
+    fn columns_across_agrees_with_the_layout_cache() {
+        // The widget's own column count is this function; if the two ever
+        // disagree, a caller laying out cells by hand next to a `GridView`
+        // would put them in different places.
+        let config = GridConfig {
+            cell_sizing: CellSizing::Fixed {
+                width: 100.0,
+                height: 120.0,
+            },
+            gap_x: 8.0,
+            gap_y: 8.0,
+            padding: 12.0,
+            ..GridConfig::default()
+        };
+        for width in [0.0_f32, 24.0, 50.0, 400.0, 1000.0, 4096.0] {
+            let layout = LayoutCache::compute(&config, width, 600.0, 10);
+            let usable = (width - config.padding * 2.0).max(0.0);
+            assert_eq!(
+                layout.columns,
+                columns_across(usable, 100.0, config.gap_x),
+                "disagreement at container width {width}"
+            );
+        }
+    }
 
     #[test]
     fn test_layout_columns_fixed_sizing() {

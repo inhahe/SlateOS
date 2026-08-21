@@ -57,7 +57,7 @@ the `# Resolved` index, numbered with your lane's prefix (`A-Q<n>`, `B-Q<n>`,
 `C-Q<n>`). The unprefixed `Q<n>` numbers are pre-split and are not to be
 extended.
 
-## Q46 — [A] Every benchmark ever recorded measured an `opt-level = 0` kernel. Should the *non-bench* boot test also switch to release, or only the bench path? — Status: OPEN
+## Q46 — [A] Every benchmark ever recorded measured an `opt-level = 0` kernel. Should the *non-bench* boot test also switch to release, or only the bench path? — Status: OPEN (costs now measured 2026-08-21; recommendation moved A → C)
 
 **Background.** `scripts/boot-test.sh:602` runs a bare `cargo build` and stages
 `target/x86_64-unknown-none/debug/kernel`. The bench suite is compiled in
@@ -130,18 +130,79 @@ only a trigger (Claude's suggestion for one, if C is chosen: a release boot test
 before any lane merges to `main`, since that is already the moment a lane runs
 the slow verification anyway).
 
+**Update 2026-08-21 — the cost was finally measured, and it reverses the
+2026-08-15 reading.** Until today the "slower build" half of this tradeoff had
+never been measured anywhere: build time was not recorded, so the entry argued
+from one measured half (the boot) and one asserted half (the build). Build
+timing now exists (`build_seconds` in `bench/boot-history.jsonl`), and four
+matched runs on one commit (`8b481b0f2`, QEMU TCG, no sanitizer) fill the 2×2:
+
+| what was edited | debug build | debug boot | **debug cycle** | release build | release boot | **release cycle** |
+|---|---|---|---|---|---|---|
+| `posix` + `kernel` | 224 s | 401 s | **625 s** | 714 s | 130 s | **844 s** |
+| `kernel` only | 42 s | 359 s | **401 s** | 594 s | 105 s | **699 s** |
+
+The boot half is 3.1–3.4× faster under release, exactly as claimed on
+2026-08-15. **But the cycle — which is what a person actually waits through —
+is 1.35× *worse* on a two-crate edit and 1.74× worse on a kernel-only one.**
+So this sentence from the 2026-08-15 update, while literally true, argued the
+wrong way and is hereby withdrawn as an argument for B:
+
+> "Option B's '*Against: slower rebuilds on every iteration*' is real, but its
+> implied 'slower boot tests' is backwards — B would make the run-time half of
+> every cycle substantially quicker."
+
+It does speed up the run-time half. The run-time half is the *smaller* half
+under release, and the half it slows down is slowed by more.
+
+**The number that decides it is 42 s → 594 s.** The two-crate row understates
+the penalty at 3.2×; the kernel-only row — the common case, since almost every
+iteration edits the kernel and nothing else — is **14×**. A release cycle after
+a one-line kernel edit is ~11½ minutes against debug's ~6½, and the extra five
+minutes are all compiler, with nothing on screen.
+
+**The obvious escape route was tried and is closed.** That 14× is mostly
+`codegen-units = 1` in `[profile.release.package.kernel]`: one codegen unit
+means a one-line edit recompiles the whole crate as a single non-parallelisable
+unit. "Build release, but with 16 units" would have bought release-only bug
+coverage at a fraction of the cost — except the kernel **does not assemble** at
+`codegen-units = 16`; it fails after 174 s in `alternative_site!`'s
+assembly-time guard (`error: expected absolute expression`). Same tree, same
+toolchain, same command, only the unit count differs. Written up as
+`known-issues.md` → *The release kernel does not assemble at `codegen-units` >
+1*. Until that is understood, "cheap release" is not on the menu, and the
+choice really is between the two columns above.
+
 *What changes, restated as observable differences:*
-- **A:** `./scripts/boot-test.sh` keeps taking ~405 s and keeps printing
-  readable panics; the shipped (optimised) kernel is only ever booted on
-  `--bench` runs.
-- **B:** every boot test builds longer but boots faster, and a panic prints
-  optimised, harder-to-read frames.
-- **C:** as A day-to-day, plus one extra release boot at merge time.
+- **A:** `./scripts/boot-test.sh` keeps taking ~400 s after a kernel edit and
+  keeps printing readable panics; the shipped (optimised) kernel is only ever
+  booted on `--bench` runs.
+- **B:** every boot test after a kernel edit takes ~700 s instead of ~400 s —
+  five extra minutes of silent compiling per iteration, for every lane, not
+  just A — and a panic prints optimised, harder-to-read frames. In exchange,
+  every run tests the binary that ships.
+- **C:** as A day-to-day, plus one ~700 s release boot at merge time.
+
+*Recommendation after measuring: **C**, which the 2026-08-21 numbers promote
+above A.* The measurement did not change what the options *are*, but it changed
+which one is cheapest for what it buys. B now has a price tag nobody would pay
+per-iteration — five silent extra minutes on every kernel edit, for all three
+lanes. C pays that same price **once per merge**, at the moment a lane is
+already running slow verification and already waiting, and buys exactly the
+thing A gives up: a release-only defect surfaces on a run somebody reads for
+correctness. The 2026-08-15 objection to C ("another mode to maintain") was
+already gone — `--profile=release` exists and is now exercised — and its
+remaining objection, the missing trigger, has an obvious answer: **a release
+boot test before a lane merges to `main`.** Claude still will not choose
+unilaterally, because B and C both change what the other two lanes must run.
 
 *If never answered:* current behaviour (A) is safe and nothing is blocked — the
 gap is that release-only defects surface only on bench runs. It does not get
 worse with time, but it does get *more* likely to matter as more kernel code
-lands unexercised in optimised form.
+lands unexercised in optimised form. One thing did get slightly worse today:
+release boots are now known to be cheap to *run* (105–130 s) and expensive to
+*build*, so the temptation to reach for B on the strength of the boot figure
+alone is real, and this entry exists partly to stop that.
 
 ---
 

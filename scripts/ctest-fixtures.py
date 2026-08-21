@@ -131,8 +131,16 @@ Usage
 
 `build` needs zig and the fastpy `compiler` package importable (each fixture's
 own `build.py` documents this); `check` and `stamp` need neither, so the gate
-runs anywhere. Concretely, on this machine:
+runs anywhere.
 
+You do not normally have to arrange the import yourself: `build` looks for a
+fastpy checkout beside the repo root (and honours `$FASTPY_DIR`) and puts it on
+the child's `PYTHONPATH`. If it cannot find one it says so and names the two
+ways to fix it, rather than letting each fixture die with a bare
+`ModuleNotFoundError: No module named 'compiler'` -- which is nine identical
+tracebacks that do not mention fastpy at all. To override the search:
+
+    FASTPY_DIR="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
     PYTHONPATH="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
 
 **Rebuild through this script, not by running `services/<name>/build.py`
@@ -154,6 +162,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -641,10 +650,74 @@ def cmd_check(only: str | None) -> int:
     return rc
 
 
+def _fastpy_dir() -> Path | None:
+    """The fastpy checkout whose `compiler` package each build.py imports.
+
+    Searched, in order: $FASTPY_DIR, anything already on $PYTHONPATH, then a
+    sibling of the repo root named exactly `fastpy`. The sibling lookup is what
+    makes the common case need no configuration at all -- every worktree here
+    (`os`, `os-lane-a/b/c`) sits next to `fastpy` in the same parent directory.
+
+    The sibling must be named `fastpy`, not merely *contain* a `compiler`
+    package. An earlier draft accepted the first sibling that looked importable
+    and so selected `_fastpy_before` -- an old snapshot that sorts ahead of
+    `fastpy` -- silently cross-compiling nine fixtures against a stale
+    compiler. Picking a build input by "first directory that seems plausible"
+    is not a search, it is a guess; when the guess is wrong it produces working
+    binaries built from the wrong source, which no later check catches. Anyone
+    whose checkout lives elsewhere sets FASTPY_DIR.
+
+    A candidate only counts if it actually contains `compiler/__init__.py`, so
+    that a wrong path is reported here rather than nine times over as a bare
+    import error in the children.
+    """
+
+    def usable(p: Path) -> bool:
+        return (p / "compiler" / "__init__.py").is_file()
+
+    env_dir = os.environ.get("FASTPY_DIR")
+    if env_dir:
+        cand = Path(env_dir)
+        # An explicit FASTPY_DIR that is wrong is a mistake worth reporting,
+        # not something to silently fall through from into a sibling that
+        # happens to work -- that would build against a checkout the caller
+        # did not name.
+        if usable(cand):
+            return cand
+        print(f"[ctest] ERROR: FASTPY_DIR={env_dir} has no compiler/__init__.py")
+        return None
+
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        if entry and usable(Path(entry)):
+            return Path(entry)
+
+    sibling = REPO.parent / "fastpy"
+    return sibling if usable(sibling) else None
+
+
 def cmd_build(only: str | None) -> int:
     if not LIBC.is_file():
         print(f"[ctest] ERROR: missing {LIBC}; run toolchain/build-sysroot.ps1 first")
         return 1
+    # Resolve fastpy before building anything. Without it every fixture dies
+    # with `ModuleNotFoundError: No module named 'compiler'`, which names
+    # neither fastpy nor PYTHONPATH -- nine identical tracebacks that read like
+    # a broken toolchain rather than an unset variable.
+    fastpy = _fastpy_dir()
+    if fastpy is None:
+        print("[ctest] ERROR: cannot find a fastpy checkout (needs compiler/__init__.py).")
+        print("[ctest]        Each services/ctest-*/build.py imports fastpy's `compiler`")
+        print("[ctest]        package to drive the zig cross-compile. Point at it with:")
+        print("[ctest]          FASTPY_DIR=<path-to-fastpy> " f"{_self_cmd()} build")
+        print("[ctest]        or place the fastpy checkout beside this repo:")
+        print(f"[ctest]          {REPO.parent / 'fastpy'}")
+        return 1
+    child_env = dict(os.environ)
+    existing = child_env.get("PYTHONPATH", "")
+    child_env["PYTHONPATH"] = (
+        f"{fastpy}{os.pathsep}{existing}" if existing else str(fastpy)
+    )
+    print(f"[ctest] fastpy: {fastpy}")
     # Warning, not fatal, unlike `check`. Building against a stale libc.a is a
     # real defect, but refusing to build would leave no way to rebuild the
     # fixtures at all on a tree whose sysroot is behind - and the rebuild is
@@ -664,6 +737,7 @@ def cmd_build(only: str | None) -> int:
             capture_output=True,
             text=True,
             timeout=900,
+            env=child_env,
         )
         if result.returncode != 0:
             print(f"[ctest] ERROR {fixture.name}: build.py exited {result.returncode}")

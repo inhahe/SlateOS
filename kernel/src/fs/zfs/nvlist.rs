@@ -56,7 +56,7 @@ const MAX_DEPTH: u32 = 16;
 pub(super) const DATA_TYPE_UINT64: u32 = 8;
 pub(super) const DATA_TYPE_STRING: u32 = 9;
 pub(super) const DATA_TYPE_NVLIST: u32 = 19;
-const DATA_TYPE_NVLIST_ARRAY: u32 = 20;
+pub(super) const DATA_TYPE_NVLIST_ARRAY: u32 = 20;
 
 /// A decoded nvpair value, borrowing the buffer it was found in.
 #[derive(Debug, Clone, Copy)]
@@ -71,8 +71,12 @@ pub enum Value<'a> {
     Str(&'a [u8]),
     /// A `DATA_TYPE_NVLIST`, ready to be walked with [`NvList::nested`].
     Nested(NvList<'a>),
-    /// A `DATA_TYPE_NVLIST_ARRAY` — the first element only, which is all the
-    /// vdev tree needs on a single-device pool.
+    /// A `DATA_TYPE_NVLIST_ARRAY` — the first element, plus the element count.
+    ///
+    /// The first element is all the vdev tree needs: the only array it holds is
+    /// `children`, and the only thing read out of a child is `ashift`, which
+    /// every leg of a mirror shares by construction. The count is what
+    /// distinguishes a leaf vdev from a parent.
     NestedArray(NvList<'a>, u32),
 }
 
@@ -183,8 +187,9 @@ impl<'a> NvList<'a> {
     /// Number of elements in the `nvlist_array` named `name`, or `None` if it
     /// is not one.
     ///
-    /// This is how a mirror or raidz vdev is detected: it has more than one
-    /// child, and this driver reads a single device.
+    /// This is how a parent vdev is told from a leaf: a leaf has no `children`
+    /// key at all. `parse_config` uses it to reject a leaf that claims children
+    /// and a mirror that claims none — both self-contradictory configs.
     #[must_use]
     pub fn nested_array_len(&self, name: &[u8]) -> Option<u32> {
         match self.get(name)? {

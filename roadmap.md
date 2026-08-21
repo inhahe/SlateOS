@@ -2167,7 +2167,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Pidfd (fs::pidfd): Process file descriptor monitoring with create/poll/signal/wait/close tracking per PID; `pidfd`/`pfd` kshell command; /proc/pidfd; 8 self-tests
 - [-] `[A]` Later: NTFS read support (**done 2026-08-16**, `fs::ntfs` — see §5.2),
   Btrfs read (**done 2026-08-16**, `fs::btrfs`), F2FS read (**done 2026-08-16**,
-  `fs::f2fs`), ZFS read (**done 2026-08-20**, `fs::zfs` — single-vdev pools,
+  `fs::f2fs`), ZFS read (**done 2026-08-20**, `fs::zfs` — one top-level vdev,
+  which may be a single disk or **one leg of a mirror** (design-decisions §247),
   resolving file attributes through the pool's own SA registry rather than the
   hardcoded ZPL offsets every ZFS bootloader uses; see design-decisions §245);
   the write sides remain open

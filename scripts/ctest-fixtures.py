@@ -150,6 +150,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -194,13 +195,56 @@ LIBC = REPO / "toolchain" / "sysroot" / "lib" / "libc.a"
 # *that file*, so a libc.a built before it is wrong even with identical sources.
 #
 # Kept in step with the `SYSROOT_STALE` block in scripts/create-ext4-rootfs.sh,
-# which falls back to these same four roots when python is unavailable.
-SYSROOT_ROOTS = (
+# which falls back to these same roots when python is unavailable.
+#
+# `libc.a` is the `posix` crate's staticlib, so its sources are the crate *and
+# its path dependencies* — `tzrules` today, whatever is added tomorrow. Those
+# are read out of `posix/Cargo.toml` rather than listed here, because a listed
+# dependency is one a future `path = "../foo"` silently opts out of. This is the
+# same reasoning as globbing the fixture recipes instead of enumerating them
+# (design-decisions.md §355), applied to the one input that most recently proved
+# it: `tzrules` was missing from this tuple for as long as it existed, and could
+# have moved `libc.a` with nothing under `posix/src` being touched at all. The
+# only thing that had noticed was a comment in `scripts/stamp-ancestry.py`,
+# which listed it correctly and was the reason it was found.
+_STATIC_SYSROOT_ROOTS = (
     "posix/src",
     "posix/Cargo.toml",
     "toolchain/stubs",
     "toolchain/build-sysroot.ps1",
 )
+
+
+def _posix_path_deps() -> tuple[str, ...]:
+    """Repo-relative source dirs of every `path = "..."` dependency of `posix`.
+
+    Deliberately a regex over the manifest text rather than a TOML parse: this
+    module must run on a stock interpreter with no third-party packages, and
+    `tomllib` is 3.11+. A dependency this misses is a dependency the stamp does
+    not cover, so the pattern is kept broad — any `path = "…"` in the file,
+    whichever table it is under, since every table that can carry one
+    (`[dependencies]`, `[build-dependencies]`, `[target.…]`) can affect the
+    library that comes out.
+    """
+    manifest = REPO / "posix" / "Cargo.toml"
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    found: list[str] = []
+    for raw in re.findall(r'path\s*=\s*"([^"]+)"', text):
+        dep = (manifest.parent / raw).resolve()
+        try:
+            rel = dep.relative_to(REPO).as_posix()
+        except ValueError:
+            continue  # outside the repo; not ours to hash
+        for sub in (f"{rel}/src", f"{rel}/Cargo.toml"):
+            if (REPO / sub).exists():
+                found.append(sub)
+    return tuple(sorted(set(found)))
+
+
+SYSROOT_ROOTS = _STATIC_SYSROOT_ROOTS + _posix_path_deps()
 SYSROOT_STAMP = REPO / "toolchain" / "sysroot" / ".sysroot.stamp"
 
 # Suffixes hashed with CRLF folded to LF. Anything else is hashed raw. The

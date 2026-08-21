@@ -923,6 +923,15 @@ fi
 # soft-float ABI bug (BUG-SYSROOT-SOFT-FLOAT-ABI in known-issues.md) lived in
 # *that file*, so a libc.a older than it is wrong even with identical sources.
 #
+# ...*and* posix's path dependencies, which is the one that was missing. libc.a
+# is the `posix` crate's staticlib, so a sibling crate it depends on — `tzrules`
+# — is linked into it and can move it with nothing under `posix/src` touched at
+# all. That was true for as long as `tzrules` existed and no gate here covered
+# it; found 2026-08-21 from a comment in `scripts/stamp-ancestry.py`, which had
+# the source list right. Both the python path and the fallback below now read
+# the dependencies out of the manifest instead of naming them, because a named
+# dependency is one the next `path = "../foo"` opts out of by existing.
+#
 # `-print -quit` stops at the first hit: this is a yes/no question over ~300
 # files.  `|| true` keeps a missing directory from killing the script under
 # `set -e` — see the fixture loop below for what that failure mode costs when
@@ -957,10 +966,23 @@ if [ -e "$LIBC_A" ] && [ -n "$SYSROOT_PY" ]; then
         SYSROOT_STALE="the inputs reported above"
     fi
 elif [ -e "$LIBC_A" ]; then
+    # `posix`'s path dependencies belong here too — see the note above. They are
+    # read out of the manifest rather than listed, so that the shell fallback
+    # covers whatever `ctest-fixtures.py` covers without a second person
+    # remembering to edit both. sed, not a TOML parser: this branch runs only
+    # when there is no python at all.
+    _dep_roots=""
+    for _dep in $(sed -n 's/.*path *= *"\([^"]*\)".*/\1/p' "$ROOT_DIR/posix/Cargo.toml" 2>/dev/null); do
+        case "$_dep" in
+            ../*) _dep_roots="$_dep_roots $ROOT_DIR/${_dep#../}" ;;
+            *) ;;    # not a sibling crate; leave the resolution to the python path
+        esac
+    done
     for sysroot_src in "$ROOT_DIR/posix/src" \
                        "$ROOT_DIR/posix/Cargo.toml" \
                        "$ROOT_DIR/toolchain/stubs" \
-                       "$ROOT_DIR/toolchain/build-sysroot.ps1"; do
+                       "$ROOT_DIR/toolchain/build-sysroot.ps1" \
+                       $_dep_roots; do
         [ -e "$sysroot_src" ] || continue
         newer="$(find "$sysroot_src" -type f -newer "$LIBC_A" -print -quit 2>/dev/null || true)"
         [ -n "$newer" ] || continue

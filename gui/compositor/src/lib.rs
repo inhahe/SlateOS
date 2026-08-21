@@ -641,6 +641,32 @@ fn pulled_onto(rect: Rect, bounds: Rect) -> Rect {
     )
 }
 
+/// A window frame placed so that some of it is on a screen: `frame` unchanged if
+/// any part of it already falls on `desktop`, and otherwise pulled onto
+/// `fallback`.
+///
+/// Two rectangles rather than one because the questions are different. *Can the
+/// user see this window?* is asked of the whole virtual desktop — a window
+/// sitting happily on the second monitor is not stranded merely because the
+/// first one shrank, and yanking it across would be the more visible bug. *Where
+/// should a window nobody can see go?* has to name one screen that actually
+/// exists, and the union of several monitors is not necessarily one: an
+/// L-shaped arrangement has a hole in its bounding box, and a window placed in
+/// the hole is exactly as lost as it was before.
+///
+/// The intersection test is strict — *no part of the frame is on any screen* —
+/// on purpose. A window hanging half off an edge is still visible and still has
+/// a title bar to grab, so its owner's choice of position stands; only a window
+/// with nothing on screen at all has no title bar, cannot be dragged, and cannot
+/// be reached with the pointer.
+fn kept_reachable(frame: Rect, desktop: Rect, fallback: Rect) -> Rect {
+    if frame.intersect(&desktop).is_some() {
+        frame
+    } else {
+        pulled_onto(frame, fallback)
+    }
+}
+
 /// One zone edge, rounded to a whole pixel.
 ///
 /// The clamp is what makes the cast safe rather than merely likely to be: the
@@ -1036,12 +1062,26 @@ impl Window {
     /// A box that four functions each recompute is a box that will be drawn in
     /// one place and hit-tested in another.
     pub fn frame_rect(&self) -> Rect {
+        self.frame_rect_for_client(self.client_rect())
+    }
+
+    /// The frame box a *given* client rectangle would have on this window — the
+    /// inverse of [`client_geometry_for_frame`](Self::client_geometry_for_frame),
+    /// and the general form of [`frame_rect`](Self::frame_rect).
+    ///
+    /// Needed because a saved rectangle is stored as client geometry
+    /// (`restore_rect`, `fs_restore_rect`) while every question about whether a
+    /// window can be *reached* is a question about its decorated box: it is the
+    /// title bar, not the client area, that has to be on screen to be grabbed.
+    /// Asking that of a window that is not currently at the rectangle in
+    /// question is the whole point, so it cannot be `frame_rect`.
+    pub fn frame_rect_for_client(&self, client: Rect) -> Rect {
         let (top, side, bottom) = self.frame_insets();
         Rect::new(
-            self.x.saturating_sub(side as i32),
-            self.y.saturating_sub(top as i32),
-            self.width.saturating_add(side.saturating_mul(2)),
-            self.height.saturating_add(top).saturating_add(bottom),
+            client.x.saturating_sub(side as i32),
+            client.y.saturating_sub(top as i32),
+            client.width.saturating_add(side.saturating_mul(2)),
+            client.height.saturating_add(top).saturating_add(bottom),
         )
     }
 
@@ -5051,8 +5091,28 @@ impl Compositor {
     }
 
     /// Restore a window from minimized, maximized or snapped state.
+    ///
+    /// The saved rectangle is a rectangle on the desktop *as it was when the
+    /// window was tiled*, and the desktop may not be that shape any more — a
+    /// resolution change is the obvious way, and it does not help that
+    /// [`resize_display`](Self::resize_display) rescues stranded windows, since
+    /// a maximised window is not stranded and its saved rectangle is not where
+    /// it is. Restoring it verbatim would drop the window somewhere the user
+    /// cannot see, click or drag it, and there is no second chance: the saved
+    /// rectangle is consumed by the restore, so nothing afterwards knows the
+    /// window was ever anywhere else.
     pub fn restore_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
         self.damage_window(window_id);
+
+        // Read before the window is borrowed mutably. `home` is deliberately the
+        // display the window is on *now*: it is currently tiled, so it is
+        // demonstrably on a real screen, and un-maximising a window on the
+        // second monitor must not move it to the first.
+        let Some(frame_now) = self.window_ref(window_id).map(Window::frame_rect) else {
+            return Err(CompositorError::WindowNotFound(window_id));
+        };
+        let desktop = self.display_manager.virtual_bounds();
+        let home = self.work_bounds_for(frame_now);
 
         let window = self
             .window_mut(window_id)
@@ -5072,8 +5132,12 @@ impl Compositor {
             window.maximized = false;
             window.snapped = None;
             if let Some(restore) = window.restore_rect.take() {
-                window.x = restore.x;
-                window.y = restore.y;
+                // After the flags are cleared, so that the frame insets are the
+                // ones the restored window will actually have.
+                let placed = kept_reachable(window.frame_rect_for_client(restore), desktop, home);
+                let (x, y, _, _) = window.client_geometry_for_frame(placed);
+                window.x = x;
+                window.y = y;
                 window.width = restore.width;
                 window.height = restore.height;
             }
@@ -5095,8 +5159,13 @@ impl Compositor {
     ///
     /// Entering saves the window's geometry, removes decorations, and resizes
     /// the client area to cover the entire display. Leaving restores the saved
-    /// geometry. A fullscreen window with an opaque, display-sized shared
-    /// buffer is eligible for direct-scanout bypass (see [`compose_frame`]).
+    /// geometry — subject to it still being somewhere the user can reach, for
+    /// the reason given on [`restore_window`](Self::restore_window): a game left
+    /// fullscreen across a resolution change would otherwise be put back at a
+    /// rectangle on a screen that no longer exists, and the saved rectangle is
+    /// consumed on the way out, so nothing afterwards could recover it. A
+    /// fullscreen window with an opaque, display-sized shared buffer is eligible
+    /// for direct-scanout bypass (see [`compose_frame`]).
     ///
     /// [`compose_frame`]: Compositor::compose_frame
     ///
@@ -5107,6 +5176,12 @@ impl Compositor {
         self.damage_window(window_id);
 
         let (fb_w, fb_h) = self.backend.size();
+        // As in `restore_window`: read before the mutable borrow, and the
+        // fallback screen is the one the window covers right now.
+        let home = self
+            .window_ref(window_id)
+            .map(|w| self.work_bounds_for(w.frame_rect()));
+        let desktop = self.display_manager.virtual_bounds();
 
         let resized = {
             let window = self
@@ -5129,8 +5204,18 @@ impl Compositor {
                 window.fullscreen = false;
                 let restored = window.fs_restore_rect.take();
                 if let Some(r) = restored {
-                    window.x = r.x;
-                    window.y = r.y;
+                    // After `fullscreen` is cleared, so the insets are the ones
+                    // the restored window will have -- a fullscreen window is
+                    // undecorated, and measuring its frame while it still is
+                    // would be measuring the wrong box.
+                    let placed = kept_reachable(
+                        window.frame_rect_for_client(r),
+                        desktop,
+                        home.unwrap_or(desktop),
+                    );
+                    let (x, y, _, _) = window.client_geometry_for_frame(placed);
+                    window.x = x;
+                    window.y = y;
                     window.width = r.width;
                     window.height = r.height;
                 }
@@ -7151,30 +7236,36 @@ impl Compositor {
         }
     }
 
-    /// Move back any window the new display size left entirely off the screen.
+    /// Move back any window the new display size left entirely off the desktop.
     ///
-    /// The test is *no part of the frame is on `bounds`*, and it is that strict
-    /// on purpose. A window hanging half off an edge is still visible and still
-    /// has a title bar to grab, so its owner's choice of position stands; a
-    /// window with nothing on screen has no title bar, cannot be dragged, cannot
-    /// be reached with the pointer at all, and is gone until the display is made
-    /// large again. Only the second case is a rescue rather than a re-layout.
+    /// *Stranded* is judged against the whole virtual desktop and not against
+    /// `bounds`, so that shrinking one monitor does not evacuate the others: a
+    /// window living on the second screen is untouched by a mode change on the
+    /// first, and dragging it across would be a far more visible bug than the
+    /// one being fixed. `bounds` — the display that just changed — is only the
+    /// place a genuinely stranded window is put, because it is a screen that is
+    /// known to exist and is the one most likely to have stranded it.
     ///
     /// Tiled and fullscreen windows are excluded because their geometry was
     /// already re-derived from the new size by the two passes before this one: a
     /// window that follows a rule cannot be stranded by the rule moving.
+    ///
+    /// See [`kept_reachable`] for why the intersection test is as strict as it
+    /// is.
     fn bring_stranded_windows_back(&mut self, bounds: Rect) {
+        let desktop = self.display_manager.virtual_bounds();
         let moves: Vec<(WindowId, i32, i32)> = self
             .windows
             .iter()
             .filter(|w| !w.fullscreen && !w.maximized && w.snapped.is_none())
-            .filter(|w| w.frame_rect().intersect(&bounds).is_none())
-            .map(|w| {
+            .map(|w| (w, kept_reachable(w.frame_rect(), desktop, bounds)))
+            .filter(|&(w, placed)| placed != w.frame_rect())
+            .map(|(w, placed)| {
                 // Through the frame rather than the client area: it is the
                 // decorated box that has to land on screen, and `pulled_onto`
                 // pins its top-left — where the title bar is — when it is too
                 // large to fit.
-                let (x, y, _, _) = w.client_geometry_for_frame(pulled_onto(w.frame_rect(), bounds));
+                let (x, y, _, _) = w.client_geometry_for_frame(placed);
                 (w.id, x, y)
             })
             .collect();
@@ -14751,5 +14842,163 @@ mod tests {
         comp.handle_input(InputEvent::MouseMove { x: 100, y: 200 });
         comp.resize_display(800, 600).expect("resize");
         assert_eq!(comp.cursor_position(), (100, 200), "the pointer was moved");
+    }
+
+    // -----------------------------------------------------------------------
+    // Reachability: a window is never placed where it cannot be reached
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resizing_one_monitor_does_not_evacuate_the_other() {
+        // `two_monitors(1)` puts an 800x600 primary at the origin, a 1024x768
+        // second screen flush to its right, and the window comfortably inside
+        // the second one -- nowhere near the first.
+        let (mut comp, id, _) = two_monitors(1);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+
+        comp.resize_display(400, 300).expect("resize");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "a window on the second monitor was dragged onto the first \
+             because the first was resized"
+        );
+    }
+
+    #[test]
+    fn un_maximising_after_a_shrink_leaves_the_window_reachable() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        // Near the old bottom-right corner, so the saved rectangle is off the
+        // new screen entirely.
+        let id = app_at(&mut comp, 1500, 900, 300, 150);
+        comp.maximize_window(id).expect("maximize");
+        comp.resize_display(800, 600).expect("resize");
+
+        comp.restore_window(id).expect("restore");
+
+        let frame = comp.window_ref(id).expect("window").frame_rect();
+        assert!(
+            frame.intersect(&Rect::new(0, 0, 800, 600)).is_some(),
+            "un-maximising put the window back at a rectangle that is \
+             entirely off the screen: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn leaving_fullscreen_after_a_shrink_leaves_the_window_reachable() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 1500, 900, 300, 150);
+        comp.set_fullscreen(id, true).expect("fullscreen");
+        comp.resize_display(800, 600).expect("resize");
+
+        comp.set_fullscreen(id, false).expect("leave fullscreen");
+
+        let frame = comp.window_ref(id).expect("window").frame_rect();
+        assert!(
+            frame.intersect(&Rect::new(0, 0, 800, 600)).is_some(),
+            "leaving fullscreen put the window back at a rectangle that is \
+             entirely off the screen: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn a_restored_window_keeps_its_own_size_and_moves_the_least_it_can() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 1500, 900, 300, 150);
+        comp.maximize_window(id).expect("maximize");
+        comp.resize_display(800, 600).expect("resize");
+        comp.restore_window(id).expect("restore");
+
+        let frame = comp.window_ref(id).expect("window").frame_rect();
+        // The rescue never resizes, and it moves by the minimum, so a frame
+        // that was off the bottom-right corner lands against that corner at
+        // exactly its original size.
+        assert_eq!(
+            (frame.width, frame.height),
+            (302, 181),
+            "the restored window was resized rather than moved"
+        );
+        assert_eq!(
+            (frame.x, frame.y),
+            (
+                800 - i32::try_from(frame.width).expect("frame width"),
+                600 - i32::try_from(frame.height).expect("frame height"),
+            ),
+            "the restored window was moved further than it had to be"
+        );
+    }
+
+    #[test]
+    fn a_restore_rectangle_still_on_the_screen_is_used_exactly() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        let id = app_at(&mut comp, 40, 60, 300, 150);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+        comp.maximize_window(id).expect("maximize");
+        comp.resize_display(800, 600).expect("resize");
+
+        comp.restore_window(id).expect("restore");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "a restore rectangle that was still perfectly reachable was moved"
+        );
+    }
+
+    #[test]
+    fn a_restore_rectangle_hanging_off_an_edge_is_still_used_exactly() {
+        let mut comp = Compositor::new(1920, 1080, 60).expect("compositor");
+        // Straddles both the right and the bottom edge of the *new* screen, so
+        // it is partly visible and partly not.
+        let id = app_at(&mut comp, 700, 500, 300, 150);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+        comp.maximize_window(id).expect("maximize");
+        comp.resize_display(800, 600).expect("resize");
+
+        comp.restore_window(id).expect("restore");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "a window that was still partly on screen -- and still had a title \
+             bar to grab -- was tidied onto it anyway"
+        );
+    }
+
+    #[test]
+    fn a_window_restored_on_the_second_monitor_stays_on_it() {
+        let (mut comp, id, _) = two_monitors(1);
+        let before = comp.window_ref(id).expect("window").frame_rect();
+        comp.maximize_window(id).expect("maximize");
+
+        comp.restore_window(id).expect("restore");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").frame_rect(),
+            before,
+            "restoring a window maximised on the second monitor moved it"
+        );
+    }
+
+    #[test]
+    fn a_window_rescued_on_restore_lands_on_its_own_monitor() {
+        let (mut comp, id, screens) = two_monitors(1);
+        comp.maximize_window(id).expect("maximize");
+        // A saved rectangle that is nowhere on the desktop. In practice that is
+        // a resolution change between the maximise and the restore; it is
+        // written directly here because a two-monitor `resize_display` can only
+        // shrink the *primary*, and it is a window maximised on the second
+        // screen that tells the two candidate fallbacks apart.
+        comp.window_mut(id).expect("window").restore_rect = Some(Rect::new(9000, 9000, 200, 150));
+
+        comp.restore_window(id).expect("restore");
+
+        let frame = comp.window_ref(id).expect("window").frame_rect();
+        assert!(
+            frame.intersect(&screens[1]).is_some(),
+            "a window maximised on the second monitor was rescued onto the \
+             first: {frame:?}"
+        );
     }
 }

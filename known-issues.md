@@ -49684,20 +49684,91 @@ Two deliberate choices:
   as consent would turn every passwordless account into a root shell.
   `nopass` in `/etc/doas.conf` is the only consent that counts here.
 
-### Still open — cross-invocation rate limiting
+### Cross-invocation rate limiting — FIXED 2026-08-21
 
-`authlib`'s failure tally lives in the `Authenticator`, which for `doas` lives
-for one invocation. `sshd` and `ftpd` keep one per daemon, so their tallies
-outlive a connection; `doas` cannot, because it *is* the process. So repeated
-`doas` attempts are not rate-limited relative to each other, which is exactly
+**Was:** `authlib`'s failure tally lived in the `Authenticator`, which for
+`doas` lives for one invocation. `sshd` and `ftpd` keep one per daemon, so
+their tallies outlive a connection; `doas` cannot, because it *is* the process.
+So repeated `doas` attempts were not rate-limited relative to each other —
+every invocation started the escalating delay again at zero — which is exactly
 the shape of an attacker who already has a shell as the user and is guessing
-toward root.
+toward root. The same held for `login` and `su`, and for `passwd`'s
+`Current password:` prompt by way of a different gap (see
+`B-PASSWD-VERIFIES-WITHOUT-AUTHLIB`).
 
-The proper fix is on-disk state, and it belongs in `authlib` rather than in
-`doas`, so that `login`, `su` and `doas` share one tally per user instead of
-three. `doas` already keeps per-uid state under `/var/run/doas` for its
-`persist` timestamps, which is the shape the tally would take. Tracked here
-rather than done now because it changes `authlib`'s contract for every caller.
+**Now:** `authlib` keeps the tally on disk as well as in memory, in one shared
+table at `authlib::DEFAULT_FAILLOCK` (`/var/run/authlib/tally`), so every
+program that authenticates through `authlib::Authenticator` counts against
+*one* tally per user. Today that is `doas`, `sshd`, `ftpd` and `logind` — but
+not yet `login` or `su`, which is the remaining half of the gap and is written
+up under "Still open" below. `Authenticator::new()` uses it; `with_stores`
+stays memory-only, so a
+test suite or a chroot cannot run up a real user's failures. Every call reads
+the file fresh (a failure another program recorded a moment ago must count
+against *this* attempt), takes the field-wise maximum of the in-memory and
+on-disk rows, and writes the advanced count back to both. A write that fails is
+ignored on purpose: the in-memory tally still limits the running process, so an
+unwritable `/var/run` degrades to the old behaviour rather than refusing to
+authenticate anyone.
+
+The table's shape is `userspace/authlib/src/faillock.rs`, and three attacks
+drove it — see `design-decisions.md` §347 for the alternatives:
+
+| Attack | What stops it |
+|---|---|
+| A username from the login prompt is attacker-chosen text; a file *named* for it is a path-traversal and an unbounded-file-creation primitive | One fixed-size file, 1024 slots, usernames hex-encoded so no name can forge or corrupt a row |
+| Probing which accounts exist by watching which ones get rate-limited | An invented username takes a slot exactly as a real one does; nothing distinguishes them |
+| Flooding the table with invented names to evict the record of the account actually under attack | Eviction is by *fewest* failures, oldest first — the attacked account is evicted last |
+
+**What did not change:** a refused (rate-limited) attempt is still not counted,
+so an attacker cannot hold a real user out by refreshing their own refusal; and
+the delay is still `delay_for` — doubling from 1s once `FREE_ATTEMPTS` are
+spent, capped at `MAX_DELAY_SECS`. The state lives under `/var/run` rather than
+`/var/lib` deliberately: it describes an attack in progress, not a durable fact
+about the account, and a reboot is not something an attacker can arrange more
+cheaply than waiting out five minutes.
+
+**Tests:** `a_program_that_runs_once_inherits_the_previous_run_s_failures`
+builds a fresh `Authenticator` per attempt to stand for a short-lived process
+and asserts a brand-new one is refused *even when presenting the correct
+password*; `a_success_in_one_program_clears_the_tally_for_the_next`;
+`a_memory_only_verifier_writes_no_shared_file`;
+`combining_two_tallies_takes_the_longer_delay_from_each_field`; plus twelve in
+`faillock` covering injection, truncation, damaged rows, the slot cap, eviction
+order and the temp-file-and-rename store.
+
+### Still open — `login` and `su` do not share the tally
+
+Both reach the right *verdict* through shared code, but neither goes through
+`Authenticator`, so neither reads or writes the shared count:
+
+| Program | What it calls | Why it is not `Authenticator` |
+|---|---|---|
+| `login` | `authlib::check_stored` (`userspace/login/src/main.rs:176`) | It owns one policy `authlib` deliberately declines to rule on: an account with an empty password field is entered by pressing Enter *at the machine's own keyboard*. `Authenticator::authenticate` reports that as `NoPassword` and leaves the caller to decide, so `login` calls the checking half directly and never touches the counting half. |
+| `su` | `userdb::Record::check_password` | It predates `authlib` and reads `/etc/users.yaml` through `userdb` for other reasons anyway. |
+
+The consequence is worth stating plainly: `login` still caps a *single process*
+at `MAX_LOGIN_ATTEMPTS` and then exits, so the delay never escalates across the
+getty respawn, and failures at the console do not slow down a subsequent `doas`
+guess or vice versa. One tally per user is the point of the change, and there
+are still three tallies.
+
+The fix `login` wants is not "call `authenticate` instead" — that would take
+the console's empty-password policy away from it. It is for `authlib` to expose
+the counting half on its own, so a caller that owns its verdict can still share
+the count: a `rate_limited(user) -> Option<retry_after>` to consult before
+prompting and a `note_failure(user)` after, with the existing `reset` for
+success, and `authenticate` refactored to be exactly those two around
+`check_stored` so there is one implementation rather than two.
+
+**That change has a tradeoff that should be decided, not assumed.** Once
+`login` shares the tally, an unprivileged process running as the user can hold
+that user at a delayed console prompt by failing `doas` on purpose — which is
+`pam_faillock`'s behaviour on Linux too, and is bounded here by
+`MAX_DELAY_SECS` (five minutes, never a permanent lockout). Whether five
+minutes of console delay purchasable by any local process is the right price
+for one tally per user is a judgement call; see `design-decisions.md` §347,
+which records it as the open half.
 
 
 ## B-PASSWD-VERIFIES-WITHOUT-AUTHLIB — 2026-08-21 — OPEN (tech debt, small)

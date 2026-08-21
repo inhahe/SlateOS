@@ -45,6 +45,7 @@ use crate::control::{Request, RequestBody, ResponseBody, encode_requests_into};
 use crate::frame::{Frame, try_decode_any};
 use crate::input::InputEvent;
 use crate::submit::encode_submit_into;
+use crate::window_list::WindowInfo;
 
 /// What the loop should do after handing an event to an application.
 ///
@@ -193,6 +194,25 @@ pub struct Connection<T: Transport> {
     /// `CREQ`. Counted for the same reason. Not fatal: the frame decoded, so
     /// the stream is still in sync and the next frame is still findable.
     misdirected: u64,
+    /// The most recent desktop window list, for a client that subscribed.
+    ///
+    /// The *latest* rather than a queue, because each `WLST` frame is a
+    /// complete snapshot and an older one is not merely stale but wrong. A
+    /// shell that fell behind should draw what the desktop looks like now, not
+    /// replay what it looked like three changes ago — which is the same
+    /// reasoning by which the compositor coalesces damage rather than queueing
+    /// it.
+    ///
+    /// `None` until the first frame arrives, which is distinct from `Some([])`:
+    /// "not told yet" and "told, and the desktop is empty" are different, and a
+    /// shell that conflated them would blank its taskbar during startup.
+    window_list: Option<Vec<WindowInfo>>,
+    /// Increments on every window-list frame received.
+    ///
+    /// Lets a shell repaint on change without diffing the list against its own
+    /// copy — and, unlike a dirty flag, cannot be lost by two consumers, since
+    /// each remembers the number it last acted on.
+    window_list_revision: u64,
 }
 
 impl<T: Transport> Connection<T> {
@@ -209,6 +229,8 @@ impl<T: Transport> Connection<T> {
             replies: BTreeMap::new(),
             unsolicited: 0,
             misdirected: 0,
+            window_list: None,
+            window_list_revision: 0,
         }
     }
 
@@ -315,6 +337,14 @@ impl<T: Transport> Connection<T> {
                     }
                 }
             }
+            // Kept even if this client never subscribed. A frame that arrived
+            // is a frame the compositor decided to send, and dropping it as
+            // "unrequested" would make an unsubscribe race look like a
+            // protocol error rather than the ordinary crossing it is.
+            Frame::WindowList(windows) => {
+                self.window_list = Some(windows);
+                self.window_list_revision = self.window_list_revision.saturating_add(1);
+            }
             // Everything else travels the other way. A compositor that sends
             // one is misrouting; that is worth being able to see and is not
             // worth killing an application over.
@@ -322,6 +352,37 @@ impl<T: Transport> Connection<T> {
                 self.misdirected = self.misdirected.saturating_add(1);
             }
         }
+    }
+
+    /// The desktop's windows as of the last `WLST` frame, or `None` if none has
+    /// arrived — which is every client that never subscribed, and a subscribed
+    /// one that has not pumped since.
+    ///
+    /// Bottom-to-top stacking order. See
+    /// [`window_list`](crate::window_list) for what a shell does with it.
+    #[must_use]
+    pub fn window_list(&self) -> Option<&[WindowInfo]> {
+        self.window_list.as_deref()
+    }
+
+    /// How many window lists have arrived. A shell repaints when this moves.
+    #[must_use]
+    pub const fn window_list_revision(&self) -> u64 {
+        self.window_list_revision
+    }
+
+    /// Start or stop receiving the desktop window list, waiting for the
+    /// compositor to acknowledge.
+    ///
+    /// The list itself arrives later, on the next pump; this only confirms the
+    /// subscription was accepted.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Transport`] if the exchange fails, and
+    /// [`ClientError::Refused`] if the compositor declined.
+    pub fn subscribe_window_list(&mut self, on: bool) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::SubscribeWindowList { subscribe: on })
     }
 
     /// Take the oldest queued input event, if any.

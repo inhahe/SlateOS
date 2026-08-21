@@ -48372,3 +48372,71 @@ way to *learn about other windows*. `CompositorRequest` has no window-list query
 and no notification, so a taskbar could now stay in front of the windows it is
 supposed to list while having no idea what they are. That protocol surface plus
 the loop itself are what remain.
+
+**Progress 2026-08-21 (2) — the window-list protocol above now exists, so the
+loop is the only thing left.** `guiremote::window_list` adds a `WLST` frame
+carrying id, pid, band, title and the visible/minimized/maximized/focused flags
+for every window on the desktop; `RequestBody::SubscribeWindowList` turns the
+stream on; the compositor pushes a fresh snapshot whenever the encoded list
+differs from the bytes it last sent that link; `oswindow` exposes it as
+`watch_desktop` / `desktop_windows` / `desktop_revision`. `design-decisions.md`
+§495; 26 tests across the three crates, each verified to fail when the
+corresponding bug is reintroduced. A taskbar can now be told what to list.
+
+**What remains is exactly one thing: the loop itself.** `desktop` gains a
+`[lib]`, a binary opens three `Layer`-banded windows (wallpaper, taskbar,
+popups) through `oswindow`, calls `watch_desktop(true)`, and on each
+`desktop_revision` change re-renders the five trees and submits them. Both
+named blockers are gone; nothing is waiting on another lane.
+
+## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
+
+**In short:** Any program connected to the compositor can ask to be sent the
+list of every window on the desktop — including each window's title. Titles are
+usually filenames, URLs or email subject lines, so a program with no business
+knowing what you have open can watch all of it, live. Nothing stops it, because
+the compositor currently has no way to tell a trusted shell apart from an
+ordinary application.
+
+**Where:** `gui/compositor/src/wire.rs` — `ClientLink::answer_requests`
+intercepts `RequestBody::SubscribeWindowList` and calls
+`set_window_list_subscription` unconditionally. `gui/remote/src/control.rs` —
+the request itself. `gui/compositor/src/lib.rs` — `Compositor::window_list`,
+which returns the whole desktop by design (see below).
+
+**Reproduce:** any `oswindow` client, including `apps/editor`, can call
+`EventLoop::watch_desktop(true)` and then read `desktop_windows()`. There is no
+check of any kind between the request arriving and the subscription being
+granted.
+
+**Why it shipped this way (2026-08-21):** the shell cannot draw a taskbar
+without it, and the honest gate does not exist yet. A capability is the right
+mechanism — the shell is handed one at launch, an application is not — and
+kernel channel IPC does not yet deliver capabilities to the compositor. Any
+check written today would test a value the *client* supplies, which is not a
+gate but the appearance of one, and worse than none because it would look
+solved. Full reasoning in `design-decisions.md` §495.
+
+**Note that the unfiltered list is not the bug.** The compositor deliberately
+sends every window in every band including minimized ones, because filtering is
+the subscriber's decision — a taskbar and an Alt-Tab switcher want different
+subsets, and a compositor that picked one would leave the other unable to
+recover what was dropped. Narrowing what is sent is not the fix; deciding *who*
+may ask is.
+
+**Proper fix:** one capability check at the single place the subscription is
+granted — the `SubscribeWindowList` arm in `answer_requests` — refusing with
+`ResponseBody::Error` when the link holds no window-list capability. The
+compositor learns the caller's capabilities from the kernel at connection
+accept, not from the connection's own claims. One site, because the
+subscription is granted in exactly one place; that was part of why the
+interception lives in `answer_requests` rather than being spread through the
+compositor.
+
+**Trigger to fix:** when kernel channel IPC carries capabilities across an
+accepted connection. Lane A owns that; no request has been filed yet because
+the feature is not near enough to specify an interface against.
+
+**If never fixed:** every window title on the desktop is readable by every
+program the user runs, silently and continuously. The desktop works; the
+privacy property a user would assume it has is simply absent.

@@ -79,6 +79,9 @@ pub use guiremote::client::{ClientError as ConnectionError, Transport as Connect
 pub use guiremote::control::{
     CursorShape as Cursor, DisplayInfo as Display, Layer, WindowSpec as Spec,
 };
+/// What a shell learns about the windows it does not own. See
+/// [`EventLoop::watch_desktop`].
+pub use guiremote::window_list::WindowInfo;
 // An addressed event, as it travels. Applications never build one — they
 // receive `(window, Event)` pairs from the loop — but anything driving an
 // application synthetically does, which is what [`testing`] is for.
@@ -688,6 +691,46 @@ impl<T: Transport> EventLoop<T> {
         &self.windows
     }
 
+    /// Start or stop being told about *other* clients' windows.
+    ///
+    /// For shells — a taskbar, a window switcher, an accessibility tool. An
+    /// ordinary application has no use for this and should not call it: the
+    /// windows it owns are already in [`windows`](Self::windows), and what the
+    /// rest of the desktop has open is none of its business.
+    ///
+    /// While subscribed, [`poll`](Self::poll) and [`run`](Self::run) keep
+    /// [`desktop_windows`](Self::desktop_windows) current.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn watch_desktop(&mut self, on: bool) -> Result<(), Error<T>> {
+        self.conn.subscribe_window_list(on)
+    }
+
+    /// Every window on the desktop, bottom-to-top, as of the last update.
+    ///
+    /// Empty until the first list arrives — which, for a client that never
+    /// called [`watch_desktop`](Self::watch_desktop), is never.
+    ///
+    /// These are *not* [`Window`]s: a `Window` is one this loop owns and can
+    /// draw into, and these are mostly other people's. Keeping the types apart
+    /// is deliberate, so that no code can drift into submitting a picture for a
+    /// window it merely knows about.
+    #[must_use]
+    pub fn desktop_windows(&self) -> &[WindowInfo] {
+        self.conn.window_list().unwrap_or(&[])
+    }
+
+    /// How many desktop window lists have arrived.
+    ///
+    /// A shell redraws its taskbar when this changes, rather than diffing the
+    /// list against its own copy every frame.
+    #[must_use]
+    pub fn desktop_revision(&self) -> u64 {
+        self.conn.window_list_revision()
+    }
+
     /// How many windows this loop owns.
     #[must_use]
     pub fn window_count(&self) -> usize {
@@ -885,6 +928,7 @@ pub mod testing {
     use guiremote::input::InputEvent;
     use guiremote::loopback::{Pipe, pipe};
     use guiremote::submit::decode_submit;
+    use guiremote::window_list::WindowInfo;
 
     use crate::{EventLoop, Transport};
 
@@ -1033,6 +1077,23 @@ pub mod testing {
         pub fn send_input(&mut self, events: &[InputEvent]) {
             self.pipe
                 .write(&guiremote::encode_input_frame(events))
+                .unwrap();
+        }
+
+        /// Push a desktop window list, as a compositor does to a subscribed
+        /// shell.
+        ///
+        /// Unconditional on purpose: the harness does *not* check that the
+        /// client subscribed first. Whether an unsubscribed client is sent a
+        /// list is the compositor's rule, tested where the compositor is; here
+        /// the question is only what the client does with one that arrives.
+        ///
+        /// # Panics
+        ///
+        /// As [`Self::send_input`].
+        pub fn send_window_list(&mut self, windows: &[WindowInfo]) {
+            self.pipe
+                .write(&guiremote::encode_window_list(windows))
                 .unwrap();
         }
 
@@ -1577,5 +1638,144 @@ mod tests {
         }
         assert_eq!(focused, ids);
         assert!(events.windows().iter().all(Window::is_focused));
+    }
+
+    /// Two windows differing in every field, so a codec or a store that
+    /// confused one for the other cannot pass.
+    fn two_desktop_windows() -> Vec<WindowInfo> {
+        vec![
+            WindowInfo {
+                id: 7,
+                pid: 1234,
+                layer: Layer::Background,
+                title: "Wallpaper".to_owned(),
+                visible: true,
+                minimized: false,
+                maximized: false,
+                focused: false,
+            },
+            WindowInfo {
+                id: 9,
+                pid: 5678,
+                layer: Layer::Normal,
+                title: "Editor".to_owned(),
+                visible: false,
+                minimized: true,
+                maximized: true,
+                focused: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn watching_the_desktop_asks_the_compositor_instead_of_assuming() {
+        // A shell cannot see other clients' windows by default, and nothing
+        // local could make it: the answer lives in the compositor. So the
+        // observable effect of `watch_desktop` must be a request on the wire.
+        let (mut events, server) = wired();
+        events.watch_desktop(true).unwrap();
+        assert!(
+            server
+                .borrow()
+                .seen
+                .iter()
+                .any(|r| matches!(r.body, RequestBody::SubscribeWindowList { subscribe: true })),
+            "watch_desktop should have subscribed on the wire"
+        );
+
+        events.watch_desktop(false).unwrap();
+        assert!(
+            server.borrow().seen.iter().any(|r| matches!(
+                r.body,
+                RequestBody::SubscribeWindowList { subscribe: false }
+            )),
+            "unwatching should have unsubscribed on the wire"
+        );
+    }
+
+    #[test]
+    fn a_client_that_never_watched_sees_an_empty_desktop() {
+        // Not an error and not a guess: a client with no subscription has been
+        // told nothing, and the honest report of that is "nothing", not a list
+        // assembled from the windows it happens to own itself.
+        let (mut events, _server) = wired();
+        open(&mut events, "A");
+        assert!(events.desktop_windows().is_empty());
+        assert_eq!(events.desktop_revision(), 0);
+    }
+
+    #[test]
+    fn a_desktop_list_arrives_field_for_field() {
+        let (mut events, server) = wired();
+        events.watch_desktop(true).unwrap();
+        let sent = two_desktop_windows();
+        server.borrow_mut().send_window_list(&sent);
+
+        // No input in that frame, so there is no event to return — the point
+        // is the side effect the pump had while reading it.
+        assert!(events.poll().unwrap().is_none());
+        assert_eq!(events.desktop_windows(), sent.as_slice());
+        assert_eq!(events.desktop_revision(), 1);
+    }
+
+    #[test]
+    fn a_later_list_replaces_the_earlier_one_rather_than_adding_to_it() {
+        // Each list is the whole desktop, so appending would leave a window
+        // that has closed visible in a taskbar forever.
+        let (mut events, server) = wired();
+        events.watch_desktop(true).unwrap();
+        server.borrow_mut().send_window_list(&two_desktop_windows());
+        assert!(events.poll().unwrap().is_none());
+
+        let only = vec![WindowInfo::new(9, 5678, "Editor")];
+        server.borrow_mut().send_window_list(&only);
+        assert!(events.poll().unwrap().is_none());
+
+        assert_eq!(events.desktop_windows(), only.as_slice());
+        assert_eq!(
+            events.desktop_revision(),
+            2,
+            "the revision counts lists received, so a shell can redraw on change"
+        );
+    }
+
+    #[test]
+    fn a_closing_desktop_is_reported_as_empty_and_not_as_unchanged() {
+        // The last window closing is exactly when a taskbar must clear itself,
+        // and an empty list is a legal frame rather than a no-op.
+        let (mut events, server) = wired();
+        events.watch_desktop(true).unwrap();
+        server.borrow_mut().send_window_list(&two_desktop_windows());
+        assert!(events.poll().unwrap().is_none());
+        assert_eq!(events.desktop_windows().len(), 2);
+
+        server.borrow_mut().send_window_list(&[]);
+        assert!(events.poll().unwrap().is_none());
+        assert!(events.desktop_windows().is_empty());
+        assert_eq!(events.desktop_revision(), 2);
+    }
+
+    #[test]
+    fn a_desktop_list_does_not_disturb_the_windows_this_client_owns() {
+        // The two window sets are separate stores. A list naming ids this
+        // client does not own must not create, drop or re-route anything in
+        // its own, and must not count as an unrouted event either.
+        let (mut events, server) = wired();
+        let mine = open(&mut events, "Mine");
+        events.watch_desktop(true).unwrap();
+
+        server.borrow_mut().send_window_list(&two_desktop_windows());
+        assert!(events.poll().unwrap().is_none());
+
+        assert_eq!(events.window_count(), 1);
+        assert!(events.window(mine).is_some());
+        assert_eq!(events.unrouted_events(), 0);
+
+        // And input still routes normally afterwards.
+        server
+            .borrow_mut()
+            .send_input(&[InputEvent::new(mine, Event::FocusIn)]);
+        let (w, _) = events.poll().unwrap().expect("an event");
+        assert_eq!(w, mine);
     }
 }

@@ -24868,6 +24868,26 @@ measurement, not in anticipation of one, and the next bench run supplies it.
 What has definitely changed is that if divergence recurs it is now one
 annotation on one function, not a reconciliation of seven bodies.
 
+**RESOLVED, 2026-08-21, and the answer is "leave it unpinned."** The measurement
+came from `llvm-objdump` rather than the bench, which is both faster and more
+direct. LLVM does inline `sum_bytes` at every site — there is no `sum_bytes`
+symbol in the kernel, and `tcp_checksum` has none either — so the literal worry
+above came true. What did *not* come true is the divergence: all three checksum
+benchmark sites now carry byte-identical loops, unrolled 4× with a 1×
+remainder, matching the still-out-of-line `tcp_checksum_v6`. Before unification
+the same three were 2×, not-at-all, and not-at-all. So `#[inline(never)]` would
+buy nothing and would cost a call on every short checksum in the stack — the
+exact cost this section was worried about — while removing the inlining that
+makes the 20-byte case cheap.
+
+The distinction worth keeping, since blurring it is what hid the original bug:
+sharing a source function did not make the copies *share code*. It made them
+present the optimiser with the same input, which is what made its decisions
+agree. That is a weaker guarantee than one out-of-line body, so it is checked
+rather than assumed — `llvm-objdump -d --disassemble-symbols=` is the check,
+recorded in `known-issues.md` §251 Postscript 2, and `#[inline(never)]` remains
+the one-line fix if a future toolchain diverges again.
+
 **One further consequence, which is really a separate finding.** The new module
 has no `#[cfg(test)] mod tests`, on purpose: `kernel/Cargo.toml` sets
 `test = false` for the kernel binary (it supplies its own `panic_impl` and

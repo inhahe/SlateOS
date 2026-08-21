@@ -443,6 +443,95 @@ static SPLIT_TALLY_WORST_PCT: AtomicU64 = AtomicU64::new(0);
 /// Number of windows too short for a split check ([`SPLIT_MIN_ITERATIONS`]).
 static SPLIT_TALLY_UNCHECKED: AtomicU64 = AtomicU64::new(0);
 
+/// Minimum cycles an *empty* measurement window costs: the harness's own floor.
+///
+/// Published by [`self_test`] from the `self_test_nop` control
+/// (`run_diagnostic("self_test_nop", 1000, || black_box(42))`), and read by
+/// [`print_scorecard`] to answer one question no amount of statistics can:
+/// **is this benchmark running at all?**
+///
+/// A benchmark that costs *less than an empty closure* is not executing the code
+/// it names, because there is no code that costs less than no code. That makes
+/// this the rare check with no threshold to tune and no false-positive rate to
+/// trade against a false-negative one — it is true by construction rather than
+/// by a constant someone picked. Contrast `SPLIT_UNSTABLE_REL_PCT`, which is
+/// provisional and printed unconditionally precisely so it *can* be calibrated
+/// later; this needs no such treatment.
+///
+/// It exists because the suite has now shipped a fully hoisted benchmark three
+/// times, and the harness reported all three impeccably. `tcp_checksum_v6` went
+/// `1604ns -> 18ns` and `scripts/bench-history.py` filed it under **IMPROVED**,
+/// with `split 1st=70 2nd=70 (0%)` — a perfectly replicating level shift.
+/// Nothing was hidden and no statistic was violated; a -99% move is simply good
+/// news to a comparator. What marks such a number false is physics, not
+/// variance, and the empty closure is the only physics the harness has.
+///
+/// **The floor must be the empty closure, not the instrument's own overhead.**
+/// The first version of this idea used `rdtsc_overhead` (138 cycles), which
+/// fires on `self_test_nop` itself (72), `net_ip_checksum_20b` (80),
+/// `sd_current_task_id` (106) and `preempt_pair` (108) — all legitimate. [`run`]
+/// amortises the timing pair across the window, so a benchmark is entitled to
+/// come in below the cost of one `rdtsc` pair. It is not entitled to come in
+/// below the cost of nothing.
+///
+/// **Warns, does not fail.** The control runs 1000 iterations while scored
+/// benchmarks run 1000-5000, and a longer window can only lower a minimum, so
+/// this floor is mildly *optimistic* against the longer runs — a benchmark just
+/// above it is not thereby cleared. Erring toward false negatives is the right
+/// direction for a check whose entire value is being believed when it does fire.
+///
+/// **The minimum over every empty-closure sample taken this boot, not the
+/// latest** — and the samples are deliberately spread apart in time. This is not
+/// belt-and-braces; a single sample makes the check actively dangerous. The
+/// floor is not a property of the build, it is a property of *the host's load
+/// during that window*: the boot of 2026-08-21 02:17 measured `self_test_nop` at
+/// **428 cycles** with three lanes compiling at once, against **70** on the
+/// otherwise-identical 01:38 boot. `self_test` runs early in boot and `run_all`
+/// some six minutes later, so a floor sampled under load and benchmarks measured
+/// after the load lifted would put a 428-cycle bound over a suite running at
+/// 70-cycle conditions and flag nearly all of it. Taking the minimum errs the
+/// only safe way: a lower floor flags less, and this check is worth having only
+/// if it is believed when it fires.
+///
+/// [`u64::MAX`] means unmeasured — no sample was taken this boot. Reported as
+/// `FLOOR unmeasured` rather than silently skipped, on the principle the canary
+/// already follows: "the instrument failed" is not "the code is fine".
+static HARNESS_FLOOR_CYCLES: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Iterations per empty-closure floor sample.
+///
+/// A named constant because the `BELOW-FLOOR` line quotes it back to the reader
+/// as the benign explanation for a trip — a scored window running 5000
+/// iterations gets five times the draws at a low minimum that this window gets,
+/// and more draws can only lower a minimum. A message that quoted a hardcoded
+/// `1000` while the sample silently ran some other count would send that reader
+/// to check an asymmetry that does not exist, which is worse than not
+/// mentioning it. Kept at 1000 to match the historical `self_test_nop`, whose
+/// numbers the surrounding documentation cites.
+const FLOOR_SAMPLE_ITERATIONS: u32 = 1000;
+
+/// Take one empty-closure sample and fold it into [`HARNESS_FLOOR_CYCLES`].
+///
+/// One function rather than an empty closure written out at each sample site,
+/// for the reason `net::checksum` was just unified: two copies of one loop are
+/// free to be compiled differently, and a floor that was unrolled while the
+/// benchmarks it bounds were not is a floor measuring something else. Here that
+/// risk is not hypothetical — `measure_access_at`'s comment records LLVM fully
+/// unrolling an empty constant-trip-count loop while leaving the real one
+/// rolled, which moved a derived figure 4x.
+///
+/// `name` differs per site because each sample prints its own live result line,
+/// and two windows sharing a name would be indistinguishable in the log at
+/// exactly the moment the log is being read to explain a divergence between
+/// them.
+fn sample_harness_floor(name: &'static str) -> BenchResult {
+    let result = run_diagnostic(name, FLOOR_SAMPLE_ITERATIONS, || {
+        core::hint::black_box(42);
+    });
+    HARNESS_FLOOR_CYCLES.fetch_min(result.min_cycles, Ordering::Relaxed);
+    result
+}
+
 /// One measurement window, as seen by the coverage report.
 ///
 /// `&'static str` rather than `String`: every call site passes a literal, so the
@@ -1070,6 +1159,15 @@ struct ScoreEntry {
     /// property of healthy code and is the specific failure that makes one
     /// boot's `min` incomparable to another's.
     split: SplitCheck,
+    /// The same minimum as `measured_ns`, in cycles rather than nanoseconds.
+    ///
+    /// Carried for the below-floor check alone (see [`HARNESS_FLOOR_CYCLES`]),
+    /// and in cycles because that check operates precisely where the ns
+    /// conversion runs out of resolution: at ~3.8 GHz the floor is 70-72 cycles,
+    /// which rounds to 18-19 ns, so *every* value from 68 to 76 cycles is one of
+    /// two integers. A check whose whole content is "is this at or below 70?"
+    /// cannot be run on a number that quantises in steps of four.
+    min_cycles: u64,
     /// Index into [`MEASUREMENTS`] of the window this entry was measured in.
     ///
     /// Carried so the log can *state* the live-name/scored-name correspondence
@@ -1180,6 +1278,7 @@ fn record(name: &'static str, result: &BenchResult, target_ns: Option<u64>) {
         mean_ns: result.mean_ns,
         iterations: result.iterations,
         split: result.split,
+        min_cycles: result.min_cycles,
         seq: result.seq,
     });
     // Mark the *measurement* covered, keyed by index rather than by name.
@@ -1312,6 +1411,87 @@ fn print_scorecard() {
                 if m.name != entry.name {
                     serial_println!("[bench] MEASURED-AS {} {}", entry.name, m.name);
                 }
+            }
+        }
+    }
+
+    // Below-floor check: is each scored benchmark running at all?
+    //
+    // See [`HARNESS_FLOOR_CYCLES`] for the reasoning. Briefly: three benchmarks
+    // have shipped fully optimised away, and every statistic the harness
+    // computes was clean on all three, because a benchmark that measures nothing
+    // measures it very repeatably. Only a physical lower bound distinguishes
+    // "fast" from "absent", and the empty closure is it.
+    //
+    // Two lines, not one, and the first prints unconditionally. The FLOOR line
+    // states the bound and the closest entry to it, so the *margin* is visible
+    // on every run rather than only on the runs that trip. That is the same
+    // reason the split summary prints its worst spread when nothing is unstable:
+    // a check whose output is empty until the day it fires gives a reader no way
+    // to tell "nothing is near the floor" from "the check is broken" — and this
+    // one has a specific way of silently breaking, namely no sample having been
+    // taken, which is why `u64::MAX` is reported rather than skipped.
+    {
+        let floor = HARNESS_FLOOR_CYCLES.load(Ordering::Relaxed);
+        if floor == u64::MAX {
+            serial_println!(
+                "[bench] FLOOR unmeasured (no empty-closure sample taken this boot) — \
+                 {} scored entries were NOT checked for being optimised away",
+                entries.len()
+            );
+        } else {
+            // Closest approach to the floor, reported as the raw pair rather
+            // than a ratio. A percentage invites reading a few cycles of
+            // difference as meaningful, and it is not: the floor is a property
+            // of host load, and has been observed at 70 cycles on an idle host
+            // and 428 with three lane builds running. Only the *ordering*
+            // against the floor from the same boot carries information; the
+            // ratio does not survive being compared across boots, and printing
+            // one would invite exactly that.
+            let mut closest: Option<(&'static str, u64)> = None;
+            let mut below = 0u64;
+            for entry in &*entries {
+                if entry.min_cycles <= floor {
+                    below = below.saturating_add(1);
+                    // States the finding and the one benign explanation, rather
+                    // than only the alarming one. The floor window runs 1000
+                    // iterations and scored windows run 1000-5000; more draws
+                    // can only lower a minimum, so a genuinely tiny benchmark
+                    // with a long window can dip below a floor measured over a
+                    // short one. That is the sole known way this fires on
+                    // honest code, it is checkable from `iters` on the two live
+                    // result lines, and naming it here is what stops the first
+                    // false positive from discrediting the check.
+                    serial_println!(
+                        "[bench] BELOW-FLOOR {} min={} cycles <= harness floor {} cycles \
+                         [{} iters] — nothing costs less than an empty closure, so either the \
+                         compiler removed the code this names, or its longer window out-drew \
+                         the {}-iteration floor sample. Check the disassembly before the latter.",
+                        entry.name,
+                        entry.min_cycles,
+                        floor,
+                        entry.iterations,
+                        FLOOR_SAMPLE_ITERATIONS
+                    );
+                }
+                if closest.is_none_or(|(_, c)| entry.min_cycles < c) {
+                    closest = Some((entry.name, entry.min_cycles));
+                }
+            }
+            match closest {
+                Some((name, cycles)) => serial_println!(
+                    "[bench] FLOOR {} cycles (empty closure); {}/{} scored entries at or below it; \
+                     closest {} at {} cycles",
+                    floor,
+                    below,
+                    entries.len(),
+                    name,
+                    cycles
+                ),
+                None => serial_println!(
+                    "[bench] FLOOR {} cycles (empty closure); no scored entries to check",
+                    floor
+                ),
             }
         }
     }
@@ -2792,6 +2972,21 @@ pub fn run_all() {
     serial_println!("[bench] === Kernel micro-benchmarks ===");
     // Clear scorecard from any previous run.
     reset_suite_state();
+
+    // Second empty-closure sample, taken here rather than only in `self_test`.
+    //
+    // `self_test` runs early in boot and this runs minutes later, and the
+    // harness's floor tracks host load, not the build: 428 cycles under three
+    // concurrent lane builds against 70 on an idle host. Sampling next to the
+    // benchmarks this bound is applied to is what keeps the bound and the
+    // measurements in the same conditions. Folded in as a minimum, so whichever
+    // sample caught the quieter moment is the one that governs — see
+    // [`HARNESS_FLOOR_CYCLES`].
+    //
+    // Not reset by `reset_suite_state`: the `self_test` sample is a valid
+    // observation of this boot's floor whether or not the suite is re-run, and
+    // discarding it could only raise the bound, which is the unsafe direction.
+    let _ = sample_harness_floor("harness_floor_suite");
 
     // Note: iteration counts are kept modest because these run during
     // boot under QEMU emulation.  For real hardware benchmarks, increase
@@ -7777,14 +7972,28 @@ pub fn self_test() {
     serial_println!("[bench]   cycles_to_ns: OK ({}Hz → {}ns)", freq, ns);
 
     // Run a trivial benchmark.
-    let result = run_diagnostic("self_test_nop", 1000, || {
-        core::hint::black_box(42);
-    });
+    //
+    // This window has a second job beyond checking that the runner runs: its
+    // minimum *is* the harness's per-sample floor, and every scored benchmark is
+    // checked against it at the end of the suite. See [`HARNESS_FLOOR_CYCLES`]
+    // for why an empty closure is the only sound floor and why the check warns
+    // rather than fails.
+    //
+    // Deliberately the existing control rather than a second empty-closure
+    // window measured inside `run_all`: a private copy would be one more
+    // instance of the failure `net::checksum` was just unified to remove — two
+    // sources for one number, free to disagree about cost while agreeing about
+    // purpose. The name is also load-bearing outside this file
+    // (`scripts/canary-load.py` and its test fixtures key on it), so it stays.
+    let result = sample_harness_floor("self_test_nop");
     assert!(
         result.min_cycles < 10000,
         "NOP benchmark should be very fast"
     );
-    serial_println!("[bench]   Benchmark runner: OK");
+    serial_println!(
+        "[bench]   Benchmark runner: OK (harness floor sample {} cycles)",
+        result.min_cycles
+    );
 
     serial_println!("[bench] Self-test PASSED");
 }

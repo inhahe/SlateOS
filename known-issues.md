@@ -46659,6 +46659,53 @@ caveat to handle when writing it: the nop control runs 1000 iterations while
 scored benchmarks run 1000–5000, and more rounds means a lower minimum, so the
 floor is mildly optimistic and the check should warn rather than fail.
 
+**IMPLEMENTED, 2026-08-21** — `HARNESS_FLOOR_CYCLES` / `sample_harness_floor` /
+the `FLOOR` and `BELOW-FLOOR` lines in `print_scorecard`. The warn-not-fail
+caveat above was honoured, but the design as sketched here had a defect that
+only showed up in a boot log, and it is worth recording because the sketch reads
+as obviously safe:
+
+> **The floor is not a property of the build. It is a property of the host's
+> load during the window that measured it.**
+
+The boot of 02:17 measured `self_test_nop` at **428 cycles**. The 01:38 boot, on
+the same host and an all-but-identical kernel, measured **70**. The difference
+was three lanes compiling at once. Since `bench::self_test()` runs early in boot
+and `bench::run_all()` some six minutes later, a floor sampled during a build
+storm and applied to a suite that ran after it lifted would have declared most
+of the scorecard "not running" — the check crying wolf on its first live fire,
+which for a check whose entire value is being *believed* when it fires is worse
+than not having it.
+
+Three consequences, all now in the code:
+
+- **Sample more than once, spread apart in time** — `self_test` and again at the
+  top of `run_all`, so at least one sample sits next to the benchmarks the bound
+  is applied to.
+- **Combine the samples with `fetch_min`, not "latest wins".** A lower floor
+  flags less. For a warn-only check erring toward false negatives, that is the
+  only safe direction, and it means whichever sample caught the quieter moment
+  governs.
+- **`u64::MAX`, not `0`, is the unmeasured sentinel**, so that "no sample" cannot
+  be confused with "a floor of zero", which would silently pass everything.
+
+Two smaller decisions worth stating. The samples go through **one** function
+rather than an empty closure written out at each site — the copy risk here is
+not theoretical, since `measure_access_at` already caught LLVM fully unrolling an
+empty constant-trip-count loop while leaving the real one rolled, and a floor
+compiled differently from the windows it bounds is a floor measuring something
+else. And `ScoreEntry` carries `min_cycles` alongside `measured_ns` because the
+check operates exactly where the ns conversion runs out of resolution: at
+3.66 GHz every value from 68 to 76 cycles rounds to 18 or 19 ns, so a check
+reading "is this at or below 70?" cannot be run against nanoseconds.
+
+The `FLOOR` line prints unconditionally, carrying the bound and the closest
+scored entry to it, for the reason the split summary prints its worst spread
+when nothing is unstable: a check that emits nothing until the day it fires
+leaves a reader unable to distinguish "nothing is near the floor" from "the
+check is broken" — and this one has a specific silent-breakage mode, namely no
+sample having been taken.
+
 **Aside, logged because it recurred while fixing the above:** the verification
 build was launched as `run-timeout.py … cargo build -p kernel | tail -25`. It hit
 its 900 s timeout and was killed — and the tool reported **exit code 0**, because
@@ -46758,6 +46805,45 @@ pins RFC 1071 §3's own worked example (an *external* vector, so it cannot share
 a bug with a test written from this code), the high-side padding of an odd
 trailing byte, split-invariance of the accumulator, the stamp-and-verify round
 trip, and the 64 KiB worst case that the module's no-overflow claim rests on.
+
+**Verified in the machine code, not inferred from the benchmark.** The open
+question the unification left was whether routing every site through one
+`sum_bytes` would actually make them *compile* the same, given that LLVM is free
+to inline it per-site and re-diverge — which is exactly what it did do: there is
+still no `sum_bytes` symbol in the post-unification kernel, and `tcp_checksum`
+is still inlined into `bench::run_all` with no symbol of its own. Inlining was
+deliberately not pinned with `#[inline(never)]`, on the grounds that pinning it
+is a decision to make *from* a measurement rather than in anticipation of one.
+The measurement, taken with `llvm-objdump -d --disassemble-symbols=` on the
+`faa834d4b +uncommitted` build:
+
+```
+; both inlined copies inside bench::run_all, and the out-of-line tcp_checksum_v6
+ffffffff80aa7d13: movzwl (%rdx,%r9), %r11d      ; word 0
+ffffffff80aa7d18: movzwl 0x2(%rdx,%r9), %ebx    ; word 1
+ffffffff80aa7d31: movzwl 0x4(%rdx,%r9), %ebx    ; word 2
+ffffffff80aa7d43: movzwl 0x6(%rdx,%r9), %esi    ; word 3
+ffffffff80aa7d52: addq   $0x8, %r9              ; eight bytes / four words
+ffffffff80aa7d56: addq   $-0x4, %r10
+ffffffff80aa7d5a: jne    …+0x1b163
+ffffffff80aa7d61: …                             ; + a 1x remainder loop, addq $0x2
+```
+
+All three checksum benchmarks — v4, v6 and the 20-byte IPv4 header
+(`movq $0x14` = length 20, at `+0x1b29c`) — now carry byte-identical loop
+shapes, unrolled 4× with a 1× tail. The 4× / 2× / not-at-all divergence is gone.
+So **`#[inline(never)]` is not needed and was not added**: LLVM still inlines at
+every site, but it now compiles every site the same way, which is the property
+the benchmark pair actually depends on. Pinning inlining would have bought
+nothing and cost a call on every short checksum in the stack.
+
+Worth separating the two claims, because conflating them is what made the
+original bug invisible: *sharing a source function* did not by itself make the
+copies share code — it made the copies present LLVM with the same inlining
+input, which is what made its decisions agree. That is a weaker guarantee than
+one out-of-line function, and it is checked rather than assumed; if a future
+LLVM diverges again the disassembly command above is the check, and
+`#[inline(never)]` is the fix.
 
 **Two general lessons, both of which cost a full measure-and-conclude cycle
 here:**

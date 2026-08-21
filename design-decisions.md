@@ -28599,6 +28599,87 @@ CPython's: whether our ext4 driver, `mmap`, tty and `getrandom` behave the way
 
 ---
 
+## §345 — A pseudo-terminal is a kernel object, because its `termios` is shared by two processes and its `^C` cannot wait for a reader
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** A pseudo-terminal lets one program run another *as if the second
+were sitting at a terminal* — that is how `ssh` gives you a shell, how a
+graphical terminal window works, and how `sudo` can prompt for a password. We
+had none, and I had to choose where to build it: inside our C library (which
+Lane B owns and could ship today) or inside the kernel (which Lane A owns, so it
+becomes a request and a wait). I chose the kernel. Two specific things make the
+library version not merely worse but *incorrect*, and both were found by
+designing it rather than by assuming.
+
+### The two blockers
+
+1. **`termios` is shared state across an address-space boundary.** `termios` is
+   the settings word for a terminal — whether typed characters are echoed back,
+   whether input is delivered a line at a time or a key at a time, which key
+   means "interrupt". The shell holds one end of the pty and calls `tcsetattr`
+   to switch echo off for a password prompt; the terminal emulator holds the
+   other end and must stop echoing *immediately*. Those are two processes. A
+   libc-side pty built on two socketpair endpoints has nowhere to keep that one
+   shared word — each side would have its own copy, and they would disagree the
+   moment either changed it. The visible failure is a typed password appearing
+   on screen.
+
+2. **`^C` must fire when it is typed, not when someone next reads.** A
+   userspace line discipline only executes inside a `read()` call. A program in
+   a compute loop calls no `read()`, so it would be uninterruptible — which is
+   the exact case `^C` exists for. Only something that sees the keystroke
+   independently of the reader can deliver `SIGINT` on time, and in this system
+   that is the kernel.
+
+### The alternative, stated fairly
+
+The libc version had real merits and I do not want them lost. It needs no other
+lane, so it could land immediately rather than waiting on a request; it keeps
+policy out of the kernel, which is what the microkernel design in `design.txt`
+asks for; and `HandleKind::UnixStream` already gives an inheritable, refcounted,
+kernel-backed bidirectional byte channel to build on, so the plumbing existed.
+It fails only on the two points above — but those two are not edge cases, they
+are the first two things any real user of a pty does.
+
+### The tension this decision carries
+
+`design.txt` says drivers live in userspace and the kernel holds only the
+scheduler, memory manager, IPC, capabilities and interrupt routing. A line
+discipline is none of those five, so putting one in the kernel is a genuine
+departure from the stated architecture, and I am recording that rather than
+glossing it.
+
+Two things make it the right call anyway. First, the kernel *already contains
+this exact code*: `kernel/src/tty.rs` is 1086 lines of canonical-mode editing,
+`VMIN`/`VTIME` handling and `ISIG` signal generation for the physical console.
+The choice is not "add a discipline to the kernel" but "have one discipline or
+two", and two would diverge. Second, the pure alternative — a userspace pty
+*service* that owns the pairs and answers over IPC — needs slave reads and
+writes to be routed from an arbitrary process's fd out to that service, which is
+a FUSE-like filesystem-server mechanism we do not have. That is a much larger
+project than the pty, and building the pty first does not preclude it: if the
+service mechanism ever lands, the pty is a natural early tenant, because the
+object's interface (create pair, read, write, get/set termios, hang up) does not
+change with its location.
+
+### Consequence
+
+Filed as `requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`.
+The request deliberately asks for a *generalisation* of `tty.rs` from one
+hardcoded device to N — four shallow couplings (three globals, the hardwired
+`keyboard::read_char` input source, the hardwired echo sink, and a
+console-specific foreground-pgrp lookup) — rather than for new code, because
+`feed()`, `LineBuf`, the `VMIN`/`VTIME` matrix and the `ISIG` classifier are
+already device-independent and already self-tested.
+
+Nothing in `posix/src/pty.rs` needs to change when it lands: `openpty`,
+`forkpty` and `login_tty` were written as the real glibc/musl algorithm over the
+real primitives precisely so they would start working with no edit.
+
+---
+
 ## §493 — The extra clocks surface in the calendar popup, not stacked in the tray
 
 **Date:** 2026-08-21
@@ -28921,6 +29002,325 @@ tests proved real by reintroduction: making `is_live` always return true fails
 the grant-expiry test, dropping the denial exemption fails the refusal test, and
 replacing `saturating_sub` with `-` panics the backwards-clock test with
 `attempt to subtract with overflow`.
+
+## §497 — Window decorations are scaled per-window from the display the window mostly sits on, and the scale is re-derived every frame rather than maintained on every move
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** A "scale factor" is how a computer copes with a screen whose
+pixels are physically tiny — a 4K laptop panel reports "draw everything twice
+as big" so a 30-pixel title bar does not come out 4 mm tall. The compositor has
+carried each display's scale factor since it was written, and *told clients
+about it over the wire*, but never used it for anything it drew itself. So on a
+HiDPI screen every window's title bar was half the height it should be and every
+close button a quarter of the area — small enough to be genuinely hard to click.
+This entry records three choices made in fixing that: which display a window
+"belongs to" when it straddles two, when the scale is recomputed, and what does
+*not* get scaled.
+
+### What was actually wrong
+
+`Display::scale_factor` existed from the first version of the compositor. Its
+only reader was `wire.rs`, which reports it to clients. Every decoration the
+compositor drew — title bar, borders, buttons, drop shadow, title text — came
+from unscaled constants (`TITLE_BAR_HEIGHT = 30`, `TITLE_BUTTON_SIZE = 20`,
+`SHADOW_SIZE = 8`, `BORDER_WIDTH = 1`). This is the recurring shape of fault in
+this tree: the correct answer was present and callers could not reach it.
+
+### Decision 1 — a window belongs to the display it overlaps most
+
+*What changes:* a window dragged three-quarters of the way onto the second
+monitor is drawn at the second monitor's scale, not the first's.
+
+| Option | Argument for | Argument against |
+|---|---|---|
+| The display containing the top-left corner | One comparison; no ties to break | Gives the wrong answer for exactly the window a user would ask about — the top-left corner is the *last* part to cross the seam, so a window nine-tenths onto the second monitor keeps the first monitor's decorations |
+| **Largest intersection** (chosen) | Matches what the user sees; the answer changes when the window's centre of mass changes | Needs a tiebreak, and needs the tiebreak to be deterministic |
+
+The tie — a window split into exact halves — goes to the rightmost display,
+because `max_by_key` returns the last maximum. Either answer is defensible; what
+mattered was that it not depend on the order displays were hotplugged in. It is
+pinned by a test so that changing it has to be deliberate.
+
+A window overlapping *nothing* — dragged into a gap between monitors, or off the
+virtual desktop entirely — answers the primary display rather than "no display".
+There is no such thing as "no scale", and falling back to the primary keeps such
+a window drawn at the size it had before it was dragged off-screen.
+
+### Decision 2 — the scale is derived before use, not maintained on move
+
+*What changes:* nothing observable. This is about where the bug will be when
+someone adds the next window-placement feature.
+
+The obvious implementation sets `window.scale_factor` at each site that moves a
+window: `move_window`, maximize, restore, tile, snap, display hotplug. That is
+six sites today. The chosen implementation is a single
+`Compositor::refresh_window_scales` that recomputes every window's scale, called
+at the top of `compose_frame` and at the top of `handle_input`.
+
+The argument is the same one that made `route_window_list` compare bytes instead
+of counting epochs (§494/§495): **a value recomputed before use has no site to
+forget; a value maintained at N mutation sites does.** And a forgotten bump here
+does not fail loudly — the window simply keeps the old monitor's decorations,
+which presents as a rendering bug a long way from the placement code that caused
+it.
+
+The cost is one rectangle intersection per window per display per frame, on a
+list that is tens of entries long. Next to compositing millions of pixels it
+does not register.
+
+Two details that are not arbitrary:
+
+- **The refresh runs *before* `compose_frame`'s damage check.** The growth of
+  the frame *is* the damage. Asking "is there anything to draw?" first would
+  answer no and leave the window at the old display's size until something
+  unrelated dirtied it.
+- **Input routing refreshes too, and needs it more often than compositing
+  does.** A drag delivers pointer motion far faster than frames are composed, so
+  a window dragged onto a higher-DPI display would otherwise be hit-tested
+  against the previous display's title-bar height for the rest of the frame —
+  the grab would slip out from under the pointer mid-drag, which is the one
+  moment a user would notice.
+
+Which display a window is on is decided from the **client** rect, not the outer
+rect. Using the outer rect would be circular: the outer rect is the client rect
+plus decorations, decorations are sized by the scale, and the scale is what is
+being computed. Feeding the result back into its own input lets a window sitting
+astride a seam alternate between two scales forever, repainting every frame.
+
+### Decision 3 — the client area is not scaled
+
+*What changes:* a client's window does not silently change size when it is
+dragged to another monitor.
+
+`Window::scale_factor` scales only what the compositor draws. `width`/`height`
+are the client area in physical pixels and are the client's to choose: a client
+is told its display's scale over the wire and decides for itself whether to
+render larger or to render the same content at more pixels. Scaling the client
+area in the compositor would resize windows behind their owners' backs, which is
+a worse bug than the one being fixed.
+
+### Two rounding traps, both real
+
+`scale_dimension` clamps to a minimum of one **display pixel**, and clamps the
+float before the cast rather than the integer after it.
+
+- `BORDER_WIDTH` is 1, so any scale below 1.5 rounds it to 1 or to **0**. A 0 px
+  border is not a thin border; it is a window whose edge cannot be grabbed to
+  resize it, because `detect_border_drag` reads the same inset. Sub-1x scales
+  are real — a 4K panel driven at a fractional scale, or a projector configured
+  down.
+- The `f32` to `u32` cast saturates at 0 for a negative or NaN scale, and a
+  `u32` clamp applied afterwards cannot tell that apart from a legitimately tiny
+  result. Clamping the float first means a nonsense scale produces a usable size
+  rather than an invisible one.
+
+A dimension that was *already* zero stays zero: that is the undecorated case,
+and inventing a 1 px title bar for a tooltip would be worse than the bug being
+guarded against.
+
+### Where the scale had to reach, beyond the obvious
+
+`Window::frame_insets` is documented as the single chokepoint all decoration
+geometry derives from, so scaling there carried hit testing, damage and drag
+detection for free. Four things sat outside it and each was a separate bug:
+
+| Site | Symptom if left unscaled |
+|---|---|
+| `render_shadow`'s layer count | An 8-layer shadow inside a 16 px allowance: a drop shadow that stops halfway, ending in a hard edge |
+| `render_shadow`'s alpha falloff | A fixed step of 5 over 16 layers reaches zero alpha half-way out — the same hard edge by a different route |
+| `window_drawn_extent` | Damage tracking repaints an 8 px allowance around a 16 px shadow, leaving a smear nothing cleans up |
+| The title font size | A 16 px title inside a 60 px bar — the visible half of the whole bug, and the half a user notices first |
+
+The falloff is now derived from the layer count (`SHADOW_ALPHA / extent`) rather
+than being a constant per-layer step. At the unscaled extent of 8 this is
+`40/8 = 5`, exactly the constant it replaces, so 1x rendering is bit-identical.
+
+`TitleBarLayout` carries the scale alongside the rectangles for the reason that
+struct exists at all: the renderer needs the several decoration dimensions that
+are *not* rectangles, and threading the scale as a separate argument would let a
+caller hand one function's rectangles to another function's scale.
+
+### Verification
+
+Ten separate reintroductions, each confirmed to fail deterministically and to
+name the right test: unscaling `frame_insets`, the buttons and `shadow_extent`;
+removing the refresh from `compose_frame` and from `handle_input`; restoring
+`window_drawn_extent` to the raw constants; dropping the one-pixel floor from
+`scale_dimension`; switching `display_for` to the top-left-corner rule;
+damaging only the new box rather than both; and looping `render_shadow` over the
+raw `SHADOW_SIZE`.
+
+---
+
+## §498 — Rounded rectangles are rasterized as scanline spans inside the compositor, with coverage carried on the existing opacity channel rather than a new backend primitive
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** Lots of things on screen are supposed to have rounded corners —
+buttons, tabs, menus, the window frames themselves. Every one of them was
+asking for rounding, that request was being carried faithfully all the way
+across to the display server, and then the very last piece of code — the one
+that actually colours pixels — threw the request away and drew a square. So
+nothing in the entire graphical system has ever had a round corner. This entry
+records how the drawing was implemented and the three judgement calls it
+needed.
+
+**The bug.** `RenderEngine::execute_command` in `gui/compositor/src/lib.rs`
+matched `RenderCommand::FillRect`, `StrokeRect` and `BoxShadow` and bound
+`corner_radii: _` on all three — the Rust spelling of "there is a field here
+and I am deliberately ignoring it". Producers were everywhere and correct:
+`guitk`'s widget borders, the SVG renderer's `rx`/`ry`, the tab strip, the
+launcher's search field, the power menu, the resource monitor, and the desktop
+shell's `corner_radii()` fed from the user's `WindowCorners` setting. The wire
+protocol serialized them faithfully (`gui/remote/src/lib.rs`'s `write_radii` /
+`read_radii`). There is exactly one rasterizer, and it discarded them.
+
+**This is the sweep's recurring shape yet again**, with a twist worth naming:
+usually the tree holds one correct answer that callers cannot reach. Here every
+*caller* was correct and the single implementation was the one that had quietly
+opted out — and because a square corner is a perfectly plausible-looking
+rectangle, nothing about the output announced that a setting was being ignored.
+A user who chose `Square` and a user who chose `ExtraRounded` got identical
+pixels.
+
+### Decision 1 — spans in the render engine, not a new `RenderTarget` method
+
+`RenderTarget` is the seam between the compositor and its backends (software
+`Framebuffer`, `RenderBackend`, the test `Recorder`, and a GPU path later). A
+rounded rectangle could have been a new trait method, letting a GPU backend
+draw it in one shader pass.
+
+| | Trait method | Scanline spans above the seam |
+|---|---|---|
+| Backends to implement | every one, now and future | none |
+| GPU quality | ideal — analytic in a shader | quads, as good as the CPU path |
+| Draw calls, 48×48 at r=12 | 1 | ~1 + 3 per corner scanline ≈ 76 |
+| Risk of two backends disagreeing | real | none — one implementation |
+
+Chosen: **spans above the seam.** The decisive argument is not the effort of
+implementing it four times, it is that implementing it four times means four
+chances for the arc to differ, and this codebase has just spent three entries
+on bugs that were exactly "the same shape computed two ways". A GPU backend
+that wants the shader version can add the trait method later as an
+*optimisation of a behaviour that is already defined and tested*, which is a
+much safer thing to add than a behaviour.
+
+The cost is bounded by construction and that is what makes it affordable:
+`RoundRect::new` returns `None` for any radius under half a pixel, so
+`CornerRadii::ZERO` — which is what almost every command in the tree carries —
+falls through to the flat `fill_rect` completely untouched. And the rounded
+path only walks scanlines *in the corner bands*; the straight middle of a
+window, which is nearly all of it, stays a single quad. A tall window's border
+costs three quads plus its corners, not one per row.
+
+### Decision 2 — coverage rides in on `opacity`, and only horizontal coverage is measured
+
+An arc drawn to whole pixels is visibly jagged at the 16 px radius that
+`WindowCorners::ExtraRounded` asks for. Antialiasing needs a way to say "this
+pixel is 40% covered", and there was no coverage channel.
+
+There did not need to be one. For a solid colour, a pixel 40% covered by an
+opaque fill and a pixel fully covered by a 40%-transparent fill composite to
+exactly the same result, and `RenderTarget::fill_rect` already blends by
+opacity. So a 1×1 fill at `opacity × coverage` *is* an antialiased pixel, and
+every backend already implements it. No new channel, no new method.
+
+The approximation taken: **horizontal coverage only.** Each scanline of the
+shape is one span, and the pixel at each end is blended by the fraction of it
+the span covers. Where the arc runs steeply — the middle of each quadrant —
+this is very nearly exact. Where it runs flat, at the extreme top and bottom of
+a corner, it understates the smoothing. The exact alternative is per-pixel area
+sampling over each corner's bounding box, which is `radius²` blends per corner
+instead of two per scanline: 1024 blends for a single 16 px corner against 32.
+At the three radii this codebase actually uses (4, 8, 16 — `WindowCorners`) the
+difference is not visible, and the cost ratio is thirty-fold.
+
+All of it goes through one function, `RenderEngine::fill_span_row`. Both the
+fill and the outline reduce to spans and route through it, so a curve cannot be
+smooth in a fill and jagged in the outline drawn on top of it.
+
+### Decision 3 — the outline is "outer shape minus inner shape", sharing the fill's arc code
+
+`stroke_round_rect` could have drawn four arcs of its own. Instead it builds
+the inset shape with `RoundRect::inset_by` and, per scanline, paints the two
+gaps between the outer span and the inner one.
+
+The reason is the failure mode, not the line count: an outline whose curve is
+computed differently from the fill it surrounds parts company with that fill by
+a pixel somewhere along the arc, and the result is a border that floats free of
+its own window at the corners. Sharing `RoundRect::span` makes that
+unrepresentable. There is a test for it — the outline may not paint a single
+pixel the fill does not cover — and it is a real one: reintroducing a
+separately-computed outer curve fails it.
+
+The straight middle is still coalesced into two vertical bars rather than walked
+per row, with a guard for the case where a border thick enough to meet in the
+middle would otherwise blend the overlap twice and leave a darker stripe.
+
+### Decision 4 — a shadow's rounding grows with the shadow
+
+`BoxShadow` is drawn as a solid rectangle expanded by `spread + blur`. Its
+radii are now expanded by the same amount rather than used as-is, because a
+shadow is a copy of its box pushed outward: at the same radius as the box it
+would be visibly *squarer* than the thing casting it, and its corners would
+stick out past the curve they are meant to sit behind.
+
+### Two clamps that are not cosmetic
+
+- **Overlapping radii.** A client picks the radii and is under no obligation to
+  pick sensible ones. `RoundRect::new` applies CSS Backgrounds 3 §5.5: two radii
+  sharing a side may not together exceed it, and when any pair does, *every*
+  radius is scaled by the same worst-case factor — scaling only the offending
+  pair rounds one corner of a small box and leaves its neighbour square, which
+  reads as a bug rather than as a clamp. Without this, `r² - dy²` stays positive
+  far outside the box and the span walks off the shape.
+- **Corner bands that would cross.** The side rule above does not imply it:
+  radii on opposite ends of a diagonal each satisfy it at a full `height` yet
+  together span twice it. Unclamped, the middle quad's height underflows to
+  roughly four billion rows.
+
+### Verification
+
+Twelve tests, and — as in §497 — each was put to a reintroduction of the bug it
+claims to guard. The first pass caught 8 of 11 and the three misses were worth
+more than the eight hits:
+
+- **The hollow-outline test probed only the centre of the shape**, which lies
+  in the straight middle band — code that coalesces into two bars and never
+  consults the inner shape at all. An outline that had entirely forgotten to
+  hollow itself out still left that pixel bare and passed. Fixed by probing a
+  scanline that runs through the rounded corners too.
+- **The "a tiny radius draws what the flat path draws" test cannot fail**, for
+  the structural reason that a tiny radius takes the flat path — so it never
+  enters the scanline code and no arithmetic error inside it can reach the
+  assertion. It is kept, because what it does pin (the fall-through, on which
+  every pre-existing decoration test depends) is worth pinning, but a second
+  test was added that actually runs the rounded path and compares its straight
+  middle against the flat primitive row for row. That one catches a band
+  boundary off by one, which shows up as a seam down a window's side where no
+  corner assertion would ever look.
+- **The nonsense-radius test does not guard the `sane` filter**, and this is
+  recorded rather than papered over. Removing the filter leaves the behaviour
+  unchanged, because degradation to a square is overdetermined three ways at
+  once: `f32::max` discards NaN in favour of its other operand, `NaN > 0.0` is
+  false so the overlap clamp skips it, and `NaN as u32` saturates to zero,
+  collapsing both corner bands. The filter is kept anyway — "correct by
+  accident along three independent paths" is not a property anyone can
+  maintain, and the next edit to any one of them would break it silently — but
+  the test is documented as pinning the user-visible behaviour rather than the
+  line, which is the honest claim.
+
+The other reintroductions, each failing deterministically and naming the right
+test: discarding a client's radii in `execute_command` (the original bug);
+drawing a chamfer instead of a quarter circle; snapping spans to whole pixels
+so nothing is antialiased; dropping the overlap clamp; never hollowing an
+outline; giving the outline its own curve; forcing every corner to the largest
+radius; sending a span straight to the framebuffer past the clip stack;
+disabling rounding entirely; starting the middle band a row late; and making
+the middle quad a pixel narrow.
 
 ---
 

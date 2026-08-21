@@ -48834,13 +48834,80 @@ a comment where it stood saying why it must not come back. The two `unistd`
 tests take the lock and establish the value they assert on instead of assuming
 it.
 
-**Generalisation not yet done.** This is the second global in this crate to need
-a test lock retrofitted after producing flakes (`ENV_STORE` was the first). The
-crate has other process-global mutable statics — an audit for "global mutable
-static, written by more than one test, no lock" would likely find more, and is
-worth doing before the next intermittent failure rather than after. Logged here
-rather than done now because it is a separate piece of work with its own risk of
-churn across many test modules.
+**Generalisation.** This is the second global in this crate to need a test lock
+retrofitted after producing flakes (`ENV_STORE` was the first). The audit that
+this entry originally deferred **was done** the same day — see the next entry —
+and found exactly one more, in `stdio`. The method that worked was a shuffled
+soak, not static analysis; see there for why.
+
+---
+
+## B-THE-STDIO-BUFFER-RACE-THAT-A-GREEN-TEST-RUN-COULD-NOT-SEE — 2026-08-21 — FIXED
+
+**In short:** `cargo test -p posix` passed every time you ran it normally, and
+failed 26 times out of 30 once the test *order* was randomised. Three `fclose`
+tests were reading a `stdout` buffer that ten unrelated `wchar` tests write to.
+Nothing is wrong with the library — this is purely an artefact of how the tests
+run on the host — but the tests are now locked, and the guard cleans up on the
+way out as well as on the way in.
+
+**Symptom.** `stdio::tests::test_fclose_stdout_flushes_only` (and its `stdin` /
+`stderr` siblings) assert `fclose` returns `0`. Under randomised ordering they
+returned `EOF`. Under the default alphabetical order they never did — which is
+why 20418 passing tests had said nothing about it.
+
+**Root cause, and why it is a host-test artefact rather than a library bug.**
+`posix/src/syscall.rs::syscall2` has a `#[cfg(not(target_os = "none"))]` arm
+that returns `HOST_ENOSYS` unconditionally. So in a host `cargo test` build,
+every `write()` to a `HandleKind::Console` fd *always fails*. `fclose` on a
+stream with a non-empty buffer must flush, the flush cannot succeed, and
+`fclose` correctly reports `EOF`. On the real target the write reaches the
+console and the same code returns `0`. Do not "fix" `fclose`.
+
+That makes the tests' real precondition "the stdout buffer is empty" — which
+holds only if no other test has written to it. Ten tests in `wchar.rs`
+(`fputwc` / `putwc` / `fputws` against `stdout`) leave bytes there.
+
+**How it was found — the method matters more than the bug.** Three attempts at
+finding this by static analysis (grepping for globals, matching writer function
+names) all produced garbage: one classifier confidently reported that 26 files
+wrote `SIM`, 25 wrote `AIO_LOCK`, 24 wrote `TIMEX_LOCK`, all from over-broad
+name matching. What worked was empirical:
+
+```
+RUSTC_BOOTSTRAP=1 cargo test -p posix --target x86_64-pc-windows-gnu \
+    -- -Z unstable-options --shuffle
+```
+
+varying `RUST_TEST_THREADS` over 8 / 32 / 64. 30 runs, **26 failing**. Then
+`--shuffle-seed N` with `--exact` to pin the order: 3 of 3 fail when the `wchar`
+tests run first, 3 of 3 pass when they run second. A deterministic split like
+that is proof of order-dependence, not of a concurrency race — an important
+distinction, because my first hypothesis (a pure race, inferred from eight
+passing single-threaded seeds) was wrong, as was my second (that the poisoner
+lived in `stdio.rs`).
+
+**Fix.** `posix/src/stdio.rs` gains `STD_STREAM_TEST_LOCK` and
+`lock_std_streams_for_test()`, returning a `StdStreamTestGuard` rather than a
+bare `MutexGuard`. The guard purges the three standard streams' buffers *both*
+on acquisition and **in `Drop`**. The drop half is the point: a test that writes
+to `stdout` cannot leave residue for the next test even if its author never
+thought about cleanup, so correctness does not depend on every future test
+remembering. A plain `MutexGuard` would leave that obligation with the caller —
+the same "looks sufficient, isn't" trap the deleted `PersonalityGuard` fell
+into. The three `fclose` tests and the ten `wchar` tests take the lock.
+
+**Verification.** The identical 30-run shuffled soak that produced 26 failures
+now produces **0**, and the three previously-deterministic-failing seeds (2, 4,
+6) pass.
+
+**Bound on what remains.** The soak exercised all 20418 tests under randomised
+order across 30 runs and surfaced exactly *one* order-dependent test beyond the
+`personality` one — this. That is a useful negative result: the crate does not
+have a swarm of these, so the shuffled soak is worth keeping as an occasional
+check rather than a standing CI cost. It is not currently wired into any script;
+re-run the invocation above by hand after adding tests that touch process
+globals.
 
 ---
 
@@ -48864,9 +48931,15 @@ the first, which is how this was found.
 | Title bar height | `TITLE_BAR_HEIGHT = 30` | `TITLE_BAR_HEIGHT = 30.0` |
 | Display scaling | none | every dimension via `self.scale(…)` |
 | Rounded corners | none | `corner_radii()`, from the user's `WindowCorners` setting |
-| Drop shadow | none | yes |
+| Drop shadow | `render_shadow`, `SHADOW_SIZE = 8`, 8 layers | yes, its own |
 | Colours | `self.theme.title_bar_focused` / `close_button` / … | its own constants |
 | Is it on screen? | **yes** | no — no caller but the demo |
+
+*(Corrected: an earlier revision of this table claimed the compositor drew no
+shadow. It does — `Window::shadow_extent` and `Compositor::render_shadow`. The
+error is worth leaving visible here because it was made the same way the bugs
+in this entry were: by reading one side carefully and asserting something about
+the other without checking.)*
 
 **This is the sweep's recurring shape once more**, and the third instance
 found in two days: the tree held one correct answer that callers could not
@@ -48885,21 +48958,37 @@ tracking, and fullscreen's decoration suppression. Moving those to the shell
 would mean moving input routing to the shell, which contradicts the
 architecture. The shell's copy is the one to delete.
 
-**But deleting it plainly would lose three real features**, which is the actual
+**But deleting it plainly would lose two real features**, which is the actual
 work in this entry:
 
-1. **Display scaling.** The shell scales every decoration dimension by the
-   user's scale factor; the compositor hardcodes pixels. On a HiDPI display the
-   compositor's title bar is 30 physical pixels — a sliver. The scale factor
-   lives in `AppearanceSettings` and has to reach the compositor.
-2. **Corner radius.** The user's `WindowCorners` setting (`Square`/`Rounded`/…)
-   is honoured only by the shell's version.
-3. **Shadows.**
+1. **Display scaling.** ✅ **Done 2026-08-21.** *(Original text kept below; the
+   note at the end of this entry records what was built.)* The shell scales
+   every decoration dimension by the user's scale factor; the compositor
+   hardcodes pixels. On a 2× display the compositor's title bar is 30 physical
+   pixels — half the height it should be, with 20px buttons inside it.
 
-So the sequence is: teach the compositor the two settings it is missing, port
-the shadow, *then* delete `render_window_decorations` and `window_chrome` and
-the geometry fields on `ManagedWindow` that exist only to feed them. Not the
-other order — deleting first ships a visible regression on every HiDPI display.
+   The sharp part: **the compositor already knows the scale factor and does not
+   use it.** `Display::scale_factor` exists, is set per display, and is reported
+   out to clients over the wire (`wire.rs:357`) — and the only reads in the
+   whole crate are that report. The compositor tells every client how to scale
+   and then does not scale itself. So this is not "thread a setting in from the
+   shell"; the value is already in the struct next to the code that ignores it.
+
+   There is one chokepoint to change, which is why this is tractable:
+   `Window::frame_insets` is documented as the single place the geometry derives
+   from, precisely so decoration cannot be right in one place and wrong in
+   another — "hit testing, damage and drag detection included". Scaling there
+   carries the whole system. The one piece of design needed is how a `Window`
+   learns *which* display it is on, since `frame_insets` takes only `&self`.
+2. **Corner radius.** The user's `WindowCorners` setting (`Square`/`Rounded`/…)
+   is honoured only by the shell's version. Unlike the scale factor this genuinely
+   is not in the compositor yet and has to arrive from `AppearanceSettings`.
+
+So the sequence is: scale the compositor's decorations off the value it already
+holds, bring the corner-radius setting across, *then* delete
+`render_window_decorations` and `window_chrome` and the geometry fields on
+`ManagedWindow` that exist only to feed them. Not the other order — deleting
+first ships a visible regression on every HiDPI display.
 
 **Why this blocks the event loop** (`TD-C-THE-SHELL-CAN-DRAW-ITSELF-AND-NOBODY-CAN-ASK-IT-TO`):
 that entry says the loop should "re-render the five trees and submit them". Four
@@ -48924,6 +49013,345 @@ on another lane — `gui/compositor` and `gui/desktop` are both lane C's.
 because nothing exercises it, and the first person to wire the loop up
 naively gets doubled title bars and reasonably concludes the compositor is
 broken.
+
+
+**Progress 2026-08-21 — prerequisite 1 (display scaling) is done.** The
+compositor now scales its own decorations. See `design-decisions.md` §497 for
+the three decisions this needed; the mechanics, in brief:
+
+- `Window::scale_factor` (decorations only — never the client area, which is the
+  client's own pixels) is applied inside `Window::frame_insets`, the documented
+  chokepoint, so hit testing, damage and drag detection all moved with the
+  drawing rather than lagging it.
+- `DisplayManager::display_for` / `scale_for` answer "which display is this
+  window on" by largest intersection, not by which display holds the top-left
+  corner.
+- `Compositor::refresh_window_scales` recomputes every window's scale at the top
+  of `compose_frame` and of `handle_input`, rather than the six placement sites
+  each remembering to bump it.
+- Four things sat *outside* `frame_insets` and each was its own bug:
+  `render_shadow`'s layer count and its alpha falloff, `window_drawn_extent`'s
+  damage allowance, and the title font size. All four are now scaled; 1×
+  rendering is bit-identical to before.
+
+Nine new tests, each proved a real regression test by reintroducing the bug it
+guards (ten reintroductions in all, every one failing deterministically and
+naming the right test).
+
+**What is left in this entry is now prerequisite 2 and the deletion**: bring
+`WindowCorners` across from `AppearanceSettings` into the compositor, then
+delete `DesktopShell::render_window_decorations`, `window_chrome`, and the
+`ManagedWindow` geometry fields that exist only to feed them. The ordering
+argument above is unchanged — corner radius first, deletion second, because
+deleting while the compositor still draws square corners ships a visible
+regression for anyone who set `Rounded`.
+
+**Correction 2026-08-21 — there is a *third* feature, and the count above was
+wrong.** The entry has said since it was written that deleting the shell's
+renderer "would lose two real features". Re-reading
+`render_window_decorations` line by line before deleting it — which is the only
+way to be sure — turned up a third, and the same reading found that
+prerequisite 2 is not the narrow job the name "corner radius" suggests.
+
+3. **Two shadow behaviours the compositor does not have.**
+   - **The `drop_shadows` user toggle.** `AppearanceSettings::drop_shadows`
+     (`gui/appearance/src/lib.rs:621`) is a real, YAML-persisted, settings-UI
+     exposed switch (`gui/desktop/src/appearance_settings.rs:715`), and the
+     shell honours it in four places, window decorations among them
+     (`gui/desktop/src/lib.rs:2384`). The compositor's `render_window` calls
+     `render_shadow` unconditionally for every window that has a title bar. So
+     a user who turns drop shadows off today would see them turn off
+     everywhere the shell draws and stay on around every window — and after
+     the deletion, stay on everywhere, with the setting doing nothing at all.
+   - **No shadow on a maximized window.** The shell suppresses it because a
+     maximized window "has no edge to cast from — there is nothing beside it
+     for a shadow to fall on, and one drawn anyway would bleed over the screen
+     border". The compositor keeps `maximized` and `fullscreen` deliberately
+     distinct (`gui/compositor/src/lib.rs:562`): fullscreen drops the title bar
+     and so drops the shadow with it, but **maximized keeps its decorations**,
+     and therefore gets a shadow drawn into the screen edge. Half of this is
+     already right by accident; the maximized half is not.
+
+**Consequently prerequisite 2 is "the appearance settings the compositor
+ignores", not "corner radius".** Both remaining items — `WindowCorners` and
+`drop_shadows` — are fields of the same `AppearanceSettings` struct that the
+compositor has no connection to at all. The work is one channel carrying both,
+not two unrelated features, and building the channel for corner radius alone
+and then discovering `drop_shadows` needs the same channel is exactly the
+band-aid accumulation `CLAUDE.md` warns about. Do them together.
+
+**And the corner-radius half is not plumbing.** The compositor's render engine
+*already receives* corner radii and throws them away: `execute_command`
+destructures `corner_radii: _` on both `RenderCommand::FillRect` and
+`StrokeRect` (`gui/compositor/src/lib.rs:2923`, `2938`, and again at `3055`).
+Every rounded rectangle any client or the shell has ever submitted has been
+rasterised square. So this needs rounded-rectangle fill and stroke implemented
+in the rasteriser first — which also fixes a silent, tree-wide bug of its own,
+independent of window decorations.
+
+**Progress 2026-08-21 — the rasteriser now draws them.** ✅ The tree-wide half
+of the paragraph above is fixed: `RenderEngine::fill_round_rect` and
+`stroke_round_rect` rasterise rounded rectangles as scanline spans, and
+`execute_command` passes each command's radii to them instead of discarding
+them — `FillRect`, `StrokeRect` and `BoxShadow` alike. That restores rounding
+for every producer in the tree at once, not only window frames: toolkit widget
+borders, the SVG renderer's `rx`/`ry`, the tab strip, the launcher's search
+field, the power menu and the resource monitor were all being drawn square.
+See `design-decisions.md` §498. Twelve tests, each proved a real regression
+test by reintroducing the bug it guards (eleven reintroductions, all caught —
+and three tests had to be *repaired* first, because the first pass proved they
+were guarding nothing; §498 records which and why).
+
+**What is left of prerequisite 2 is now the settings channel**, not the
+drawing: the compositor still has no connection to `AppearanceSettings`, so it
+does not know the user's `WindowCorners` choice (its own decorations are still
+drawn with the flat primitives) nor the `drop_shadows` toggle, and it still
+draws a shadow on maximized windows. Note that `gui/appearance` depends only on
+`guitk` and `yamldoc`, so `compositor` can depend on it without a cycle.
+
+## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
+
+**In short:** `ssh host 'cat /etc/passwd'` used to come back with the text
+`exec: cat /etc/passwd` and an exit code of 0. Nothing ran. The output looked
+enough like output that a script could not tell, and the success was invented
+too — so `ssh host false` also said everything was fine. `exec` now really runs
+the command, as the authenticated user, and reports its real stdout, stderr and
+exit status.
+
+**Where it was:** `userspace/sshd/src/main.rs`, `handle_channel_request`'s
+three session arms.
+
+### What was wrong
+
+sshd is a protocol-complete SSH-2 server — real Diffie-Hellman key exchange,
+AES-128-CTR, HMAC-SHA256, password and public-key auth, channel windows, the
+lot. Underneath that, the session layer fabricated all three of its answers:
+
+| Request | Old behaviour | Why that is worse than not implementing it |
+|---|---|---|
+| `exec` | replied SUCCESS, then sent `format!("exec: {cmd}\r\n")` as channel data | the client cannot distinguish echoed input from real output |
+| `shell` | replied SUCCESS, sent `Welcome to Slate OS, {user}!\r\n$ ` and echoed keystrokes | looks like a shell at the terminal; there is no process |
+| `pty-req` | replied SUCCESS, allocated nothing | client puts *its* terminal in raw mode and waits for echo forever |
+
+And no `exit-status` was ever sent on any path. RFC 4254 §6.10 makes that
+request the only way a server reports how a command ended; the OpenSSH client
+treats a channel that closes without one as **success**. So every failure — a
+command that did not exist, a command that ran and returned 1, a command that
+was never run at all — arrived at the caller as exit 0. `roadmap.md` marked
+"PTY support, session management" as `[x]` on the strength of the messages
+being *parsed*.
+
+### The fix
+
+- **`exec` executes.** `run_exec_request` resolves the authenticated username
+  in `/etc/passwd`, spawns `<login shell> -c '<command>'` as that user, and
+  reports the result. stdout goes on the data stream, stderr on
+  `SSH_MSG_CHANNEL_EXTENDED_DATA` type 1 (RFC 4254 §5.2) so `ssh host cmd >
+  file` does not fold diagnostics into `file`, and the exit is reported as
+  `exit-status`, or as `exit-signal` when the child was killed and the signal
+  is one of the thirteen the RFC names.
+- **The spawn happens before the reply.** §6.5's reply says whether the request
+  was *accepted*; a command that could not be started was not, so it gets
+  `SSH_MSG_CHANNEL_FAILURE` rather than a SUCCESS followed by an error.
+- **Privilege drop, and a refusal instead of a fallback.** sshd binds port 22
+  and therefore runs as root. The child is spawned with `CommandExt::gid`/`uid`
+  set to the account's, under `#[cfg(unix)]` — which is every target this
+  daemon actually runs on, the slateos target spec declaring
+  `target-family: ["unix"]`. If the username has **no** `/etc/passwd` entry the
+  request is refused, because the only other identity available is the
+  daemon's. Running an authenticated user's command as root would have been a
+  privilege escalation introduced by the very change that made `exec` work.
+- **The environment is built, not inherited.** `env_clear()` then `HOME`,
+  `USER`, `LOGNAME`, `SHELL`, `PATH`. Inheriting init's environment leaks the
+  daemon's configuration to a remote user and lets a variable set at boot
+  change how their commands behave.
+- **`pty-req` and `shell` now answer FAILURE.** See the next entry.
+- **Output is split to the peer's `max_packet`.** `remote_max_packet` was
+  parsed from `CHANNEL_OPEN` and then carried an `#[allow(dead_code)]`;
+  exceeding it is a protocol violation and a command whose output is larger
+  than one packet is the ordinary case.
+- **Inbound channel data is dropped instead of echoed.** With `exec`'s stdin on
+  `/dev/null` and `shell` refused, nothing is waiting on the channel's input.
+  The receive window is credited back so a client that keeps sending is not
+  left blocked on a window that never reopens.
+
+### Verification
+
+123 tests pass (`cargo test -p sshd --target x86_64-pc-windows-gnu`), clippy
+clean on both the host and `x86_64-slateos`. New tests cover `/etc/passwd`
+parsing including malformed lines and the empty-shell default, the environment
+being built solely from the account, the RFC signal-name table, `exit-status`'s
+`want_reply = false` framing, and that the chunk overhead constant matches the
+real header size.
+
+### What this does *not* mean
+
+`exec` is real but not yet streamed, and `shell` is refused outright. Both are
+recorded in the next entry rather than left to be discovered.
+
+
+## TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION — 2026-08-21
+
+**In short:** `ssh host 'some command'` works properly now. `ssh host` — a
+plain interactive login — does not, and answers with "shell request failed".
+Two separate things are missing: a pseudo-terminal (a fake keyboard-and-screen
+pair that lets a program believe it is at a real terminal), and a connection
+loop that can move bytes in both directions at once. Until both exist, refusing
+is the honest answer; the previous code answered SUCCESS and printed a fake
+prompt.
+
+**Where it lives:** `userspace/sshd/src/main.rs` — `handle_channel_request`'s
+`pty-req` and `shell` arms, and `run_exec_request`.
+
+### The three limitations, and what each one costs
+
+**1. `pty-req` is refused, because SlateOS has no pty device.**
+
+`kernel/src/tty.rs` contains a complete, self-tested line discipline —
+canonical mode, `ERASE`/`KILL`, `^C`→`SIGINT`, `VMIN`/`VTIME`, `termios`,
+`winsize` — but it exists exactly once, hardwired to the physical keyboard and
+screen. A pty is that same discipline with a program on the far end. Filed as
+`requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`
+(lane A owns `kernel/**`); the reasoning for why this cannot be done in libc is
+`design-decisions.md` §345.
+
+*Cost while unfixed:* clients print "PTY allocation request failed on channel
+0" and continue without one. That is exactly what they do against a real server
+configured with `PermitTTY no`, so it is a supported state rather than a broken
+one.
+
+**2. `shell` is refused, because an interactive shell needs both a pty and
+bidirectional I/O.**
+
+Even given a pty, `run_connection` is a single-threaded loop of blocking
+`recv_packet` calls. Hosting a shell means watching the socket and the child's
+pipes simultaneously. The proper fix is to give the connection loop a readiness
+wait over both — the same `SYS_IO_POLL`-shaped primitive the rest of userspace
+uses — rather than threads, which the target spec's `has-thread-local: false`
+makes a poor bet.
+
+*Cost while unfixed:* no interactive login over SSH. `ssh host command` covers
+scripted use, which is the majority of what a headless machine needs.
+
+**3. `exec` collects output rather than streaming it.**
+
+`child.wait_with_output()` runs to completion and then sends. This is deliberate
+and not merely lazy: reading two pipes one after the other from a single thread
+deadlocks the moment the child fills the pipe that is not being read, and
+`wait_with_output` is the standard-library primitive that drains both together.
+
+*Cost while unfixed:* a command that never exits (`tail -f`) produces nothing at
+all, and a command with very large output is buffered in RAM. `ssh host 'find
+/'` will work but will hold the whole listing in memory first.
+
+*Proper fix:* the same readiness wait as (2). Once the loop can poll the child's
+pipes alongside the socket, all three limitations dissolve into one
+implementation — which is why they are one entry and not three.
+
+### Also missing, smaller
+
+- **`env` requests are accepted and discarded.** The arm replies SUCCESS
+  without recording anything, so `ssh -o SendEnv=LC_ALL host` silently loses
+  the variable. Accepting is the right answer only once the variables reach the
+  child; today refusing would be more truthful, but OpenSSH's default is to
+  ignore unlisted variables *silently* too, so this is consistent with the
+  reference implementation rather than a lie.
+- **`exec`'s stdin is `/dev/null`.** `ssh host 'wc -l' < file` reports 0. This
+  is a consequence of (3), not a separate decision.
+- **Supplementary groups are not set.** `session_command` sets the primary gid
+  and uid; `setgroups` is not called, so a session does not carry the account's
+  secondary group memberships. Blocked on the same gap `su` and `doas` have —
+  see the comment at `userspace/doas/src/main.rs:731`.
+
+**Trigger:** revisit when lane A lands the pty syscalls, or sooner if a
+readiness wait over pipes plus sockets appears for another reason.
+
+**If never fixed:** SSH remains a command-execution channel rather than a login
+service. Nothing lies about it — every unsupported request is refused at the
+protocol level and the client says so — but `apps/terminal` and interactive
+CPython over SSH stay out of reach.
+
+
+## B-SSH-CLIENT-DISCARDED-THE-REMOTE-EXIT-STATUS-AND-ALL-OF-STDERR — 2026-08-21 — FIXED
+
+**In short:** our `ssh` client exited 0 no matter what the remote command
+returned, and threw away every byte the remote command wrote to stderr without
+so much as a warning. So `ssh host false` looked like a success, and
+`ssh host 'cc broken.c'` printed nothing at all about why the compile failed.
+Both now work: the client exits with the remote status, and remote stderr comes
+out on the local stderr.
+
+**Where it was:** `userspace/ssh/src/main.rs` — `handle_channel_request`,
+`process_server_message`, and `main`.
+
+### What was wrong
+
+Three separate holes, all in the same direction — information the server sent
+that the client silently dropped.
+
+**1. `exit-status` was parsed and discarded.** `handle_channel_request` read
+the request type, logged it at `-v`, and returned. `main` then exited 0
+unconditionally. This is the mirror of the sshd bug fixed the same day
+(`B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT`): between the
+two, a failing remote command was reported as a success at *both* ends, and
+fixing only the server would have left the client still lying.
+
+**2. `SSH_MSG_CHANNEL_EXTENDED_DATA` was not handled at all.** Message type 95
+was not even in the client's `msg` module, so it fell through
+`process_server_message`'s catch-all to `verbose("unhandled message type: 95")`
+— invisible unless `-v` was passed. Everything a remote command wrote to
+stderr vanished.
+
+**3. A latent MAC desynchronisation.** When a server-initiated request set
+`want_reply`, the client replied by calling `tcp_send_all` directly with
+`build_packet(..., self.seq_send, ...)` and **did not advance `seq_send`**. The
+sequence number is an input to every packet's MAC, so the next packet the
+client sent would have been MACed with a number the server had already moved
+past, and the server would have rejected it and everything after it. The
+function took `&self`, which is why it could not advance the counter — the
+signature was the bug. It is `&mut self` now and goes through `send_packet`.
+
+Never observed in practice only because no server this client talks to sends a
+channel request with `want_reply` set. `exit-status` and `exit-signal` must
+both have it clear (RFC 4254 §6.10).
+
+### The fix
+
+- `exit-status` and `exit-signal` are parsed into a `RemoteExit` on the
+  session, and `main` exits with it.
+- Exit codes now follow `ssh(1)` exactly: the remote command's status on
+  success, **255** for any failure of the client or the connection. The four
+  `process::exit(1)` sites became `EXIT_SSH_FAILURE`. Reserving one code is
+  what lets a caller distinguish "the command failed" from "the command never
+  ran"; with 1 doing double duty it could not.
+- A command killed by a signal has no status of its own; it is reported on
+  stderr and exits 255, matching OpenSSH.
+- Extended data type 1 goes to stderr; any other type code is discarded with a
+  verbose note rather than being written to stdout, where it would corrupt the
+  command's output. Malformed messages are dropped whole.
+- `shell request failed` / `exec request failed` are now distinguished in the
+  error text, and name the channel. They have different causes — a server with
+  no pseudo-terminal support refuses `shell` and accepts `exec`, which is
+  exactly what SlateOS's own sshd now does — and a combined message sends the
+  reader looking in the wrong place.
+
+### A note on what could not be fixed
+
+A server that sends **no** `exit-status` still yields exit 0, because that is
+what an interactive session looks like and the client cannot tell the two
+apart. This is not a client-side gap that can be closed; it is the reason a
+*server* must always send one, and is why the sshd fix was the necessary half.
+
+### Verification
+
+The client had **no test module at all** — 2556 lines, zero tests. It has 11
+now, covering: a status recorded and returned; a non-zero status not becoming
+success; a missing status meaning success; `exit-signal` including that the
+name is stored verbatim without a `SIG` prefix; an unknown request not
+overwriting a status already received; a truncated `exit-status` being an error
+rather than a silent zero; unknown and malformed extended data being dropped;
+and that `EXIT_SSH_FAILURE` is 255. Clippy clean on the host and on
+`x86_64-slateos`.
 
 ---
 

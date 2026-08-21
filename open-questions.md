@@ -2266,6 +2266,19 @@ down the console.
   two the rate limit does not cover, which is close to the worst place to have
   the gap.
 
+### A third prompt rides on the same answer
+
+`passwd`, when it asks for your *current* password before letting you set a new
+one, is outside the tally too, for an unrelated reason (it was written before
+`authlib` existed). It has its own argument for staying outside, and it is a
+good one: changing your password is the action you most want available when you
+suspect your password is compromised, and a rate limit is exactly the mechanism
+that would take it away from you. But "the two prompts a human uses disagree
+about whether a shared count applies to them" is the inconsistency `authlib`
+was built to prevent, so whatever is decided for `login` should be decided for
+`passwd` in the same breath. Detail: `known-issues.md` →
+`B-PASSWD-VERIFIES-WITHOUT-AUTHLIB`.
+
 ### My recommendation
 
 **Option A, and let `su` join with it.** The delay is capped at five minutes

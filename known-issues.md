@@ -49843,7 +49843,19 @@ while still recording to the audit log — the distinction being whether a
 failure should impede a later, different program. That is a change to
 `authlib`'s contract, so it wants doing at the same time as the on-disk tally
 described under `B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS`
-→ "Still open — cross-invocation rate limiting", not separately.
+→ "Cross-invocation rate limiting", not separately.
+
+**Update 2026-08-21 — the tally now exists, and this question folded into a
+larger one.** The on-disk shared tally landed the same day (see the entry
+above). That did not settle this; it sharpened it. The counter-argument in the
+paragraphs below — "anyone who can reach any prompt as you can stop you
+changing your password" — was hypothetical while the tally was per-process and
+is concrete now that it is per-user and persistent. It is also the *same*
+question, in a different prompt, as whether `login` should obey the shared
+tally. Both are queued together as `open-questions.md` → **B-Q6**; answer that
+and this follows from it. Do not decide this one in isolation — the two prompts
+disagreeing about whether a shared count applies to them is precisely the
+inconsistency `authlib` exists to prevent.
 
 **Not a security hole today, and worth being precise about why:** reaching this
 prompt requires already running as the account whose password is being changed.

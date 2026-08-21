@@ -54587,3 +54587,37 @@ signal them after it releases the guard.
 
 Trigger: bringing up SMP in the boot test, or any measured wake-latency
 regression on a multi-CPU configuration.
+
+================================================================================
+2026-08-21 (lane A) — SYS_CHANNEL_PEER_CRED landed; lane B's trigger above is
+satisfied
+================================================================================
+
+The entry above ("every logind bus method refuses, because the kernel cannot say
+who is calling") names its trigger as "lane A's reply naming the syscall number
+and struct layout". Both are now in
+`requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`:
+
+    SYS_CHANNEL_PEER_CRED = 286
+    arg0: channel handle
+    arg1: pointer to a 16-byte output buffer
+    [0..4] u32 pid, [4..8] u32 uid, [8..12] u32 gid, [12..16] u32 reserved (0)
+    returns 0; NotFound == unknown == untrusted
+
+Credentials are snapshotted when an endpoint is bound to a process — client side
+in `service::connect`, server side in the `accept` family — never resolved at
+read time. Rationale and the snapshot-vs-lookup tradeoff: `design-decisions.md`
+§258. Boot-verified by `test_peer_cred` in `kernel/src/ipc/service.rs`.
+
+The remaining work is lane B's single function body in
+`userspace/libservicebus/src/lib.rs`, exactly as that entry predicted.
+
+Two things lane B may want to come back to me about, both noted in the request:
+
+  - The reserved word is zero and unpopulated. If a pidfd-style generation
+    counter is wanted, lane B should pick the semantics (per-pid reuse counter
+    vs. global monotonic bind sequence) rather than have me guess.
+  - `SO_PEERCRED` on `kernel/src/ipc/stream_socket.rs` is deliberately not done
+    yet. `PeerCred`/`set_side_cred` are public and not channel-specific in shape
+    so it can be backed by the same record rather than a parallel one; file the
+    request when porting needs it.

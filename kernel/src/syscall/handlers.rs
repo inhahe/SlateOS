@@ -11255,6 +11255,72 @@ pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_CHANNEL_PEER_CRED` — report the process on the other end of a channel.
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to a 16-byte output buffer.
+///
+/// Writes, little-endian: `pid` (u32), `uid` (u32), `gid` (u32), then a
+/// reserved u32 that is always zero.
+///
+/// # Why a snapshot
+///
+/// The values are the ones recorded when the peer's endpoint was *bound* to
+/// a process, not a lookup performed now.  That is the point of the call
+/// rather than an optimisation: a pid resolved at read time can name a
+/// different process, because the original may have exited and its number
+/// been reused, and a service that authorises on a recycled pid authorises
+/// the wrong process.  The uid is likewise the bind-time one, so a peer that
+/// drops privileges after connecting does not retroactively lose the
+/// authority it connected with, and one that gains them does not
+/// retroactively gain it on an already-open channel.  Linux snapshots
+/// `SO_PEERCRED` at `connect`/`socketpair` for exactly these reasons.
+///
+/// # Errors
+///
+/// - `NotFound` — `arg0` names no live channel, or no process was ever
+///   recorded for the peer side.  Both are *unknown*, not *nobody*, and a
+///   service must treat either as a refusal rather than as a credential.
+/// - `InvalidArgument` — the recorded pid does not fit the 32-bit ABI field.
+///   Truncating would report a *different, existing* process to a caller
+///   that is about to make an authorisation decision with it, so the call
+///   fails closed instead.  Unreachable until pids exceed `u32::MAX`.
+/// - `Fault` — the output buffer is not writable.
+pub fn sys_channel_peer_cred(args: &SyscallArgs) -> SyscallResult {
+    let handle = ChannelHandle::from_raw(args.arg0);
+
+    let Some(cred) = channel::peer_cred(handle) else {
+        // "No such channel" and "no record for the peer" are deliberately
+        // one error: neither is a credential, which is the only distinction
+        // a caller that must fail closed can act on, and separating them
+        // would make this call report whether an arbitrary handle value
+        // happens to name a live channel.
+        return SyscallResult::err(KernelError::NotFound);
+    };
+
+    let Ok(pid32) = u32::try_from(cred.pid) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+
+    let mut buf = [0u8; 16];
+    buf[0..4].copy_from_slice(&pid32.to_le_bytes());
+    buf[4..8].copy_from_slice(&cred.uid.to_le_bytes());
+    buf[8..12].copy_from_slice(&cred.gid.to_le_bytes());
+    // buf[12..16] stays zero: reserved, so a pidfd-style generation counter
+    // can be added later without changing the struct's size or what an
+    // existing reader sees.
+
+    // SAFETY: `buf` is a live 16-byte kernel-owned stack buffer, so the
+    // source range is valid for `buf.len()` bytes; `copy_to_user` validates
+    // the destination against the caller's address space and brackets the
+    // store with STAC/CLAC.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), args.arg1, buf.len()) } {
+        return SyscallResult::err(e);
+    }
+
+    SyscallResult::ok(0)
+}
+
 // ---------------------------------------------------------------------------
 // Namespace syscalls (290–295)
 // ---------------------------------------------------------------------------

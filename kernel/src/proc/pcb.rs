@@ -4383,6 +4383,22 @@ pub fn process_uid(pid: ProcessId) -> Option<u32> {
     PROCESS_TABLE.lock().get(&pid).map(|p| p.credentials.uid)
 }
 
+/// Read a process's real UID *and* primary GID together, or `None` if the
+/// PID is unknown.
+///
+/// One lookup rather than [`process_uid`] plus a second call, because the
+/// caller is snapshotting an identity for `SYS_CHANNEL_PEER_CRED` and two
+/// separate reads can straddle a credential change — producing a pair that
+/// describes no state the process was ever in.  A service authorising on a
+/// half-updated identity is exactly what the snapshot exists to prevent.
+#[must_use]
+pub fn process_uid_gid(pid: ProcessId) -> Option<(u32, u32)> {
+    PROCESS_TABLE
+        .lock()
+        .get(&pid)
+        .map(|p| (p.credentials.uid, p.credentials.gid))
+}
+
 /// Mark a process as "ready" (fully initialized and accepting requests).
 ///
 /// Called by the process itself via `SYS_NOTIFY_READY`.  The parent

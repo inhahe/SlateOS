@@ -24,7 +24,8 @@ use crate::serial_println;
 use super::handlers;
 use super::number::{
     MAX_SYSCALL_NR, SYS_ARP_TABLE, SYS_CAP_QUERY, SYS_CAP_REQUEST, SYS_CAP_REQUEST_CANCEL,
-    SYS_CAP_REQUEST_STATUS, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE, SYS_CHANNEL_RECV,
+    SYS_CAP_REQUEST_STATUS, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE, SYS_CHANNEL_PEER_CRED,
+    SYS_CHANNEL_RECV,
     SYS_CHANNEL_RECV_CAPS, SYS_CHANNEL_RECV_TIMEOUT, SYS_CHANNEL_SEND, SYS_CHANNEL_SEND_BLOCKING,
     SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_SEND_TIMEOUT, SYS_CHANNEL_TRY_RECV, SYS_CLOCK_ADJTIME,
     SYS_CLOCK_MONOTONIC, SYS_CLOCK_REALTIME, SYS_CLOCK_SETTIME, SYS_CONSOLE_READ_CHAR,
@@ -353,6 +354,9 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SERVICE_TRY_ACCEPT as usize] = Some(handlers::sys_service_try_accept);
     handlers[SYS_SERVICE_ACCEPT_TIMEOUT as usize] = Some(handlers::sys_service_accept_timeout);
     handlers[SYS_SERVICE_UNREGISTER as usize] = Some(handlers::sys_service_unregister);
+    // Sits in the service block, not the channel block (200–209 is full):
+    // it is the missing half of `SYS_SERVICE_ACCEPT`.
+    handlers[SYS_CHANNEL_PEER_CRED as usize] = Some(handlers::sys_channel_peer_cred);
 
     // Namespace (290–295).
     handlers[SYS_NS_CREATE as usize] = Some(handlers::sys_ns_create);

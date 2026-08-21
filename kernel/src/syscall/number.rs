@@ -1255,6 +1255,49 @@ pub const SYS_SERVICE_ACCEPT_TIMEOUT: u64 = 284;
 /// Returns: 0 on success.
 pub const SYS_SERVICE_UNREGISTER: u64 = 285;
 
+/// Report the credentials of the process on the other end of a channel.
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to a 16-byte output buffer.
+///
+/// Writes, little-endian:
+/// ```text
+///   [0..4]   u32  pid
+///   [4..8]   u32  uid
+///   [8..12]  u32  gid
+///   [12..16] u32  reserved (always zero)
+/// ```
+///
+/// The credentials are a *snapshot* taken when the peer's endpoint was
+/// bound to a process — by `SYS_SERVICE_CONNECT` for a client end and by
+/// the `SYS_SERVICE_ACCEPT` family for a server end — not a lookup
+/// performed now.  A pid resolved at read time can name a different
+/// process, because the original may have exited and its number been
+/// reused, and a service that authorises a recycled pid authorises the
+/// wrong process.  For the same reason the uid is the one held at bind
+/// time: dropping privileges after connecting does not retroactively
+/// revoke the authority the connection was made with, and gaining them
+/// does not retroactively confer it.
+///
+/// The record survives the peer exiting, so a client that sends a request
+/// and dies before it is handled can still be identified.
+///
+/// Lives in the service block rather than the channel block (200–209, which
+/// is full) because it is the missing half of `SYS_SERVICE_ACCEPT`: it
+/// answers the question an accepted connection raises and cannot itself
+/// answer.
+///
+/// Returns: 0 on success.
+///
+/// Errors: `InvalidHandle` (not a live channel), `NotFound` (no process was
+/// ever recorded for the peer — the endpoint belongs to a kernel task, or
+/// to a raw `SYS_CHANNEL_CREATE` pair the kernel did not broker), `Fault`
+/// (the output buffer is not writable).
+///
+/// `NotFound` means *unknown*, and unknown must never be treated as a
+/// credential: a service that cannot identify its caller has to refuse.
+pub const SYS_CHANNEL_PEER_CRED: u64 = 286;
+
 // ---------------------------------------------------------------------------
 // Namespace syscalls (290–299) — per-process filesystem isolation
 // ---------------------------------------------------------------------------

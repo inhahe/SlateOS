@@ -34,7 +34,7 @@
 //!
 //! | Group name    | Capabilities                              |
 //! |---------------|-------------------------------------------|
-//! | `admin`       | All resource types, all rights             |
+//! | `admin`       | Every `ResourceType`, all rights — enforced by a boot self-test, not by convention |
 //! | `network`     | Socket(READ\|WRITE)                       |
 //! | `filesystem`  | File(READ\|WRITE\|CREATE\|DELETE\|METADATA) |
 //! | `driver`      | PortIo(READ\|WRITE), DeviceIrq(READ\|WRITE) |
@@ -56,7 +56,13 @@ use crate::serial_println;
 const MAX_GROUPS: usize = 32;
 
 /// Maximum capability grants per group.
-const MAX_CAPS_PER_GROUP: usize = 16;
+///
+/// Must be at least the number of [`ResourceType`] variants, because the
+/// `admin` group grants every one of them and a group that cannot hold its own
+/// definition is a group that silently means something narrower than its name.
+/// It was 16 against 26 resource types until 2026-08-21, which is why
+/// `install_builtin` now reports an overflow instead of truncating.
+const MAX_CAPS_PER_GROUP: usize = 32;
 
 /// Maximum member GIDs per group.
 const MAX_MEMBERS_PER_GROUP: usize = 16;
@@ -171,194 +177,249 @@ pub const GROUP_IPC: CapGroupId = 6;
 pub fn init() {
     let mut groups = GROUPS.lock();
 
-    // admin: all resource types, all rights.
-    install_builtin(
-        &mut groups,
-        GROUP_ADMIN,
-        b"admin",
-        &[
-            CapGrant {
-                resource_type: ResourceType::Channel,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::Pipe,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::SharedMemory,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::EventFd,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::CompletionPort,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::Process,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::Thread,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::PortIo,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::DeviceIrq,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::File,
-                rights: Rights::ALL,
-            },
-            CapGrant {
+    // admin: every resource type, all rights.
+    //
+    // "Every" is meant literally and is checked at boot by
+    // `test_admin_grants_every_resource_type`, because this list used to claim
+    // it and not be it: it stopped at `IoScheduler` (14 entries) while
+    // `ResourceType` had grown to 26 variants, and `install_builtin` silently
+    // truncated anything past the then-16 capacity anyway.  The omission failed
+    // closed — `check_access` only ever *adds* authority — so nothing was
+    // over-granted, but an `admin` that quietly means "admin, except for
+    // terminals, sound, DRM and sockets" is a trap for whoever first puts a
+    // process in this group.
+    //
+    // Kept as an explicit list rather than derived from a `ResourceType::ALL`
+    // array on purpose: a group that automatically absorbs every future
+    // resource type is ambient authority wearing a capability system's clothes.
+    // Adding a type should be a decision to grant it here, and the boot test is
+    // what makes that decision unskippable rather than merely advisable.
+    let admin_grants = [
+        ResourceType::Channel,
+        ResourceType::Pipe,
+        ResourceType::SharedMemory,
+        ResourceType::EventFd,
+        ResourceType::CompletionPort,
+        ResourceType::Process,
+        ResourceType::Thread,
+        ResourceType::PortIo,
+        ResourceType::DeviceIrq,
+        ResourceType::File,
+        ResourceType::Socket,
+        ResourceType::Timer,
+        ResourceType::IoScheduler,
+        ResourceType::Service,
+        ResourceType::Namespace,
+        ResourceType::StreamSocket,
+        ResourceType::MemFd,
+        ResourceType::Epoll,
+        ResourceType::SignalFd,
+        ResourceType::Timerfd,
+        ResourceType::Inotify,
+        ResourceType::AlsaPcm,
+        ResourceType::Drm,
+        ResourceType::NetRaw,
+        ResourceType::NetSocket,
+        ResourceType::Pty,
+        ResourceType::SystemClock,
+        ResourceType::PrivilegedPort,
+        ResourceType::ResourceLimit,
+    ]
+    .map(|resource_type| CapGrant {
+        resource_type,
+        rights: Rights::ALL,
+    });
+    // Evaluated in order, each `&mut groups` borrow ending with its call.
+    // Collecting the results rather than discarding them is the point: the
+    // summary line below used to print "6 built-in capability groups
+    // initialized" unconditionally, including in the runs where a group had
+    // been silently truncated or not installed at all.
+    let results = [
+        install_builtin(
+            &mut groups,
+            GROUP_ADMIN,
+            b"admin",
+            &admin_grants,
+            0, // gid 0 = root
+        ),
+        // network: socket access.
+        install_builtin(
+            &mut groups,
+            GROUP_NETWORK,
+            b"network",
+            &[CapGrant {
                 resource_type: ResourceType::Socket,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::Service,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::Namespace,
-                rights: Rights::ALL,
-            },
-            CapGrant {
-                resource_type: ResourceType::IoScheduler,
-                rights: Rights::ALL,
-            },
-        ],
-        0,
-    ); // gid 0 = root
-
-    // network: socket access.
-    install_builtin(
-        &mut groups,
-        GROUP_NETWORK,
-        b"network",
-        &[CapGrant {
-            resource_type: ResourceType::Socket,
-            rights: Rights::READ.union(Rights::WRITE),
-        }],
-        0,
-    );
-
-    // filesystem: file access.
-    install_builtin(
-        &mut groups,
-        GROUP_FILESYSTEM,
-        b"filesystem",
-        &[CapGrant {
-            resource_type: ResourceType::File,
-            rights: Rights::READ
-                .union(Rights::WRITE)
-                .union(Rights::CREATE)
-                .union(Rights::DELETE)
-                .union(Rights::METADATA),
-        }],
-        0,
-    );
-
-    // driver: port I/O and IRQ access.
-    install_builtin(
-        &mut groups,
-        GROUP_DRIVER,
-        b"driver",
-        &[
-            CapGrant {
-                resource_type: ResourceType::PortIo,
                 rights: Rights::READ.union(Rights::WRITE),
-            },
-            CapGrant {
-                resource_type: ResourceType::DeviceIrq,
-                rights: Rights::READ.union(Rights::WRITE),
-            },
-        ],
-        0,
-    );
+            }],
+            0,
+        ),
+        // filesystem: file access.
+        install_builtin(
+            &mut groups,
+            GROUP_FILESYSTEM,
+            b"filesystem",
+            &[CapGrant {
+                resource_type: ResourceType::File,
+                rights: Rights::READ
+                    .union(Rights::WRITE)
+                    .union(Rights::CREATE)
+                    .union(Rights::DELETE)
+                    .union(Rights::METADATA),
+            }],
+            0,
+        ),
+        // driver: port I/O and IRQ access.
+        install_builtin(
+            &mut groups,
+            GROUP_DRIVER,
+            b"driver",
+            &[
+                CapGrant {
+                    resource_type: ResourceType::PortIo,
+                    rights: Rights::READ.union(Rights::WRITE),
+                },
+                CapGrant {
+                    resource_type: ResourceType::DeviceIrq,
+                    rights: Rights::READ.union(Rights::WRITE),
+                },
+            ],
+            0,
+        ),
+        // process: process and thread management.
+        install_builtin(
+            &mut groups,
+            GROUP_PROCESS,
+            b"process",
+            &[
+                CapGrant {
+                    resource_type: ResourceType::Process,
+                    rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+                },
+                CapGrant {
+                    resource_type: ResourceType::Thread,
+                    rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+                },
+            ],
+            0,
+        ),
+        // ipc: IPC primitive access.
+        install_builtin(
+            &mut groups,
+            GROUP_IPC,
+            b"ipc",
+            &[
+                CapGrant {
+                    resource_type: ResourceType::Channel,
+                    rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+                },
+                CapGrant {
+                    resource_type: ResourceType::Pipe,
+                    rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+                },
+                CapGrant {
+                    resource_type: ResourceType::SharedMemory,
+                    rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+                },
+                CapGrant {
+                    resource_type: ResourceType::EventFd,
+                    rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+                },
+                CapGrant {
+                    resource_type: ResourceType::CompletionPort,
+                    rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
+                },
+            ],
+            0,
+        ),
+    ];
 
-    // process: process and thread management.
-    install_builtin(
-        &mut groups,
-        GROUP_PROCESS,
-        b"process",
-        &[
-            CapGrant {
-                resource_type: ResourceType::Process,
-                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-            },
-            CapGrant {
-                resource_type: ResourceType::Thread,
-                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-            },
-        ],
-        0,
-    );
-
-    // ipc: IPC primitive access.
-    install_builtin(
-        &mut groups,
-        GROUP_IPC,
-        b"ipc",
-        &[
-            CapGrant {
-                resource_type: ResourceType::Channel,
-                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-            },
-            CapGrant {
-                resource_type: ResourceType::Pipe,
-                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-            },
-            CapGrant {
-                resource_type: ResourceType::SharedMemory,
-                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-            },
-            CapGrant {
-                resource_type: ResourceType::EventFd,
-                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-            },
-            CapGrant {
-                resource_type: ResourceType::CompletionPort,
-                rights: Rights::READ.union(Rights::WRITE).union(Rights::CREATE),
-            },
-        ],
-        0,
-    );
-
-    serial_println!("[cap] 6 built-in capability groups initialized");
+    let installed = results.iter().filter(|r| r.is_ok()).count();
+    if installed == results.len() {
+        serial_println!("[cap] {installed} built-in capability groups initialized");
+    } else {
+        // `install_builtin` has already said which one and why.
+        serial_println!(
+            "[cap] FAIL: only {} of {} built-in capability groups initialized",
+            installed,
+            results.len()
+        );
+    }
 }
 
 /// Install a built-in group.
+///
+/// Every input is a compile-time constant in [`init`], so every error here is
+/// a programming mistake rather than a runtime condition — but it is reported
+/// rather than absorbed. All three failure modes used to be silent `min()`
+/// clamps or a fall-through, and all three produce a group that *exists* and
+/// answers [`check_access`] with a narrower authority than its name promises:
+///
+/// - **too many grants** — the previous `grants.len().min(MAX_CAPS_PER_GROUP)`
+///   dropped the tail. `admin` sat one type short of the cap for months while
+///   claiming in a comment to grant "all resource types".
+/// - **name too long** — a truncated name still matches nothing in
+///   [`find_by_name`], so the group becomes unreachable by name while looking
+///   installed.
+/// - **table full** — the loop simply fell off the end, leaving a
+///   `GROUP_*` constant pointing at no group at all.
+///
+/// A capability group that under-grants fails closed, so none of these is a
+/// privilege escalation; each is an authority that silently stops working,
+/// which is the harder kind to notice.
 fn install_builtin(
     groups: &mut [CapGroup; MAX_GROUPS],
     id: CapGroupId,
     name: &[u8],
     grants: &[CapGrant],
     member_gid: u32,
-) {
+) -> KernelResult<()> {
+    if grants.len() > MAX_CAPS_PER_GROUP {
+        serial_println!(
+            "[cap] FAIL: built-in group id={} has {} grants, capacity is {}",
+            id,
+            grants.len(),
+            MAX_CAPS_PER_GROUP
+        );
+        return Err(KernelError::InvalidArgument);
+    }
+    if name.len() > MAX_NAME_LEN {
+        serial_println!(
+            "[cap] FAIL: built-in group id={} name is {} bytes, limit is {}",
+            id,
+            name.len(),
+            MAX_NAME_LEN
+        );
+        return Err(KernelError::InvalidArgument);
+    }
+
     // Find a free slot.
     for group in groups.iter_mut() {
         if !group.active {
             group.active = true;
             group.builtin = true;
             group.id = id;
-            group.name_len = name.len().min(MAX_NAME_LEN);
-            group.name[..group.name_len].copy_from_slice(&name[..group.name_len]);
-            group.cap_count = grants.len().min(MAX_CAPS_PER_GROUP);
-            for (i, g) in grants.iter().enumerate().take(group.cap_count) {
-                group.caps[i] = Some(*g);
+            group.name_len = name.len();
+            group
+                .name
+                .get_mut(..group.name_len)
+                .ok_or(KernelError::InvalidArgument)?
+                .copy_from_slice(name);
+            group.cap_count = grants.len();
+            for (slot, g) in group.caps.iter_mut().zip(grants.iter()) {
+                *slot = Some(*g);
             }
             group.member_gids[0] = member_gid;
             group.member_count = 1;
-            return;
+            return Ok(());
         }
     }
+
+    serial_println!(
+        "[cap] FAIL: no free slot for built-in group id={} ({} slots, all active)",
+        id,
+        MAX_GROUPS
+    );
+    Err(KernelError::OutOfMemory)
 }
 
 // ---------------------------------------------------------------------------
@@ -595,6 +656,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[cap/groups] Running capability groups self-test...");
 
     test_builtins_exist()?;
+    test_admin_grants_every_resource_type()?;
     test_create_remove()?;
     test_member_management()?;
     test_access_check()?;
@@ -621,6 +683,84 @@ fn test_builtins_exist() -> KernelResult<()> {
     }
 
     serial_println!("[cap/groups]   Built-in groups: OK");
+    Ok(())
+}
+
+/// Test 1b: `admin` grants every resource type, as its name and its comment
+/// both claim.
+///
+/// This exists because it did not, and nobody noticed. The list stopped at
+/// `IoScheduler` while `ResourceType` grew twelve more variants, and
+/// [`install_builtin`] silently truncated anything past the then-capacity of 16
+/// on top of that. Nothing broke, because [`check_access`] is additive — a
+/// missing grant denies rather than permits — which is exactly why it survived:
+/// an under-granting `admin` is indistinguishable from an `admin` nobody has
+/// used yet.
+///
+/// Checked by discriminant against `1..=ResourceType::LAST` rather than against
+/// a second hand-written list, so this test cannot drift the same way the thing
+/// it is testing did.
+fn test_admin_grants_every_resource_type() -> KernelResult<()> {
+    let groups = GROUPS.lock();
+    let Some(admin) = groups.iter().find(|g| g.active && g.id == GROUP_ADMIN) else {
+        serial_println!("[cap/groups]   FAIL: admin group not installed");
+        return Err(KernelError::InternalError);
+    };
+
+    // Bit `d` set means discriminant `d` is granted.  LAST is 29 today; the
+    // guard keeps this from silently becoming a no-op if the enum ever outgrows
+    // a u64 bitmap.
+    if usize::from(ResourceType::LAST) >= u64::BITS as usize {
+        serial_println!(
+            "[cap/groups]   FAIL: ResourceType::LAST is {}, too many for this test's bitmap",
+            ResourceType::LAST
+        );
+        return Err(KernelError::InternalError);
+    }
+    let mut granted: u64 = 0;
+    for cap in admin.caps.iter().flatten() {
+        if !cap.rights.contains(Rights::ALL) {
+            serial_println!(
+                "[cap/groups]   FAIL: admin grants type {} without Rights::ALL",
+                cap.resource_type.discriminant()
+            );
+            return Err(KernelError::InternalError);
+        }
+        let Some(bit) = 1u64.checked_shl(u32::from(cap.resource_type.discriminant())) else {
+            serial_println!("[cap/groups]   FAIL: admin grant discriminant exceeds the bitmap");
+            return Err(KernelError::InternalError);
+        };
+        granted |= bit;
+    }
+
+    for d in 1..=ResourceType::LAST {
+        // Cannot overflow: the guard above bounded LAST below u64::BITS.
+        if granted & 1u64.checked_shl(u32::from(d)).unwrap_or(0) == 0 {
+            serial_println!(
+                "[cap/groups]   FAIL: admin is missing resource type {} (of 1..={}) — see \
+                 ResourceType::discriminant's checklist",
+                d,
+                ResourceType::LAST
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Every type present *and* the count matching means no duplicates either,
+    // which is what would happen if an append reused an existing entry.
+    if admin.cap_count != usize::from(ResourceType::LAST) {
+        serial_println!(
+            "[cap/groups]   FAIL: admin has {} grants for {} resource types — a duplicate",
+            admin.cap_count,
+            ResourceType::LAST
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[cap/groups]   admin grants all {} resource types: OK",
+        ResourceType::LAST
+    );
     Ok(())
 }
 

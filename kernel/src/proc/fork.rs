@@ -364,6 +364,11 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         // the child's IPC-handle list to avoid double-bookkeeping.
         // NetRaw is a non-inheritable exclusive claim: a forked child must not
         // silently co-own the physical NIC.  It re-opens explicitly if needed.
+        //
+        // SystemClock/PrivilegedPort/ResourceLimit are pure authority with no
+        // per-open object behind them, so there is nothing to refcount: the
+        // child inherits them through the cloned capability table exactly as it
+        // inherits PortIo, and duping them here would double-count nothing.
         ResourceType::Process
         | ResourceType::Thread
         | ResourceType::PortIo
@@ -372,6 +377,9 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         | ResourceType::IoScheduler
         | ResourceType::Service
         | ResourceType::NetRaw
+        | ResourceType::SystemClock
+        | ResourceType::PrivilegedPort
+        | ResourceType::ResourceLimit
         | ResourceType::Namespace => Ok(None),
     }
 }

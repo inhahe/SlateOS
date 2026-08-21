@@ -20477,6 +20477,117 @@ pub fn self_test_linux_virtgpu_getparam() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 regression test for the **virtio-gpu 2D render-resource round trip**
+/// on `/dev/dri/renderD128`.
+///
+/// The harness spawns [`elf::build_linux_virtgpu_resource_test_elf`], a
+/// self-contained Linux-ABI payload that walks the whole path a real render
+/// client walks: `RESOURCE_CREATE` (64×64 B8G8R8A8) → `MAP` → `mmap` → write
+/// and read back the first and last dword of the guest backing →
+/// `TRANSFER_TO_HOST` → `WAIT` → `RESOURCE_INFO` → `GEM_CLOSE`, then asserts
+/// the closed handle no longer resolves *and* that the still-live mapping
+/// keeps reading back.
+///
+/// Those last two assertions are the reason this test exists rather than
+/// stopping at "the ioctls return 0". They pin the two opposite ways a destroy
+/// path gets lifetime wrong: leaving the fd's ownership record behind (a
+/// handle that outlives its resource, which the next `RESOURCE_CREATE` could
+/// alias), or freeing the backing frames while userspace still has them
+/// mapped (which hands a live page to the next allocation). Neither is visible
+/// from the kernel-side `virtio::gpu::resource_self_test`, because neither
+/// involves a second address space.
+///
+/// Exit sentinels are per-stage — `0xE1` open, `0xE2` RESOURCE_CREATE, `0xE3`
+/// zero handle, `0xE4` stride, `0xE5` size, `0xE6` MAP, `0xE7` mmap, `0xE8`/
+/// `0xE9` the mapping's first/last dword, `0xEA` TRANSFER_TO_HOST, `0xEB`
+/// WAIT, `0xEC` RESOURCE_INFO, `0xED` info size, `0xEE` GEM_CLOSE, `0xEF` the
+/// closed handle still resolved, `0xF0` the mapping died with the handle.
+///
+/// If no DRM device is bound (a build/boot without `-device virtio-gpu-pci`),
+/// there is nothing to open, so the test is **skipped** (returns `Ok`) rather
+/// than reported as a failure.
+pub fn self_test_linux_virtgpu_resource() -> KernelResult<()> {
+    const MAX_YIELDS: usize = 256;
+
+    if crate::drm::device_count() == 0 {
+        serial_println!(
+            "[spawn] Skipping virtio-gpu render-resource (ring 3) test — no DRM device bound."
+        );
+        return Ok(());
+    }
+
+    serial_println!(
+        "[spawn] Running virtio-gpu render-resource round trip (ring 3, /dev/dri/renderD128)..."
+    );
+
+    let exe_elf = elf::build_linux_virtgpu_resource_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-virtgpu-resource"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // Like GETPARAM, the render node needs no capability to open, and the
+    // resource ioctls are gated on fd ownership rather than on a capability.
+    let options = SpawnOptions {
+        name: "spawn-test-linux-virtgpu-resource",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: virtgpu-resource spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    for _ in 0..MAX_YIELDS {
+        crate::sched::yield_now();
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break;
+        }
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: virtgpu-resource (ring 3) — process not a zombie after {} yields, \
+             got {:?}",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: virtgpu-resource (ring 3) — expected exit 0, got {:?} (225=open, \
+             226=RESOURCE_CREATE, 227=zero handle, 228=stride, 229=size, 230=MAP, 231=mmap, \
+             232/233=mapping pattern, 234=TRANSFER_TO_HOST, 235=WAIT, 236=RESOURCE_INFO, \
+             237=info size, 238=GEM_CLOSE, 239=closed handle still resolved, 240=mapping died \
+             with the handle)",
+            exit_code
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   virtio-gpu render resource (ring 3: CREATE/MAP/mmap/TRANSFER_TO_HOST/WAIT/\
+         INFO/GEM_CLOSE round trip, close-while-mapped survives): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 regression test for **`fallocate(2)` mode 0 (posix_fallocate
 /// grow)** (Linux #285) against the writable memfs root.
 ///

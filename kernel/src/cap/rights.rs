@@ -114,13 +114,35 @@ impl Rights {
     /// See design-decisions.md §207.
     pub const SET_CREDENTIALS: Self = Self(1 << 18);
 
+    /// Authority to lock memory beyond the per-process quota.
+    ///
+    /// Required on a [`ResourceLimit`](crate::cap::ResourceType::ResourceLimit)
+    /// capability to be projected `CAP_IPC_LOCK`.  Locking *within* the quota
+    /// needs nothing.
+    ///
+    /// **Why this is its own bit and not [`WRITE`](Self::WRITE).** The rest of
+    /// `ResourceLimit`'s authority — raising a *hard* rlimit — really is a
+    /// write to the process's limit table, and `WRITE` says so. `mlock`ing
+    /// past the quota is not a write to anything; it is a claim on physical
+    /// memory that the quota exists to bound. Folding it into `WRITE` would
+    /// mean that granting "may raise its own file-descriptor limit" silently
+    /// also granted "may pin unbounded physical memory", which is a denial-of-
+    /// service primitive and a different privilege on Linux
+    /// (`CAP_IPC_LOCK` vs `CAP_SYS_RESOURCE`) that ported software drops
+    /// separately. Same argument as [`SET_CREDENTIALS`](Self::SET_CREDENTIALS)
+    /// and [`DEBUG`](Self::DEBUG): `Rights` is a `u64` with bits to spare, and
+    /// a bit that means two things is a bit that gets granted for one of them.
+    /// See design-decisions.md §269 (this bit) and §350 (lane B's projection
+    /// of it onto `CAP_IPC_LOCK`).
+    pub const MEMORY_LOCK: Self = Self(1 << 19);
+
     /// Every distinct right, in declaration order.
     ///
     /// Exists so that [`the aliasing assertion below`](self) can be stated
     /// once over the whole set rather than pairwise by hand. Convenience
     /// *combinations* (`ALL`, `READ_ONLY`, …) are deliberately absent — they
     /// are unions of these and would defeat the check.
-    const DISTINCT: [Self; 13] = [
+    const DISTINCT: [Self; 14] = [
         Self::READ,
         Self::WRITE,
         Self::EXECUTE,
@@ -134,6 +156,7 @@ impl Rights {
         Self::IO_REALTIME,
         Self::DEBUG,
         Self::SET_CREDENTIALS,
+        Self::MEMORY_LOCK,
     ];
 
     // --- Convenience combinations ---
@@ -283,6 +306,7 @@ impl core::fmt::Display for Rights {
             (Self::IO_REALTIME, "io_rt"),
             (Self::DEBUG, "debug"),
             (Self::SET_CREDENTIALS, "setcred"),
+            (Self::MEMORY_LOCK, "mlock"),
         ];
 
         for (flag, name) in &flags {

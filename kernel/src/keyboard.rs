@@ -957,12 +957,17 @@ fn drain_echo(_arg: u64) {
 /// Try to read one character from the ring buffer without blocking.
 ///
 /// Returns `Some(ch)` if a character is available, `None` if the buffer
-/// is empty.  Also polls the USB keyboard for pending reports before
-/// checking the buffer.
+/// is empty.
+///
+/// Once [`start_usb_hid_poller`] has run this is a pure ring read, which is
+/// what finally makes it mean what its name says on USB hardware. It used to
+/// poll the device itself, and that made a readiness check unreliable in a way
+/// no caller could see: one poll fetches at most one report, so a program
+/// spinning on this function saw a key only if a report happened to be sitting
+/// in the event ring at that instant, and never saw one typed a moment
+/// earlier while nothing was calling.
 pub fn try_read_char() -> Option<u8> {
-    // Poll USB HID keyboard for any pending input reports.  This is a
-    // no-op if no USB keyboard is present or no data is waiting.
-    poll_usb_keyboard();
+    poll_usb_keyboard_if_unpolled();
 
     try_read_char_raw()
 }
@@ -1014,23 +1019,30 @@ pub enum ReadOutcome {
 /// reproduces the historical uninterruptible behaviour exactly, with no
 /// second copy of this loop to keep in sync.
 ///
-/// **Why this is still a `HLT` poll and not a real park.**  A proper
-/// `park_interruptible` here would be wrong today: USB HID keys are only
-/// noticed by `poll_usb_keyboard`, and its *only* three call sites are inside
-/// this function and `try_read_char`.  A reader that parked indefinitely
-/// would stop polling, and a USB keyboard would go dead — nothing else in the
-/// system drives that poll.  Making the read genuinely sleep therefore
-/// requires first moving HID polling into a driver-owned periodic task; that
-/// is tracked as the second stage of
-/// `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE`.  Interruptibility
-/// and parking are separable, and this is the half that can be done now:
-/// checking a pending-signal flag once per `HLT` wake costs nothing and fixes
-/// the user-visible defect (Ctrl-C not reaching a process blocked on the
-/// console), while the parking half is a driver restructure.
+/// **Why this is still a `HLT` poll and not a real park.**  The reason it was
+/// wrong *before* is now gone: [`start_usb_hid_poller`] drives HID polling
+/// from a timer, so a reader that stopped spinning no longer takes the USB
+/// keyboard down with it.  That was the blocking half of
+/// `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE` stage 2, and it is
+/// unblocked.
+///
+/// What stage 2 still needs is the wake side, which is a separate piece of
+/// work and is not done here: the poller pushes into the ring but wakes
+/// nobody, so a genuinely parked reader would sleep through its own keystroke.
+/// Converting this loop to `park_interruptible` therefore requires
+/// `push_char` to wake the waiting reader — with the ISR-safe idiom
+/// (`sched::try_wake`, falling back to `sched::defer_wake`), not
+/// `WaitQueue::try_wake_one`, which loses the wake on a lost `try_lock`.
+/// Until then the `HLT` spin is what makes the ring get looked at.
+///
+/// [`usb_hid_poller_armed`] is the precondition to check before making that
+/// change; do not assume it, because the poller does not arm on a machine
+/// with no xHCI controller.
 fn read_char_inner(deadline_ns: Option<u64>, pid: u64) -> ReadOutcome {
     loop {
-        // Poll USB keyboard for any pending reports.
-        poll_usb_keyboard();
+        // A no-op once the periodic poller is armed; the fallback for when it
+        // is not.  See `poll_usb_keyboard_if_unpolled`.
+        poll_usb_keyboard_if_unpolled();
 
         if let Some(ch) = try_read_char_raw() {
             return ReadOutcome::Byte(ch);
@@ -1343,6 +1355,125 @@ pub fn poll_usb_keyboard() {
 }
 
 // ---------------------------------------------------------------------------
+// Periodic HID polling
+// ---------------------------------------------------------------------------
+
+/// How often the HID poller runs, in nanoseconds.
+///
+/// 8 ms is the `bInterval` a USB boot keyboard advertises for its interrupt
+/// endpoint — the rate the device itself asks to be asked at — so polling
+/// faster buys nothing but wasted event-ring reads, and polling slower starts
+/// to be felt: at 16 ms a fast typist can outrun the poller within a single
+/// report window, and the 6-key boot report has no room to queue.
+///
+/// This is a *floor* on latency, not a cap on throughput. Each tick drains
+/// whatever the ring holds, so a burst typed between two ticks is not lost,
+/// merely delivered together.
+const USB_HID_POLL_INTERVAL_NS: u64 = 8_000_000;
+
+/// Whether the periodic poller is actually running.
+///
+/// Read by the console read paths to decide whether they still have to poll
+/// the device themselves. This is not belt-and-braces: [`crate::hrtimer`]
+/// refuses to schedule past a hard per-CPU ceiling and returns a handle that
+/// never fires, so "the timer was requested" and "the timer runs" are
+/// genuinely different facts. If the poller did not arm, a reader that stopped
+/// polling would make a USB keyboard permanently dead rather than merely
+/// laggy — so the fallback stays, gated on the truth rather than on the
+/// attempt.
+static USB_HID_POLLER_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// The periodic poll itself, called from the APIC timer ISR.
+///
+/// Everything downstream of here is already ISR-shaped, because IRQ 1 has
+/// always driven exactly this path for PS/2: `handle_usb_hid_report` touches
+/// nothing but atomics, and `push_char` defers its echo to a worker rather
+/// than rendering inline. The one thing that is *not* safe from an ISR is
+/// waiting for the controller, which is why this calls
+/// [`crate::xhci::try_poll_keyboard`] and not `poll_keyboard`.
+fn usb_hid_tick(_arg: u64) {
+    if let Some(report) = crate::xhci::try_poll_keyboard() {
+        handle_usb_hid_report(report.modifiers, report.keycodes);
+    }
+}
+
+/// Arm the periodic USB HID poller.
+///
+/// Call once, after both [`crate::hrtimer::init`] and [`crate::xhci::init`].
+/// Idempotent — a second call is a no-op rather than a second timer, so a
+/// `rescan` that discovers a keyboard later cannot end up with two.
+///
+/// **Why this exists at all.** Until 2026-08-21 the only thing that ever
+/// fetched a USB HID report was a console read, from inside its own poll loop.
+/// That made the device visible only to a caller already blocked waiting for
+/// it, which is the one situation where polling is redundant. Everything else
+/// — type-ahead while the system is busy, a non-blocking readiness check, a
+/// hotkey, Ctrl-C to a program that is not reading stdin — saw nothing,
+/// because nothing asked. PS/2 never had the problem (IRQ 1 pushes into the
+/// same ring), and QEMU's default keyboard is PS/2, which is why every boot
+/// test to date exercised only the working half. See `known-issues.md` →
+/// `A-USB-KEYSTROKES-ARE-ONLY-FETCHED-WHILE-SOMEBODY-IS-BLOCKED-READING`.
+pub fn start_usb_hid_poller() {
+    if USB_HID_POLLER_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    // Arming when no controller is present would be harmless — `try_poll_keyboard`
+    // returns `None` on a `None` controller — but it would also be a lie to the
+    // read paths, which use ARMED to decide they no longer need to poll.  With
+    // no xHCI there is nothing to poll either way; keeping the flag false costs
+    // one atomic load per read and keeps the two facts aligned.
+    if !crate::xhci::is_available() {
+        crate::serial_println!("[keyboard] No xHCI controller; USB HID poller not started");
+        return;
+    }
+
+    // Fire the first tick a full period out rather than immediately: this runs
+    // during boot, and a callback that fires inside `schedule_repeating` would
+    // reach into the controller before the caller's own initialisation has
+    // finished settling.
+    let _handle = crate::hrtimer::schedule_repeating(
+        USB_HID_POLL_INTERVAL_NS,
+        USB_HID_POLL_INTERVAL_NS,
+        usb_hid_tick,
+        0,
+    );
+
+    // The handle is deliberately dropped: this timer runs for the life of the
+    // system and there is no caller who could ever want to cancel it.  Losing
+    // the handle is therefore not a leak of anything cancellable.
+    USB_HID_POLLER_ARMED.store(true, Ordering::Release);
+    crate::serial_println!(
+        "[keyboard] USB HID poller armed ({} ms period)",
+        USB_HID_POLL_INTERVAL_NS / 1_000_000
+    );
+}
+
+/// Poll the USB keyboard from a read path, but only if nothing else does.
+///
+/// With the periodic poller running this is a single relaxed load, and the
+/// read paths become symmetric with the PS/2 path: they read the ring and
+/// nothing else. Without it — no xHCI, or an hrtimer that refused the
+/// schedule — the old inline poll is still the only thing keeping a USB
+/// keyboard alive, so it stays.
+fn poll_usb_keyboard_if_unpolled() {
+    if USB_HID_POLLER_ARMED.load(Ordering::Relaxed) {
+        return;
+    }
+    poll_usb_keyboard();
+}
+
+/// Whether the periodic USB HID poller is running.
+///
+/// Exposed for the self-test and for whoever implements stage 2 of
+/// `BUG-CONSOLE-READ-UNINTERRUPTIBLE`: a blocking console read may only be
+/// converted from a `HLT` spin into a real park once this is `true`, because a
+/// parked task does not spin and so cannot poll for its own wakeup.
+#[must_use]
+pub fn usb_hid_poller_armed() -> bool {
+    USB_HID_POLLER_ARMED.load(Ordering::Acquire)
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1370,8 +1501,60 @@ pub fn self_test() -> Result<(), &'static str> {
 
     echo_ring_self_test()?;
     read_outcome_self_test()?;
+    usb_hid_poller_self_test()?;
 
     crate::serial_println!("[keyboard] Self-test PASSED");
+    Ok(())
+}
+
+/// Check that USB HID input does not depend on somebody being blocked on it.
+///
+/// This cannot press a key, so it does not try to. What it *can* check is the
+/// property whose absence was the bug: that a poller exists at all whenever
+/// there is a USB keyboard to poll. The old defect would sail through any test
+/// that merely read a character, because a blocking read polls the device on
+/// its own — which is exactly why it went unnoticed for as long as it did.
+///
+/// The boot test attaches `-device qemu-xhci -device usb-kbd`, so the
+/// interesting branch is the one that runs in CI; the `else` arms cover a
+/// machine without USB and are not failures.
+fn usb_hid_poller_self_test() -> Result<(), &'static str> {
+    let has_ctrl = crate::xhci::is_available();
+    let has_kbd = has_ctrl && crate::xhci::has_keyboard();
+    let armed = usb_hid_poller_armed();
+
+    if has_kbd && !armed {
+        crate::serial_println!(
+            "[keyboard]   FAIL: a USB keyboard is enumerated but no HID poller is armed — \
+             keystrokes will only be seen while something is already blocked reading"
+        );
+        return Err("USB keyboard present but HID poller not armed");
+    }
+    if armed && !has_ctrl {
+        // Would mean ARMED and the controller disagree, and the read paths
+        // trust ARMED to decide they need not poll.
+        crate::serial_println!("[keyboard]   FAIL: HID poller armed with no xHCI controller");
+        return Err("HID poller armed without a controller");
+    }
+
+    // Run one tick synchronously.  This exercises the whole ISR path --
+    // `try_lock`, endpoint drain, re-post, `handle_usb_hid_report` -- not just
+    // the lock acquisition, so a `try_lock` that mishandles the uncontended
+    // case, or a re-post that kills the endpoint, shows up here rather than as
+    // a keyboard that wedges after its first keypress on real hardware.
+    //
+    // Calling the tick rather than discarding `try_poll_keyboard()` also means
+    // a report that happens to be waiting is *delivered* instead of dropped: a
+    // self-test has no business eating a keystroke, and this runs late enough
+    // in boot that there could be one.
+    usb_hid_tick(0);
+
+    crate::serial_println!(
+        "[keyboard]   USB HID poller: {} (xhci {}, keyboard {}): OK",
+        if armed { "armed" } else { "not needed" },
+        if has_ctrl { "present" } else { "absent" },
+        if has_kbd { "present" } else { "absent" },
+    );
     Ok(())
 }
 

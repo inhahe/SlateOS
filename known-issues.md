@@ -50756,7 +50756,10 @@ what `tty::backend_read_char` / `backend_read_char_timeout` and
 predicted below, `canonical_read`/`raw_read` needed no edit: the four-state
 `Input` enum already carried `Interrupted` through to `ConsoleRead::Interrupted`.
 
-**The proper fix, corrected — and why the original one below is wrong.** The
+**The proper fix, corrected — and why the original one below is wrong.**
+(Historical: step 1 of the two below has since been done — see the ✅ on it.
+The paragraph is kept as written because it is the reasoning that identified
+the ordering, and the ordering still holds.) The
 text under "The proper fix" says to replace the `HLT` spin with
 `park_interruptible` plus a wake from the IRQ 1 handler. **That would make a
 USB keyboard dead.** USB HID keys are not interrupt-driven here at all: they
@@ -50769,13 +50772,27 @@ nothing about xHCI.
 
 So stage 2 is two changes, in order:
 
-1. **Move USB HID polling out of the read path** into a driver-owned periodic
-   task (a timer callback, or a workqueue item re-armed on the tick), so
-   keystrokes are noticed whether or not anybody is blocked reading. This also
-   fixes a *separate* latent bug that the current arrangement hides: **USB
-   keystrokes are only ever polled while some task is inside a console read.**
-   A USB key pressed while the system is busy elsewhere is not buffered, it is
-   simply never fetched from the ring until the next read comes along.
+1. ✅ **DONE 2026-08-21.** **Move USB HID polling out of the read path** into a
+   driver-owned periodic task (a timer callback, or a workqueue item re-armed
+   on the tick), so keystrokes are noticed whether or not anybody is blocked
+   reading. This also fixes a *separate* latent bug that the current
+   arrangement hides: **USB keystrokes are only ever polled while some task is
+   inside a console read.** A USB key pressed while the system is busy
+   elsewhere is not buffered, it is simply never fetched from the ring until
+   the next read comes along.
+
+   *Done as the timer-callback variant:* `keyboard::start_usb_hid_poller()`
+   arms an 8 ms hrtimer (the endpoint's own advertised interval — QEMU reports
+   `interval=7`, which xHCI encodes as 2^6 × 125 µs) whose callback drains the
+   endpoint from the APIC timer ISR via the new `xhci::try_poll_keyboard`.
+   Details, including why the ISR path must `try_lock` rather than `lock`, are
+   in `A-USB-KEYSTROKES-ARE-ONLY-FETCHED-WHILE-SOMEBODY-IS-BLOCKED-READING`.
+
+   **Read the paragraph below before treating this as unblocking step 2**: what
+   was removed is the "a parked reader stops polling and the keyboard dies"
+   objection. The poller still wakes nobody, so step 2's wake side is
+   untouched — a parked reader would now sleep through a keystroke that *was*
+   successfully captured, which is a better failure but still a hang.
 2. **Then** convert the loop to a real park: a waiter set on the scancode
    queue, `park_interruptible`, and a wake from both the PS/2 IRQ and the new
    HID poll task. The wake must use the ISR-safe idiom — `sched::try_wake(tid)`
@@ -51780,7 +51797,44 @@ unanswered fork in this one.
 
 ---
 
-## A-USB-KEYSTROKES-ARE-ONLY-FETCHED-WHILE-SOMEBODY-IS-BLOCKED-READING — 2026-08-21 — lane A — OPEN
+## A-USB-KEYSTROKES-ARE-ONLY-FETCHED-WHILE-SOMEBODY-IS-BLOCKED-READING — 2026-08-21 — lane A — FIXED 2026-08-21
+
+**Fixed** the same day it was filed, by items 1 and 2 of "The proper fix" below.
+`keyboard::start_usb_hid_poller()` arms an 8 ms hrtimer whose callback drains
+the HID endpoint from the APIC timer ISR, so a USB keystroke now reaches the
+input ring whether or not anybody is reading. The read paths poll inline only
+as a fallback, gated on `USB_HID_POLLER_ARMED` — which records whether the
+timer *runs*, not whether it was requested, because `hrtimer` refuses to
+schedule past a per-CPU ceiling and hands back a handle that never fires.
+
+Confirmed on the boot rig, which attaches `-device qemu-xhci -device usb-kbd`:
+
+```
+[xhci] Configured keyboard on slot 1 (EP1 IN, 8 bytes, interval=7)
+[keyboard] USB HID poller armed (8 ms period)
+[keyboard]   USB HID poller: armed (xhci present, keyboard present): OK
+```
+
+`interval=7` is the device's own answer and it matches: xHCI encodes the
+interval as 2^(n-1) × 125 µs, so 7 is exactly the 8 ms the poller uses. The
+period is not a guess.
+
+The ISR calls `xhci::try_poll_keyboard`, a new `try_lock` variant. That is a
+correctness requirement, not a tuning choice: `XHCI.lock()` from the timer ISR
+deadlocks outright, because the code the interrupt preempted may hold that
+same lock **on the same CPU**, and a spinlock cannot be re-entered by the
+interrupt that stopped its owner from releasing it. A contended tick skips, and
+loses nothing — the ring is drained per *report*, not per tick, so whatever a
+skipped tick left behind is still there 8 ms later.
+
+A regression test (`keyboard::usb_hid_poller_self_test`) asserts the property
+whose absence *was* the bug — that a poller exists whenever there is a keyboard
+to poll — rather than reading a character, which is what let the defect hide:
+a blocking read polls the device itself, so any test that merely read a byte
+passed both before and after.
+
+**Item 3 is a separate piece of work and is NOT done.** See the note at the end
+of this entry.
 
 **In short:** On a machine whose keyboard is USB (which is every modern machine
 — PS/2 is a legacy port), the kernel never notices a keystroke on its own. It
@@ -51854,6 +51908,25 @@ USB hardware — and stage 2 of the interruptible-read fix stays blocked
 indefinitely. It gets more expensive with time, not less: every consumer written
 against `try_read_char()` in the meantime is written against a function that
 cannot do what its name says on the hardware we are about to start booting on.
+
+**What item 3 still needs (read this before attempting stage 2).** This fix
+removed the objection quoted in item 3 — a parked reader no longer takes the
+USB keyboard down with it, because the poller runs regardless. But stage 2 is
+**still not safe to do**, for a *different* reason that this entry originally
+folded into the same sentence:
+
+> the poller pushes into the ring and wakes nobody.
+
+So a genuinely parked reader would now sleep straight through its own
+keystroke. That is a strictly better failure than the old one — the keystroke
+is captured rather than never fetched — but it is still a hang. Stage 2 needs
+`push_char` to wake the waiting reader, with the ISR-safe idiom recorded above
+(`sched::try_wake`, falling back to `sched::defer_wake`; **not**
+`WaitQueue::try_wake_one`, which drops the wake on a lost `try_lock`).
+
+Check `keyboard::usb_hid_poller_armed()` rather than assuming it: the poller
+does not arm on a machine with no xHCI controller, and on such a machine the
+`HLT` spin is still the only thing that looks at the ring.
 
 ## B-THE-STALENESS-GATE-PRINTS-THE-WRONG-REMEDY-WHEN-THE-STALE-SIDE-IS-LIBC — 2026-08-21 — lane B — OPEN
 

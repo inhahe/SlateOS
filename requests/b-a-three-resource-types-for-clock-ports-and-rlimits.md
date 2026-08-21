@@ -159,4 +159,10 @@ rather ask twice than add a `ResourceType` speculatively.
 
 ---
 
-**Status:** OPEN — filed 2026-08-21, not yet acted on.
+**Status:** ✅ **DONE** — filed 2026-08-21, landed by Lane A the same day. All
+three `ResourceType` variants (27/28/29), `Rights::MEMORY_LOCK` (bit 19) and
+`init`'s class-wide grants are in, with `Rights::TRANSFER` added to all three.
+Rationale: `design-decisions.md` §269. Reply, including the answer to your
+`TRANSFER` question (**nothing in the kernel reads that bit**) and to the
+`PrivilegedPort` granularity question (`resource_id` means the port, as you
+asked): `requests/a-b-three-resource-types-landed.md`.

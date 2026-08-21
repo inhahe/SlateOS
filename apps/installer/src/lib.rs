@@ -630,11 +630,26 @@ impl YamlParser {
         }
 
         // Quoted strings.
-        if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-        {
-            let inner = &trimmed[1..trimmed.len().wrapping_sub(1)];
-            return Ok(YamlValue::Str(Self::unescape_string(inner)));
+        //
+        // Stripped in sequence rather than tested with `starts_with` and
+        // `ends_with` and then sliced `1..len - 1`. In the latter shape the
+        // proof that the slice is in bounds lives in a different statement
+        // from the slice, and it was not a proof: a value of a single `"` both
+        // starts and ends with a quote — the *same byte* answering both tests
+        // — so the guard passed with `len == 1` and the slice became `1..0`,
+        // which panics. The `wrapping_sub` that used to be there made the
+        // underflow silent but not harmless: it produced `usize::MAX` and the
+        // slice panicked anyway, one line later and less legibly.
+        //
+        // A lone quote is a thing a hand-edited install manifest contains, so
+        // this was reachable by typo, not only by malice.
+        for quote in ['"', '\''] {
+            if let Some(inner) = trimmed
+                .strip_prefix(quote)
+                .and_then(|rest| rest.strip_suffix(quote))
+            {
+                return Ok(YamlValue::Str(Self::unescape_string(inner)));
+            }
         }
 
         // Numbers — try integer first, then float.
@@ -1860,6 +1875,36 @@ mod tests {
     fn yaml_parse_string_single_quoted() {
         let val = YamlParser::parse("name: 'hello'").unwrap();
         assert_eq!(val.get("name").unwrap().as_str(), Some("hello"));
+    }
+
+    /// A single quote character is not an empty quoted string — it is one
+    /// unbalanced byte, and must come back as the plain string `"` rather than
+    /// panicking. The old code tested `starts_with` and `ends_with` and then
+    /// sliced `1..len - 1`, and that one byte answered both tests, so the
+    /// slice was `1..0`. A typo in a hand-edited manifest killed the installer.
+    #[test]
+    fn yaml_lone_quote_is_a_plain_string_not_a_panic() {
+        for (input, want) in [
+            ("name: \"", "\""),
+            ("name: '", "'"),
+            ("name: \"\"", ""),
+            ("name: ''", ""),
+            ("name: \"unterminated", "\"unterminated"),
+            ("name: trailing\"", "trailing\""),
+        ] {
+            let val = YamlParser::parse(input).expect(input);
+            assert_eq!(val.get("name").unwrap().as_str(), Some(want), "on {input:?}");
+        }
+    }
+
+    /// A value quoted with one kind of quote must not be un-quoted by the
+    /// other. Testing the two prefixes and the two suffixes in one `||` chain
+    /// could pair a `'` prefix with a `"` suffix; stripping in sequence, per
+    /// quote character, cannot.
+    #[test]
+    fn yaml_mismatched_quotes_are_not_stripped() {
+        let val = YamlParser::parse("name: \"mixed'").unwrap();
+        assert_eq!(val.get("name").unwrap().as_str(), Some("\"mixed'"));
     }
 
     #[test]

@@ -46669,6 +46669,43 @@ gates that check it are metadata *reads*, and the two metadata *writes* are
 gated on `WRITE` — was a contributing cause of the misdiagnosis and has been
 corrected to describe the bit the code implements.
 
+**The fix reached one of two tests; completed 2026-08-21 in `e066c8990`.**
+`0153b147c` fixed `self_test_linux_real_glibc_make` and left
+`self_test_linux_real_glibc_make_cc` (same file, ~1600 lines later) still
+granting `READ | WRITE`, so `make: stat: /cap.mk: Permission denied` kept
+failing that rung of the boot test for a day. The reason is worth naming
+because it will recur: the *report* named one test, and the report was treated
+as the extent of the bug. It was not — it was the extent of what lane B
+happened to be running. The habit that catches this is to grep for the
+*mechanism* (`ResourceType::File` grants that omit `METADATA` in a native-ABI
+launch) rather than to fix the symptom that was reported. These are the only
+two tests in the tree that run `make` (`grep 'b"make"' spawn.rs` — two hits);
+both now grant `METADATA`.
+
+Running that mechanism-grep to its end is *not* cheap, which is the honest
+caveat: `Rights::READ | Rights::WRITE` without `METADATA` matches ~85 sites in
+`spawn.rs` alone, and the overwhelming majority are Linux-ABI tests that
+correctly need nothing. Only a native-ABI binary that stats is affected, and
+there is no grep that separates those two populations — which is precisely why
+Q56 exists. What bounds the live damage is the boot test rather than the grep:
+it exercises every one of those launch sites, so any other instance would
+already be failing a rung with a `stat`/`Permission denied` symptom. As of
+`e066c8990` none does.
+
+**The fix worked, and the rung still fails — for a different reason.** Worth
+recording precisely, because "still red after the fix" reads like a failed fix
+and this was not one. Before, `make-drives-tcc` died at `make: stat: /cap.mk:
+Permission denied` without parsing anything. After, make parses the makefile
+and gets as far as running `/bin/tcc -c /cap-a.c -o /cap-a.o` — then the child
+faults at `rip=0x10315d4, addr=0x8, exit code=Some(-8)`. That triple is
+*byte-identical* to the one its sibling `self_test_linux_real_glibc_make` hits,
+i.e. lane B's `BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT`.
+So the boot's failure *count* did not drop, but the number of distinct causes
+went from two to one: both `make` rungs now fail in the same place, in lane B's
+tree, and nothing lane A owns is implicated. A fix that converges two symptoms
+onto one known cause is progress even though the tally is unchanged — and the
+tally is why it would have been easy to record this as "no effect."
+
 **What it exposed and did not fix:** the same operation requires a capability
 under the native ABI and nothing at all under the Linux one. Put to the operator
 as **Q56** in `open-questions.md` rather than decided, because closing it means

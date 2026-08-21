@@ -11,10 +11,22 @@ Shape **A**, your recommendation. The verifier is the new `userspace/authlib`
 crate; `logind::unlock_session` now refuses without a successful
 `authenticate_session`. The reply — exact signatures, and what to do meanwhile
 — is `requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md`;
-the rationale is `design-decisions.md` §341. **Half**-landed because the
-transport does not exist yet: `logind` has no resident event loop, so there is
-still no socket for `apps/lockscreen` to call. Keep `PasswordValidator` as
-interim scaffolding and shape the screen to take its verdict from outside.
+the rationale is `design-decisions.md` §341.
+
+**Update 2026-08-20 — the transport landed too** (§342). `logind` now has a
+resident event loop and registers **`system.logind`** on the service registry;
+`AuthenticateSession` / `UnlockSession` / `LockSession` / `GetSession` /
+`ListSessions` are live and the argument encoding is `libservicebus::fields`.
+The reply file above has the table.
+
+It is still not *usable*, for a reason outside both our lanes: the kernel
+cannot tell a service who connected to it, every method is authorised against
+the caller's uid, and so every method currently answers
+`system.logind.Error.UnknownCaller`. Filed as
+`requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`. Build against
+the interface — it is the final shape — but keep `PasswordValidator` as interim
+scaffolding until lane A replies, and shape the screen to take its verdict from
+outside.
 
 **In short.** `apps/lockscreen` (mine) asks "is this the user's password?" and
 answers it from a verifier handed to it by its caller. The system's actual

@@ -54491,3 +54491,48 @@ adding the check in the same change.
 Everything else about it is already right: the override clears the ticket as
 well as the lock, so it cannot leave a session whose *next* lock opens for
 free (`the_administrative_override_needs_no_password_and_leaves_no_ticket`).
+
+RESOLVED 2026-08-20, in the same change as the transport, exactly as this entry
+required. `userspace/logind/src/bus.rs` is the daemon's bus-facing surface and
+`serve()` in main.rs is the resident event loop; the override is reachable over
+the bus only through `bus::force_unlock_session`, which requires
+`Required::Administrator` and refuses anyone whose credentials are not root —
+including the session's own owner, which is the case that matters, since a lock
+screen that could call it would not be a lock
+(`bus::tests::force_unlock_is_refused_to_the_sessions_own_owner`). The
+`loginctl` personality still calls `Daemon::force_unlock_session` directly and
+is still unaffected, for the reason above: it operates on its own in-memory
+state.
+
+The check is real but currently unsatisfiable — see the next entry.
+
+================================================================================
+2026-08-20 (lane B) — every logind bus method refuses, because the kernel
+cannot say who is calling
+================================================================================
+
+`userspace/logind` now registers `system.logind` on the service registry and
+answers method calls (`bus.rs`, `serve()` in main.rs). Every method is
+authorised against the caller's uid, and the caller's uid comes from
+`libservicebus::Connection::peer_credentials()`, which returns `None` for every
+connection — because `SYS_SERVICE_ACCEPT` hands back a bare channel handle and
+the kernel records nothing about the process that connected. There is no
+`SO_PEERCRED` equivalent anywhere in `kernel/src/ipc/`.
+
+So the interface is complete, tested, and answers
+`system.logind.Error.UnknownCaller` to everything.
+
+That is the correct behaviour, not a bug: an unidentified caller must not be
+assumed to be the session's owner, or `ForceUnlockSession` becomes a
+password-free unlock for anything that can open a channel. But it does mean
+lane C's `apps/lockscreen` still cannot unlock a screen, even though both ends
+now exist.
+
+FIX: filed as requests/b-a-a-service-cannot-find-out-who-is-calling-it.md —
+a `SYS_CHANNEL_PEER_CRED(handle, *out)` reporting {pid, uid, gid} snapshotted
+at connect time. When lane A lands it, the change on this side is one function
+body in userspace/libservicebus/src/lib.rs; no caller moves, because the
+fail-closed contract (`None` == unknown == untrusted) is already what every
+caller is written against.
+
+TRIGGER: lane A's reply naming the syscall number and struct layout.

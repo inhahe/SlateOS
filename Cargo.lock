@@ -5675,6 +5675,7 @@ name = "logind"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "libservicebus",
  "posix",
 ]
 

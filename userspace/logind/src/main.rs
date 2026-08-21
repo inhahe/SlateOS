@@ -36,6 +36,8 @@
 // ("logind daemon event loop not yet implemented") for the tracking note.
 #![allow(dead_code)]
 
+mod bus;
+
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
@@ -1320,13 +1322,156 @@ fn run_daemon(args: &[String]) -> i32 {
         daemon.config.idle_timeout,
     );
 
-    // In a real implementation, this would enter an event loop listening
-    // on D-Bus for session/seat/power requests. For now we just indicate
-    // readiness and return.
-    daemon.running = false;
+    let code = serve(&mut daemon);
 
+    daemon.running = false;
     let _ = writeln!(io::stderr(), "logind: shutting down");
+    code
+}
+
+/// The resident event loop: register on the service registry and answer
+/// method calls until the daemon is asked to stop.
+///
+/// One completion port multiplexes the listener and every accepted
+/// connection, so an idle daemon costs nothing and a client that connects and
+/// says nothing does not hold a thread. `user_data` is the connection's index
+/// in `conns`, with `LISTENER_KEY` reserved for the listener itself.
+///
+/// A dead or misbehaving client is dropped rather than retried: there is no
+/// state on this side worth preserving across a broken channel, and a client
+/// that wants to talk again can connect again.
+#[cfg(unix)]
+fn serve(daemon: &mut Daemon) -> i32 {
+    use libservicebus::{EventLoop, ServiceHost, SourceType};
+
+    /// `user_data` reserved for the listener. Connections use their index,
+    /// which is why the reserved value is at the top of the range rather than
+    /// 0 — index 0 is a perfectly ordinary connection.
+    const LISTENER_KEY: u64 = u64::MAX;
+
+    let host = match ServiceHost::register(bus::SERVICE_NAME) {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = writeln!(
+                io::stderr(),
+                "logind: cannot register {}: {e}",
+                bus::SERVICE_NAME
+            );
+            return 1;
+        }
+    };
+
+    let mut evloop = match EventLoop::new() {
+        Ok(l) => l,
+        Err(e) => {
+            let _ = writeln!(io::stderr(), "logind: cannot create event loop: {e}");
+            return 1;
+        }
+    };
+
+    if let Err(e) = evloop.register_listener(&host, LISTENER_KEY) {
+        let _ = writeln!(io::stderr(), "logind: cannot watch listener: {e}");
+        return 1;
+    }
+
+    // `Option` rather than removal, because `user_data` is the index: removing
+    // an entry would renumber every connection after it, and the completion
+    // port is still holding the old numbers.
+    let mut conns: Vec<Option<libservicebus::Connection>> = Vec::new();
+
+    while daemon.running {
+        let events = match evloop.wait() {
+            Ok(e) => e.to_vec(),
+            Err(e) => {
+                let _ = writeln!(io::stderr(), "logind: event loop failed: {e}");
+                return 1;
+            }
+        };
+
+        for event in events {
+            if event.user_data == LISTENER_KEY {
+                match host.try_accept() {
+                    Ok(Some(conn)) => {
+                        let key = conns.len() as u64;
+                        if let Err(e) = evloop.register_connection(&conn, key) {
+                            let _ = writeln!(io::stderr(), "logind: cannot watch client: {e}");
+                            continue;
+                        }
+                        conns.push(Some(conn));
+                    }
+                    // Spurious readiness, or another accept won the race.
+                    Ok(None) => {}
+                    Err(e) => {
+                        let _ = writeln!(io::stderr(), "logind: accept failed: {e}");
+                    }
+                }
+                continue;
+            }
+
+            let idx = event.user_data as usize;
+            let Some(slot) = conns.get_mut(idx) else {
+                continue;
+            };
+            let Some(conn) = slot.as_mut() else {
+                continue;
+            };
+
+            // Drain: one readiness notification can cover several queued
+            // messages, and leaving any behind would stall that client until
+            // it happened to send another.
+            let mut drop_client = false;
+            loop {
+                match conn.try_recv() {
+                    Ok(Some(mut call)) => {
+                        // The kernel cannot yet say who this is; `bus` refuses
+                        // everything on `None`, which is the intended
+                        // behaviour until the peer-credential syscall lands.
+                        let caller = conn.peer_credentials();
+                        let reply = bus::handle_message(daemon, &call, caller);
+                        bus::wipe(&mut call.payload);
+                        if conn.send(&reply).is_err() {
+                            drop_client = true;
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {
+                        drop_client = true;
+                        break;
+                    }
+                }
+            }
+
+            if drop_client {
+                if let Some(conn) = slot.as_ref() {
+                    let _ = evloop.unregister_source(SourceType::Channel, conn.handle());
+                }
+                // Dropping the `Connection` closes the channel handle.
+                *slot = None;
+            }
+        }
+    }
+
     0
+}
+
+/// Host-build stand-in for [`serve`].
+///
+/// The event loop talks to the kernel through raw `syscall` instructions, so
+/// it exists only on the target it is written for. On a development host those
+/// instructions would enter a foreign kernel with a Slate OS syscall number,
+/// so the loop is not merely useless there — it must not be reachable. The
+/// bus *policy* is not gated: `bus::dispatch` is ordinary code and its tests
+/// run everywhere, which is where the behaviour that matters is checked.
+#[cfg(not(unix))]
+fn serve(_daemon: &mut Daemon) -> i32 {
+    let _ = writeln!(
+        io::stderr(),
+        "logind: the service bus is only available on Slate OS; \
+         this build can run `loginctl` but cannot serve {}",
+        bus::SERVICE_NAME
+    );
+    1
 }
 
 // ============================================================================

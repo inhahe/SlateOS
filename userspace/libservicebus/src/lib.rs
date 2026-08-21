@@ -462,6 +462,41 @@ impl Message {
 }
 
 // ============================================================================
+// Peer credentials
+// ============================================================================
+
+/// Who is on the other end of a connection, as reported by the kernel.
+///
+/// A service that does anything privileged needs this: the *only* trustworthy
+/// answer to "who is asking?" comes from the kernel, because it is the one
+/// party to the conversation that the caller cannot lie to. An identity the
+/// client sends in its own message body is not an identity — it is a claim.
+///
+/// Obtained from [`Connection::peer_credentials`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Credentials {
+    /// Process ID of the peer at the time the connection was established.
+    ///
+    /// Recorded at connect time on purpose: a pid read *later* can name a
+    /// different process, because the original may have exited and the number
+    /// been reused. A credential that changes meaning underneath its holder is
+    /// worse than no credential.
+    pub pid: u32,
+    /// Effective user ID of the peer at connect time.
+    pub uid: u32,
+    /// Effective group ID of the peer at connect time.
+    pub gid: u32,
+}
+
+impl Credentials {
+    /// Whether the peer is the superuser.
+    #[must_use]
+    pub const fn is_root(self) -> bool {
+        self.uid == 0
+    }
+}
+
+// ============================================================================
 // Connection — client side of a service connection
 // ============================================================================
 
@@ -507,6 +542,30 @@ impl Connection {
     /// Get the raw channel handle (for use with EventLoop).
     pub fn handle(&self) -> u64 {
         self.handle
+    }
+
+    /// The kernel's report of who is on the other end, if it can tell us.
+    ///
+    /// `None` means **the identity of the caller is unknown**, and a caller
+    /// whose identity is unknown must be treated as untrusted — not as
+    /// "probably the user". Services should fail closed on `None`.
+    ///
+    /// # Currently always `None`
+    ///
+    /// The kernel has no peer-credential syscall yet: `SYS_SERVICE_ACCEPT`
+    /// (`kernel/src/syscall/handlers.rs::sys_service_accept`) returns a bare
+    /// channel handle and records nothing about the connecting process, so
+    /// there is nothing for this function to read. Requested from lane A in
+    /// `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`; until
+    /// that lands, every privileged method on every service must refuse.
+    ///
+    /// This is deliberately shipped as a working call that answers "I don't
+    /// know" rather than left unwritten: it puts the fail-closed decision in
+    /// the services *now*, so landing the syscall is a one-line change here
+    /// and no change at all in the callers.
+    #[must_use]
+    pub fn peer_credentials(&self) -> Option<Credentials> {
+        None
     }
 
     /// Send a message on this connection.
@@ -1046,6 +1105,101 @@ impl Drop for Timer {
 }
 
 // ============================================================================
+// Payload fields — the argument encoding services share
+// ============================================================================
+
+/// A length-prefixed list of byte strings, for message payloads.
+///
+/// [`Message`] carries its payload as opaque bytes, which is the right choice
+/// for the transport — a compositor's pixel buffer and a session manager's
+/// method arguments have nothing in common, and forcing one type system on
+/// both would serve neither. But it leaves *argument lists* unspecified, and
+/// an unspecified thing that every service needs is a thing every service
+/// invents separately. That is the shape that produced three disagreeing
+/// password hashers (`design-decisions.md` §329) and five disagreeing YAML
+/// parsers (§330). So the one encoding lives here, once.
+///
+/// Wire format, all integers little-endian:
+///
+/// ```text
+/// [0..4]   u32   field count
+/// then, per field:
+///   [0..4] u32   byte length
+///   [4..]  bytes
+/// ```
+///
+/// Fields are **bytes, not text**: a username or a path may legally be
+/// non-UTF-8, and a codec that decodes to `String` would corrupt it (see the
+/// project rule on OS-boundary data). Callers that want text validate it
+/// themselves, at the point where they know whether invalid UTF-8 is an error
+/// or just an unusual name.
+pub mod fields {
+    /// The largest field count this decoder will believe.
+    ///
+    /// The count is read from untrusted bytes and used to size a `Vec`, so
+    /// without a cap a four-byte header could ask for four billion entries.
+    /// No interface here has anything like this many arguments; the limit
+    /// exists to bound the allocation, not to express a design.
+    pub const MAX_FIELDS: usize = 64;
+
+    /// Encode a list of byte strings into a payload.
+    #[must_use]
+    pub fn encode(items: &[&[u8]]) -> Vec<u8> {
+        let total: usize = 4 + items.iter().map(|f| 4 + f.len()).sum::<usize>();
+        let mut out = Vec::with_capacity(total);
+        // `as u32` is safe against a caller who really does pass more than
+        // 4 G fields only because `decode` refuses anything over MAX_FIELDS;
+        // the truncated count would simply fail to decode.
+        out.extend_from_slice(&(items.len() as u32).to_le_bytes());
+        for item in items {
+            out.extend_from_slice(&(item.len() as u32).to_le_bytes());
+            out.extend_from_slice(item);
+        }
+        out
+    }
+
+    /// Decode a payload into its byte strings.
+    ///
+    /// Returns `None` if the payload is truncated, declares more fields than
+    /// [`MAX_FIELDS`], or declares a field longer than the bytes that remain.
+    /// Every one of those is a malformed message rather than a distinguishable
+    /// error, and a service's only sane response to any of them is the same
+    /// `InvalidArguments` reply — so they collapse into one `None`.
+    #[must_use]
+    pub fn decode(payload: &[u8]) -> Option<Vec<&[u8]>> {
+        let count_bytes: [u8; 4] = payload.get(0..4)?.try_into().ok()?;
+        let count = u32::from_le_bytes(count_bytes) as usize;
+        if count > MAX_FIELDS {
+            return None;
+        }
+
+        let mut out = Vec::with_capacity(count);
+        let mut pos = 4usize;
+        for _ in 0..count {
+            let len_bytes: [u8; 4] = payload.get(pos..pos.checked_add(4)?)?.try_into().ok()?;
+            let len = u32::from_le_bytes(len_bytes) as usize;
+            pos = pos.checked_add(4)?;
+            let end = pos.checked_add(len)?;
+            out.push(payload.get(pos..end)?);
+            pos = end;
+        }
+        Some(out)
+    }
+
+    /// Decode a payload and require exactly `n` fields.
+    ///
+    /// The count check belongs with the decode rather than in each method
+    /// handler: an interface with a fixed arity that accepts a message of the
+    /// wrong arity is an interface that will one day read argument 2 as
+    /// argument 1.
+    #[must_use]
+    pub fn decode_exact(payload: &[u8], n: usize) -> Option<Vec<&[u8]>> {
+        let items = decode(payload)?;
+        if items.len() == n { Some(items) } else { None }
+    }
+}
+
+// ============================================================================
 // Helper: duration conversions
 // ============================================================================
 
@@ -1143,6 +1297,83 @@ mod tests {
         assert_eq!(BusError::from_errno(-5), BusError::Disconnected);
         assert_eq!(BusError::from_errno(-6), BusError::TimedOut);
         assert_eq!(BusError::from_errno(-100), BusError::Unknown(-100));
+    }
+
+    #[test]
+    fn fields_roundtrip_including_the_awkward_cases() {
+        // An empty list, an empty field, a non-UTF-8 field and a normal one:
+        // the empty *field* is the one that breaks naive codecs, because it is
+        // indistinguishable from "no field" unless the length is explicit.
+        assert_eq!(fields::decode(&fields::encode(&[])), Some(vec![]));
+
+        let items: Vec<&[u8]> = vec![b"session-1", b"", &[0xff, 0xfe, 0x00, b'a']];
+        let encoded = fields::encode(&items);
+        assert_eq!(fields::decode(&encoded), Some(items));
+    }
+
+    #[test]
+    fn fields_rejects_a_truncated_payload_rather_than_guessing() {
+        let encoded = fields::encode(&[b"alice".as_slice(), b"hunter2".as_slice()]);
+        // Every proper prefix is malformed; none may decode to something
+        // plausible, because a partly-read argument list is how a password
+        // ends up being compared against a truncated copy of itself.
+        for cut in 0..encoded.len() {
+            assert_eq!(fields::decode(&encoded[..cut]), None, "prefix of len {cut}");
+        }
+        assert!(fields::decode(&encoded).is_some());
+    }
+
+    #[test]
+    fn fields_refuses_a_count_it_cannot_have_been_sent() {
+        // A four-byte header claiming four billion fields must not become a
+        // four-billion-entry Vec::with_capacity.
+        let mut hostile = u32::MAX.to_le_bytes().to_vec();
+        hostile.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(fields::decode(&hostile), None);
+
+        // A count just over the cap is refused for the same reason, and a
+        // count just under it is not.
+        let over: Vec<&[u8]> = vec![b"x"; fields::MAX_FIELDS + 1];
+        assert_eq!(fields::decode(&fields::encode(&over)), None);
+        let at: Vec<&[u8]> = vec![b"x"; fields::MAX_FIELDS];
+        assert!(fields::decode(&fields::encode(&at)).is_some());
+    }
+
+    #[test]
+    fn fields_refuses_a_length_that_overruns_the_buffer() {
+        // One field claiming 16 bytes in an 8-byte payload.
+        let mut lying = 1u32.to_le_bytes().to_vec();
+        lying.extend_from_slice(&16u32.to_le_bytes());
+        lying.extend_from_slice(b"short");
+        assert_eq!(fields::decode(&lying), None);
+    }
+
+    #[test]
+    fn decode_exact_enforces_arity() {
+        let two = fields::encode(&[b"a".as_slice(), b"b".as_slice()]);
+        assert!(fields::decode_exact(&two, 2).is_some());
+        assert!(fields::decode_exact(&two, 1).is_none());
+        assert!(fields::decode_exact(&two, 3).is_none());
+    }
+
+    #[test]
+    fn a_peer_we_cannot_identify_reports_no_credentials() {
+        // The kernel cannot answer yet; the contract is that this is an
+        // explicit "unknown", never a fabricated uid 0 or uid 1000.
+        let conn = Connection {
+            handle: 0,
+            next_serial: 1,
+            recv_buf: Vec::new(),
+        };
+        assert_eq!(conn.peer_credentials(), None);
+        // ... and Drop must not run a syscall against a handle we invented.
+        std::mem::forget(conn);
+    }
+
+    #[test]
+    fn root_is_recognised_by_uid_not_by_name() {
+        assert!(Credentials { pid: 1, uid: 0, gid: 0 }.is_root());
+        assert!(!Credentials { pid: 1, uid: 1000, gid: 0 }.is_root());
     }
 
     #[test]

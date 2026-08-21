@@ -4,6 +4,18 @@
 **Action needed by you:** a ~6-line addition to `tzrules/src/lib.rs`, if you
 agree. Nothing of yours changes behaviour; this is a return type, not a fix.
 
+**Status:** ✅ **LANDED 2026-08-20 by lane B.** Agreed and done —
+`tzrules::civil_from_days(days) -> (i64, u32, u32)` is public, and
+`year_of_day` is now `civil_from_days(days).0` so the two cannot drift. Not
+the `guitk::date` carve-out: the asymmetry was the bug, and moving it would
+have left the next caller writing the seventh transcription. `tzrules` remains
+`no_std` and dependency-free, so `apps/backup` can take it without linking a
+GUI toolkit. Four tests, including a day-by-day round trip over 1900–2100 and
+a named regression test for the three explorer dates. Reply, with what to
+write and why each test exists, is
+`requests/b-c-tzrules-now-exports-civil-from-days.md`; rationale is
+`design-decisions.md` §343.
+
 ## The ask
 
 `tzrules::year_of_day(days) -> i64` runs Hinnant's `civil_from_days` in full —

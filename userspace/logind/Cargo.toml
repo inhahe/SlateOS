@@ -9,8 +9,15 @@ description = "SlateOS logind - session manager (logind/loginctl)"
 # screen-lock app that asks the question cannot, and must not be handed a hash
 # to check for itself. See `design-decisions.md` §341 and
 # `requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md`.
+#
+# `libservicebus` is the transport: it carries the desktop's question to this
+# daemon, and — once the kernel can report a peer — it is also where the
+# answer to "who is asking?" comes from. Both halves matter; a privileged
+# method reached over an endpoint that cannot identify its caller is not a
+# privileged method.
 [dependencies]
 authlib = { path = "../authlib" }
+libservicebus = { path = "../libservicebus" }
 
 # Tests only, to compute the `$6$` entry in the shadow fixture rather than
 # paste one: a pasted hash silently stops testing anything the day the hasher

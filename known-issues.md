@@ -51049,3 +51049,137 @@ cleanup together.
 
 **If never fixed:** an intermittent red in the shared merge gate that each lane
 pays for in turn, over exactly the code where a false green is most expensive.
+
+## A-USB-KEYSTROKES-ARE-ONLY-FETCHED-WHILE-SOMEBODY-IS-BLOCKED-READING — 2026-08-21 — lane A — OPEN
+
+**In short:** On a machine whose keyboard is USB (which is every modern machine
+— PS/2 is a legacy port), the kernel never notices a keystroke on its own. It
+only goes and asks the keyboard for one at the moment some program is already
+sitting there waiting for input. Type-ahead therefore does not work: keys
+pressed while the system is busy are not queued as they are pressed, they are
+collected in a burst the next time something blocks on a read. Anything that
+wants to *check* for a keypress without waiting for one — a poll, a
+`select`/`epoll`-style readiness test, a hotkey, a Ctrl-C while a program is
+running — cannot see the key at all, because nothing polled the device.
+
+**Found by:** lane A, while fixing `BUG-CONSOLE-READ-UNINTERRUPTIBLE` (stage 1,
+2026-08-21). Not caused by that change — the fix inherited the structure. It is
+recorded separately because it is a distinct defect with a distinct fix, and
+because stage 2 of that entry is **blocked on this one**.
+
+**Where.** `kernel/src/keyboard.rs:1339` `poll_usb_keyboard()` is the only
+caller of `kernel/src/xhci.rs:2256` `poll_keyboard()`, which is the only route
+by which a USB HID report ever reaches the input ring. `poll_usb_keyboard` in
+turn has exactly **two** call sites, both on the read path:
+
+| Site | Context |
+|---|---|
+| `keyboard.rs:965`, in `try_read_char()` | a non-blocking read — polls, then checks the ring |
+| `keyboard.rs:1033`, in `read_char_inner()` | the blocking loop — polls on every spin |
+
+There is no timer call site, no interrupt call site, and no driver task. The
+xHCI event ring is not serviced from an interrupt handler for the HID endpoint;
+it is drained synchronously by whoever is asking for a character.
+
+**Why this is worse than it first reads.** PS/2 keyboards go through IRQ 1 and
+are pushed into the same ring by the interrupt handler, so they behave
+correctly. That is why the defect has never been seen: **QEMU's default keyboard
+is PS/2**, so every boot test to date has exercised the working path. The broken
+path is the one that runs on real hardware — which, per `design-decisions.md`
+§263, is about to start happening.
+
+**Reproduce (once a USB keyboard is reachable).** Boot with
+`-device qemu-xhci -device usb-kbd` and no PS/2 keyboard. At the shell, start
+something that takes a few seconds and does not read stdin, type during it, and
+observe that the characters appear all at once when the *next* read blocks,
+rather than being echoed as typed. `try_read_char()` called in a tight loop by a
+program that never blocks will also mostly return `None` regardless of what is
+being typed, because each call polls only once.
+
+**The proper fix.** Move HID polling off the read path and onto a driver-owned
+periodic task:
+
+1. A kernel task (or an hrtimer callback) polls the xHCI HID interrupt endpoint
+   at the endpoint's own `bInterval` — 8 ms is the usual figure for a boot
+   keyboard — and pushes reports into the input ring exactly as the IRQ 1
+   handler does. The ring, the echo queue and `push_char` are already
+   ISR-shaped, so nothing downstream changes.
+2. `try_read_char()` and `read_char_inner()` then stop polling and simply read
+   the ring, which makes them symmetric with the PS/2 path and makes a
+   non-blocking readiness check meaningful for the first time.
+3. Only then can `BUG-CONSOLE-READ-UNINTERRUPTIBLE` stage 2 proceed. That stage
+   converts the blocking read from a `hlt` spin into a real park, and parking is
+   *unsafe today precisely because of this bug*: a parked task does not spin,
+   so nothing calls `poll_usb_keyboard`, so a USB keystroke can never arrive to
+   wake it. Parking without fixing this first deadlocks USB keyboards outright.
+
+Use the ISR-safe wake idiom when the poller pushes a byte —
+`sched::try_wake(tid)`, falling back to `sched::defer_wake(tid)` — not
+`WaitQueue::try_wake_one()`, which loses the wake on a lost `try_lock`.
+
+**If never fixed:** the console keeps working in QEMU and keeps working for
+blocking reads on real hardware, so nothing looks broken. What stays impossible
+is type-ahead, non-blocking input, and any readiness-based console I/O on real
+USB hardware — and stage 2 of the interruptible-read fix stays blocked
+indefinitely. It gets more expensive with time, not less: every consumer written
+against `try_read_char()` in the meantime is written against a function that
+cannot do what its name says on the hardware we are about to start booting on.
+
+## B-THE-STALENESS-GATE-PRINTS-THE-WRONG-REMEDY-WHEN-THE-STALE-SIDE-IS-LIBC — 2026-08-21 — lane B — OPEN
+
+**In short:** We keep 70-odd compiled test programs in git, and a checker warns
+when one has gone out of date. It correctly noticed that nine of them were out
+of date — but it told us to rebuild **the wrong thing**. It said "rebuild the
+test programs", when what had actually moved was the C library they are built
+against. Following that instruction would have rebuilt all nine against a stale
+library and recorded the result as *fresh*, which is precisely the accident this
+checker exists to prevent, and precisely what happened for real on 2026-08-16.
+
+**Found by:** lane A, 2026-08-21, while unblocking a boot test. Reported to lane
+B as `requests/a-b-operator-answered-five-of-your-open-questions.md`. It is
+direct evidence in **B-Q5** (`open-questions.md`) and lane A thinks it is a
+stronger argument for that question's option C than the reproducibility result
+the operator actually asked for.
+
+**Where:** `scripts/ctest-fixtures.py`, the `check` subcommand. The stamp
+(`<fixture>.stamp`, format v2) hashes `build.py`, `main.c`, `libc.a` and the
+output ELF into **one** value. A mismatch therefore proves only that *something*
+in that set moved; the script cannot tell *which*, and its message picks one
+answer and states it as fact.
+
+**What actually happened.** `toolchain/sysroot/lib/libc.a` (gitignored) was built
+at 08:32. The last `posix/` commit was `4bd151de5` at 10:17; the stamp commit
+`a1b26843b` at 10:20; the merge `85955aec7` at 11:17. The sysroot was simply two
+`posix/` commits behind, so `libc.a` was the stale input and the nine ELFs were
+correct. Rebuilding the sysroot produced an archive hashing to *exactly* the
+value already recorded in the stamps, confirming the ELFs had never been wrong.
+
+**Why the safety net does not close the hole.** What caught the misdirection here
+was `scripts/create-ext4-rootfs.sh`'s independent **mtime** gate. But mtime is
+documented as unusable in a fresh clone — `git clone` stamps every file with the
+checkout time, destroying the ordering it depends on, which is the whole reason
+the content stamps were introduced. So in CI, or on any freshly-cloned machine,
+the mtime gate is silent and **only the wrong advice survives**.
+
+**The fix, within the current design.** Record a committed identity for `libc.a`
+itself and split the diagnosis on it:
+
+| `libc.a` vs committed identity | ELF vs stamp | Remedy to print |
+|---|---|---|
+| differs | — | **rebuild the sysroot** (`toolchain/build-sysroot.ps1`) |
+| matches | differs | **rebuild the fixture** (`services/<name>/build.py`) |
+
+That is a strictly smaller change than B-Q5's option C and is worth doing even
+if C is chosen later, since C needs the same identity to decide what to rebuild.
+
+**A related, smaller nuisance in the same cascade.** Rebuilding `libc.a` to
+*byte-identical* content still moves its mtime, after which
+`create-ext4-rootfs.sh` emits nine `WARNING: ctest-*.elf is OLDER than the
+sysroot libc.a` lines that are pure noise — every content stamp matches. Observed
+directly this session. A gate that cries wolf on a verified no-op trains its
+readers to skip it.
+
+**If never fixed:** the checker keeps catching real staleness — it is not
+broken, it is *ambiguous* — but roughly half the time it will name the wrong
+remedy, and the remedy it names is the one that manufactures a false green. The
+2026-08-16 incident is reachable by following the tool's own instructions.

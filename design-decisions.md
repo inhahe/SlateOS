@@ -26550,3 +26550,167 @@ the two items are now always written as a single test —
 `the_painted_grid_is_square_evenly_spaced_and_fits_the_window` in nonogram,
 `the_painted_dots_are_a_square_even_lattice_centred_in_the_window` in dots — so
 that it is not possible to do one without the other.
+
+---
+
+## §339 — `libc.a` is built at `codegen-units=4096`, because an archive's object granularity is a libc ABI feature
+
+**Date:** 2026-08-20
+**Decided by:** Claude (autonomous)
+
+**In short:** we tried to build the real GNU `make` against our C library and
+link it. It compiled perfectly and asked for nothing we don't have — but the
+link still failed, with eleven "this name is defined twice" errors. The cause
+was not in `make` and not in any function we wrote: it was in how our library
+file is *packaged*. Rust had glued unrelated functions together into a small
+number of chunks, and a real C library must keep them separable so that a
+program which brings its own `getopt` can decline ours. One compiler flag —
+`-C codegen-units=4096` — restores that separability, and the eleven errors
+became zero. The alternative was to accept slightly better-optimised code and
+a C library that no GNU program can link against.
+
+**Terms used below.** An *archive* (`libc.a`) is a container holding many
+*object files*; the linker pulls out an object only if that object defines a
+symbol that is still missing, and never pulls out the rest. A *codegen unit*
+(CGU) is the chunk rustc hands to LLVM; one CGU becomes one object file in the
+archive. *gnulib* is a library of portability replacements that essentially
+every GNU program copies into its own source tree.
+
+### What happened
+
+`scripts/make-spike/run.sh` cross-compiles GNU make 4.4.1 unmodified and links
+it `-nostdlib` against `toolchain/sysroot/lib/libc.a`. The first run:
+
+```
+CONFIGURE_EXIT=0
+MAKE_EXIT=0
+OBJ_COUNT=30
+SLATE_LINK_EXIT=1
+MISSING_COUNT=0
+```
+
+Zero missing symbols and a failed link. The failures were all of the other
+kind — eleven duplicate definitions, in four families:
+
+```
+fnmatch
+glob globfree
+getopt getopt_long getopt_long_only optarg opterr optind optopt
+error
+```
+
+Every one of those is a name **gnulib supplies a replacement for**. That is not
+a coincidence and it is not specific to make: coreutils, grep, sed, tar,
+findutils, diffutils, gawk, gcc and binutils all vendor gnulib and therefore all
+define those same names themselves. A real libc defines them too, and this is
+normally harmless, because in glibc each function is its own object file — the
+program already defined `getopt`, so glibc's `getopt.o` is simply never
+extracted.
+
+Ours could not do that. Measuring the shipped archive with `nm --defined-only
+-g -A` (419 members, 384 rcgu objects, 2680 C-ABI symbols) showed why:
+
+| symbol | shared its object file with |
+|---|---|
+| `fnmatch` | `stdout`, `fopen`, `fwrite`, `fileno`, `isalpha`, `tolower` |
+| `glob`, `globfree` | `printf`, `snprintf`, `vfprintf`, `uname`, `err`, `warn` |
+| the `getopt` family | `sem_wait`, `sched_getaffinity`, `__fprintf_chk` |
+| the `error` family | `getenv`, `environ`, `setenv`, `regcomp`, `statfs` |
+
+So the collision was **unavoidable**, not unlucky. Each of the four names shared
+a member with something no C program can do without, so that member was always
+going to be extracted, and its `getopt` was always going to collide with the
+program's own. No link order, no object subsetting, no `--start-group` and no
+amount of care on the *caller's* side can avoid extracting an object you need
+for `printf`.
+
+### The decision
+
+Add `-C codegen-units=4096` to `$sysrootFlags` in `toolchain/build-sysroot.ps1`.
+Rebuilt that way the archive has 577 members and the four families are isolated:
+
+```
+cgu.034 -> fnmatch
+cgu.038 -> glob globfree
+cgu.050 -> getopt getopt_long getopt_long_only optarg opterr optind optopt
+cgu.065 -> error error_at_line error_message_count error_one_per_line
+           error_print_progname verror verror_at_line
+```
+
+Relinking make against it dropped the duplicate count from 11 to 0 and left
+exactly one undefined symbol, `bsd_signal` — which is how that genuine gap was
+found at all (fixed in `posix/src/signal.rs`, together with `sysv_signal`).
+
+The number 4096 is not a target; it is "no ceiling". rustc's partitioner starts
+from one CGU per module and *merges* until it is under the limit, so a limit
+above the module count means no merging happens and the layout falls out at
+roughly one object per module. That is glibc's one-object-per-`.c` layout,
+reached by a different route.
+
+### The alternatives, and why they lose
+
+**Leave it, and patch each port.** Every gnulib-using package can be built with
+`--disable-year2038`-style configure overrides or by deleting `lib/getopt.o`
+from its own object list before linking. This works and it is what a first
+instinct reaches for — it is also a per-package workaround for a defect in our
+libc, repeated for every C program we ever port, each time discovered by a
+confusing link error rather than by a rule. Rejected: the bug is ours.
+
+**Split the offending modules into their own crates.** Genuinely fixes the four
+known cases and nothing else. The next port brings its own gnulib module list
+and the problem recurs with different names. It also fragments `posix` for a
+reason that has nothing to do with the code's structure.
+
+**`--allow-multiple-definition` in every port's link.** Silences the error by
+letting the linker pick whichever definition it saw first, which means the
+program's `getopt` and our `getopt` become a coin flip decided by link order.
+That is a correctness hazard dressed as a build fix; a program that vendors
+gnulib's `getopt` usually does so because it depends on a behaviour difference.
+Rejected outright.
+
+**Set `codegen-units = 1` and rely on `--whole-archive`-free linking.** Goes the
+wrong way: one CGU means one object means *every* symbol collides.
+
+### What it costs — and what it unexpectedly saved
+
+Higher `codegen-units` means less cross-function optimisation *within* an
+object, because LLVM only sees one module at a time. In principle that is a
+real cost; in practice `#[inline]` functions and generic instantiations are
+still duplicated into every CGU that uses them, and a C library's hot paths
+(`memcpy`, `strlen`, `printf`'s inner loop) are self-contained. Compile time
+goes up slightly at link and down at codegen (more parallelism). We are not
+measuring a code-quality regression here because there is no benchmark of
+libc.a's generated code to regress against — that is a gap worth noting, but it
+does not change the decision: a libc that cannot be linked against is not made
+better by being optimised.
+
+What was *not* anticipated is that the same change makes linked binaries
+**smaller**, for the identical reason it fixes the duplicates. Archive
+extraction is all-or-nothing per member, so a coarse member drags in every
+function it contains whether the program calls it or not. Relinking pkgconf
+2.3.0 — which was already linking cleanly and needed no fix at all — against
+the rebuilt archive:
+
+| | before (`cgu=16`) | after (`cgu=4096`) |
+|---|---|---|
+| `pkgconf-slateos.elf` | 2,926,720 bytes | 2,551,080 bytes |
+
+375,640 bytes, 12.8%, from a program whose source did not change by one
+character. The dead weight was `glob`, `regcomp`, `statfs` and their neighbours
+riding into the image on the coattails of `printf` and `getenv`. Every
+statically linked program on the system gets some version of that back, which
+comfortably outweighs whatever inlining was lost — and it is a second,
+independent sign that the coarse archive was wrong rather than merely
+inconvenient.
+
+### Why the change landed in `toolchain/`, which is not Lane B's
+
+`toolchain/build-sysroot.ps1` is not inside any lane's ownership globs. It was
+edited directly rather than filed as a `requests/` item because the line it
+changes builds Lane B's own `posix` crate into Lane B's own sysroot, and the
+edit is confined to that crate's `RUSTFLAGS` — the kernel and the bare-metal
+services are built from `.cargo/config.toml`'s `[target.x86_64-unknown-none]`
+rustflags, which this script deliberately replaces wholesale and does not
+touch. If that ceases to be true — if the script grows a step that builds
+something outside `posix`/`stubs` — the flag should move to a per-crate
+mechanism rather than the shared one.

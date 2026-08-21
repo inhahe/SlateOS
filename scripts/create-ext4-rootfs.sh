@@ -1034,6 +1034,43 @@ else
     echo "[rootfs]       (build it with: wsl -d Ubuntu -- bash scripts/pkgconf-spike/run.sh)"
 fi
 
+# --- GNU make 4.4.1, likewise linked against OUR OWN libc ---------------------
+# Third application of the same policy, and the one that paid for the other two:
+# make is the first program we linked that vendors gnulib, and gnulib is what
+# exposed the fact that our libc.a's *archive granularity* was not libc-like.
+# rustc's default codegen-units=16 had merged `getopt` into the same archive
+# member as `sem_wait`, `glob` with `printf`, `fnmatch` with `fopen` and `error`
+# with `getenv` — the four families gnulib supplies replacements for, each
+# riding along with a symbol no C program can avoid, so the member was always
+# extracted and the duplicate definition was unavoidable from the caller's side.
+# Eleven duplicate symbols, zero undefined.  See design-decisions.md §339.
+#
+# Staged here for exactly the reason the pkgconf block above exists: a port that
+# only ever links is a claim, not a result, and this project has twice called
+# something "proven" while its only binary sat in /tmp.
+#
+# NOT staged as /usr/bin/make as well: unlike pkgconf/pkg-config, `make` has one
+# canonical name, and a second copy would be 3 MB of image for nothing.
+#
+# Staleness: identical rule to bash and pkgconf — absent is honest (warn),
+# present-but-older-than-libc.a is a lie (fatal).
+MAKE_SLATE="$ROOT_DIR/build/spike/make-slateos.elf"
+MAKE_STALE=0
+if [ -e "$MAKE_SLATE" ]; then
+    cp -L "$MAKE_SLATE" "$STAGE/bin/make"
+    echo "[rootfs] staged GNU make 4.4.1 (linked against our libc.a): /bin/make"
+    if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+       && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$MAKE_SLATE" ]; then
+        echo "[rootfs] WARNING: make-slateos.elf is OLDER than the sysroot libc.a — it links a"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Rebuild it:"
+        echo "[rootfs]            wsl -d Ubuntu -- bash scripts/make-spike/run.sh"
+        MAKE_STALE=1
+    fi
+else
+    echo "[rootfs] NOTE: $MAKE_SLATE not found — /bin/make will be absent"
+    echo "[rootfs]       (build it with: wsl -d Ubuntu -- bash scripts/make-spike/run.sh)"
+fi
+
 # --- .pc fixtures for the pkgconf self-test -----------------------------------
 # `/bin/pkgconf --version` proves the binary loads, relocates, runs main and
 # exits 0. It does not prove pkgconf *works*, because the thing pkgconf does is
@@ -1233,6 +1270,26 @@ if [ "$PKGCONF_STALE" -gt 0 ]; then
         echo "[rootfs]        /bin/pkgconf on the image would be built against a libc"
         echo "[rootfs]        that is no longer in the build. Rebuild it:"
         echo "[rootfs]          wsl -d Ubuntu -- bash scripts/pkgconf-spike/run.sh"
+        echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+# And once more for make.  Worth stating why this is a third copy of the same
+# nine lines rather than a loop over a list: each of the three names a different
+# rebuild command, and the command is the only part of the message that actually
+# helps whoever hit the error.  A table-driven version would have to carry that
+# string anyway, and would put the reader one indirection further from it.
+if [ "$MAKE_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: make-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike/make-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/make on the image would be built against a libc that is"
+        echo "[rootfs]        no longer in the build. Rebuild it:"
+        echo "[rootfs]          wsl -d Ubuntu -- bash scripts/make-spike/run.sh"
         echo "[rootfs]        or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi

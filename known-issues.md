@@ -46064,3 +46064,118 @@ in a dead spot, and one that the renderer paints each of the `2·n·(n−1)` lin
 exactly once. Mutation sweep 27/28, then 28/28 once the threshold was pinned by
 something other than itself. rustfmt drift 173 → 0 (committed separately),
 binary clippy 95 → 78, test-module warnings 7 → 0.
+
+## FIXED-B-LIBC-ARCHIVE-GRANULARITY-MADE-GNULIB-PORTS-UNLINKABLE (lane B, 2026-08-20)
+
+**Status: fixed** in `toolchain/build-sysroot.ps1` on 2026-08-20 by adding
+`-C codegen-units=4096` to `$sysrootFlags`. Recorded here because the *symptom*
+is so far from the *cause* that anyone who hits a variant of it will otherwise
+spend the same hour re-deriving it.
+
+**Symptom.** A C program links against `toolchain/sysroot/lib/libc.a` and fails
+with duplicate-symbol errors for `getopt`, `glob`, `fnmatch` or `error` (and
+their families: `optind`, `globfree`, `verror`, …) while reporting **zero**
+undefined symbols. Reproduce with `scripts/make-spike/run.sh` against a sysroot
+built before the fix: `SLATE_LINK_EXIT=1` with `MISSING_COUNT=0` and 11
+duplicates.
+
+**Cause.** `libc.a` was built with rustc's default `codegen-units = 16`, which
+merges unrelated modules into 16 object files. The four names above are exactly
+the ones gnulib supplies replacements for — so every GNU package that vendors
+gnulib (coreutils, grep, sed, tar, findutils, diffutils, gawk, gcc, binutils,
+make) defines them itself — and each of them shared an archive member with a
+symbol no C program can avoid (`fnmatch` with `fopen`, `glob` with `printf`,
+`getopt` with `sem_wait`, `error` with `getenv`). The linker therefore always
+extracted the member, and the collision could not be avoided from the caller's
+side by link order, object subsetting or `--start-group`.
+
+**Fix.** `-C codegen-units=4096` makes rustc's partitioner stop merging and emit
+roughly one object per module, which is glibc's one-object-per-`.c` layout. The
+rebuilt archive isolates all four families (`cgu.034` = `fnmatch`, `cgu.038` =
+`glob globfree`, `cgu.050` = the getopt family, `cgu.065` = the error family)
+and make's duplicate count went 11 → 0. Full rationale, alternatives considered
+and the cost in `design-decisions.md` §339.
+
+**If it comes back.** The failure mode is silent: nothing tests the archive's
+*shape*, only its contents. A regression would be reintroduced by anyone who
+adds a `[profile.release]` to the workspace root with an explicit
+`codegen-units`, or who reorders `$sysrootFlags` such that a later `-C
+codegen-units` wins. The cheap guard is to run `scripts/make-spike/run.sh` after
+any change to how the sysroot is built; the proper guard is a test that asserts
+`nm --defined-only -g -A libc.a` places `getopt` in a member defining no more
+than the getopt family, and that has not been written — see the tech-debt entry
+below.
+
+## TD-B-NOTHING-TESTS-THE-SHAPE-OF-LIBC-A (lane B, 2026-08-20)
+
+**What.** We now depend on `libc.a` having one-symbol-family-per-archive-member
+granularity (see the FIXED entry above), and nothing checks it. Every existing
+libc test links a fixture and calls a function; none of them would notice if the
+archive collapsed back to 16 objects, because a fixture that defines no `getopt`
+of its own links fine either way. The defect only shows up when a *third-party*
+program brings its own copy — i.e. at the moment we are trying to port
+something, which is the worst time to discover it.
+
+**Where.** `toolchain/build-sysroot.ps1` (`$sysrootFlags`) produces the archive;
+there is no test crate that inspects it.
+
+**Proper fix.** A test that runs `nm --defined-only -g` over each member of the
+built `libc.a` and asserts that the member defining `getopt` defines nothing
+outside the getopt family, and likewise for `glob`, `fnmatch` and `error`. Better
+still, invert it: assert that *no* member defines both a gnulib-replaceable name
+and a name from a short list of unavoidable ones (`printf`, `malloc`, `fopen`,
+`getenv`, `memcpy`). That generalises to the next gnulib module we have not
+thought of. It needs `nm` and a built sysroot, so it belongs with the other
+sysroot-level checks rather than in `cargo test -p posix`.
+
+**Why not done now.** The spike that found the bug is not itself a test — it
+downloads and builds GNU make, which is far too heavy for the normal suite, and
+it lives in `scripts/make-spike/` for that reason. Writing the lightweight
+archive-shape assertion is a separate, smaller piece of work.
+
+## TD-B-CARGO-TEST-WORKSPACE-NO-LONGER-FINISHES (lane B, 2026-08-20)
+
+**What.** `cargo test --workspace` can no longer reach the *first test* inside a
+bounded timeout on a cold cache. Measured 2026-08-20 from a clean-ish target
+dir: 2,428 crates compiled in 50 minutes, **zero `test result` lines produced**,
+and `scripts/run-timeout.py`'s 3000 s limit killed the run mid-compile. The
+suite did not fail — it never started. `userspace/` alone now holds 2,751 crate
+directories, nearly all of them near-identical single-binary `*-cli` crates.
+
+**Why it matters more than it looks.** The project's testing rule is that the
+full workspace suite gates a merge to `main`. A suite that cannot finish is a
+gate that is quietly always skipped, and the failure mode is indistinguishable
+from success at a glance: the log ends in `Compiling …` with no failures in it.
+This session hit exactly that — a 50-minute run was left in flight for most of
+an hour under the impression it was validating a change, when it could never
+have reached the tests, and the change actually being validated (`posix`) took
+**3 seconds** once run on its own (20,398 tests, 0 failed).
+
+**Where.** Root `Cargo.toml` `members` (`userspace/*`); the timeout lives in
+whatever `scripts/run-timeout.py` invocation the agent chooses, so there is no
+single place that is "wrong" — which is part of the problem.
+
+**Proper fix — options, none yet chosen.**
+1. **Split the workspace.** Move the `*-cli` crates into their own workspace so
+   the core (`posix`, `kernel`, `fs`, `net`, `init`, `services`, coreutils) can
+   be tested in minutes, and run the CLI workspace on its own cadence. Biggest
+   win, biggest churn, and it cuts across all three lanes' trees, so it needs
+   coordination rather than a unilateral edit.
+2. **`cargo test --workspace --exclude`-list the `*-cli` crates** for the
+   routine gate and run the full thing only before a `main` merge. Cheap, but
+   the exclusion list has to be maintained and will silently rot.
+3. **Test only the crates a change touches** (`-p <crate>`), with the full run
+   reserved for release points. This is what actually happened here and it
+   worked well, but it is currently an ad-hoc judgement call rather than a
+   documented rule, so it is applied inconsistently.
+
+**Interim rule being followed.** Use `-p <crate> --target x86_64-pc-windows-gnu`
+for the change under test, and do not treat a timed-out `--workspace` run as
+evidence of anything. If a `--workspace` run is started, give it a timeout that
+accounts for a >50-minute compile, and check that the log actually contains
+`test result` lines before believing it.
+
+**Not filed as a request to another lane** because it is not yet clear which of
+the three options is right, and picking one is a workspace-layout decision with
+consequences for every lane. Promote to `open-questions.md` if the routine
+per-crate workaround starts letting real regressions through.

@@ -90,8 +90,20 @@ echo "SLATE_LINK_EXIT=$?"
 echo "=== distinct undefined symbols the SlateOS link is missing ==="
 grep -oP "undefined symbol: \K.*" slate-link.log | sort -u | tee "/tmp/slate_missing-$LANE.txt" | head -60
 echo "MISSING_COUNT=$(sort -u "/tmp/slate_missing-$LANE.txt" | wc -l)"
+
+# Duplicates get their own count, for the same reason as in the make and pkgconf
+# spikes: MISSING_COUNT greps only `undefined symbol:`, so it reads 0 on a link
+# that failed with duplicate definitions, and the run looks green when it is not.
+# That is not hypothetical for bash — the musl-side build in cross2.sh fails
+# exactly that way on bash 5.2's inverted `strtoimax` test, and libc.a's archive
+# granularity produced eleven such errors for GNU make (design-decisions.md
+# §339). Printed unconditionally, so that zero is a measurement and not a silence.
+echo "=== duplicate symbol definitions (0 is the expected answer) ==="
+grep -oP "duplicate symbol: \K.*" slate-link.log | sort -u | tee "/tmp/slate_dupes-$LANE.txt" | head -60
+echo "DUPLICATE_COUNT=$(sort -u "/tmp/slate_dupes-$LANE.txt" | wc -l)"
+
 echo "=== other errors ==="
-grep -v "undefined symbol\|^>>>" slate-link.log | head -20
+grep -v "undefined symbol\|duplicate symbol\|^>>>" slate-link.log | head -20
 
 if [ -x "$BUILD/bash-slateos" ]; then
   file "$BUILD/bash-slateos"

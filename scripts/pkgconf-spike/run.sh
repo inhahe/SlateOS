@@ -99,7 +99,19 @@ MISSING="/tmp/pkgconf_missing-$SLATE_LANE.txt"
 grep -oP "undefined symbol: \K.*" slate-link.log | sort -u >"$MISSING" || true
 echo "MISSING_COUNT=$(wc -l <"$MISSING")"
 cat "$MISSING"
-grep -v "undefined symbol\|^>>>" slate-link.log | head -20 || true
+
+# Duplicates are counted separately because MISSING_COUNT cannot see them, and a
+# reader will otherwise take a lone `MISSING_COUNT=0` as "the link succeeded".
+# The make spike hit exactly that: eleven duplicate-symbol errors under a
+# MISSING_COUNT of 0, caused by libc.a's archive granularity rather than by
+# anything the program asked for (design-decisions.md §339). pkgconf does not
+# vendor gnulib so it never tripped it, but the metric was equally blind here.
+DUPES="/tmp/pkgconf_dupes-$SLATE_LANE.txt"
+grep -oP "duplicate symbol: \K.*" slate-link.log | sort -u >"$DUPES" || true
+echo "DUPLICATE_COUNT=$(wc -l <"$DUPES")"
+cat "$DUPES"
+
+grep -v "undefined symbol\|duplicate symbol\|^>>>" slate-link.log | head -20 || true
 
 if [ -x pkgconf-slateos ]; then
   file pkgconf-slateos

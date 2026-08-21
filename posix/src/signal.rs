@@ -185,8 +185,66 @@ process_global! {
 /// POSIX: `signal()` is equivalent to `sigaction()` with
 /// implementation-defined `sa_flags`.  We reset `sa_mask` and
 /// `sa_flags` to zero (similar to BSD semantics without SA_RESTART).
+///
+/// This is the third caller of [`install_signal_with_flags`], and the reason
+/// the other two exist: `signal()` is the spelling whose flags are
+/// *implementation-defined*, so a program that actually depends on the
+/// difference must say [`bsd_signal`] or [`sysv_signal`] instead.  Delegating
+/// rather than repeating the body keeps the three from drifting apart in
+/// validation or in which `sigaction` fields they clear — the part that has
+/// nothing to do with which semantics were asked for.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn signal(signum: i32, handler: SighandlerT) -> SighandlerT {
+    install_signal_with_flags(signum, handler, 0, false)
+}
+
+/// Install a signal handler with **BSD** semantics: the signal is blocked for
+/// the duration of its own handler, the handler is *not* reset to `SIG_DFL` on
+/// delivery, and interrupted syscalls restart (`SA_RESTART`).
+///
+/// This exists because `signal()` alone is famously ambiguous — System V reset
+/// the disposition on every delivery, BSD did not — so portable C code that
+/// cares reaches for one of the two unambiguous spellings instead. GNU make
+/// does exactly that: `src/main.c` calls `bsd_signal` for `SIGHUP`, `SIGINT`,
+/// `SIGQUIT` and `SIGTERM`, and a missing `bsd_signal` was the *only* unresolved
+/// symbol when make 4.4.1 was linked against this libc
+/// (`scripts/make-spike/README.md`).
+///
+/// glibc and musl both provide it, and `configure` finds it there, so its
+/// absence here is not a divergence anyone would notice until the link.
+///
+/// Returns the previous handler, or `SIG_ERR` with `errno` set on a bad signal.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn bsd_signal(signum: i32, handler: SighandlerT) -> SighandlerT {
+    install_signal_with_flags(signum, handler, SA_RESTART, true)
+}
+
+/// Install a signal handler with **System V** semantics: the disposition is
+/// reset to `SIG_DFL` the moment the signal is delivered (`SA_RESETHAND`), the
+/// signal is *not* blocked during its own handler (`SA_NODEFER`), and
+/// interrupted syscalls are not restarted.
+///
+/// The counterpart to [`bsd_signal`], and provided alongside it for the same
+/// reason: a program that wants the SysV race explicitly should be able to ask
+/// for it by name rather than get it by accident from a `signal()` whose
+/// semantics vary by platform. glibc exports both; so do we.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sysv_signal(signum: i32, handler: SighandlerT) -> SighandlerT {
+    install_signal_with_flags(signum, handler, SA_RESETHAND | SA_NODEFER, false)
+}
+
+/// The body shared by [`bsd_signal`] and [`sysv_signal`].
+///
+/// `mask_self` decides whether the installed action blocks its own signal while
+/// the handler runs — the one behavioural difference between the two that is
+/// not expressible as a flag, since it lives in `sa_mask` rather than
+/// `sa_flags`.
+fn install_signal_with_flags(
+    signum: i32,
+    handler: SighandlerT,
+    flags: u64,
+    mask_self: bool,
+) -> SighandlerT {
     if !(1..NSIG).contains(&signum) || signum == SIGKILL || signum == SIGSTOP {
         errno::set_errno(errno::EINVAL);
         return SIG_ERR;
@@ -204,11 +262,24 @@ pub extern "C" fn signal(signum: i32, handler: SighandlerT) -> SighandlerT {
         errno::set_errno(errno::EINVAL);
         return SIG_ERR;
     };
+
+    let mut mask = SigsetT::EMPTY;
+    if mask_self {
+        // Bit layout as documented on `SigsetT`: signal N lives at
+        // bits[(N-1)/64], bit (N-1) % 64.  Computed here rather than by calling
+        // `sigaddset`, which takes a raw pointer and would need an unsafe block
+        // to say something this function already knows is in range.
+        let bit = (signum - 1) as usize;
+        if let Some(word) = mask.bits.get_mut(bit / 64) {
+            *word |= 1u64 << (bit % 64);
+        }
+    }
+
     let old = slot.sa_handler;
     slot.sa_handler = handler;
-    slot.sa_flags = 0;
+    slot.sa_flags = flags;
     slot.sa_restorer = 0;
-    slot.sa_mask = SigsetT::EMPTY;
+    slot.sa_mask = mask;
     old
 }
 
@@ -2444,6 +2515,125 @@ mod tests {
         unsafe {
             sigaction(SIGUSR1, &raw const old, core::ptr::null_mut());
         }
+    }
+
+    // -- bsd_signal / sysv_signal --------------------------------------
+    //
+    // These two exist to be *unambiguous* where `signal()` is not, so the
+    // tests assert the disambiguating bits specifically: what ends up in
+    // `sa_flags` and `sa_mask`. Asserting only "the handler was stored"
+    // would pass for a `bsd_signal` that was a plain alias of `signal`,
+    // which is exactly the mistake worth catching.
+
+    /// BSD semantics = restart interrupted syscalls, keep the handler
+    /// installed across deliveries, and block the signal inside its own
+    /// handler. The first two are `SA_RESTART` with `SA_RESETHAND` absent;
+    /// the third is the signal's own bit in `sa_mask`.
+    #[test]
+    fn test_bsd_signal_sets_restart_and_masks_itself() {
+        let prev = bsd_signal(SIGUSR1, SIG_IGN);
+        assert_ne!(prev, SIG_ERR);
+
+        let mut check = Sigaction {
+            sa_handler: 0,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+        unsafe {
+            sigaction(SIGUSR1, core::ptr::null(), &raw mut check);
+        }
+
+        assert_eq!(check.sa_handler, SIG_IGN);
+        assert_eq!(check.sa_flags & SA_RESTART, SA_RESTART);
+        assert_eq!(check.sa_flags & SA_RESETHAND, 0);
+        assert_eq!(check.sa_flags & SA_NODEFER, 0);
+
+        // SIGUSR1 is signal 10, so bit 9 of word 0.
+        let bit = (SIGUSR1 - 1) as usize;
+        assert_eq!(
+            check.sa_mask.bits[bit / 64] & (1u64 << (bit % 64)),
+            1u64 << (bit % 64),
+            "bsd_signal must block the signal during its own handler"
+        );
+
+        signal(SIGUSR1, SIG_DFL);
+    }
+
+    /// System V semantics are the exact opposite pair: the disposition is
+    /// torn down on delivery (`SA_RESETHAND`), the signal is *not* blocked
+    /// in its own handler (`SA_NODEFER`, and an empty `sa_mask`), and
+    /// syscalls do not restart.
+    #[test]
+    fn test_sysv_signal_sets_resethand_nodefer_and_no_mask() {
+        let prev = sysv_signal(SIGUSR2, SIG_IGN);
+        assert_ne!(prev, SIG_ERR);
+
+        let mut check = Sigaction {
+            sa_handler: 0,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+        unsafe {
+            sigaction(SIGUSR2, core::ptr::null(), &raw mut check);
+        }
+
+        assert_eq!(check.sa_handler, SIG_IGN);
+        assert_eq!(check.sa_flags & SA_RESETHAND, SA_RESETHAND);
+        assert_eq!(check.sa_flags & SA_NODEFER, SA_NODEFER);
+        assert_eq!(check.sa_flags & SA_RESTART, 0);
+        assert_eq!(check.sa_mask, SigsetT::EMPTY);
+
+        signal(SIGUSR2, SIG_DFL);
+    }
+
+    /// The two must not agree about `SA_RESTART` — if they do, one of them
+    /// has been reduced to the other and the whole reason for having both
+    /// names is gone.
+    #[test]
+    fn test_bsd_and_sysv_signal_disagree_about_restart() {
+        bsd_signal(SIGUSR1, SIG_IGN);
+        sysv_signal(SIGUSR2, SIG_IGN);
+
+        let mut bsd = DEFAULT_SIGACTION;
+        let mut sysv = DEFAULT_SIGACTION;
+        unsafe {
+            sigaction(SIGUSR1, core::ptr::null(), &raw mut bsd);
+            sigaction(SIGUSR2, core::ptr::null(), &raw mut sysv);
+        }
+        assert_ne!(bsd.sa_flags, sysv.sa_flags);
+
+        signal(SIGUSR1, SIG_DFL);
+        signal(SIGUSR2, SIG_DFL);
+    }
+
+    /// Both share `signal()`'s rejection rules, because both are specified
+    /// in terms of `sigaction()` and `sigaction()` refuses these.
+    #[test]
+    fn test_bsd_and_sysv_signal_reject_what_signal_rejects() {
+        for signum in [0, -1, SIGKILL, SIGSTOP, NSIG, NSIG + 1] {
+            crate::errno::set_errno(0);
+            assert_eq!(bsd_signal(signum, SIG_IGN), SIG_ERR, "bsd_signal({signum})");
+            assert_eq!(crate::errno::get_errno(), errno::EINVAL);
+
+            crate::errno::set_errno(0);
+            assert_eq!(
+                sysv_signal(signum, SIG_IGN),
+                SIG_ERR,
+                "sysv_signal({signum})"
+            );
+            assert_eq!(crate::errno::get_errno(), errno::EINVAL);
+        }
+    }
+
+    /// Both return the *previous* handler, like `signal()`.
+    #[test]
+    fn test_bsd_and_sysv_signal_return_previous_handler() {
+        signal(SIGUSR1, SIG_DFL);
+        assert_eq!(bsd_signal(SIGUSR1, SIG_IGN), SIG_DFL);
+        assert_eq!(sysv_signal(SIGUSR1, SIG_DFL), SIG_IGN);
+        signal(SIGUSR1, SIG_DFL);
     }
 
     #[test]

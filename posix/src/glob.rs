@@ -61,6 +61,20 @@ pub struct GlobT {
     pub gl_offs: usize,
 }
 
+/// Our `glob_t` must fit inside the one the caller's `<glob.h>` reserved.
+///
+/// See `pthread.rs`'s module note for why this is a `const` and why the bound
+/// is `<=`.  We are at 24 bytes against musl's 72 — the difference is the
+/// `gl_flags` and the six replacement-function pointers, which we do not
+/// implement.  All three fields we *do* have are the POSIX-visible ones and
+/// sit at the offsets glibc puts them at (0, 8, 16), which is what makes the
+/// undersizing invisible: a caller reading `gl_pathc`, `gl_pathv` or
+/// `gl_offs` reads ours.
+const _: () = {
+    assert!(size_of::<GlobT>() <= 72, "musl/glibc glob_t");
+    assert!(align_of::<GlobT>() <= 8);
+};
+
 // SAFETY: GlobT contains a raw pointer to heap-allocated path arrays.
 // Only one thread accesses the glob result at a time per POSIX.
 unsafe impl Sync for GlobT {}

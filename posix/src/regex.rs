@@ -123,6 +123,17 @@ pub struct RegexT {
     program: *mut RegexProgram,
 }
 
+/// Our `regex_t` must fit inside the one the caller's `<regex.h>` reserved.
+///
+/// See `pthread.rs`'s module note for why this is a `const` and why the bound
+/// is `<=`.  We are at 16 bytes against musl's 64.  `re_nsub` is public and
+/// sits at offset 0 in both, which is the one field POSIX lets a caller read,
+/// so the undersizing is invisible to conforming code.
+const _: () = {
+    assert!(size_of::<RegexT>() <= 64, "musl/glibc regex_t");
+    assert!(align_of::<RegexT>() <= 8);
+};
+
 // SAFETY: RegexT contains a raw pointer to a heap-allocated program.
 // POSIX mandates single-threaded access to a compiled regex unless
 // the caller synchronizes externally.

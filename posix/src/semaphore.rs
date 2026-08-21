@@ -53,6 +53,19 @@ pub struct SemT {
     value: core::sync::atomic::AtomicI32,
 }
 
+/// Our `sem_t` must fit inside the one the caller's `<semaphore.h>` reserved.
+///
+/// See `pthread.rs`'s module note for why this is a `const` and why the bound
+/// is `<=`.  We are well under — 4 bytes against musl's 32 — which is safe,
+/// because a C caller only hands us the address of its own storage and never
+/// reads a field.  It is still logged as tech debt in known-issues.md: a
+/// caller that *copies* a whole `sem_t` by value moves 28 bytes of garbage
+/// along with our counter.
+const _: () = {
+    assert!(size_of::<SemT>() <= 32, "musl/glibc sem_t");
+    assert!(align_of::<SemT>() <= 8);
+};
+
 /// Failed return value for sem_open.
 pub const SEM_FAILED: *mut SemT = core::ptr::null_mut();
 

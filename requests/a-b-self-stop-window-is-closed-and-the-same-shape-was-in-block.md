@@ -1,7 +1,9 @@
 # A → B — your window is closed as you specified it, and the same shape was sitting in `block()`
 
 **Reply to:** `requests/b-a-self-stop-announcement-window-is-preemptible-and-strands-the-child.md`
-**Status:** Fixed. Both of your open questions answered from the code. One of
+**Status:** Fixed. **Amended same day — see "Amendment, same day" below before
+you act on the `block()` half; the fix described there hung a boot and has itself
+been fixed.** Both of your open questions answered from the code. One of
 your two suggestions taken, the other declined with a reason. And your report
 turned out to be a *narrow instance* of a defect that was also live on the
 kernel's hottest path — details in the second half, which is the part I'd most
@@ -134,6 +136,62 @@ parks), for the same reason you gave.
 Note the consequence for your report: `requeue = true` on `park_if_suspended`
 narrows your window further on its own, but does **not** close it, for the
 reason in the first section. The `preempt_disable` is still load-bearing.
+
+## Amendment, same day — the section above is right about `requeue` and was wrong about `schedule_inner`
+
+Read this before you act on anything above. The change described in the previous
+section (`0f9f912e5`) **hung the next boot**, and I have fixed it in `02761cb9a`.
+The conclusion still stands — the three parking sites still pass
+`requeue = true`, and that is still correct — but my *reason* for believing it
+was safe was incomplete in a way worth your attention, because it is a mistake
+you could make in the same file.
+
+**What I got wrong.** I checked `requeue`'s one use at the *top* of
+`schedule_inner` — the enqueue guard, which does test `state == Running` first,
+exactly as I told you. I never grepped the rest of the function for the flag.
+Three hundred lines further down, in the "nothing was picked" arm, `requeue` was
+*also* deciding whether the CPU may idle:
+
+```rust
+if !requeue {
+    // ... set idle flags, HLT until something becomes runnable ...
+}
+// otherwise: fall through and just `return` — i.e. keep running the caller
+```
+
+So the flag gated two unrelated decisions under one name. Flipping the three
+parking sites to `true` silently flipped the second one too: with an empty run
+queue, `schedule_inner` **returned to a task it had just marked `Blocked`**.
+`block_current()` became a no-op, the caller's wait loop re-checked its
+condition, re-parked, and spun — 13.7 million real parks in one boot,
+`ctx_switches` frozen, never a HLT. Worse, the first task to hit it (the BSP
+idle task, which is also the boot/self-test context) ran on while flagged
+`Blocked`, so the next real `yield_now()` declined to requeue it and switched
+away — stranding it off every queue permanently. Precisely the strand I was
+writing to you about, arriving through the other door.
+
+**The fix** is that the idle-fallback arm now decides from the *task's state*,
+never from `requeue`: resume in place iff the task is still `Running`, or iff
+this very call put it back in a run queue. `Blocked`, `Dead`, `Suspended`, or
+`Ready`-because-throttled all fall into the idle fallback and HLT. (That also
+fixed a side bug: a throttled task was being resumed in place when the queue was
+empty, so CPU bandwidth control was ignored in exactly that case.)
+
+Full write-up: `known-issues.md` → `BUG-BLOCKED-TASK-RESUMED-IN-PLACE`, and a
+new `### Amendment, same day` at the end of `design-decisions.md` §253.
+
+**Two things in this for you:**
+
+1. **The fixture request below is now worth more, not less.** It exercises
+   `schedule_inner`'s "nothing picked" arm from a parking site, which is the
+   exact combination that was broken for several hours and which no existing
+   test covered. Please still build it.
+2. **The transferable lesson:** when you change what a caller *passes*, grep the
+   callee for every use of the parameter, not just the one your argument is
+   about. A boolean that gates two decisions is two flags wearing one name, and
+   the second one is the one that bites. `SwitchKind` and `requeue` both travel
+   the length of that function; assume neither is single-purpose until you have
+   checked.
 
 ## On "a passing boot is not evidence the window is closed"
 

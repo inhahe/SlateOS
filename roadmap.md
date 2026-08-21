@@ -1578,6 +1578,7 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] USB HID class driver: config descriptor parsing, SET_CONFIGURATION, SET_PROTOCOL (boot), SET_IDLE, interrupt endpoint detection
   - [x] USB HID interrupt transfer polling (poll_keyboard/poll_mouse via event ring)
   - [x] USB HID keycode-to-scancode translation (HID_TO_SCANCODE table, handle_usb_hid_report integration with keyboard ring buffer)
+  - [x] USB HID *periodic* polling — 8 ms hrtimer (`keyboard::start_usb_hid_poller`) drives the endpoint from the APIC timer ISR via `xhci::try_poll_keyboard`, so keystrokes arrive without a reader blocked. Until 2026-08-21 polling only happened inside a console read, so type-ahead and non-blocking input were impossible on USB (PS/2 was fine via IRQ 1, and QEMU defaults to PS/2, which is why it went unseen). Fixes `known-issues.md` → `A-USB-KEYSTROKES-ARE-ONLY-FETCHED-WHILE-SOMEBODY-IS-BLOCKED-READING`; unblocks half of `BUG-CONSOLE-READ-UNINTERRUPTIBLE` stage 2 (the wake side is still open)
 - [x] Framebuffer / basic display (UEFI GOP framebuffer initially)
   - [x] 8x16 VGA bitmap font, framebuffer text console (160x50 @ 1280x800)
 - [x] Storage (NVMe, AHCI/SATA)

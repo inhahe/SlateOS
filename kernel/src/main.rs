@@ -1304,6 +1304,17 @@ extern "C" fn kernel_main() -> ! {
             // No-op without xHCI hardware (common in QEMU unless -device qemu-xhci).
             xhci::init(boot_info.hhdm_offset);
 
+            // Start fetching USB HID reports on a timer rather than only when
+            // somebody is already blocked on a console read.
+            //
+            // Must follow xhci::init (it checks for a controller) and
+            // hrtimer::init (it schedules against it); both are above.  Placed
+            // immediately after the controller comes up so that everything
+            // later in boot — including the self-tests — runs with the same
+            // input path real hardware will use, rather than with a keyboard
+            // that only exists while something is reading it.
+            keyboard::start_usb_hid_poller();
+
             // Step 20e-2: Add disk-backed swap alongside zram.
             // Multi-device swap: zram (priority 100) handles most evictions with
             // zero I/O latency; disk (priority 0) catches overflow when zram is full.

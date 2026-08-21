@@ -2253,10 +2253,41 @@ pub fn rescan() {
 ///
 /// Returns `Some(HidKeyboardReport)` if a key event is available.
 /// This is non-blocking — returns None immediately if no data.
+///
+/// Blocks on the controller lock, so this is for **thread context only**.
+/// The periodic poller that actually keeps the input ring fed runs in the
+/// APIC timer ISR and must use [`try_poll_keyboard`] instead.
 pub fn poll_keyboard() -> Option<HidKeyboardReport> {
-    let mut ctrl = XHCI.lock();
-    let ctrl = ctrl.as_mut()?;
+    let mut guard = XHCI.lock();
+    poll_keyboard_locked(guard.as_mut()?)
+}
 
+/// Poll for USB keyboard input without ever waiting for the controller lock.
+///
+/// This is what [`crate::keyboard::usb_hid_tick`] calls, and it runs in the
+/// APIC timer ISR. `lock()` there would not merely stall — it would deadlock:
+/// the code the interrupt preempted may itself be inside `XHCI.lock()` **on
+/// this same CPU**, and a spinlock cannot be re-entered by the interrupt that
+/// stopped its owner from ever releasing it.
+///
+/// A contended tick skips rather than waits. That is cheap in the only way
+/// that matters here: the event ring is not drained *per tick* but per
+/// *report*, and every report a skipped tick left behind is still sitting in
+/// the ring 8 ms later. The only cost of contention is latency, bounded by one
+/// period, and the contending party is by construction someone briefly
+/// touching the controller (`rescan`, `port_status`, an ordinary
+/// `poll_keyboard`) rather than anything that holds it for long.
+pub fn try_poll_keyboard() -> Option<HidKeyboardReport> {
+    let mut guard = XHCI.try_lock()?;
+    poll_keyboard_locked(guard.as_mut()?)
+}
+
+/// The body shared by [`poll_keyboard`] and [`try_poll_keyboard`].
+///
+/// Split out so the two differ in exactly one thing — how they acquire the
+/// controller — and cannot drift in the re-posting logic, which is the part
+/// that keeps the endpoint alive and is easy to get subtly wrong.
+fn poll_keyboard_locked(ctrl: &mut XhciController) -> Option<HidKeyboardReport> {
     // Find the keyboard slot.
     let kb_iface = ctrl
         .hid_interfaces

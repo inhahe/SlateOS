@@ -51848,3 +51848,79 @@ where nobody would look for it.
 unusable in any script that checks status rather than parsing stdout. Note this
 affects only `+trace`; ordinary lookups already propagate their errors through
 `run` and exit non-zero.
+
+
+## TD-B-SSH-KEY-EXCHANGE-LEAKS-ITS-SECRET-THROUGH-TIMING (lane B, 2026-08-21)
+
+**In short:** When `ssh` connects, it and the server each pick a secret random
+number and combine them to agree on a session key -- this is Diffie-Hellman key
+exchange. Our client computes its half with an algorithm whose *running time
+depends on the secret*: bits of the secret that are 1 take measurably longer
+than bits that are 0. Anyone who can time the handshake precisely -- a process
+on the same machine, or in principle a well-placed network observer -- can read
+the secret back out of those timings and then decrypt the whole session. The fix
+is to stop using this key exchange and use X25519 instead, which is designed so
+that every secret takes exactly the same time.
+
+**Where.** `userspace/ssh/src/main.rs`, the `BigUint` section. Two data-dependent
+branches, both on the security-critical path:
+
+- `mod_pow` is square-and-multiply: `for i in (0..bits).rev() { result =
+  result.mod_mul(&result, modulus); if exp.bit(i) { result =
+  result.mod_mul(&base, modulus); } }`. The extra multiply happens only for a
+  1 bit, so total time is (roughly) linear in the popcount of the exponent, and
+  the *pattern* of fast/slow rounds is the exponent itself.
+- `div_rem`'s Knuth add-back step (`if t < 0 { ... }`) runs an extra pass over
+  the divisor only when the trial quotient digit was one too large. That is
+  operand-dependent, so even the "constant" squarings are not constant-time.
+
+The exponent in question is the DH private exponent generated in
+`key_exchange`; the modulus is the 2048-bit group 14 prime.
+
+**How it was found.** While rewriting `BigUint` onto 32-bit limbs to fix the
+unusable 77-second handshake (commit `07cfa2521`). The rewrite made the
+arithmetic ~350x faster; it did not make it constant-time, and it was never
+written to be.
+
+**How bad it is, honestly.** Bounded, but not negligible. The exponent is
+ephemeral: a fresh one is drawn per connection, so an attacker gets exactly one
+timing trace per secret rather than the thousands that classic RSA/DSA timing
+attacks accumulate against a long-lived key. A single trace of a 2048-bit
+modexp is not obviously enough to recover the exponent end-to-end. But "not
+obviously enough" is not a security argument, the leak is a per-bit one rather
+than a statistical aggregate, and a co-resident process can time far more
+precisely than a network attacker. Treat it as a real weakness that has not yet
+been demonstrated, not as a theoretical one.
+
+**The proper fix, and why it is a replacement rather than a repair.** Making
+this code constant-time means rewriting `mod_pow` as a fixed-window ladder with
+constant-time table selection, and rewriting `div_rem` to do the add-back
+unconditionally under a mask -- i.e. writing a constant-time bignum library by
+hand, unreviewed, which is the exact category of code that is famously got
+wrong. The better answer is to delete the requirement:
+
+1. Implement **X25519 (RFC 7748)** in `posix/`, beside the existing `ed25519`.
+   The Montgomery ladder is naturally constant-time -- it performs the same
+   operations for every scalar bit and selects between them with arithmetic
+   rather than a branch -- the scalar is a fixed 32 bytes so there is no
+   variable-length loop, and RFC 7748 s5.2 ships known-answer vectors to test
+   against.
+2. Switch ssh's key exchange to **`curve25519-sha256`** (RFC 8731), which is
+   what OpenSSH prefers by default anyway, keeping
+   `diffie-hellman-group14-sha256` only as a fallback for servers that lack it.
+
+That removes the hand-rolled 2048-bit modexp from the handshake entirely. The
+`BigUint` code would remain only for the fallback path (and could then be
+dropped altogether if the fallback is dropped).
+
+**Checked 2026-08-21:** `posix/src` has no X25519 today. Grepping
+`x25519|curve25519` there matches only Linux uapi *type definitions*
+(`linux_wireguard*.rs`, `linux_crypto_kpp*.rs`) -- names in an ABI, not an
+implementation. So step 1 is genuinely new code, not a wiring job.
+
+**If never fixed:** no regression -- this is how the client has behaved since it
+was written, and the 350x speedup neither introduced nor worsened it. It does
+not get worse with time on its own. But it is the one remaining defect in ssh
+that a rewrite cannot be argued out of: every other finding from the lint sweep
+was fixed in place, and this one was left because the correct fix is a new
+primitive rather than an edit.

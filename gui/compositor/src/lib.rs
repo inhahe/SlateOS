@@ -102,6 +102,9 @@ pub use guiremote::control::CursorShape;
 pub use guiremote::control::Layer;
 use guiremote::control::WindowSpec;
 use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
+// Same reason: `window_list` returns these, and a shell reading one should not
+// have to reach past the compositor to name what it got.
+pub use guiremote::window_list::WindowInfo;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -3269,6 +3272,10 @@ pub struct Compositor {
     theme: DecorationTheme,
     /// Outbound event notifications for clients (stub queue).
     pending_notifications: VecDeque<EventNotification>,
+    /// Reused encoding buffer for
+    /// [`route_window_list`](Self::route_window_list), so that a shell polling
+    /// an unchanged desktop at 60 Hz allocates nothing.
+    window_list_scratch: Vec<u8>,
     /// Which modifier keys are held, and whether Caps Lock is latched.
     ///
     /// Kept here rather than derived per event because a modifier is a *state*
@@ -3320,6 +3327,7 @@ impl Compositor {
             render_engine: RenderEngine::new(),
             theme: DecorationTheme::default(),
             pending_notifications: VecDeque::new(),
+            window_list_scratch: Vec::new(),
             modifiers: ModifierState::new(),
             full_recomposite: true,
             occlusion_cull: true,
@@ -5220,6 +5228,40 @@ impl Compositor {
         let at = self.stack_insertion_index(layer);
         self.z_stack.insert(at, id);
         self.update_z_orders();
+    }
+
+    /// The desktop's windows as a shell sees them, bottom-to-top.
+    ///
+    /// The whole set, including invisible and minimized windows and every
+    /// stacking band, because filtering is the *shell's* decision and it needs
+    /// different subsets for different jobs: a taskbar wants the minimized ones
+    /// (that is what its buttons restore) and not the overlays; an Alt-Tab
+    /// switcher wants neither the minimized ones nor the background. A
+    /// compositor that pre-filtered would have to pick one of those and be
+    /// wrong for the other, with no way for the client to recover what was
+    /// dropped.
+    ///
+    /// Ordered by `z_stack` rather than by creation, so consecutive entries are
+    /// neighbours on screen and the last one is the topmost window.
+    #[must_use]
+    pub fn window_list(&self) -> Vec<WindowInfo> {
+        self.z_stack
+            .iter()
+            .filter_map(|&id| self.window_ref(id))
+            .map(|w| WindowInfo {
+                id: w.id.raw(),
+                pid: w.client_pid,
+                layer: w.layer,
+                title: w.title.clone(),
+                visible: w.visible,
+                minimized: w.minimized,
+                maximized: w.maximized,
+                // From the window's own flag rather than from
+                // `self.focused_window`, so the list cannot disagree with the
+                // window it describes if the two ever drift apart.
+                focused: w.focused,
+            })
+            .collect()
     }
 
     /// Update z_order fields on all windows based on their position in z_stack.

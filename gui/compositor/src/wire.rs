@@ -51,6 +51,7 @@ use guiremote::control::{
 };
 use guiremote::frame::{Frame, try_decode_any};
 use guiremote::submit::Submission;
+use guiremote::window_list::encode_window_list_into;
 use guitk::render::RenderTree;
 
 use crate::{Compositor, CompositorRequest, CompositorResponse, WindowId};
@@ -80,6 +81,26 @@ pub struct ClientLink {
     /// Whether the client has hung up. A closed link is drained but not read
     /// from again.
     closed: bool,
+    /// Whether this client asked to be told about the whole desktop's windows.
+    ///
+    /// False for every ordinary application, which is what makes the whole
+    /// mechanism free when nobody wants it: an unsubscribed link never builds a
+    /// list at all.
+    wants_window_list: bool,
+    /// The exact bytes of the last window-list frame written to this link.
+    ///
+    /// Compared against a freshly built list to decide whether to send, rather
+    /// than a change-counter bumped by every operation that touches a window.
+    /// A counter has to be bumped at every such site, and the failure mode of
+    /// missing one is a taskbar that is silently wrong until something else
+    /// happens to change — the "counting instead of searching" trap that
+    /// `design-decisions.md` §494 flagged in the stacking order. Comparing the
+    /// output cannot be forgotten, because there is nowhere to forget it.
+    ///
+    /// Empty until the first list is sent, which is why an empty desktop still
+    /// produces a frame: `[]` never equals the encoding of an empty list, which
+    /// carries a header.
+    window_list_sent: Vec<u8>,
 }
 
 /// What went wrong serving a client.
@@ -91,10 +112,11 @@ pub enum WireError {
     Malformed(DecodeError),
     /// The client sent a frame only the compositor is supposed to send.
     ///
-    /// `SCEN` and `ORDR` travel the other way — a scene is the compositor's
-    /// description of the desktop, and a bare `ORDR` has no addressee, which is
-    /// why `SURF` exists. Receiving one means the peer is confused about which
-    /// end it is, and treating it as a no-op would hide that.
+    /// `SCEN`, `ORDR` and `WLST` travel the other way — a scene and a window
+    /// list are the compositor's description of the desktop, and a bare `ORDR`
+    /// has no addressee, which is why `SURF` exists. Receiving one means the
+    /// peer is confused about which end it is, and treating it as a no-op would
+    /// hide that.
     WrongDirection(&'static str),
 }
 
@@ -130,7 +152,30 @@ impl ClientLink {
             outbox: Vec::new(),
             windows: Vec::new(),
             closed: false,
+            wants_window_list: false,
+            window_list_sent: Vec::new(),
         }
+    }
+
+    /// Whether this client is receiving the desktop's window list.
+    #[must_use]
+    pub const fn wants_window_list(&self) -> bool {
+        self.wants_window_list
+    }
+
+    /// Start or stop sending this client the desktop's window list.
+    ///
+    /// Subscribing always forgets what was last sent, so a re-subscribe
+    /// re-sends the list rather than being a no-op. That is the useful reading
+    /// of a repeated subscribe — "I may have lost track" — and it is what makes
+    /// the first list after subscribing arrive at all.
+    ///
+    /// Unsubscribing also forgets it, so that a later re-subscribe cannot be
+    /// answered with silence because the list happens not to have changed while
+    /// the client was not listening.
+    pub fn set_window_list_subscription(&mut self, on: bool) {
+        self.wants_window_list = on;
+        self.window_list_sent.clear();
     }
 
     /// The process on the other end.
@@ -276,6 +321,17 @@ fn to_compositor_request(
             opacity,
         },
         RequestBody::GetDisplayInfo => CompositorRequest::GetDisplayInfo,
+        // Handled by `answer_requests` before it reaches here, because it
+        // changes the *link*, not the compositor: nothing about a subscription
+        // belongs in the window/display state a `CompositorRequest` describes,
+        // and giving it a variant would mean adding one the compositor cannot
+        // serve without being handed the connection that asked. Reaching this
+        // arm is a bug in that dispatch, so it says so rather than answering.
+        RequestBody::SubscribeWindowList { .. } => {
+            return Err(ResponseBody::Error {
+                message: "window-list subscription is a link-level request".to_string(),
+            });
+        }
     })
 }
 
@@ -371,6 +427,7 @@ impl Compositor {
                 Frame::Scene(_) => return Err(WireError::WrongDirection("scene")),
                 Frame::Render(_) => return Err(WireError::WrongDirection("unaddressed render")),
                 Frame::Input(_) => return Err(WireError::WrongDirection("input")),
+                Frame::WindowList(_) => return Err(WireError::WrongDirection("window list")),
             }
         }
 
@@ -387,6 +444,13 @@ impl Compositor {
     fn answer_requests(&mut self, link: &mut ClientLink, requests: &[Request]) {
         let mut replies = Vec::with_capacity(requests.len());
         for req in requests {
+            // Subscription is the one request whose subject is the connection
+            // rather than a window, so it is answered here and never converted.
+            if let RequestBody::SubscribeWindowList { subscribe } = req.body {
+                link.set_window_list_subscription(subscribe);
+                replies.push(Response::new(req.seq, ResponseBody::Ok));
+                continue;
+            }
             let body = match to_compositor_request(link, req.body.clone()) {
                 Ok(request) => {
                     // Destruction is noted before dispatch and creation after,
@@ -465,6 +529,51 @@ impl Compositor {
         routed
     }
 
+    /// Send this link the desktop's window list, if it wants one and the list
+    /// has changed since it last got one. Returns whether a frame was queued.
+    ///
+    /// Call once per link per tick, alongside [`route_input`](Self::route_input).
+    /// Calling it more often is harmless — the second call finds nothing to
+    /// send — and calling it less often costs latency, not correctness, because
+    /// each frame is a whole snapshot rather than a step in a sequence.
+    ///
+    /// ## Why this compares bytes instead of watching for changes
+    ///
+    /// The obvious design is a counter the compositor bumps whenever a window
+    /// is created, destroyed, retitled, focused, minimized, maximized or
+    /// hidden, with each link remembering the value it last saw. That is one
+    /// bump per site and about eight sites today, every one of which is a place
+    /// a future change can forget — and a forgotten bump does not fail, it
+    /// leaves a taskbar quietly showing yesterday's title until something
+    /// unrelated happens to move the counter. Deriving the answer from the list
+    /// itself has no site to forget: if the list a client would receive is
+    /// different, it is sent.
+    ///
+    /// The cost is building and encoding the list once per tick *per subscribed
+    /// link*, and subscribed links are shells — one, on a normal desktop. An
+    /// unsubscribed link, which is every application, does no work at all.
+    pub fn route_window_list(&mut self, link: &mut ClientLink) -> bool {
+        // Checked before anything is built, so an ordinary application pays a
+        // single boolean test per tick for a feature it does not use.
+        if !link.wants_window_list || link.closed {
+            return false;
+        }
+        // Reuses one buffer across ticks rather than allocating a fresh Vec for
+        // a frame that is usually discarded as unchanged.
+        self.window_list_scratch.clear();
+        let windows = self.window_list();
+        encode_window_list_into(&mut self.window_list_scratch, &windows);
+
+        if link.window_list_sent == self.window_list_scratch {
+            return false;
+        }
+        link.outbox.extend_from_slice(&self.window_list_scratch);
+        link.window_list_sent.clear();
+        link.window_list_sent
+            .extend_from_slice(&self.window_list_scratch);
+        true
+    }
+
     /// Drop input that no client claimed, and say how much there was.
     ///
     /// A non-zero count is a real symptom rather than housekeeping: it means
@@ -493,8 +602,11 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use guiremote::control::{CursorShape, Request, RequestBody, WindowSpec, decode_responses};
+    use guiremote::control::{
+        CursorShape, Layer, Request, RequestBody, WindowSpec, decode_responses,
+    };
     use guiremote::input::decode_input_frame;
+    use guiremote::window_list::WindowInfo;
     use guiremote::{InputEvent, encode_requests, encode_submit};
     use guitk::color::Color;
     use guitk::event::Event;
@@ -867,6 +979,322 @@ mod tests {
             "a closed link's events are dropped, not left for another link"
         );
         assert!(comp.window_ref(WindowId::from_raw(window)).is_some());
+    }
+
+    // ------------------------------------------------------------------
+    // The window list: how a shell learns about windows it did not open
+    // ------------------------------------------------------------------
+
+    /// Every window-list frame in a byte stream, ignoring the input frames and
+    /// replies interleaved with them.
+    fn window_lists(bytes: &[u8]) -> Vec<Vec<WindowInfo>> {
+        let mut lists = Vec::new();
+        let mut at = 0usize;
+        while at < bytes.len() {
+            let (frame, used) = guiremote::decode_any(&bytes[at..]).expect("decodes");
+            if let Frame::WindowList(windows) = frame {
+                lists.push(windows);
+            }
+            at += used;
+        }
+        assert_eq!(at, bytes.len(), "no bytes left over");
+        lists
+    }
+
+    /// Route everything pending to `link` and return the window lists sent.
+    fn pump_lists(comp: &mut Compositor, link: &mut ClientLink) -> Vec<Vec<WindowInfo>> {
+        comp.route_input(link);
+        comp.route_window_list(link);
+        let bytes = link.take_outgoing();
+        window_lists(&bytes)
+    }
+
+    /// Open a window in a named stacking band over `link`.
+    fn open_in(comp: &mut Compositor, link: &mut ClientLink, title: &str, layer: Layer) -> u64 {
+        let mut spec = WindowSpec::new(title, 200, 150);
+        spec.layer = layer;
+        let responses = exchange(comp, link, vec![RequestBody::CreateWindow(spec)]);
+        match responses[0].body {
+            ResponseBody::WindowCreated { window } => window,
+            ref other => panic!("expected WindowCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_shell_is_told_about_windows_it_did_not_open() {
+        // The whole point of the protocol. Before it, a taskbar could stay in
+        // front of the windows it was supposed to list (that is what `Layer`
+        // bought) and had no way at all to find out what they were.
+        let (mut comp, mut shell) = wired();
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        assert!(matches!(responses[0].body, ResponseBody::Ok));
+        assert!(shell.wants_window_list());
+
+        let mut app = ClientLink::new(99);
+        let theirs = open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+
+        let lists = pump_lists(&mut comp, &mut shell);
+        assert_eq!(lists.len(), 1, "exactly one list, not one per change");
+        let list = &lists[0];
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, theirs);
+        assert_eq!(list[0].title, "Editor");
+        assert_eq!(
+            list[0].pid, 99,
+            "the owner, so a shell can group by program"
+        );
+        assert!(list[0].focused, "a new window takes focus");
+        assert!(!shell.owns(WindowId::from_raw(theirs)));
+    }
+
+    #[test]
+    fn an_application_that_never_subscribed_is_told_nothing_about_the_desktop() {
+        // A window list is a description of every other program on the machine.
+        // An app that did not ask must not receive one — and, just as much, must
+        // not pay for building one.
+        let (mut comp, mut app) = wired();
+        open_in(&mut comp, &mut app, "Mine", Layer::Normal);
+        let mut other = ClientLink::new(99);
+        open_in(&mut comp, &mut other, "Theirs", Layer::Normal);
+
+        assert!(!comp.route_window_list(&mut app));
+        assert!(window_lists(&app.take_outgoing()).is_empty());
+    }
+
+    #[test]
+    fn an_unchanged_desktop_costs_nothing_after_the_first_list() {
+        // A shell ticks at frame rate; a desktop changes a few times a minute.
+        // Re-sending the same list 60 times a second would be the whole cost of
+        // the feature.
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+
+        assert!(comp.route_window_list(&mut shell), "the first list is sent");
+        drop(shell.take_outgoing());
+
+        for tick in 0..10 {
+            assert!(
+                !comp.route_window_list(&mut shell),
+                "tick {tick} re-sent an unchanged list"
+            );
+        }
+        assert!(!shell.has_outgoing());
+    }
+
+    #[test]
+    fn a_retitle_reaches_the_shell() {
+        // The change with no other signal. Creation and destruction move the
+        // window count, focus moves a flag — but a title changing is invisible
+        // to anything except the list itself, so a design that watched for
+        // "interesting" events instead of comparing the list would drop it.
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        let window = open_in(&mut comp, &mut app, "untitled", Layer::Normal);
+        assert_eq!(pump_lists(&mut comp, &mut shell)[0][0].title, "untitled");
+
+        exchange(
+            &mut comp,
+            &mut app,
+            vec![RequestBody::SetTitle {
+                window,
+                title: "notes.txt — saved".to_string(),
+            }],
+        );
+
+        let lists = pump_lists(&mut comp, &mut shell);
+        assert_eq!(lists.len(), 1, "the retitle produced a list");
+        assert_eq!(lists[0][0].title, "notes.txt — saved");
+    }
+
+    #[test]
+    fn minimizing_and_restoring_both_reach_the_shell() {
+        // A taskbar button's whole job: it must know which windows are
+        // minimized, because those are the ones clicking it restores.
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        let window = open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+        assert!(!pump_lists(&mut comp, &mut shell)[0][0].minimized);
+
+        exchange(&mut comp, &mut app, vec![RequestBody::Minimize { window }]);
+        let lists = pump_lists(&mut comp, &mut shell);
+        assert_eq!(lists.len(), 1);
+        assert!(lists[0][0].minimized);
+
+        exchange(&mut comp, &mut app, vec![RequestBody::Restore { window }]);
+        let lists = pump_lists(&mut comp, &mut shell);
+        assert_eq!(lists.len(), 1);
+        assert!(!lists[0][0].minimized);
+    }
+
+    #[test]
+    fn closing_the_last_window_sends_an_empty_list_rather_than_nothing() {
+        // "Nothing to report" and "there is nothing left" are different, and a
+        // shell told the first when the second happened leaves a taskbar button
+        // for a program that has exited.
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        let window = open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+        assert_eq!(pump_lists(&mut comp, &mut shell)[0].len(), 1);
+
+        exchange(
+            &mut comp,
+            &mut app,
+            vec![RequestBody::DestroyWindow { window }],
+        );
+        let lists = pump_lists(&mut comp, &mut shell);
+        assert_eq!(lists.len(), 1, "the desktop emptying is itself news");
+        assert!(lists[0].is_empty());
+    }
+
+    #[test]
+    fn unsubscribing_stops_the_traffic_and_resubscribing_resends() {
+        // Re-subscribing must not be answered with silence just because the
+        // list happens not to have changed while the client was not listening.
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+        assert_eq!(pump_lists(&mut comp, &mut shell).len(), 1);
+
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: false }],
+        );
+        assert!(!shell.wants_window_list());
+        open_in(&mut comp, &mut app, "Second", Layer::Normal);
+        assert!(
+            !comp.route_window_list(&mut shell),
+            "an unsubscribed link gets nothing even when the desktop changes"
+        );
+        drop(shell.take_outgoing());
+
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let lists = pump_lists(&mut comp, &mut shell);
+        assert_eq!(lists.len(), 1, "re-subscribing re-sends");
+        assert_eq!(lists[0].len(), 2, "including what changed while away");
+    }
+
+    #[test]
+    fn the_list_carries_the_band_so_a_taskbar_can_leave_itself_out_of_it() {
+        // Without `layer` a taskbar lists the wallpaper and itself, which is
+        // the reason this field is on the frame rather than left to be inferred.
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        open_in(&mut comp, &mut shell, "Taskbar", Layer::Overlay);
+        open_in(&mut comp, &mut shell, "Wallpaper", Layer::Background);
+        let mut app = ClientLink::new(99);
+        open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+
+        let lists = pump_lists(&mut comp, &mut shell);
+        let list = &lists[lists.len() - 1];
+        assert_eq!(list.len(), 3);
+        // Bottom-to-top, which is the stacking order and so is banded.
+        assert_eq!(
+            list.iter().map(|w| w.layer).collect::<Vec<_>>(),
+            vec![Layer::Background, Layer::Normal, Layer::Overlay]
+        );
+        let taskbar_would_show: Vec<&str> = list
+            .iter()
+            .filter(|w| w.layer == Layer::Normal)
+            .map(|w| w.title.as_str())
+            .collect();
+        assert_eq!(taskbar_would_show, vec!["Editor"]);
+    }
+
+    #[test]
+    fn two_shells_each_get_their_own_copy_and_their_own_staleness() {
+        // The state that decides whether to send lives on the link, not on the
+        // compositor: one shell having been told must not count as the other
+        // having been told.
+        let (mut comp, mut first) = wired();
+        let mut second = ClientLink::new(77);
+        for link in [&mut first, &mut second] {
+            exchange(
+                &mut comp,
+                link,
+                vec![RequestBody::SubscribeWindowList { subscribe: true }],
+            );
+        }
+        let mut app = ClientLink::new(99);
+        open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+
+        assert_eq!(pump_lists(&mut comp, &mut first).len(), 1);
+        assert_eq!(
+            pump_lists(&mut comp, &mut second).len(),
+            1,
+            "the second shell is told too"
+        );
+        assert!(!comp.route_window_list(&mut first));
+        assert!(!comp.route_window_list(&mut second));
+    }
+
+    #[test]
+    fn a_shell_that_hung_up_is_not_queued_a_list_it_will_never_read() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        shell.close();
+        let mut app = ClientLink::new(99);
+        open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+
+        assert!(!comp.route_window_list(&mut shell));
+        assert!(!shell.has_outgoing());
+    }
+
+    #[test]
+    fn a_window_list_from_a_client_is_rejected_rather_than_ignored() {
+        // It travels the other way. A client sending one is confused about
+        // which end it is, and a silent no-op would leave that to be found later
+        // as a taskbar that never updates.
+        let (mut comp, mut link) = wired();
+        link.receive(&guiremote::window_list::encode_window_list(&[
+            WindowInfo::new(1, 2, "Forged"),
+        ]));
+        assert_eq!(
+            comp.serve(&mut link),
+            Err(WireError::WrongDirection("window list"))
+        );
     }
 
     #[test]

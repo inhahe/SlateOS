@@ -107,6 +107,12 @@ pub use submit::{
     try_decode_submit,
 };
 
+pub mod window_list;
+pub use window_list::{
+    MAX_WINDOWS_PER_LIST, WINDOW_LIST_MAGIC, WINDOW_LIST_VERSION, WindowInfo, decode_window_list,
+    encode_window_list, encode_window_list_into, try_decode_window_list,
+};
+
 pub mod frame;
 pub use frame::{Frame, decode_any, try_decode_any};
 
@@ -379,6 +385,13 @@ pub enum DecodeError {
     TooManyMessages(u32),
     /// A [`CursorShape`](control::CursorShape) byte is not in this decoder's table.
     BadCursorShape(u8),
+    /// A window-list frame's entry count exceeds
+    /// [`window_list::MAX_WINDOWS_PER_LIST`].
+    ///
+    /// Distinct from [`TooManyWindows`](Self::TooManyWindows), which bounds a
+    /// *scene* frame, so that a limit hit names the frame that hit it even if
+    /// the two limits later diverge.
+    TooManyListedWindows(u32),
 }
 
 impl core::fmt::Display for DecodeError {
@@ -431,6 +444,13 @@ impl core::fmt::Display for DecodeError {
                 )
             }
             Self::BadCursorShape(b) => write!(f, "unknown cursor shape {b:#04x}"),
+            Self::TooManyListedWindows(n) => {
+                write!(
+                    f,
+                    "window-list entry count {n} exceeds limit {}",
+                    window_list::MAX_WINDOWS_PER_LIST
+                )
+            }
         }
     }
 }

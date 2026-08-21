@@ -366,6 +366,24 @@ pub enum RequestBody {
     SetOpacity { window: u64, opacity: f32 },
     /// Ask about the display. Answered with [`ResponseBody::DisplayInfo`].
     GetDisplayInfo,
+    /// Start or stop receiving the desktop's window list.
+    ///
+    /// A shell — a taskbar, a window switcher, an accessibility tool — needs to
+    /// know about windows it did not open, which nothing else in this protocol
+    /// will tell it. While subscribed, the compositor sends a
+    /// [`WLST`](crate::window_list) frame whenever the list it would send
+    /// differs from the one this client last received; see that module for why
+    /// it is a push rather than a query.
+    ///
+    /// Answered with [`ResponseBody::Ok`], and the first list follows
+    /// separately rather than riding in the reply: a `WLST` frame is what
+    /// arrives on every *later* change, so making the first one arrive by a
+    /// different route would give a shell two code paths to the same state.
+    ///
+    /// Subscribing twice is not an error and does not double the traffic. It
+    /// does re-send the list, which is the useful reading of a repeated
+    /// subscribe — "I may have lost track, tell me again".
+    SubscribeWindowList { subscribe: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -384,6 +402,7 @@ enum RequestTag {
     GetDisplayInfo = 0x0B,
     SetFullscreen = 0x0C,
     SetOpacity = 0x0D,
+    SubscribeWindowList = 0x0E,
 }
 
 impl RequestTag {
@@ -402,6 +421,7 @@ impl RequestTag {
             0x0B => Self::GetDisplayInfo,
             0x0C => Self::SetFullscreen,
             0x0D => Self::SetOpacity,
+            0x0E => Self::SubscribeWindowList,
             _ => return None,
         })
     }
@@ -615,6 +635,10 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             write_f32(out, *opacity);
         }
         RequestBody::GetDisplayInfo => out.push(RequestTag::GetDisplayInfo as u8),
+        RequestBody::SubscribeWindowList { subscribe } => {
+            out.push(RequestTag::SubscribeWindowList as u8);
+            out.push(u8::from(*subscribe));
+        }
     }
 }
 
@@ -834,6 +858,9 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             }
         }
         RequestTag::GetDisplayInfo => RequestBody::GetDisplayInfo,
+        RequestTag::SubscribeWindowList => RequestBody::SubscribeWindowList {
+            subscribe: read_bool(r)?,
+        },
     })
 }
 
@@ -979,6 +1006,10 @@ mod tests {
                     opacity: 0.25,
                 },
             ),
+            // Both polarities: a codec that wrote a constant byte for the flag
+            // would round-trip one of these and not the other.
+            Request::new(14, RequestBody::SubscribeWindowList { subscribe: true }),
+            Request::new(15, RequestBody::SubscribeWindowList { subscribe: false }),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
     }

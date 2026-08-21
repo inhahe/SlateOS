@@ -1597,11 +1597,25 @@ pub const SFD_FLAGS_VALID: i32 = SFD_CLOEXEC | SFD_NONBLOCK;
 
 /// Create or modify a signalfd.
 ///
-/// Returns -1 with `ENOSYS` after argument-domain validation.  We do
-/// not yet route signals through file descriptors (no signal queue
-/// integration), but invalid callers must still see Linux-matching
-/// errno values so glibc's `signalfd(3)` wrapper and direct
-/// `signalfd4(2)` callers see correct error reporting.
+/// Returns -1 with `ENOSYS` after argument-domain validation.  Invalid
+/// callers must still see Linux-matching errno values so glibc's
+/// `signalfd(3)` wrapper and direct `signalfd4(2)` callers see correct
+/// error reporting.
+///
+/// # Why `ENOSYS` (corrected 2026-08-21)
+///
+/// This comment used to say we "do not yet route signals through file
+/// descriptors (no signal queue integration)".  That is no longer true of the
+/// system: `kernel/src/syscall/linux.rs` implements `sys_signalfd` and
+/// `sys_signalfd4` for real — there is a `HandleKind::SignalFd`, it is
+/// readable through `dispatch_signalfd_read`, and it is `dup`-able and
+/// `close`-able like any other handle.
+///
+/// It is still true of *this ABI*.  The native syscall table has no
+/// `SYS_SIGNALFD*` number, and `kernel/src/syscall/entry.rs` routes a process
+/// to one dispatcher or the other by its `AbiMode`, so a binary linked against
+/// our `libc.a` cannot reach the implementation.  See `known-issues.md` →
+/// `B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS`.
 ///
 /// Validation order matches `fs/signalfd.c::sys_signalfd4` →
 /// `do_signalfd4` in Linux:

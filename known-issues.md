@@ -48459,3 +48459,262 @@ the feature is not near enough to specify an interface against.
 **If never fixed:** every window title on the desktop is readable by every
 program the user runs, silently and continuously. The desktop works; the
 privacy property a user would assume it has is simply absent.
+
+---
+
+### B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS, AND LIBC'S DOC COMMENTS EXPLAIN IT WITH A REASON THAT STOPPED BEING TRUE — 2026-08-21 — OPEN
+
+**In short.** SlateOS has two syscall ABIs. A binary loaded as a Linux
+executable gets `kernel/src/syscall/linux.rs`; a binary linked against our own
+`toolchain/sysroot/lib/libc.a` — CPython, bash, make, every `ctest-*` fixture —
+gets the native table. Over time lane A implemented a number of operations on
+the *Linux* side that the native side has no syscall number for, so our libc
+still answers `ENOSYS`. That part is defensible. What is not defensible is that
+several of those libc functions carry a doc comment giving the *reason* as "the
+kernel does not do this" — and the kernel does.
+
+**The concrete one that prompted the audit.** `posix/src/process.rs`
+`process_vm_readv` reads:
+
+> returns `-1` with `errno = ENOSYS`: cross-process memory access isn't part of
+> the microkernel's IPC model (programs use channel handles to transfer pages
+> explicitly rather than peeking at another task's address space).
+
+`kernel/src/syscall/linux.rs:26529` implements it, in both directions, with a
+same-address-space fast path and a cross-address-space path gated on a
+`Process` capability carrying the `DEBUG` right (design-decisions §24), using
+`copy_from_user_as` / `copy_to_user_as` against the target's PML4. The claim in
+the comment is not a simplification; it is the opposite of what the kernel now
+does, and anyone reading libc to find out whether SlateOS can do cross-process
+introspection gets the wrong answer.
+
+**How this was measured, so it can be re-run — and the two wrong ways I tried
+first.** Start by parsing `linux.rs` for `nr::X => sys_x(args)` arms. That is
+"a handler exists", which is *not* the same as "it works", and treating it as
+such is the trap this entry is about. Cross that against libc functions with an
+unconditional `set_errno(ENOSYS)` terminal outside `#[cfg(test)]`.
+
+Classifying each handler is where it goes wrong:
+
+- **Wrong test 1: "does the handler body contain `ENOSYS`?"** This calls
+  `sys_mknod_common` a real implementation, because it validates its arguments
+  carefully and then returns `linux_err(errno::EPERM)` — no `ENOSYS` anywhere.
+  A handler that never says `ENOSYS` can still refuse every call it gets. I
+  used this test while *writing this very entry* and it produced a list that
+  overstated the gap by a third.
+- **Wrong test 2: "can the handler return `SyscallResult::ok`?"** — right
+  question, but only if you follow delegation properly. My first
+  delegation-follower handled one level and only when the wrapper's body was a
+  bare tail call, so `sys_signalfd` (which has statements before delegating to
+  `signalfd_common`) and `sys_process_vm_readv` (delegating to
+  `process_vm_impl`) both looked like they never succeed. They do:
+  `signalfd_common` has two `SyscallResult::ok` sites, `process_vm_impl` seven.
+
+**The right test** is "can this handler, following delegation to its real
+implementation, ever return `SyscallResult::ok`?" — verified per call rather
+than trusted to a regex. The result, for the libc `ENOSYS` terminals checked:
+
+| Class | Calls |
+|---|---|
+| **Kernel really implements it; native libc has no number to reach it** | `signalfd`, `signalfd4`, `process_vm_readv`, `process_vm_writev`, `pidfd_open`, `kcmp`, `arch_prctl` |
+| **Kernel denies it too — the two differ only in *which* errno** | `mknod`, `mknodat`, `setns`, `mount`, `umount2`, `ptrace`, `chroot`, `swapon`, `swapoff`, `reboot`, `init_module` (all `EPERM`); `mq_notify` (`EBADF`) |
+| **Partial: libc's `ENOSYS` is a narrow arm, or the kernel succeeds only in the no-op case** | `unshare(0)`, `iopl(0)`, `ioperm`, `quotactl`, `syslog`, `madvise`, `tee` |
+| **Both sides `ENOSYS` — libc is honest** | `clone3`, `getdents`, `seccomp`, `bpf`, `userfaultfd`, `perf_event_open`, `io_uring_setup`, `fanotify_init`, `socket(SOCK_RAW)` |
+
+Only the first row is a missing feature. The second row is a *divergence*: both
+ABIs refuse the operation, but a program probing for support distinguishes
+`ENOSYS` from `EPERM`, so it still matters — it is just a much smaller problem,
+and one that argues for fixing the errno rather than adding a syscall number.
+
+**Why it bites.** The same program gets different behaviour depending on which
+ABI it was linked for, on calls neither side documents as ABI-dependent. Ports
+are exactly the programs that probe for features at runtime. And nothing tests
+the correspondence: `cargo test -p posix` tests libc against libc's own
+expectations, the kernel self-tests exercise the Linux arms directly, and no
+test compares the two answers for the same call.
+
+**Proper fix, in the order it should be done.**
+
+1. **Stop the doc comments from lying** — the cheap half, and the half that
+   costs nothing to get wrong later. Each libc `ENOSYS` terminal for a row-one
+   operation should say *"the native syscall table has no number for this; the
+   kernel implements it on the Linux ABI at `linux.rs:<line>`"*, not *"the
+   kernel does not do this"*. Done for `process_vm_readv`/`writev` and
+   `signalfd`, `pidfd_open`, `kcmp` and `arch_prctl` in the commit that filed
+   this entry — **step 1 is done**, that being all seven of row one. Row two
+   needs no doc change: libc saying "we don't do this" is true there, and only
+   the errno differs.
+2. **Decide, per row-one operation, whether the native ABI should reach it at
+   all.** This is a real design question and not obviously "yes for
+   everything". `signalfd`, `pidfd_open` and `process_vm_readv` are the easy
+   yes: each already takes a handle or is gated on a capability, so a native
+   number would not widen anyone's authority. `kcmp` is the awkward one — it
+   compares two *arbitrary* pids' resources by number, which is ambient
+   authority by construction, and is also the least-needed of the set.
+   `arch_prctl` is neither — it is per-thread CPU state (`FS`/`GS` base), and
+   the question there is whether the native ABI wants a general escape hatch or
+   a specific TLS call. Whatever is decided, the answer belongs in
+   `design-decisions.md`, because right now the split is an accident of what
+   lane A happened to need.
+3. **Then add native syscall numbers for whatever survives step 2**, which is a
+   lane A change and needs a request. Separately — and much cheaper — row two's
+   errno divergence can be closed from either side without a new syscall
+   number, by having libc return the kernel's `EPERM` instead of `ENOSYS` for
+   operations we deliberately refuse. That is a behaviour change to libc, so it
+   wants step 2's decision first rather than being done opportunistically.
+
+**Trigger.** Step 1 is done. Step 2 is worth raising with the operator only if
+a port actually needs one of these; none does today (CPython, bash and make
+link clean without them), which is why this is filed rather than escalated.
+Note that the audit turned up a reason to answer step 2 with "no" for at least
+one member of row one — see the `kcmp` entry immediately below.
+
+**If never fixed:** the libc keeps telling readers the kernel cannot do things
+it can. That is the same defect class as
+`B-WORKSPACE-TEST-IS-RED-SLATEOS-COREUTILS-SHADOW-THE-HOSTS` sitting at
+`Status: OPEN` for five days after it was fixed — a wrong statement in a file
+that other lanes consult is worse than no statement, because it is acted on.
+
+---
+
+### A-KCMP-COMPARES-ANY-TWO-PROCESSES-WITH-NO-AUTHORITY-CHECK — 2026-08-21 — OPEN (lane A tree; request filed)
+
+**In short.** A "syscall" is a request a program makes of the kernel. One of
+them, `kcmp`, asks the kernel to compare two *other* programs — "are these two
+things part of the same running program?", "does program 41 have file number 7
+open?". Linux only answers if the asker would be allowed to debug both targets.
+Ours answers anybody, about anybody. Nothing in SlateOS can reach it today, for
+an accidental reason (the syscall table our own programs use has no number for
+it), so this is a latent hole rather than a live one.
+
+**Where.** `kernel/src/syscall/linux.rs`, `sys_kcmp`, 33398–33546 — lane A's
+tree, so lane B has not touched it. Filed as
+`requests/b-a-kcmp-compares-any-two-processes-with-no-authority-check.md`.
+
+**The gap.** The handler's own header comment (33402–33410) writes Linux's gate
+order down correctly, including `ptrace_may_access(both tasks) -> -EPERM` as
+step 2. Step 2 is in the comment and not in the code: grepping the entire
+function body for `EPERM`, `capabilit`, `Rights` or `may_access` matches only
+that comment line. There is no path on which any caller is refused.
+
+This is inconsistent with lane A's own established policy rather than with some
+external standard, which is what makes it look like an oversight. Eleven lines
+away in the same file, `sys_process_vm_readv` (26529) gates cross-process access
+on a `Process` capability carrying `Rights::DEBUG` and states the principle
+outright — *"never by ambient PID authority"* (26702). `kcmp` is the same shape
+of introspection and got no gate.
+
+**What actually leaks, having checked rather than assumed.**
+
+- *Thread membership.* `KCMP_VM`/`FILES`/`FS`/`SIGHAND`/`IO`/`SYSVSEM` all
+  collapse to one `same_proc` predicate — identical owning `ProcessId` — so the
+  call reports whether any two TIDs on the system are threads of one process.
+  Narrower than Linux (we have no separable `files_struct` to share) but still
+  another user's private thread layout.
+- *Cross-process fd probing — the sharper one.* `KCMP_FILE` calls
+  `pcb::linux_fd_lookup(proc_pid, fd)` against **the target's** fd table and
+  answers `EBADF` when a descriptor is absent (33507–33527). Walking `idx1` and
+  watching `EBADF` flip enumerates exactly which fds another process holds open;
+  when both resolve, the returned ordering leaks `handle_kind_ord(kind)`, i.e.
+  whether the target's fd 7 is a socket or a file.
+
+**What does *not* leak, recorded so nobody re-derives it.** `kcmp` is usually
+also a KASLR concern, because Linux's comparator orders raw kernel pointers and
+must launder them through a per-boot cookie (`kptr_obfuscate()`). Ours does not:
+it orders `handle_kind_ord(kind)` and `raw_handle` — a handle-table index — and
+TIDs in the cross-process case. No kernel address is exposed and the cookie has
+no analogue to add. This is an authority bug only.
+
+**Why it is not urgent.** The native syscall table has no number for `kcmp`, so
+no binary linked against our libc can call it at all, and `posix/src/process.rs`
+`kcmp` is an argument validator that terminates in `ENOSYS`. But "unreachable
+because the other ABI happens not to expose it" is not a security property, and
+it interacts directly with the open question in
+`B-THE-NATIVE-LIBC-AND-THE-LINUX-ABI-DISAGREE-ABOUT-WHAT-EXISTS` step 2 — one of
+the calls being considered for a native number is this one. It should not get a
+number before it gets a gate.
+
+**Proper fix (lane A's call; the request argues for the first).** Either
+require a `Process` capability with `DEBUG` over each target, refusing with
+`EPERM` between the `ESRCH` liveness gate and the `type` range gate so the errno
+discriminator still matches Linux — noting the predicate is a conjunction over
+both targets, so a single undifferentiated `EPERM` is needed or the gate becomes
+its own oracle — or, more cheaply, refuse unless both targets resolve to the
+caller's own process, which closes both leaks, keeps the only form real programs
+use (`kcmp(getpid(), getpid(), …)`) working, and can be widened later. Either
+way the existing `kernel_ctx` escape must be preserved or the boot self-test
+goes red.
+
+**If never fixed:** a latent cross-process fd-enumeration oracle sits behind a
+syscall number we have not assigned, guarded by nothing but the fact that we
+forgot to assign it — and the comment above it tells every future reader that it
+is gated when it is not.
+
+---
+
+### B-PERSONALITY-TESTS-WERE-RACING-AND-AN-RAII-GUARD-MADE-THEM-LOOK-ISOLATED — 2026-08-21 — FIXED
+
+**In short.** Two tests in the POSIX library failed at random — passing one run,
+failing the next, with no code change in between. Cause: several tests all read
+and write one shared setting, and `cargo test` runs tests side by side, so they
+overwrote each other's setup. What made it take a while to see is that the tests
+already had something that *looked* like protection and wasn't.
+
+**Symptom.** `cargo test -p posix --target x86_64-pc-windows-gnu` intermittently:
+
+```
+---- unistd::tests::test_personality_query stdout ----
+assertion `left == right` failed: Should return PER_LINUX (0)
+  left: 5505024
+ right: 0
+```
+
+Also `unistd::tests::test_personality_set`. The immediately preceding run of the
+identical tree passed 20418/20418, which is what identified it as a race rather
+than a regression — the intervening edits were doc comments only.
+
+**Root cause.** `posix/src/unistd.rs::PERSONALITY_STATE` is one process-global
+`AtomicU32`. `cargo test` runs the binary's tests on parallel threads *within one
+process*, so every test touching it shares it. `unistd::tests::test_personality_query`
+asserted it read `0` without ever setting it, and
+`sys_personality::tests::test_phase78_combined_flags_round_trip` sets
+`PER_LINUX | ADDR_NO_RANDOMIZE | MMAP_PAGE_ZERO | READ_IMPLIES_EXEC`
+= `0x54_0000` = **5505024** — the exact observed value. Not a near miss; the
+failing assertion printed the other test's constant.
+
+**Why it hid — the part worth keeping.** `sys_personality`'s tests were not
+naive about shared state. They had a `reset_personality()` helper *and* an RAII
+`PersonalityGuard` that snapshot the value on construction and restored it on
+drop, with a doc comment saying it existed "so tests don't bleed state into each
+other". Both are useless here, and worse than useless because they look
+sufficient:
+
+- **Save/restore is not mutual exclusion.** It defends against *sequential*
+  bleed — test A leaving a value behind for test B. It does nothing about a
+  concurrent writer, which is the failure mode cargo actually produces.
+- **The restore is itself a write**, so a guard dropping at the end of test A
+  can clobber test B's setup mid-assertion. The mechanism intended to prevent
+  interference was also a source of it.
+
+The lesson generalises past this file: an isolation mechanism that does not
+*exclude* is decoration, and its presence suppresses the question "are these
+tests actually isolated?" for everyone who reads them afterwards.
+
+**Fix.** `posix/src/unistd.rs` now exposes `PERSONALITY_TEST_LOCK` /
+`lock_personality_for_test()` — same shape as the existing
+`environ::ENV_TEST_LOCK`, which solved this identical problem for `ENV_STORE`
+after the `wordexp::tests::tilde_*` flakes. `sys_personality`'s
+`reset_personality()` now *returns the guard* (taking the lock, then resetting)
+rather than returning the previous `i32`, so a caller that forgets to bind it
+has nothing plausible to do with the result; `PersonalityGuard` is deleted, with
+a comment where it stood saying why it must not come back. The two `unistd`
+tests take the lock and establish the value they assert on instead of assuming
+it.
+
+**Generalisation not yet done.** This is the second global in this crate to need
+a test lock retrofitted after producing flakes (`ENV_STORE` was the first). The
+crate has other process-global mutable statics — an audit for "global mutable
+static, written by more than one test, no lock" would likely find more, and is
+worth doing before the next intermittent failure rather than after. Logged here
+rather than done now because it is a separate piece of work with its own risk of
+churn across many test modules.

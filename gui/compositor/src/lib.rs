@@ -109,6 +109,11 @@ use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
 // Same reason: `window_list` returns these, and a shell reading one should not
 // have to reach past the compositor to name what it got.
 pub use guiremote::window_list::WindowInfo;
+// Same reason again: `Window::snapped` can hold one, and `snap_window_to_zone`
+// takes one. The type belongs to the protocol crate because both ends have to
+// agree on which rectangle a slot names — see `guiremote::zones`.
+pub use guiremote::zones::{SnapLayoutPreset, SnapSlot};
+use guiremote::zones::{SnapZone, WorkArea};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -244,6 +249,13 @@ pub enum CompositorError {
     StreamNotFound(u64),
     /// A resize was asked of a window the client declared non-resizable.
     NotResizable(WindowId),
+    /// A snap layout produced no rectangle for the zone that was requested.
+    ///
+    /// Not reachable through [`SnapSlot`], which cannot be built naming a zone
+    /// its layout does not have. It exists because the alternative to reporting
+    /// the failure is inventing a rectangle, and a window silently placed
+    /// *somewhere* is a worse outcome than a request that visibly failed.
+    ZoneNotInLayout(WindowId),
 }
 
 impl std::fmt::Display for CompositorError {
@@ -271,6 +283,9 @@ impl std::fmt::Display for CompositorError {
             ),
             Self::StreamNotFound(id) => write!(f, "stream session not found: {}", id),
             Self::NotResizable(id) => write!(f, "window is not resizable: {}", id.raw()),
+            Self::ZoneNotInLayout(id) => {
+                write!(f, "snap layout has no such zone: {}", id.raw())
+            }
         }
     }
 }
@@ -531,6 +546,60 @@ pub enum InputEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Snap-zone geometry
+// ---------------------------------------------------------------------------
+
+/// The compositor's own bounds, described the way `guiremote::zones` wants them.
+///
+/// The conversion is a widening, not a narrowing: display coordinates are in
+/// the low tens of thousands at most, comfortably inside the 24-bit range where
+/// `f32` represents every integer exactly, so no coordinate is disturbed by the
+/// round trip through floating point.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "display coordinates are far inside f32's exact-integer range"
+)]
+fn work_area_of(bounds: Rect) -> WorkArea {
+    WorkArea::new(
+        bounds.x as f32,
+        bounds.y as f32,
+        bounds.width as f32,
+        bounds.height as f32,
+    )
+}
+
+/// One zone edge, rounded to a whole pixel.
+///
+/// The clamp is what makes the cast safe rather than merely likely to be: the
+/// value handed to `as` is already inside `i32`'s range, so there is nothing to
+/// truncate. A `NaN` cannot arise from a finite work area, and if one somehow
+/// did, Rust's float-to-int casts saturate rather than invoke undefined
+/// behaviour — it would become `0`, a wrong pixel but never a wild one.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "clamped into i32's range before the cast"
+)]
+fn round_px(v: f32) -> i32 {
+    v.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32
+}
+
+/// A zone's rectangle in the compositor's whole-pixel coordinates.
+///
+/// Each of the four *edges* is rounded, and the extents are then derived from
+/// the rounded edges. Rounding the origin and the size independently is the
+/// obvious alternative and it tiles badly: two zones that share a boundary
+/// would round it twice, once as one zone's right edge and once as the other's
+/// left, and the two answers can differ — which shows up as a one-pixel column
+/// that either belongs to both windows or to neither.
+fn zone_rect(zone: SnapZone) -> Rect {
+    let left = round_px(zone.x);
+    let top = round_px(zone.y);
+    let right = round_px(zone.x + zone.width);
+    let bottom = round_px(zone.y + zone.height);
+    Rect::new(left, top, span(left, right), span(top, bottom))
+}
+
+// ---------------------------------------------------------------------------
 // Window
 // ---------------------------------------------------------------------------
 
@@ -548,6 +617,29 @@ pub enum SnapEdge {
     Left,
     /// The right half.
     Right,
+}
+
+/// What a snapped window is snapped *to*.
+///
+/// Two ways of asking for a tiled position, kept as separate variants because
+/// they resolve to genuinely different rectangles rather than being two names
+/// for one. [`Half`](Self::Half) splits the display at its midpoint with no
+/// gutter, so two windows on opposite halves meet with no visible seam — that
+/// is what the keyboard shortcut has always done. [`Zone`](Self::Zone) is one
+/// cell of a named layout offered by the shell's zone picker, and every cell of
+/// a layout is inset by [`guiremote::zones::ZONE_GAP`] so the tiled windows
+/// read as separate panes. Folding `Half` into `Zone(TwoEqualHalves, 0 | 1)`
+/// would look like a simplification and would in fact hand every keyboard snap
+/// a six-pixel gutter it never asked for.
+///
+/// Like [`SnapEdge`], and for the same reason spelled out there, this stores
+/// the *request* and never the rectangle the request currently resolves to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SnapTarget {
+    /// One half of the display, with no gutter between the halves.
+    Half(SnapEdge),
+    /// One cell of a named multi-window layout, inset by the zone gap.
+    Zone(SnapSlot),
 }
 
 /// A managed window in the compositor.
@@ -601,15 +693,15 @@ pub struct Window {
     pub fs_restore_rect: Option<Rect>,
     /// Position and size before maximizing *or snapping* (for restore).
     pub restore_rect: Option<Rect>,
-    /// Which half of the work area this window is snapped to, if any.
+    /// What this window is snapped to, if anything.
     ///
     /// A separate state from [`maximized`](Self::maximized) rather than a
     /// second flag beside it, because the three are mutually exclusive and a
     /// pair of booleans can represent a window that is both — which
     /// [`restore_window`](Compositor::restore_window) would then have to pick
     /// between. `Option` makes the illegal state unrepresentable and gives
-    /// "snapped, and to which side" one answer instead of two.
-    pub snapped: Option<SnapEdge>,
+    /// "snapped, and to where" one answer instead of two.
+    pub snapped: Option<SnapTarget>,
     /// Whether the window needs to be redrawn.
     pub dirty: bool,
     /// Whether the compositor draws a title bar and borders for this window.
@@ -4388,16 +4480,6 @@ impl Compositor {
     /// maximize, then snap, then restore returns to where the window was before
     /// any of it, not to the full-screen rectangle it had in between.
     pub fn snap_window(&mut self, window_id: WindowId, edge: SnapEdge) -> CompositorResult<()> {
-        if !self
-            .window_ref(window_id)
-            .ok_or(CompositorError::WindowNotFound(window_id))?
-            .resizable
-        {
-            return Err(CompositorError::NotResizable(window_id));
-        }
-
-        self.damage_window(window_id);
-
         let bounds = self.display_manager.virtual_bounds();
         // Halve by splitting at the midpoint rather than by giving each side
         // `width / 2`: on an odd width the latter leaves a one-pixel column
@@ -4407,12 +4489,73 @@ impl Compositor {
         let half = match edge {
             SnapEdge::Left => Rect::new(bounds.x, bounds.y, mid, bounds.height),
             SnapEdge::Right => Rect::new(
-                bounds.x.saturating_add(i32::try_from(mid).unwrap_or(i32::MAX)),
+                bounds
+                    .x
+                    .saturating_add(i32::try_from(mid).unwrap_or(i32::MAX)),
                 bounds.y,
                 bounds.width.saturating_sub(mid),
                 bounds.height,
             ),
         };
+
+        self.place_snapped(window_id, half, SnapTarget::Half(edge))
+    }
+
+    /// Tile a window into one cell of a named multi-window layout.
+    ///
+    /// The shell names *which zone of which layout* and never a rectangle; the
+    /// rectangle is worked out here, from the compositor's own display bounds,
+    /// for [`snap_window`](Self::snap_window)'s reason. `guiremote::zones` is
+    /// where the arithmetic lives so that the picker the user aimed at and the
+    /// placement they got are computed from one definition rather than two
+    /// copies of it.
+    ///
+    /// Everything else — the non-resizable refusal, replacing rather than
+    /// stacking on a previous maximize or snap, keeping the *original*
+    /// `restore_rect` — matches [`snap_window`](Self::snap_window) exactly,
+    /// because both go through the same placement step.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist,
+    /// [`CompositorError::NotResizable`] if the client declared it fixed-size,
+    /// and [`CompositorError::ZoneNotInLayout`] if the layout yielded no
+    /// rectangle for the slot — which a well-formed [`SnapSlot`] cannot cause.
+    pub fn snap_window_to_zone(
+        &mut self,
+        window_id: WindowId,
+        slot: SnapSlot,
+    ) -> CompositorResult<()> {
+        let area = work_area_of(self.display_manager.virtual_bounds());
+        let zone = slot
+            .rect(area)
+            .ok_or(CompositorError::ZoneNotInLayout(window_id))?;
+
+        self.place_snapped(window_id, zone_rect(zone), SnapTarget::Zone(slot))
+    }
+
+    /// Move a window into an already-resolved tile rectangle.
+    ///
+    /// The shared tail of [`snap_window`](Self::snap_window) and
+    /// [`snap_window_to_zone`](Self::snap_window_to_zone). The two differ only
+    /// in how they arrive at `rect` and what they record in `snapped`; the
+    /// bookkeeping below is subtle enough — see the `restore_rect` comment —
+    /// that having it in one place rather than two is the point of the split.
+    fn place_snapped(
+        &mut self,
+        window_id: WindowId,
+        rect: Rect,
+        target: SnapTarget,
+    ) -> CompositorResult<()> {
+        if !self
+            .window_ref(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?
+            .resizable
+        {
+            return Err(CompositorError::NotResizable(window_id));
+        }
+
+        self.damage_window(window_id);
 
         let (final_w, final_h) = {
             let window = self
@@ -4429,9 +4572,9 @@ impl Compositor {
             }
 
             window.maximized = false;
-            window.snapped = Some(edge);
+            window.snapped = Some(target);
 
-            let (x, y, fit_w, fit_h) = window.client_geometry_for_frame(half);
+            let (x, y, fit_w, fit_h) = window.client_geometry_for_frame(rect);
             window.x = x;
             window.y = y;
             let (w, h) = window.clamp_size(fit_w, fit_h);
@@ -6199,6 +6342,9 @@ impl Compositor {
                     ShellControlAction::Close => self.request_close(window_id),
                     ShellControlAction::SnapLeft => self.snap_window(window_id, SnapEdge::Left),
                     ShellControlAction::SnapRight => self.snap_window(window_id, SnapEdge::Right),
+                    ShellControlAction::SnapToZone(slot) => {
+                        self.snap_window_to_zone(window_id, slot)
+                    }
                 };
                 match result {
                     Ok(()) => CompositorResponse::Ok,
@@ -7683,7 +7829,11 @@ mod tests {
         let win = comp.window_ref(id).expect("window");
         assert!(!win.minimized, "still minimized");
         assert!(win.visible, "un-minimized but still hidden");
-        assert_eq!(comp.focused_window, Some(id), "un-minimized but not focused");
+        assert_eq!(
+            comp.focused_window,
+            Some(id),
+            "un-minimized but not focused"
+        );
     }
 
     /// A taskbar button must give a window back exactly as the user left it.
@@ -7767,9 +7917,9 @@ mod tests {
             "a shell close destroyed the window outright"
         );
         assert!(
-            comp.pending_notifications
-                .iter()
-                .any(|n| matches!(n, EventNotification::WindowClose { window_id } if *window_id == id)),
+            comp.pending_notifications.iter().any(
+                |n| matches!(n, EventNotification::WindowClose { window_id } if *window_id == id)
+            ),
             "the client was never told to close"
         );
     }
@@ -7837,7 +7987,7 @@ mod tests {
         ));
         assert_eq!(
             comp.window_ref(id).expect("window").snapped,
-            Some(SnapEdge::Left),
+            Some(SnapTarget::Half(SnapEdge::Left)),
             "SnapLeft"
         );
 
@@ -7847,7 +7997,7 @@ mod tests {
         ));
         assert_eq!(
             comp.window_ref(id).expect("window").snapped,
-            Some(SnapEdge::Right),
+            Some(SnapTarget::Half(SnapEdge::Right)),
             "SnapRight"
         );
         assert!(matches!(
@@ -7887,7 +8037,8 @@ mod tests {
         let right = comp.create_window_from_spec(&spec, 1);
 
         comp.snap_window(left, SnapEdge::Left).expect("snap left");
-        comp.snap_window(right, SnapEdge::Right).expect("snap right");
+        comp.snap_window(right, SnapEdge::Right)
+            .expect("snap right");
 
         let l = comp.window_ref(left).expect("left");
         let r = comp.window_ref(right).expect("right");
@@ -8037,6 +8188,266 @@ mod tests {
                     if *window_id == id && *w == width && *h == height
             )),
             "the client was never told the snap resized it"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Zone snapping
+    // -----------------------------------------------------------------------
+
+    /// An undecorated window, so that its client rectangle *is* its frame and a
+    /// placement assertion can be made against the zone rectangle directly
+    /// rather than through the decoration insets.
+    fn with_one_bare_window(width: u32, height: u32) -> (Compositor, WindowId) {
+        let mut comp = Compositor::new(width, height, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Bare", 200, 150);
+        spec.position = Some((100, 100));
+        spec.decorations = false;
+        let id = comp.create_window_from_spec(&spec, 1);
+        (comp, id)
+    }
+
+    /// The window lands in the rectangle the shell's picker drew for that zone.
+    ///
+    /// This is the one assertion the whole arrangement exists for. The user
+    /// aims at a rectangle painted on screen by the shell; the compositor,
+    /// which never saw that painting, has to place the window in the *same*
+    /// rectangle. Both sides get there through `guiremote::zones`, and this
+    /// test computes the expected rectangle the way a shell would — from the
+    /// display bounds, through the shared code — rather than restating the
+    /// arithmetic, which would only prove the restatement matches itself.
+    #[test]
+    fn a_zone_snapped_window_lands_in_the_rectangle_the_picker_drew() {
+        let (mut comp, id) = with_one_bare_window(801, 601);
+        let bounds = comp.display_manager.virtual_bounds();
+
+        for slot in SnapSlot::all() {
+            let drawn = zone_rect(slot.rect(work_area_of(bounds)).expect("zone"));
+
+            comp.snap_window_to_zone(id, slot).expect("snap to zone");
+
+            let w = comp.window_ref(id).expect("window");
+            assert_eq!(
+                Rect::new(w.x, w.y, w.width, w.height),
+                drawn,
+                "zone {} of {:?} was drawn in one place and filled in another",
+                slot.zone(),
+                slot.preset()
+            );
+        }
+
+        // A guard on the loop above: if `all` ever yielded nothing, every
+        // assertion in it would vacuously pass.
+        assert_eq!(SnapSlot::all().count(), usize::from(SnapSlot::COUNT));
+    }
+
+    /// What is stored is the slot, not the rectangle it currently resolves to.
+    ///
+    /// The same rule [`SnapEdge`] documents, for the same reason: a stored
+    /// rectangle is silently wrong the moment the display changes size, and
+    /// there is no later moment at which it would be noticed.
+    #[test]
+    fn a_zone_snapped_window_records_the_slot_and_not_its_geometry() {
+        let (mut comp, id) = with_one_window();
+        let slot = SnapSlot::new(SnapLayoutPreset::SixGrid, 4).expect("slot");
+
+        comp.snap_window_to_zone(id, slot).expect("snap to zone");
+
+        assert_eq!(
+            comp.window_ref(id).expect("window").snapped,
+            Some(SnapTarget::Zone(slot))
+        );
+    }
+
+    /// Zone snapping is a departure from the window's own geometry in exactly
+    /// the sense maximizing and half-snapping are, so it goes through the same
+    /// `restore_rect` bookkeeping and is undone by the same `restore_window`.
+    ///
+    /// The mixed sequence is the point: each transition is a chance to
+    /// overwrite `restore_rect` with geometry the window only has because of
+    /// the previous one, and a zone snap that skipped the check would leave the
+    /// window unable ever to get back to its original size.
+    #[test]
+    fn zone_snapping_restores_to_the_windows_own_geometry() {
+        let (mut comp, id) = with_one_window();
+        let before = {
+            let w = comp.window_ref(id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+
+        comp.maximize_window(id).expect("maximize");
+        comp.snap_window_to_zone(
+            id,
+            SnapSlot::new(SnapLayoutPreset::FourQuadrants, 2).expect("slot"),
+        )
+        .expect("snap to zone");
+        assert_ne!(
+            Rect::new(
+                comp.window_ref(id).expect("window").x,
+                comp.window_ref(id).expect("window").y,
+                comp.window_ref(id).expect("window").width,
+                comp.window_ref(id).expect("window").height,
+            ),
+            before,
+            "the zone snap moved nothing, so the restore proves nothing"
+        );
+        comp.snap_window(id, SnapEdge::Left).expect("snap left");
+        comp.snap_window_to_zone(
+            id,
+            SnapSlot::new(SnapLayoutPreset::ThreeColumns, 1).expect("slot"),
+        )
+        .expect("snap to zone again");
+
+        comp.restore_window(id).expect("restore");
+
+        let w = comp.window_ref(id).expect("window");
+        assert_eq!(Rect::new(w.x, w.y, w.width, w.height), before);
+        assert_eq!(w.snapped, None);
+    }
+
+    /// Zone snapping and maximizing are alternatives, not stages — the same
+    /// mutual exclusion half-snapping already keeps.
+    #[test]
+    fn a_window_is_never_zone_snapped_and_maximized_at_once() {
+        let (mut comp, id) = with_one_window();
+        let slot = SnapSlot::new(SnapLayoutPreset::ThreeLeftTwoRight, 0).expect("slot");
+
+        comp.maximize_window(id).expect("maximize");
+        comp.snap_window_to_zone(id, slot).expect("snap to zone");
+        assert!(
+            !comp.window_ref(id).expect("window").maximized,
+            "zone-snapping a maximized window left it recorded as maximized too"
+        );
+
+        comp.maximize_window(id).expect("maximize again");
+        assert_eq!(
+            comp.window_ref(id).expect("window").snapped,
+            None,
+            "maximizing a zone-snapped window left it recorded as snapped too"
+        );
+    }
+
+    /// A fixed-size window refuses a zone snap for the reason it refuses every
+    /// other tile: tiling it is a resize it said it cannot take.
+    #[test]
+    fn a_non_resizable_window_refuses_to_be_zone_snapped() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut spec = WindowSpec::new("Fixed", 200, 150);
+        spec.position = Some((100, 100));
+        spec.resizable = false;
+        let id = comp.create_window_from_spec(&spec, 1);
+        let before = {
+            let w = comp.window_ref(id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+
+        assert!(matches!(
+            comp.snap_window_to_zone(
+                id,
+                SnapSlot::new(SnapLayoutPreset::TwoThirdsRight, 1).expect("slot")
+            ),
+            Err(CompositorError::NotResizable(_))
+        ));
+        let w = comp.window_ref(id).expect("window");
+        assert_eq!(Rect::new(w.x, w.y, w.width, w.height), before);
+        assert_eq!(w.snapped, None);
+    }
+
+    /// The shell's request reaches the window, end to end: a `SnapToZone`
+    /// arriving as a request moves the window and is answered `Ok`.
+    ///
+    /// Distinct from calling `snap_window_to_zone` directly — this is what
+    /// proves the new wire verb is actually dispatched rather than merely
+    /// decodable.
+    #[test]
+    fn the_snap_to_zone_request_reaches_the_window() {
+        let (mut comp, id) = with_one_bare_window(800, 600);
+        let slot = SnapSlot::new(SnapLayoutPreset::FourQuadrants, 3).expect("slot");
+        let expected = zone_rect(
+            slot.rect(work_area_of(comp.display_manager.virtual_bounds()))
+                .expect("zone"),
+        );
+
+        let response = comp.handle_request(CompositorRequest::ShellControl {
+            window_id: id,
+            action: ShellControlAction::SnapToZone(slot),
+        });
+
+        assert!(matches!(response, CompositorResponse::Ok));
+        let w = comp.window_ref(id).expect("window");
+        assert_eq!(Rect::new(w.x, w.y, w.width, w.height), expected);
+        assert_eq!(w.snapped, Some(SnapTarget::Zone(slot)));
+    }
+
+    /// Zones that share an edge round to the *same* pixel, so the tiled windows
+    /// neither overlap by a column nor leave one bare.
+    ///
+    /// Rounding each zone's origin and its size independently is the obvious
+    /// way to get from the layout's `f32` rectangles to whole pixels, and it is
+    /// wrong: a boundary at 666.67 becomes an origin of 667 for the zone on its
+    /// right while the zone on its left still ends at 333 + 333 = 666, and the
+    /// column at x = 666 belongs to nobody. Deriving the extents from rounded
+    /// *edges* is what closes it.
+    ///
+    /// A work area too short for the zone gap is used because that is the case
+    /// in which the layout drops the gap — and a dropped gap is the only time
+    /// two zones share an edge at all.
+    #[test]
+    fn zones_that_share_an_edge_round_to_the_same_pixel() {
+        // 1000 / 3 is 333.33: every interior boundary is fractional.
+        let area = WorkArea::new(0.0, 0.0, 1000.0, 4.0);
+        let rects: Vec<Rect> = (0..3)
+            .map(|z| {
+                let slot = SnapSlot::new(SnapLayoutPreset::ThreeColumns, z).expect("slot");
+                zone_rect(slot.rect(area).expect("zone"))
+            })
+            .collect();
+
+        assert_eq!(rects.len(), 3);
+        assert_eq!(rects[0].x, 0, "the first column starts at the left edge");
+        for pair in rects.windows(2) {
+            let (left, right) = (pair[0], pair[1]);
+            assert_eq!(
+                left.x
+                    .saturating_add(i32::try_from(left.width).expect("small")),
+                right.x,
+                "a gap or an overlap between columns {left:?} and {right:?}"
+            );
+        }
+        let last = rects[2];
+        assert_eq!(
+            last.x
+                .saturating_add(i32::try_from(last.width).expect("small")),
+            1000,
+            "the last column must reach the right edge"
+        );
+    }
+
+    /// A layout resolves against whatever display it is asked about, because
+    /// the slot names no pixels. Snapping to the same slot on a differently
+    /// sized display must land somewhere different.
+    #[test]
+    fn a_zone_is_resolved_against_the_display_it_is_snapped_on() {
+        let slot = SnapSlot::new(SnapLayoutPreset::TwoThirdsLeft, 1).expect("slot");
+
+        let (mut small, small_id) = with_one_bare_window(800, 600);
+        small.snap_window_to_zone(small_id, slot).expect("snap");
+        let on_small = {
+            let w = small.window_ref(small_id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+
+        let (mut large, large_id) = with_one_bare_window(1920, 1080);
+        large.snap_window_to_zone(large_id, slot).expect("snap");
+        let on_large = {
+            let w = large.window_ref(large_id).expect("window");
+            Rect::new(w.x, w.y, w.width, w.height)
+        };
+
+        assert_ne!(
+            on_small, on_large,
+            "the slot resolved to one rectangle on two different displays, \
+             which means a rectangle got stored somewhere it should not have"
         );
     }
 

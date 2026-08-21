@@ -736,11 +736,26 @@ fi
 # (A hosted compile against the staged glibc/crt/headers is a later rung.)
 #
 # tcc is not on a default Ubuntu install and `apt install tcc` needs root, so
-# this script accepts tcc from PATH or from a cached source build at
-# /tmp/tccinstall/bin/tcc (build: git clone https://repo.or.cz/tinycc.git &&
-# ./configure && make && make install prefix=/tmp/tccinstall).  Absent tcc the
-# self-test no-ops, matching the make/dash best-effort pattern above.
+# this script accepts tcc from PATH or from a cached source build.  To make one:
+#
+#   git clone https://repo.or.cz/tinycc.git && cd tinycc
+#   ./configure --prefix=$HOME/.cache/slateos/tccinstall && make && make install
+#
+# Absent tcc the self-test no-ops, matching the make/dash best-effort pattern
+# above.
+#
+# ~/.cache is searched *before* /tmp and is the place to build into.  /tmp is
+# still accepted because that is where the original instructions put it, but it
+# is the wrong home for this: /tmp is cleared when WSL restarts, and when it
+# went, the image lost tcc silently.  The boot stayed green, 26 Path Z rungs
+# turned into SKIP lines, and nothing anywhere read as a regression.  A cache
+# that survives a reboot is the difference between "this host has a C compiler"
+# being something you arrange once and something that quietly un-arranges
+# itself.
 TCC_SRC="$(command -v tcc || true)"
+if [ -z "$TCC_SRC" ] && [ -x "$HOME/.cache/slateos/tccinstall/bin/tcc" ]; then
+    TCC_SRC="$HOME/.cache/slateos/tccinstall/bin/tcc"
+fi
 if [ -z "$TCC_SRC" ] && [ -x /tmp/tccinstall/bin/tcc ]; then
     TCC_SRC="/tmp/tccinstall/bin/tcc"
 fi
@@ -791,7 +806,18 @@ if [ -n "$TCC_SRC" ] && [ -e "$TCC_SRC" ]; then
         ABS_LIBDIR="$(cd "$TCC_LIBDIR" && pwd)"
         mkdir -p "$STAGE$ABS_LIBDIR"
         cp -L "$TCC_LIBDIR/libtcc1.a" "$STAGE$ABS_LIBDIR/libtcc1.a"
+        # Record where it went, because only tcc knows: the path is tcc's
+        # compiled-in --prefix, so it changes whenever the host's tcc is built
+        # somewhere else.  The kernel self-test used to hard-code
+        # /tmp/tccinstall/lib/tcc and consequently reported "prerequisite
+        # missing" for 25 rungs the moment the cache moved out of /tmp — a
+        # green boot describing a compiler that was in fact right there.  A
+        # constant that has to agree with a build script it cannot see is a
+        # constant that will disagree with it; this file is the one copy.
+        mkdir -p "$STAGE/etc"
+        printf '%s' "$ABS_LIBDIR" > "$STAGE/etc/tcc-libdir"
         echo "[rootfs] staged hosted-compile support: crt objects + libc.so script + libtcc1.a ($ABS_LIBDIR)"
+        echo "[rootfs]   recorded that path in /etc/tcc-libdir for the kernel self-test"
     else
         echo "[rootfs] WARNING: libtcc1.a not found ($TCC_LIBDIR) — tcc hosted self-test will no-op"
     fi

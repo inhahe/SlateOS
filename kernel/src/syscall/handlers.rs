@@ -4686,22 +4686,63 @@ pub fn sys_tty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_TTY_ACQUIRE_CTTY` — claim the console as the caller's session's
+/// Which terminal device a terminal syscall from `pid` acts on.
+///
+/// These syscalls take no fd yet, so "the terminal" can only mean the caller's
+/// session's controlling terminal — which is what `tcgetattr(0, …)` means in
+/// practice anyway, since a program's stdin is its controlling terminal in
+/// every case that matters.  A process with no controlling terminal (a daemon,
+/// or anything before the first `TIOCSCTTY`) gets the console, which is both
+/// the pre-pty behaviour and the only terminal it could possibly have meant.
+///
+/// Once the `SYS_TTY_*` family takes a handle, the handle wins and this becomes
+/// the fallback for the handle-less legacy forms.
+pub fn caller_tty(pid: crate::proc::pcb::ProcessId) -> crate::tty::TtyId {
+    crate::proc::pcb::ctty_tty_of(pid).unwrap_or(crate::tty::CONSOLE)
+}
+
+/// The terminal the *current* task acts on, or the console if it has no
+/// process (a kernel task) or no controlling terminal.
+fn current_tty() -> crate::tty::TtyId {
+    caller_process_or_err().map_or(crate::tty::CONSOLE, caller_tty)
+}
+
+/// `SYS_TTY_ACQUIRE_CTTY` — claim a terminal as the caller's session's
 /// controlling terminal (`ioctl(fd, TIOCSCTTY)`).
 ///
-/// Takes no arguments.  Delegates the POSIX rules — session leader only,
-/// console must be free — to [`pcb::ctty_acquire`].
+/// `arg0` names the terminal under the family's convention
+/// ([`resolve_tty_arg`]): `0` is the caller's current terminal — the console,
+/// for a caller that has none, which is every existing caller — and `>= 2` is a
+/// pty end the caller owns.  Delegates the POSIX rules — session leader only,
+/// terminal must be free — to [`pcb::ctty_acquire`].
 ///
-/// Returns 0, `PermissionDenied`, or `NoSuchProcess`.
+/// It used to take a bare terminal *id*, which made this the one hole in the
+/// pty family's authority model: ids are small integers, so any session leader
+/// could claim any free pty as its controlling terminal by guessing the number,
+/// and thereafter receive that terminal's input. Requiring a handle costs the
+/// legitimate caller nothing — a child that is about to `setsid` and claim a
+/// slave got the slave from `openpty` and holds it across `execve` — and closes
+/// that hole by construction.
+///
+/// Returns 0, `PermissionDenied`, `NoSuchProcess`, `InvalidHandle`, or
+/// `NotSupported` when the named terminal is not live.
 ///
 /// [`pcb::ctty_acquire`]: crate::proc::pcb::ctty_acquire
 pub fn sys_tty_acquire_ctty(args: &SyscallArgs) -> SyscallResult {
-    let _ = args;
     let pid = match caller_process_or_err() {
         Ok(pid) => pid,
         Err(e) => return SyscallResult::err(e),
     };
-    match crate::proc::pcb::ctty_acquire(pid) {
+    let tty = match resolve_tty_arg(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // Claiming a terminal that does not exist is ENOTTY, not a silent success
+    // that would leave the session pointing at a dead id.
+    if !crate::tty::exists(tty) {
+        return SyscallResult::err(KernelError::NotSupported);
+    }
+    match crate::proc::pcb::ctty_acquire(pid, tty) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -4781,7 +4822,7 @@ pub fn sys_tty_get_termios(args: &SyscallArgs) -> SyscallResult {
     if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    let bytes = crate::tty::get_termios().to_bytes();
+    let bytes = crate::tty::get_termios(current_tty()).to_bytes();
     // SAFETY: `bytes` is a live kernel array of exactly TERMIOS_BYTES bytes;
     // copy_to_user validates the destination is writable user memory and
     // performs the SMAP dance.
@@ -4812,7 +4853,7 @@ pub fn sys_tty_set_termios(args: &SyscallArgs) -> SyscallResult {
     if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    match tty_set_termios_from_user(args.arg0) {
+    match tty_set_termios_from_user(current_tty(), args.arg0) {
         TtyCtlOutcome::Done => SyscallResult::ok(0),
         TtyCtlOutcome::Restart(r) => r,
         TtyCtlOutcome::Fail(e) => SyscallResult::err(e),
@@ -4832,8 +4873,8 @@ pub fn sys_tty_set_termios(args: &SyscallArgs) -> SyscallResult {
 /// background is always a job-control violation, because the foreground job
 /// would silently inherit settings it never asked for (`termios(3)`,
 /// "Terminal Access Control").
-pub fn tty_set_termios_from_user(arg: u64) -> TtyCtlOutcome {
-    match tty_job_control_check(crate::proc::signal::SIGTTOU) {
+pub fn tty_set_termios_from_user(tty: crate::tty::TtyId, arg: u64) -> TtyCtlOutcome {
+    match tty_job_control_check_for(tty, crate::proc::signal::SIGTTOU) {
         TtyCtlOutcome::Done => {}
         other => return other,
     }
@@ -4845,7 +4886,7 @@ pub fn tty_set_termios_from_user(arg: u64) -> TtyCtlOutcome {
     {
         return TtyCtlOutcome::Fail(e);
     }
-    crate::tty::set_termios(crate::tty::Termios::from_bytes(&bytes));
+    crate::tty::set_termios(tty, crate::tty::Termios::from_bytes(&bytes));
     TtyCtlOutcome::Done
 }
 
@@ -5106,10 +5147,19 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
 
     let mut kbuf = [0u8; crate::tty::MAX_CANON];
     let dst = kbuf.get_mut(..want).unwrap_or(&mut []);
-    let n = match crate::tty::console_read(dst) {
+    let tty = current_tty();
+    let n = match crate::tty::read(tty, dst) {
         crate::tty::ConsoleRead::Data(n) => n,
         crate::tty::ConsoleRead::Signal(sig) => {
-            return TtyReadOutcome::Restart(deliver_console_signal(sig));
+            return TtyReadOutcome::Restart(deliver_console_signal(tty, sig));
+        }
+        // A signal is already pending for *us*: there is nothing to deliver,
+        // just let the checkpoint run.  Anything typed so far is still in the
+        // terminal's editor, so a transparent restart resumes mid-line.
+        crate::tty::ConsoleRead::Interrupted => {
+            return TtyReadOutcome::Restart(super::linux::restart::restart_result(
+                super::linux::restart::ERESTARTSYS,
+            ));
         }
     };
     if n == 0 {
@@ -5124,8 +5174,42 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
     }
 }
 
+/// Send `sig` to every member of `tty`'s foreground process group.
+///
+/// Split out from [`deliver_console_signal`] because not every terminal-
+/// generated signal interrupts a syscall: `SIGWINCH` from `TIOCSWINSZ` is
+/// delivered by a *writer* that has nothing to restart, while `^C` is
+/// delivered by the reader it aborts.  Sharing the loop keeps the
+/// "no foreground group ⇒ no signal" rule and the `SI_KERNEL` origin in one
+/// place instead of two.
+///
+/// A `pgid` of 0 means no foreground group is installed, which is not an
+/// error: Linux likewise generates no signal for a tty with no `tty->pgrp`.
+pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
+    use crate::proc::pcb;
+    use crate::proc::signal::si_code::SI_KERNEL;
+
+    let pgid = crate::tty::foreground_pgid(tty);
+    if pgid == 0 {
+        return;
+    }
+    for target in pcb::pids_in_group(pgid) {
+        let send_args = SyscallArgs {
+            arg0: target,
+            arg1: u64::from(sig),
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        // Best-effort: a member that exited between the membership snapshot
+        // and delivery just fails its own send; the rest still receive it.
+        let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
+    }
+}
+
 /// Deliver a terminal-generated signal (`SIGINT`/`SIGQUIT`/`SIGTSTP` from
-/// `^C`/`^\`/`^Z`) to the console's foreground process group, then return
+/// `^C`/`^\`/`^Z`) to `tty`'s foreground process group, then return
 /// the `ERESTARTSYS` restart sentinel for the interrupted reader.
 ///
 /// Mirrors Linux's `n_tty.c` calling `kill_pgrp(tty->pgrp, sig, …)`: the line
@@ -5133,32 +5217,14 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
 /// surrounding layer.  The signal carries an `SI_KERNEL` siginfo (kernel
 /// origin, no sender pid), matching a tty-generated signal.
 ///
-/// If no foreground group is installed (`foreground_pgid() == 0` — e.g.
+/// If no foreground group is installed (`foreground_pgid(tty) == 0` — e.g.
 /// before any interactive shell ran `tcsetpgrp`), there is no group to
 /// signal, so the `^C` simply restarts the read (Linux likewise generates no
 /// signal when the tty has no foreground pgrp).  Either way we return
 /// `ERESTARTSYS`: with a deliverable signal the checkpoint runs the default
 /// action / handler; with none it transparently restarts the blocking read.
-pub fn deliver_console_signal(sig: u8) -> SyscallResult {
-    use crate::proc::pcb;
-    use crate::proc::signal::si_code::SI_KERNEL;
-
-    let pgid = crate::tty::foreground_pgid();
-    if pgid != 0 {
-        for target in pcb::pids_in_group(pgid) {
-            let send_args = SyscallArgs {
-                arg0: target,
-                arg1: u64::from(sig),
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            // Best-effort: a member that exited between the membership snapshot
-            // and delivery just fails its own send; the rest still receive it.
-            let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
-        }
-    }
+pub fn deliver_console_signal(tty: crate::tty::TtyId, sig: u8) -> SyscallResult {
+    signal_foreground_group(tty, sig);
     // The restart machinery lives in the Linux shim's module but is not
     // Linux-specific: `entry.rs` runs `resolve_syscall_restart` over *both*
     // ABIs' results, so a sentinel from a native handler is resolved the same
@@ -5182,6 +5248,426 @@ pub fn sys_tty_read(args: &SyscallArgs) -> SyscallResult {
         TtyReadOutcome::Bytes(n) => SyscallResult::ok(n as i64),
         TtyReadOutcome::Restart(r) => r,
         TtyReadOutcome::Fail(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pseudo-terminal handlers (544–556)
+// ---------------------------------------------------------------------------
+
+/// Resolve a pty handle argument, checking that the caller owns it.
+///
+/// Every pty syscall that names an *end* takes its handle here first. The check
+/// is ownership, not existence, and that is the whole point: a
+/// [`PtyHandle`](crate::tty::pty::PtyHandle) is `(tty_id << 1) | end`, so its
+/// raw form is trivially enumerable, and a master handle is the authority to
+/// type arbitrary bytes into whatever shell is on the other end. Treating it as
+/// self-authorising — which is what every other IPC handle in this kernel does,
+/// soundly, because their values are unguessable — would mean any process could
+/// write to raw `2` and inject keystrokes into pty 1's shell.
+///
+/// Raw `0` and `1` are rejected outright rather than being decoded: they would
+/// name the master and slave of tty id 0, and tty 0 is
+/// [`crate::tty::CONSOLE`], which is not a pty. Handing them to
+/// `pty::master_write` would find no entry and fail anyway, but failing here
+/// keeps the reason legible and reserves both values as sentinels.
+///
+/// # Errors
+///
+/// `InvalidHandle` if the caller does not hold this exact handle, or if the raw
+/// value is one of the two reserved ones. `NoSuchProcess` for a kernel task.
+fn owned_pty_handle(raw: u64) -> KernelResult<crate::tty::pty::PtyHandle> {
+    if raw < 2 {
+        return Err(KernelError::InvalidHandle);
+    }
+    let pid = caller_process_or_err()?;
+    if !pcb::owns_ipc_handle(pid, ResourceType::Pty, raw) {
+        return Err(KernelError::InvalidHandle);
+    }
+    Ok(crate::tty::pty::PtyHandle::from_raw(raw))
+}
+
+/// Resolve a *terminal* argument under the convention shared by the whole
+/// `SYS_PTY_*`/`SYS_TTY_*` family: `0` means the caller's controlling terminal,
+/// `>= 2` is an owned pty handle, `1` is invalid.
+///
+/// `0` is the important case. It is what every pre-pty caller already passes,
+/// it is what a program means by `tcgetattr(0, …)`, and for a shell running on
+/// a pty slave it resolves — via [`caller_tty`] — to that slave's terminal
+/// without the shell needing a handle at all. So the convention is not a
+/// compatibility shim bolted onto a handle API; it is the common case, with
+/// handles available for the uncommon one (a terminal emulator acting on a pty
+/// it owns but has not made its own controlling terminal).
+///
+/// # Errors
+///
+/// `InvalidHandle` for raw `1` or an unowned handle; `NoSuchProcess` for a
+/// kernel task naming a handle.
+fn resolve_tty_arg(arg: u64) -> KernelResult<crate::tty::TtyId> {
+    if arg == 0 {
+        return Ok(current_tty());
+    }
+    Ok(owned_pty_handle(arg)?.id())
+}
+
+/// Apply the POSIX job-control rule for an operation on a *named* terminal.
+///
+/// [`tty_job_control_check`] asks whether the caller is a background member of
+/// its **own** controlling terminal's session, which is the only question the
+/// pre-pty syscalls could ask, because the only terminal they could name was
+/// that one. With handles in the picture the two can differ, and the rule has
+/// to follow the terminal being operated on, not the caller:
+///
+/// `SIGTTOU` exists to stop a *background job* from reaching over the shoulder
+/// of the foreground job it shares a terminal with. A terminal emulator holding
+/// a pty master is not in that terminal's session at all — it is the other side
+/// of the wire — so it is neither foreground nor background there, and stopping
+/// it because it happens to be a background job on some unrelated terminal of
+/// its own would be a deadlock: the emulator is often exactly the process that
+/// would have to be resumed to make itself foreground.
+///
+/// So: named terminal is the caller's own ⇒ the ordinary rule; anything else ⇒
+/// allowed, the caller having proved its authority by holding the handle.
+#[must_use]
+fn tty_job_control_check_for(tty: crate::tty::TtyId, sig: u32) -> TtyCtlOutcome {
+    if tty == current_tty() {
+        tty_job_control_check(sig)
+    } else {
+        TtyCtlOutcome::Done
+    }
+}
+
+/// Hang up the process groups a [`crate::tty::pty::close`] reported.
+///
+/// `SIGHUP` then `SIGCONT`, both across the whole group, for the same reason as
+/// [`kill_orphaned_pgrp`]: SIGHUP's default action terminates, so the ordering
+/// only matters for a member that *installed* a handler and survived — and that
+/// member must still be continued, or a stopped job whose terminal was just
+/// unplugged would wait forever for a shell that no longer has a terminal to
+/// run on.
+pub fn hangup_pty_groups(hangup: &crate::tty::pty::Hangup) {
+    use crate::proc::signal;
+    for &fg in hangup {
+        serial_println!("[pty] master closed: SIGHUP+SIGCONT to group {}", fg);
+        for member in pcb::pids_in_group(fg) {
+            deliver_kernel_signal(member, signal::SIGHUP);
+        }
+        for member in pcb::pids_in_group(fg) {
+            deliver_kernel_signal(member, signal::SIGCONT);
+        }
+    }
+}
+
+/// Close a pty handle and perform any hangup it caused.
+///
+/// The one place `pty::close` is called from the syscall layer, so that the
+/// process-exit path, the fork-rollback path and `SYS_PTY_CLOSE` cannot drift
+/// into three different answers to "who gets the SIGHUP".
+pub fn close_pty_handle(handle: crate::tty::pty::PtyHandle) {
+    let hangup = crate::tty::pty::close(handle);
+    hangup_pty_groups(&hangup);
+}
+
+/// `SYS_PTY_CREATE` — allocate a pseudo-terminal, returning **both** ends.
+///
+/// Master in `rax`, slave in `rdx`. See the syscall number's doc for why both,
+/// where Linux returns only the master.
+pub fn sys_pty_create(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    let (master, slave) = match crate::tty::pty::create() {
+        Ok(pair) => pair,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match caller_pid() {
+        Some(pid) => {
+            pcb::register_ipc_handle(pid, ResourceType::Pty, master.raw());
+            pcb::register_ipc_handle(pid, ResourceType::Pty, slave.raw());
+        }
+        None => {
+            // A kernel task has no handle table to record the ends in, so
+            // nothing would ever close them and the pty would leak for the
+            // lifetime of the boot. The self-test calls `pty::create` directly;
+            // reaching here means a kernel task issued the syscall, which is a
+            // bug in that task, so refuse rather than leak.
+            close_pty_handle(master);
+            close_pty_handle(slave);
+            return SyscallResult::err(KernelError::NoSuchProcess);
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    let m = master.raw() as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let s = slave.raw() as i64;
+    SyscallResult::ok2(m, s)
+}
+
+/// `SYS_PTY_MASTER_WRITE` — feed bytes to the slave's line discipline, as if
+/// they had been typed.
+///
+/// `arg0` master handle, `arg1` buffer, `arg2` length. Blocks while the input
+/// ring is full, which gives a paste into a slow program back-pressure instead
+/// of a silent truncation.
+pub fn sys_pty_master_write(args: &SyscallArgs) -> SyscallResult {
+    let handle = match owned_pty_handle(args.arg0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let len = args.arg2 as usize;
+    if args.arg1 == 0 && len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // Copied in first because `master_write` blocks: a `&[u8]` over a user
+    // pointer held across a park can be unmapped by a sibling thread.
+    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::tty::pty::master_write(handle, &data) {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(n) => SyscallResult::ok(n as i64),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PTY_MASTER_READ` — read the slave's output (blocking).
+///
+/// `arg0` master handle, `arg1` buffer, `arg2` capacity. Returns `ChannelClosed`
+/// (EIO), never 0, when the last slave has closed — see design-decisions.md
+/// §259: a terminal emulator that mistakes a hangup for a zero-length read spins
+/// at 100% CPU on a dead window.
+pub fn sys_pty_master_read(args: &SyscallArgs) -> SyscallResult {
+    pty_master_read_common(args, false)
+}
+
+/// `SYS_PTY_MASTER_TRY_READ` — non-blocking [`sys_pty_master_read`].
+pub fn sys_pty_master_try_read(args: &SyscallArgs) -> SyscallResult {
+    pty_master_read_common(args, true)
+}
+
+/// Body shared by the blocking and non-blocking master reads.
+fn pty_master_read_common(args: &SyscallArgs, non_blocking: bool) -> SyscallResult {
+    let handle = match owned_pty_handle(args.arg0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let cap = args.arg2 as usize;
+    if args.arg1 == 0 && cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let result = crate::mm::user::with_user_out_buf(args.arg1, cap, usize::MAX, |buf| {
+        if non_blocking {
+            crate::tty::pty::master_try_read(handle, buf)
+        } else {
+            crate::tty::pty::master_read(handle, buf)
+        }
+    });
+    match result {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(n) => SyscallResult::ok(n as i64),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PTY_SLAVE_WRITE` — write program output to a terminal.
+///
+/// `arg0` names the terminal under the [`resolve_tty_arg`] convention: `0` (the
+/// caller's controlling terminal) is what a shell on a pty passes, and is the
+/// only thing it *can* pass, since it inherited the slave across `execve` and
+/// holds no handle. `arg1`/`arg2` are the buffer.
+///
+/// With `arg0 == 0` this is exactly [`sys_console_write`] — both resolve the
+/// caller's terminal and hand the bytes to [`crate::tty::write`], which applies
+/// the backend's own output processing (`ONLCR` for a pty, none for the
+/// framebuffer console, whose `putchar` already treats `\n` as a line break).
+/// The duplication is deliberate and cheap: a program that knows it is talking
+/// to a pty it *owns* — a terminal emulator writing a banner into a session it
+/// has not joined — needs the handle form, and one that does not, does not.
+pub fn sys_pty_slave_write(args: &SyscallArgs) -> SyscallResult {
+    let tty = match resolve_tty_arg(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    tty_write_from_user(tty, args.arg1, args.arg2 as usize)
+}
+
+/// `SYS_PTY_CLOSE` — drop one reference to one end.
+///
+/// Closing the last master hangs up the session on the slave (SIGHUP+SIGCONT);
+/// closing the last of both ends destroys the terminal device.
+pub fn sys_pty_close(args: &SyscallArgs) -> SyscallResult {
+    let handle = match owned_pty_handle(args.arg0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // Deregister before closing: `close` can signal, and a signal handler that
+    // runs before the table is updated would see a handle that is already gone.
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::Pty, handle.raw());
+    }
+    close_pty_handle(handle);
+    SyscallResult::ok(0)
+}
+
+/// `SYS_PTY_DUP` — take another reference to an end.
+///
+/// Returns the *same* raw value, with the refcount bumped — the handle is the
+/// identity of an end, not of a reference to it. A caller therefore needs one
+/// `SYS_PTY_CLOSE` per `SYS_PTY_DUP`, which is what makes `dup2(master, 0)`
+/// followed by two closes correct.
+pub fn sys_pty_dup(args: &SyscallArgs) -> SyscallResult {
+    let handle = match owned_pty_handle(args.arg0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::tty::pty::dup(handle) {
+        Ok(dup) => {
+            if let Some(pid) = caller_pid() {
+                pcb::register_ipc_handle(pid, ResourceType::Pty, dup.raw());
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(dup.raw() as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PTY_SLAVE_ID` — the terminal id behind a handle, for `ptsname(3)`.
+///
+/// A *name*, not a way to obtain the end: knowing the id lets a program print
+/// `/dev/pts/3`, and grants nothing, because every operation on a pty needs an
+/// owned handle or a controlling-terminal relationship.
+pub fn sys_pty_slave_id(args: &SyscallArgs) -> SyscallResult {
+    let handle = match owned_pty_handle(args.arg0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if !crate::tty::pty::exists(handle) {
+        return SyscallResult::err(KernelError::InvalidHandle);
+    }
+    SyscallResult::ok(i64::from(handle.id()))
+}
+
+/// `SYS_PTY_POLL` — is this end readable and/or writable right now?
+///
+/// Bit 0 readable, bit 1 writable. **A hangup counts as readable**, matching
+/// `poll(2)`'s `POLLHUP|POLLIN` convention: an event loop must be woken so its
+/// next read can observe the `EIO`, rather than being told "not ready" forever
+/// on a terminal that is never going to be ready again.
+pub fn sys_pty_poll(args: &SyscallArgs) -> SyscallResult {
+    let handle = match owned_pty_handle(args.arg0) {
+        Ok(h) => h,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let mut bits = 0i64;
+    if crate::tty::pty::readable(handle) {
+        bits |= 1;
+    }
+    if crate::tty::pty::writable(handle) {
+        bits |= 2;
+    }
+    SyscallResult::ok(bits)
+}
+
+/// `SYS_PTY_GET_WINSIZE` — read a terminal's `struct winsize`.
+///
+/// `arg0` names the terminal ([`resolve_tty_arg`]), `arg1` is the output
+/// buffer.
+pub fn sys_pty_get_winsize(args: &SyscallArgs) -> SyscallResult {
+    let tty = match resolve_tty_arg(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg1 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let bytes = crate::tty::get_winsize(tty).to_bytes();
+    // SAFETY: `bytes` is a live kernel array of exactly WINSIZE_BYTES bytes;
+    // copy_to_user validates the destination and performs the SMAP dance.
+    match unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), args.arg1, bytes.len()) } {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PTY_SET_WINSIZE` — set a terminal's `struct winsize`, raising
+/// `SIGWINCH` on a real change.
+///
+/// `arg0` names the terminal ([`resolve_tty_arg`]), `arg1` is the input buffer.
+///
+/// The `SIGWINCH` goes to the terminal's foreground process group — the program
+/// *inside* the window — and only when the dimensions actually changed, because
+/// shells re-set the same size on every prompt and waking every full-screen
+/// program to redraw an unchanged screen is a visible stutter, not just waste.
+pub fn sys_pty_set_winsize(args: &SyscallArgs) -> SyscallResult {
+    let tty = match resolve_tty_arg(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg1 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let mut bytes = [0u8; crate::tty::WINSIZE_BYTES];
+    // SAFETY: `bytes` is a live kernel array of exactly WINSIZE_BYTES bytes;
+    // copy_from_user validates the source and performs the SMAP dance.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_from_user(args.arg1, bytes.as_mut_ptr(), bytes.len()) }
+    {
+        return SyscallResult::err(e);
+    }
+    if crate::tty::set_winsize(tty, crate::tty::WinSize::from_bytes(&bytes)) {
+        #[allow(clippy::cast_possible_truncation)]
+        signal_foreground_group(tty, crate::proc::signal::SIGWINCH as u8);
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_PTY_GET_TERMIOS` — read a named terminal's `struct termios`.
+///
+/// `arg0` names the terminal ([`resolve_tty_arg`]), `arg1` is the output
+/// buffer. With `arg0 == 0` this is [`sys_tty_get_termios`]; the handle form
+/// exists so `openpty(3)` can read back the slave's discipline before anything
+/// is running on it.
+pub fn sys_pty_get_termios(args: &SyscallArgs) -> SyscallResult {
+    let tty = match resolve_tty_arg(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg1 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let bytes = crate::tty::get_termios(tty).to_bytes();
+    // SAFETY: `bytes` is a live kernel array of exactly TERMIOS_BYTES bytes;
+    // copy_to_user validates the destination and performs the SMAP dance.
+    match unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), args.arg1, bytes.len()) } {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PTY_SET_TERMIOS` — install a named terminal's `struct termios`.
+///
+/// `arg0` names the terminal ([`resolve_tty_arg`]), `arg1` is the input buffer.
+///
+/// This is the one operation the pre-pty pair genuinely could not express:
+/// `openpty(3)` sets the slave's discipline *before* forking, when the slave is
+/// nobody's controlling terminal, so [`sys_tty_set_termios`] — which acts on the
+/// caller's own — has no way to name it. Doing it after the fork instead is a
+/// race the child can win by reading a line first, under the discipline the
+/// parent was about to replace.
+pub fn sys_pty_set_termios(args: &SyscallArgs) -> SyscallResult {
+    let tty = match resolve_tty_arg(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg1 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    match tty_set_termios_from_user(tty, args.arg1) {
+        TtyCtlOutcome::Done => SyscallResult::ok(0),
+        TtyCtlOutcome::Restart(r) => r,
+        TtyCtlOutcome::Fail(e) => SyscallResult::err(e),
     }
 }
 
@@ -6285,7 +6771,32 @@ fn stop_process_for_signal(
     // anyone is told about the stop, so that a SIGCONT racing in below finds a
     // suspended thread to resume rather than a running one to ignore. The
     // thread keeps executing until phase 2. See this function's doc comment.
+    //
+    // Preemption must be off from here until the stop is *published*, and this
+    // is a correctness requirement, not a latency tweak. From `suspend_pending`
+    // onwards this thread is marked Suspended while still executing on-CPU. An
+    // involuntary switch in that state is normally benign — `schedule_inner`'s
+    // requeue guard declines to enqueue a Suspended task, which is precisely a
+    // park, and the resume that follows unparks it. But here nothing can
+    // follow: the only thing that would ever cause a `resume()` is the
+    // `record_jc_stopped` below, which is the code that just got preempted. The
+    // thread is stranded off every run queue with nobody aware it stopped, and
+    // the parent's `waitpid(..., WUNTRACED)` blocks forever.
+    //
+    // Reported by lane B (`requests/b-a-self-stop-announcement-window-is-
+    // preemptible-and-strands-the-child.md`) as an intermittent `ctest-jobctl`
+    // failure — roughly one boot in four, flipped into visibility by a pure
+    // code-layout change in libc. `preempt_disable` defers the tick rather than
+    // masking interrupts: `do_deferred_preempt` re-arms NEED_RESCHED and lands
+    // the preemption on a later tick.
+    //
+    // The two serial prints inside the region are deliberate. They are the slow
+    // part of it, but the ordering of `[sched] Suspended` / `[signal] stopped` /
+    // `[sched] Resumed` is exactly what diagnosis of this class of bug reads,
+    // and an atomic region emits them as a faithful trace. The cost is bounded
+    // by one deferred tick on one CPU; other CPUs are unaffected.
     if let Some(t) = self_thread {
+        sched::preempt_disable();
         sched::suspend_pending(t);
     }
 
@@ -6302,6 +6813,16 @@ fn stop_process_for_signal(
     // carries on, which is the correct outcome for a continue that overtook
     // its own stop. Otherwise this returns once `continue_process` resumes us.
     if self_thread.is_some() {
+        // Balanced with the `preempt_disable` above (same condition), and
+        // dropped *before* the park because `park_if_suspended` performs a
+        // voluntary switch, and `schedule_inner` flags any voluntary switch made
+        // with a non-zero preempt count as a caller bug — the count is how it
+        // detects a spinlock carried across a yield, and it cannot tell that
+        // apart from a deliberate atomic region. Re-enabling here does not
+        // reopen the window: the stop is already published, so a preempt now
+        // is the benign kind — it parks the thread, and the SIGCONT that
+        // `record_jc_stopped` made possible will unpark it.
+        sched::preempt_enable();
         sched::park_if_suspended();
     }
 }
@@ -7134,10 +7655,20 @@ pub fn sys_timer_cancel(args: &SyscallArgs) -> SyscallResult {
 // Console I/O handlers (100–109)
 // ---------------------------------------------------------------------------
 
-/// `SYS_CONSOLE_WRITE` — write bytes to the framebuffer console.
+/// `SYS_CONSOLE_WRITE` — write bytes to the caller's terminal.
 ///
-/// Handles ASCII control characters (`\n`, `\r`, `\t`).
-/// Also mirrors to serial output via `console::write_str`.
+/// Despite the name this is **not** hardwired to the physical console: it
+/// writes to [`current_tty`], so a process whose controlling terminal is a pty
+/// slave reaches its pty. The name is kept because it is the number userspace
+/// already calls; the behaviour is "write to my terminal", which is what every
+/// caller meant.
+///
+/// That distinction is the entire point of the change that introduced
+/// [`crate::tty::write`]. The *read* side has resolved the caller's controlling
+/// terminal since the tty layer became multi-device; the write side had not, so
+/// a shell on a pty would have read its input from the pty and printed its
+/// output on the screen behind the terminal emulator. Both directions now go
+/// through the same device dispatch.
 ///
 /// When the terminal has `TOSTOP` set, a **background** caller is stopped
 /// with `SIGTTOU` instead of writing (see [`tty_job_control_check`]).  With
@@ -7145,19 +7676,27 @@ pub fn sys_timer_cancel(args: &SyscallArgs) -> SyscallResult {
 /// interleaved, which is why the flag is tested before the check rather than
 /// inside it: the terminal decides whether the policy applies at all.
 ///
-/// This is the only console write path; the Linux ABI's `write`/`writev` to a
+/// This is the only terminal write path; the Linux ABI's `write`/`writev` to a
 /// console fd route here through `dispatch_write`, so the gate is not
 /// duplicated.  A restart sentinel therefore has to survive `linux_from_native`
 /// — which it does, deliberately.
 pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
-    let len = args.arg1 as usize;
+    tty_write_from_user(current_tty(), args.arg0, args.arg1 as usize)
+}
 
-    if args.arg0 == 0 || len == 0 {
+/// Write `len` bytes from user address `ptr` to terminal `tty`.
+///
+/// Shared by [`sys_console_write`] and [`sys_pty_slave_write`] so that the
+/// job-control gate, the bounce and the short-write rule exist once. These were
+/// very nearly two copies, and a `TOSTOP` rule added to only one of them is the
+/// same mistake `tty_set_termios_from_user` was factored out to prevent.
+fn tty_write_from_user(tty: crate::tty::TtyId, ptr: u64, len: usize) -> SyscallResult {
+    if ptr == 0 || len == 0 {
         return SyscallResult::ok(0);
     }
 
-    if crate::tty::get_termios().c_lflag & crate::tty::lflag::TOSTOP != 0 {
-        match tty_job_control_check(crate::proc::signal::SIGTTOU) {
+    if crate::tty::get_termios(tty).c_lflag & crate::tty::lflag::TOSTOP != 0 {
+        match tty_job_control_check_for(tty, crate::proc::signal::SIGTTOU) {
             TtyCtlOutcome::Done => {}
             TtyCtlOutcome::Restart(r) => return r,
             TtyCtlOutcome::Fail(e) => return SyscallResult::err(e),
@@ -7168,31 +7707,21 @@ pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
     // caller how much was consumed, so a longer buffer is written by looping.
     let safe_len = len.min(CONSOLE_WRITE_MAX);
 
-    // Bounced into the kernel before any of it reaches the console: the
-    // console lock is held across the write, and `putchar` can scroll the
-    // framebuffer, so this is exactly the kind of long operation during which
-    // a peer thread could remap the source buffer.
-    let bytes = match crate::mm::user::read_user_vec(args.arg0, safe_len, CONSOLE_WRITE_MAX) {
+    // Bounced into the kernel before any of it reaches the terminal: the
+    // console lock is held across the write and `putchar` can scroll the
+    // framebuffer, while the pty path can *block* on a full output ring. Both
+    // are exactly the kind of long operation during which a peer thread could
+    // remap the source buffer.
+    let bytes = match crate::mm::user::read_user_vec(ptr, safe_len, CONSOLE_WRITE_MAX) {
         Ok(b) => b,
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Use write_str when possible — it writes to both framebuffer
-    // and serial.  For non-UTF8 data, write bytes individually.
-    if let Ok(s) = core::str::from_utf8(&bytes) {
-        crate::console::write_str(s);
-    } else {
-        // Non-UTF8: write each byte to framebuffer (putchar) and
-        // serial (via serial_print).
-        for &b in &bytes {
-            crate::console::putchar(b);
-        }
-        // Mirror to serial.
-        crate::serial_print!("<{} bytes>", safe_len);
+    match crate::tty::write(tty, &bytes) {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(n) => SyscallResult::ok(n as i64),
+        Err(e) => SyscallResult::err(e),
     }
-
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(safe_len as i64)
 }
 
 /// `SYS_CONSOLE_READ_CHAR` — read one character from the keyboard.
@@ -7204,6 +7733,12 @@ pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
 /// job control: a background caller is stopped with `SIGTTIN` exactly as in
 /// [`sys_tty_read`].  Which layer decodes the keystrokes is irrelevant to
 /// whose job is entitled to them.
+///
+/// **Interruptible.** Returns [`KernelError::Interrupted`] (`EINTR`) if a
+/// signal becomes deliverable while blocked, without consuming a character.
+/// Until 2026-08-21 it did not: a process blocked here could not be killed
+/// until somebody pressed a key, which is `known-issues.md` →
+/// `BUG-CONSOLE-READ-UNINTERRUPTIBLE`.
 pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
     if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -7224,8 +7759,19 @@ pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    // Block until a key is available.
-    let ch = crate::keyboard::read_char();
+    // Block until a key is available, or a signal cuts the wait short.
+    let pid = crate::ipc::waiters::current_user_pid();
+    let ch = match crate::keyboard::read_char_interruptible(pid) {
+        crate::keyboard::ReadOutcome::Byte(ch) => ch,
+        crate::keyboard::ReadOutcome::Interrupted => {
+            return SyscallResult::err(KernelError::Interrupted);
+        }
+        // Unreachable: no deadline was supplied.  Report it as EINTR rather
+        // than inventing a byte — a restartable error is the safe direction.
+        crate::keyboard::ReadOutcome::TimedOut => {
+            return SyscallResult::err(KernelError::Interrupted);
+        }
+    };
 
     if let Err(e) = crate::mm::user::write_user_value::<u8>(args.arg0, ch) {
         return SyscallResult::err(e);
@@ -11218,6 +11764,72 @@ pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// `SYS_CHANNEL_PEER_CRED` — report the process on the other end of a channel.
+///
+/// `arg0`: channel handle.
+/// `arg1`: pointer to a 16-byte output buffer.
+///
+/// Writes, little-endian: `pid` (u32), `uid` (u32), `gid` (u32), then a
+/// reserved u32 that is always zero.
+///
+/// # Why a snapshot
+///
+/// The values are the ones recorded when the peer's endpoint was *bound* to
+/// a process, not a lookup performed now.  That is the point of the call
+/// rather than an optimisation: a pid resolved at read time can name a
+/// different process, because the original may have exited and its number
+/// been reused, and a service that authorises on a recycled pid authorises
+/// the wrong process.  The uid is likewise the bind-time one, so a peer that
+/// drops privileges after connecting does not retroactively lose the
+/// authority it connected with, and one that gains them does not
+/// retroactively gain it on an already-open channel.  Linux snapshots
+/// `SO_PEERCRED` at `connect`/`socketpair` for exactly these reasons.
+///
+/// # Errors
+///
+/// - `NotFound` — `arg0` names no live channel, or no process was ever
+///   recorded for the peer side.  Both are *unknown*, not *nobody*, and a
+///   service must treat either as a refusal rather than as a credential.
+/// - `InvalidArgument` — the recorded pid does not fit the 32-bit ABI field.
+///   Truncating would report a *different, existing* process to a caller
+///   that is about to make an authorisation decision with it, so the call
+///   fails closed instead.  Unreachable until pids exceed `u32::MAX`.
+/// - `Fault` — the output buffer is not writable.
+pub fn sys_channel_peer_cred(args: &SyscallArgs) -> SyscallResult {
+    let handle = ChannelHandle::from_raw(args.arg0);
+
+    let Some(cred) = channel::peer_cred(handle) else {
+        // "No such channel" and "no record for the peer" are deliberately
+        // one error: neither is a credential, which is the only distinction
+        // a caller that must fail closed can act on, and separating them
+        // would make this call report whether an arbitrary handle value
+        // happens to name a live channel.
+        return SyscallResult::err(KernelError::NotFound);
+    };
+
+    let Ok(pid32) = u32::try_from(cred.pid) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+
+    let mut buf = [0u8; 16];
+    buf[0..4].copy_from_slice(&pid32.to_le_bytes());
+    buf[4..8].copy_from_slice(&cred.uid.to_le_bytes());
+    buf[8..12].copy_from_slice(&cred.gid.to_le_bytes());
+    // buf[12..16] stays zero: reserved, so a pidfd-style generation counter
+    // can be added later without changing the struct's size or what an
+    // existing reader sees.
+
+    // SAFETY: `buf` is a live 16-byte kernel-owned stack buffer, so the
+    // source range is valid for `buf.len()` bytes; `copy_to_user` validates
+    // the destination against the caller's address space and brackets the
+    // store with STAC/CLAC.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), args.arg1, buf.len()) } {
+        return SyscallResult::err(e);
+    }
+
+    SyscallResult::ok(0)
 }
 
 // ---------------------------------------------------------------------------

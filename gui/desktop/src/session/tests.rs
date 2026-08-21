@@ -69,6 +69,29 @@ fn key(k: Key) -> guitk::event::Event {
     })
 }
 
+/// A press with modifiers held — a desktop shortcut rather than a bare key.
+fn chord(k: Key, modifiers: Modifiers) -> guitk::event::Event {
+    guitk::event::Event::Key(KeyEvent {
+        key: k,
+        pressed: true,
+        modifiers,
+        text: None,
+    })
+}
+
+/// Every `ShellControl` the session sent, in order.
+fn controls(desktop: &Desktop) -> Vec<(u64, ShellControlAction)> {
+    desktop
+        .borrow()
+        .seen
+        .iter()
+        .filter_map(|r| match r.body {
+            RequestBody::ShellControl { window, action } => Some((window, action)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// An ordinary application window, as the compositor would list it.
 fn app(id: u64, title: &str) -> WindowInfo {
     WindowInfo::new(id, 2000 + id, title)
@@ -394,6 +417,133 @@ fn a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised() {
             }),
         "a click on the focused window's button should put it away"
     );
+}
+
+/// The keyboard half of the same rule the taskbar obeys.
+///
+/// Alt+F4 used to call the shell's own `remove_window`, which dropped the
+/// taskbar button and left the program running: the compositor was never told,
+/// and the next window list put the button straight back. The shortcut has to
+/// leave the session as a request like any other.
+#[test]
+fn alt_f4_asks_the_compositor_to_close_the_focused_window() {
+    let (mut session, desktop) = session();
+    let mut focused = app(2, "notes.txt");
+    focused.focused = true;
+    desktop
+        .borrow_mut()
+        .send_window_list(&[app(1, "Terminal"), focused]);
+    session.pump().expect("pump");
+
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        session.background().window(),
+        chord(Key::F4, Modifiers::alt()),
+    )]);
+    session.pump().expect("pump");
+
+    assert_eq!(
+        controls(&desktop),
+        [(2, ShellControlAction::Close)],
+        "Alt+F4 never reached the compositor"
+    );
+    // And the shell has not pretended: the window it was told about is still
+    // there, because the only thing that removes it is the next list.
+    assert_eq!(session.shell().visible_windows().len(), 2);
+}
+
+/// The shortcut that names every window at once — the reason a shortcut's
+/// outcome carries a list rather than one request.
+#[test]
+fn super_d_asks_for_every_window_to_be_minimised() {
+    let (mut session, desktop) = session();
+    desktop
+        .borrow_mut()
+        .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt"), app(3, "mail")]);
+    session.pump().expect("pump");
+
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        session.background().window(),
+        chord(
+            Key::D,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ),
+    )]);
+    session.pump().expect("pump");
+
+    assert_eq!(
+        controls(&desktop),
+        [
+            (1, ShellControlAction::Minimize),
+            (2, ShellControlAction::Minimize),
+            (3, ShellControlAction::Minimize),
+        ],
+        "one press has to reach every window, not just the focused one"
+    );
+}
+
+/// A shortcut aimed at a window that has just closed is the same race a taskbar
+/// click is, and — for Super+D — must not stop the rest of the batch.
+#[test]
+fn a_refused_shortcut_does_not_swallow_the_rest_of_the_batch() {
+    let (mut session, desktop) = session();
+    desktop
+        .borrow_mut()
+        .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
+    session.pump().expect("pump");
+
+    desktop.borrow_mut().refuse = Some("no such window".to_owned());
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        session.background().window(),
+        chord(
+            Key::D,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ),
+    )]);
+    session
+        .pump()
+        .expect("a refused shell control must not bring the desktop down");
+
+    assert_eq!(
+        controls(&desktop).len(),
+        2,
+        "the second window was skipped because the first one was refused"
+    );
+}
+
+/// Super+Right tiles the focused window by *naming the edge*. The shell must not
+/// compute the rectangle — the compositor knows the work area, and a shell that
+/// guessed would disagree with it the moment a monitor changed.
+#[test]
+fn super_right_asks_for_a_tile_and_computes_no_geometry() {
+    let (mut session, desktop) = session();
+    let mut focused = app(1, "Terminal");
+    focused.focused = true;
+    desktop.borrow_mut().send_window_list(&[focused]);
+    session.pump().expect("pump");
+
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        session.background().window(),
+        chord(
+            Key::Right,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ),
+    )]);
+    session.pump().expect("pump");
+
+    // One request, naming an edge and no pixels. There is no protocol verb at
+    // all that would let the shell send a rectangle for a window it does not
+    // own — see `ShellControlAction` — so this asserts what *is* sent and the
+    // absence of the alternative is structural.
+    assert_eq!(controls(&desktop), [(1, ShellControlAction::SnapRight)]);
 }
 
 #[test]

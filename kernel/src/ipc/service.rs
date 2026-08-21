@@ -33,6 +33,20 @@
 //! ## Lock Ordering
 //!
 //! `SERVICE_REGISTRY` → `SCHED` (accept may call sched::wake/block).
+//! `SERVICE_REGISTRY` → `CHANNELS` (the failure paths in `connect` close
+//! the half-built endpoints while holding the registry).  The peer-credential
+//! snapshots deliberately avoid nesting at all: `connect` records the client
+//! side before taking the registry, and the `accept` family records the
+//! server side after releasing it.
+//!
+//! ## Peer Credentials
+//!
+//! Each accepted connection carries the kernel's own record of who is on
+//! each end, snapshotted at connect/accept time and readable through
+//! `SYS_CHANNEL_PEER_CRED`.  Without it a service has no way to answer "may
+//! this caller do this?", because the only alternative — believing a uid the
+//! client puts in its own message — is asking the process being authorised
+//! to vouch for itself.  See [`channel::PeerCred`].
 //!
 //! ## Performance
 //!
@@ -43,7 +57,7 @@
 #![allow(dead_code)]
 
 use crate::error::{KernelError, KernelResult};
-use crate::ipc::channel::{self, ChannelHandle};
+use crate::ipc::channel::{self, ChannelHandle, PeerCred};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use crate::sync::Mutex;
@@ -274,6 +288,51 @@ pub fn register(name: &[u8]) -> KernelResult<ServiceListenerHandle> {
     Ok(ServiceListenerHandle(id))
 }
 
+// ---------------------------------------------------------------------------
+// Peer credentials
+// ---------------------------------------------------------------------------
+
+/// Snapshot the identity of the process running on the current CPU.
+///
+/// Returns `None` in kernel context — either the current task belongs to no
+/// process, or it belongs to the reserved PID 0 that the namespace check
+/// above already treats as "the kernel".  A kernel-created endpoint is
+/// deliberately reported as *unknown* rather than as a root credential: a
+/// service that authorises a caller it cannot identify is the exact hole
+/// this record exists to close, and "the kernel did it, so allow it" is that
+/// hole with a friendlier name.
+fn current_process_cred() -> Option<PeerCred> {
+    let task_id = sched::current_task_id();
+    let pid = crate::proc::thread::owner_process(task_id)?;
+    if pid == 0 {
+        return None;
+    }
+    let (uid, gid) = crate::proc::pcb::process_uid_gid(pid)?;
+    Some(PeerCred { pid, uid, gid })
+}
+
+/// Snapshot the accepting process onto the server end of a just-dequeued
+/// connection, then hand the endpoint back.
+///
+/// The client's end was recorded in [`connect`]; this records the other
+/// half, so the credential lookup is symmetric and a *client* can also ask
+/// who answered it.  That matters for the same reason the server side does:
+/// a name in the registry is not proof of who is behind it, and a client
+/// about to send a password to "system.logind" may reasonably want the
+/// kernel's word on who will receive it.
+///
+/// Called with no registry lock held, so the `SERVICE_REGISTRY` → `CHANNELS`
+/// ordering used elsewhere in this file is preserved trivially.
+fn bind_accepted(handle: ChannelHandle) -> ChannelHandle {
+    if let Some(cred) = current_process_cred() {
+        // The server side of a queued connection has never been bound, so a
+        // refused overwrite is impossible here; and if it somehow were, the
+        // existing record is the one to keep.
+        let _ = channel::set_side_cred(handle, cred);
+    }
+    handle
+}
+
 /// Connect to a named service.
 ///
 /// Creates a new channel pair.  The server-side endpoint is queued for
@@ -296,6 +355,19 @@ pub fn connect(name: &[u8]) -> KernelResult<ChannelHandle> {
 
     // Create a fresh channel pair: client_ep ↔ server_ep.
     let (client_ep, server_ep) = channel::create();
+
+    // Snapshot the connecting process onto its own end *before* the server
+    // end becomes reachable.  Both queueing paths below (`entry.pending`
+    // and the socket-activation `pre_queue`) publish `server_ep` to a
+    // service that may be woken and accept it immediately, and a service
+    // that accepted a half-initialised connection would read "unknown" for
+    // a caller the kernel could in fact identify — which, under a
+    // fail-closed policy, is a refusal that depends on scheduling.
+    if let Some(cred) = current_process_cred() {
+        // A freshly created endpoint has no recorded side, so this cannot
+        // be a refused overwrite; nothing to report either way.
+        let _ = channel::set_side_cred(client_ep, cred);
+    }
 
     let wake_task: Option<TaskId>;
 
@@ -412,23 +484,30 @@ pub fn connect(name: &[u8]) -> KernelResult<ChannelHandle> {
 /// [`ChannelClosed`]: KernelError::ChannelClosed
 pub fn accept(listener: ServiceListenerHandle) -> KernelResult<ChannelHandle> {
     loop {
-        {
+        let dequeued = {
             let mut reg = SERVICE_REGISTRY.lock();
             let entry = reg
                 .listeners
                 .get_mut(&listener.0)
                 .ok_or(KernelError::InvalidHandle)?;
 
-            if let Some(handle) = entry.pending.pop_front() {
-                return Ok(handle);
+            let popped = entry.pending.pop_front();
+
+            if popped.is_none() {
+                if entry.closed {
+                    return Err(KernelError::ChannelClosed);
+                }
+
+                // No pending connections — block.
+                entry.accept_waiter = Some(sched::current_task_id());
             }
 
-            if entry.closed {
-                return Err(KernelError::ChannelClosed);
-            }
+            popped
+        };
 
-            // No pending connections — block.
-            entry.accept_waiter = Some(sched::current_task_id());
+        // Outside the registry lock: `bind_accepted` takes `CHANNELS`.
+        if let Some(handle) = dequeued {
+            return Ok(bind_accepted(handle));
         }
 
         sched::block_current();
@@ -445,21 +524,22 @@ pub fn accept(listener: ServiceListenerHandle) -> KernelResult<ChannelHandle> {
 /// - [`InvalidHandle`] — listener handle not found.
 /// - [`ChannelClosed`] — listener was unregistered.
 pub fn try_accept(listener: ServiceListenerHandle) -> KernelResult<Option<ChannelHandle>> {
-    let mut reg = SERVICE_REGISTRY.lock();
-    let entry = reg
-        .listeners
-        .get_mut(&listener.0)
-        .ok_or(KernelError::InvalidHandle)?;
+    let dequeued = {
+        let mut reg = SERVICE_REGISTRY.lock();
+        let entry = reg
+            .listeners
+            .get_mut(&listener.0)
+            .ok_or(KernelError::InvalidHandle)?;
 
-    if let Some(handle) = entry.pending.pop_front() {
-        return Ok(Some(handle));
-    }
+        match entry.pending.pop_front() {
+            Some(handle) => handle,
+            None if entry.closed => return Err(KernelError::ChannelClosed),
+            None => return Ok(None),
+        }
+    };
 
-    if entry.closed {
-        return Err(KernelError::ChannelClosed);
-    }
-
-    Ok(None)
+    // Outside the registry lock: `bind_accepted` takes `CHANNELS`.
+    Ok(Some(bind_accepted(dequeued)))
 }
 
 /// Accept a pending connection with a timeout (nanoseconds).
@@ -475,18 +555,25 @@ pub fn accept_timeout(
 ) -> KernelResult<ChannelHandle> {
     // Fast path.
     {
-        let mut reg = SERVICE_REGISTRY.lock();
-        let entry = reg
-            .listeners
-            .get_mut(&listener.0)
-            .ok_or(KernelError::InvalidHandle)?;
+        let dequeued = {
+            let mut reg = SERVICE_REGISTRY.lock();
+            let entry = reg
+                .listeners
+                .get_mut(&listener.0)
+                .ok_or(KernelError::InvalidHandle)?;
 
-        if let Some(handle) = entry.pending.pop_front() {
-            return Ok(handle);
-        }
+            let popped = entry.pending.pop_front();
 
-        if entry.closed {
-            return Err(KernelError::ChannelClosed);
+            if popped.is_none() && entry.closed {
+                return Err(KernelError::ChannelClosed);
+            }
+
+            popped
+        };
+
+        // Outside the registry lock: `bind_accepted` takes `CHANNELS`.
+        if let Some(handle) = dequeued {
+            return Ok(bind_accepted(handle));
         }
     }
 
@@ -507,29 +594,37 @@ pub fn accept_timeout(
         crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, sched::current_task_id());
 
     loop {
-        {
+        let dequeued = {
             let mut reg = SERVICE_REGISTRY.lock();
             let entry = reg.listeners.get_mut(&listener.0).ok_or_else(|| {
                 crate::hrtimer::cancel(timer_handle);
                 KernelError::InvalidHandle
             })?;
 
-            if let Some(handle) = entry.pending.pop_front() {
+            let popped = entry.pending.pop_front();
+
+            if popped.is_some() {
                 crate::hrtimer::cancel(timer_handle);
-                return Ok(handle);
+            } else {
+                if entry.closed {
+                    crate::hrtimer::cancel(timer_handle);
+                    return Err(KernelError::ChannelClosed);
+                }
+
+                if crate::hrtimer::now_ns() >= deadline_ns {
+                    crate::hrtimer::cancel(timer_handle);
+                    return Err(KernelError::TimedOut);
+                }
+
+                entry.accept_waiter = Some(sched::current_task_id());
             }
 
-            if entry.closed {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::ChannelClosed);
-            }
+            popped
+        };
 
-            if crate::hrtimer::now_ns() >= deadline_ns {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::TimedOut);
-            }
-
-            entry.accept_waiter = Some(sched::current_task_id());
+        // Outside the registry lock: `bind_accepted` takes `CHANNELS`.
+        if let Some(handle) = dequeued {
+            return Ok(bind_accepted(handle));
         }
 
         sched::block_current();
@@ -815,6 +910,7 @@ fn trigger_service_spawn(path: &str, name: &[u8]) {
 /// 4. Unregister closes pending connections.
 /// 5. Duplicate name rejected.
 /// 6. Blocking accept via spawned task.
+/// 7. Peer credentials on an accepted connection.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[service] Running service registry self-test...");
 
@@ -824,8 +920,185 @@ pub fn self_test() -> KernelResult<()> {
     test_duplicate_name()?;
     test_blocking_accept()?;
     test_socket_activation()?;
+    test_peer_cred()?;
 
     serial_println!("[service] Service registry self-test PASSED");
+    Ok(())
+}
+
+/// Test 7: `SYS_CHANNEL_PEER_CRED` — the kernel's answer to "who is calling
+/// me?", end to end.
+///
+/// The bind sites themselves cannot be exercised from here: this runs as a
+/// kernel task, and `current_process_cred` deliberately reports *unknown*
+/// for a kernel task rather than inventing a root credential.  That refusal
+/// is itself asserted below, and everything downstream of it — which side a
+/// handle reads, the refusal to overwrite a recorded side, survival of the
+/// peer's exit, and the 16-byte ABI the syscall writes — is driven with
+/// credentials built from real PCB entries.
+fn test_peer_cred() -> KernelResult<()> {
+    use crate::syscall::dispatch::{SyscallArgs, dispatch};
+    use crate::syscall::number::SYS_CHANNEL_PEER_CRED;
+
+    let client_pid = crate::proc::pcb::create("peercred-client", 0);
+    let server_pid = crate::proc::pcb::create("peercred-server", 0);
+
+    let listener = register(b"test.peercred")?;
+    let client_ep = connect(b"test.peercred")?;
+    let server_ep = try_accept(listener)?.ok_or(KernelError::InternalError)?;
+
+    let cleanup = || {
+        channel::close(client_ep);
+        channel::close(server_ep);
+        let _ = unregister(listener);
+        crate::proc::pcb::destroy(client_pid);
+        crate::proc::pcb::destroy(server_pid);
+    };
+
+    // Spelled out rather than hidden in a closure so the boot log names the
+    // assertion that failed; a closure could not early-return from here.
+    macro_rules! require {
+        ($cond:expr, $msg:expr) => {
+            if !($cond) {
+                cleanup();
+                serial_println!("[service]   FAIL: {}", $msg);
+                return Err(KernelError::InternalError);
+            }
+        };
+    }
+
+    // Fail-closed in kernel context.  A connection brokered by a kernel task
+    // has no process behind it, and reporting one — uid 0, say — would hand
+    // every service the strongest credential in the system for free.
+    require!(
+        channel::peer_cred(server_ep).is_none(),
+        "a kernel-brokered connection reported a peer credential"
+    );
+
+    let client_cred = PeerCred {
+        pid: client_pid,
+        uid: 1000,
+        gid: 1000,
+    };
+    require!(
+        channel::set_side_cred(client_ep, client_cred),
+        "binding an unbound endpoint was refused"
+    );
+
+    // The holder of a handle reads its *peer's* record, not its own.
+    require!(
+        channel::peer_cred(server_ep) == Some(client_cred),
+        "the server did not see the client's credentials"
+    );
+    require!(
+        channel::peer_cred(client_ep).is_none(),
+        "the client saw a credential for a server side that was never bound"
+    );
+
+    // A credential that can be overwritten is one the peer can influence,
+    // which is the property this record exists to deny.
+    let forged = PeerCred {
+        pid: server_pid,
+        uid: 0,
+        gid: 0,
+    };
+    require!(
+        !channel::set_side_cred(client_ep, forged),
+        "an already-bound endpoint accepted a second credential"
+    );
+    require!(
+        channel::peer_cred(server_ep) == Some(client_cred),
+        "a refused rebind still altered the recorded credential"
+    );
+
+    // The other direction: a client can ask who answered it.
+    let server_cred = PeerCred {
+        pid: server_pid,
+        uid: 0,
+        gid: 0,
+    };
+    require!(
+        channel::set_side_cred(server_ep, server_cred),
+        "binding the server side was refused"
+    );
+    require!(
+        channel::peer_cred(client_ep) == Some(server_cred),
+        "the client did not see the server's credentials"
+    );
+
+    // The syscall's wire format, driven through the real dispatch path.
+    // `copy_to_user` accepts a kernel pointer in kernel context, so this
+    // exercises the handler exactly as ring 3 would reach it.
+    let mut buf = [0xAAu8; 16];
+    let args = SyscallArgs {
+        arg0: server_ep.raw(),
+        arg1: buf.as_mut_ptr() as u64,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let result = dispatch(SYS_CHANNEL_PEER_CRED, &args);
+    require!(
+        result.value == 0,
+        "SYS_CHANNEL_PEER_CRED failed on a bound channel"
+    );
+
+    let decode = |off: usize| -> u32 {
+        let mut word = [0u8; 4];
+        if let (Some(dst), Some(src)) = (word.get_mut(..4), buf.get(off..off.saturating_add(4))) {
+            dst.copy_from_slice(src);
+        }
+        u32::from_le_bytes(word)
+    };
+    require!(
+        u64::from(decode(0)) == client_pid,
+        "the reported pid is not the client's"
+    );
+    require!(decode(4) == 1000, "the reported uid is not the client's");
+    require!(decode(8) == 1000, "the reported gid is not the client's");
+    // Reserved, so a pidfd-style generation counter can be added later
+    // without an ABI break — but only if nothing ships reading garbage there.
+    require!(decode(12) == 0, "the reserved word was not zero");
+
+    // An unbound channel and a bogus handle are the same answer: unknown.
+    // Separating them would make this call report whether an arbitrary
+    // handle value happens to name a live channel.
+    let (plain_a, plain_b) = channel::create();
+    let bogus = SyscallArgs {
+        arg0: plain_a.raw(),
+        arg1: buf.as_mut_ptr() as u64,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let bogus_result = dispatch(SYS_CHANNEL_PEER_CRED, &bogus);
+    channel::close(plain_a);
+    channel::close(plain_b);
+    require!(
+        bogus_result.value < 0,
+        "an unbrokered channel pair reported a peer credential"
+    );
+
+    // Requirement that is easiest to regress silently: a client can send a
+    // request and exit before the service handles it, and the answer to "who
+    // sent this?" must still exist then — otherwise the service's behaviour
+    // depends on scheduling.
+    channel::close(client_ep);
+    require!(
+        channel::peer_cred(server_ep) == Some(client_cred),
+        "the credential vanished when the peer closed its end"
+    );
+
+    channel::close(server_ep);
+    unregister(listener)?;
+    crate::proc::pcb::destroy(client_pid);
+    crate::proc::pcb::destroy(server_pid);
+
+    serial_println!(
+        "[service]   Peer credentials (snapshot at bind, peer-side read, no rebind, survives peer exit): OK"
+    );
     Ok(())
 }
 

@@ -239,11 +239,20 @@ impl Layer {
 /// off the variant.
 ///
 /// The actions are the ones a shell surface actually offers: a taskbar button
-/// (activate, minimise), its context menu (maximise, restore, close), and an
-/// Alt-Tab switcher (activate). Deliberately not move/resize: placing windows
-/// is the compositor's, and a shell that could move any window would be a
-/// second window manager — the duplication this part of the tree exists to
-/// remove.
+/// (activate, minimise), its context menu (maximise, restore, close), an
+/// Alt-Tab switcher (activate), and the keyboard shortcuts that tile a window
+/// to one half of the screen (snap left/right).
+///
+/// Deliberately not move/resize: placing windows is the compositor's, and a
+/// shell that could move any window would be a second window manager — the
+/// duplication this part of the tree exists to remove. **Snap is not an
+/// exception to that rule, it is an instance of it.** Every action here names
+/// an *intent* and lets the compositor work out the rectangle from its own
+/// work area; `Maximize` was always of that shape, and `SnapLeft` is the same
+/// shape with a different fraction. What would break the rule is a
+/// `Move { x, y, w, h }` — a client-supplied rectangle — and that is still
+/// absent, which is the distinction to preserve when adding to this enum: if
+/// the shell has to compute pixels to use a verb, the verb is wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ShellControlAction {
     /// Un-minimise if minimised, then focus and raise within the window's band.
@@ -265,9 +274,36 @@ pub enum ShellControlAction {
     /// gets to put up its dialog. A shell that could destroy a window would be
     /// able to discard a user's work from a context menu.
     Close,
+    /// Fill the left half of the work area.
+    ///
+    /// Left and right are separate variants rather than `Snap(Edge)` because
+    /// the wire encoding is one byte per action and a nested payload would make
+    /// this the only action that carries one — every reader and writer of the
+    /// frame would grow a special case for the sake of a two-valued field.
+    SnapLeft,
+    /// Fill the right half of the work area.
+    SnapRight,
 }
 
 impl ShellControlAction {
+    /// Every action there is.
+    ///
+    /// Exists so that the codec tests iterate the actions rather than a
+    /// hand-written list of them: the list they used to hold was the kind that
+    /// goes stale silently, leaving a newly-added action with no test that it
+    /// survives the wire at all. Adding a variant now breaks the compile of
+    /// `all_really_is_every_action` until it is added here too, and the fixed
+    /// array length breaks it again if it is added without being counted.
+    pub const ALL: [Self; 7] = [
+        Self::Activate,
+        Self::Minimize,
+        Self::Restore,
+        Self::Maximize,
+        Self::Close,
+        Self::SnapLeft,
+        Self::SnapRight,
+    ];
+
     /// The wire byte for this action.
     #[must_use]
     pub const fn as_byte(self) -> u8 {
@@ -277,6 +313,8 @@ impl ShellControlAction {
             Self::Restore => 2,
             Self::Maximize => 3,
             Self::Close => 4,
+            Self::SnapLeft => 5,
+            Self::SnapRight => 6,
         }
     }
 
@@ -294,6 +332,8 @@ impl ShellControlAction {
             2 => Some(Self::Restore),
             3 => Some(Self::Maximize),
             4 => Some(Self::Close),
+            5 => Some(Self::SnapLeft),
+            6 => Some(Self::SnapRight),
             _ => None,
         }
     }
@@ -1160,15 +1200,43 @@ mod tests {
     /// wrote a constant would round-trip whichever one the sample happened to
     /// pick. Listing them also makes adding a sixth action fail here until it
     /// is added to the list, which is the point of an exhaustive test.
+    /// `ALL` is what every other test here iterates, so it being complete is a
+    /// precondition of all of them rather than a nicety.
+    ///
+    /// The `match` is the mechanism: it is exhaustive, so adding a variant to
+    /// the enum stops this file compiling until the variant is named here, and
+    /// the arm then leads the reader to `ALL`. The length assertion catches the
+    /// other half — a variant named in the match and in `ALL` but not counted
+    /// in `ALL`'s fixed length is a compile error, and one that is somehow
+    /// neither fails here.
+    #[test]
+    fn all_really_is_every_action() {
+        for action in ShellControlAction::ALL {
+            match action {
+                ShellControlAction::Activate
+                | ShellControlAction::Minimize
+                | ShellControlAction::Restore
+                | ShellControlAction::Maximize
+                | ShellControlAction::Close
+                | ShellControlAction::SnapLeft
+                | ShellControlAction::SnapRight => {}
+            }
+        }
+
+        // Every byte the decoder accepts names an action that is in `ALL`, and
+        // there are exactly as many of them. A variant reachable from the wire
+        // but missing from `ALL` would be one no test above ever exercises.
+        let decodable: Vec<ShellControlAction> =
+            (0..=u8::MAX).filter_map(ShellControlAction::from_byte).collect();
+        assert_eq!(decodable.len(), ShellControlAction::ALL.len());
+        for action in decodable {
+            assert!(ShellControlAction::ALL.contains(&action));
+        }
+    }
+
     #[test]
     fn every_shell_control_action_survives_the_wire() {
-        let actions = [
-            ShellControlAction::Activate,
-            ShellControlAction::Minimize,
-            ShellControlAction::Restore,
-            ShellControlAction::Maximize,
-            ShellControlAction::Close,
-        ];
+        let actions = ShellControlAction::ALL;
         let reqs: Vec<Request> = actions
             .iter()
             .enumerate()

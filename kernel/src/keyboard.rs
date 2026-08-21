@@ -791,23 +791,38 @@ fn extended_to_ascii(code: u8) -> Option<u8> {
 // Ring buffer operations
 // ---------------------------------------------------------------------------
 
-/// Push a character into the ring buffer (called from ISR).
+/// Push a byte into the input ring, with no echo. Returns `false` if the ring
+/// was full and the byte was dropped.
 ///
-/// If the buffer is full, the character is silently dropped.
-fn push_char(ch: u8) {
+/// Split out of [`push_char`] so the self-test can stage a byte without also
+/// painting it on the framebuffer — and so "did the byte land?" is answerable,
+/// which [`push_char`]'s `()` return hides.
+fn push_char_raw(ch: u8) -> bool {
     let head = INPUT_HEAD.load(Ordering::Acquire);
     let tail = INPUT_TAIL.load(Ordering::Acquire);
 
     // Check if buffer is full (head is one slot behind tail after wrap).
     let next_head = head.wrapping_add(1);
     if (next_head & INPUT_BUF_MASK as u32) == (tail & INPUT_BUF_MASK as u32) {
-        // Buffer full — drop the character.
-        return;
+        return false;
     }
 
     let idx = (head as usize) & INPUT_BUF_MASK;
     INPUT_BUF[idx].store(ch, Ordering::Release);
     INPUT_HEAD.store(next_head, Ordering::Release);
+    true
+}
+
+/// Push a character into the ring buffer (called from ISR).
+///
+/// If the buffer is full, the character is silently dropped.
+fn push_char(ch: u8) {
+    if !push_char_raw(ch) {
+        // Buffer full — drop the character, and drop its echo with it. Echoing
+        // a byte no reader will ever receive would put a character on screen
+        // that the program cannot see.
+        return;
+    }
 
     // Echo to the framebuffer console for immediate visual feedback,
     // unless the consumer has disabled echo (e.g., kshell handles its
@@ -970,24 +985,106 @@ fn try_read_char_raw() -> Option<u8> {
     Some(ch)
 }
 
-/// Read one character, blocking if the buffer is empty.
+/// How a blocking console read ended.
 ///
-/// This spins in a loop yielding the CPU (via HLT) until a character
-/// becomes available.  Polls both PS/2 (interrupt-driven) and USB HID
-/// (polled) keyboard inputs.  In the future this will use proper
-/// scheduler blocking with an eventfd or similar mechanism.
-pub fn read_char() -> u8 {
+/// Three outcomes rather than `Option<u8>` because a signal-interrupted read
+/// and a timed-out read must reach userspace as different things — `EINTR`
+/// versus a short read of zero bytes — and collapsing them into `None` is
+/// exactly the information loss that made `sys_console_read_char`
+/// uninterruptible in the first place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOutcome {
+    /// A character was read.
+    Byte(u8),
+    /// A signal is deliverable to the calling process; the read must unwind
+    /// so the signal can run.  No character was consumed.
+    Interrupted,
+    /// The deadline passed with no character available.
+    TimedOut,
+}
+
+/// The one blocking-read loop, shared by all four public entry points.
+///
+/// `deadline_ns = None` blocks indefinitely; `Some(t)` gives up once
+/// [`crate::hrtimer::now_ns`] reaches `t`.
+///
+/// `pid` is the *user* process on whose behalf we are reading, or `0` for a
+/// kernel task.  It selects whether the loop is interruptible at all:
+/// `deliverable_signal_pending(0)` is unconditionally `false`, so passing `0`
+/// reproduces the historical uninterruptible behaviour exactly, with no
+/// second copy of this loop to keep in sync.
+///
+/// **Why this is still a `HLT` poll and not a real park.**  A proper
+/// `park_interruptible` here would be wrong today: USB HID keys are only
+/// noticed by `poll_usb_keyboard`, and its *only* three call sites are inside
+/// this function and `try_read_char`.  A reader that parked indefinitely
+/// would stop polling, and a USB keyboard would go dead — nothing else in the
+/// system drives that poll.  Making the read genuinely sleep therefore
+/// requires first moving HID polling into a driver-owned periodic task; that
+/// is tracked as the second stage of
+/// `known-issues.md` → `BUG-CONSOLE-READ-UNINTERRUPTIBLE`.  Interruptibility
+/// and parking are separable, and this is the half that can be done now:
+/// checking a pending-signal flag once per `HLT` wake costs nothing and fixes
+/// the user-visible defect (Ctrl-C not reaching a process blocked on the
+/// console), while the parking half is a driver restructure.
+fn read_char_inner(deadline_ns: Option<u64>, pid: u64) -> ReadOutcome {
     loop {
         // Poll USB keyboard for any pending reports.
         poll_usb_keyboard();
 
         if let Some(ch) = try_read_char_raw() {
-            return ch;
+            return ReadOutcome::Byte(ch);
         }
-        // Yield CPU until next interrupt (the keyboard IRQ or timer
-        // will wake us).
+
+        // Check for a deliverable signal *before* the deadline, so a process
+        // that is both signalled and timed out reports EINTR — the signal is
+        // the more informative of the two, and POSIX lets either win.
+        if crate::ipc::waiters::deliverable_signal_pending(pid) {
+            return ReadOutcome::Interrupted;
+        }
+
+        if let Some(deadline) = deadline_ns
+            && crate::hrtimer::now_ns() >= deadline
+        {
+            return ReadOutcome::TimedOut;
+        }
+
+        // Yield CPU until next interrupt (the keyboard IRQ or the periodic
+        // timer tick, which bounds how long we sleep past a deadline and how
+        // long a signal waits to be noticed).
         crate::cpu::hlt();
     }
+}
+
+/// Read one character, blocking if the buffer is empty.
+///
+/// This spins in a loop yielding the CPU (via HLT) until a character
+/// becomes available.  Polls both PS/2 (interrupt-driven) and USB HID
+/// (polled) keyboard inputs.
+///
+/// **Not interruptible by signals** — it is the kernel-task entry point
+/// (kshell and the boot console), which have no signal context to check.
+/// A userspace read must go through [`read_char_interruptible`] instead.
+pub fn read_char() -> u8 {
+    match read_char_inner(None, 0) {
+        ReadOutcome::Byte(ch) => ch,
+        // Unreachable: with `deadline_ns = None` there is no timeout, and
+        // `deliverable_signal_pending(0)` is always false for a kernel task.
+        // Returning NUL rather than panicking keeps a kernel bug from
+        // becoming a kernel panic on the console read path.
+        ReadOutcome::Interrupted | ReadOutcome::TimedOut => 0,
+    }
+}
+
+/// Read one character on behalf of user process `pid`, blocking until either
+/// a character arrives or a signal becomes deliverable to `pid`.
+///
+/// This is the entry point for `sys_console_read_char` and the TTY layer:
+/// unlike [`read_char`] it unwinds with [`ReadOutcome::Interrupted`] so the
+/// caller can return `EINTR` and let the signal run.  Passing `pid == 0`
+/// degrades to the uninterruptible behaviour of [`read_char`].
+pub fn read_char_interruptible(pid: u64) -> ReadOutcome {
+    read_char_inner(None, pid)
 }
 
 /// Read one character, blocking until either a character is available or the
@@ -1002,19 +1099,20 @@ pub fn read_char() -> u8 {
 /// A `deadline_ns` already in the past returns immediately — `Some(ch)` if a
 /// character happens to be buffered, else `None` — so callers can use it as a
 /// non-blocking poll with `deadline_ns = now`.
+///
+/// **Not interruptible by signals**; see [`read_char_timeout_interruptible`].
 pub fn read_char_timeout(deadline_ns: u64) -> Option<u8> {
-    loop {
-        poll_usb_keyboard();
-        if let Some(ch) = try_read_char_raw() {
-            return Some(ch);
-        }
-        if crate::hrtimer::now_ns() >= deadline_ns {
-            return None;
-        }
-        // Yield until the next interrupt (keyboard IRQ or the periodic timer
-        // tick, which bounds how long we sleep past the deadline).
-        crate::cpu::hlt();
+    match read_char_inner(Some(deadline_ns), 0) {
+        ReadOutcome::Byte(ch) => Some(ch),
+        ReadOutcome::Interrupted | ReadOutcome::TimedOut => None,
     }
+}
+
+/// [`read_char_timeout`] on behalf of user process `pid`, distinguishing a
+/// signal ([`ReadOutcome::Interrupted`]) from the deadline expiring
+/// ([`ReadOutcome::TimedOut`]).
+pub fn read_char_timeout_interruptible(deadline_ns: u64, pid: u64) -> ReadOutcome {
+    read_char_inner(Some(deadline_ns), pid)
 }
 
 /// Enable or disable keyboard echo.
@@ -1271,8 +1369,69 @@ pub fn self_test() -> Result<(), &'static str> {
     );
 
     echo_ring_self_test()?;
+    read_outcome_self_test()?;
 
     crate::serial_println!("[keyboard] Self-test PASSED");
+    Ok(())
+}
+
+/// Exercise the three exits of [`read_char_inner`] without needing a keypress.
+///
+/// The point is the *shared loop*: all four public read entry points funnel
+/// through one body, so the way to be sure `read_char_timeout` still returns
+/// `None` on a lapsed deadline — and that the added signal check did not turn
+/// a timeout into an early return or vice versa — is to drive the body itself
+/// at each of its three exits.
+///
+/// A signal-interrupted exit cannot be provoked from here: it needs a real
+/// user process to own a pending signal, and this runs on a kernel task
+/// (`pid == 0`), for which `deliverable_signal_pending` is false by
+/// construction. What *is* checked here is the property that makes the
+/// pid-0 path safe — that a kernel-task read never reports `Interrupted` —
+/// which is the invariant [`read_char`]'s unreachable arm depends on.
+/// End-to-end EINTR delivery belongs in a ring-3 Path-Z rung.
+fn read_outcome_self_test() -> Result<(), &'static str> {
+    // Interrupts masked so a keystroke arriving mid-test cannot satisfy a
+    // read that is supposed to time out. Same reasoning as the echo ring:
+    // the producer under test is IRQ 1.
+    crate::cpu::without_interrupts(|| {
+        // Drain anything buffered, so "empty" below means empty.
+        while try_read_char_raw().is_some() {}
+
+        // A deadline already in the past, with nothing buffered, must return
+        // TimedOut immediately rather than blocking. `now_ns()` itself is a
+        // valid past-or-present deadline.
+        let now = crate::hrtimer::now_ns();
+        match read_char_inner(Some(now), 0) {
+            ReadOutcome::TimedOut => {}
+            ReadOutcome::Byte(_) => return Err("lapsed deadline returned a byte from an empty ring"),
+            ReadOutcome::Interrupted => {
+                return Err("kernel task (pid 0) reported Interrupted — signal check ignored pid");
+            }
+        }
+
+        // With a byte buffered, the same lapsed deadline must yield the byte:
+        // available input outranks an expired deadline, which is what makes
+        // `read_char_timeout(now)` usable as a non-blocking poll.
+        if !push_char_raw(b'K') {
+            return Err("could not stage a byte in the input ring");
+        }
+        match read_char_inner(Some(now), 0) {
+            ReadOutcome::Byte(b'K') => {}
+            ReadOutcome::Byte(_) => return Err("read_char_inner returned the wrong byte"),
+            ReadOutcome::TimedOut => return Err("buffered byte lost to an expired deadline"),
+            ReadOutcome::Interrupted => return Err("kernel task reported Interrupted"),
+        }
+
+        // And the public wrapper agrees, which is the contract callers see.
+        if read_char_timeout(crate::hrtimer::now_ns()).is_some() {
+            return Err("read_char_timeout invented a byte from an empty ring");
+        }
+
+        Ok(())
+    })?;
+
+    crate::serial_println!("[keyboard]   read_char_inner exits (byte/timeout): OK");
     Ok(())
 }
 

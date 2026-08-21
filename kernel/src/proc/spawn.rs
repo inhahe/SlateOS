@@ -105,14 +105,26 @@ fn pathz_missing(rung: &str, required: &[&str]) -> bool {
 /// the nonzero path: `boot-test.sh` greps for `rung(s) SKIPPED` and surfaces it,
 /// so a boot that quietly lost a chunk of its coverage can no longer be read as
 /// a clean run.
+///
+/// The advice names the *host* prerequisite rather than only the rebuild
+/// command, because "rebuild the image" is the wrong instruction in the case
+/// that actually happens.  On 2026-08-21 all 26 tcc rungs vanished at once
+/// because WSL had restarted and cleared `/tmp/tccinstall`; rebuilding the
+/// image as instructed would have produced an identical image with the same 26
+/// SKIPs and no new information.  A remedy that does not fix the failure it is
+/// printed under teaches its reader to skip the line.
 pub fn pathz_report_skips() {
     let n = PATHZ_SKIPPED.load(core::sync::atomic::Ordering::Relaxed);
     if n == 0 {
         serial_println!("[spawn] Path-Z prerequisites: complete — 0 rungs skipped");
     } else {
         serial_println!(
-            "[spawn] Path-Z prerequisites: {} rung(s) SKIPPED — coverage is INCOMPLETE \
-             (rebuild rootfs.ext4 via scripts/create-ext4-rootfs.sh; see the SKIP lines above)",
+            "[spawn] Path-Z prerequisites: {} rung(s) SKIPPED — coverage is INCOMPLETE. \
+             Each SKIP line above names the file that was missing; rebuilding the image \
+             helps only if the HOST can supply it. The tcc rungs need a tcc on PATH or at \
+             ~/.cache/slateos/tccinstall/bin/tcc — build instructions are in the tcc \
+             section of scripts/create-ext4-rootfs.sh. Install what is missing FIRST, then \
+             rebuild: wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh",
             n
         );
     }
@@ -7818,7 +7830,7 @@ pub fn self_test_cctty() -> KernelResult<()> {
     // The console must be free for the fixture to claim it. Nothing in the
     // boot sequence acquires one, but say so rather than let a stray holder
     // turn into an unexplained EPERM at check 21.
-    if let Some(holder) = pcb::ctty_console_fg_pgrp() {
+    if let Some(holder) = pcb::ctty_fg_pgrp(crate::tty::CONSOLE) {
         serial_println!(
             "[spawn]   FAIL: ctest-ctty — the console is already claimed (foreground group {}) \
              before the fixture starts, so its TIOCSCTTY would fail with EPERM. Some earlier \
@@ -7853,13 +7865,13 @@ pub fn self_test_cctty() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     // Sampled *before* destroy: the fixture deliberately exits still holding
     // the console, so this is what the session-exit release has to clean up.
-    let held_at_exit = pcb::ctty_console_fg_pgrp();
+    let held_at_exit = pcb::ctty_fg_pgrp(crate::tty::CONSOLE);
 
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
 
     // And after: destroying the session's last process must release it.
-    let held_after_destroy = pcb::ctty_console_fg_pgrp();
+    let held_after_destroy = pcb::ctty_fg_pgrp(crate::tty::CONSOLE);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -27335,19 +27347,40 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
 /// This is the first rung of the operator-decided "GCC/CMake/Make toolchain"
 /// initiative (design-decisions §9 / §12, Path Z).  Every prior Path-Z test
 /// ran a single program or a shell; this runs `make`, the build *driver* that
-/// orchestrates a real toolchain.  `make` is itself an unmodified glibc PIE
-/// (`DT_NEEDED libc.so.6` only — both it and its interpreter are already
-/// staged), so ld.so loads it, it reads + parses the Makefile, builds the
+/// orchestrates a real toolchain.  It reads + parses the Makefile, builds the
 /// dependency graph, and to run the recipe `@/bin/emit > /make-out.txt` it
 /// `fork`s and `exec`s `/bin/sh -c '…'` (the recipe contains the shell
 /// metacharacter `>`, so make does **not** take its direct-exec optimisation),
 /// `/bin/sh` (dash) in turn forks/execs the external `/bin/emit` with stdout
 /// redirected to the file, and make `wait4`s its child and propagates the
-/// status.  A correct run therefore exercises, end to end: make's glibc
+/// status.  A correct run therefore exercises, end to end: make's C-runtime
 /// startup, Makefile `open`/`read`/`stat`, dependency evaluation, recipe
 /// dispatch via `/bin/sh`, the nested fork→exec→redirect→wait chain, and exit
 /// status propagation up through make.  No fd is injected — the test reads the
 /// file the recipe produced back from the VFS.
+///
+/// # Which `make` this actually runs, and why the capability grant matters
+///
+/// This test was written against the Debian glibc `make` that
+/// `create-ext4-rootfs.sh` stages first, and its name still says so.  The
+/// script then **overwrites** `/bin//make` with `build/spike/make-slateos.elf`
+/// — GNU make 4.4.1 linked against our own `libc.a` — so the binary that runs
+/// here is static, non-PIE, and speaks the **native** syscall ABI, not the
+/// Linux one.  (`detect_linux_abi` correctly says no; the give-away in the log
+/// is the absence of a `Detected Linux x86_64 ABI binary` line.)
+///
+/// That matters because the two ABIs do not gate `stat` alike: the Linux
+/// translation layer checks a `File` capability for `open` only, while the
+/// native [`crate::syscall::handlers::sys_fs_stat`] requires
+/// [`Rights::METADATA`].  So the `READ | WRITE` grant this test inherited from
+/// its glibc-era siblings was silently sufficient until the binary changed
+/// underneath it, at which point `stat("/Makefile")` began returning `EACCES`
+/// — and GNU make maps *any* failed `stat` to "file does not exist", so the
+/// symptom surfaced three thousand log lines later as `No rule to make target
+/// '/Makefile'`, naming neither `stat` nor a permission problem.  Every other
+/// native Path-Z test grants `METADATA` for exactly this reason; this one now
+/// does too.  See `requests/b-a-path-z-real-make-fails-because-stat-of-\
+/// Makefile-returns-eacces.md`.
 ///
 /// No-op (returns `Ok(())`) when the rootfs / `/bin/make` / `/bin/sh` /
 /// `/bin/emit` is absent (so a kernel built without the toolchain rootfs still
@@ -27450,7 +27483,14 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
     // probing; SHELL=/bin/sh pins the recipe shell so make does not search.
     let argv: &[&[u8]] = &[b"make", b"-f", b"/Makefile", b"all"];
     let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"SHELL=/bin/sh"];
-    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    // METADATA is not optional here: make stats every makefile and every target
+    // it considers, and a native-ABI `stat` is gated on it. See the ABI note in
+    // this function's doc comment for why READ | WRITE used to be enough.
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
     let options = SpawnOptions {
         name: "spawn-test-make",
         parent: 0,
@@ -27987,7 +28027,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
 /// via [`pathz_skip`].  This function deliberately does not log it itself: it is
 /// shared by ~26 rungs, and one line per rung is the information you actually
 /// want (see known-issues.md → `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`).
-fn stage_hosted_cc_support() -> KernelResult<Option<&'static str>> {
+fn stage_hosted_cc_support() -> KernelResult<Option<alloc::string::String>> {
     // (src in /mnt rootfs, dst in VFS) staging pairs.  ld + libc + libm + tcc
     // are shared with the other Path-Z tests; the crt objects, libc.so script,
     // libc_nonshared.a and libtcc1.a are the hosted-compile additions.
@@ -28025,21 +28065,42 @@ fn stage_hosted_cc_support() -> KernelResult<Option<&'static str>> {
             "/mnt/usr/lib/x86_64-linux-gnu/libc_nonshared.a",
             "/usr/lib/x86_64-linux-gnu/libc_nonshared.a",
         ),
-        (
-            "/mnt/tmp/tccinstall/lib/tcc/libtcc1.a",
-            "/tmp/tccinstall/lib/tcc/libtcc1.a",
-        ),
     ];
+
+    // libtcc1.a is the one support file whose path is not a constant: it lives
+    // at tcc's compiled-in --prefix, so it moves whenever the host's tcc is
+    // built somewhere else.  `create-ext4-rootfs.sh` stages it at that exact
+    // absolute path (tcc opens it by absolute path, so it must resolve
+    // unchanged inside the VFS) and records the directory in /etc/tcc-libdir.
+    //
+    // This used to be the constant "/tmp/tccinstall/lib/tcc". When the host
+    // cache moved out of /tmp — because WSL clears /tmp on restart, which is
+    // what silently emptied the compiler out of the image in the first place —
+    // 25 rungs reported "prerequisite missing" for a file that was present
+    // under a different name. A kernel constant that must agree with a host
+    // build script it cannot see will eventually disagree with it, and the
+    // disagreement is invisible because a missing prerequisite is a SKIP, not
+    // a failure. Reading the path the image itself recorded removes the
+    // agreement requirement rather than restating it.
+    let libdir = match crate::fs::Vfs::read_file("/mnt/etc/tcc-libdir") {
+        Ok(bytes) => match core::str::from_utf8(&bytes) {
+            Ok(s) if !s.trim().is_empty() => alloc::string::String::from(s.trim()),
+            _ => return Ok(Some(alloc::string::String::from("/mnt/etc/tcc-libdir"))),
+        },
+        Err(_) => return Ok(Some(alloc::string::String::from("/mnt/etc/tcc-libdir"))),
+    };
+    let libtcc1_src = alloc::format!("/mnt{libdir}/libtcc1.a");
+    let libtcc1_dst = alloc::format!("{libdir}/libtcc1.a");
 
     // The hosted compile needs the whole support set; if tcc itself or any
     // support file is missing, no-op (matches the rootfs best-effort pattern).
     for probe in [
         "/mnt/bin/tcc",
         "/mnt/usr/lib/x86_64-linux-gnu/crt1.o",
-        "/mnt/tmp/tccinstall/lib/tcc/libtcc1.a",
+        libtcc1_src.as_str(),
     ] {
         if !crate::fs::Vfs::exists(probe) {
-            return Ok(Some(probe));
+            return Ok(Some(alloc::string::String::from(probe)));
         }
     }
 
@@ -28047,8 +28108,12 @@ fn stage_hosted_cc_support() -> KernelResult<Option<&'static str>> {
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
     let _ = crate::fs::Vfs::mkdir_all("/usr/lib/x86_64-linux-gnu");
-    let _ = crate::fs::Vfs::mkdir_all("/tmp/tccinstall/lib/tcc");
-    for (src, dst) in STAGE {
+    let _ = crate::fs::Vfs::mkdir_all(&libdir);
+    for (src, dst) in STAGE
+        .iter()
+        .map(|(s, d)| (*s, *d))
+        .chain(core::iter::once((libtcc1_src.as_str(), libtcc1_dst.as_str())))
+    {
         match crate::fs::Vfs::read_file(src) {
             Ok(bytes) => {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
@@ -28058,12 +28123,12 @@ fn stage_hosted_cc_support() -> KernelResult<Option<&'static str>> {
                         dst,
                         e
                     );
-                    return Ok(Some(dst));
+                    return Ok(Some(alloc::string::String::from(dst)));
                 }
             }
             Err(e) => {
                 serial_println!("[spawn]   hosted cc: reading {} failed: {:?}", src, e);
-                return Ok(Some(src));
+                return Ok(Some(alloc::string::String::from(src)));
             }
         }
     }
@@ -28390,7 +28455,7 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
         Ok(Some(missing)) => {
             pathz_skip(
                 format_args!("REAL C compiler (tcc, HOSTED glibc link, {label}, ring 3, Path Z)"),
-                missing,
+                &missing,
             );
             return Ok(());
         }
@@ -28624,7 +28689,7 @@ int main(void){\n\
         Ok(Some(missing)) => {
             pathz_skip(
                 format_args!("REAL C compiler (tcc, SEPARATE compilation, ring 3, Path Z)"),
-                missing,
+                &missing,
             );
             return Ok(());
         }
@@ -28939,7 +29004,7 @@ int main(void){\n\
         Ok(Some(missing)) => {
             pathz_skip(
                 format_args!("REAL make-drives-tcc build (ring 3, Path Z)"),
-                missing,
+                &missing,
             );
             return Ok(());
         }
@@ -29205,7 +29270,7 @@ int main(void){\n\
         Ok(Some(missing)) => {
             pathz_skip(
                 format_args!("REAL project-header C build (tcc, #include \"...\", ring 3, Path Z)"),
-                missing,
+                &missing,
             );
             return Ok(());
         }

@@ -24,7 +24,7 @@ use crate::launcher::{self, Category};
 use crate::{
     DesktopShell, Hit, Key, KeyEvent, Layer, Modifiers, MouseButton, MouseEvent, MouseEventKind,
     Rect, START_MENU_ROW_HEIGHT, ShellAction, ShellControlAction, TextRole, WindowId, WindowInfo,
-    WindowState, click, scroll, scroll_rows,
+    WindowRequest, WindowState, click, scroll, scroll_rows,
 };
 use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
@@ -556,10 +556,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     let first = shell.taskbar_button_rect(0);
     assert_eq!(
         click_at(&mut shell, first),
-        ShellAction::Control {
-            window: a,
-            action: ShellControlAction::Activate,
-        },
+        ShellAction::Control(WindowRequest::new(a, ShellControlAction::Activate)),
         "the button of an unfocused window must summon it"
     );
 
@@ -580,10 +577,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     let button = shell.taskbar_button_rect(index);
     assert_eq!(
         click_at(&mut shell, button),
-        ShellAction::Control {
-            window: b,
-            action: ShellControlAction::Minimize,
-        },
+        ShellAction::Control(WindowRequest::new(b, ShellControlAction::Minimize)),
         "the button of the focused window must put it away"
     );
     assert_eq!(
@@ -745,10 +739,7 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
     let action = click_at(&mut shell, button);
     assert_eq!(
         action,
-        ShellAction::Control {
-            window: WindowId(1),
-            action: ShellControlAction::Minimize,
-        }
+        ShellAction::Control(WindowRequest::new(WindowId(1), ShellControlAction::Minimize))
     );
     assert!(
         shell.visible_windows().len() == 1,
@@ -990,17 +981,17 @@ fn escape_closes_a_popup_and_is_otherwise_left_alone() {
 
     let mut shell = shell();
     assert!(
-        !shell.handle_hotkey(&escape),
+        !shell.handle_hotkey(&escape).consumed,
         "Escape with nothing open must reach the focused window"
     );
 
     click_clock(&mut shell);
-    assert!(shell.handle_hotkey(&escape));
+    assert!(shell.handle_hotkey(&escape).consumed);
     assert!(!shell.calendar.visible);
-    assert!(!shell.handle_hotkey(&escape));
+    assert!(!shell.handle_hotkey(&escape).consumed);
 
     click_start(&mut shell);
-    assert!(shell.handle_hotkey(&escape));
+    assert!(shell.handle_hotkey(&escape).consumed);
     assert!(!shell.start_menu_open);
 }
 

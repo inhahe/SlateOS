@@ -24,7 +24,8 @@ use crate::serial_println;
 use super::handlers;
 use super::number::{
     MAX_SYSCALL_NR, SYS_ARP_TABLE, SYS_CAP_QUERY, SYS_CAP_REQUEST, SYS_CAP_REQUEST_CANCEL,
-    SYS_CAP_REQUEST_STATUS, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE, SYS_CHANNEL_RECV,
+    SYS_CAP_REQUEST_STATUS, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE, SYS_CHANNEL_PEER_CRED,
+    SYS_CHANNEL_RECV,
     SYS_CHANNEL_RECV_CAPS, SYS_CHANNEL_RECV_TIMEOUT, SYS_CHANNEL_SEND, SYS_CHANNEL_SEND_BLOCKING,
     SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_SEND_TIMEOUT, SYS_CHANNEL_TRY_RECV, SYS_CLOCK_ADJTIME,
     SYS_CLOCK_MONOTONIC, SYS_CLOCK_REALTIME, SYS_CLOCK_SETTIME, SYS_CONSOLE_READ_CHAR,
@@ -69,6 +70,9 @@ use super::number::{
     SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_EXEC_FDS,
     SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID, SYS_PROCESS_SPAWN,
     SYS_PROCESS_SPAWN_EX, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS,
+    SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE,
+    SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
+    SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_WRITE,
     SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE,
     SYS_SCHED_SET_TIMESLICE, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT,
     SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT,
@@ -353,6 +357,9 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SERVICE_TRY_ACCEPT as usize] = Some(handlers::sys_service_try_accept);
     handlers[SYS_SERVICE_ACCEPT_TIMEOUT as usize] = Some(handlers::sys_service_accept_timeout);
     handlers[SYS_SERVICE_UNREGISTER as usize] = Some(handlers::sys_service_unregister);
+    // Sits in the service block, not the channel block (200–209 is full):
+    // it is the missing half of `SYS_SERVICE_ACCEPT`.
+    handlers[SYS_CHANNEL_PEER_CRED as usize] = Some(handlers::sys_channel_peer_cred);
 
     // Namespace (290–295).
     handlers[SYS_NS_CREATE as usize] = Some(handlers::sys_ns_create);
@@ -429,6 +436,23 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_TTY_GET_TERMIOS as usize] = Some(handlers::sys_tty_get_termios);
     handlers[SYS_TTY_SET_TERMIOS as usize] = Some(handlers::sys_tty_set_termios);
     handlers[SYS_TTY_READ as usize] = Some(handlers::sys_tty_read);
+
+    // Pseudo-terminals (544–554). The same line discipline as above, driven by
+    // a program instead of the keyboard driver — what a terminal emulator, an
+    // `ssh` server, `script(1)` or `expect(1)` needs.
+    handlers[SYS_PTY_CREATE as usize] = Some(handlers::sys_pty_create);
+    handlers[SYS_PTY_MASTER_WRITE as usize] = Some(handlers::sys_pty_master_write);
+    handlers[SYS_PTY_MASTER_READ as usize] = Some(handlers::sys_pty_master_read);
+    handlers[SYS_PTY_MASTER_TRY_READ as usize] = Some(handlers::sys_pty_master_try_read);
+    handlers[SYS_PTY_SLAVE_WRITE as usize] = Some(handlers::sys_pty_slave_write);
+    handlers[SYS_PTY_CLOSE as usize] = Some(handlers::sys_pty_close);
+    handlers[SYS_PTY_DUP as usize] = Some(handlers::sys_pty_dup);
+    handlers[SYS_PTY_SLAVE_ID as usize] = Some(handlers::sys_pty_slave_id);
+    handlers[SYS_PTY_POLL as usize] = Some(handlers::sys_pty_poll);
+    handlers[SYS_PTY_GET_WINSIZE as usize] = Some(handlers::sys_pty_get_winsize);
+    handlers[SYS_PTY_SET_WINSIZE as usize] = Some(handlers::sys_pty_set_winsize);
+    handlers[SYS_PTY_GET_TERMIOS as usize] = Some(handlers::sys_pty_get_termios);
+    handlers[SYS_PTY_SET_TERMIOS as usize] = Some(handlers::sys_pty_set_termios);
 
     // POSIX signal shim (522–526). SYS_SIGNAL_RETURN (524) is a
     // frame-modifying syscall handled specially in syscall_handler_inner,
@@ -853,6 +877,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_process_group_syscalls()?;
     test_dispatch_ctty_syscalls()?;
     test_dispatch_termios_syscalls()?;
+    test_dispatch_pty_syscalls()?;
     test_dispatch_tty_job_control()?;
     test_dispatch_wait_process_group_filter()?;
     test_dispatch_signal_stop_self_rejects_non_stop_signals()?;
@@ -1250,7 +1275,13 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
         Err(KernelError::InternalError)
     }
 
-    let saved = tty::get_termios();
+    // Explicitly the console: this test runs during boot from a kernel task,
+    // which has no controlling terminal, so it is also the device the syscalls
+    // under test resolve to (`handlers::current_tty` falls back to `CONSOLE`).
+    // Naming it here rather than relying on that fallback keeps the assertions
+    // meaningful if the fallback ever changes.
+    let dev = tty::CONSOLE;
+    let saved = tty::get_termios(dev);
 
     // (1) A null pointer is InvalidArgument, not a fault or a silent success.
     //     This also proves both numbers are registered: an unregistered
@@ -1279,14 +1310,14 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
     //     what libc used to drop on the floor.
     let mut raw = saved;
     raw.c_lflag &= !(tty::lflag::ICANON | tty::lflag::ECHO);
-    tty::set_termios(raw);
-    let read_back = tty::get_termios();
+    tty::set_termios(dev, raw);
+    let read_back = tty::get_termios(dev);
     if read_back.c_lflag & tty::lflag::ICANON != 0 {
-        tty::set_termios(saved);
+        tty::set_termios(dev, saved);
         return fail("ICANON survived a raw-mode set");
     }
     if read_back.c_lflag & tty::lflag::ECHO != 0 {
-        tty::set_termios(saved);
+        tty::set_termios(dev, saved);
         return fail("ECHO survived a raw-mode set");
     }
 
@@ -1295,20 +1326,177 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
     //     `termios_to_wire`/`termios_from_wire`.
     let wire = raw.to_bytes();
     if wire.len() != tty::TERMIOS_BYTES {
-        tty::set_termios(saved);
+        tty::set_termios(dev, saved);
         return fail("termios wire size is not TERMIOS_BYTES");
     }
     if tty::Termios::from_bytes(&wire) != raw {
-        tty::set_termios(saved);
+        tty::set_termios(dev, saved);
         return fail("termios did not survive a to_bytes/from_bytes round trip");
     }
 
-    tty::set_termios(saved);
-    if tty::get_termios() != saved {
+    tty::set_termios(dev, saved);
+    if tty::get_termios(dev) != saved {
         return fail("failed to restore the original termios");
     }
 
     serial_println!("[syscall]   Native termios (541/542) reaches the line discipline: OK");
+    Ok(())
+}
+
+/// Verify the pty syscalls (544–554) are registered and, above all, that the
+/// **ownership gate** holds.
+///
+/// This test cannot exercise the happy path: it runs from a kernel task, which
+/// owns no process, so it holds no handles and `SYS_PTY_CREATE` deliberately
+/// refuses it (a kernel task has no handle table, so a pty created for one
+/// would leak for the rest of the boot).  What it *can* check is the part that
+/// matters most, and the check is meaningful precisely because a live pty
+/// exists during it:
+///
+/// Every other IPC handle in this kernel is self-authorising, which is sound
+/// because the values are unguessable.  A [`crate::tty::pty::PtyHandle`] is
+/// `(tty_id << 1) | end` — enumerable — and a master handle is the authority to
+/// type arbitrary bytes at whatever shell is on the other end.  So a caller
+/// that names a handle it does not hold must be refused *even when the handle
+/// names a pty that really exists*, which is the case a test against a
+/// non-existent pty would not distinguish.  That is why this creates one first.
+///
+/// It also pins the two reserved raw values.  `0` means "my controlling
+/// terminal" for the terminal-naming syscalls and `1` would decode as "the
+/// slave of tty 0" — and tty 0 is the console, not a pty.  Both must be refused
+/// by the handle-only syscalls rather than silently decoded.
+fn test_dispatch_pty_syscalls() -> KernelResult<()> {
+    use crate::tty::pty;
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: pty: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    let invalid = i64::from(KernelError::InvalidHandle.code());
+    let no_proc = i64::from(KernelError::NoSuchProcess.code());
+
+    // A real, live pty that this task does not own.  Everything below is a
+    // *deliberate* attempt to reach it without a handle.
+    let (m, s) = match pty::create() {
+        Ok(pair) => pair,
+        Err(_) => return fail("could not create a pty to test against"),
+    };
+    let id = m.id();
+
+    // A non-null, deliberately *unmapped* user address.  The ownership check
+    // runs before any buffer is validated or touched, so a handler that
+    // reaches the pointer at all has already failed the test — and it fails it
+    // as `InvalidAddress`, a verdict distinct from every expected one, rather
+    // than silently reading kernel memory, which is what passing a real kernel
+    // buffer here would have allowed.  (`mm::user` is what makes reaching it a
+    // rejected copy rather than a kernel #PF; see `validate_kernel_range`.)
+    const UNMAPPED_USER_PTR: u64 = 0x1000;
+    let args_for = |handle: u64| SyscallArgs {
+        arg0: handle,
+        arg1: UNMAPPED_USER_PTR,
+        arg2: 1,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+
+    // (1) An unowned but *existing* master handle is refused.  This is the
+    //     keystroke-injection case: without the gate, `dispatch` here would
+    //     succeed and feed a byte into the pty's line discipline.
+    for (nr, name) in [
+        (SYS_PTY_MASTER_WRITE, "SYS_PTY_MASTER_WRITE"),
+        (SYS_PTY_MASTER_TRY_READ, "SYS_PTY_MASTER_TRY_READ"),
+        (SYS_PTY_CLOSE, "SYS_PTY_CLOSE"),
+        (SYS_PTY_DUP, "SYS_PTY_DUP"),
+        (SYS_PTY_SLAVE_ID, "SYS_PTY_SLAVE_ID"),
+        (SYS_PTY_POLL, "SYS_PTY_POLL"),
+    ] {
+        let got = dispatch(nr, &args_for(m.raw())).value;
+        if got != invalid && got != no_proc {
+            serial_println!("[syscall]     ({} returned {} for an unowned handle)", name, got);
+            let _ = pty::close(m);
+            let _ = pty::close(s);
+            return fail("a pty handle the caller does not own must be refused");
+        }
+    }
+
+    // (2) The reserved raw values are refused by the handle-only syscalls
+    //     rather than decoded into tty 0 (the console).  `SYS_PTY_POLL` on raw
+    //     `0` would otherwise report on the console's non-existent pty.
+    for raw in [0u64, 1] {
+        let got = dispatch(SYS_PTY_POLL, &args_for(raw)).value;
+        if got != invalid {
+            serial_println!("[syscall]     (SYS_PTY_POLL on raw {} returned {})", raw, got);
+            let _ = pty::close(m);
+            let _ = pty::close(s);
+            return fail("raw 0 and 1 are reserved and must be InvalidHandle");
+        }
+    }
+
+    // (3) Registration: an *unregistered* number reports NotSupported, which is
+    //     distinct from every verdict above, so reaching here proves each of
+    //     the numbers tested has a handler installed.  `SYS_PTY_CREATE` is the
+    //     one not covered by (1), so check it explicitly — and its refusal of a
+    //     kernel task is itself the contract that it does not leak a pty.
+    let none = SyscallArgs {
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let got = dispatch(SYS_PTY_CREATE, &none).value;
+    if got != no_proc {
+        serial_println!("[syscall]     (SYS_PTY_CREATE returned {} from a kernel task)", got);
+        let _ = pty::close(m);
+        let _ = pty::close(s);
+        return fail("SYS_PTY_CREATE from a kernel task should be NoSuchProcess (unregistered?)");
+    }
+
+    // (4) The four terminal-naming syscalls resolve `arg0 == 0` to the caller's
+    //     terminal — the console here — rather than treating it as a handle. A
+    //     null buffer is InvalidArgument, which also proves each is registered.
+    for (nr, name) in [
+        (SYS_PTY_GET_WINSIZE, "SYS_PTY_GET_WINSIZE"),
+        (SYS_PTY_SET_WINSIZE, "SYS_PTY_SET_WINSIZE"),
+        (SYS_PTY_GET_TERMIOS, "SYS_PTY_GET_TERMIOS"),
+        (SYS_PTY_SET_TERMIOS, "SYS_PTY_SET_TERMIOS"),
+    ] {
+        if dispatch(nr, &none).value != i64::from(KernelError::InvalidArgument.code()) {
+            serial_println!("[syscall]     ({} gave an unexpected verdict)", name);
+            let _ = pty::close(m);
+            let _ = pty::close(s);
+            return fail("a null buffer should be InvalidArgument (unregistered?)");
+        }
+    }
+
+    // (5) …and refuse an unowned handle in `arg0` *before* looking at the
+    //     buffer, so a caller cannot learn whether a pty exists, or push a
+    //     discipline onto someone else's shell, by naming it.
+    for (nr, name) in [
+        (SYS_PTY_GET_WINSIZE, "SYS_PTY_GET_WINSIZE"),
+        (SYS_PTY_SET_WINSIZE, "SYS_PTY_SET_WINSIZE"),
+        (SYS_PTY_GET_TERMIOS, "SYS_PTY_GET_TERMIOS"),
+        (SYS_PTY_SET_TERMIOS, "SYS_PTY_SET_TERMIOS"),
+    ] {
+        let got = dispatch(nr, &args_for(m.raw())).value;
+        if got != invalid && got != no_proc {
+            serial_println!("[syscall]     ({} returned {} for an unowned handle)", name, got);
+            let _ = pty::close(m);
+            let _ = pty::close(s);
+            return fail("a terminal named by an unowned handle must be refused");
+        }
+    }
+
+    let _ = pty::close(m);
+    let _ = pty::close(s);
+    if crate::tty::exists(id) {
+        return fail("the test pty outlived both its ends");
+    }
+
+    serial_println!("[syscall]   Pty syscalls (544-556) registered, ownership enforced: OK");
     Ok(())
 }
 
@@ -1357,7 +1545,7 @@ fn test_dispatch_tty_job_control() -> KernelResult<()> {
     if pcb::set_running(shell).is_err() {
         return fail("could not start the shell process", &[shell]);
     }
-    if pcb::ctty_acquire(shell).is_err() {
+    if pcb::ctty_acquire(shell, crate::tty::CONSOLE).is_err() {
         return fail("the shell could not claim the console", &[shell]);
     }
     let job = match pcb::fork_create(shell, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new()) {

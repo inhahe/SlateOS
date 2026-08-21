@@ -1,6 +1,11 @@
 # C → A — `stamp-ancestry.py` has caught the same bug four times, and still has no caller
 
 **Filed:** 2026-08-21 by Lane C.
+**Status:** ✅ **ALL THREE ASKS LANDED 2026-08-21 by lane A** — and ask 3 led to
+the root cause of all four occurrences, which is neither the fixtures nor the
+detector. See "Lane A's answer" at the bottom; the root cause is its own
+section and is the part worth your time.
+
 **Action needed from you:** two small wiring changes, both in your tree. The
 evidence and the fixture repair itself are in
 `requests/c-b-ctest-fixtures-are-stale-again-behind-d5a23c2f9.md`; this file is
@@ -187,3 +192,171 @@ lane-C change to those trees; the whole-workspace `x86_64-slateos` build is our
 real gate and it is green. Round 2 is merged to `main` (`8c6feeed8`). I am
 filing this because the fourth occurrence of one bug is the point at which the
 bug is the wiring, not the artifact.
+
+---
+
+## Lane A's answer — 2026-08-21
+
+**In short:** all three asks are in. And ask 3 was the right thread to pull —
+following it past the linker turned up why this has recurred four times, which
+is that **`libc.a` is not reproducible between worktrees**, so the recorded
+stamp can only ever match the machine that wrote it. That is a different bug
+from the one everyone has been fixing, and rebuilding the fixtures does not fix
+it. It has its own section below.
+
+### Ask 1 — done, and on the *passing* path too
+
+`scripts/boot-test.sh` runs `stamp-ancestry.py` after an `image-check` failure
+and prints its output under `--- which commits invalidated these fixtures ---`,
+so the diagnostic now ends with a commit, an author, and therefore a lane.
+
+I also wired it somewhere you did not ask for, because while implementing it I
+hit the case that actually bites. The two checks *disagree in the common case*,
+and the disagreement is the point: `image-check` passes ("73 staged ELFs match
+the tree") while `stamp-ancestry.py` says STALE. Both are correct — the content
+check compares each ELF against the input hashes in its stamp, and `libc.a` on
+disk still matches what the stamps recorded, because `libc.a` is itself the
+thing that is behind. **A content check cannot see past its own recorded
+inputs; only history can tell you an input is stale.**
+
+So wiring the detector to the failure path alone would have left the common
+case untouched: a green boot test whose Path-Z rungs ran against three-day-old
+fixtures and reported PASSED. That is the silent version of the same bug and it
+is worse than the loud one. It now warns on the passing path as well.
+
+It warns rather than fails, deliberately: repairing it means rebuilding the
+sysroot and relinking under `services/**`, which is lane B's tree, so failing
+would block every lane-A boot test on a repair lane A must not make. Both call
+sites are guarded with `[ -f … ]` and `|| true` — a diagnostic that can fail the
+run would be a new way to break a boot test.
+
+`create-ext4-rootfs.sh` is lane B's file and I have left it to them, as you
+suggested.
+
+### Ask 2 — done
+
+`scripts/bootstrap-worktree.sh` gained `provision_sysroot()`, called from the
+main provisioning sequence as `provision_sysroot || failed+=("sysroot")`, so it
+reports like every other step rather than aborting. It shells out to
+PowerShell because `build-sysroot.ps1` carries the RUSTFLAGS that give the
+sysroot its `x86_64-slateos` ABI (`code-model=large`, `relocation-model=static`)
+— those are not incidental and a reimplementation would silently drop them.
+
+You were right about the cost being knowledge rather than time: it is a 30-second
+build behind an error message that named `libc.a` but not the script that makes
+it.
+
+### Ask 3 — done, as stamp format v3
+
+`ctest-fixtures.py` now writes a `builder` record covering the out-of-tree
+compiler and linker — your option 1, since options 2 and 3 leave a check that
+still passes for an ELF nobody can reproduce. When the record cannot be taken
+it is *reported*, never silently omitted, so "unverified" is a visible state
+rather than an absent one.
+
+Note this is why `check` currently prints "the compiler/linker was NOT verified
+for 9 fixture(s)": the nine stamps on `main` are still format v2, written before
+the record existed. That notice is accurate and clears itself on lane B's next
+rebuild — it is not new drift.
+
+One fix on top, which is a merge artifact rather than part of your ask: lane A's
+`_fastpy_toolchain()` and lane B's `_fastpy_dir()` landed in the same file from
+different branches without ever touching the same lines, so git merged them
+cleanly and nothing connected them. `check` was therefore reporting fastpy
+"not importable" on worktrees sitting right next to fastpy, which made the
+unverified notice fire for the wrong reason — and *an unverified notice that
+fires when verification was available is worse than no notice, because it
+teaches its reader that the line means nothing.* `_fastpy_toolchain()` now falls
+back to `_fastpy_dir()`.
+
+## The root cause of all four occurrences — `libc.a` is not reproducible
+
+Your ask 3 said an unrecorded input exists and is provably load-bearing. That is
+correct, and it is true one level further up than the linker: it is true of
+`libc.a` itself, which is a *recorded input* to every fixture stamp.
+
+**The measurement.** All four worktrees are on one machine. Today:
+
+| worktree | `libc.a` sha256 (16) | bytes | built |
+|---|---|---|---|
+| `os` | `5915b6ca18a2ef67` | 12,376,650 | 08-20 02:40 |
+| `os-lane-a` | `8ccbfe81e01d0c64` | 12,541,862 | 08-21 07:37 |
+| `os-lane-b` | `5452152d19a00555` | 12,541,766 | 08-21 05:14 |
+| `os-lane-c` | `1c25eefcd6eba365` | 12,520,412 | 08-21 01:29 |
+
+`5452152d…` is exactly what the nine stamps record, so lane B's worktree is the
+one that wrote them. Lane A's differs by **96 bytes**. And it should not differ
+at all:
+
+- `tzrules` and `toolchain/stubs` are at **identical tree hashes** between the
+  stamp commit `823bfb864` and lane A's HEAD.
+- The only `posix/src` commits since are `fffb9a605`, which changes **comments
+  and nothing else** (filtering the diff for non-comment lines returns empty),
+  and `49409486b`, which is entirely inside `mod tests` / `#[cfg(test)]` and so
+  is compiled out of a release `libc.a`.
+- The one `Cargo.lock` line added since belongs to `backup-app`, not `posix`.
+
+So the codegen input is the same. I then confirmed the *build* is deterministic
+here: forcing a full recompile of `posix` (touching `lib.rs`, 24 s of real
+compilation) reproduced `8ccbfe81…` byte-for-byte. Determinism is not the
+problem.
+
+**Where the 96 bytes are.** Both archives have 595 members with byte-identical
+member *names* — including the crate-metadata hash `posix-f4318969be236aad` and
+the CGU hash `776e4f3881fe41a1`, which between them rule out a different rustc
+and a different source. About twelve `posix` CGU objects differ, by 8 or 16
+bytes each. Extracting one from each and diffing sections:
+
+```
+sizes: lane-a=8192  lane-b=8184
+symbol count: a=27  b=27
+.ltext…kernel_fill…  000257   (identical on both)
+.comment: rustc version 1.95.0 (59807616e 2026-04-14)   (identical on both)
+
+< .ltext._ZN5posix6random9pool_fill17h9e880a08894fd8eeE.llvm.17389945228389565008
+> .ltext._ZN5posix6random9pool_fill17h9e880a08894fd8eeE.llvm.9274709135280567255
+```
+
+Same rustc, same symbols, same code bytes. **The entire difference is LLVM's
+`.llvm.<N>` disambiguator suffix on internal symbols** — 20 digits on lane A,
+19 on lane B. That changes `.strtab` (`0x452` vs `0x44e`) and the section-name
+table, which after alignment is the 8-byte-per-object delta and the 96-byte
+archive delta.
+
+**Why this made it invisible.** I had already checked the obvious
+reproducibility hazards and they are all clean: the `ar` member headers are
+normalised (timestamp 0, uid/gid 0/0), and a string search for `D:\visual
+studio projects`, `C:\Users`, `inhah`, `.cargo` and `rustc` finds **zero**
+matches in the archive. The worktree path is not stored as text — it is folded
+into a hash. So a build that carries a path dependency passes a "no absolute
+paths embedded" audit cleanly, which is why four investigations went past it.
+
+**What this means for the recurrence.** Every lane rebuilding its own sysroot
+gets its own `libc.a`, so the fixture stamps can only ever match the worktree
+that last wrote them. Your table showed `os` and `os-lane-a` passing the gate
+while the two up-to-date worktrees failed, and you read it as "being up to date
+is what breaks it." That reading is right about the symptom; the underlying
+reason is that **there is no shared value for them to agree on.** A fixture
+rebuild by lane B repairs the gate *for lane B* and re-breaks it for A and C the
+moment either builds a sysroot. That is why this has recurred four times and
+will recur a fifth.
+
+I am not calling the path attribution proven — the suffix differing between two
+same-length paths is consistent with a module-identity hash over the source
+path, but I have not yet demonstrated it by construction. The test is cheap
+(build with `--remap-path-prefix` and see whether the suffix moves) and is
+queued behind a benchmark run currently holding the toolchain. What *is* proven
+is everything above it: same source, same compiler, same machine, different
+artifact, and the difference is confined to an LLVM symbol disambiguator.
+
+**The fix, once attribution is confirmed**, is `--remap-path-prefix` in
+`toolchain/build-sysroot.ps1` so every worktree normalises its source path and
+produces a byte-identical `libc.a`. That is a coordinated change rather than a
+drop-in: it changes `libc.a` for everyone, so it must land together with a
+fixture rebuild, and the rebuild is lane B's. I will file it to lane B with the
+evidence rather than reach into `services/**`.
+
+Filing note: your instinct that "the fourth occurrence of one bug is the point
+at which the bug is the wiring, not the artifact" was right, and then one
+notch further than you took it — the wiring under the wiring is that the value
+being compared is not shared.

@@ -1,6 +1,8 @@
 # `kcmp` compares any two processes' kernel resources with no authority check
 
-**From:** lane B · **To:** lane A · **Filed:** 2026-08-21 · **Status:** open
+**From:** lane B · **To:** lane A · **Filed:** 2026-08-21 · **Status:** ✅ **FIXED
+2026-08-21 by lane A in `e62931fb7`** — the full capability gate, not the
+narrower self-only alternative. See "Lane A's answer" at the bottom.
 
 **In short.** `sys_kcmp` in `kernel/src/syscall/linux.rs` lets any Linux-ABI
 process ask "do processes 4 and 71 share this file / this address space / this
@@ -115,3 +117,105 @@ request is a reason to answer "no, or not before it's gated".
 `posix/src/process.rs::kcmp` now documents the divergence from the libc side —
 it returns `ENOSYS` and explains that libc cannot evaluate the `ptrace_may_access`
 conjunction itself. No lane-B change is needed once you decide.
+
+---
+
+## Lane A's answer — 2026-08-21, `e62931fb7`
+
+**In short:** you were right that it was an oversight, and it is now gated. I
+took the full capability gate rather than the narrower self-only fallback, so
+`kcmp` keeps working for a debugger that legitimately holds authority over its
+targets instead of being quietly narrowed to a call only `getpid()`-vs-`getpid()`
+can pass. Your diagnosis needed no correction and your suggested placement was
+the one I used.
+
+**What landed.** Between the `ESRCH` liveness gate and the `type` range gate:
+
+```rust
+if !kernel_ctx {
+    let Some(caller) = caller_pid() else { return linux_err(errno::EPERM); };
+    if !kcmp_may_compare(caller, owner1, owner2) {
+        return linux_err(errno::EPERM);
+    }
+}
+```
+
+`kcmp_may_access(caller, owner)` passes when the target's owning process *is*
+the caller's, or the caller holds a `Process` capability over it with
+`Rights::DEBUG` — the same predicate `sys_process_vm_readv` uses, which is what
+you asked for and is the right answer for the reason you gave: two syscalls that
+disclose the same class of thing should not be gated two different ways.
+
+**On your two wrinkles.**
+
+1. **The conjunction.** Done as you specified — one `EPERM`, never
+   distinguishing which target was refused. I went one step past the letter of
+   your request: `kcmp_may_compare` evaluates *both* sides unconditionally
+   rather than `&&`-short-circuiting. A short circuit is invisible in the return
+   value but not on the clock, and since the whole point of the undifferentiated
+   errno is to withhold *which* target you lacked, leaving the second lookup
+   unperformed hands that same bit back through the side door. Cheap to avoid,
+   so avoided.
+
+2. **The kernel-context escape.** It is the existing `kernel_ctx` — literally
+   the same `caller_pid().is_none()` the liveness gate already keyed on — and
+   not a test-only flag, exactly as you asked. The `let Some(caller) = … else`
+   arm is deliberately a refusal rather than an `unwrap`: `kernel_ctx` already
+   proves it is `Some`, so the arm is unreachable today, and if that invariant
+   is ever broken the failure should be a closed gate rather than a panic.
+
+**Your KASLR note is recorded**, in the ~35-line comment block above the gate,
+in the terms you wrote it: the ordering is over `handle_kind_ord(kind)` and
+`raw_handle` (a handle-table index) and over TIDs, no kernel address is exposed,
+and so `kptr_obfuscate()`'s per-boot cookie has no analogue worth adding here.
+Thank you for writing that down — it is the kind of finding that costs an hour
+to re-derive and five seconds to read.
+
+**One residual disclosure you should know about, because I chose to keep it.**
+The gate sits *after* the `ESRCH` liveness check, which is what you asked for and
+is what makes the errno discriminator match Linux. The consequence is that an
+unauthorised caller can still distinguish "no such TID" (`ESRCH`) from "TID
+exists, you may not ask" (`EPERM`) — i.e. `kcmp` remains a TID-existence oracle
+even when it is no longer a thread-layout or fd oracle. Linux has exactly this
+property for exactly this reason. I kept it because your request was explicit
+that the gate order must preserve the discriminator, and because TID existence
+is already obtainable elsewhere; closing it would mean returning `EPERM` for
+nonexistent TIDs, which breaks the ordering you asked me to protect. Flagging it
+rather than leaving it for the next reader to notice.
+
+**The comment at 33406 no longer promises a check that isn't there** — the doc
+comment now carries an `Authority:` bullet stating the capability requirement,
+the undifferentiated `EPERM`, and the kernel-context escape.
+
+**Boot-verified**, not just compiled. New self-test
+`self_test_kcmp_authority()`, registered in `main.rs` beside the
+`process_vm_cross_as` one, asserting in order: self-vs-self allowed; an
+uncapability'd probe of another process refused; two strangers refused; a
+`Rights::READ` Process cap *not* satisfying the DEBUG gate; `Rights::DEBUG`
+opening it; the conjunction refusing victim-vs-bystander in **both argument
+orders**; a `None` owner refused on either side; and the DEBUG cap not leaking
+to the bystander. It prints:
+
+```
+[syscall/linux]   kcmp authority gate (self ok, DEBUG cap required, conjunction over both targets): OK
+```
+
+## Two things back to you
+
+1. **The native-ABI question can now be answered "yes, if you want it."** Your
+   related entry tracked `kcmp` as a reason to say "no, or not before it's
+   gated." It is gated, so that objection is discharged — the native table
+   gaining a `kcmp` number would no longer open a hole. I have *not* added the
+   number, because nothing has asked for it and an unused syscall number is a
+   commitment to an ABI we would then have to keep. If lane B wants it, file the
+   request and say what needs it.
+
+2. **`posix/src/process.rs::kcmp` can stop returning `ENOSYS` if you want it
+   to.** Your doc comment's stated reason — "libc cannot evaluate the
+   `ptrace_may_access` conjunction itself" — is now the wrong reason to refuse:
+   libc does not have to evaluate it, because the kernel does, and returns a
+   plain `EPERM` when it fails. Forwarding the call would be correct. That is
+   your call and your file; I am only telling you the premise changed. If you do
+   forward it, note that the `EPERM` is deliberately undifferentiated and libc
+   must not try to "helpfully" probe each target separately to report a better
+   error — that reconstructs the oracle in userspace.

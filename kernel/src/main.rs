@@ -3783,6 +3783,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // The same capability gate on the other syscall that needed it. `kcmp` had
+    // none until lane B audited it — it would tell any caller whether any two
+    // TIDs belonged to one process, and enumerate an arbitrary process's open
+    // descriptors through `KCMP_FILE`'s EBADF. Unit-level for the same reason
+    // as the test above: `caller_pid()` is `None` here, so the syscall takes
+    // its kernel-context escape and only the predicate is reachable.
+    if let Err(e) = syscall::linux::self_test_kcmp_authority() {
+        serial_println!("WARNING: Linux kcmp authority self-test failed: {:?}", e);
+    }
+
     // The layer underneath that one: `copy_{to,from}_user_as` walk another
     // process's page table by hand, so nothing faults and the two states a
     // fault would have fixed — an untouched committed page and a copy-on-write
@@ -5714,6 +5724,13 @@ extern "C" fn kernel_main() -> ! {
     // TTY/termios layer self-test (depends on the console being up so that
     // TIOCGWINSZ can report live dimensions).
     tty::self_test();
+
+    // Pseudo-terminal self-test.  Runs after `tty::self_test` because it
+    // creates real terminal devices through the same table and drives the
+    // line discipline end-to-end over them; a failure here means the
+    // discipline works for the console but not for a device with no keyboard
+    // driver behind it, which is precisely what a pty is.
+    tty::pty::self_test();
 
     // Terminal session multiplexer init + self-test.
     termsession::init();

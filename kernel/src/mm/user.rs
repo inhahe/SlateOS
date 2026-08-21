@@ -76,6 +76,11 @@ const PAGE_SIZE: u64 = 4096;
 /// process (bare kernel task), validation is skipped — kernel code
 /// uses kernel pointers that are always valid.
 ///
+/// The bypass is a *permission* answer, not a promise that the address is
+/// mapped: the copy primitives re-check that separately in kernel context
+/// (see [`validate_kernel_range`]), so a bogus pointer that gets past this
+/// still fails the copy rather than faulting the machine.
+///
 /// # Arguments
 ///
 /// - `ptr` — start of the buffer (from a userspace register).
@@ -242,6 +247,77 @@ fn validate_user_range(ptr: u64, len: usize, need_writable: bool) -> KernelResul
     Ok(())
 }
 
+/// Check that a range is actually mapped, for a copy performed in **kernel
+/// context**.
+///
+/// The permission question — "may this task touch this address?" — is answered
+/// by [`validate_user_read`] and friends, which bypass in kernel context
+/// because a bare kernel task legitimately passes kernel-half pointers that
+/// [`validate_user_range`]'s user-half rule would reject. This answers the
+/// *other* question, which that bypass silently dropped: is the address there
+/// at all.
+///
+/// It has to be asked, because `copy_from_user`/`copy_to_user` treat a
+/// successful validation as a licence to `rep movs` through the raw address.
+/// With validation bypassed wholesale, every user-pointer API degenerated in
+/// kernel context into an unchecked dereference: a kernel-context caller that
+/// reached one with a bogus pointer took an unrecoverable kernel #PF and halted
+/// the machine instead of getting an `InvalidAddress` it could report. The boot
+/// self-tests pass deliberately bogus pointers (`0x1000`) to exercise `EFAULT`
+/// gates, so the only thing keeping the kernel alive was that each individual
+/// handler remembered to short-circuit on `caller_pid() == None` *before* the
+/// copy — a per-handler obligation nothing enforced, and one that a diagnostic
+/// hook on the dispatch tail (which runs after every handler, gate or no gate)
+/// broke on its first boot.
+///
+/// Checking it here rather than in the validators keeps the validators'
+/// answers unchanged — a great many self-tests depend on the bypass letting a
+/// bogus pointer *past validation* so that a later gate can be observed — while
+/// making the dereference itself unable to fault.
+///
+/// `translate` resolves 1 GiB and 2 MiB leaves as well as 4 KiB ones, so a
+/// kernel pointer into a huge-page-mapped region (the HHDM, the kernel image)
+/// passes normally. The cost is a page-table walk per page on a path only
+/// kernel tasks take; no user syscall reaches it.
+///
+/// No CoW break and no demand-paging fault-in: both are properties of a
+/// *process's* address space, and there is no process here. A kernel-half page
+/// that is not present will not become present by being asked.
+#[allow(clippy::arithmetic_side_effects)]
+fn validate_kernel_range(ptr: u64, len: usize, need_writable: bool) -> KernelResult<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    if ptr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    let end = ptr
+        .checked_add(len as u64)
+        .ok_or(KernelError::InvalidAddress)?;
+
+    let cr3 = page_table::read_cr3();
+    let pml4 = page_table::cr3_to_pml4(cr3);
+
+    let mut addr = ptr & !(PAGE_SIZE - 1);
+    while addr < end {
+        let virt = VirtAddr::new(addr);
+        if page_table::translate(pml4, virt).is_none() {
+            return Err(KernelError::InvalidAddress);
+        }
+        if need_writable {
+            match page_flags(pml4, virt) {
+                Some(flags) if flags.contains(PageFlags::WRITABLE) => {}
+                // A read-only kernel mapping (`.rodata`, the kernel text) is a
+                // genuine fault for a would-be writer, and unlike the user
+                // case there is no CoW to break.
+                _ => return Err(KernelError::InvalidAddress),
+            }
+        }
+        addr = addr.saturating_add(PAGE_SIZE);
+    }
+    Ok(())
+}
+
 /// Fault in a not-present user page that is backed by a committed VMA
 /// but has not been populated yet (demand paging).
 ///
@@ -255,8 +331,9 @@ fn validate_user_range(ptr: u64, len: usize, need_writable: bool) -> KernelResul
 /// caller's post-check.
 ///
 /// Returns `false` for bare kernel tasks (no owning process) — those use
-/// kernel-space pointers and never reach this path because
-/// [`validate_user_range`] is skipped for them via [`is_kernel_context`].
+/// kernel-space pointers and never reach this path, because
+/// [`is_kernel_context`] routes them to [`validate_kernel_range`], which does
+/// not attempt demand paging.
 fn try_fault_in_user_page(addr: u64, need_writable: bool) -> bool {
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
@@ -351,6 +428,12 @@ pub unsafe fn copy_from_user(user_src: u64, kernel_dst: *mut u8, len: usize) -> 
 
     // Validate the user source range.
     validate_user_read(user_src, len)?;
+    // In kernel context the line above answers `Ok(())` unconditionally, which
+    // is a permission verdict and not a mapping one — so confirm the range is
+    // really there before dereferencing it.  See `validate_kernel_range`.
+    if is_kernel_context() {
+        validate_kernel_range(user_src, len, false)?;
+    }
 
     // SAFETY: We validated user_src is mapped and readable.
     // STAC/CLAC provide SMAP-safe access.
@@ -390,6 +473,10 @@ pub unsafe fn copy_to_user(kernel_src: *const u8, user_dst: u64, len: usize) -> 
 
     // Validate the user destination range (must be writable).
     validate_user_write(user_dst, len)?;
+    // Kernel context: see the matching note in `copy_from_user`.
+    if is_kernel_context() {
+        validate_kernel_range(user_dst, len, true)?;
+    }
 
     // SAFETY: We validated user_dst is mapped and writable.
     // STAC/CLAC provide SMAP-safe access.
@@ -695,6 +782,12 @@ unsafe fn user_atomic_u32(addr: u64) -> KernelResult<&'static core::sync::atomic
     // sure the word is a real futex location the owning process could have
     // written, and requiring write permission keeps one rule for all ops.
     validate_user_write(addr, 4)?;
+    // Kernel context: see the note in `copy_from_user` — the validator above
+    // bypasses, so the mapping still has to be confirmed before the atomic
+    // touches the word.
+    if is_kernel_context() {
+        validate_kernel_range(addr, 4, true)?;
+    }
     // SAFETY: `addr` is 4-byte aligned (checked above) and validated as a
     // mapped, writable user address, so it is a valid place for a `u32`.
     // `AtomicU32` has the same size and alignment as `u32` and no validity
@@ -1194,6 +1287,75 @@ pub fn self_test() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+    }
+
+    // Test 7: a copy through a bogus pointer *from kernel context* fails
+    // rather than faulting the machine.
+    //
+    // This is a regression test with a body count. `validate_user_read` returns
+    // `Ok(())` unconditionally in kernel context, which used to be the whole
+    // check `copy_from_user` performed — so the copy went on to `rep movs`
+    // through whatever address it was handed, and an unmapped one halted the
+    // kernel with an unrecoverable #PF. Nothing in the type system or the
+    // review checklist flagged it; what kept the kernel alive was that each
+    // handler happened to short-circuit on `caller_pid() == None` before
+    // copying. A diagnostic hook on the dispatch tail — which by construction
+    // runs after handlers that returned *before* their gate — found the hole on
+    // its first boot.
+    //
+    // This test runs in exactly that context (the boot self-test task owns no
+    // process), so a regression does not merely fail it: it re-panics the
+    // kernel here, in a named test, instead of a thousand lines later.
+    let mut scratch = [0u8; 4];
+    // SAFETY: `scratch` is a live 4-byte stack array, so it is a valid
+    // destination.  The *source* is deliberately bogus — that is the point —
+    // and the contract under test is that `copy_from_user` rejects it.
+    match unsafe { copy_from_user(0x1000, scratch.as_mut_ptr(), scratch.len()) } {
+        Err(KernelError::InvalidAddress) => {} // Expected.
+        other => {
+            crate::serial_println!(
+                "[user]   FAIL: kernel-context copy from an unmapped address should be \
+                 InvalidAddress, got {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // And the write direction, which additionally has to reject a mapped but
+    // read-only kernel page.  `self_test`'s own code is in `.text`, which is
+    // mapped and not writable, so it is a source of one to hand over.
+    match unsafe { copy_to_user(scratch.as_ptr(), 0x1000, scratch.len()) } {
+        Err(KernelError::InvalidAddress) => {} // Expected.
+        other => {
+            crate::serial_println!(
+                "[user]   FAIL: kernel-context copy to an unmapped address should be \
+                 InvalidAddress, got {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    let text_addr = self_test as *const () as usize as u64;
+    match unsafe { copy_to_user(scratch.as_ptr(), text_addr, scratch.len()) } {
+        Err(KernelError::InvalidAddress) => {} // Expected.
+        other => {
+            crate::serial_println!(
+                "[user]   FAIL: kernel-context copy into read-only kernel text should be \
+                 InvalidAddress, got {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // A *mapped* kernel pointer must still work, or the check above would have
+    // broken every legitimate kernel-context caller instead of just the bogus
+    // ones.
+    let source = [0xA5u8, 0x5A, 0x11, 0x22];
+    // SAFETY: both ends are live stack arrays of 4 bytes.
+    unsafe { copy_from_user(source.as_ptr() as u64, scratch.as_mut_ptr(), 4)? };
+    if scratch != source {
+        crate::serial_println!("[user]   FAIL: kernel-context copy of a mapped range corrupted it");
+        return Err(KernelError::InternalError);
     }
 
     crate::serial_println!("[user] User memory validation self-test PASSED");

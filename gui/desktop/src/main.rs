@@ -56,8 +56,12 @@ fn main() {
         modifiers: Modifiers::alt(),
         text: None,
     };
-    desktop.handle_hotkey(&alt_f4);
-    println!("After Alt+F4: {} windows remaining", desktop.windows.len());
+    let closed = desktop.handle_hotkey(&alt_f4);
+    println!(
+        "Alt+F4 asked the compositor for {:?}; the shell still shows {} windows",
+        closed.requests,
+        desktop.windows.len()
+    );
 
     // Open the start menu and pick Settings out of it, the way a click would.
     let start = desktop.start_button_rect();
@@ -116,7 +120,7 @@ fn main() {
     };
     println!(
         "Escape closed it: {} (still open: {})",
-        desktop.handle_hotkey(&escape),
+        desktop.handle_hotkey(&escape).consumed,
         desktop.calendar.visible
     );
 
@@ -130,10 +134,12 @@ fn main() {
         );
     }
 
-    // Test virtual desktop switching
-    desktop.switch_desktop(1);
+    // Test virtual desktop switching. Which desktop is showing is the shell's
+    // own; which window then has the keyboard is not, so the switch hands back a
+    // request the same way a click does.
+    let raise = desktop.switch_desktop(1);
     println!(
-        "Switched to desktop {}: {} visible windows",
+        "Switched to desktop {}: {} visible windows, raise {raise:?}",
         desktop.current_desktop_number(),
         desktop.visible_windows().len()
     );
@@ -164,8 +170,11 @@ fn main() {
 
     let button = desktop.taskbar_button_rect(1);
     match desktop.handle_mouse(&click(button.x + button.w / 2.0, button.y + button.h / 2.0)) {
-        ShellAction::Control { window, action } => {
-            println!("Taskbar asked the compositor for {action:?} on {window:?}");
+        ShellAction::Control(request) => {
+            println!(
+                "Taskbar asked the compositor for {:?} on {:?}",
+                request.action, request.window
+            );
         }
         other => println!("Taskbar returned {other:?}"),
     }

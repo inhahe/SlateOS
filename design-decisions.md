@@ -29526,6 +29526,1308 @@ radius; sending a span straight to the framebuffer past the clip stack;
 disabling rounding entirely; starting the middle band a row late; and making
 the middle quad a pixel narrow.
 
+---
+
+## §253 — `requeue` means "re-enqueue if still Running", so every parking call site passes `true`
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** When a thread wants to stop running — because it is waiting for
+something, or because a shell pressed Ctrl-Z on it — it does two things in a
+row: it writes down "I am no longer running", and then it actually hands the CPU
+to somebody else. Those are two separate steps, and the timer can interrupt
+between them. If it does, the thread is handed off early, and by the time it
+gets to its own hand-off step the thing it was waiting for may have already
+happened and put it back to work. It then executes a hand-off written on the
+assumption that it still needed one — and that hand-off says "do not put me back
+in the queue." Nothing ever runs it again. The fix is to make that instruction
+conditional: "put me back only if I am still running," which is a no-op in the
+ordinary case and a rescue in the raced one.
+
+### The window
+
+Every self-parking path in `kernel/src/sched/mod.rs` has the same shape:
+
+```rust
+{ let mut state = SCHED.lock(); task.state = TaskState::Blocked; }  // or Suspended
+schedule_inner(false, SwitchKind::Voluntary);
+```
+
+The state write and the switch are under *different* acquisitions of `SCHED`.
+Between the unlock and `schedule_inner`'s own lock, `do_deferred_preempt` can
+fire: it is called from the IRQ exit path, and all four of its guards are open
+there (not idle, not in softirq, `preempt_count == 0`, `SCHED` unlocked).
+
+An involuntary preempt in that window is *not* itself the bug. `schedule_inner`'s
+requeue guard declines to re-enqueue a non-`Running` task, which is exactly a
+park — and the wake or resume the task was waiting for then finds it parked and
+works normally. The task is re-enqueued, picked, and set `Running`, and returns
+from the preempt.
+
+The bug is the next instruction it executes: the `schedule_inner(false, …)` it
+was about to call, now reached with the wakeup already spent. `requeue = false`
+switches the task away while it is `Running` — off every run queue, not
+`Blocked`, with nothing outstanding that could ever enqueue it again. It never
+runs, and everything waiting on it waits forever.
+
+### The decision
+
+`requeue` was documented as "if true, the current task is placed back in its
+priority queue". It has never meant that: the guard has always tested
+`state == Running` first. Read correctly, `requeue = true` from a parking site is
+not a contradiction — it means *"park me, unless I am somehow still Running, in
+which case put me back."* Which is precisely the wanted behaviour in both cases.
+
+So `block()`, `suspend()` and `park_if_suspended()` now pass `true`. In the
+ordinary case the state is `Blocked`/`Suspended`, the guard declines, and the
+task parks byte-for-byte as before. In the raced case it is enqueued instead of
+stranded.
+
+`exit()` keeps `requeue = false` — it is the one site where the task genuinely
+must never be scheduled again, and it sets `Dead`, which the guard also declines.
+
+### Alternatives considered
+
+- **Bracket each window with `preempt_disable`/`preempt_enable`.** Works, and is
+  what `stop_process_for_signal` does for a *different* window (below). Rejected
+  as the general answer because it adds a preempt-disabled region to `block()` —
+  the hottest path in the kernel, taken by every channel recv and every futex
+  wait — to fix something the existing guard already had the information to
+  handle. Paying a cost on every block to cover a rare race is the wrong shape.
+- **Teach the requeue guard to recognise a "pending park".** Rejected: it puts
+  caller-side sequencing knowledge into the scheduler's hot path, and weakens a
+  guard whose job is to *not* resurrect tasks another CPU suspended.
+- **Leave it and rely on the wake being idempotent.** It is not. `wake()` acts on
+  `Blocked`; by then the task is `Running`, so a second wake is dropped.
+
+### Cost
+
+One extra `state.tasks.get_mut` + state comparison on the park path, inside a
+lock already held. No new allocation, no new lock, no change to the switch
+itself. Against that: a class of permanent hang that is invisible until it
+happens and leaves no diagnostic when it does.
+
+A one-shot `BUG` warning now fires if any `requeue = false` switch is ever
+applied to a still-`Running` task (`Uncounted`/`exit` exempt), so a future
+regression of this class announces itself on the serial log instead of
+presenting as an intermittent hang three thousand lines later.
+
+### The related, but distinct, window this does *not* cover
+
+`stop_process_for_signal` (`kernel/src/syscall/handlers.rs`) has a second window
+with the same trigger and a different cause, reported by lane B in
+`requests/b-a-self-stop-announcement-window-is-preemptible-and-strands-the-child.md`.
+There the thread is marked `Suspended` *before* the stop is announced to the
+parent, deliberately, so that a `SIGCONT` racing the announcement finds something
+to resume. A preempt inside that region is the one case that is **not** benign:
+the announcement is the only thing that would ever cause a `resume()`, so a task
+parked before it runs is parked with nobody aware it stopped. `requeue = true`
+cannot help — there is no wake to have raced. That region is bracketed with
+`preempt_disable`/`preempt_enable` instead, released after the announcement is
+published and before the park, because from that point onwards a preempt *is* the
+benign kind.
+
+Two serial prints sit inside the bracketed region. Moving them out would shorten
+it, but the ordering of `[sched] Suspended` / `[signal] stopped` / `[sched]
+Resumed` is exactly what diagnosis of this bug class reads — and an earlier fix
+in this same function (§ the `SIGCONT`-beats-`SIGSTOP` race) was *caused* by
+believing a misordered log. An atomic region emits them as a faithful trace. The
+cost is one deferred tick on one CPU.
+
+### Amendment, same day: this decision was right and its implementation was not
+
+Passing `requeue = true` from the parking sites is correct and stays. But
+`requeue` was gating a **second** thing 300 lines further down `schedule_inner`,
+which the change above did not look at: whether an empty run queue means "idle
+until something is runnable" or "just return to the caller". Under
+`requeue = true` it meant the latter, so `block_current()` on an empty run queue
+returned to a task it had just marked `Blocked` — a busy spin, and, for the
+first task it happened to, a permanent strand. It hung the next boot in the
+barrier self-test.
+
+Fixed by deciding that question from the current task's *state* instead of from
+`requeue`, which also fixes a quieter bug of the same origin (a throttled task
+was resumed rather than idled, so CPU bandwidth control was ignored whenever the
+run queue was empty). Full write-up: `known-issues.md`
+→ `BUG-BLOCKED-TASK-RESUMED-IN-PLACE`.
+
+The transferable part: **a boolean parameter that gates two different decisions
+is two parameters sharing a name**, and changing what callers pass requires
+reading every use of it in the callee, not only the use the change is about. The
+commit message for `0f9f912e5` is a careful and correct argument about the one
+use it examined.
+
+## §254 — The fixture stamp records the out-of-tree linker, and a stamp that predates the record is a note rather than a failure
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** Each `services/ctest-*` test program is checked into git twice —
+once as C source, once as the compiled binary the boot test runs — and a
+"stamp" file records a fingerprint of everything that went into the binary, so
+that editing the source without rebuilding the binary is caught. The stamp
+listed only files from this repository. But the compiler and the linker that
+actually produce the binary live in a *different* project (fastpy) that is
+being developed at the same time, and nothing recorded which version of them
+was used. Change the linker and every committed binary quietly stops matching
+its sources, while every stamp still reports "ok" — because the thing that
+moved was never on the list. The stamp now records those two tools as well. The
+awkward part is that adding a field invalidates all nine existing stamps at
+once, and repairing them means rebuilding binaries that belong to a different
+lane; so an old-format stamp prints a note and keeps going, instead of failing
+the build for everyone.
+
+### The omission
+
+`services/ctest-*/build.py` does two things: it runs `zig cc` to compile
+`main.c` to an object, then calls `compiler.toolchain._link_slateos` — a
+function in fastpy — to link that object against the sysroot `libc.a`. That
+function chooses the entry symbol, the lld flavor, `-static`,
+`--no-dynamic-linker`, and the archive search order. `_find_zig_cc` and
+`_find_rust_lld` choose the binaries.
+
+None of that was in the stamp, which listed `build.py`, `main.c` and `libc.a`.
+`build.py` was included because it "*is* the compile and link flags" — true of
+the `zig cc` half, and false of the link half, which is one function call whose
+body is in another repository.
+
+Lane C named the shape exactly (`requests/c-a-the-staleness-detector-has-no-
+caller.md`): *a proof that lives in a different statement from the code it
+justifies*. The stamp is not merely stated separately from the artifact; it is
+stated in terms of a set of inputs it also chose, and nothing audits that set.
+
+### The decision
+
+Stamp format **v3** adds three `builder` lines:
+
+```
+builder compiler.toolchain sha256 <sha256 of fastpy's toolchain.py, CRLF-folded>
+builder rust-lld version <self-reported version, whitespace-collapsed>
+builder zig version <self-reported version, whitespace-collapsed>
+```
+
+Three sub-decisions inside that, each with a real alternative:
+
+**A hash of `toolchain.py`, not fastpy's version.** Lane C ranked a version pin
+second. fastpy's standing rule is that its version bumps on every observable
+change, which makes it a *stable* identifier — but the rule is prose, enforced
+by whoever remembers it, not by the build. A pin reading `0.1.0` proves that
+somebody bumped, not that the file is unchanged. For a stamp whose entire
+purpose is "prove this artifact matches its inputs", a hash is the honest
+answer and a version string is a promise about a hash. *Cost, accepted
+explicitly:* the gate goes STALE whenever fastpy edits `toolchain.py` for any
+reason, including reasons nowhere near `_link_slateos`, and fastpy is under
+active development so that will not be rare. That is correct anyway — if the
+recipe changed, the committed ELF genuinely is no longer reproducible from
+current inputs, and "rebuild" genuinely is the right answer.
+
+**Versions, not hashes, for the two binaries.** `rust-lld` and `zig` are
+installed rather than committed, tens of megabytes each, and their bytes differ
+between machines running the same release. Hashing them would report drift on
+every second worktree — which is the `sha256_text` mistake (§ the v2 CRLF
+finding) repeated at toolchain scale, and a false STALE here blocks the image
+build on every machine except the one that wrote the stamp. The self-reported
+version is the coarsest identifier that still moves when behaviour does.
+
+**The `version` field states what the stamp contains, not what wrote it.**
+`check` and `stamp` are documented to work on a machine with no zig and no
+fastpy — that is why the ELFs are tracked in git at all — so the record cannot
+always be taken. Rather than write a v3 stamp with the `builder` lines missing,
+`compute()` writes `version 2` when it could not look. A v3 stamp therefore
+*always* carries the linker identity. The alternative (v3 with optional fields)
+makes an absent `builder` line ambiguous between "old format" and "written
+somewhere that could not look" — and an ambiguous field that defaults to "fine"
+is the silent pass this entire mechanism exists to remove.
+
+### Why an old stamp is a note and not an error
+
+The pre-existing rule was that a version mismatch is a hard error, on the
+sound reasoning that v1 and v2 hashes were computed under different rules and
+comparing them "could only produce an unfounded accusation."
+
+That reasoning does not extend to v2 → v3. v3 changes no existing hash; it only
+adds fields. The two formats are comparable on everything they both describe.
+So `COMPARABLE_FROM = 2` now bounds the error, and a v2 stamp gets its in-tree
+inputs verified in full, with the builder lines elided from both sides and one
+`NOTE` printed per run naming the fixtures that were not fully checked.
+
+The alternative was a flag day: bump, accept that `check` fails, and coordinate
+a simultaneous re-stamp. Rejected on two grounds.
+
+1. **It reds the gate in all three lanes for a record nobody has had a chance
+   to write.** `scripts/create-ext4-rootfs.sh` exits 1 on a stamp mismatch, so
+   every lane's image build breaks until the rebuild lands — and the only
+   escape hatch, `ALLOW_STALE_FIXTURES=1`, switches off the genuine check
+   alongside the spurious one.
+2. **The repair is not mine to make.** Re-stamping means rebuilding nine ELFs
+   under `services/**`, which is lane B's tree, and `requests/a-c-fixture-
+   rebuild-was-correct-on-lane-c-and-wrong-on-main.md` is the standing rule
+   that the wrong lane must not do that rebuild. A gate that fails the build
+   for something its reader is *forbidden* to fix is the same defect as no
+   gate at all, one step over.
+
+With the note instead, the change lands green, the gap is visible on every
+`check`, and lane B's next rebuild upgrades each fixture to v3 with no
+coordination at all.
+
+### One version per format
+
+Bumping `STAMP_VERSION` also silently broke the *sysroot* stamp, which shared
+the constant. `sysroot_staleness()` diffs the on-disk sysroot stamp against a
+fresh `compute_sysroot()` through `_describe_drift`, which compares every field
+including `version` — so the bump reported `libc.a` as built from changed
+inputs, a hard error raised *before* any per-fixture verdict, on every machine
+whose stamp predated the bump. The image manifest escaped only by accident: its
+reader ignores the version field.
+
+Three formats now have three constants. Recorded here rather than only in a
+comment because the failure is invisible until it fires, and because "one
+version constant per format" is the kind of rule that gets undone by the next
+person who sees three constants with the same value.
+
+### Addendum: the rule was undone at the very next merge, exactly as predicted
+
+The paragraph above guessed how this would be lost, and it took one merge. Lane
+B's `0f0d436df` ("rootfs: stage CPython, and cover non-ELF payload in the image
+manifest") rewrote `cmd_image_stamp` on `main` — correctly widening
+`_staged_elfs()` to `_staged_artifacts()`, since the image now carries a stdlib
+zip as well as ELFs — and, working from a tree that had never seen this entry,
+wrote `version {STAMP_VERSION}` back into the image header.
+
+Git could not have caught it. Both branches rewrote the same two lines, so it
+surfaced as an ordinary text conflict, and either side taken whole is wrong:
+ours loses the non-ELF payload, theirs loses the version split. The merge
+(`d5d94ac1a`) takes `_staged_artifacts()` from `main` and `IMAGE_STAMP_VERSION`
+from here, which is what neither branch could produce alone.
+
+Worth stating as its own lesson, since this arrangement guarantees more of
+them: **a conflict is not a request to choose a side.** When two lanes changed
+the same lines for unrelated reasons, "ours" and "theirs" are both regressions,
+and the merge is the only place the union can be written. The same merge had a
+second instance, and the harder kind — lane A's `_fastpy_toolchain()` demanded
+`PYTHONPATH` while lane B's new `_fastpy_dir()` already located the sibling
+checkout automatically. They never touched the same lines, so there was no
+conflict, and *because* there was no conflict nothing prompted anyone to connect
+them. `check` had been printing "this machine cannot resolve them" on worktrees
+that could resolve them all along. Textual conflicts are the merges git can
+find; these are the ones it cannot.
+
+
+---
+
+## §255 — A full timer queue refuses the newest request; it does not evict an armed one
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** the kernel keeps a per-CPU list of pending timers — alarms set by
+code that is waiting for something and wants to give up after a while. The list
+had a fixed size, and when it filled up the code threw away the alarm with the
+most distant deadline to make room for the new one. Whoever set the discarded
+alarm was never told, so they waited forever for a wake-up that had been
+deleted. This decides what to do instead: refuse the *new* request, tell the
+new caller, and never touch an alarm that is already set.
+
+### The situation
+
+`kernel/src/hrtimer.rs`'s `schedule_absolute` did, on reaching
+`MAX_TIMERS_PER_CPU`:
+
+```rust
+serial_println!("[hrtimer] WARNING: per-CPU timer limit reached — oldest timer evicted");
+state.timers.pop(); // Remove the last (furthest) timer.
+```
+
+Every hrtimer call site in the tree is a wait-with-timeout —
+`channel_recv_timeout`, `futex_wait_timeout`, eventfd/pipe/stream-socket
+timeouts, `timerfd`, `itimer`, the container restart backoff. So the evicted
+entry always belongs to a task that is blocked and expecting it. Discarding it
+converts a timeout into an indefinite block, silently, in a subsystem chosen at
+random by whichever deadline happened to be furthest out. It fired 1541 times in
+one boot (`known-issues.md` → `BUG-HRTIMER-EVICTS-AN-ARMED-TIMER`).
+
+### The decision
+
+Three parts.
+
+**1. Never evict.** An armed timer is a promise to a task that has already
+committed to blocking. There is no capacity pressure worth breaking that for.
+
+**2. Refuse the newest request at a hard ceiling, rather than growing without
+limit.** *What changes:* at 4096 pending timers on one CPU, `schedule_ns`
+returns a handle for a timer that was never inserted, and a one-shot `*** BUG:`
+line names the ceiling.
+
+This is genuinely worse for the refused caller than for a caller in a healthy
+system — it will block without its timeout. The reason it is still right: the
+harm now lands on the request that is *arriving into* an already-broken
+condition, not on an arbitrary earlier caller that did nothing wrong. And it is
+diagnosable — there is a message, a counter (`refused_count()`), and the caller
+is on the stack. The old behaviour was harm to a random victim with no record
+at all.
+
+The considered alternative was returning `Option<HrTimerHandle>` and making all
+23 call sites handle refusal. That is the honest signature and it is the right
+end state, but it is a different change: the callers' correct behaviour on
+refusal is "fail the syscall with a timeout-ish errno", which is 23 separate
+semantic decisions, and bundling them with a lost-wakeup fix would make neither
+reviewable. The ceiling is set high enough that reaching it means the machine
+is already failing, which is why the interim is tolerable and not a fudge.
+
+**3. `MAX_TIMERS_PER_CPU` (256) demoted from limit to soft threshold.**
+*What changes:* crossing 256 is accepted and reported once instead of silently
+corrupting the queue. 256 is the depth past which no healthy workload should
+go — roughly one timer per task in a timed wait — so crossing it is evidence
+about a *caller*, and the diagnostic says so ("some caller is arming timers it
+never cancels"), which is what actually leads to the bug. In this case it led
+straight to `sleep_ns_interruptible`, which armed a timer per iteration and
+cancelled none.
+
+### Where the diagnostics go
+
+Both warnings moved out of the `without_interrupts` block and out of the lock.
+The original wrote to the serial port with interrupts disabled and the per-CPU
+timer lock held, once per overflowing schedule. Serial I/O with interrupts off
+delays the APIC tick that drains the timer queue — so the flood made the
+condition it was reporting measurably worse. Both are now one-shot.
+
+This is the same call made in §253's hardening branch and in the sleep-queue
+exhaustion warning: **a diagnostic on a saturation path must be rate-limited,
+because the path is by definition being taken at high frequency, and an
+un-limited print turns a squeeze into a livelock.** Three instances in one day
+is enough to state it as a rule rather than three coincidences.
+
+### Cost accepted
+
+The hard ceiling is 4096 against a sorted `Vec` with O(n) insert, so the
+worst-case insert is a ~160 KiB memmove with interrupts disabled — far outside
+the < 10 µs ISR latency target. That is a real regression in the *worst* case
+and no change at all in the normal one (the list is < 64 deep in a healthy
+boot). It is accepted only because it is bounded and logged: `todo.txt` carries
+the structural fix (min-heap with lazy cancel-by-id), with the one-shot
+soft-threshold warning as its trigger.
+
+
+---
+
+## §256 — A timer handle names the CPU that holds it, and that pins an invariant
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** the kernel keeps one list of pending alarms per processor core.
+Cancelling an alarm used to mean searching every core's list, one after another,
+with interrupts switched off for the whole search. That turned out to be slow
+enough to stop the clock interrupt itself from being delivered, which hung the
+machine. The fix is to write down, in the ticket you get when you set an alarm,
+*which* core's list it went on — so cancelling looks in one place. The cost is
+that this only works while alarms never move between lists, so that has to
+become a rule rather than an accident.
+
+### The situation
+
+`hrtimer::cancel` took a bare id and had to find the entry:
+
+```rust
+crate::cpu::without_interrupts(|| {
+    let mut state = CPU_TIMERS[current_cpu_index()].lock();
+    if let Some(pos) = state.timers.iter().position(|t| t.id == handle.0) { ... }
+    // Try other CPUs (timer might have been scheduled from a different CPU
+    // if the task migrated).  This is rare but correct.
+    for i in 0..live_cpus { ... }
+});
+```
+
+The comment is wrong in a specific and instructive way: it conflates the *task*
+migrating with the *timer entry* migrating. The task does migrate. The entry
+does not — `schedule_absolute` inserts into `CPU_TIMERS[current_cpu_index()]`,
+and only that CPU's `process_expired()` ever removes it, including the re-insert
+that re-arms a repeating timer (same id, same list). So the cross-CPU walk could
+never find anything the first lookup had missed, except by finding the *current*
+CPU's list after the task moved — which is the same list under a different
+index, not a different list.
+
+That made it pure cost, and the cost was not small. A miss is the *common* case
+(`cancel` runs on the success path of every wait-with-timeout, where the timer
+has usually already fired), and a miss walked every live CPU's list to the end,
+taking a lock per list, with interrupts disabled throughout. Once
+`sleep_ns_interruptible` started cancelling correctly — which is the fix in
+§255's neighbourhood — that landed on the kernel's hottest wait path, and
+`process_expired()` runs *only* from the APIC timer ISR. Missed ticks mean
+timers do not fire, which means waits never end. Three boots hung
+(`known-issues.md` → `BUG-HRTIMER-CANCEL-SCANS-EVERY-CPU`).
+
+### The decision
+
+`HrTimerHandle` changes from `(u64)` to `{ id: u64, cpu: usize }`.
+`cancel` locks `CPU_TIMERS[handle.cpu]` and scans it, once.
+
+*What changes:* a cancel takes one lock instead of up to `cpu_count()`, and the
+interrupts-off window shrinks from "scan every core's list" to "scan one list".
+Nothing observable changes when a cancel succeeds.
+
+A handle for a request refused at the hard ceiling carries `cpu == usize::MAX`,
+so `CPU_TIMERS.get(handle.cpu)` returns `None` and cancelling is a no-op. This
+is better than the alternative of returning some plausible CPU index: a refused
+timer is on no list, and a search that can never succeed is exactly the pattern
+this change exists to delete.
+
+### What it costs, and the invariant it pins
+
+The handle doubles in size, 8 bytes to 16. Irrelevant — handles are held one per
+blocked waiter, never in bulk.
+
+The real cost is that this **promotes "a timer entry never changes CPU list"
+from an accident of the implementation to a load-bearing invariant.** Today
+nothing violates it, and the doc comment on `HrTimerHandle` says so explicitly
+with the reasoning. But a future change that migrated timers with their task —
+which is a reasonable thing to want, so that a task's timeouts fire on the core
+it is running on — would silently break cancellation: `cancel` would look at the
+old list, find nothing, and return `false` while leaving the entry armed on the
+new one. That is precisely the leak class §255 was fixing.
+
+The alternative that does not pin the invariant is to keep the search and make
+it cheap some other way — e.g. a global id→cpu map, or a per-entry "cancelled"
+flag with lazy removal. Both are more machinery than the problem deserves right
+now, and the lazy-removal one is what the eventual min-heap rewrite in
+`todo.txt` will bring anyway. So: take the invariant, document it at the type,
+and let the rewrite revisit it.
+
+Filed in `todo.txt` under the existing `hrtimer: replace the sorted Vec` entry:
+whoever does that rewrite must decide migration and cancellation together.
+
+---
+
+## §257 — An undeliverable wake is counted and shouted about, never quietly dropped
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** when the scheduler cannot immediately tell a sleeping task "wake
+up", it parks the message in a small queue for the next scheduling pass. That
+queue has 32 slots. The old code, on finding all 32 full, just gave up and
+returned — the task it was trying to wake would sleep forever. The new code
+tries once more to deliver the wake directly, and if that fails too it counts
+the loss and prints one loud line. The decision is to prefer a noisy, diagnosable
+failure over a silent one, and specifically *not* to make the queue block or
+spin until a slot frees.
+
+### Context
+
+`defer_wake` exists for one situation: something in interrupt context wants to
+wake a task, but the code it interrupted is holding the scheduler lock, so it
+cannot. It writes the task id into a slot and returns; the next `schedule_inner`
+delivers it.
+
+The queue-full case had a comment saying it "should never happen (32 slots,
+drained every 10ms)". That reasoning is sound in the steady state and useless as
+a guarantee: there are ~20 call sites across futex, pipe, channel, eventfd,
+signal, timerfd and the hrtimer callbacks, and a burst is exactly the condition
+under which the queue is both full *and* the wakes matter most.
+
+This came up while fixing `BUG-DEFERRED-WAKE-DROPPED-BEFORE-PARK`, where a
+*different* silent drop in the same file cost several boot cycles to find
+precisely because it left no trace. The lesson generalises: in this queue, a lost
+message is a hung machine, and a hung machine with no log line is the most
+expensive kind of bug this project produces.
+
+### The options
+
+**(a) Block or spin until a slot frees.** Guarantees delivery. Rejected: this
+runs in hard-IRQ context, and the entity that frees a slot is `schedule_inner`
+on a CPU that may be the one now spinning inside the ISR. That is a deadlock,
+not a slow path. The same objection kills "just take the scheduler lock" — the
+whole reason we are here is that the lock is held by the interrupted code.
+
+**(b) Grow the queue.** Cheap and it raises the threshold, but it does not change
+the shape of the failure, only its frequency — and it makes the drain scan
+longer on every scheduling decision, which is the hot path. Worth doing if the
+counter ever proves non-zero; not worth doing speculatively.
+
+**(c) Retry `try_wake` once, then count and warn.** Chosen. The retry is free and
+occasionally works: `defer_wake` is only reached because `try_wake` lost the race
+for the lock some instructions earlier, and the holder may well have released it
+since. `try_lock` keeps it ISR-safe, so it cannot deadlock. If it still fails,
+`DEFERRED_WAKE_DROPS` increments and a one-shot `CRITICAL` line names the task.
+
+### What it costs
+
+A dropped wake is still a dropped wake — option (c) does not make delivery
+reliable, and it would be wrong to read the counter as "harmless". What it buys
+is that the next person to see a machine wedged with a `Blocked` task and no
+timer can read one line and know whether this was the cause, instead of
+reasoning it out from the absence of evidence. Both dumps (`dump_timer_sources`
+via the liveness watchdog and the idle-fallback wedge) print the counter, the
+pending flag and every occupied slot alongside the sleep queue and the hrtimer
+lists, so the three ways a wake can vanish are distinguishable in the log.
+
+The one-shot guard on the warning is deliberate: if the queue is thrashing, the
+first line is the diagnosis and the following thousand are a serial-port denial
+of service on the very log you need to read.
+
+---
+
+## §258 — A service asks the kernel who is calling, and the kernel answers with a snapshot
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — implementing `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`
+
+**In short:** A program can connect to a named system service, but until now the
+service had no way to find out *which* program had connected. So a service that
+needs to decide "may this caller unlock someone else's screen?" could not answer
+it. The only workaround is to have the caller state its own identity in the
+message — which is asking the program you are trying to check to vouch for
+itself. This adds one syscall, `SYS_CHANNEL_PEER_CRED` (number 286), where the
+kernel reports the process ID, user ID and group ID of whoever is on the other
+end of a connection. The number that gets reported is *recorded at the moment
+the connection is made* and never looked up again afterwards, which is the part
+of this decision with a real tradeoff.
+
+### The problem
+
+`SYS_SERVICE_ACCEPT` hands a service a channel and nothing else. Lane B's
+`userspace/logind` implements `design-decisions.md` §341 — the desktop hands a
+typed password to a privileged verifier and never sees a stored hash — and its
+policy has three sentences, none of which can be evaluated without the caller's
+uid:
+
+- root may act on any session;
+- anyone else may act only on their own, and someone else's session is reported
+  as *not existing* rather than as *forbidden*, so the error is not a
+  who-is-logged-in oracle;
+- the password-free administrator override is root-only.
+
+So `logind` currently answers `UnknownCaller` to every method and lane C's
+`apps/lockscreen` cannot unlock a screen. Failing closed there is correct, and
+it is why this was a missing feature rather than a security hole — but it is a
+missing feature that blocks every privileged service we have not written yet,
+each on its first authorisation check.
+
+### The decision that had two defensible sides: snapshot vs. lookup
+
+**(a) Resolve on read.** When a service calls `SYS_CHANNEL_PEER_CRED`, look up
+the peer's process right then and report its current uid. Simpler — no new
+state on the channel, nothing to keep in sync, and it reports the truth about
+the process *as it is now*, which sounds like the more honest answer.
+
+**(b) Snapshot at bind.** Record the peer's identity when its endpoint is bound
+to a process — in `service::connect` for a client end, in the `accept` family
+for a server end — and report that record forever after. Chosen.
+
+The case for (b) is that (a) is not actually reporting the truth about the right
+process. Three concrete failures:
+
+1. **Process IDs are reused.** A client connects as pid 71, sends a request, and
+   exits. Before the service handles it, pid 71 is issued to something else. A
+   read-time lookup answers with the *new* process's uid, and the service
+   authorises the wrong program. This is not a rare interleaving; it is what
+   happens whenever a short-lived client outruns a busy service.
+2. **A read-time answer can be "gone."** The peer exiting must not turn "who
+   sent this?" into an error, or a service's behaviour depends on scheduling —
+   the same request succeeds or fails depending on how quickly the client died.
+   Under (b) the record outlives the peer for free, because `channel::close`
+   removes a channel only once *both* sides have closed.
+3. **Privilege changes apply retroactively under (a).** A process that drops
+   privileges after connecting would retroactively lose the authority its
+   connection was made with; worse, one that *gains* privileges would
+   retroactively gain it on a channel it opened while unprivileged. Neither is
+   what an authorisation decision means.
+
+Linux snapshots `SO_PEERCRED` at `connect`/`socketpair` rather than resolving it
+in `getsockopt`, for these reasons. The cost of (b) is 24 bytes per channel and
+the obligation to record at every site that binds an endpoint — a real
+maintenance burden, since a future bind site that forgets makes the credential
+silently unavailable. That is mitigated by the direction of the failure: a
+forgotten site reports *unknown*, and unknown is a refusal, so the bug is a
+service that stops working rather than one that authorises a stranger.
+
+### Three smaller calls, recorded because each could have gone the other way
+
+**Unknown is not root.** `current_process_cred` returns `None` for a kernel task
+rather than a uid-0 credential. A kernel-brokered connection genuinely has no
+process behind it, and "the kernel did it, so allow it" is ambient authority
+with a friendlier name. Every reader is documented to treat `None` as a refusal.
+
+**A bound side cannot be rebound.** `set_side_cred` refuses rather than
+overwrites. A credential that can be replaced is one the peer can influence,
+which is the exact property the record exists to deny.
+
+**"No such channel" and "no credential recorded" are one error.** Both return
+`NotFound`. Distinguishing them would make the call report whether an arbitrary
+handle value happens to name a live channel — a small oracle, bought for a
+distinction no fail-closed caller can act on, since neither answer is a
+credential.
+
+### What is deliberately not covered
+
+A channel pair from `SYS_CHANNEL_CREATE` records nothing, so `peer_cred` on it
+reports unknown. Only the service registry brokers a connection between two
+distinct processes; for a raw pair the kernel does not know which process will
+end up holding which end, and a guess written into a credential field is worse
+than an honest refusal.
+
+The reserved fourth word is always zero, leaving room for the pidfd-style
+generation counter lane B asked about without an ABI break. It is not populated
+today because nothing needs it, and a field that ships with a real value is one
+we must then keep meaning the same thing.
+
+---
+
+## §259 — A pty whose slave has closed reports `EIO` to the master, not end-of-file
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — answering the semantics question lane B
+delegated in `requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`
+
+**In short:** A pseudo-terminal ("pty") is a fake terminal: a pair of connected
+endpoints where one side — the *master* — is held by a terminal emulator or a
+terminal-multiplexer window, and the other — the *slave* — is what the program
+inside believes is its keyboard and screen. When the program inside exits, its
+slave end closes, and the emulator holding the master is left reading from a
+pipe with nobody on the far end. There are two plausible things to tell it:
+"zero bytes, end of file" or "the error `EIO`". They lead to visibly different
+programs, and the two cannot both be right, so this picks `EIO` — which is what
+Linux does — and records why the choice is not merely "copy Linux".
+
+### The situation
+
+`master_read` in `kernel/src/tty/pty.rs` is the emulator's read. Three states
+are possible when it is called:
+
+| State | What it means | Answer |
+|---|---|---|
+| Output ring has bytes | The program printed something | those bytes |
+| Ring empty, slave still open | The program hasn't printed *yet* | block / would-block |
+| Ring empty, slave all closed | The program is gone | **this decision** |
+
+The third row is the only one in question. Note that whatever we choose, any
+bytes still in the ring must be delivered *first* — a program's last line of
+output must not be swallowed by the fact that it exited immediately after
+printing it. That part is not a tradeoff and the self-test pins it.
+
+### The options
+
+**Option A — return 0 (end of file).** *What changes:* an emulator sees the same
+"stream finished" answer it would get from a closed pipe, and its ordinary
+end-of-stream path closes the window.
+
+**Option B — return `EIO`.** *What changes:* the emulator gets an error return,
+and must treat that specific error as "the child is gone" rather than as a
+failure worth reporting.
+
+### The decision: B, `EIO`
+
+Linux does this, but the reason to follow it here is that **the two failure
+modes are not symmetric.**
+
+- If we return `EIO` to a program that only understands `0`: it sees an
+  unexpected error, most likely prints a diagnostic, and stops. Noisy, but it
+  terminates.
+- If we return `0` to a program that only understands `EIO`: many such programs
+  treat a zero-length read as "nothing right now, try again" — which is exactly
+  what a zero-length read means on a non-blocking fd — and spin forever at 100%
+  CPU on a window whose child is already dead.
+
+A spurious error message is a cosmetic bug. A hot spin on a dead window is a
+resource leak that the user must kill by hand. When one option's worst case is
+strictly less bad than the other's, that asymmetry decides it, and the fact
+that Linux landed in the same place means every ported terminal emulator
+already has the code path we are choosing.
+
+### The secondary consequence
+
+The opposite direction — *master* closed, slave reading — is **not** symmetric
+with this, and is deliberately different: the slave gets `Data(0)`, a genuine
+end of file. That is right because a program reading its own terminal and
+finding it gone should see the same thing as a program reading a closed stdin,
+and because the shell inside is additionally hung up: `close` collects the
+foreground process groups on the device and the caller signals them. A program
+that reads EOF from its terminal exits; that is the behaviour we want, and an
+`EIO` there would instead make well-behaved programs report a fault on the
+entirely ordinary event of a terminal window being closed.
+
+### If this is ever revisited
+
+The place to change is `master_read`'s `slave_refs == 0` arm and the assertion
+in `pty::self_test` that pins it (`"master read after slave close"`). Lane B's
+libc will grow the userspace half — `read(2)` on `/dev/ptmx` — and must map this
+to `errno == EIO` rather than inventing its own convention, or a terminal
+emulator will see one answer from the kernel and a different one from libc.
+
+---
+
+## §260 — A user-pointer copy from kernel context checks the mapping, because the permission bypass never meant "this address exists"
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** When kernel code (rather than a user program) hands the
+kernel's "copy from a user pointer" helpers an address, those helpers used to
+skip *all* checking and copy from whatever number they were given. A wrong
+number therefore did not produce an error — it killed the machine outright,
+with a page fault the kernel cannot recover from. The decision is to keep the
+permission waiver (kernel code legitimately passes kernel addresses, which the
+user-address rule would reject) but to still confirm the address is actually
+mapped before dereferencing it, so a bad pointer comes back as an error the
+caller can report.
+
+### The shape of the hole
+
+`mm::user::validate_user_read` / `_write` / `_ptr` open with:
+
+```rust
+if is_kernel_context() {
+    return Ok(());
+}
+```
+
+where "kernel context" means the running task owns no process. The waiver
+itself is right and has to stay: a bare kernel task's buffers live in the
+kernel half of the address space, which `validate_user_range` rejects on
+principle, and dozens of fidelity self-tests depend on a bogus pointer getting
+*past validation* so that a later gate in the handler can be observed.
+
+What was wrong is that `copy_from_user` and `copy_to_user` treat a successful
+validation as a licence to `rep movs` through the raw address. So in kernel
+context every user-pointer API degenerated into an unchecked dereference. The
+only thing standing between that and a halted kernel was a per-handler
+convention: each handler happened to return early on `caller_pid() == None`
+*before* reaching its copy. Nothing enforced it, nothing tested it, and it is
+not a property a reviewer can check locally — it is a property of every
+handler at once.
+
+It broke the first time something ran at a place no handler owns. A stat-family
+diagnostic added to `dispatch_linux`'s tail — which by construction runs after
+*every* handler, including ones that returned before their own gate — re-read
+the path pointer to name the file in its log line. The fidelity self-tests pass
+`0x1000` as a "path" to observe an `EINVAL` gate, so the hook read address
+`0x1000` from a kernel task and the boot died at 15 seconds with
+`Page Fault (#PF) … address=0x1000, error=0x0`.
+
+### The alternatives
+
+**Guard the diagnostic and move on.** One line, and it *is* also correct on its
+own terms (a kernel task has no path to name), so it was done as well. But as
+the whole fix it treats a landmine as a stumble. The next thing to run outside a
+handler — a tracepoint, an audit hook, an accounting pass, an io_uring
+submission replayed from a kernel worker — steps on the same mine, and the
+symptom is a dead machine at boot rather than a failed test naming the caller.
+This is precisely the band-aid pattern `CLAUDE.md` says to stop and redesign
+instead of repeating.
+
+**Make the validators themselves strict in kernel context** — waive only the
+user-half rule, keep the mapping check. This was written and then withdrawn: it
+changes what a great many self-tests observe. `access(0x1000, 0)` in kernel
+context is *supposed* to reach `ENOENT` by way of the bypass; under a strict
+validator it stops at `EFAULT`, and the same is true across a wide spread of
+gate-order tests. Those tests are not wrong — they are testing gate ordering,
+and the bypass is the mechanism that lets them see past the first gate — so
+breaking all of them to fix a dereference is the wrong trade.
+
+**Check at the dereference** — chosen. The validators keep answering exactly
+what they answered before, and `copy_from_user`, `copy_to_user` and
+`user_atomic_u32` ask the *other* question, the one the bypass silently
+dropped: is this range mapped at all. `validate_kernel_range` walks the current
+address space a page at a time and additionally requires writability when the
+caller intends to write. `page_table::translate` resolves 1 GiB and 2 MiB
+leaves as well as 4 KiB ones, so a kernel pointer into the HHDM or the kernel
+image passes normally. The cost is a page-table walk per page on a path only
+kernel tasks take; no user syscall reaches it.
+
+No CoW break and no demand-paging fault-in on that path: both are properties of
+a *process's* address space, and in kernel context there is no process. A
+kernel-half page that is not present will not become present by being asked.
+
+### What this does not fix
+
+Kernel-context code that builds a slice over a user address by hand rather than
+going through the copy helpers is still unprotected. A sweep of `kernel/src`
+found no such site in the syscall or IPC layers — the copy primitives are the
+only routes — but the property holds by audit, not by construction. If one is
+ever added, the same fault returns.
+
+### Where it is pinned
+
+`mm::user::self_test` test 7: a kernel-context `copy_from_user` from `0x1000`
+must be `InvalidAddress`; likewise `copy_to_user` to `0x1000` and to the
+address of the test function itself (mapped, `.text`, not writable); and a copy
+of a mapped kernel range must still succeed and be byte-exact, so the check
+cannot pass by rejecting everything. The test runs in kernel context by
+construction — the boot self-test task owns no process — so a regression
+re-panics the kernel inside a named test rather than a thousand lines later.
+
+## §261 — The shell becomes byte-clean along the *expanded word*, not along the command line
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude proposed and recommended this option; operator
+agreed)
+
+**In short:** Our shell cannot type, or tab-complete, a filename whose name is
+not valid text — a name containing a stray byte that isn't part of any
+character. The fix could either be to rewrite the entire shell (85,000 lines,
+879 function signatures) so that *everything* it handles is raw bytes, or to
+convert only the path that a filename actually travels: the word after it has
+been expanded, the path resolver, tab completion, and the commands that consume
+paths. The decision is the second one. A raw byte still cannot be *typed*
+literally — you write `$'\xff'`, exactly as in bash — but every such filename
+becomes reachable, listable and completable.
+
+### Why the smaller change is not the lesser change
+
+`known-issues.md` → `TD-KSHELL-LINE-EDITOR-IS-UTF8` originally prescribed
+converting the line editor **and** the statement executors together, on the
+argument that a partial conversion merely moves the lossy step from the keyboard
+to the parser, where it is *less* visible. That argument is correct, and it is
+not an argument against what was chosen — it targets a **layer** split (editor
+byte-clean, parser not). This is not a layer split; it is a *data-flow* split.
+One path — the path a filename takes from the user's keystrokes to the syscall —
+becomes byte-clean end to end, with no lossy step anywhere along it. The source
+line stays text, which is what it is in bash too: bash's script source is text
+and its expanded argument is a byte string.
+
+The measurement that forced the question: `kernel/src/kshell.rs` is 84,845 lines
+and 879 of its 1,024 functions take or return `&str`/`String`. The entry's
+"~1520 call sites" had counted method calls, not signatures. Option A was
+therefore a single unreviewable commit rewriting a working shell, for a defect
+the entry itself classifies as *not* data loss. Worth noting what is not
+implicated: only 6 `from_utf8_lossy` sites exist in the whole file and all six
+format file *content* (`column`, `diff`), not paths.
+
+### What A would have bought that B does not
+
+Byte-purity for non-path arguments. No known use case needs it, and the escape
+mechanism (`$'…'`, already parsed at 7 sites) reaches it anyway.
+
+### Where it lands
+
+`kernel/src/kshell.rs`: word expansion, `resolve_path` (208; 270 call sites),
+`get_cwd` (194), tab completion, and the path-consuming commands. Helpers exist
+in `kernel/src/bytestr.rs` (stage (a), commit `d19372dd4`). Completion emits the
+`$'\xff'` spelling for candidates that are not valid UTF-8.
+
+## §262 — Modern AMD graphics is out of scope until there is hardware to run it on; a driver nobody has ever started is worse than an honest gap
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended this option)
+
+**In short:** The plan asks for a driver for modern AMD graphics cards. There is
+no way to run one: the emulator we test in doesn't imitate any recent AMD card,
+and this PC has an NVIDIA card. Such a driver could be written from
+documentation but never once started — no picture, no error, no clue which of
+its many steps was wrong. The decision is to say plainly that this OS drives
+modern AMD cards through the generic fallback only, and to revisit it if
+hardware ever appears. The old-AMD driver that *does* run is unaffected and
+stays.
+
+### The operator's own framing, recorded because it is the shape of the revisit
+
+The operator's answer was "a for now, maybe someday c, but i can't afford it
+right now", and then raised a third possibility worth writing down rather than
+discarding: write the driver blind but **refuse to claim it works** — state
+explicitly in the documentation that it was written without any hardware to test
+on, and invite users (or an LLM on their machine) to debug it and send patches.
+
+That variant is not option B, and the difference matters: B's fatal defect is
+the *claim*, not the code. A roadmap that ticks "AMD support" on the strength of
+code nobody has run is a claim we would have to un-make. A file that says "this
+is untested, here is the documentation it was written from" makes no false
+claim.
+
+It was still not adopted, for the reason the operator themselves named: the
+failure mode is a black screen, and "they'd have to figure out how to fix a
+blank screen … but i guess we'd have the same problem". A contributor debugging
+a modern AMD bring-up has to get through firmware upload and a long power-up
+sequence with no output channel at all — that is not a task a patch-sized
+contribution absorbs. If bare-metal boot lands (see §263), the calculus changes,
+because then a contributor at least has serial output.
+
+### What is settled and not in question
+
+The old-card driver is done and running (§217). Its timing arithmetic is shared
+with the newer chips, so none of it is wasted whichever way this goes. Writing
+it immediately caught a genuine bug a never-run driver would have kept forever.
+
+### If this is revisited
+
+The trigger is hardware: a spare modern AMD card fitted to this machine, or the
+Linux-host passthrough setup described in Q50 option D. Until then roadmap §3.1
+records the gap rather than a promise.
+
+## §263 — SlateOS will boot on this PC's own bare metal, and the Intel iGPU driver will be written against the real chip
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended A-for-now with D over C; operator
+chose C)
+
+**In short:** Most laptops and many desktops display through Intel graphics
+built into the CPU. We can't test a driver for it in the emulator — but unlike
+the AMD case, *the chip is already inside this PC*, merely switched off in the
+firmware settings, so no purchase is needed. The decision is to switch it on,
+get SlateOS starting up on the real machine from a USB stick, and then write the
+Intel driver against real silicon. The operator will do the physical half:
+enable the iGPU in firmware, move the monitor cable to the Intel output, and
+plug in a flash drive.
+
+### Why the operator's choice overrides the recommendation, and why that is right
+
+The recommendation was A-for-now, and D (a Linux host with GVT-g/VFIO
+passthrough) over C if real support were ever wanted — on the grounds that C's
+prerequisite, *booting a real PC*, is a substantially bigger job than the driver
+it enables, and that D keeps testing **automated** rather than manual, which is
+what the rest of this project's testing depends on.
+
+Both of those remain true and neither was disputed. What they undervalue is that
+bare-metal boot is a goal in the plan **in its own right**, not merely a means to
+this driver. Charged against the driver alone it looks disproportionate; charged
+against everything it unblocks — real storage, real USB, real ACPI, a real
+monitor's EDID, a real accelerator for the benchmark suite (Q53 option D, Q54) —
+it is the highest-leverage prerequisite on the board. D would have bought one
+driver and left every one of those still unreachable.
+
+### What was measured, not assumed
+
+| Fact | Evidence |
+|---|---|
+| This PC's CPU contains Intel UHD Graphics 630 | CPU is an `Intel(R) Core(TM) i7-8700K`; that model includes UHD 630, a mainstream well-documented i915 target |
+| The chip is switched off, not absent | Windows lists only `NVIDIA GeForce RTX 4090`; **no** Intel display device enumerates on the PCI bus at all — the usual state when a separate card is fitted. Re-enabling is a firmware toggle |
+| Passthrough is unavailable on this host regardless | QEMU here accelerates via WHPX, which has no device passthrough. VFIO and Intel GVT-g are Linux-only — which is why option D needed a second OS |
+| SlateOS has never run on real hardware | Every boot to date is QEMU. **This, not the chip, is the actual gate** |
+
+### The risk, and its containment
+
+The one real hazard is a black screen on the machine the operator works at. It
+is contained by construction: boot from a **USB stick**, leave the Windows disk
+untouched, and keep the NVIDIA output available to fall back to. Nothing about
+this modifies the host installation.
+
+### Sequencing
+
+This is blocked on the operator being physically present, and they have said so
+("whenever you're ready, just wait for me"). Lane A's job is to have the
+bootable-USB path ready *before* asking: an image that a firmware will start, a
+serial or on-screen channel that reports progress, and a documented recovery
+step. The driver itself is the small half and comes last.
+
+## §264 — Mesa is on the roadmap, sequenced by what it unblocks rather than by 3D itself
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended treating this as a separate later
+call; operator decided it now)
+
+**In short:** Nothing in this OS has ever drawn a 3D image. The missing piece is
+Mesa, the library that turns 3D drawing commands into work for a graphics chip.
+The decision is that we *will* port it — it is no longer parked or
+"indefinitely deferred" — but it does not jump the queue ahead of wifi, a web
+browser, and the rest. The operator asked a sharp follow-up: does a browser need
+Mesa? The answer is that it uses it heavily but does not require it, which is
+what sets the ordering.
+
+### The question that decided the ordering
+
+> "will chromium use mesa for webgl/webgpu support? in that case, maybe do mesa
+> before chromium?"
+
+Chromium's entire GPU stack routes through Mesa on Linux: WebGL goes through
+ANGLE onto GLES/EGL or ANGLE's Vulkan backend; WebGPU goes through Dawn onto
+Vulkan; and separately from either, GPU compositing, GPU rasterization and
+VA-API video decode all do too. So Mesa is not a WebGL side-feature — it is most
+of what makes a browser feel like a browser.
+
+**But Chromium bundles SwiftShader**, a software renderer, and falls back to it
+when no GPU driver is present. So Chromium without Mesa *runs*, including WebGL;
+it is slow, it burns CPU, and WebGPU is far more likely to be disabled outright.
+That makes Mesa a **performance** prerequisite for Chromium, not a functional
+one — which is exactly the distinction that lets it be scheduled rather than
+blocking.
+
+Conclusion, and it agrees with the operator's instinct: **Mesa before Chromium**,
+because a browser is the single largest consumer of it and shipping one that
+software-renders every frame is a bad first impression that we would then have
+to re-earn. But **wifi before Mesa** — a machine that cannot get on a network
+has nothing for the browser to display.
+
+### What is already done, and what "3D works" would still require
+
+Option A of the original question is **built and tested** (§243): the 3D-capable
+emulated device boots green, full display bring-up, and the `SET_SCANOUT:
+resp=0x1203` regression is fixed. `SLATE_GPU=virtio-gpu-gl-pci ./scripts/boot-test.sh`
+is the flag.
+
+The caveat must be restated because A's completion makes it easy to over-read:
+**nothing renders 3D.** The driver issues exactly one command from the 3D set —
+the one that allocates the framebuffer — and never creates a rendering context
+or submits a command stream. `3D_FEATURES = 0` and the empty capset list in
+`kernel/src/drm/virtgpu_uapi.rs` are still correct and still untouched. "The 3D
+device boots" is not "3D works".
+
+### Lane note
+
+Mesa lands in `gui/**`, which is **lane C's** zone; it competes with the
+compositor and desktop queue, not with kernel work. Lane A's contribution is
+done. §59's stale premise — that no 3D test environment exists — is superseded
+by this entry.
+
+## §265 — The contamination-canary check gets a measured noise distribution before its tolerance is touched
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended this option; operator: "i'll go
+with your recommendation")
+
+**In short:** We have a tool that watches for the machine getting busy while
+benchmarks run, so that a benchmark slowed by *other work on the PC* isn't
+mistaken for a real regression. The check that verifies this tool works fails it
+if it points anywhere unexpected at all — zero tolerance — and we have now
+measured that the machine hiccups on its own in 2 runs out of 5 with nothing
+running. So the check can fail a perfectly good tool on a coin flip. The
+decision is to run 20+ idle benchmark rounds first and set the rule from the
+resulting distribution, then replace zero-tolerance with a rule that fails on a
+*shifted band* rather than on isolated spikes.
+
+### Why not just relax it now
+
+Because five runs is enough to prove the assumption is wrong and far too few to
+calibrate anything — picking a number from 5 samples is exactly how the original
+zero got there. The 20-run sweep costs about 45 minutes of machine time.
+
+### Why a band, not a count
+
+An isolated spike and a wrongly-placed window are different faults. "Reported a
+stray hiccup somewhere" is the tool working correctly on a noisy host; "found
+the window but in the wrong place" is the fault the check exists to catch. A
+count-based tolerance cannot tell them apart; a band-shift rule can. It is more
+code, and the band/spike boundary needs its own justification from the sweep.
+
+### The conflict-of-interest note, kept deliberately
+
+The rule being relaxed is the one that returned `FAILED` on my own experiment
+three hours before the question was filed. Changing a gate immediately after it
+fails you is indistinguishable from moving the goalposts however sound the
+reasoning, which is why this went to the operator rather than being decided
+unilaterally. The part with no such hazard was already done: the grader prints
+the measured idle-host rate beside the count. **No verdict was changed.**
+
+Evidence: `known-issues.md` RESULT P23, RESULT P24.
+
+## §266 — The "10% regression" rule is restated against each benchmark's measured band, and real hardware is booked as the fix that makes it mean something again
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended this option; operator: "i'll go
+with your recommendation")
+
+**In short:** `CLAUDE.md` says to investigate any benchmark that gets more than
+10% slower. We measured what a *no-op rebuild* does — same code, same machine,
+just recompiled — and 71% of benchmarks move by more than 10% from nothing at
+all. The median is 26%; the worst is 182%; and the hot paths the document
+singles out as critical are among the *worst*. So the rule as written points at
+phantoms, and — much worse — teaches a reader to shrug off a real 15% regression
+as "probably layout". The decision is to restate the rule as "larger than that
+benchmark's measured band, or 10% if no band has been measured", **and** to book
+running the suite on real hardware as the change that actually restores the
+guarantee.
+
+### Why the restatement alone is not enough
+
+Because it is an admission, not a solution. It concedes in writing that we
+cannot detect a **100% regression in `pick_next`**, which is not an acceptable
+end state for a scheduler hot path. `page_alloc_free` 92%, `page_fault` 85%,
+`ipc_channel` 83%, `syscall_dispatch` 42% — these are tight hot loops, which is
+precisely what the emulator's page-straddle penalty acts on. That is not bad
+luck; it is the mechanism.
+
+### Why not simply raise the flat number
+
+A single higher threshold (say 30%, just above the median band) is wrong in both
+directions at once: far too loose for the 25 quiet benchmarks, still far too
+tight for the 26 that move ≥50%.
+
+### What makes the hardware half reachable now
+
+When this question was filed, "run the benchmarks on real hardware" was
+infrastructure we did not have and had no plan for. **§263 changes that** —
+bare-metal boot is now a decided, sequenced piece of work. Two caveats come with
+it and are recorded so they are not discovered afterwards: every assumption that
+breaks under a hardware accelerator breaks on bare metal too, and a bare-metal
+run currently records its accelerator as *absent*
+(`TD-A-A-BARE-METAL-RUN-RECORDS-ITS-ACCELERATOR-AS-ABSENT`).
+
+Scope note: the sweep behind these numbers is **release-profile only** on one
+host. The `debug` profile — which is what the majority of historical benchmark
+records were taken under — has no band measured at all.
+
+## §267 — The benchmark suite tries the faster accelerator before splitting; the correctness gate never leaves TCG
+
+**Date:** 2026-08-21
+**Decided by:** Operator (Claude recommended this option; operator: "i'll go
+with your recommendation")
+
+**In short:** The emulator we test in has a second, much faster mode (3.5×) that
+would roughly halve the benchmark-noise problem in §266 — but it silently
+switches off three CPU security features the kernel is built around. The
+decision is: first spend one boot per candidate measuring whether the fast mode
+actually removes the noise (it might make the whole question disappear); if it
+does, **split** — benchmarks run on the fast accelerator, the correctness gate
+stays on the slow one that still exercises the security features. Never simply
+switch everything over.
+
+### Why splitting is safe here specifically
+
+The two accelerators' weaknesses are disjoint *by purpose*. Losing SMEP/SMAP/UMIP
+coverage matters for the **correctness** gate, where a missing `stac` shows up as
+a fault. The instruction-layout artefact matters only for **benchmarks**, where
+it is currently making 71% of the suite unreadable. Splitting puts each weakness
+where it does not bite. The infrastructure already exists: §237 made the
+accelerator part of the comparison key precisely so two series can coexist
+without contaminating each other.
+
+Switching wholesale was rejected outright: giving up the only place SMEP, SMAP
+and UMIP are ever exercised, in order to make a benchmark faster, trades a
+security property for a convenience.
+
+### The bill that comes with the fast accelerator, stated up front
+
+Fixing the contamination floor restores the *measurement*, not automatically the
+*verdict*. Under the fast accelerator the 25% tolerance would apply to a
+0.85-cycle quantity whose real variation has never been observed there — a store
+costs 0.85 cycles on the real CPU against 5.16 under emulation. And a second
+check in the same family (the scattered-access scale test) asserts something
+that is simply **false on real hardware**: that a per-access cost cannot depend
+on how many pages the loop walks, which ignores caches entirely. So the true
+cost is *re-establishing the benchmark suite's self-validation on a platform
+where its assumptions do not hold*.
+
+Separately and regardless of this decision: the canary's floor threshold is
+**100× too strict** — its stated derivation yields 4 hundredths of a cycle at
+the precision the code has used since 2026-08-14, and TCG itself was clearing it
+by only 29%. That is a defect under TCG too and is being fixed either way. Full
+arithmetic in `known-issues.md` →
+`B-A-THE-CONTAMINATION-CANARY-IS-A-TCG-ONLY-INSTRUMENT`.
+
+## 268. The bootable USB image is built by our own Python, and the boot test can boot it
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous) — implementation choices under the scope
+`design-decisions.md` §263 already settled with the operator.
+
+**In short:** To run SlateOS on the operator's actual PC we need a file that can
+be copied onto a flash drive and started by the machine's firmware. We had
+never made one: the test setup builds a fake filesystem inside the emulator each
+time it runs, which works beautifully for testing and produces nothing you can
+carry across a room. This entry records three choices made while filling that
+gap — writing the image ourselves in Python instead of installing third-party
+disk tools, plugging it into the emulator as a *pretend flash drive* rather than
+as an internal disk, and making the guard against writing to the wrong physical
+drive a refusal rather than a warning.
+
+### The gap
+
+`scripts/boot-test.sh` passes QEMU `-drive format=raw,file=fat:rw:build/esp`.
+That is QEMU's *virtual FAT* — it synthesises a filesystem on the fly from a
+host directory. It is the right thing for a harness: there is no image to
+rebuild, so there is no stale image to boot by accident, and the edit-boot loop
+stays fast. But it means every structure a firmware must parse before reaching
+the kernel — protective MBR, GPT, FAT32 BPB, directory entries — was produced by
+QEMU and never by us. A defect in any of them was **invisible in the only test
+we had and fatal on the only hardware we care about.**
+
+### Decision 1 — write the image in stdlib Python, do not install disk tools
+
+*What changes:* `python scripts/build-usb-image.py` works in a bare checkout;
+nothing new has to be installed on any machine.
+
+| Option | For | Against |
+|---|---|---|
+| **A. `mtools` + `sgdisk`** (or `xorriso`) | Battle-tested; a few lines of shell | Four new hard prerequisites. None is installed here — checked 2026-08-21, all of `xorriso`, `mformat`, `mkfs.vfat`, `sgdisk` are absent |
+| **B. Pure-Python builder** ← chosen | No prerequisites at all; deterministic output; the layout is reviewable | ~600 lines we now own, writing structures we never read back |
+
+The deciding argument is not "fewer dependencies" in the abstract. It is that
+this project has already been bitten by exactly this failure: the boot test
+carries a prerequisite gate written because a missing `limine/` surfaced as a
+`cp: cannot stat` *after* a full workspace build. A tool that is absent in a
+fresh clone fails late, in a confusing place, on someone else's machine. And
+`scripts/create-disk.py` already writes FAT16/FAT32 from scratch in Python for
+the FAT driver self-test, so B is the established pattern rather than a novelty.
+
+`scripts/build-iso.sh` is not a third option: it needs `xorriso` (absent), and
+an ISO9660 image is read-only, so it could never carry a writable ESP or a
+second partition for a rootfs.
+
+**The real cost of B is honest and worth naming:** nothing in this repository
+reads a GPT or a FAT32 directory, so a byte-layout bug's error message is a
+black screen on a machine in another room. That is the worst feedback loop in
+the project. The mitigation is `scripts/test-build-usb-image.py` — a reader
+written *independently of the writer*, checking GPT CRCs, both FAT copies,
+cluster chains, long-filename entries, `.`/`..`, and file bytes. A test that
+re-derived the writer's own arithmetic would agree with it about its mistakes.
+
+### Decision 2 — attach the image as USB storage, not as a disk
+
+*What changes:* under `--usb-image`, QEMU shows the firmware a USB hard drive.
+
+Attaching it as another SATA/virtio disk would have been one word shorter and
+would have tested the GPT and FAT32 equally well. It was rejected because the
+thing being rehearsed is a **flash drive**, and the firmware path for one is not
+the path for an internal disk: a different enumeration, a different boot-option
+class, a different position in the boot order. The verification run shows the
+distinction paying off immediately —
+
+```
+BdsDxe: failed to load Boot0003 "UEFI QEMU NVMe Ctrl SLATE-NVME-1 1" ...: Not Found
+BdsDxe: loading Boot0004 "UEFI QEMU QEMU USB HARDDRIVE 1-0000:00:0d.0-2" ...
+```
+
+OVMF passed over every other device and *chose the USB disk*, which is precisely
+what the operator's firmware will have to do. The cost is nil: the harness
+already carries a `qemu-xhci` controller for the USB keyboard.
+
+### Decision 3 — `--usb-image` is opt-in, and rebuilds unconditionally
+
+*What changes:* an ordinary boot test is unaffected; `--usb-image` adds a few
+seconds and boots the real bytes.
+
+Making it the default would have put every layer under continuous test, which is
+normally the right instinct. Against it: the virtual-FAT path needs no image
+rebuild, which is what keeps the edit-boot loop fast, and `--no-stage` soaks
+exist specifically to boot *the ESP that is already there*. Two defaults cannot
+both be served, and the fast one is used a hundred times more often.
+
+Within `--usb-image`, though, the image is rebuilt **unconditionally**, even
+under `--no-stage`. Skipping the rebuild when the tree "looks unchanged" would
+reintroduce exactly the stale-image failure that the staging freshness guard
+above it already exists to prevent — and the whole point of §263 is that we are
+about to trust this image on hardware.
+
+### Decision 4 — the stick writer refuses, it does not warn
+
+*What changes:* `scripts/write-usb-stick.ps1` cannot target an internal disk at
+all, by any argument.
+
+Writing a raw image to the wrong disk is the one genuinely irreversible act in
+this whole path, and the standing project rule is that irreversible actions are
+the only ones that warrant real caution. A warning printed before a destructive
+default is a warning that gets skimmed. So: USB bus type only (not overridable),
+never the system or boot disk (not overridable), a size cap because a 2 TB "USB"
+disk is far more likely an external backup drive than a boot stick (overridable,
+explicitly), and the target's model name must be **retyped**. That last guard is
+the load-bearing one: a disk *number* is one keystroke away from another disk; a
+model string is not.
+
+Rufus in DD mode would have been a legitimate answer and is still documented as
+an alternative in `bare-metal-boot.md`. It was not made *the* answer because it
+is a download the operator may not have at the moment they need it, and the
+guarded script is available in the worktree that already exists.
+
+### What this does not do
+
+The image carries no rootfs, and the kernel has **no USB mass-storage driver** —
+`kernel/src/xhci.rs` binds interface class `0x03` (HID) and nothing else, so the
+kernel cannot read the stick it booted from. Firmware read the kernel before
+`ExitBootServices`, which is why booting works regardless. The honest goal of
+the first bare-metal boot is therefore narrow: does the kernel come up on a real
+chipset, with a real firmware memory map, real ACPI tables, a real APIC and a
+real PCI bus? Everything needing storage is a later trip. Both gaps are recorded
+in `bare-metal-boot.md` §6 so they are not rediscovered as bugs.
+
 ## 499. The compositor reads the user's appearance settings from the shared model, and reads the whole of it
 
 **Date:** 2026-08-21

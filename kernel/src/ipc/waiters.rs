@@ -102,3 +102,67 @@ pub fn wake_all(tasks: Vec<TaskId>) {
         sched::wake(task_id);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Signal-interruptible parking
+// ---------------------------------------------------------------------------
+//
+// Every one of these objects is *slow* — it has no inherent timeout, so a task
+// blocked on one could wait forever. A blocking operation interrupted by a
+// deliverable signal must therefore wake and return, so the signal's handler
+// can run (the syscall layer maps the resulting `Interrupted` to the
+// ERESTARTSYS sentinel). Without that, a process blocked on an empty pipe, a
+// full eventfd or a quiet socket could never be killed.
+//
+// The preamble that achieves it is three lines long and race-sensitive, and
+// five modules (pipe, eventfd, stream_socket, timerfd, futex) each grew their
+// own byte-identical copy. Five copies of a race-sensitive idiom is five
+// chances for one to be "fixed" alone and drift — which is exactly how
+// `BUG-PIPE-SINGLE-WAITER-SLOT` came to exist in four places at once. They live
+// here now, next to the waiter set they are always used with.
+
+/// The owning user process id of the current task, or `0` for a kernel task.
+///
+/// Blocking IPC waits are interruptible by signals only for user processes;
+/// kernel tasks (`pid == 0`) have no signal state and park uninterruptibly.
+#[must_use]
+pub fn current_user_pid() -> u64 {
+    crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0)
+}
+
+/// `true` if a deliverable (unblocked) signal is pending for `pid`.
+///
+/// Always `false` for `pid == 0` (kernel task — no signal context).
+#[must_use]
+pub fn deliverable_signal_pending(pid: u64) -> bool {
+    pid != 0 && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
+}
+
+/// Park the current task on a blocking IPC object, interruptibly for user
+/// processes.
+///
+/// For a user process this registers a signal-waiter (so `set_pending` wakes
+/// the park when a deliverable signal arrives) using the register-then-recheck
+/// idiom that closes the post-before-park race, blocks, then deregisters.
+/// Kernel tasks park uninterruptibly.
+///
+/// The caller's surrounding loop must, after this returns, re-acquire the
+/// object's lock and re-evaluate **both** the object state and
+/// [`deliverable_signal_pending`] — a signal wake is reported by the latter,
+/// not by this function's return.
+pub fn park_interruptible(pid: u64, task: TaskId) {
+    if pid == 0 {
+        sched::block_current();
+        return;
+    }
+    let deliverable = !crate::proc::signal::blocked(pid);
+    crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
+    if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
+        // A signal arrived between enqueue and registration — don't block; the
+        // caller's loop will observe the pending signal and return Interrupted.
+        crate::proc::signal::deregister_signalfd_waiter(pid, task);
+        return;
+    }
+    sched::block_current();
+    crate::proc::signal::deregister_signalfd_waiter(pid, task);
+}

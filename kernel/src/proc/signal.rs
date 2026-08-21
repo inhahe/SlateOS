@@ -87,6 +87,16 @@ pub const SIGTTIN: u32 = 21;
 /// `SIGTTOU` — background write to controlling terminal. Catchable stop.
 pub const SIGTTOU: u32 = 22;
 
+/// `SIGWINCH` — the controlling terminal's window size changed.
+///
+/// Raised by `TIOCSWINSZ` when the size *actually* changes, so a full-screen
+/// program (an editor, a pager, a shell drawing a right-aligned prompt) knows
+/// to re-query `TIOCGWINSZ` and redraw.  Its default action is **ignore** —
+/// see [`default_action`] — which is what makes it safe to broadcast to a
+/// whole foreground group: a program that does not care is not killed by a
+/// resize.  Standard Linux number.
+pub const SIGWINCH: u32 = 28;
+
 /// Default disposition of a signal for a process with no handler.
 ///
 /// This mirrors the Linux default-action table closely enough for the

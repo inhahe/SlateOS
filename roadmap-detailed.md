@@ -2116,6 +2116,31 @@ _Custom Python (fastpy) text editor. Editing engine is a toolkit widget (Phase 3
 - [ ] Text editor app: plugin system (Python scripts)
 - [ ] Text editor app: status bar (line/col, encoding, language, indentation mode)
 - [x] **External-change detection with three-way merge.** When a file open in an editor is modified on disk while the in-editor buffer has unsaved edits, the editor does not silently clobber or blindly reload: it presents a modal offering **keep current changes**, **reload from disk** (discard buffer edits), **auto-merge** (three-way diff3 merge of buffer vs. disk against the common ancestor), or **review merge** side-by-side (per-conflict take-ours / take-disk / keep-both, then accept). A buffer with *no* unsaved edits reloads automatically. Implemented in both `apps/editor` and `apps/markdowneditor`; the shared engine lives in `apps/diffcore` (`diff3` three-way merge + `FileSync` external-change tracker + `MergeReview`), using the same LCS-based approach as orchestrator2's file-edit review viewer. _(Done — see todo2 item 18.)_
+- [ ] **Bring over the operator's existing notepad (`D:\visual studio projects\notepad`).** (Operator request,
+      2026-08-21.) It is a C# application, so there are two routes and they are
+      not equivalent — this needs a decision before work starts, and the second
+      one is far larger than "port an app":
+  - [ ] **Route 1 — reimplement it in Python/fastpy against our toolkit.** Keeps
+        §4.2's premise intact (the editing engine is the Phase 3.5 `TextEdit`
+        widget; the app is a thin wrapper), so the result gains our theming,
+        capability model, and the three-way-merge machinery above for free. Cost
+        is bounded and the feature list is already written down — it is mostly a
+        matter of walking the existing app's UI and matching behaviour.
+  - [ ] **Route 2 — port Mono / .NET so C# programs run natively.** Strictly
+        more powerful: it would run *every* C# program, not just this one, and
+        the operator raised it for that reason. But it is a runtime port on the
+        scale of the CPython work, not an app port, and it brings its own
+        prerequisites — a JIT (so W^X and our CFI setup have to accommodate
+        runtime code generation), a GC that wants to suspend threads and walk
+        their stacks, P/Invoke, and a class library that expects a large POSIX
+        surface. Note also that the app would still need a GUI backend: .NET's
+        WinForms/WPF do not exist here, so a C#-native notepad would need
+        Avalonia or a binding to our own toolkit regardless. **Porting Mono does
+        not by itself get this app running.**
+  - [ ] *Lane A's read, non-binding:* these are answers to different questions.
+        Route 1 delivers the editor; route 2 delivers a language runtime and
+        should be prioritised as such — against CPython-style ambitions, not
+        against a text editor. Doing route 1 now does not foreclose route 2.
 
 ### 4.3 Process Explorer
 
@@ -2396,6 +2421,42 @@ costs neither the CPython memory footprint nor interpreter-speed execution._
 - [ ] Select what to include: files/dirs, programs, program data, program settings
 - [ ] Rollback any OS update, permanently disable it or retry later
 - [ ] Per-program snapshots/rollback (program data and settings)
+- [ ] **A VSS equivalent — a system service that hands out a frozen, readable
+      view of a live volume, so backup and imaging tools can copy files that are
+      open and being written.** (Operator request, 2026-08-21.) This is the piece
+      Windows calls the Volume Shadow Copy Service, and it is what makes "back up
+      the whole machine while it is running" produce a *consistent* image rather
+      than a pile of files caught mid-write. Without it, every backup program
+      reinvents the same broken heuristics: skip locked files, or copy them torn
+      and hope.
+  - [ ] **Point-in-time volume snapshot, exposed as a read-only mount.** The
+        natural implementation is the CoW machinery §4.10 already calls for and
+        that the Btrfs port (§ filesystem) would provide directly; on ext4 it
+        needs either an LVM-style block-level snapshot or a device-mapper
+        equivalent. Decide which at implementation time — the API above it
+        should not care.
+  - [ ] **Writer coordination (the actually-hard half).** A frozen block device
+        gives you a *crash-consistent* image, not an *application-consistent*
+        one: a database mid-transaction is captured mid-transaction. VSS's real
+        contribution is the writer protocol — the service asks registered
+        applications to quiesce (flush, reach a consistent on-disk state, and
+        briefly stop writing), takes the snapshot, then releases them. Model it
+        on channel IPC with a bounded freeze timeout, and make a non-responding
+        writer degrade to crash-consistent-for-that-writer rather than hanging
+        the whole snapshot.
+  - [ ] **Capability-gated, not admin-gated.** Taking a snapshot means reading
+        every byte of a volume including other users' data, so it must hang off
+        an explicit capability on the volume rather than an ambient "is root"
+        check — same argument as `Rights::DEBUG` for cross-process memory.
+  - [ ] **Ties into what already exists here:** the change journal (§ "what
+        changed since timestamp X") gives incremental backups their file list;
+        the "file is complete" finalizer (§ filesystem) tells a writer-less
+        backup which files are safe without a freeze at all; the
+        do-not-back-up attribute (§ thumbnail cache) keeps regenerable data out.
+        A snapshot service completes that set — those three answer *what* to
+        copy, and this answers *how to copy it while it is in use*.
+  - [ ] Consumers: the backup program (§4.4), disk imaging, `pkg` generation
+        rollback, and any "export my whole home directory" flow.
 
 ### 4.11 Service Discovery / RPC
 

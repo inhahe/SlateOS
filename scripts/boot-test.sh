@@ -1071,6 +1071,10 @@ to_win_path() {
 # matters if that block is ever bypassed; it is kept in sync deliberately.
 KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/debug/kernel"
 ESP_DIR="$PROJECT_ROOT/build/esp"
+# --usb-image only: the real GPT/FAT32 image built from $ESP_DIR by
+# scripts/build-usb-image.py, attached as a USB mass-storage device instead of
+# QEMU's virtual FAT.  See the --usb-image case in the arg parser.
+USB_IMG="$PROJECT_ROOT/build/slateos-usb.img"
 SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
 # QEMU writes its OS-level PID here so we can reap it reliably.  Under MSYS,
 # `kill "$!"` uses the Cygwin PID and does NOT reliably TerminateProcess a
@@ -1082,6 +1086,7 @@ SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
 PIDFILE="$PROJECT_ROOT/build/qemu.pid"
 # QEMU args need Windows paths
 ESP_DIR_WIN="$(to_win_path "$ESP_DIR")"
+USB_IMG_WIN="$(to_win_path "$USB_IMG")"
 SERIAL_FILE_WIN="$(to_win_path "$SERIAL_FILE")"
 PIDFILE_WIN="$(to_win_path "$PIDFILE")"
 
@@ -1222,6 +1227,10 @@ RECLAIM_SPACE="${BOOT_TEST_RECLAIM_SPACE:-0}"
 # See check_prerequisites.
 BOOTSTRAP="${BOOT_TEST_BOOTSTRAP:-0}"
 
+# Boot a real GPT/FAT32 disk image over USB instead of QEMU's virtual FAT.
+# See the --usb-image case in the arg parser for why this is not the default.
+USB_IMAGE=0
+
 # Parse args
 for arg in "$@"; do
     case "$arg" in
@@ -1258,6 +1267,25 @@ for arg in "$@"; do
         --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
         --reclaim-space) RECLAIM_SPACE=1 ;;
         --bootstrap) BOOTSTRAP=1 ;;
+        # --usb-image boots the same bytes a flash drive would hold.
+        #
+        # The default path hands QEMU `fat:rw:build/esp`, which synthesises a
+        # filesystem from a host directory.  Everything a real firmware must
+        # parse before it can reach the kernel -- the protective MBR, both GPT
+        # copies, the FAT32 BPB, the on-disk directory entries -- is therefore
+        # produced by QEMU and never by us, so a defect in any of it is
+        # invisible here and fatal on hardware.  This flag builds the real image
+        # with scripts/build-usb-image.py and attaches it as a `usb-storage`
+        # device on the xHCI controller the harness already has, which is how
+        # firmware will actually see a stick: enumerated over USB, not as a
+        # SATA disk.  OVMF is an independent GPT+FAT32 implementation and Limine
+        # is a second one, so a boot that reaches the kernel here has had the
+        # image validated twice by code that is not ours.
+        #
+        # Kept opt-in rather than made the default: the virtual-FAT path needs
+        # no image rebuild, which is what makes the ordinary edit-boot loop
+        # fast, and a soak wants the ESP it already has (see --no-stage).
+        --usb-image) USB_IMAGE=1 ;;
     esac
 done
 
@@ -2177,6 +2205,34 @@ fi
 printf '    cmdline: %s\n' "$KERNEL_CMDLINE" >> "$ESP_DIR/limine.conf"
 echo "=== Kernel cmdline: $KERNEL_CMDLINE ==="
 
+# Step 2b: Build the real USB image, if asked for.
+#
+# Built AFTER staging and unconditionally (even under --no-stage): the image is
+# a pure function of $ESP_DIR, so rebuilding it is how the image tracks the
+# staged tree.  Skipping it when the tree looks unchanged would reintroduce
+# exactly the stale-image failure the staging freshness guard above exists to
+# prevent -- and the build is a few seconds on a 40 MiB kernel.
+ESP_DRIVE_ARGS=(-drive "format=raw,file=fat:rw:$ESP_DIR_WIN")
+# The matching `-device usb-storage` cannot live in ESP_DRIVE_ARGS: QEMU
+# realises -device options in command-line order, so one naming bus xhci0.0
+# must appear AFTER the qemu-xhci that creates it or the run dies with
+# "Bus 'xhci0.0' not found".  It is emitted next to usb-kbd instead.
+USB_STICK_ARGS=()
+if [ "$USB_IMAGE" -eq 1 ]; then
+    echo "=== Building USB image (GPT + FAT32) ==="
+    if ! python "$PROJECT_ROOT/scripts/build-usb-image.py" \
+            --source "$ESP_DIR" --output "$USB_IMG"; then
+        echo "ERROR: could not build $USB_IMG." >&2
+        exit 1
+    fi
+    # `if=none` + an explicit id so the image binds ONLY to the usb-storage
+    # device below and is not also auto-attached to the default IDE bus, which
+    # would present the same filesystem twice and let firmware boot the copy
+    # that is not being tested.
+    ESP_DRIVE_ARGS=(-drive "id=usbstick,if=none,format=raw,file=$USB_IMG_WIN")
+    USB_STICK_ARGS=(-device "usb-storage,bus=xhci0.0,drive=usbstick")
+fi
+
 # Step 3: Create a small swap disk image (16 MiB) for disk-backed swap testing.
 SWAP_IMG="$PROJECT_ROOT/build/swap.img"
 SWAP_IMG_WIN="$(to_win_path "$SWAP_IMG")"
@@ -2832,7 +2888,7 @@ QEMU_START_EPOCH=$(date +%s)
     -netdev user,id=net2 \
     -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58 \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
-    -drive "format=raw,file=fat:rw:$ESP_DIR_WIN" \
+    "${ESP_DRIVE_ARGS[@]}" \
     -device virtio-blk-pci,drive=swap-disk \
     -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN" \
     "${ROOTFS_ARGS[@]}" \
@@ -2850,6 +2906,7 @@ QEMU_START_EPOCH=$(date +%s)
     -device nvme,drive=nvme-disk,serial=SLATE-NVME-1 \
     -device qemu-xhci,id=xhci0 \
     -device usb-kbd,bus=xhci0.0 \
+    "${USB_STICK_ARGS[@]}" \
     -serial "file:$SERIAL_FILE_WIN" \
     -pidfile "$PIDFILE_WIN" \
     "${GPU_DISPLAY_ARGS[@]}" \

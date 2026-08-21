@@ -72,7 +72,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::waiters::{WaiterSet, wake_all};
+use super::waiters::{
+    WaiterSet, current_user_pid, deliverable_signal_pending, park_interruptible, wake_all,
+};
 use crate::error::{KernelError, KernelResult};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
@@ -530,49 +532,8 @@ fn timerfd_wake(tid: u64) {
     }
 }
 
-/// The owning user process id of the current task, or `0` for a kernel task.
-///
-/// Timerfd reads are interruptible by signals only for user processes; kernel
-/// tasks (`pid == 0`) have no signal state and park uninterruptibly.
-fn current_user_pid() -> u64 {
-    crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0)
-}
 
-/// `true` if a deliverable (unblocked) signal is pending for `pid`.
-///
-/// Always `false` for `pid == 0` (kernel task — no signal context).
-fn deliverable_signal_pending(pid: u64) -> bool {
-    pid != 0 && crate::proc::signal::has_pending_in_mask(pid, !crate::proc::signal::blocked(pid))
-}
 
-/// Park the current task for a blocking timerfd read, interruptibly for user
-/// processes.
-///
-/// The caller has already armed the expiry [`crate::hrtimer`] (if the timer is
-/// armed) — that is one wake source.  This adds the signal-waiter registration
-/// (so [`crate::proc::signal::set_pending`] wakes the park when a deliverable
-/// signal arrives), using the register-then-recheck idiom to close the
-/// post-before-park race, blocks, then deregisters.  Kernel tasks park
-/// uninterruptibly.  After this returns the caller's loop must re-evaluate both
-/// the timerfd state and [`deliverable_signal_pending`] — a signal wake is
-/// reported by the latter, not by this function.
-fn park_for_timerfd(pid: u64, task: u64) {
-    if pid == 0 {
-        sched::block_current();
-        return;
-    }
-    let deliverable = !crate::proc::signal::blocked(pid);
-    crate::proc::signal::register_signalfd_waiter(pid, task, deliverable);
-    if crate::proc::signal::has_pending_in_mask(pid, deliverable) {
-        // A signal arrived between waiter registration and the signal-waiter
-        // registration — don't block; the caller's loop observes it and
-        // returns Interrupted.
-        crate::proc::signal::deregister_signalfd_waiter(pid, task);
-        return;
-    }
-    sched::block_current();
-    crate::proc::signal::deregister_signalfd_waiter(pid, task);
-}
 
 /// Outcome of a blocking timerfd read ([`read_expirations_blocking`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -672,7 +633,7 @@ pub fn read_expirations_blocking(handle: TimerFdHandle) -> KernelResult<Blocking
         let timer =
             next_remaining.map(|rem| crate::hrtimer::schedule_ns(rem.max(1), timerfd_wake, task));
 
-        park_for_timerfd(pid, task);
+        park_interruptible(pid, task);
 
         // Woken (timer fired, settime re-armed, signal, or spurious) — cancel
         // any pending wakeup timer (harmless if it already fired) and

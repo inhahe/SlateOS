@@ -326,6 +326,46 @@ struct Channel {
     /// waiting for its peer to take it.  The sender blocks until the
     /// peer calls recv/try_recv and takes the message.
     rendezvous_slots: [Option<Message>; 2],
+
+    /// Credentials of the process owning each side, snapshotted when that
+    /// side was bound to a process — *not* resolved when they are read.
+    ///
+    /// `creds[side]` describes the owner of `side`, so the holder of a
+    /// handle reads its *peer's* entry (see [`peer_cred`]).  `None` means no
+    /// process was ever recorded for that side — the case for a channel
+    /// created by a kernel task — and is reported as "unknown", never as a
+    /// credential, because a service that cannot identify its caller must
+    /// refuse rather than guess.
+    ///
+    /// Snapshotting is the point, not an optimisation.  A pid looked up at
+    /// read time can name a *different* process: the original may have
+    /// exited and its number been reused, and a service that authorises on a
+    /// recycled pid authorises the wrong process.  Likewise the uid is the
+    /// one held at bind time, so a peer that later drops privileges does not
+    /// retroactively lose the authority it connected with, and one that
+    /// gains them does not retroactively gain it on an already-open channel.
+    /// Linux snapshots `SO_PEERCRED` at `connect`/`socketpair` for exactly
+    /// these reasons.
+    ///
+    /// The record outlives the peer: [`close`] removes a `Channel` only once
+    /// *both* sides are closed, so a client that sends a request and exits
+    /// before the service handles it can still be identified.
+    creds: [Option<PeerCred>; 2],
+}
+
+/// A snapshot of the identity of the process owning one end of a channel.
+///
+/// Taken by the kernel when the endpoint is bound to a process, so it cannot
+/// be forged: the only party to an IPC conversation that cannot lie about the
+/// caller's identity is the kernel, and this is the kernel saying it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCred {
+    /// Process ID of the owner at bind time.
+    pub pid: crate::proc::pcb::ProcessId,
+    /// Real user ID held at bind time.
+    pub uid: u32,
+    /// Primary group ID held at bind time.
+    pub gid: u32,
 }
 
 impl Channel {
@@ -337,6 +377,7 @@ impl Channel {
             sender_waiters: [None, None],
             sync: false,
             rendezvous_slots: [None, None],
+            creds: [None, None],
         }
     }
 
@@ -348,6 +389,7 @@ impl Channel {
             sender_waiters: [None, None],
             sync: true,
             rendezvous_slots: [None, None],
+            creds: [None, None],
         }
     }
 }
@@ -411,6 +453,58 @@ pub fn create_sync() -> (ChannelHandle, ChannelHandle) {
 #[allow(dead_code)]
 pub fn is_sync(handle: ChannelHandle) -> Option<bool> {
     CHANNELS.lock().get(&handle.channel_id()).map(|ch| ch.sync)
+}
+
+/// Record the identity of the process owning one side of a channel.
+///
+/// Called by whoever *binds* an endpoint to a process — today
+/// [`super::service::connect`] for the client side and the service
+/// `accept` family for the server side.  The snapshot is taken there
+/// rather than read back later on purpose; see [`PeerCred`] and the
+/// `creds` field for why a pid resolved at read time is the wrong answer.
+///
+/// Idempotent-by-refusal: an already-recorded side is left alone and
+/// `false` is returned.  A credential that can be overwritten is a
+/// credential the peer can influence, and this record exists precisely
+/// because the peer must not be able to influence it.
+///
+/// Returns `false` if the channel does not exist or the side was already
+/// bound.
+pub fn set_side_cred(handle: ChannelHandle, cred: PeerCred) -> bool {
+    let mut channels = CHANNELS.lock();
+    let Some(ch) = channels.get_mut(&handle.channel_id()) else {
+        return false;
+    };
+    let side = handle.side();
+    // `side()` masks to bit 0, so the index is always 0 or 1.
+    let Some(slot) = ch.creds.get_mut(side) else {
+        return false;
+    };
+    if slot.is_some() {
+        return false;
+    }
+    *slot = Some(cred);
+    true
+}
+
+/// Report the credentials of the process on the *other* end of a channel.
+///
+/// This is the kernel answering "who is calling me?" for a service that
+/// holds the server end of a connection.  The answer is the snapshot taken
+/// when the peer was bound, so it is neither forgeable by the peer nor
+/// invalidated by the peer exiting: [`close`] drops a channel only once
+/// both sides are closed, so a client that sends a request and dies before
+/// it is handled can still be identified.
+///
+/// Returns `None` when the handle names no channel, or when no process was
+/// ever recorded for the peer side (a channel created by a kernel task).
+/// `None` means *unknown* and must never be treated as a credential — a
+/// service that cannot identify its caller has to refuse, not guess.
+#[must_use]
+pub fn peer_cred(handle: ChannelHandle) -> Option<PeerCred> {
+    let channels = CHANNELS.lock();
+    let ch = channels.get(&handle.channel_id())?;
+    ch.creds.get(handle.peer_side()).copied().flatten()
 }
 
 /// Send a message to the peer endpoint.

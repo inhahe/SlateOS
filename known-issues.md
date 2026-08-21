@@ -46648,10 +46648,40 @@ guard whose job is precisely to not resurrect suspended tasks.
 **Meanwhile:** lane-b boot tests can fail on `ctest-jobctl` intermittently
 through no fault of the tree under test. Re-run before believing it.
 
-## OPEN-A-PATH-Z-REAL-MAKE-STAT-OF-MAKEFILE-RETURNS-EACCES (found by lane B, 2026-08-20) — filed to lane A
+## FIXED-A-PATH-Z-REAL-MAKE-STAT-OF-MAKEFILE-RETURNS-EACCES (found by lane B, 2026-08-20; fixed by lane A, 2026-08-21)
 
 **Owner: lane A** (`kernel/**`). Filed as
-`requests/b-a-path-z-real-make-fails-because-stat-of-Makefile-returns-eacces.md`.
+`requests/b-a-path-z-real-make-fails-because-stat-of-Makefile-returns-eacces.md`,
+answered in `requests/a-b-make-eacces-was-the-abi-switch-your-rootfs-change-made.md`.
+
+**Cause: `/bin/make` is not a Linux binary any more.** `create-ext4-rootfs.sh`
+stages the Debian glibc `make` and then *overwrites* it with
+`build/spike/make-slateos.elf` (GNU make 4.4.1 linked against our `libc.a`), so
+the binary that runs is static, non-PIE and speaks the **native** syscall ABI.
+Native `sys_fs_stat` requires `Rights::METADATA`; the Linux-ABI stat path checks
+nothing. The test granted `READ | WRITE`, which was sufficient only while make
+came in the Linux door.
+
+**Fix:** the test grants `READ | WRITE | METADATA`, as every other native Path-Z
+test in the file already does, and its doc comment now names the ABI switch.
+`Rights::METADATA`'s own doc — which said "Modify metadata" while all eight
+gates that check it are metadata *reads*, and the two metadata *writes* are
+gated on `WRITE` — was a contributing cause of the misdiagnosis and has been
+corrected to describe the bit the code implements.
+
+**What it exposed and did not fix:** the same operation requires a capability
+under the native ABI and nothing at all under the Linux one. Put to the operator
+as **Q56** in `open-questions.md` rather than decided, because closing it means
+granting `METADATA` at ~50 launch sites across two lanes.
+
+**Diagnostic note worth keeping.** Two probes were added while chasing this — on
+the `Err` return of `stat_meta_for_path`, and on the return value of every
+stat-family Linux syscall — and *both staying silent* is what identified the
+cause. An absent log line was the evidence; the same is true of the
+`Detected Linux x86_64 ABI binary` line, whose absence in the make region is the
+one-line tell for this whole class of confusion.
+
+**Original report follows.**
 
 **What.** `self_test_linux_real_glibc_make` (`kernel/src/proc/spawn.rs:27361`)
 fails on every boot. The kernel stages a two-line Makefile at `/Makefile` with
@@ -46693,6 +46723,10 @@ a freshly written, not-yet-cached root child differently (`write_file`
 invalidates only the *negative* dcache prefix), or a read-side hook fires —
 `fs::atime`'s relatime update on stat is the best-shaped candidate, since it
 would make a read path perform a write.
+
+*(Both hypotheses were wrong; neither was involved. So was the "ruled out"
+verdict on the capability grant — accurate for a Linux-ABI process, and the
+process was not one. See the cause section at the top.)*
 
 **How to close it in one boot:** log the `KernelError` and path where
 `stat_meta_for_path` (`kernel/src/syscall/linux.rs:19032`) returns `Err`.
@@ -50083,6 +50117,786 @@ rather than a silent zero; unknown and malformed extended data being dropped;
 and that `EXIT_SSH_FAILURE` is 255. Clippy clean on the host and on
 `x86_64-slateos`.
 
+---
+
+## Three timer leaks with one shape, found from a boot that hung after 1208s (lane A)
+
+**In short:** a task that asks to sleep for five seconds, and is then woken
+after one millisecond by something else, used to leave *two* pieces of
+bookkeeping behind - a sleep-queue slot and a kernel timer - both still armed
+for the remaining 4.999 seconds, for a sleep nobody is waiting on any more.
+Enough of those at once filled two fixed-size tables. One of the tables
+responded by **throwing away somebody else's armed timer**, which is a lost
+wakeup manufactured on demand. All three are fixed.
+
+The failure that exposed them: boot `1208s FAIL` on `lane-a`, 2026-08-21. It is
+not reproducible on demand - it needs the machine's real network to be slow, so
+it will not appear in most boots. A comparison boot on a byte-identical kernel
+passed in 691s with none of the symptoms, which is what makes the network the
+differentiator rather than any code change.
+
+### The observed sequence
+
+| Serial line | Symptom |
+|---|---|
+| 2153-3709 | **1541 x** `[hrtimer] WARNING: per-CPU timer limit reached - oldest timer evicted`, all inside the ring-3 network tests |
+| 27913 | `[sched] WARNING: sleep queue full, task 0 falling back to spin` |
+| 28077 | `[futex]   FAIL: timeout_expires returned Ok(true)` -> `[FATAL]` |
+| 28084-28969 | `[irq-storm] IRQ 10 MASKED: ~500000 IRQs/sec` x 9, escalating cooldowns, never recovering |
+| end | `!! could not acquire SCHED lock - a task is likely wedged holding it`, then panic |
+
+The comparison boot had `[hrtimer] Stats: scheduled=359`; the failing one had
+`scheduled=5308`. Same tests, same image, same 26 skipped Path-Z rungs - the
+only difference is that the failing boot's TCP fetches to the real internet were
+slow, so far more code sat in timed waits at once.
+
+### `BUG-SLEEPSLOT-HELD-UNTIL-DEADLINE` - fixed
+
+`kernel/src/sched/mod.rs`, `sleep_until_tick_interruptible`.
+
+`SLEEP_QUEUE` is 256 fixed slots. A slot was claimed by CAS-ing `wake_tick`
+from 0, and released **only** by `process_sleep_wakeups` once `now >= deadline`.
+`_interruptible` exists precisely so that another wake can return early - and on
+that path the slot stayed armed for the whole remaining timeout. A
+`WaitQueue::wait_until_timeout(30s)` satisfied in a millisecond held a slot for
+thirty seconds. `sleep_until_tick` loops around the interruptible variant and
+claimed a *fresh* slot per iteration, so one long sleep with many early wakes
+could hold many slots at once.
+
+Two follow-on harms, both seen:
+
+1. Exhaustion is **self-amplifying**. The fallback is `while tick < deadline
+   { yield_now(); }`, and every spinner hammers `SCHED`; the timer ISR retires
+   expired slots under `SCHED.try_lock()`, which then fails, so slots are *not*
+   retired, so the queue stays full. The old code also printed a serial line per
+   failed claim - 1100+ of them - adding serial I/O to that loop. That is the
+   livelock in the table above.
+2. When the ISR finally reaches an orphaned slot it takes the
+   `Some(task)`-but-not-`Blocked` branch and sets `pending_wake = true` on a
+   task that is awake and doing something else entirely. The next
+   `block_current()` that task makes returns *without blocking*. That is the
+   most plausible reading of `timeout_expires returned Ok(true)`: a futex wait
+   with a 5 ms timeout reported "I was woken" because a token left by an
+   unrelated sleep was sitting there waiting to be spent.
+
+**Fix.** `SleepEntry` gains a `claim` field holding a globally unique token,
+and `claim` - not `wake_tick` - is now the free/busy marker. A sleeper releases
+its own slot by CAS-ing *its own token* out, so a stale releaser whose slot was
+already retired and re-claimed simply fails and does nothing. The ISR takes the
+slot into a `RELEASING` state *before* reading `task_id`, which closes the
+window where a slot could be recycled underneath the scan and the wrong task
+woken. `sleep_until_tick_interruptible` now releases on both paths, and the
+exhaustion warning is one-shot.
+
+### `BUG-SLEEPSLOT-LEAKED-BY-KILL` - fixed
+
+**In short:** a task that is asleep holds one of 256 "wake me at time T"
+tickets. It gives the ticket back on the line right after it wakes up. If
+something *kills* it while it is asleep, it never reaches that line, so the
+ticket sits there until time T arrives - which for the long timeouts this
+kernel uses is nearly an hour. Enough of those and no one can sleep any more:
+the next sleeper falls back to spinning, which pins a whole CPU.
+
+`kernel/src/sched/mod.rs`, `kill_task` / `sleep_until_tick_interruptible`.
+
+The sibling of `BUG-SLEEPSLOT-HELD-UNTIL-DEADLINE` above, and it survived that
+fix. That fix gave the *sleeper* a way to release its own slot early
+(`release_sleep_slot(slot)` on the line after `block_current()` returns). It
+does nothing for a sleeper that never returns from `block_current()` at all,
+which is exactly what `kill_task` produces: a `Blocked` task is "simply marked
+Dead", and dead tasks do not run cleanup code.
+
+`process_sleep_wakeups` does eventually retire the slot - it frees an expired
+slot "regardless of the task's state" - but only at the deadline. That is the
+whole harm: the deadline is the thing the killed task was waiting *out*.
+
+**How it was found.** Not from a failure. The wedge dump added while chasing
+`BUG-BLOCKED-TASK-RESUMED-IN-PLACE` prints the sleep queue, and it showed two
+slots held by tasks 206 and 207 - both long dead - with `wake_tick` about
+374000 against a `now` of about 34000. At 100 Hz that is a wake scheduled ~57
+minutes into a boot that lasts six. Those two slots were gone for the whole
+run. `bench.rs` kills its helper tasks (`kill_task(helper_id)` in half a dozen
+benchmarks), which is where they came from; every benchmark that leaves a
+helper asleep costs a slot for the rest of the boot.
+
+Two slots out of 256 is not a failure, which is why nothing had noticed. But it
+is monotonic - slots only ever leak, never come back - so the failure mode is a
+long-running system, and it lands as the *self-amplifying* exhaustion livelock
+documented in the entry above rather than as anything that names sleep slots.
+
+**Fix.** `release_sleep_slots_for_task(task_id)`, called from `kill_task` once
+the `SCHED` lock is dropped. It scans the queue and frees the slots the dying
+task owns, using the same take-into-`RELEASING`-before-reading-`task_id`
+discipline as `process_sleep_wakeups` - and restoring the token untouched when
+the slot turns out to belong to someone else, so a concurrent scan cannot lose
+an unrelated sleep. It prints a line when it frees anything, because a kill
+that has to clean up after a sleeper is worth seeing in a log.
+
+`kill_task` is the single choke point: a grep of the tree finds no other writer
+of `TaskState::Dead` outside `sched/mod.rs`, and `task_exit`'s self-termination
+path cannot be holding a slot (a task in `block_current` is not the task calling
+`exit`).
+
+Covered by a new case in `sched::self_test`: spawn a task that sleeps for
+10,000,000 ticks, confirm the occupied-slot count went up by one, kill it, and
+require the count to be back where it started - `[sched]   kill_task(sleeping)
+releases the sleep slot: OK`.
+
+### `BUG-HRTIMER-ORPHANED-BY-EARLY-WAKE` - fixed
+
+`kernel/src/sched/mod.rs`, `sleep_ns_interruptible`.
+
+The same shape, one table over: `let _handle = hrtimer::schedule_ns(...);
+block_current();` - and no `cancel`. Woken early, the timer stays armed. And
+`sleep_ns` loops around this function, so a sleep broken by repeated early wakes
+armed one timer per iteration and cancelled none.
+
+The arithmetic in the failing boot says this is where the pressure came from:
+`scheduled=5308, fired=3730, cancelled=32`. Thirty-two cancellations against
+five thousand arms, in a kernel whose every hrtimer call site is a
+wait-with-timeout that ought to cancel on the success path.
+
+**Fix.** `hrtimer::cancel(handle)` after `block_current()`. A no-op if the timer
+already fired.
+
+### `BUG-HRTIMER-EVICTS-AN-ARMED-TIMER` - fixed
+
+`kernel/src/hrtimer.rs`, `schedule_absolute`.
+
+On reaching `MAX_TIMERS_PER_CPU` (256) the code did `state.timers.pop()` -
+discarding the furthest-out pending timer to make room. That timer is armed,
+someone is blocked waiting for it, and its owner is never told. It is a silent
+lost wakeup, and it happened **1541 times in one boot**, to subsystems that had
+done nothing wrong. `channel_recv_timeout`, `futex_wait_timeout`,
+`eventfd`/`pipe`/`stream_socket` timeouts and `timerfd` are all reachable this
+way; the victim is whoever happened to have the longest deadline.
+
+The warning made it worse rather than better: it was `serial_println!` from
+inside `without_interrupts` with the per-CPU timer lock held, unconditionally,
+once per overflowing schedule. Serial I/O with interrupts disabled delays the
+APIC tick that drains the queue, so the flood deepened the queue it was
+reporting on.
+
+**Fix.** Never evict. `MAX_TIMERS_PER_CPU` becomes a soft threshold that warns
+once and keeps accepting; a new `MAX_TIMERS_HARD_CEILING` (4096) refuses instead
+of evicting, on the grounds that concentrating the harm on the caller that is
+actually asking is the only version of this that is diagnosable. Both
+diagnostics moved outside the IRQ-disabled critical section and are one-shot,
+and `TOTAL_REFUSED` is now reported by the self-test alongside a
+`scheduled - fired - cancelled - pending` tripwire that would have made the
+original bug visible on the first boot that hit it.
+
+### Not fixed, and deliberately so
+
+- **`IRQ 10` storming at ~500 kHz.** IRQ 10 is a shared level-triggered PCI
+  line in this QEMU config (virtio-net, virtio-blk dev 0, ATI VGA, AC97, NVMe,
+  xHCI, AHCI, SMBus). The dispatcher at `kernel/src/ioapic.rs:735-770` acks
+  virtio-blk, virtio-net and rtl8139 on every IRQ; the other five devices have
+  no handler, so if one of them asserts, nothing deasserts it and the line stays
+  low. **A single storm-mask-cooldown cycle happens on passing boots too** - it
+  is only fatal when the scheduler is too wedged to service the device during
+  the cooldown. So the storm is a real and separate defect, but it was a
+  passenger here, not the driver. Needs its own investigation: identify which
+  of the five unhandled devices asserts, and either give it a stub handler that
+  acks or mask it at the PCI command register.
+- **`hrtimer`'s sorted `Vec`.** O(n) insert under a lock with interrupts
+  disabled. At the new ceiling that is a 160 KiB memmove worst case. Logged in
+  `todo.txt`; wants a real min-heap with lazy cancel-by-id, or a timer wheel.
+
+---
+
+## The fix for the timer leaks unmasked a boot hang: a dropped wakeup (lane A)
+
+**In short:** adding "cancel the timer when you wake up early" - which was the
+correct fix for `BUG-HRTIMER-ORPHANED-BY-EARLY-WAKE` above - made boots hang
+intermittently. The hang itself was **not** in the new code. It was a
+long-standing hole in the scheduler's "deferred wake" queue: when a wake-up
+signal could not be delivered immediately, it was parked in a queue for the next
+scheduling pass - and if, by the time that pass ran, the target task had not
+gone to sleep yet, the queue **threw the signal away** instead of leaving a note
+saying "don't go to sleep, you were already woken." The task then went to sleep
+with nothing left to wake it. The leak fixes just made that window get hit far
+more often. Fixed by making the queue leave the note, which is what every other
+wake path in the scheduler already did.
+
+**Three defects, one investigation.** They are written up separately below:
+`BUG-HRTIMER-CANCEL-SCANS-EVERY-CPU` (real, fixed, *not* the hang - the hang
+reproduced identically with it fixed), `BUG-DEFERRED-WAKE-DROPPED-BEFORE-PARK`
+(the hang in runs 1 and 3), and `BUG-BLOCKED-TASK-RESUMED-IN-PLACE` (a second,
+unrelated hang - run 2 - that only became reachable a few hours earlier, and
+that the fix for the first one exposed by letting the boot get far enough to
+reach it).
+
+**Read the runs table below with that in mind:** it lists three stalls as if
+they were one bug. They were two. Runs 1 and 3 are the dropped wake; run 2, the
+barrier self-test, is the in-place-resume spin, which has nothing to do with
+timers at all.
+
+### How it presented
+
+Three separate boots with the timer-leak fixes applied stalled at three
+different places, all of them **immediately after a task exited**:
+
+| Run | Stalled at | Preceding line |
+|---|---|---|
+| 1 | serial line 2333 | `[sched] Task 109 exiting` (`spawn-test-linux-brk`) |
+| 2 | serial line 26395 | `[sched] Spawned task 335` (barrier self-test) |
+| 3 | serial line 2178 | `[sched] Task 108 exiting` (netstack daemon) |
+
+Neither of the two pre-change baseline logs (`serial-fail-A.txt`,
+`serial-pass-B.txt`) contains a single `IDLE-FALLBACK WEDGE`, so this was new.
+
+### How it was found
+
+Three successive theories were wrong (hrtimer id reuse; the new hard-ceiling
+refusal handing back a handle for a timer that was never inserted; the
+`process_sleep_wakeups` `Retry` path orphaning a slot). All three were disproved
+by reading, and the wasted effort is the point: the fix was to stop theorising
+and add **permanent** diagnostics, which named the culprit on the very first
+boot afterwards.
+
+The diagnostics, all now committed:
+
+- `Task::block_site` - `block_current()` is `#[track_caller]` and records
+  `core::panic::Location::caller()` on the task before it parks. This is
+  authoritative: `git grep "state = TaskState::Blocked"` has exactly one hit,
+  inside `block_current()`, in the same `SCHED`-locked critical section that
+  writes `block_site`.
+- `sched::dump_timer_sources()` - prints every held sleep slot with its
+  deadline against `now`, flagging any that is already expired, and then calls:
+- `hrtimer::dump_pending()` - per-CPU pending lists with an `OVERDUE` flag,
+  plus the `scheduled/fired/cancelled/refused` totals.
+
+Both the liveness watchdog and `dump_idle_fallback_wedge` call it, so either
+kind of stall now prints the same evidence.
+
+What the first instrumented boot printed:
+
+```
+tid=0   state=Blocked cpu=0 prio=31 pending_wake=false waited=4683
+        block_site=kernel\src\sched\mod.rs:5814 name="idle"
+tid=335 state=Blocked cpu=0 prio=16 pending_wake=false waited=0
+        block_site=kernel\src\sched\waitqueue.rs:181 name="test-barrier"
+```
+
+`mod.rs:5814` is the `block_current()` inside `sleep_ns_interruptible` - i.e.
+a wait-with-timeout whose hrtimer never fired. `waited=4683` ticks against a
+timeout that `wait_timeout_ns` caps at 100 ms (10 ticks). Note also that `tid=0`
+is simultaneously the boot thread *and* cpu0's idle task, which is why cpu0
+fell into the idle-fallback HLT loop with nothing left to wake it.
+
+### `BUG-HRTIMER-CANCEL-SCANS-EVERY-CPU` - fixed, but **not** the hang
+
+`kernel/src/hrtimer.rs`, `cancel()`.
+
+**Read the last paragraph of this subsection before believing the middle of
+it.** The IRQ-off-cost story below is a plausible mechanism that turned out not
+to be the one operating here; it is kept because the defect it describes is
+real and the fix is worth having.
+
+A `HrTimerHandle` was a bare id, so `cancel` had to search for the entry. It
+tried the current CPU, and on a miss dropped that lock and locked+scanned every
+other live CPU's list - the whole thing inside `without_interrupts`. A miss is
+the *common* case, because `cancel` runs on the success path of every
+wait-with-timeout, where the timer has usually already fired.
+
+Before the leak fix that cost nothing, because `cancel` was almost never called
+(`cancelled=32` against `scheduled=5308` in the failing boot). Adding the
+correct `cancel` moved it onto the hottest wait path in the kernel: `kmutex`,
+semaphore, condvar, `kchannel` and `once_event` all route through
+`wait_timeout_ns` -> `sleep_ns_interruptible`. `process_expired()` runs **only**
+from the APIC timer ISR, so frequent long IRQ-off windows coalesce or lose
+ticks, and timers then do not fire at all. Hence: the cancel path could stop the
+very timers it was cancelling.
+
+**The cross-CPU walk was not merely expensive, it was unnecessary.** A timer
+entry never migrates. `schedule_absolute` inserts into
+`CPU_TIMERS[current_cpu_index()]`, and only that CPU's `process_expired()`
+removes it - including the re-insert of a repeating timer, which keeps both the
+same id and the same list. The comment that justified the walk ("timer might
+have been scheduled from a different CPU if the task migrated") conflated the
+*task* migrating with the *entry* migrating; the entry does not move.
+
+**Fix.** `HrTimerHandle` becomes `{ id, cpu }`, carrying the list the entry
+landed on. `cancel` takes exactly one lock and does exactly one scan. A handle
+returned by a request that was refused at the hard ceiling carries
+`cpu == usize::MAX`, so cancelling it is a no-op instead of a search that could
+never succeed.
+
+**This did not fix the hang.** The next boot with it applied stalled at the
+*identical* serial line (2178, `[sched] Task 108 exiting`). Keep the change - it
+removes a cross-CPU lock walk from the kernel's hottest wait path and pins a
+real invariant - but it is an optimisation, not the bug. See the next section
+for what was actually wrong.
+
+### `BUG-DEFERRED-WAKE-DROPPED-BEFORE-PARK` - fixed (this was the hang)
+
+`kernel/src/sched/mod.rs`, `drain_deferred_wakes_locked()`.
+
+**What the wedge dump showed.** Single-CPU boot, every other task `Dead`:
+
+```
+tid=0   state=Blocked pending_wake=false block_site=kernel\src\container.rs:4311  name="idle"
+tid=108 state=Blocked pending_wake=false waited=4664
+        block_site=kernel\src\sched\mod.rs:5828                                  name="netstack-dns"
+[sched]   sleep queue: 0/256 slots occupied
+[hrtimer] totals: scheduled=19467 fired=10 cancelled=19457 refused=0
+[hrtimer] cpu0: 0 pending
+```
+
+`container.rs:4311` is `wait_process()`, so tid 0 is waiting for the netstack
+daemon. `mod.rs:5828` is the `block_current()` inside `sleep_ns_interruptible`.
+Tid 108 is parked on a sleep whose **timer no longer exists** (`0 pending`, and
+the totals account for every timer ever created: `19467 = 10 + 19457 + 0`), with
+`pending_wake=false`. Nothing anywhere could ever run again. Note the totals are
+*healthy*: a 19457:10 cancel-to-fire ratio is the leak fix working, since every
+`wait_timeout_ns` satisfied early legitimately cancels its timer.
+
+**The defect.** Three functions wake a task. All three must handle the case
+where the target has not parked yet, because the ordinary
+register-then-recheck interleaving puts it there constantly:
+
+| | target `Blocked` | target `Running`/`Ready` |
+|---|---|---|
+| `wake()` | enqueue | `pending_wake = true` |
+| `try_wake()` | enqueue | `pending_wake = true` |
+| `drain_deferred_wakes_locked()` | enqueue | **wake discarded, slot cleared** |
+
+The third one is not a rare path - it is the *primary* one. Its own doc comment
+says so: on a single-CPU system the ISR-context `try_wake` always loses the race
+for the scheduler lock against the code it interrupted, so every deferred wake
+is delivered here. So every wake that arrived in the window between a task
+arming its timer and reaching `block_current()` was silently dropped.
+
+The sequence that hung the boot:
+
+1. tid 108 calls `sleep_ns_interruptible`, arms its hrtimer, and is still
+   `Running`.
+2. The timer expires. `process_expired` removes the entry (this is the `fired`
+   that leaves `0 pending`) and calls the callback, which calls
+   `try_wake(108)` - contended, so it falls back to `defer_wake(108)`.
+3. `schedule_inner` drains. tid 108 is still `Running`, so the drain discards
+   the wake and clears the slot.
+4. tid 108 reaches `block_current()`, sees `pending_wake == false`, and parks
+   forever with no timer armed.
+
+Step 3 is a window of a few instructions, which is why the hang was
+intermittent, and why it needed the leak fixes (which multiplied timer traffic
+~4x) to become frequent enough to catch.
+
+**Fix.** `drain_deferred_wakes_locked` sets `pending_wake = true` in the
+not-`Blocked` case, exactly like the other two.
+
+### Two smaller defects fixed in the same file, found by reading around it
+
+Neither is known to have caused an observed failure; both are the same class of
+silent wake loss.
+
+1. **The pending-flag was cleared after the scan, not before.** Both
+   `drain_deferred_wakes_locked` and `process_deferred_wakes` scanned the 32
+   slots and then stored `DEFERRED_WAKES_PENDING = false`. A `defer_wake`
+   landing in a slot the loop had already walked past sets the flag *behind* the
+   cursor - and the trailing store then erased it, stranding that slot until
+   some unrelated later wake happened to set the flag again. Both now clear the
+   flag before the scan, where a redundant rescan is the worst outcome.
+
+2. **A full queue dropped the wake silently.** `defer_wake` fell off the end of
+   its 32-slot search and returned, with a comment saying this "should never
+   happen". A dropped wake is a hang, so it must not be invisible: it now
+   retries `try_wake` once directly (the lock holder may have released it since,
+   and `try_lock` keeps this ISR-safe), and if that also fails it increments
+   `DEFERRED_WAKE_DROPS` and prints one `CRITICAL` line. The counter and the
+   occupied slots are printed by `dump_timer_sources()`, so both dumps show
+   them.
+
+**Diagnostic gap this closed.** From the parked task's side, a dropped wake, a
+stranded queue slot and a timer that never fired look identical - `Blocked`,
+`pending_wake=false`, no timer. `dump_timer_sources()` now prints the sleep
+queue, the deferred-wake queue (occupied slots, the pending flag, the drop
+count) and the hrtimer lists together, from both the liveness watchdog and the
+idle-fallback wedge dump, so the log tells them apart.
+
+### `BUG-DEFERRED-WAKE-NO-REMOTE-IPI` - open, latency only
+
+`kernel/src/sched/mod.rs`, `drain_deferred_wakes_locked()`.
+
+`wake()` and `try_wake()` both call `signal_cpu(target_cpu)` after enqueueing,
+so a target CPU sitting in HLT is IPI'd immediately. The deferred drain does
+not - it cannot, because it runs with the `SCHED` guard held and every other
+call site deliberately sends the IPI *after* releasing it.
+
+Not a hang: each CPU's APIC timer is periodic, so an idle target picks the task
+up on its next tick. But it is up to a full tick (~10 ms) of added wake latency
+for any deferred wake that lands on a remote CPU, and it is an inconsistency
+with the other two wake paths, which is exactly the kind of asymmetry that hid
+`BUG-DEFERRED-WAKE-DROPPED-BEFORE-PARK` above.
+
+**Proper fix:** have the drain collect the target CPUs into a small fixed-size
+set and have `schedule_inner` signal them after it drops the guard. Deferred
+rather than done now only because the boot in progress is validating the
+lost-wakeup fix and this would change the same function; it is not blocked on
+anything. Currently invisible because the boot tests run single-CPU.
+
+### BUG-BLOCKED-TASK-RESUMED-IN-PLACE - fixed (the barrier-self-test hang)
+
+**In short:** a task that goes to sleep is supposed to hand the CPU to somebody
+else, and if there is nobody else the CPU is supposed to idle until there is.
+Instead, when the run queue happened to be empty, the scheduler just *returned*
+to the task it had a moment ago marked as sleeping - so "go to sleep" quietly
+did nothing. The task's wait loop saw itself wake instantly, re-checked its
+condition, went back to sleep, and repeated: 13.7 million times in one boot, at
+full CPU, forever. The first task this happened to was the boot task itself,
+which then ran on while flagged as asleep until its next ordinary yield handed
+the CPU away and left it unreachable. Boot never finished.
+
+**This one is mine and it is three hours old.** Commit `0f9f912e5` (today,
+04:08) changed `block_current()` to pass `requeue = true` to `schedule_inner`.
+That commit is right about what it says: `requeue` guards an enqueue that only
+fires for a still-`Running` task, so a parking caller passing `true` parks
+exactly as `false` would, and it closes a real strand. What it missed is that
+`requeue` was silently gating a **second, unrelated thing** further down the
+same function:
+
+```rust
+let Some(picked_id) = picked else {
+    if !requeue {
+        ... set IDLE_FLAG, drop the lock, HLT until something is runnable ...
+    }
+    return;      // <-- requeue == true lands here
+};
+```
+
+With nothing to pick and `requeue == true`, `schedule_inner` returned to a task
+it had just marked `Blocked`. One flag, two meanings, and only one of them was
+reviewed.
+
+#### What the dump showed
+
+The decisive evidence came from the `block_tick` / `block_seq` / `sleep_timer`
+fields added to the task table for the *other* bug:
+
+```
+tid=0   state=Blocked ... block_site=mod.rs:5927 block_tick=29131 block_seq=7525    sleep_timer=20704 name="idle"
+tid=335 state=Blocked ... block_site=waitqueue.rs:181 block_tick=82361 block_seq=13731855 sleep_timer=0 name="test-barrier"
+cpu0: heartbeat=82362 ctx_switches=1160 ...
+[hrtimer] totals: scheduled=20704 fired=13 cancelled=20691 refused=0
+[hrtimer] last cancelled ids (oldest first): [..., 20702, 20703, 20704]
+[sched]   deferred wakes: 0/32 queued, pending_flag=false, dropped=0
+```
+
+Every number is explained by the fix above, and none of them by anything else:
+
+- **`block_seq=13731855`** on tid 335 - it *really parked* 13.7 million times
+  (`block_seq` only increments on a genuine park, never on the `pending_wake`
+  early return). That is the spin, at ~300 parks per 10 ms tick.
+- **`ctx_switches` frozen at 1160** across 50 000 ticks - the spin performs no
+  context switch, because `schedule_inner` never got as far as switching.
+- **The idle-fallback wedge dump never fired**, though it exists precisely for
+  "nothing runnable while a task is parked". It is inside the `if !requeue`
+  branch, so the boot could not reach the diagnostic written for it.
+- **`sleep_timer=20704` on tid 0, and 20704 in the *cancelled* ring** - the
+  contradiction that took the longest to accept. A task cannot cancel the timer
+  it is still parked on. It can if its park silently returned: tid 0 parked
+  (recording tick 29131 and timer 20704), fell through the empty-queue arm,
+  carried on executing while flagged `Blocked`, and reached
+  `sleep_ns_interruptible`'s own `hrtimer::cancel(handle)` on the line after the
+  park. The stale `block_tick` is the fingerprint of a park that never happened.
+- **tid 0 then stranded.** Still flagged `Blocked`, it ran into the barrier
+  self-test, spawned the helper (tid 335), and called `yield_now()`. That path
+  passes `requeue = true`, whose enqueue guard requires `Running` - so it
+  declined to requeue, picked tid 335, and switched away for real. tid 0 was now
+  off-CPU, `Blocked`, in no run queue, with no timer and no waker. Permanent.
+- **tid 335's `block_site=waitqueue.rs:181`** is `WaitQueue::wait_until`'s
+  `block_current()`. Its predicate (`generation != my_gen`) could never come
+  true, because the only task that could advance the barrier's generation was
+  tid 0, which no longer existed as far as the scheduler was concerned.
+
+Note how well this bug hid: the task table said `Blocked`, the run queue was
+empty, no timer was pending and no wake was queued or dropped. Every field
+agreed it was a classic lost wakeup - which is what the previous bug in this
+section actually was, and which is why the first several hours of the
+investigation went looking for a third missing wake path.
+
+#### The fix
+
+`requeue` no longer decides whether the CPU may keep running the current task.
+That is now decided by the current task's own state, which is what the question
+was always about:
+
+```rust
+let resume_in_place = state.tasks.get(&current_id).is_some_and(|t| {
+    t.state == TaskState::Running || (requeued_current && t.state == TaskState::Ready)
+});
+if !resume_in_place { ... idle fallback ... }
+```
+
+`requeued_current` is set only where this call actually enqueued the task. So:
+
+| Current task | Old behaviour (`requeue = true`) | New behaviour |
+|---|---|---|
+| `Running` | resume in place | resume in place (unchanged) |
+| `Ready`, requeued by this call | resume in place | resume in place, plus a one-shot "the pick missed a task I just enqueued" warning - that combination is a run-queue bug |
+| `Ready` because **throttled** | resume in place - i.e. ran a task whose CPU budget was spent | idle fallback; `unthrottle_expired()` re-enqueues it at the next period |
+| `Blocked` / `Suspended` | **resume in place - the spin** | idle fallback (correct) |
+| `Dead` | resume in place | idle fallback (correct) |
+
+The throttling row is a second, quieter bug fixed by the same change: with an
+empty run queue, CPU bandwidth control was simply ignored.
+
+The good half of `0f9f912e5` is kept intact - the three parking sites still pass
+`requeue = true`, and still get rescued when a wake lands in their
+unlock-to-lock window.
+
+#### The lesson worth keeping
+
+The regression was introduced by a commit whose message is a careful, correct
+argument - about the one call site it looked at. `requeue` was read as "a
+parameter that means re-enqueue", and it was, at the top of the function; 300
+lines later the same name was doing duty as "and therefore it is safe to
+return". **When changing what a boolean parameter is passed, grep every use of
+it in the callee, not just the one the change is about.** A flag that gates two
+things is two flags wearing one name.
+
+### Process note, for whoever reads this next
+
+The restored copy of the section above this one exists because a
+`git checkout -- known-issues.md`, run to undo a botched append, threw away an
+hour of uncommitted analysis. Never use `git checkout --` / `git restore` to
+undo an edit to a file with other uncommitted work in it. Edit the file back,
+or commit first and revert the commit.
+
+---
+
+## FIXED 2026-08-21 — 26 Path Z rungs disappeared and the boot stayed green, because `/tmp` is not a cache
+
+**Where:** `scripts/create-ext4-rootfs.sh` (tcc discovery, ~line 738) and
+`kernel/src/proc/spawn.rs::pathz_report_skips`.
+
+**What happened.** A benchmark boot on `lane-a` reported:
+
+```
+=== PATH-Z COVERAGE INCOMPLETE ===
+  Path-Z prerequisites: 26 rung(s) SKIPPED — coverage is INCOMPLETE
+  [spawn]   SKIP: REAL C compiler (tcc, ring 3, Path Z) — prerequisite missing: /mnt/bin/tcc
+  ... and 25 more
+=== Boot test PASSED ===
+```
+
+Twenty-six rungs of the Path Z ladder — every test that proves an unmodified,
+prebuilt C *compiler* runs in ring 3 under our kernel and produces a working
+executable — did not run. The boot was green, the streak counter incremented,
+and nothing in the summary read as a regression.
+
+**Root cause.** `create-ext4-rootfs.sh` looked for tcc in exactly two places:
+`command -v tcc`, and `/tmp/tccinstall/bin/tcc`. tcc is not on a default Ubuntu
+install and `apt install tcc` needs root, so in practice it was always the
+second one — and `/tmp` is cleared when WSL restarts. When it went, the next
+`create-ext4-rootfs.sh` run staged an image with no compiler in it, and the
+skips followed silently from there.
+
+**Why it stayed invisible for a while.** The report line said:
+
+> (rebuild rootfs.ext4 via scripts/create-ext4-rootfs.sh; see the SKIP lines above)
+
+That is the wrong remedy for the failure that actually occurs. Rebuilding the
+image when the *host* has no tcc produces an identical image with the same 26
+skips. Anyone who followed the instruction would have got no new information and
+learned that the line means nothing — which is worse than no advice.
+
+**Fix, in two parts.**
+
+1. **A cache that survives a reboot.** The script now searches
+   `~/.cache/slateos/tccinstall/bin/tcc` *before* `/tmp`, and the comment gives
+   the build recipe pointed at that prefix. `/tmp` is still accepted, since that
+   is where the original instructions put it, but it is no longer the
+   documented home. tcc has been built there on this host.
+2. **A remedy that matches the failure.** `pathz_report_skips` now says that
+   each SKIP line names the missing file, that rebuilding helps only if the host
+   can supply it, where a tcc is looked for, and to install first and rebuild
+   second.
+
+**Deliberately not changed: an absent prerequisite still does not fail the
+boot.** That matches the rule already settled for absent-vs-stale fixtures
+higher in this file — a skip reports nothing *and says so*, whereas a stale
+artifact reports OK and is wrong. Failing a fresh checkout that simply has no C
+compiler would be punitive, and the loud `PATH-Z COVERAGE INCOMPLETE` banner is
+the right instrument. What was missing was not a gate but a cache and an
+accurate sentence.
+
+**The lesson worth keeping.** A tool cached in `/tmp` is a prerequisite that
+un-installs itself on a schedule nobody controls, and the failure it produces is
+a *quieter* test run rather than a broken one. When a build step degrades
+gracefully on a missing input, the input needs a home that outlives a reboot —
+graceful degradation plus a volatile cache is a coverage leak with no alarm on
+it.
+
+---
+
+## `BUG-CONSOLE-READ-UNINTERRUPTIBLE` — **stage 1 FIXED 2026-08-21; stage 2 open** (lane A)
+
+**Status:** the user-visible half is fixed — a process blocked reading the
+console is now interruptible by a signal, and `SYS_CONSOLE_READ_CHAR` /
+`tty::read` return `EINTR`. What remains open is that the reader still *polls*
+rather than parking, so the wake costs up to one timer tick and a core cannot
+go idle. See "**The proper fix, corrected**" below: the fix originally recorded
+here would have broken USB keyboards, which is why it was split.
+
+**Stage 1, as landed (2026-08-21).** `kernel/src/keyboard.rs` grew
+`pub enum ReadOutcome { Byte(u8), Interrupted, TimedOut }` and one private
+`read_char_inner(deadline_ns: Option<u64>, pid: u64)` that all four public
+entry points share. The loop is unchanged except for one added test per `HLT`
+wake: `ipc::waiters::deliverable_signal_pending(pid)`. Because
+`deliverable_signal_pending(0)` is unconditionally `false`, the pre-existing
+`read_char()` / `read_char_timeout()` pass `pid = 0` and keep their exact old
+semantics for kshell's six call sites — no duplicated loop, and no behaviour
+change on the kernel-task path. The new `read_char_interruptible(pid)` and
+`read_char_timeout_interruptible(deadline_ns, pid)` pass the real pid and are
+what `tty::backend_read_char` / `backend_read_char_timeout` and
+`sys_console_read_char` (`kernel/src/syscall/handlers.rs`) now call. As
+predicted below, `canonical_read`/`raw_read` needed no edit: the four-state
+`Input` enum already carried `Interrupted` through to `ConsoleRead::Interrupted`.
+
+**The proper fix, corrected — and why the original one below is wrong.** The
+text under "The proper fix" says to replace the `HLT` spin with
+`park_interruptible` plus a wake from the IRQ 1 handler. **That would make a
+USB keyboard dead.** USB HID keys are not interrupt-driven here at all: they
+are noticed only by `keyboard::poll_usb_keyboard()` → `xhci::poll_keyboard()`,
+and that function has exactly three call sites in the whole kernel — all of
+them *inside* `try_read_char` and the blocking read loop. Nothing else in the
+system drives the poll. A reader that parked indefinitely would stop polling,
+and only a PS/2 keyboard would still work. IRQ 1 is the PS/2 line; it says
+nothing about xHCI.
+
+So stage 2 is two changes, in order:
+
+1. **Move USB HID polling out of the read path** into a driver-owned periodic
+   task (a timer callback, or a workqueue item re-armed on the tick), so
+   keystrokes are noticed whether or not anybody is blocked reading. This also
+   fixes a *separate* latent bug that the current arrangement hides: **USB
+   keystrokes are only ever polled while some task is inside a console read.**
+   A USB key pressed while the system is busy elsewhere is not buffered, it is
+   simply never fetched from the ring until the next read comes along.
+2. **Then** convert the loop to a real park: a waiter set on the scancode
+   queue, `park_interruptible`, and a wake from both the PS/2 IRQ and the new
+   HID poll task. The wake must use the ISR-safe idiom — `sched::try_wake(tid)`
+   and, on failure, `sched::defer_wake(tid)` — **not** `WaitQueue::try_wake_one`
+   and not a `try_lock`ed waiter set: both of those *lose* the wake when the
+   ISR loses the lock, and a lost wake here is a hang. The natural shape is a
+   lock-free CAS array of waiting task ids whose full-array fallback is today's
+   `HLT` poll, so the degenerate case degrades to current behaviour rather than
+   to a deadlock.
+
+**Original report follows, unedited apart from the heading, because the
+reasoning it records is what stage 1 acted on.**
+
+**Found:** 2026-08-21, while generalising `kernel/src/tty` from one console into
+N terminal devices (`requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`).
+
+**What it is.** A process blocked reading the *console* cannot be interrupted by
+a signal. It parks inside `keyboard::read_char()`, which is a `HLT`-spin waiting
+for a scancode and has no signal check in it, so `SIGINT`, `SIGTERM` — anything
+short of `SIGKILL`'s scheduler-level teardown — does not wake it. The process
+resumes only when somebody presses a key.
+
+**Where.** `kernel/src/keyboard.rs` `read_char()`, reached from
+`kernel/src/tty/mod.rs` `backend_read_char()`'s `Backend::Console` arm. The doc
+comment there points at this entry.
+
+**Why it did not matter before, and does now.** With one terminal it was
+invisible: the only process that could be blocked on the console was the
+foreground job, and a `^C` typed at the console *is* a keypress, so the same
+event that generated the signal also woke the read. The generalisation makes the
+gap visible by contrast — the pty backend
+(`pty::slave_read_input_blocking`) parks through
+`ipc::waiters::park_interruptible` and *is* interruptible, so the same
+`tty::read` call is interruptible on one device and not on another. A process
+signalled from elsewhere (another terminal, a `kill` from a script) while
+blocked on the console still hangs until a key is pressed.
+
+**Reproduce.** Have a process block on `SYS_TTY_READ` against the console; from
+a second context send it `SIGTERM`. It stays blocked. Press any key: it wakes
+and the signal is then delivered at the syscall-return checkpoint.
+
+**The proper fix.** Give the keyboard the same waiter/park structure the pty
+backend has: a `WaiterSet` of tasks blocked on the scancode queue, `park_interruptible`
+instead of the `HLT` spin, and a wake from the IRQ 1 handler. Then
+`backend_read_char` can return `Input::Interrupted` for the console exactly as it
+already does for a pty, and `canonical_read`/`raw_read` need no change at all —
+the four-state `Input` return was widened for precisely this. The keyboard is
+lane A's, so no cross-lane request is needed.
+
+**Why it is not fixed in the same change.** The pty work is already a large
+refactor of the shared discipline, and the keyboard rework touches the IRQ path,
+which wants its own boot test rather than being folded into one that is already
+proving the discipline. Scoped as the immediate follow-up.
+
+**Severity.** Real but narrow: today's only console reader is the interactive
+shell, whose signals arrive from keypresses. It becomes a genuine hang the
+moment a second terminal exists and something on it kills a job on the console —
+which is the state the pty work creates.
+
+## BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT (found by lane A, 2026-08-21)
+
+**Status:** OPEN. **Owner: lane B** (`posix/src/spawn.rs`). Filed as
+`requests/a-b-posix-spawn-file-actions-init-smashes-the-callers-stack.md`,
+which carries the disassembly, the layout table and the recommended fix.
+
+**What.** Our `PosixSpawnFileActionsT` (`posix/src/spawn.rs:220`) is **4,624
+bytes** — a `usize` count plus sixteen 288-byte `FileActionSlot`s, each
+carrying an inline `[u8; 256]` path. Every C program that uses `posix_spawn`
+is compiled against a `<spawn.h>` that declares the same type as **80 bytes**
+(musl and glibc agree; only the field names differ). So
+`posix_spawn_file_actions_init` zeroes 4,544 bytes past the end of the
+caller's object — its spilled locals, its saved registers, its return address,
+and roughly 4 KiB of its callers' frames. Every `add*` call writes one
+288-byte slot into the same 80 bytes.
+
+**How it shows up.** The Path-Z real-`make` rung. GNU make 4.4.1
+(`build/spike/make-slateos.elf`) dies in ring 3 at
+`child_execute_job`/`job.c:2422`, `for (pp = child->environment; …)`, because
+`child` — spilled to `rbp-0x48`, one slot past an 80-byte file-actions object
+at `rbp-0x98` — has been zeroed:
+
+```
+[exception] User page fault (task 325) at 0x10315d4, addr=0x8 (not-present, read)
+[spawn]   FAIL: real make — exit code=Some(-8), expected 0
+```
+
+`exit code=Some(-8)` is exception 8 negated, not an exit status.
+
+**Why nothing caught it.** The two sides are compiled from different headers
+in different languages, so no compiler sees both. `cargo test -p posix` cannot
+see it either: every test allocates the object as a Rust
+`PosixSpawnFileActionsT`, which is by construction big enough. Only a size
+assertion finds this — and one *exists* for the sibling `posix_spawnattr_t`
+(`test_spawnattr_matches_musl_layout`, `:1877`), whose doc comment spells out
+this exact failure mode. The file-actions object never got the same treatment.
+
+**Masked until now.** make never reached `child_execute_job`: it died earlier
+in the remake pass on the EACCES covered by
+`FIXED-A-PATH-Z-REAL-MAKE-STAT-OF-MAKEFILE-RETURNS-EACCES` above. Fixing that
+grant is what exposed this.
+
+**Fix, in outline.** 80 bytes is not negotiable — it is what every compiled
+object already believes. The actions must move out of line behind the pointer
+at offset 8, where musl's `void *__actions` and glibc's
+`struct __spawn_action *__actions` both sit, with `malloc`/`realloc` growth
+and a `strdup`'d path instead of 256 inline bytes. Add the 80-byte assertion
+as a `const { assert!(…) }` rather than a `#[test]`, for the reason
+`kernel/src/cap/rights.rs`'s aliasing check gives: the two halves live in
+different crates compiled from different headers, so no single diff contains
+both, and it should be impossible to *build* rather than merely detectable on
+a test run.
+
+**Audit done at the same time.** Every other C-visible opaque struct in
+`posix/src` was checked for the smashing direction (ours larger than the
+header's). `posix_spawnattr_t` 336/336, `pthread_mutex_t` 40/40,
+`pthread_cond_t` 48/48, `pthread_rwlock_t` 56/56, `pthread_barrier_t` 32/32 —
+all exact. `sem_t` (32→4), `regex_t` (64→16) and `glob_t` (72→24) are
+*undersized*, which does not smash anything; noted in the request as a
+lower-priority correctness point, not a safety one. `posix_spawn_file_actions_t`
+is the only one in the dangerous direction.
+
 ## B-THE-SSH-STACK-AUTHENTICATED-NOBODY — 2026-08-21 — FIXED
 
 **In short:** SlateOS's SSH server, SSH client and FTP server all performed
@@ -50744,21 +51558,34 @@ still collide the way the original bug did.
 | Fixed name, no pid and no counter | `crond2` (`crond2_test_anacron`, `…2`, `…3`, `…_ts`), `du` (`du_test_walk`, `du_test_apparent`, `du_test_exclude`), `firejail` (eight `firejail_test_*`), `wc` (`wc-width-<pid>`) | Not between tests of one run (the names differ), but **yes between two concurrent runs** of the suite — e.g. the workspace gate and a `cargo test -p du` in another window |
 | Clock **and** counter | `coreutils/src/bin/touch.rs`, `coreutils/src/bin/realpath.rs`, `oils/src/interp.rs:64490` | No — the counter already makes these correct. They leak on a panicking test, and the clock in the name is dead weight, but neither is a correctness bug |
 
-`oils` additionally has its own `ScratchDir` type (`interp.rs` ~68606, ~93419)
-which is a fourth partial reimplementation of the same idea.
+**`oils` already has the fix and its seven sites simply do not use it.**
+`interp.rs:68598` defines a local `ScratchDir` with a local `uniq_name`
+(`:68577`) that is *correct*: pid + a process-wide `AtomicU64` sequence, a
+`Drop` that removes the tree, and a clock stamp kept only so a leftover
+directory's age is readable — never as the uniqueness. It was written for
+`TD-OILS-TEST-SCRATCH-NAME-COLLISION`, the same bug under a different name, and
+it even uses `create_dir` rather than `create_dir_all` so a collision would fail
+loudly instead of silently sharing. The seven sites in the table above are
+hand-rolled clock paths that were never converted when the crate fixed itself;
+they are not a competing design, they are code the existing design never
+reached. An earlier revision of this entry called the local type "a fourth
+partial reimplementation" — that was wrong, and it mattered, because it made the
+remedy look like a redesign when it is a mechanical retarget.
 
 **Why it wasn't done in the same change.** The five auth crates
 (`authlib`, `ftpd`, `sshd`, `doas`, `logind`) are the ones where a fixture
 collision produces a *false green over password checking*, which is a different
 severity from a flaky `du` test. They were converted, tested and merged first
-rather than held behind a mechanical sweep of eight more crates. `oils` alone is
-a 100k-line file with seven sites and a competing local type.
+rather than held behind a mechanical sweep of eight more crates.
 
 **The proper fix.** Add `scratchdir = { path = "../scratchdir" }` to each
 crate's `[dev-dependencies]` and replace each helper with
 `ScratchDir::new("<crate>_test")` + `dir.path(name)`, deleting the manual
-cleanup tails — `Drop` covers the panicking case they never could. For `oils`,
-also delete its local `ScratchDir` in favour of the shared one. See
+cleanup tails — `Drop` covers the panicking case they never could. For `oils`
+the seven sites can move to the local `ScratchDir` that is already there, which
+is a smaller change than adding a dependency to a crate that does not need one;
+replacing the local type with the shared crate afterwards is a tidy-up, not part
+of the fix. See
 design-decisions.md §349 for why this is a crate rather than a corrected copy in
 each place, and `scratchdir`'s module docs for why the clock cannot be made to
 work.
@@ -50828,3 +51655,223 @@ the one most people use — but 2293 lines of tested code stay unreachable, whic
 invites the next reader to assume the feature exists because the tests are
 green. `design.txt` does not mandate zone presets, so this is a feature the
 project chose to build and has not yet connected, not a spec violation.
+
+---
+
+## A-USB-KEYSTROKES-ARE-ONLY-FETCHED-WHILE-SOMEBODY-IS-BLOCKED-READING — 2026-08-21 — lane A — OPEN
+
+**In short:** On a machine whose keyboard is USB (which is every modern machine
+— PS/2 is a legacy port), the kernel never notices a keystroke on its own. It
+only goes and asks the keyboard for one at the moment some program is already
+sitting there waiting for input. Type-ahead therefore does not work: keys
+pressed while the system is busy are not queued as they are pressed, they are
+collected in a burst the next time something blocks on a read. Anything that
+wants to *check* for a keypress without waiting for one — a poll, a
+`select`/`epoll`-style readiness test, a hotkey, a Ctrl-C while a program is
+running — cannot see the key at all, because nothing polled the device.
+
+**Found by:** lane A, while fixing `BUG-CONSOLE-READ-UNINTERRUPTIBLE` (stage 1,
+2026-08-21). Not caused by that change — the fix inherited the structure. It is
+recorded separately because it is a distinct defect with a distinct fix, and
+because stage 2 of that entry is **blocked on this one**.
+
+**Where.** `kernel/src/keyboard.rs:1339` `poll_usb_keyboard()` is the only
+caller of `kernel/src/xhci.rs:2256` `poll_keyboard()`, which is the only route
+by which a USB HID report ever reaches the input ring. `poll_usb_keyboard` in
+turn has exactly **two** call sites, both on the read path:
+
+| Site | Context |
+|---|---|
+| `keyboard.rs:965`, in `try_read_char()` | a non-blocking read — polls, then checks the ring |
+| `keyboard.rs:1033`, in `read_char_inner()` | the blocking loop — polls on every spin |
+
+There is no timer call site, no interrupt call site, and no driver task. The
+xHCI event ring is not serviced from an interrupt handler for the HID endpoint;
+it is drained synchronously by whoever is asking for a character.
+
+**Why this is worse than it first reads.** PS/2 keyboards go through IRQ 1 and
+are pushed into the same ring by the interrupt handler, so they behave
+correctly. That is why the defect has never been seen: **QEMU's default keyboard
+is PS/2**, so every boot test to date has exercised the working path. The broken
+path is the one that runs on real hardware — which, per `design-decisions.md`
+§263, is about to start happening.
+
+**Reproduce (once a USB keyboard is reachable).** Boot with
+`-device qemu-xhci -device usb-kbd` and no PS/2 keyboard. At the shell, start
+something that takes a few seconds and does not read stdin, type during it, and
+observe that the characters appear all at once when the *next* read blocks,
+rather than being echoed as typed. `try_read_char()` called in a tight loop by a
+program that never blocks will also mostly return `None` regardless of what is
+being typed, because each call polls only once.
+
+**The proper fix.** Move HID polling off the read path and onto a driver-owned
+periodic task:
+
+1. A kernel task (or an hrtimer callback) polls the xHCI HID interrupt endpoint
+   at the endpoint's own `bInterval` — 8 ms is the usual figure for a boot
+   keyboard — and pushes reports into the input ring exactly as the IRQ 1
+   handler does. The ring, the echo queue and `push_char` are already
+   ISR-shaped, so nothing downstream changes.
+2. `try_read_char()` and `read_char_inner()` then stop polling and simply read
+   the ring, which makes them symmetric with the PS/2 path and makes a
+   non-blocking readiness check meaningful for the first time.
+3. Only then can `BUG-CONSOLE-READ-UNINTERRUPTIBLE` stage 2 proceed. That stage
+   converts the blocking read from a `hlt` spin into a real park, and parking is
+   *unsafe today precisely because of this bug*: a parked task does not spin,
+   so nothing calls `poll_usb_keyboard`, so a USB keystroke can never arrive to
+   wake it. Parking without fixing this first deadlocks USB keyboards outright.
+
+Use the ISR-safe wake idiom when the poller pushes a byte —
+`sched::try_wake(tid)`, falling back to `sched::defer_wake(tid)` — not
+`WaitQueue::try_wake_one()`, which loses the wake on a lost `try_lock`.
+
+**If never fixed:** the console keeps working in QEMU and keeps working for
+blocking reads on real hardware, so nothing looks broken. What stays impossible
+is type-ahead, non-blocking input, and any readiness-based console I/O on real
+USB hardware — and stage 2 of the interruptible-read fix stays blocked
+indefinitely. It gets more expensive with time, not less: every consumer written
+against `try_read_char()` in the meantime is written against a function that
+cannot do what its name says on the hardware we are about to start booting on.
+
+## B-THE-STALENESS-GATE-PRINTS-THE-WRONG-REMEDY-WHEN-THE-STALE-SIDE-IS-LIBC — 2026-08-21 — lane B — OPEN
+
+**In short:** We keep 70-odd compiled test programs in git, and a checker warns
+when one has gone out of date. It correctly noticed that nine of them were out
+of date — but it told us to rebuild **the wrong thing**. It said "rebuild the
+test programs", when what had actually moved was the C library they are built
+against. Following that instruction would have rebuilt all nine against a stale
+library and recorded the result as *fresh*, which is precisely the accident this
+checker exists to prevent, and precisely what happened for real on 2026-08-16.
+
+**Found by:** lane A, 2026-08-21, while unblocking a boot test. Reported to lane
+B as `requests/a-b-operator-answered-five-of-your-open-questions.md`. It is
+direct evidence in **B-Q5** (`open-questions.md`) and lane A thinks it is a
+stronger argument for that question's option C than the reproducibility result
+the operator actually asked for.
+
+**Where:** `scripts/ctest-fixtures.py`, the `check` subcommand. The stamp
+(`<fixture>.stamp`, format v2) hashes `build.py`, `main.c`, `libc.a` and the
+output ELF into **one** value. A mismatch therefore proves only that *something*
+in that set moved; the script cannot tell *which*, and its message picks one
+answer and states it as fact.
+
+**What actually happened.** `toolchain/sysroot/lib/libc.a` (gitignored) was built
+at 08:32. The last `posix/` commit was `4bd151de5` at 10:17; the stamp commit
+`a1b26843b` at 10:20; the merge `85955aec7` at 11:17. The sysroot was simply two
+`posix/` commits behind, so `libc.a` was the stale input and the nine ELFs were
+correct. Rebuilding the sysroot produced an archive hashing to *exactly* the
+value already recorded in the stamps, confirming the ELFs had never been wrong.
+
+**Why the safety net does not close the hole.** What caught the misdirection here
+was `scripts/create-ext4-rootfs.sh`'s independent **mtime** gate. But mtime is
+documented as unusable in a fresh clone — `git clone` stamps every file with the
+checkout time, destroying the ordering it depends on, which is the whole reason
+the content stamps were introduced. So in CI, or on any freshly-cloned machine,
+the mtime gate is silent and **only the wrong advice survives**.
+
+**The fix, within the current design.** Record a committed identity for `libc.a`
+itself and split the diagnosis on it:
+
+| `libc.a` vs committed identity | ELF vs stamp | Remedy to print |
+|---|---|---|
+| differs | — | **rebuild the sysroot** (`toolchain/build-sysroot.ps1`) |
+| matches | differs | **rebuild the fixture** (`services/<name>/build.py`) |
+
+That is a strictly smaller change than B-Q5's option C and is worth doing even
+if C is chosen later, since C needs the same identity to decide what to rebuild.
+
+**A related, smaller nuisance in the same cascade.** Rebuilding `libc.a` to
+*byte-identical* content still moves its mtime, after which
+`create-ext4-rootfs.sh` emits nine `WARNING: ctest-*.elf is OLDER than the
+sysroot libc.a` lines that are pure noise — every content stamp matches. Observed
+directly this session. A gate that cries wolf on a verified no-op trains its
+readers to skip it.
+
+**If never fixed:** the checker keeps catching real staleness — it is not
+broken, it is *ambiguous* — but roughly half the time it will name the wrong
+remedy, and the remedy it names is the one that manufactures a false green. The
+2026-08-16 incident is reachable by following the tool's own instructions.
+
+## TD-B-USERSPACE-CRATES-DO-NOT-INHERIT-THE-WORKSPACE-LINTS (lane B, 2026-08-21)
+
+**In short:** CLAUDE.md requires every crate to run a set of "defensive" compiler
+warnings — the ones that point at code which can crash on bad input (an array
+read past its end, an addition that overflows, an `unwrap` on something that
+might be missing). Almost no crate under `userspace/` actually turns them on:
+**2730 of 2762** lane-B crates never opted in. The warnings are configured once
+at the top of the repository and each crate has to say one line to inherit them;
+32 crates say it. Nothing is broken today, but the checks that are supposed to
+catch a whole class of crash-on-bad-input bugs are simply not running over
+almost any of this tree.
+
+**How it was found.** Three of the crates that decide *whether a password is
+accepted* were in the missing set: `doas` (grants privilege elevation), `logind`
+(unlocks a locked screen) and `ftpd` (authenticates a network client, and parses
+attacker-supplied protocol commands to do it). `doas` and `logind` had no clippy
+configuration of any kind — neither `[lints] workspace = true` in `Cargo.toml`
+nor a `#![deny]`/`#![warn]` in the source. `ftpd` had a bare
+`#![deny(clippy::all)]`, which is the default group and excludes every lint
+named in CLAUDE.md. Turning inheritance on in those three surfaced **71
+production sites**: 41 in `doas`, 25 in `ftpd`, 5 in `logind`. All 71 are now
+fixed (see the commit that adds this entry); the survey that followed is what
+found the other 2727 crates.
+
+**Scope, measured rather than estimated.**
+
+| | Count |
+|---|---|
+| Lane-B crates (`userspace/`, `services/`, `init/`, `posix`) | 2762 |
+| …that inherit the workspace lints | 32 |
+| …that do not | **2730** |
+| of those, `-cli` wrapper crates (~124 lines each) | 2226 |
+| of those, full utilities | ~504 |
+
+The non-inheriting crates are not uniformly unchecked: some carry a bare
+`#![deny(clippy::all)]` of their own (e.g. `age`, `ab`), some carry nothing at
+all (e.g. `acl`, `acpi`). Neither case gets `pedantic` or the four defensive
+lints, so the distinction does not affect the exposure.
+
+`userspace/*` is already a workspace `members` glob and `[workspace.lints]` is
+already defined at the root, so this is a **one-line opt-in per crate**, not a
+configuration design problem. The cost is entirely in the warnings it uncovers.
+
+**What the sweep will cost.** Measured on four full utilities (`acl`, `acpi`,
+`age`, `ab`): 87 warnings, ~22 per crate. The breakdown matters more than the
+total, because only part of it is what CLAUDE.md is actually protecting:
+
+| Kind | Count | Is it a real defect risk |
+|---|---|---|
+| `arithmetic_side_effects` | 20 | **Yes** — an overflow on attacker-influenced input |
+| `indexing_slicing` | 18 | **Yes** — a panic on a short slice |
+| `map(..).unwrap_or(..)`, redundant closure, inline format args, needless pass-by-value, precision-losing casts, … | 49 | Style; mechanical, many auto-fixable with `clippy --fix` |
+
+So roughly **44% of the warnings are the defensive ones** and the rest are
+style. Extrapolating ~22/crate over ~504 full utilities is on the order of
+**11,000 warnings**, of which ~4,800 are defensive; the 2226 `-cli` wrappers are
+about a sixth the size each and will add a smaller tail.
+
+**The proper fix, and why it should be staged by trust boundary rather than
+alphabetically.** Add `[lints] workspace = true` to each crate and fix what it
+finds. A single 2730-crate commit is the wrong shape: it would either bury ~4800
+genuine findings under ~6200 style ones, or tempt a blanket `#![allow]` that
+turns the whole exercise into a no-op. Order the sweep by what a bug in the
+crate can reach:
+
+1. **Authentication and privilege** — done: `doas`, `ftpd`, `logind` (and
+   `authlib`/`sshd`, which already inherited).
+2. **Network-facing daemons** — anything that parses bytes off a socket before
+   it knows who sent them.
+3. **setuid/privileged helpers and anything that writes to `/etc`.**
+4. **Everything else,** where `clippy --fix` handles most of the style half and
+   the defensive half can be reviewed in batches.
+
+Each stage is its own commit with its own green test run, the way the three auth
+crates were.
+
+**If never fixed:** no regression — the exposure is exactly what it has been
+since the crates were written. But the lints exist because this codebase has no
+human reviewer, and a check that runs over 32 of 2762 crates is not the safety
+net CLAUDE.md describes. Every crate added under `userspace/` without the line
+makes the ratio worse, so the honest read is that this gets slowly worse rather
+than staying flat.
+

@@ -123,17 +123,18 @@ fn read_passwd_entries(path: &str) -> Vec<PasswdEntry> {
 /// Parse a single /etc/passwd line.
 fn parse_passwd_line(line: &str) -> Option<PasswdEntry> {
     let fields: Vec<&str> = line.split(':').collect();
-    if fields.len() < 7 {
+    // A slice pattern states the field layout the code then reads, so the
+    // arity check and the field accesses cannot drift apart the way a
+    // `len() < 7` guard followed by `fields[6]` can.
+    let [username, _passwd, uid, gid, _gecos, home, shell, ..] = fields.as_slice() else {
         return None;
-    }
-    let uid = fields[2].parse().ok()?;
-    let gid = fields[3].parse().ok()?;
+    };
     Some(PasswdEntry {
-        username: fields[0].to_string(),
-        uid,
-        gid,
-        home: fields[5].to_string(),
-        shell: fields[6].to_string(),
+        username: (*username).to_string(),
+        uid: uid.parse().ok()?,
+        gid: gid.parse().ok()?,
+        home: (*home).to_string(),
+        shell: (*shell).to_string(),
     })
 }
 
@@ -176,17 +177,17 @@ fn read_group_entries() -> Vec<GroupEntry> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| {
             let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() < 4 {
+            let [name, _passwd, gid, members, ..] = fields.as_slice() else {
                 return None;
-            }
-            let gid = fields[2].parse().ok()?;
-            let members = fields[3]
+            };
+            let gid = gid.parse().ok()?;
+            let members = members
                 .split(',')
                 .map(|m| m.trim().to_string())
                 .filter(|m| !m.is_empty())
                 .collect();
             Some(GroupEntry {
-                name: fields[0].to_string(),
+                name: (*name).to_string(),
                 gid,
                 members,
             })
@@ -272,11 +273,69 @@ fn parse_config(content: &str) -> Result<Vec<Rule>, String> {
             continue;
         }
 
-        let rule = parse_rule(line).map_err(|e| format!("line {}: {e}", line_num + 1))?;
+        // Report the 1-based line number the operator sees in their editor.
+        // Saturating rather than `+ 1`: a config with `usize::MAX` lines cannot
+        // exist, but the parser should not be the place that decides that.
+        let rule =
+            parse_rule(line).map_err(|e| format!("line {}: {e}", line_num.saturating_add(1)))?;
         rules.push(rule);
     }
 
     Ok(rules)
+}
+
+/// A read position in a token list.
+///
+/// Both parsers below used to walk a `Vec<String>` with a bare `idx`, checking
+/// the bound in one statement (`tokens.get(idx)`) and advancing in another
+/// (`idx += 1`) roughly forty times between them. Every one of those pairs is a
+/// place the two halves can be written apart -- an `idx += 1` on a path that did
+/// not consume a token, or a `tokens[idx]` reached without a preceding `get`.
+/// Giving the index an owner removes the opportunity: `peek` is the only read
+/// and it is bounds-checked, `bump` is the only advance and it is the one place
+/// the addition happens (saturating, so an index can never wrap around into a
+/// small number and re-read the front of the list).
+struct Cursor<'a> {
+    toks: &'a [String],
+    idx: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(toks: &'a [String]) -> Self {
+        Self { toks, idx: 0 }
+    }
+
+    /// The token at the read position, without consuming it.
+    fn peek(&self) -> Option<&'a str> {
+        self.toks.get(self.idx).map(String::as_str)
+    }
+
+    /// Advance one token. Saturating: past the end simply stays past the end.
+    fn bump(&mut self) {
+        self.idx = self.idx.saturating_add(1);
+    }
+
+    /// Consume and return the token at the read position.
+    fn next_tok(&mut self) -> Option<&'a str> {
+        let tok = self.peek();
+        self.bump();
+        tok
+    }
+
+    /// The tokens from the read position onward.
+    fn rest(&self) -> &'a [String] {
+        self.toks.get(self.idx..).unwrap_or_default()
+    }
+
+    /// Consume everything remaining and return it, leaving the cursor at the
+    /// end. Callers that swallow the tail must still leave the cursor honest,
+    /// or the "nothing left over" check at the end of a parse would report the
+    /// tokens they just accepted as unexpected.
+    fn take_rest(&mut self) -> &'a [String] {
+        let rest = self.rest();
+        self.idx = self.toks.len();
+        rest
+    }
 }
 
 /// Parse a single doas.conf rule line.
@@ -294,60 +353,62 @@ fn parse_rule(line: &str) -> Result<Rule, String> {
         return Err("empty rule".to_string());
     }
 
-    let mut idx = 0;
+    let mut c = Cursor::new(&tokens);
 
     // 1. Action
-    let action = match tokens.get(idx).map(String::as_str) {
+    let action = match c.next_tok() {
         Some("permit") => RuleAction::Permit,
         Some("deny") => RuleAction::Deny,
         Some(other) => return Err(format!("expected 'permit' or 'deny', got '{other}'")),
         None => return Err("expected 'permit' or 'deny'".to_string()),
     };
-    idx += 1;
 
     // 2. Options (only valid for permit rules, but we parse them either way
     //    so we can give a clear error).
     let mut options = RuleOptions::default();
     loop {
-        match tokens.get(idx).map(String::as_str) {
+        match c.peek() {
             Some("nopass") => {
                 options.nopass = true;
-                idx += 1;
+                c.bump();
             }
             Some("persist") => {
                 options.persist = true;
-                idx += 1;
+                c.bump();
             }
             Some("keepenv") => {
                 options.keepenv = true;
-                idx += 1;
+                c.bump();
             }
             Some("setenv") => {
-                idx += 1;
+                c.bump();
                 // Expect a '{' token next.
-                if tokens.get(idx).map(String::as_str) != Some("{") {
+                if c.next_tok() != Some("{") {
                     return Err("expected '{' after 'setenv'".to_string());
                 }
-                idx += 1;
 
-                // Collect assignments until '}'.
-                while tokens.get(idx).map(String::as_str) != Some("}") {
-                    if idx >= tokens.len() {
-                        return Err("unterminated 'setenv' block (missing '}')".to_string());
+                // Collect assignments until '}'. Consuming through `next_tok`
+                // makes running out of tokens and reaching the closing brace the
+                // same decision, so an unterminated block cannot slip past a
+                // bound check that was written as a separate statement.
+                loop {
+                    match c.next_tok() {
+                        Some("}") => break,
+                        None => {
+                            return Err("unterminated 'setenv' block (missing '}')".to_string());
+                        }
+                        // `split_once` carries the "there is an '='" test and the
+                        // two halves it implies together; `find` plus two range
+                        // indexes re-derives the same offsets by hand.
+                        Some(assignment) => match assignment.split_once('=') {
+                            Some((var, val)) => {
+                                options.setenv.push((var.to_string(), val.to_string()));
+                            }
+                            // A bare name in setenv means unset (remove) that variable.
+                            None => options.unsetenv.push(assignment.to_string()),
+                        },
                     }
-                    let assignment = &tokens[idx];
-                    if let Some(eq_pos) = assignment.find('=') {
-                        let var = assignment[..eq_pos].to_string();
-                        let val = assignment[eq_pos + 1..].to_string();
-                        options.setenv.push((var, val));
-                    } else {
-                        // A bare name in setenv means unset (remove) that variable.
-                        options.unsetenv.push(assignment.clone());
-                    }
-                    idx += 1;
                 }
-                // Skip the closing '}'.
-                idx += 1;
             }
             _ => break,
         }
@@ -364,53 +425,43 @@ fn parse_rule(line: &str) -> Result<Rule, String> {
     }
 
     // 3. Identity (required).
-    let identity = match tokens.get(idx) {
-        Some(tok) => tok.clone(),
+    let identity = match c.next_tok() {
+        Some(tok) => tok.to_string(),
         None => return Err("expected user or :group identity".to_string()),
     };
-    idx += 1;
 
     // 4. Optional "as <target>"
     let mut target = None;
-    if tokens.get(idx).map(String::as_str) == Some("as") {
-        idx += 1;
+    if c.peek() == Some("as") {
+        c.bump();
         target = Some(
-            tokens
-                .get(idx)
+            c.next_tok()
                 .ok_or_else(|| "expected username after 'as'".to_string())?
-                .clone(),
+                .to_string(),
         );
-        idx += 1;
     }
 
     // 5. Optional "cmd <command>"
     let mut cmd = None;
     let mut args = None;
-    if tokens.get(idx).map(String::as_str) == Some("cmd") {
-        idx += 1;
+    if c.peek() == Some("cmd") {
+        c.bump();
         cmd = Some(
-            tokens
-                .get(idx)
+            c.next_tok()
                 .ok_or_else(|| "expected command after 'cmd'".to_string())?
-                .clone(),
+                .to_string(),
         );
-        idx += 1;
 
-        // 6. Optional "args <args...>"
-        if tokens.get(idx).map(String::as_str) == Some("args") {
-            idx += 1;
-            let mut arg_list = Vec::new();
-            while idx < tokens.len() {
-                arg_list.push(tokens[idx].clone());
-                idx += 1;
-            }
-            args = Some(arg_list);
+        // 6. Optional "args <args...>" -- everything remaining.
+        if c.peek() == Some("args") {
+            c.bump();
+            args = Some(c.take_rest().to_vec());
         }
     }
 
     // There should be nothing left.
-    if idx < tokens.len() {
-        return Err(format!("unexpected token '{}'", tokens[idx]));
+    if let Some(tok) = c.peek() {
+        return Err(format!("unexpected token '{tok}'"));
     }
 
     Ok(Rule {
@@ -841,53 +892,38 @@ fn parse_args(raw: &[String]) -> Result<DoasArgs, String> {
         arguments: Vec::new(),
     };
 
-    let mut idx = 1; // skip argv[0]
+    let mut c = Cursor::new(raw);
+    c.bump(); // skip argv[0]
     let mut end_of_opts = false;
 
-    while idx < raw.len() {
-        let arg = &raw[idx];
-
+    while let Some(arg) = c.peek() {
         if end_of_opts || !arg.starts_with('-') || arg == "-" {
             // First non-option is the command; the rest are its arguments.
-            result.command = Some(arg.clone());
-            result.arguments = raw[idx + 1..].to_vec();
+            result.command = Some(arg.to_string());
+            c.bump();
+            result.arguments = c.take_rest().to_vec();
             break;
         }
 
-        match arg.as_str() {
-            "--" => {
-                end_of_opts = true;
-                idx += 1;
-            }
+        c.bump();
+        match arg {
+            "--" => end_of_opts = true,
             "-u" | "-U" => {
-                idx += 1;
-                if idx >= raw.len() {
-                    return Err("option -u requires a user argument".to_string());
-                }
-                result.target_user = raw[idx].clone();
-                idx += 1;
+                result.target_user = c
+                    .next_tok()
+                    .ok_or_else(|| "option -u requires a user argument".to_string())?
+                    .to_string();
             }
-            "-s" => {
-                result.shell_mode = true;
-                idx += 1;
-            }
+            "-s" => result.shell_mode = true,
             "-C" => {
-                idx += 1;
-                if idx >= raw.len() {
-                    return Err("option -C requires a config file argument".to_string());
-                }
-                result.config_path = raw[idx].clone();
+                result.config_path = c
+                    .next_tok()
+                    .ok_or_else(|| "option -C requires a config file argument".to_string())?
+                    .to_string();
                 result.check_config = true;
-                idx += 1;
             }
-            "-L" => {
-                result.clear_persist = true;
-                idx += 1;
-            }
-            "-n" => {
-                result.non_interactive = true;
-                idx += 1;
-            }
+            "-L" => result.clear_persist = true,
+            "-n" => result.non_interactive = true,
             other => return Err(format!("unknown option: {other}")),
         }
     }
@@ -1079,7 +1115,17 @@ fn main() {
 // Tests
 // ============================================================================
 
+// Panicking on bad data is what a test is *for*: an `unwrap` that fires is a
+// failure report, not a crash in someone's session. CLAUDE.md scopes the four
+// defensive lints to non-test code for exactly this reason.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use scratchdir::ScratchDir;
@@ -1404,6 +1450,18 @@ mod tests {
             rules[0].args.as_ref().unwrap(),
             &["install".to_string(), "vim".to_string()]
         );
+    }
+
+    /// `args` with nothing after it means "the command, called with no
+    /// arguments" -- an empty list, not the absence of a list, and not an
+    /// error. The distinction is load-bearing: `Some(vec![])` only matches an
+    /// invocation that passes no arguments, while `None` matches any arguments
+    /// at all, so collapsing the two would silently widen the rule.
+    #[test]
+    fn parse_permit_cmd_args_empty() {
+        let rules = parse_config("permit alice cmd /usr/bin/pkg args\n").unwrap();
+        assert_eq!(rules[0].cmd.as_deref(), Some("/usr/bin/pkg"));
+        assert_eq!(rules[0].args.as_deref(), Some(&[][..]));
     }
 
     #[test]

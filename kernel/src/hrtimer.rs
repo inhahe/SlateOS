@@ -41,15 +41,29 @@
 
 use crate::serial_println;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Maximum number of timers per CPU.
+/// Soft threshold on the per-CPU timer queue.
+///
+/// Not a limit: crossing it is accepted and merely reported once.  It marks
+/// the depth beyond which a healthy workload has no business being — one
+/// pending timer per task blocked in a timed wait — so crossing it means some
+/// caller is arming timers it never cancels, and that caller is what wants
+/// finding.
 const MAX_TIMERS_PER_CPU: usize = 256;
+
+/// Hard ceiling on the per-CPU timer queue.
+///
+/// A backstop against unbounded growth, not an operating limit.  The list is
+/// a sorted `Vec` with O(n) insert, so this also bounds the worst-case time
+/// spent under the per-CPU lock with interrupts disabled.  See `todo.txt`
+/// (`hrtimer: replace the sorted Vec`) for the structural fix.
+const MAX_TIMERS_HARD_CEILING: usize = 4096;
 
 /// Maximum CPUs supported.
 const MAX_CPUS: usize = 16;
@@ -59,8 +73,35 @@ const MAX_CPUS: usize = 16;
 // ---------------------------------------------------------------------------
 
 /// Unique handle for a scheduled timer (used for cancellation).
+///
+/// Carries the CPU whose list the entry was inserted into, so [`cancel()`] can
+/// go straight to the one list that can possibly hold it.  A timer entry never
+/// migrates: [`schedule_absolute`] inserts into `CPU_TIMERS[current_cpu_index()]`
+/// and only *that* CPU's `process_expired()` ever removes it.  (The *task* that
+/// armed the timer can migrate, which is a different thing — an earlier version
+/// of `cancel` conflated the two and walked every CPU's list as a result.)
+///
+/// `cpu == usize::MAX` marks a handle for a timer that was never inserted
+/// (refused at the hard ceiling); cancelling it is a no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HrTimerHandle(u64);
+pub struct HrTimerHandle {
+    /// Globally unique timer id.
+    id: u64,
+    /// Index of the per-CPU list holding the entry, or `usize::MAX` if none.
+    cpu: usize,
+}
+
+impl HrTimerHandle {
+    /// The globally unique id of the timer this handle refers to.
+    ///
+    /// Exposed so a blocked task can record *which* timer is supposed to wake
+    /// it; the id can then be matched against the pending lists and the
+    /// fired/cancelled disposition rings in a hang dump.
+    #[must_use]
+    pub const fn id(self) -> u64 {
+        self.id
+    }
+}
 
 /// A pending high-resolution timer.
 #[derive(Clone, Copy)]
@@ -118,6 +159,73 @@ static TOTAL_SCHEDULED: AtomicU64 = AtomicU64::new(0);
 
 /// Total timers cancelled since boot.
 static TOTAL_CANCELLED: AtomicU64 = AtomicU64::new(0);
+
+/// Total timer requests refused at the hard ceiling since boot.
+///
+/// Should be 0 on every healthy boot; a non-zero value means some caller is
+/// blocking on a timeout that will never arrive.
+static TOTAL_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// Depth of the fired/cancelled disposition rings.
+///
+/// A timer that is gone from the pending lists went one of exactly two ways,
+/// and from the blocked task's side the two are indistinguishable — both leave
+/// it parked with no wakeup source.  These rings record the last
+/// `DISPOSITION_RING` ids to take each exit, so a hang dump can look up the id
+/// the task recorded and say which happened, instead of inferring it.
+const DISPOSITION_RING: usize = 32;
+
+/// Ids of the most recently fired timers (a wrapping ring).
+static LAST_FIRED_IDS: [AtomicU64; DISPOSITION_RING] = {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [Z; DISPOSITION_RING]
+};
+
+/// Write cursor for [`LAST_FIRED_IDS`]; wraps via `% DISPOSITION_RING`.
+static LAST_FIRED_POS: AtomicUsize = AtomicUsize::new(0);
+
+/// Ids of the most recently cancelled timers (a wrapping ring).
+static LAST_CANCELLED_IDS: [AtomicU64; DISPOSITION_RING] = {
+    const Z: AtomicU64 = AtomicU64::new(0);
+    [Z; DISPOSITION_RING]
+};
+
+/// Write cursor for [`LAST_CANCELLED_IDS`]; wraps via `% DISPOSITION_RING`.
+static LAST_CANCELLED_POS: AtomicUsize = AtomicUsize::new(0);
+
+/// Append `id` to a disposition ring.
+///
+/// Lock-free and racy by design: two CPUs can pick the same slot and one id is
+/// lost.  That is acceptable for a diagnostic whose only job is to answer
+/// "which exit did this particular id take", and it keeps the cost of the
+/// instrumentation to one `fetch_add` plus one store on the timer fire path.
+fn ring_push(ring: &[AtomicU64; DISPOSITION_RING], pos: &AtomicUsize, id: u64) {
+    let idx = pos.fetch_add(1, Ordering::Relaxed) % DISPOSITION_RING;
+    if let Some(slot) = ring.get(idx) {
+        slot.store(id, Ordering::Relaxed);
+    }
+}
+
+/// Print a disposition ring, oldest entry first.
+fn dump_ring(label: &str, ring: &[AtomicU64; DISPOSITION_RING], pos: &AtomicUsize) {
+    let end = pos.load(Ordering::Relaxed);
+    let start = end.saturating_sub(DISPOSITION_RING);
+    let mut line: [u64; DISPOSITION_RING] = [0; DISPOSITION_RING];
+    let mut n = 0usize;
+    for i in start..end {
+        if let (Some(src), Some(dst)) = (ring.get(i % DISPOSITION_RING), line.get_mut(n)) {
+            *dst = src.load(Ordering::Relaxed);
+            n = n.saturating_add(1);
+        }
+    }
+    if let Some(slice) = line.get(..n) {
+        serial_println!(
+            "[hrtimer]   last {} ids (oldest first): {:?}",
+            label,
+            slice
+        );
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -192,32 +300,30 @@ pub fn schedule_repeating(
 /// Returns `true` if the timer was found and removed, `false` if it
 /// already fired or was not found (invalid handle).
 ///
-/// Disables interrupts while holding per-CPU timer locks to prevent
+/// Disables interrupts while holding the per-CPU timer lock to prevent
 /// deadlock with the APIC timer ISR.
+///
+/// Exactly one lock is taken, on the CPU recorded in the handle.  This matters
+/// far more than it looks: a *miss* is the common case (`cancel` runs on the
+/// success path of every wait-with-timeout, where the timer has usually already
+/// fired), and the previous implementation answered a miss by locking and
+/// scanning **every** live CPU's list with interrupts disabled.  Since
+/// `process_expired()` only runs from the APIC timer ISR, long and frequent
+/// IRQ-off windows on the hottest wait path in the kernel coalesce timer ticks
+/// — i.e. the cancel path could stop the very timers it was cancelling.
 pub fn cancel(handle: HrTimerHandle) -> bool {
-    let found = crate::cpu::without_interrupts(|| {
-        let cpu = crate::smp::current_cpu_index();
-        let mut state = CPU_TIMERS[cpu].lock();
+    let Some(list) = CPU_TIMERS.get(handle.cpu) else {
+        // Refused at the hard ceiling: never inserted, nothing to remove.
+        return false;
+    };
 
-        if let Some(pos) = state.timers.iter().position(|t| t.id == handle.0) {
+    let found = crate::cpu::without_interrupts(|| {
+        let mut state = list.lock();
+        if let Some(pos) = state.timers.iter().position(|t| t.id == handle.id) {
             state.timers.remove(pos);
             TOTAL_CANCELLED.fetch_add(1, Ordering::Relaxed);
+            ring_push(&LAST_CANCELLED_IDS, &LAST_CANCELLED_POS, handle.id);
             return true;
-        }
-
-        // Try other CPUs (timer might have been scheduled from a different CPU
-        // if the task migrated).  This is rare but correct.
-        drop(state);
-        for i in 0..MAX_CPUS {
-            if i == cpu {
-                continue;
-            }
-            let mut other = CPU_TIMERS[i].lock();
-            if let Some(pos) = other.timers.iter().position(|t| t.id == handle.0) {
-                other.timers.remove(pos);
-                TOTAL_CANCELLED.fetch_add(1, Ordering::Relaxed);
-                return true;
-            }
         }
         false
     });
@@ -226,7 +332,7 @@ pub fn cancel(handle: HrTimerHandle) -> bool {
         crate::ktrace::record(
             crate::ktrace::Category::Timer,
             crate::ktrace::event::TIMER_CANCEL,
-            handle.0,
+            handle.id,
             0,
         );
     }
@@ -251,6 +357,13 @@ pub fn scheduled_count() -> u64 {
     TOTAL_SCHEDULED.load(Ordering::Relaxed)
 }
 
+/// Query how many timer requests were refused at the hard ceiling.
+///
+/// Non-zero means a caller is blocked on a timeout that will never fire.
+pub fn refused_count() -> u64 {
+    TOTAL_REFUSED.load(Ordering::Relaxed)
+}
+
 /// Query the next timer expiry time on the current CPU (or None).
 pub fn next_expiry_ns() -> Option<u64> {
     crate::cpu::without_interrupts(|| {
@@ -258,6 +371,60 @@ pub fn next_expiry_ns() -> Option<u64> {
         let state = CPU_TIMERS[cpu].lock();
         state.timers.first().map(|t| t.expiry_ns)
     })
+}
+
+/// Dump every pending timer on every live CPU to the serial port.
+///
+/// Diagnostic for the hang paths only.  A task blocked in a wait-with-timeout
+/// that never returns has exactly two possible explanations, and this tells
+/// them apart: its timer is **still queued** (so the ISR scan has stopped
+/// draining — a firing bug) or it is **gone** (so the arm was lost or the
+/// timer was cancelled out from under it — a lifetime bug). Without this the
+/// two are indistinguishable from a serial log, which is what made the last
+/// hang take a full boot cycle per hypothesis.
+///
+/// `arg` is printed because every in-tree timer callback takes a task id as
+/// its argument, so it identifies the waiter.
+pub fn dump_pending() {
+    let live_cpus = crate::smp::cpu_count().min(MAX_CPUS);
+    serial_println!(
+        "[hrtimer]   totals: scheduled={} fired={} cancelled={} refused={}",
+        TOTAL_SCHEDULED.load(Ordering::Relaxed),
+        TOTAL_FIRED.load(Ordering::Relaxed),
+        TOTAL_CANCELLED.load(Ordering::Relaxed),
+        TOTAL_REFUSED.load(Ordering::Relaxed),
+    );
+    // Match a blocked task's recorded `sleep_timer_id` against these to see
+    // which exit its timer took.  Present in neither ring, and not pending
+    // below, means it was never armed at all.
+    dump_ring("fired", &LAST_FIRED_IDS, &LAST_FIRED_POS);
+    dump_ring("cancelled", &LAST_CANCELLED_IDS, &LAST_CANCELLED_POS);
+    let now = now_ns();
+    for i in 0..live_cpus {
+        crate::cpu::without_interrupts(|| {
+            let state = CPU_TIMERS[i].lock();
+            serial_println!(
+                "[hrtimer]   cpu{}: {} pending (now_ns={})",
+                i,
+                state.timers.len(),
+                now
+            );
+            for t in state.timers.iter().take(16) {
+                serial_println!(
+                    "[hrtimer]     id={} expiry_ns={} arg={} interval_ns={} ({})",
+                    t.id,
+                    t.expiry_ns,
+                    t.arg,
+                    t.interval_ns,
+                    if now >= t.expiry_ns {
+                        "OVERDUE - the ISR scan is not draining"
+                    } else {
+                        "pending"
+                    },
+                );
+            }
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -276,8 +443,9 @@ pub fn next_expiry_ns() -> Option<u64> {
 /// Returns the number of timers fired this tick.
 pub fn process_expired() -> u32 {
     /// An expired timer captured under the lock to fire afterward:
-    /// (callback, argument, interval in ns).
-    type ExpiredTimer = (fn(u64), u64, u64);
+    /// (callback, argument, interval in ns, id).  The id is carried so the
+    /// fire path can record the timer's disposition for hang dumps.
+    type ExpiredTimer = (fn(u64), u64, u64, u64);
 
     if !INITIALIZED.load(Ordering::Relaxed) {
         return 0;
@@ -304,7 +472,12 @@ pub fn process_expired() -> u32 {
         while !state.timers.is_empty() && fire_count < 16 {
             if state.timers[0].expiry_ns <= now {
                 let entry = state.timers.remove(0);
-                to_fire[fire_count] = Some((entry.callback, entry.arg, entry.interval_ns));
+                to_fire[fire_count] = Some((
+                    entry.callback,
+                    entry.arg,
+                    entry.interval_ns,
+                    entry.id,
+                ));
 
                 // If repeating, re-insert with the next expiry.
                 if entry.interval_ns > 0 {
@@ -329,7 +502,7 @@ pub fn process_expired() -> u32 {
     // Fire callbacks outside the lock (and outside the IRQ-disabled region).
     // Callbacks might schedule new timers (which take the lock with CLI).
     for slot in to_fire.iter().take(fire_count) {
-        if let Some((cb, arg, _interval)) = *slot {
+        if let Some((cb, arg, _interval, id)) = *slot {
             // Defense-in-depth: validate the stored callback points into
             // kernel `.text` before `call`-ing it.  This dispatch runs from
             // the APIC timer ISR, so a corrupted/zeroed `callback` field would
@@ -350,6 +523,9 @@ pub fn process_expired() -> u32 {
                 );
                 continue;
             }
+            // Record the disposition *before* the call: the callback can
+            // re-enter the scheduler and never return here on this path.
+            ring_push(&LAST_FIRED_IDS, &LAST_FIRED_POS, id);
             cb(arg);
             fired = fired.saturating_add(1);
         }
@@ -394,6 +570,12 @@ fn schedule_absolute(
     arg: u64,
 ) -> HrTimerHandle {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let mut over_soft_limit = false;
+    let mut refused = false;
+    // Which list the entry actually landed on.  Captured out of the closure so
+    // the handle can name it; `cancel` then needs exactly one lock.  Stays
+    // `usize::MAX` (= "nowhere") if the request is refused below.
+    let mut sched_cpu = usize::MAX;
 
     // SAFETY: Must disable interrupts before taking the per-CPU timer lock.
     // The APIC timer ISR calls process_expired() which also takes this lock.
@@ -412,17 +594,68 @@ fn schedule_absolute(
 
         let mut state = CPU_TIMERS[cpu].lock();
 
-        // Enforce per-CPU limit.
-        if state.timers.len() >= MAX_TIMERS_PER_CPU {
-            serial_println!(
-                "[hrtimer] WARNING: per-CPU timer limit reached — oldest timer evicted"
-            );
-            state.timers.pop(); // Remove the last (furthest) timer.
+        // Soft threshold: past this the queue is deeper than any healthy
+        // workload needs, which means something is arming timers it never
+        // cancels.  Say so, but keep accepting — refusing here would break the
+        // caller, and the caller is the victim, not the culprit.
+        if state.timers.len() == MAX_TIMERS_PER_CPU {
+            over_soft_limit = true;
+        }
+
+        // Hard ceiling.  Refuse rather than evict.
+        //
+        // This used to `pop()` the furthest-out timer to make room.  That is
+        // never acceptable: the evicted timer is *armed*, someone is blocked
+        // waiting for it, and its owner is given no way to find out.  It is a
+        // silent lost wakeup manufactured on demand — 1541 of them in a single
+        // boot here, all belonging to subsystems that had done nothing wrong.
+        // Refusing the newest request instead concentrates the harm on the
+        // caller that is actually asking, and the caller can at least be
+        // diagnosed from the message below.  See `known-issues.md` →
+        // `BUG-HRTIMER-EVICTS-AN-ARMED-TIMER`.
+        if state.timers.len() >= MAX_TIMERS_HARD_CEILING {
+            refused = true;
+            return;
         }
 
         insert_sorted(&mut state.timers, entry);
+        sched_cpu = cpu;
         TOTAL_SCHEDULED.fetch_add(1, Ordering::Relaxed);
     });
+
+    // Diagnostics *outside* `without_interrupts` and outside the lock.  The
+    // old code wrote to the serial port with interrupts disabled and the
+    // per-CPU timer lock held, once per overflowing schedule — which delayed
+    // the very APIC tick that drains the queue, so the flood made the
+    // condition it was reporting worse.
+    if over_soft_limit {
+        static SOFT_WARNED: AtomicBool = AtomicBool::new(false);
+        if !SOFT_WARNED.swap(true, Ordering::Relaxed) {
+            serial_println!(
+                "[hrtimer] WARNING: per-CPU timer queue passed {} entries — some caller is \
+                 arming timers it never cancels. (one-shot warning)",
+                MAX_TIMERS_PER_CPU
+            );
+        }
+    }
+    if refused {
+        static REFUSED_WARNED: AtomicBool = AtomicBool::new(false);
+        if !REFUSED_WARNED.swap(true, Ordering::Relaxed) {
+            serial_println!(
+                "[hrtimer] *** BUG: per-CPU timer queue hit the hard ceiling of {} — \
+                 refusing new timers. A caller that blocks on this handle will not be woken \
+                 by a timeout. (one-shot warning)",
+                MAX_TIMERS_HARD_CEILING
+            );
+        }
+        TOTAL_REFUSED.fetch_add(1, Ordering::Relaxed);
+        // `cpu: usize::MAX` — the entry is on no list, so cancelling is a no-op
+        // rather than a scan that can never find anything.
+        return HrTimerHandle {
+            id,
+            cpu: usize::MAX,
+        };
+    }
 
     // Trace outside the critical section (ktrace might allocate).
     crate::ktrace::record(
@@ -432,7 +665,10 @@ fn schedule_absolute(
         expiry_ns,
     );
 
-    HrTimerHandle(id)
+    HrTimerHandle {
+        id,
+        cpu: sched_cpu,
+    }
 }
 
 /// TSC-based nanosecond fallback when HPET is unavailable.
@@ -633,12 +869,41 @@ pub fn self_test() {
     let sched = scheduled_count();
     let cancelled_n = TOTAL_CANCELLED.load(Ordering::Relaxed);
     let fired_n = fired_count();
+    let refused_n = refused_count();
+    let pending_n = pending_count();
+    // `scheduled - fired - cancelled - pending` is the count of timers that
+    // were armed and then neither fired, were cancelled, nor are still
+    // waiting.  Under the old eviction policy that number was the tally of
+    // silently destroyed wakeups; it must now be 0.
+    let unaccounted = sched
+        .saturating_sub(fired_n)
+        .saturating_sub(cancelled_n)
+        .saturating_sub(pending_n as u64);
     serial_println!(
-        "[hrtimer]   Stats: scheduled={}, fired={}, cancelled={}",
+        "[hrtimer]   Stats: scheduled={}, fired={}, cancelled={}, pending={}, refused={}",
         sched,
         fired_n,
-        cancelled_n
+        cancelled_n,
+        pending_n,
+        refused_n
     );
+    if refused_n > 0 {
+        serial_println!(
+            "[hrtimer]   *** {} timer request(s) refused at the hard ceiling — a caller \
+             is waiting on a timeout that will never arrive",
+            refused_n
+        );
+    }
+    // Not a hard failure: `pending_count()` only sees the current CPU, so on a
+    // multi-CPU boot the arithmetic legitimately under-counts.  It is still
+    // the cheapest tripwire for a return of the eviction bug.
+    if unaccounted > (crate::smp::cpu_count() as u64).saturating_mul(64) {
+        serial_println!(
+            "[hrtimer]   *** {} timer(s) unaccounted for (scheduled but never fired, \
+             cancelled, or pending) — see BUG-HRTIMER-EVICTS-AN-ARMED-TIMER",
+            unaccounted
+        );
+    }
 
     serial_println!("[hrtimer] Self-test PASSED");
 }

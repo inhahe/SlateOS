@@ -423,7 +423,17 @@ pub fn wipe(payload: &mut [u8]) {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
+// Panicking on bad data is what a test is *for*: an `unwrap` that fires is a
+// failure report, not a crash in someone's session. CLAUDE.md scopes the four
+// defensive lints to non-test code for exactly this reason.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use crate::{CreateSessionParams, DaemonConfig};

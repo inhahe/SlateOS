@@ -21,3 +21,11 @@ posix = { path = "../../posix" }
 # `/etc/shadow` stand-in and one read back the other's line. See known-issues.md
 # `B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE`.
 scratchdir = { path = "../scratchdir" }
+
+# Inherit the workspace lint configuration. This crate carried only a bare
+# `#![deny(clippy::all)]` in `main.rs`, so it had neither `pedantic` nor the four
+# the workspace keeps at `warn` -- `unwrap_used`, `expect_used`,
+# `indexing_slicing`, `arithmetic_side_effects` -- over code that parses
+# attacker-supplied protocol commands and decides whether a password is correct.
+[lints]
+workspace = true

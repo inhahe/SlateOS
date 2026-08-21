@@ -46356,3 +46356,52 @@ guard whose job is precisely to not resurrect suspended tasks.
 
 **Meanwhile:** lane-b boot tests can fail on `ctest-jobctl` intermittently
 through no fault of the tree under test. Re-run before believing it.
+
+## OPEN-A-PATH-Z-REAL-MAKE-STAT-OF-MAKEFILE-RETURNS-EACCES (found by lane B, 2026-08-20) — filed to lane A
+
+**Owner: lane A** (`kernel/**`). Filed as
+`requests/b-a-path-z-real-make-fails-because-stat-of-Makefile-returns-eacces.md`.
+
+**What.** `self_test_linux_real_glibc_make` (`kernel/src/proc/spawn.rs:27361`)
+fails on every boot. The kernel stages a two-line Makefile at `/Makefile` with
+`Vfs::write_file` and runs the real Debian `make -f /Makefile all` on it; make
+prints
+
+```
+make: stat: /Makefile: Permission denied
+make: *** No rule to make target '/Makefile'.  Stop.
+```
+
+and exits 2. The first line is GNU make's `perror_with_name("stat: ", …)` in
+`remake.c::f_mtime`, so a ring-3 `stat("/Makefile")` returned **EACCES**
+(`KernelError::PermissionDenied` — nothing else maps to EACCES in
+`linux_errno_for`). `f_mtime` treats a failed `stat` as "does not exist", the
+makefile is a goal in make's remake pass with no rule to build it and is not
+`dontcare`, so make calls `fatal()` and dies before evaluating `all`. That is
+why nothing downstream — the recipe, `/bin/sh`, `/bin/emit`, `/make-out.txt` —
+appears in the log.
+
+**Not a regression.** The test has never passed on `lane-b`: it ran for the
+first time in the 2026-08-20 boot, because the rootfs only just gained
+`/bin/make`. Deterministic across both boots that day.
+
+**Ruled out** (details and line citations in the request): the capability
+grant (`(File, 1u64, READ|WRITE)` is what all 47 Path-Z tests use, and the
+Linux-ABI stat path has no `require_cap_type` at all); path-based stat in
+general (`[ -f /bin/dash ]` and `[ -d /bin ]` both pass in the same boot);
+"files directly under `/`" (`/slateos-test-mmap.dat` is kernel-written at the
+root and opens fine from ring 3); the syscall shim (`sys_newfstatat` and
+`sys_statx` both reach `stat_meta_for_path` with no permission check);
+`check_file_tags` (not called by `Vfs::metadata_resolved`, and it bypasses for
+uid 0); memfs (`MemFs::metadata` has no permission logic, and new files default
+to `0o644`); and namespaces (`NsRule::Hide` is the only denial and nothing
+outside `namespace.rs` constructs one).
+
+**Remaining hypotheses.** Something on `resolve_follow`/`resolve_inner` treats
+a freshly written, not-yet-cached root child differently (`write_file`
+invalidates only the *negative* dcache prefix), or a read-side hook fires —
+`fs::atime`'s relatime update on stat is the best-shaped candidate, since it
+would make a read path perform a write.
+
+**How to close it in one boot:** log the `KernelError` and path where
+`stat_meta_for_path` (`kernel/src/syscall/linux.rs:19032`) returns `Err`.

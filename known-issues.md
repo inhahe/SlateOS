@@ -32351,6 +32351,39 @@ already turns scan-code-set-1 into characters, and the fix is additive.
 whether the kernel's existing keyboard path can be given a second consumer, or
 whether this wants a new device; that reading is lane C's to do before filing.
 
+**Update 2026-08-21 — that reading is done, and it is now filed:**
+`requests/c-a-userspace-cannot-read-the-keyboard-or-the-mouse-at-all.md`. What
+the drivers turned out to say:
+
+* **The mouse has no userspace door of any kind.** `kernel/src/mouse.rs` keeps a
+  128-entry lock-free ring of `MouseEvent { buttons, dx, dy, dz }` and exposes
+  `try_read_event()`/`read_event()` to *kernel* callers only. Nothing under
+  `kernel/src/syscall/` or `kernel/src/fs/` reads it; the only matches for
+  "mouse" there are accessibility *settings* (`mouse_keys`, `mouse_speed`). So
+  the pointer cannot move, as opposed to moving badly.
+* **The keyboard's existing consumer cannot be reused, because the information
+  is destroyed before the queue.** `handle_scancode`
+  (`kernel/src/keyboard.rs:289`) computes `(extended, code, pressed)`, uses
+  `pressed` to update the modifier statics, and then keeps only the ASCII
+  character — for the keys that have one. `SYS_CONSOLE_TRY_READ_CHAR` therefore
+  hands back a `u8`: no release events, no keycode, nothing for F-keys, arrows,
+  Home/Insert or the keypad. Giving it "a second consumer" would hand that
+  consumer the same lossy `u8`. The raw push has to happen inside the ISR, which
+  is lane A's tree.
+* **The ask is Linux `struct input_event` on `/dev/input/event0`/`event1`**, with
+  `EV_KEY`/`EV_REL`/`EV_SYN`, `BTN_LEFT`-style button codes, and `O_NONBLOCK`.
+  Every other kernel door this compositor uses is the Linux one — the scanout
+  path issues real `open`/`ioctl`/`mmap` numbers on purpose — and input is also
+  where every future port (SDL, GTK, Chromium, an X server) will look first.
+  The request explicitly offers to own the set-1 → Linux-keycode table in lane C
+  if that is what makes the kernel half small enough to land.
+
+**No interim is being built, deliberately.** Driving the compositor from
+`SYS_CONSOLE_TRY_READ_CHAR` would give typing and nothing else, and would need
+its own event synthesis, focus rules and tests — all of which get deleted when
+the real device lands. That is exactly the band-aid accumulation `CLAUDE.md`
+names. This entry stays open and honest instead.
+
 ## TD-COMPOSITOR-COPIES-EVERY-FRAME-TWICE (lane C, 2026-08-21)
 
 **In short:** every frame the desktop draws is copied one extra time on its way

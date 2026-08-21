@@ -50049,3 +50049,65 @@ proving the discipline. Scoped as the immediate follow-up.
 shell, whose signals arrive from keypresses. It becomes a genuine hang the
 moment a second terminal exists and something on it kills a job on the console —
 which is the state the pty work creates.
+
+## BUG-POSIX-SPAWN-FILE-ACTIONS-IS-4624-BYTES-IN-AN-80-BYTE-SLOT (found by lane A, 2026-08-21)
+
+**Status:** OPEN. **Owner: lane B** (`posix/src/spawn.rs`). Filed as
+`requests/a-b-posix-spawn-file-actions-init-smashes-the-callers-stack.md`,
+which carries the disassembly, the layout table and the recommended fix.
+
+**What.** Our `PosixSpawnFileActionsT` (`posix/src/spawn.rs:220`) is **4,624
+bytes** — a `usize` count plus sixteen 288-byte `FileActionSlot`s, each
+carrying an inline `[u8; 256]` path. Every C program that uses `posix_spawn`
+is compiled against a `<spawn.h>` that declares the same type as **80 bytes**
+(musl and glibc agree; only the field names differ). So
+`posix_spawn_file_actions_init` zeroes 4,544 bytes past the end of the
+caller's object — its spilled locals, its saved registers, its return address,
+and roughly 4 KiB of its callers' frames. Every `add*` call writes one
+288-byte slot into the same 80 bytes.
+
+**How it shows up.** The Path-Z real-`make` rung. GNU make 4.4.1
+(`build/spike/make-slateos.elf`) dies in ring 3 at
+`child_execute_job`/`job.c:2422`, `for (pp = child->environment; …)`, because
+`child` — spilled to `rbp-0x48`, one slot past an 80-byte file-actions object
+at `rbp-0x98` — has been zeroed:
+
+```
+[exception] User page fault (task 325) at 0x10315d4, addr=0x8 (not-present, read)
+[spawn]   FAIL: real make — exit code=Some(-8), expected 0
+```
+
+`exit code=Some(-8)` is exception 8 negated, not an exit status.
+
+**Why nothing caught it.** The two sides are compiled from different headers
+in different languages, so no compiler sees both. `cargo test -p posix` cannot
+see it either: every test allocates the object as a Rust
+`PosixSpawnFileActionsT`, which is by construction big enough. Only a size
+assertion finds this — and one *exists* for the sibling `posix_spawnattr_t`
+(`test_spawnattr_matches_musl_layout`, `:1877`), whose doc comment spells out
+this exact failure mode. The file-actions object never got the same treatment.
+
+**Masked until now.** make never reached `child_execute_job`: it died earlier
+in the remake pass on the EACCES covered by
+`FIXED-A-PATH-Z-REAL-MAKE-STAT-OF-MAKEFILE-RETURNS-EACCES` above. Fixing that
+grant is what exposed this.
+
+**Fix, in outline.** 80 bytes is not negotiable — it is what every compiled
+object already believes. The actions must move out of line behind the pointer
+at offset 8, where musl's `void *__actions` and glibc's
+`struct __spawn_action *__actions` both sit, with `malloc`/`realloc` growth
+and a `strdup`'d path instead of 256 inline bytes. Add the 80-byte assertion
+as a `const { assert!(…) }` rather than a `#[test]`, for the reason
+`kernel/src/cap/rights.rs`'s aliasing check gives: the two halves live in
+different crates compiled from different headers, so no single diff contains
+both, and it should be impossible to *build* rather than merely detectable on
+a test run.
+
+**Audit done at the same time.** Every other C-visible opaque struct in
+`posix/src` was checked for the smashing direction (ours larger than the
+header's). `posix_spawnattr_t` 336/336, `pthread_mutex_t` 40/40,
+`pthread_cond_t` 48/48, `pthread_rwlock_t` 56/56, `pthread_barrier_t` 32/32 —
+all exact. `sem_t` (32→4), `regex_t` (64→16) and `glob_t` (72→24) are
+*undersized*, which does not smash anything; noted in the request as a
+lower-priority correctness point, not a safety one. `posix_spawn_file_actions_t`
+is the only one in the dangerous direction.

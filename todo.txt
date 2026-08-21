@@ -54233,6 +54233,29 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##     deduplicates by (file, line, column, lint). Never quote a raw warning
 ##     total from `-W <lint>` flags: those leak into dependencies and bypass the
 ##     workspace lint table, so the number is not the tree's backlog.
+##
+##     Pass `--keep-going` as well. Without it one deny-level error anywhere in
+##     the workspace ends the run, and the measurement quietly covers only the
+##     crates that finished before it.
+##
+## (d2) ADDED 2026-08-21 (lane C), the corollary that actually bites per-crate:
+##     `cargo clippy -p <crate>` DOES NOT LINT THAT CRATE'S TESTS. `#[cfg(test)]`
+##     code is a separate cargo target; without `--all-targets` clippy never
+##     compiles it, so every lint inside `mod tests` is unreported -- including
+##     deny-level ones, which means a crate can be "clippy clean" and still fail
+##     a real `--all-targets` build.
+##
+##     `cargo test` does not cover for this: tests are compiled by rustc, not
+##     clippy, so a passing suite says nothing about lints. Combined with (d) --
+##     which stops any workspace-wide `--all-targets` run from ever reaching the
+##     apps -- test code in this tree had no lint coverage from either direction.
+##
+##     That is not hypothetical: 39ce76067 (lane C) put a `clippy::chars_next_cmp`
+##     error in `apps/chess`'s test helpers and it went unseen for a day, with
+##     `-p chess` clean and 121 tests passing the whole time. Fixed in 970221739.
+##
+##     ALWAYS pass `--all-targets` when clippy-ing a single crate, and treat
+##     "-p X is clean" as a claim about non-test code only.
 
 ## ---------------------------------------------------------------------------
 ## [C] 2026-08-16 -- A USE probe font, so the 81 unmeasured scripts are measured

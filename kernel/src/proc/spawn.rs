@@ -27999,7 +27999,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
 /// via [`pathz_skip`].  This function deliberately does not log it itself: it is
 /// shared by ~26 rungs, and one line per rung is the information you actually
 /// want (see known-issues.md → `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`).
-fn stage_hosted_cc_support() -> KernelResult<Option<&'static str>> {
+fn stage_hosted_cc_support() -> KernelResult<Option<alloc::string::String>> {
     // (src in /mnt rootfs, dst in VFS) staging pairs.  ld + libc + libm + tcc
     // are shared with the other Path-Z tests; the crt objects, libc.so script,
     // libc_nonshared.a and libtcc1.a are the hosted-compile additions.
@@ -28037,21 +28037,42 @@ fn stage_hosted_cc_support() -> KernelResult<Option<&'static str>> {
             "/mnt/usr/lib/x86_64-linux-gnu/libc_nonshared.a",
             "/usr/lib/x86_64-linux-gnu/libc_nonshared.a",
         ),
-        (
-            "/mnt/tmp/tccinstall/lib/tcc/libtcc1.a",
-            "/tmp/tccinstall/lib/tcc/libtcc1.a",
-        ),
     ];
+
+    // libtcc1.a is the one support file whose path is not a constant: it lives
+    // at tcc's compiled-in --prefix, so it moves whenever the host's tcc is
+    // built somewhere else.  `create-ext4-rootfs.sh` stages it at that exact
+    // absolute path (tcc opens it by absolute path, so it must resolve
+    // unchanged inside the VFS) and records the directory in /etc/tcc-libdir.
+    //
+    // This used to be the constant "/tmp/tccinstall/lib/tcc". When the host
+    // cache moved out of /tmp — because WSL clears /tmp on restart, which is
+    // what silently emptied the compiler out of the image in the first place —
+    // 25 rungs reported "prerequisite missing" for a file that was present
+    // under a different name. A kernel constant that must agree with a host
+    // build script it cannot see will eventually disagree with it, and the
+    // disagreement is invisible because a missing prerequisite is a SKIP, not
+    // a failure. Reading the path the image itself recorded removes the
+    // agreement requirement rather than restating it.
+    let libdir = match crate::fs::Vfs::read_file("/mnt/etc/tcc-libdir") {
+        Ok(bytes) => match core::str::from_utf8(&bytes) {
+            Ok(s) if !s.trim().is_empty() => alloc::string::String::from(s.trim()),
+            _ => return Ok(Some(alloc::string::String::from("/mnt/etc/tcc-libdir"))),
+        },
+        Err(_) => return Ok(Some(alloc::string::String::from("/mnt/etc/tcc-libdir"))),
+    };
+    let libtcc1_src = alloc::format!("/mnt{libdir}/libtcc1.a");
+    let libtcc1_dst = alloc::format!("{libdir}/libtcc1.a");
 
     // The hosted compile needs the whole support set; if tcc itself or any
     // support file is missing, no-op (matches the rootfs best-effort pattern).
     for probe in [
         "/mnt/bin/tcc",
         "/mnt/usr/lib/x86_64-linux-gnu/crt1.o",
-        "/mnt/tmp/tccinstall/lib/tcc/libtcc1.a",
+        libtcc1_src.as_str(),
     ] {
         if !crate::fs::Vfs::exists(probe) {
-            return Ok(Some(probe));
+            return Ok(Some(alloc::string::String::from(probe)));
         }
     }
 
@@ -28059,8 +28080,12 @@ fn stage_hosted_cc_support() -> KernelResult<Option<&'static str>> {
     let _ = crate::fs::Vfs::mkdir_all("/lib/x86_64-linux-gnu");
     let _ = crate::fs::Vfs::mkdir_all("/bin");
     let _ = crate::fs::Vfs::mkdir_all("/usr/lib/x86_64-linux-gnu");
-    let _ = crate::fs::Vfs::mkdir_all("/tmp/tccinstall/lib/tcc");
-    for (src, dst) in STAGE {
+    let _ = crate::fs::Vfs::mkdir_all(&libdir);
+    for (src, dst) in STAGE
+        .iter()
+        .map(|(s, d)| (*s, *d))
+        .chain(core::iter::once((libtcc1_src.as_str(), libtcc1_dst.as_str())))
+    {
         match crate::fs::Vfs::read_file(src) {
             Ok(bytes) => {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
@@ -28070,12 +28095,12 @@ fn stage_hosted_cc_support() -> KernelResult<Option<&'static str>> {
                         dst,
                         e
                     );
-                    return Ok(Some(dst));
+                    return Ok(Some(alloc::string::String::from(dst)));
                 }
             }
             Err(e) => {
                 serial_println!("[spawn]   hosted cc: reading {} failed: {:?}", src, e);
-                return Ok(Some(src));
+                return Ok(Some(alloc::string::String::from(src)));
             }
         }
     }
@@ -28402,7 +28427,7 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
         Ok(Some(missing)) => {
             pathz_skip(
                 format_args!("REAL C compiler (tcc, HOSTED glibc link, {label}, ring 3, Path Z)"),
-                missing,
+                &missing,
             );
             return Ok(());
         }
@@ -28636,7 +28661,7 @@ int main(void){\n\
         Ok(Some(missing)) => {
             pathz_skip(
                 format_args!("REAL C compiler (tcc, SEPARATE compilation, ring 3, Path Z)"),
-                missing,
+                &missing,
             );
             return Ok(());
         }
@@ -28951,7 +28976,7 @@ int main(void){\n\
         Ok(Some(missing)) => {
             pathz_skip(
                 format_args!("REAL make-drives-tcc build (ring 3, Path Z)"),
-                missing,
+                &missing,
             );
             return Ok(());
         }
@@ -29217,7 +29242,7 @@ int main(void){\n\
         Ok(Some(missing)) => {
             pathz_skip(
                 format_args!("REAL project-header C build (tcc, #include \"...\", ring 3, Path Z)"),
-                missing,
+                &missing,
             );
             return Ok(());
         }

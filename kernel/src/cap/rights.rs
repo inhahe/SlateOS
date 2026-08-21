@@ -32,7 +32,28 @@ impl Rights {
     /// Delete the resource or child objects within it.
     pub const DELETE: Self = Self(1 << 4);
 
-    /// Modify metadata (permissions, attributes, etc.).
+    /// **Access** a resource's metadata — its size, times, mode, link target,
+    /// extended attributes, and the filesystem statistics behind it.
+    ///
+    /// This bit is what `stat`, `lstat`, `readlink`, `getxattr`, `listxattr`,
+    /// `statvfs` and `flock` are gated on. It is deliberately *not* implied by
+    /// [`READ`](Self::READ): "may learn this file's size" and "may read this
+    /// file's bytes" are different authorities, and an indexer or a `du` should
+    /// be able to hold the first without the second.
+    ///
+    /// **It does not gate metadata *modification*.** Changing metadata —
+    /// `setxattr`, `removexattr`, and in future `chmod`/`utimes` — requires
+    /// [`WRITE`](Self::WRITE), on the principle that mutating a file's
+    /// attributes is a write to the file's inode. This doc used to read
+    /// "Modify metadata (permissions, attributes, etc.)", which described
+    /// neither the gates that exist nor the ones that check this bit; the
+    /// mismatch cost a cross-lane investigation, because a reader who had
+    /// correctly noted that stat-by-path is gated on a *modify* right
+    /// reasonably concluded that could not be the cause of an `EACCES` on a
+    /// read. If a future change does want a distinct "may alter attributes"
+    /// authority, give it its own bit rather than overloading this one — the
+    /// same argument [`SET_CREDENTIALS`](Self::SET_CREDENTIALS) makes at
+    /// length, and there are 52 free bits.
     pub const METADATA: Self = Self(1 << 5);
 
     /// Transfer (delegate) this capability to another task.

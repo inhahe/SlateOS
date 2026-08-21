@@ -46544,10 +46544,40 @@ guard whose job is precisely to not resurrect suspended tasks.
 **Meanwhile:** lane-b boot tests can fail on `ctest-jobctl` intermittently
 through no fault of the tree under test. Re-run before believing it.
 
-## OPEN-A-PATH-Z-REAL-MAKE-STAT-OF-MAKEFILE-RETURNS-EACCES (found by lane B, 2026-08-20) — filed to lane A
+## FIXED-A-PATH-Z-REAL-MAKE-STAT-OF-MAKEFILE-RETURNS-EACCES (found by lane B, 2026-08-20; fixed by lane A, 2026-08-21)
 
 **Owner: lane A** (`kernel/**`). Filed as
-`requests/b-a-path-z-real-make-fails-because-stat-of-Makefile-returns-eacces.md`.
+`requests/b-a-path-z-real-make-fails-because-stat-of-Makefile-returns-eacces.md`,
+answered in `requests/a-b-make-eacces-was-the-abi-switch-your-rootfs-change-made.md`.
+
+**Cause: `/bin/make` is not a Linux binary any more.** `create-ext4-rootfs.sh`
+stages the Debian glibc `make` and then *overwrites* it with
+`build/spike/make-slateos.elf` (GNU make 4.4.1 linked against our `libc.a`), so
+the binary that runs is static, non-PIE and speaks the **native** syscall ABI.
+Native `sys_fs_stat` requires `Rights::METADATA`; the Linux-ABI stat path checks
+nothing. The test granted `READ | WRITE`, which was sufficient only while make
+came in the Linux door.
+
+**Fix:** the test grants `READ | WRITE | METADATA`, as every other native Path-Z
+test in the file already does, and its doc comment now names the ABI switch.
+`Rights::METADATA`'s own doc — which said "Modify metadata" while all eight
+gates that check it are metadata *reads*, and the two metadata *writes* are
+gated on `WRITE` — was a contributing cause of the misdiagnosis and has been
+corrected to describe the bit the code implements.
+
+**What it exposed and did not fix:** the same operation requires a capability
+under the native ABI and nothing at all under the Linux one. Put to the operator
+as **Q56** in `open-questions.md` rather than decided, because closing it means
+granting `METADATA` at ~50 launch sites across two lanes.
+
+**Diagnostic note worth keeping.** Two probes were added while chasing this — on
+the `Err` return of `stat_meta_for_path`, and on the return value of every
+stat-family Linux syscall — and *both staying silent* is what identified the
+cause. An absent log line was the evidence; the same is true of the
+`Detected Linux x86_64 ABI binary` line, whose absence in the make region is the
+one-line tell for this whole class of confusion.
+
+**Original report follows.**
 
 **What.** `self_test_linux_real_glibc_make` (`kernel/src/proc/spawn.rs:27361`)
 fails on every boot. The kernel stages a two-line Makefile at `/Makefile` with
@@ -46589,6 +46619,10 @@ a freshly written, not-yet-cached root child differently (`write_file`
 invalidates only the *negative* dcache prefix), or a read-side hook fires —
 `fs::atime`'s relatime update on stat is the best-shaped candidate, since it
 would make a read path perform a write.
+
+*(Both hypotheses were wrong; neither was involved. So was the "ruled out"
+verdict on the capability grant — accurate for a Linux-ABI process, and the
+process was not one. See the cause section at the top.)*
 
 **How to close it in one boot:** log the `KernelError` and path where
 `stat_meta_for_path` (`kernel/src/syscall/linux.rs:19032`) returns `Err`.

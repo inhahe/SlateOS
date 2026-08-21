@@ -2173,6 +2173,64 @@ question as its cheapest fix; that was a prediction and it did not survive the
 measurement.
 
 
+## Q56 — [A] A program compiled for Linux is exempt from the file-permission checks our own programs must pass. Close the gap, or write it down as the price of running Linux software? — Status: OPEN
+
+**In short:** When a program asks this system a question about a file — "how big
+is it?", "when was it changed?" — our own programs are required to hold a
+*permission token* for that, and are refused if they don't. Programs built for
+Linux, which we also run, are never asked: the same question through the Linux
+door is answered without any check at all. So the same program, doing the same
+thing to the same file, is policed or not policed depending on which door it
+came in by. The question is whether to start policing the Linux door too, or to
+accept that it is unpoliced and say so plainly somewhere.
+
+**How this surfaced:** it is not theoretical. A test that runs GNU `make` was
+written when `make` came in by the Linux door, and was given the tokens a Linux
+program needs. The build later switched to a `make` compiled for *our* system,
+which comes in by the other door — and the very same test started failing,
+because now the checks applied and one token was missing. It is fixed (the test
+grants the token now), but the fact that recompiling a program changed what it
+was allowed to do is the thing worth deciding about.
+
+**Glossary:** *capability / permission token* — a thing a process must be handed
+in order to do something, rather than being allowed because of who it is.
+*ambient authority* — permission you get by *being* you, with no token to hold
+or hand over; what Linux uses, and what this project's design says it does not
+want. *ABI* — the convention a compiled program uses to call the system; we
+support two, ours and Linux's, and a program picks one when it is compiled.
+*`stat`* — the call that asks a file's size, times and mode.
+
+**The two doors, concretely:** our own `stat` requires a `File` capability
+carrying the `METADATA` right (8 call sites in `handlers.rs`). The Linux
+translation layer checks a `File` capability for `open` and for the mutating
+`*at` calls, and for nothing else — `stat`, `lstat`, `statx`, `readlink`,
+`statvfs` and the xattr readers all go straight through to the VFS (2
+`require_cap_type` sites in the whole of `linux.rs`).
+
+| Option | *What changes* |
+|---|---|
+| **A. Enforce parity** — the Linux layer checks the same rights ours does | A ported Linux program not given a `METADATA` token can no longer `stat`. Every launch site must grant it, and any we miss fails with "permission denied" on a call the program has no reason to expect can fail. Blast radius today: ~50 Path-Z tests, plus dash, tcc, python and `ld.so` |
+| **B. Leave it, and document it** — declare the Linux ABI a lower-assurance compatibility surface | No behaviour changes. We write down, in `design.txt` and the Linux layer's module doc, that a Linux-ABI process holds ambient filesystem authority — so "capability-based security from day one" is true of native programs only |
+| **C. Draw the boundary deliberately** — keep today's behaviour, but state it as a rule and test it | Same behaviour as B, except the line is explicit and checkable: a newly added Linux syscall that only *reads* metadata is documented as needing no check, so nobody adds one inconsistently and nobody re-investigates this from scratch |
+
+**My recommendation: C, and keep A available.** A is what the design spec's "no
+ambient authority" line implies, and I do not think it can be paid for today —
+the entire value of the Linux ABI is running binaries nobody built for us, and
+those binaries assume ambient authority by construction. B is honest but leaves
+the boundary undrawn, which is how it drifts. C costs a paragraph and a test.
+
+**If this is never answered:** nothing breaks and nothing degrades on its own —
+but the inconsistency is a trap that has already cost one cross-lane
+investigation (lane B correctly ruled out the capability grant, because for the
+ABI they had in mind it genuinely was not checked), and it will cost another
+the next time a binary is rebuilt for the other ABI. Meanwhile the design spec
+claims something about this system that is true of only half of it.
+
+**Where it bites:** `kernel/src/syscall/linux.rs` (the two `require_cap_type`
+sites), `kernel/src/syscall/handlers.rs:8365+` (the native gates),
+`kernel/src/cap/rights.rs` (`Rights::METADATA`).
+
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

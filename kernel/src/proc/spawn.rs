@@ -27347,19 +27347,40 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
 /// This is the first rung of the operator-decided "GCC/CMake/Make toolchain"
 /// initiative (design-decisions §9 / §12, Path Z).  Every prior Path-Z test
 /// ran a single program or a shell; this runs `make`, the build *driver* that
-/// orchestrates a real toolchain.  `make` is itself an unmodified glibc PIE
-/// (`DT_NEEDED libc.so.6` only — both it and its interpreter are already
-/// staged), so ld.so loads it, it reads + parses the Makefile, builds the
+/// orchestrates a real toolchain.  It reads + parses the Makefile, builds the
 /// dependency graph, and to run the recipe `@/bin/emit > /make-out.txt` it
 /// `fork`s and `exec`s `/bin/sh -c '…'` (the recipe contains the shell
 /// metacharacter `>`, so make does **not** take its direct-exec optimisation),
 /// `/bin/sh` (dash) in turn forks/execs the external `/bin/emit` with stdout
 /// redirected to the file, and make `wait4`s its child and propagates the
-/// status.  A correct run therefore exercises, end to end: make's glibc
+/// status.  A correct run therefore exercises, end to end: make's C-runtime
 /// startup, Makefile `open`/`read`/`stat`, dependency evaluation, recipe
 /// dispatch via `/bin/sh`, the nested fork→exec→redirect→wait chain, and exit
 /// status propagation up through make.  No fd is injected — the test reads the
 /// file the recipe produced back from the VFS.
+///
+/// # Which `make` this actually runs, and why the capability grant matters
+///
+/// This test was written against the Debian glibc `make` that
+/// `create-ext4-rootfs.sh` stages first, and its name still says so.  The
+/// script then **overwrites** `/bin//make` with `build/spike/make-slateos.elf`
+/// — GNU make 4.4.1 linked against our own `libc.a` — so the binary that runs
+/// here is static, non-PIE, and speaks the **native** syscall ABI, not the
+/// Linux one.  (`detect_linux_abi` correctly says no; the give-away in the log
+/// is the absence of a `Detected Linux x86_64 ABI binary` line.)
+///
+/// That matters because the two ABIs do not gate `stat` alike: the Linux
+/// translation layer checks a `File` capability for `open` only, while the
+/// native [`crate::syscall::handlers::sys_fs_stat`] requires
+/// [`Rights::METADATA`].  So the `READ | WRITE` grant this test inherited from
+/// its glibc-era siblings was silently sufficient until the binary changed
+/// underneath it, at which point `stat("/Makefile")` began returning `EACCES`
+/// — and GNU make maps *any* failed `stat` to "file does not exist", so the
+/// symptom surfaced three thousand log lines later as `No rule to make target
+/// '/Makefile'`, naming neither `stat` nor a permission problem.  Every other
+/// native Path-Z test grants `METADATA` for exactly this reason; this one now
+/// does too.  See `requests/b-a-path-z-real-make-fails-because-stat-of-\
+/// Makefile-returns-eacces.md`.
 ///
 /// No-op (returns `Ok(())`) when the rootfs / `/bin/make` / `/bin/sh` /
 /// `/bin/emit` is absent (so a kernel built without the toolchain rootfs still
@@ -27462,7 +27483,14 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
     // probing; SHELL=/bin/sh pins the recipe shell so make does not search.
     let argv: &[&[u8]] = &[b"make", b"-f", b"/Makefile", b"all"];
     let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"SHELL=/bin/sh"];
-    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    // METADATA is not optional here: make stats every makefile and every target
+    // it considers, and a native-ABI `stat` is gated on it. See the ABI note in
+    // this function's doc comment for why READ | WRITE used to be enough.
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
     let options = SpawnOptions {
         name: "spawn-test-make",
         parent: 0,

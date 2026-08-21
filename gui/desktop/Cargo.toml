@@ -25,6 +25,17 @@ path = "src/main.rs"
 [dependencies]
 guitk = { path = "../toolkit" }
 
+# The compositor protocol's vocabulary — `WindowInfo`, the shape of the window
+# list a taskbar is built from, and `ShellControlAction`, the shape of what a
+# taskbar button asks for. The *transport* is deliberately not here: this crate
+# produces render trees and intents, and the loop that carries them belongs to
+# whatever runs the shell. Depending on the words without depending on the wire
+# is what keeps `DesktopShell` drivable in a test with no compositor at all.
+#
+# It costs nothing extra to pull in: `guiremote`'s only dependency is `guitk`,
+# which this crate already has.
+guiremote = { path = "../remote" }
+
 # The POSIX `TZ`-rule engine, shared with the libc (`posix`) and the shell
 # (`userspace/oils`). The taskbar clock is the most-looked-at rendering of local
 # time on the machine, so if it carried its own notion of a zone it would be the

@@ -22,9 +22,9 @@ use crate::calendar;
 use crate::datetime_settings::AdditionalClock;
 use crate::launcher::{self, Category};
 use crate::{
-    DesktopShell, Hit, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, Rect,
-    START_MENU_ROW_HEIGHT, ShellAction, TextRole, WindowId, WindowState, click, scroll,
-    scroll_rows,
+    DesktopShell, Hit, Key, KeyEvent, Layer, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+    Rect, START_MENU_ROW_HEIGHT, ShellAction, ShellControlAction, TextRole, WindowId, WindowInfo,
+    WindowState, click, scroll, scroll_rows,
 };
 use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
@@ -540,7 +540,12 @@ fn a_taskbar_button_is_clickable_where_it_is_drawn() {
 }
 
 #[test]
-fn a_taskbar_button_focuses_an_unfocused_window_and_minimizes_a_focused_one() {
+fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one() {
+    // The taskbar button is a toggle, and the two halves are different
+    // requests: the window you are not looking at is summoned, the one you are
+    // is put away. Both are *asked for* — the shell does not minimise anything
+    // itself, because the compositor owns whether a window is minimised and a
+    // shell that decided for itself would hold a second answer.
     let mut shell = shell();
     let a = shell.add_window("A", 0, 0, 100, 100, 1);
     let b = shell.add_window("B", 0, 0, 100, 100, 2);
@@ -549,17 +554,213 @@ fn a_taskbar_button_focuses_an_unfocused_window_and_minimizes_a_focused_one() {
     // A is at index 0 — `visible_windows` is in Z order, and B was raised when
     // it was added.
     let first = shell.taskbar_button_rect(0);
-    assert_eq!(click_at(&mut shell, first), ShellAction::Consumed);
-    assert_eq!(shell.focused_window, Some(a));
+    assert_eq!(
+        click_at(&mut shell, first),
+        ShellAction::Control {
+            window: a,
+            action: ShellControlAction::Activate,
+        },
+        "the button of an unfocused window must summon it"
+    );
+
+    // And the click changed nothing locally. This is the half that used to be
+    // wrong: the shell focused the window itself, so it believed a thing the
+    // compositor had not been told and would not agree with.
+    assert_eq!(
+        shell.focused_window,
+        Some(b),
+        "the shell focused a window on its own authority"
+    );
 
     let index = shell
         .visible_windows()
         .iter()
-        .position(|w| w.id == a)
+        .position(|w| w.id == b)
         .unwrap();
     let button = shell.taskbar_button_rect(index);
-    click_at(&mut shell, button);
-    assert_eq!(shell.windows[&a].state, WindowState::Minimized);
+    assert_eq!(
+        click_at(&mut shell, button),
+        ShellAction::Control {
+            window: b,
+            action: ShellControlAction::Minimize,
+        },
+        "the button of the focused window must put it away"
+    );
+    assert_eq!(
+        shell.windows[&b].state,
+        WindowState::Normal,
+        "the shell minimized a window on its own authority"
+    );
+}
+
+#[test]
+fn a_taskbar_button_whose_window_has_gone_swallows_the_click() {
+    // The window closed between the frame the button was drawn in and the
+    // press. Nothing to ask for — but the click landed on the taskbar, and a
+    // taskbar that let it through would raise whatever happened to be behind.
+    let mut shell = shell();
+    shell.add_window("A", 0, 0, 100, 100, 1);
+    let button = shell.taskbar_button_rect(0);
+    shell.apply_window_list(&[]);
+
+    assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
+}
+
+// ---- the window list the taskbar is drawn from ----------------------------
+
+/// An ordinary application window as the compositor would describe it.
+fn app(id: u64, title: &str) -> WindowInfo {
+    WindowInfo::new(id, u64::from(u32::try_from(id).unwrap()), title)
+}
+
+#[test]
+fn the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it() {
+    // The compositor's list is the whole truth about the desktop, not a stream
+    // of changes: a window that is not in it has gone, and a shell that merged
+    // instead of replacing would keep a button for a program that has exited.
+    let mut shell = shell();
+    // Seeded through the same door a live shell uses, and with an id that
+    // appears in no later list — the point being missed otherwise. Seeding with
+    // `add_window` gives the stale window id 1, which the next list happens to
+    // reuse and therefore overwrites, so a shell that merged would pass anyway.
+    shell.apply_window_list(&[app(9, "closed since")]);
+    assert!(shell.windows.contains_key(&WindowId(9)));
+
+    let mut second = app(2, "Editor");
+    second.focused = true;
+    shell.apply_window_list(&[app(1, "Terminal"), second]);
+
+    assert!(
+        !shell.windows.contains_key(&WindowId(9)),
+        "a window absent from the list kept its taskbar button"
+    );
+    let titles: Vec<&str> = shell
+        .visible_windows()
+        .iter()
+        .map(|w| w.title.as_str())
+        .collect();
+    assert_eq!(titles, ["Terminal", "Editor"], "in the order sent, bottom up");
+    assert_eq!(shell.focused_window, Some(WindowId(2)));
+    assert_eq!(
+        shell.visible_windows().last().map(|w| w.id),
+        Some(WindowId(2)),
+        "the list is bottom-to-top, so the last entry is topmost"
+    );
+}
+
+#[test]
+fn the_taskbar_leaves_out_every_surface_that_is_not_an_application_window() {
+    // The list describes the shell's own surfaces too — its taskbar, its
+    // wallpaper, its start menu. A taskbar that listed them would be mostly
+    // buttons for itself, and `Layer` is the only field that tells them apart.
+    let mut shell = shell();
+    let mut wallpaper = app(1, "Wallpaper");
+    wallpaper.layer = Layer::Background;
+    let mut bar = app(2, "Taskbar");
+    bar.layer = Layer::Overlay;
+
+    shell.apply_window_list(&[wallpaper, app(3, "Editor"), bar]);
+
+    let ids: Vec<WindowId> = shell.visible_windows().iter().map(|w| w.id).collect();
+    assert_eq!(ids, [WindowId(3)], "the shell listed its own surfaces");
+}
+
+#[test]
+fn a_minimized_window_keeps_its_button_and_an_unmapped_one_does_not() {
+    // The two are different states and the difference is exactly the taskbar:
+    // a minimised window is one the user put away and can click to get back, so
+    // it must keep its button. A window its own program unmapped is not there.
+    let mut shell = shell();
+    let mut away = app(1, "Minimized");
+    away.minimized = true;
+    let mut hidden = app(2, "Unmapped");
+    hidden.visible = false;
+
+    shell.apply_window_list(&[away, hidden, app(3, "Ordinary")]);
+
+    assert_eq!(shell.windows[&WindowId(1)].state, WindowState::Minimized);
+    assert!(
+        !shell.windows[&WindowId(1)].visible,
+        "a minimized window is not on the glass"
+    );
+    assert!(
+        shell.windows.contains_key(&WindowId(2)),
+        "an unmapped window keeps its id and its place in the stack"
+    );
+    let listed: Vec<WindowId> = shell.visible_windows().iter().map(|w| w.id).collect();
+    assert_eq!(listed, [WindowId(3)]);
+}
+
+#[test]
+fn a_retitle_reaches_the_button_without_disturbing_shell_local_state() {
+    // The update a taskbar exists to show, and the one most likely to be lost:
+    // a window that is already known must be updated in place, not rebuilt,
+    // because the shell holds per-window state the compositor knows nothing
+    // about and cannot send back.
+    let mut shell = shell();
+    shell.apply_window_list(&[app(1, "untitled")]);
+    shell.windows.get_mut(&WindowId(1)).unwrap().icon_id = 42;
+    shell.windows.get_mut(&WindowId(1)).unwrap().desktop = 3;
+
+    shell.apply_window_list(&[app(1, "notes.txt — saved")]);
+
+    let win = &shell.windows[&WindowId(1)];
+    assert_eq!(win.title, "notes.txt — saved");
+    assert_eq!(win.icon_id, 42, "the icon was rebuilt from nothing");
+    assert_eq!(
+        win.desktop, 3,
+        "a retitle moved the window to another virtual desktop"
+    );
+}
+
+#[test]
+fn an_empty_desktop_leaves_nothing_focused() {
+    // "Nobody is focused" is a state the compositor can genuinely be in — every
+    // window minimised, or the last one closed — so the shell must be able to
+    // hold it. Keeping the previous answer would leave a taskbar button lit for
+    // a window that is gone.
+    let mut shell = shell();
+    let mut only = app(1, "Editor");
+    only.focused = true;
+    shell.apply_window_list(&[only]);
+    assert_eq!(shell.focused_window, Some(WindowId(1)));
+
+    shell.apply_window_list(&[]);
+    assert_eq!(shell.focused_window, None);
+    assert!(shell.windows.is_empty());
+}
+
+#[test]
+fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop() {
+    // A round trip in the shape a live session runs it: the taskbar button
+    // produces a request, and the *only* way the result comes back is the next
+    // list. Applying the compositor's answer is what moves the shell — nothing
+    // the click did.
+    let mut shell = shell();
+    let mut focused = app(1, "Editor");
+    focused.focused = true;
+    shell.apply_window_list(&[focused]);
+
+    let button = shell.taskbar_button_rect(0);
+    let action = click_at(&mut shell, button);
+    assert_eq!(
+        action,
+        ShellAction::Control {
+            window: WindowId(1),
+            action: ShellControlAction::Minimize,
+        }
+    );
+    assert!(
+        shell.visible_windows().len() == 1,
+        "the shell acted on the request itself"
+    );
+
+    // The compositor did as it was asked and said so.
+    let mut away = app(1, "Editor");
+    away.minimized = true;
+    shell.apply_window_list(&[away]);
+    assert!(shell.visible_windows().is_empty());
+    assert_eq!(shell.focused_window, None);
 }
 
 #[test]

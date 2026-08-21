@@ -48624,6 +48624,59 @@ its own.**
   why the offset abstraction above must be per-surface rather than one global
   constant.
 
+**Progress 2026-08-21 (5) — the shell can now ask, and the taskbar asks.** Two
+of the three things this entry says are missing are done; the loop itself is
+not.
+
+- **A shell can act on a window it does not own.** `ShellControl { window,
+  action }` (`gui/remote/src/control.rs`) with five actions — `Activate`,
+  `Minimize`, `Restore`, `Maximize`, `Close` — reaching
+  `Compositor::activate_window` / `minimize_window` / `restore_window` /
+  `maximize_window` / `request_close`. This was the hard blocker: *every* other
+  window request is resolved against the sending connection's own windows
+  (`ClientLink::resolve`), which is the ownership model and refuses every
+  legitimate taskbar click. Deliberately excludes move/resize — placing windows
+  is the compositor's, and a shell that could move any window would be the
+  second window manager this entry exists to remove.
+  - `Activate` is one operation, not restore-then-focus: `focus_window` refuses
+    a minimised window on purpose, so un-minimising has to come first. It is
+    also *not* `restore_window`, which un-maximises too — a window minimised
+    while maximised has to come back maximised.
+  - `Close` asks rather than destroys, pushing the same
+    `EventNotification::WindowClose` the title-bar button does.
+  - Privilege routes through the new `ClientLink::require_shell`, which checks
+    nothing and says so. See `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`
+    below — that gate is still open, and now has two callers instead of one,
+    which is exactly why they were routed through a single function.
+
+- **The shell's window map is a projection, and the taskbar emits intents.**
+  `DesktopShell::apply_window_list(&[WindowInfo])` (`gui/desktop/src/lib.rs`) is
+  now the authority on what exists; `ShellAction::Control { window, action }` is
+  what a taskbar click produces. The click no longer mutates anything. Three
+  things `apply_window_list` decides, each with a test:
+  - It **replaces** rather than merges — the list is the whole truth, and a
+    merge leaves a button for a program that has exited.
+  - It drops everything outside `Layer::Normal`, so the taskbar does not list
+    itself, the wallpaper and its own start menu.
+  - A projected window's geometry is **zero, and that is not a placeholder**:
+    `WindowInfo` carries none because the shell does not place windows, so
+    there is nothing truthful to put there. The only reader would be
+    `Hit::WindowContent`, which a live session never reaches (see above), and a
+    zero rectangle matches nothing — the right answer to a question never asked.
+
+**Still missing, and now the whole of what is left here:** the event loop. The
+three `Layer`-banded surfaces (wallpaper/`Background`, taskbar/`Overlay`,
+popups/full-screen `Overlay`), `watch_desktop(true)`, a re-render of the four
+trees on each `desktop_revision` change, and the per-surface origin translation
+in both directions described above. Also still open: `DesktopShell` retains
+`add_window`, `focus_window`, `minimize_window`, `snap_window*` and
+`toggle_maximize` — the geometry half of the old private window manager. They
+are now used only by the demo and the tests, which have no compositor to be told
+by, but they are a second answer to questions the compositor already answers and
+should go when the loop lands. `main.rs` demonstrates the honest path in its
+`-- taskbar --` section and builds a *fresh* `DesktopShell` to do it, precisely
+because ids from the two regimes must not be mixed.
+
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 
 **In short:** Any program connected to the compositor can ask to be sent the
@@ -50235,3 +50288,53 @@ cleanup together.
 
 **If never fixed:** an intermittent red in the shared merge gate that each lane
 pays for in turn, over exactly the code where a false green is most expensive.
+## TD-C-RUSTDOC-LINKS-GO-NOWHERE-IN-FIVE-GUI-CRATES
+
+**In short:** The GUI crates' generated documentation has 55 broken or
+misleading cross-references. Some are links that point at nothing at all, so a
+reader clicking "see `export_text`" lands on an error page; some point at
+internals a reader of the public docs cannot see; and two in the toolkit are
+unclosed HTML tags, which make rustdoc swallow the rest of that paragraph. None
+of it affects behaviour — this is documentation quality only.
+
+**Where:** counted 2026-08-21 with `cargo doc -p <crate> --no-deps
+--target x86_64-pc-windows-gnu`, one warning per problem:
+
+| Crate | Warnings | Worst class |
+|---|---|---|
+| `osfont` (`gui/font`) | 18 | 14 links to private items, 3 unresolved |
+| `desktop` (`gui/desktop`) | 11 | 8 links to private items, 2 unresolved |
+| `guitk` (`gui/toolkit`) | 11 | 2 **unclosed HTML tags** — these eat text |
+| `compositor` | 8 | 3 unresolved, 3 private |
+| `guiremote` (`gui/remote`) | 7 | 3 private, 1 unresolved |
+| `oswindow`, `appearance` | 0 | — |
+
+**The three kinds, worst first:**
+
+1. **`unresolved link to X` (9 total).** The link target does not exist —
+   usually a method that was renamed or removed and the doc comment beside it
+   was not. `gui/desktop/src/calendar.rs:547` promises "the text format produced
+   by `export_text`"; there is no `export_text`. This is the only class that is
+   actively *wrong* rather than merely unhelpful, because it documents an API
+   that is not there.
+2. **`unclosed HTML tag` (2, both `guitk`).** Rustdoc treats `<` as markup, so
+   an unescaped one in prose opens a tag that never closes and the remainder of
+   the paragraph is absorbed into it and never rendered. The text exists in the
+   source and is invisible in the docs, which is the failure mode hardest to
+   notice.
+3. **`links to private item` (34).** A public doc comment links to something a
+   reader of the public documentation cannot follow. Not wrong, but the link is
+   dead for its audience.
+
+**The proper fix** is per-warning and mechanical: repoint or delete the
+unresolved links (checking which is right — an unresolved link often means the
+sentence around it is also stale), escape or close the two HTML tags, and for
+the private-item links either make the target public, drop the link and name the
+item in plain text, or move the sentence to a `//` comment where it is not
+promising a reader a hyperlink. There is no design decision here.
+
+**If never fixed:** the docs stay quietly worse than the code, and the noise
+floor hides the next real one. Three of these are already *stale claims* about
+APIs that do not exist, which is how a reader ends up writing against a function
+that was deleted. It does not get worse on its own, but every new crate adds to
+it, and a warning count nobody watches is one nobody will ever bring to zero.

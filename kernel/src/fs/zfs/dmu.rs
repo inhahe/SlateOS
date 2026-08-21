@@ -26,6 +26,23 @@
 //! Metadata is written to two or three DVAs. `read_block` tries them in order
 //! and only fails when every copy fails, which is the entire value of the
 //! redundancy: a bad sector under copy 0 costs a retry, not the pool.
+//!
+//! # Gang blocks
+//!
+//! When a pool is too fragmented to find one contiguous run for a block, ZFS
+//! writes a *gang block*: the DVA points at a small header holding block
+//! pointers to the pieces, and the pieces concatenate — in header order, each
+//! contributing its own `psize` — to the bytes the caller asked for. The gang
+//! bit in the DVA is what says the offset leads to a header rather than to
+//! data. Pieces may themselves be gang blocks, so the header is a tree.
+//!
+//! Two things about the header are easy to get wrong and worth stating here.
+//! It is *self*-checksummed — it carries a `zio_eck_t` trailer verified
+//! against its own address rather than against the parent's `blk_cksum` — and
+//! the address used is always **DVA 0's**, even when reading copy 1 or 2, so
+//! that every ditto copy of a header hashes identically. And the parent's
+//! `blk_cksum` is never checked against the assembled bytes: each piece is
+//! verified against its own pointer, which is what covers the data.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -34,14 +51,35 @@ use crate::error::{KernelError, KernelResult};
 use crate::fs::blocksrc::{SectorSource, read_bytes};
 
 use super::raw::{
-    BLKPTR_LEN, BlkPtr, DMU_OT_NONE, DNODE_CORE_LEN, DNODE_LEN, SPA_MAXBLOCKSIZE, parse_blkptr,
-    read_u8, read_u16, read_u64,
+    BLKPTR_LEN, BlkPtr, DMU_OT_NONE, DNODE_CORE_LEN, DNODE_LEN, Dva, SPA_MAXBLOCKSIZE,
+    ZIO_CHECKSUM_GANG_HEADER, parse_blkptr, read_u8, read_u16, read_u64,
 };
-use super::zio;
+use super::zio::{self, ZEC_LEN, ZioCksum};
 
 /// `log2(BLKPTR_LEN)`: how many bits of a block id one level of indirection
 /// consumes, before the indirect block's own size is taken into account.
 const SPA_BLKPTRSHIFT: u32 = 7;
+
+/// `SPA_OLD_GANGBLOCKSIZE`: the gang header size every pool used before the
+/// `dynamic_gang_header` feature, and still the size on any pool without it.
+/// Three block pointers, 88 bytes of padding, then the 40-byte trailer.
+const SPA_OLD_GANGBLOCKSIZE: usize = 512;
+
+/// Largest gang header this driver will attempt. A gang header occupies one
+/// minimum allocation on its vdev — `1 << ashift` — and the label parser caps
+/// `ashift` at 16, so nothing larger can be legitimate.
+const GANG_HEADER_MAX: usize = 1 << 16;
+
+/// How far a gang tree may nest before the read is refused.
+///
+/// A cap is not optional: a header whose child pointer addresses the header
+/// itself is a cycle that appends no bytes, so nothing else would ever stop
+/// the recursion, and a kernel stack is not a place to discover that. Six
+/// levels is far past anything real — even the three-pointer old-style header
+/// spans 729 pieces at that depth, which for the 16 MiB maximum block means
+/// pieces of 22 KiB. A pool fragmented worse than that is failing allocations,
+/// not writing deeper gang trees.
+const MAX_GANG_DEPTH: u32 = 6;
 
 /// `BPE_PAYLOAD_SIZE`: bytes of payload an embedded block pointer can carry.
 const BPE_PAYLOAD_SIZE: usize = 112;
@@ -246,7 +284,10 @@ impl<'a> Reader<'a> {
     /// - [`KernelError::NotSupported`] for an encrypted block, or an
     ///   unimplemented checksum/compression algorithm.
     /// - [`KernelError::InvalidArgument`] for a block larger than
-    ///   [`SPA_MAXBLOCKSIZE`], or a DVA on a vdev we do not have.
+    ///   [`SPA_MAXBLOCKSIZE`], or a gang tree whose pieces do not add up to
+    ///   the block.
+    /// - [`KernelError::NotSupported`] for a DVA on a vdev we do not have, or
+    ///   a gang tree nested past [`MAX_GANG_DEPTH`].
     /// - [`KernelError::IoError`] if every copy failed to read or verify.
     pub fn read_block(&self, bp: &BlkPtr) -> KernelResult<Vec<u8>> {
         if bp.embedded {
@@ -281,37 +322,156 @@ impl<'a> Reader<'a> {
             if dva.is_empty() {
                 continue;
             }
-            if dva.gang {
-                // A gang block is a tree of smaller allocations standing in
-                // for one large one, used when the pool is too fragmented to
-                // find a contiguous run. Supporting it means a second block
-                // format; skipping the copy is correct because the other
-                // DVAs are ordinary, and only a pool at the edge of full has
-                // gang blocks at all.
-                last_err = KernelError::NotSupported;
-                continue;
-            }
-            if dva.vdev != 0 {
-                last_err = KernelError::NotSupported;
-                continue;
-            }
-            let Ok(phys) = dva.physical_offset() else {
-                continue;
+            let raw = match self.read_copy(bp, dva, psize, 0) {
+                Ok(v) => v,
+                Err(e) => {
+                    last_err = e;
+                    continue;
+                }
             };
-            let Ok(raw) = read_bytes(self.src, phys, psize) else {
-                last_err = KernelError::IoError;
-                continue;
-            };
-            if let Err(e) = zio::verify(bp.checksum, &raw, &bp.cksum) {
-                last_err = e;
-                continue;
-            }
             match zio::decompress(bp.compress, &raw, lsize) {
                 Ok(v) => return Ok(v),
                 Err(e) => last_err = e,
             }
         }
         Err(last_err)
+    }
+
+    /// Read `bp`'s `psize` bytes as stored — verified, but not decompressed —
+    /// from whichever copy answers first.
+    ///
+    /// This is [`Self::read_block`] without the decompression step and without
+    /// the caller-facing validation, and it exists because a gang piece needs
+    /// exactly that: its own ditto copies tried in turn, its own checksum
+    /// proved, and its stored bytes handed back to be concatenated. A gang
+    /// piece is never compressed on its own — only the block as a whole is —
+    /// so there is nothing to decompress here.
+    fn read_raw(&self, bp: &BlkPtr, depth: u32) -> KernelResult<Vec<u8>> {
+        if bp.embedded || bp.encrypted || !bp.little_endian {
+            // ZFS does not put an embedded pointer in a gang header — an
+            // embedded block needs no allocation, so it cannot be the thing a
+            // failed allocation was split into. Refusing is therefore not a
+            // gap in coverage; it is declining to invent a meaning for a shape
+            // the writer never produces.
+            return Err(KernelError::NotSupported);
+        }
+        if bp.psize == 0 || bp.psize > SPA_MAXBLOCKSIZE {
+            return Err(KernelError::InvalidArgument);
+        }
+        let psize = usize::try_from(bp.psize).map_err(|_| KernelError::InvalidArgument)?;
+
+        let mut last_err = KernelError::IoError;
+        for dva in &bp.dvas {
+            if dva.is_empty() {
+                continue;
+            }
+            match self.read_copy(bp, dva, psize, depth) {
+                Ok(v) => return Ok(v),
+                Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
+    }
+
+    /// Read one named copy of `bp`: `psize` verified bytes, gang or not.
+    fn read_copy(
+        &self,
+        bp: &BlkPtr,
+        dva: &Dva,
+        psize: usize,
+        depth: u32,
+    ) -> KernelResult<Vec<u8>> {
+        if dva.vdev != 0 {
+            return Err(KernelError::NotSupported);
+        }
+        let phys = dva.physical_offset()?;
+        if dva.gang {
+            return self.read_gang(bp, phys, dva.asize, psize, depth);
+        }
+        let raw = read_bytes(self.src, phys, psize).map_err(|_| KernelError::IoError)?;
+        zio::verify(bp.checksum, &raw, &bp.cksum)?;
+        Ok(raw)
+    }
+
+    /// Reassemble the gang block whose header sits at `phys`, into exactly
+    /// `psize` bytes.
+    fn read_gang(
+        &self,
+        bp: &BlkPtr,
+        phys: u64,
+        asize: u64,
+        psize: usize,
+        depth: u32,
+    ) -> KernelResult<Vec<u8>> {
+        if depth >= MAX_GANG_DEPTH {
+            return Err(KernelError::NotSupported);
+        }
+        let verifier = gang_verifier(bp);
+        let gbh = self.read_gang_header(phys, asize, &verifier)?;
+
+        // The trailer is the last 40 bytes; everything before it that is a
+        // whole block pointer is one, and the remainder is padding.
+        let nblkptrs = gbh.len().saturating_sub(ZEC_LEN) / BLKPTR_LEN;
+        let mut out: Vec<u8> = Vec::new();
+        for g in 0..nblkptrs {
+            let off = g.checked_mul(BLKPTR_LEN).ok_or(KernelError::InvalidArgument)?;
+            let gbp = parse_blkptr(&gbh, off)?;
+            if gbp.is_hole() {
+                // A header allocated more pointer slots than the split needed.
+                // Unlike a hole in a file this contributes nothing at all — not
+                // even zeroes — because the pieces are defined by concatenation
+                // and an unused slot is not a piece.
+                continue;
+            }
+            let part = self.read_raw(&gbp, depth.wrapping_add(1))?;
+            let total = out
+                .len()
+                .checked_add(part.len())
+                .ok_or(KernelError::InvalidArgument)?;
+            if total > psize {
+                return Err(KernelError::InvalidArgument);
+            }
+            out.extend_from_slice(&part);
+        }
+        if out.len() != psize {
+            // The pieces must account for the whole block. A short tree means
+            // the header and the pointer disagree about how much was written,
+            // and padding the difference with zeroes would hand the caller
+            // invented bytes that then pass no further check — the parent's
+            // checksum does not cover assembled gang data.
+            return Err(KernelError::InvalidArgument);
+        }
+        Ok(out)
+    }
+
+    /// Read and verify a gang header, resolving how long it is.
+    ///
+    /// A header used to be 512 bytes always. The `dynamic_gang_header` feature
+    /// made it one minimum allocation on its vdev instead, which on an
+    /// `ashift=12` pool is 4096. This driver does not read `features_for_read`,
+    /// so it does what ZFS itself does in `zio_checksum_error`: try the larger
+    /// size the allocation admits, and fall back to 512 if that does not
+    /// verify. The self-checksum is what decides, so a wrong guess cannot be
+    /// mistaken for a right one — it fails the trailer magic or the hash.
+    fn read_gang_header(
+        &self,
+        phys: u64,
+        asize: u64,
+        verifier: &ZioCksum,
+    ) -> KernelResult<Vec<u8>> {
+        let big = usize::try_from(asize).ok().filter(|&n| {
+            n > SPA_OLD_GANGBLOCKSIZE && n <= GANG_HEADER_MAX && n % BLKPTR_LEN == 0
+        });
+        if let Some(len) = big
+            && let Ok(buf) = read_bytes(self.src, phys, len)
+            && zio::verify_embedded(ZIO_CHECKSUM_GANG_HEADER, &buf, verifier).is_ok()
+        {
+            return Ok(buf);
+        }
+        let buf = read_bytes(self.src, phys, SPA_OLD_GANGBLOCKSIZE)
+            .map_err(|_| KernelError::IoError)?;
+        zio::verify_embedded(ZIO_CHECKSUM_GANG_HEADER, &buf, verifier)?;
+        Ok(buf)
     }
 
     /// Resolve block `blkid` of the object described by `dn`.
@@ -450,6 +610,38 @@ impl<'a> Reader<'a> {
         let len = usize::try_from(size).map_err(|_| KernelError::FileTooLarge)?;
         self.read_object_range(dn, 0, len, size)
     }
+}
+
+/// The verifier a gang header is checksummed against.
+///
+/// `zio_checksum_gang_verifier`. A gang header cannot be checksummed the
+/// ordinary way, because the pointer that would hold its checksum is the same
+/// pointer whose contents the header describes — ZFS would have to know the
+/// header's hash before it had finished writing the header. So the header
+/// carries its own hash in a trailer, and what goes into the hash in place of
+/// that field is the header's *address*: vdev, offset, and the txg it was
+/// written in. Forging a header therefore means placing it at exactly the
+/// address the parent pointer names, in the txg the parent records.
+///
+/// Two details are easy to get wrong and both matter:
+///
+/// - The address comes from **DVA 0** (`BP_IDENTITY`) whichever copy is being
+///   read. That is deliberate: it makes all ditto copies of a header
+///   byte-identical, so any of them satisfies the parent.
+/// - The offset is the raw DVA offset, *not* [`Dva::physical_offset`]. The
+///   label/boot reserve is a property of the device, not of the block's
+///   identity.
+fn gang_verifier(bp: &BlkPtr) -> ZioCksum {
+    let identity = bp.dvas.first().copied().unwrap_or_default();
+    // `BP_GET_PHYSICAL_BIRTH`: the physical birth word is zero when it equals
+    // the logical one, which is the common case, so a zero there means "read
+    // the logical txg" rather than "txg zero".
+    let txg = if bp.phys_birth == 0 {
+        bp.birth
+    } else {
+        bp.phys_birth
+    };
+    [u64::from(identity.vdev), identity.offset, txg, 0]
 }
 
 /// Reconstruct the payload of an embedded block pointer.

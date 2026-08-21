@@ -140,14 +140,52 @@ anything *works*.
 
 make leans on the operating system far harder than pkgconf does — it forks,
 execs, waits, opens pipes, installs `SIGCHLD` handlers, and on a `-j` build runs
-a jobserver over either a pipe or a POSIX named semaphore. `run.sh` records
-what configure decided about both of those (`MAKE_JOBSERVER_AND_WAIT_DECISIONS_FROM_CONFIG_H`)
-precisely because they are the likeliest reasons a make that links will not run.
+a jobserver over either a pipe or a POSIX named semaphore. `run.sh` records what
+configure decided about all of that
+(`MAKE_JOBSERVER_AND_WAIT_DECISIONS_FROM_CONFIG_H`) precisely because they are
+the likeliest reasons a make that links will not run. As of 2026-08-20:
+
+```
+#define HAVE_FORK 1              #define HAVE_WAIT3 1
+#define HAVE_VFORK 1             #define HAVE_WAITPID 1
+#define HAVE_MKFIFO 1            #define MAKE_JOBSERVER 1
+#define HAVE_POSIX_SPAWN 1
+#define HAVE_POSIX_SPAWNATTR_SETSIGMASK 1
+/* #undef HAVE_SYS_LOADAVG_H */  (HAVE_NAMED_SEMAPHORES: absent)
+```
+
+Read that as a to-do list, because it is one. Two lines matter most:
+
+- **`HAVE_POSIX_SPAWN 1`** — make will launch children through `posix_spawn`,
+  *not* `fork`+`exec`. Whatever is true of our `fork` is therefore not the
+  question; `posix_spawn` with `posix_spawnattr_setsigmask` is.
+- **`MAKE_JOBSERVER 1` with `HAVE_MKFIFO 1` and no `HAVE_NAMED_SEMAPHORES`** —
+  a `-j` build will coordinate over a **FIFO**, so `mkfifo` and blocking
+  reads/writes on it are on the critical path. The named-semaphore route, which
+  would have been the other possibility, is not taken.
+
+Every one of those symbols is present in `libc.a` — checked with `nm` rather
+than by reading the source, since the archive is what the program links:
+`mkfifo`, `mkfifoat`, `posix_spawn`, `posix_spawnp`, `wait3`, `waitpid`,
+`fork`, `vfork`, `pipe`, `pipe2`, `sem_open`, `sem_wait`, all defined. That is
+still only presence, not behaviour.
 
 Treat a green run as permission to build a rootfs rung, not as a port. The same
 mistake has already been made twice in this tree: pkgconf was called "proven" for
 two days while its only binary sat in `/tmp`, and it is still `[-]` rather than
 `[x]` because *shipped is not run*.
+
+### The recording itself was broken until 2026-08-20
+
+Worth stating plainly, because it is the failure this section is *about*. The
+first version of that block grepped `config.h`; make 4.4.1 puts it at
+`src/config.h`. So the heading printed, `grep: config.h: No such file or
+directory` printed under it, and — because the script is `set -uo pipefail`
+without `-e` — the run still ended in `SLATE_MAKE_BUILT` and exit 0. The log
+looked exactly like a log in which the facts had been recorded. A diagnostic
+that fails open is worse than no diagnostic at all: it manufactures the
+appearance of the evidence it failed to collect. `run.sh` now locates
+`config.h` and says loudly when it cannot find one.
 
 ## Source pin
 

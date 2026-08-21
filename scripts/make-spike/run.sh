@@ -69,9 +69,27 @@ grep -iE "error|warning: implicit" make.log | head -20
 # for children. Recorded in the build log because config.h lives under /tmp and
 # does not survive it being cleared — the same "the artifact outlived the facts
 # about it" problem that left pkgconf's binary in /tmp for two days.
+#
+# config.h is at src/config.h, NOT the top level: make 4.4.1 sets
+# AC_CONFIG_HEADERS([src/config.h]). The first version of this block grepped
+# `config.h` and printed `grep: config.h: No such file or directory` under the
+# heading — and because this script is `set -uo pipefail` without `-e`, the
+# whole run still reported SLATE_MAKE_BUILT and exited 0. A diagnostic that
+# fails open is worse than no diagnostic: the heading was still printed, so the
+# log looked like the facts had been recorded when the line beneath it was an
+# error message. Located rather than hard-coded, so a future make that moves it
+# again is a loud failure instead of a quiet empty section.
 echo "MAKE_JOBSERVER_AND_WAIT_DECISIONS_FROM_CONFIG_H:"
-grep -E 'HAVE_(NAMED_)?SEMAPHORES|HAVE_MKFIFO|HAVE_WAITPID|HAVE_WAIT3|HAVE_POSIX_SPAWN|HAVE_FORK|HAVE_VFORK|MAKE_JOBSERVER|HAVE_SYS_LOADAVG' \
-    config.h
+CONFIG_H="$(find . -maxdepth 3 -name config.h -print -quit 2>/dev/null)"
+if [ -n "$CONFIG_H" ]; then
+    echo "(from $CONFIG_H)"
+    grep -E 'HAVE_(NAMED_)?SEMAPHORES|HAVE_MKFIFO|HAVE_WAITPID|HAVE_WAIT3|HAVE_POSIX_SPAWN|HAVE_FORK|HAVE_VFORK|MAKE_JOBSERVER|HAVE_SYS_LOADAVG' \
+        "$CONFIG_H"
+else
+    echo "ERROR: no config.h found — configure did not produce one, so the"
+    echo "       jobserver/wait decisions below are UNRECORDED. Do not read the"
+    echo "       absence of lines here as 'make made no such decisions'."
+fi
 
 # The decisive step. -nostdlib so we get SlateOS's libc, not zig's bundled musl.
 # libc.a twice: it is Rust-built and its intra-archive references are not

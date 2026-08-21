@@ -121,6 +121,38 @@ if ($llvm_ar) {
 }
 
 Write-Host ""
+# Assert the archive's SHAPE, not just that it built.
+#
+# `$sysrootFlags` above carries `-C codegen-units=4096` for a reason that is
+# invisible in the output it produces: it controls how many object files the
+# crate is split into, and therefore which functions share an archive member.
+# A member is extracted whole -- so two functions in one member cannot be
+# taken separately, and a program that brings its own `getopt` cannot decline
+# ours if ours rides along with a symbol the program does need. That is an ABI
+# property of libc.a, and it is exactly the sort of property that decays
+# silently: nothing fails to build, no test goes red, and the damage only
+# appears the next time someone ports a GNU package, weeks away from whatever
+# change caused it. GNU make 4.4.1 found it for us, at the cost of a day.
+#
+# So the check runs HERE, in the script that produces the artifact, rather than
+# living in scripts/ for someone to remember. It parses the archive's own
+# symbol index (no `nm`, which does not exist on this host outside WSL) and
+# costs well under a second.
+#
+# It is FATAL. A warning would make this the third thing in this project that
+# was written, shipped, and then never actually run.
+Write-Host "=== Checking libc.a archive shape ===" -ForegroundColor Cyan
+$pyShape = Get-Command python -ErrorAction SilentlyContinue
+if (-not $pyShape) { $pyShape = Get-Command python3 -ErrorAction SilentlyContinue }
+if ($pyShape) {
+    & $pyShape.Source (Join-Path $root "scripts\check-libc-shape.py") (Join-Path $sysroot "libc.a")
+    if ($LASTEXITCODE -ne 0) { throw "libc.a shape check failed (see above) - the sysroot is built but not safe to port GNU packages against" }
+} else {
+    Write-Host "  WARNING: no python on PATH - archive shape NOT checked." -ForegroundColor Yellow
+    Write-Host "  Run scripts/check-libc-shape.py by hand before trusting this sysroot." -ForegroundColor Yellow
+}
+
+Write-Host ""
 # Record what this sysroot was built from, by content.
 #
 # Without this, the only way to ask "is libc.a behind its sources?" was to

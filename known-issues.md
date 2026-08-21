@@ -48450,6 +48450,16 @@ demo and its own tests.
 `render_start_menu` (:2564), `render_calendar` (:2948).
 `gui/desktop/Cargo.toml` — no `[lib]`.
 
+*(Both paragraphs above are as-written and now partly historical. The `[lib]`
+exists — see progress note (3) below — and the file is `src/lib.rs`, not
+`src/main.rs`. **There are four render methods, not five:**
+`render_window_decorations` was deleted with the shell's duplicate decorator
+(`TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS`, resolved),
+which is a simplification for this entry rather than a complication: the loop
+below can submit everything `DesktopShell` renders, with no carve-out for a
+surface the compositor also draws. The remaining four are `render_taskbar`,
+`render_alt_tab`, `render_start_menu` and `render_calendar`.)*
+
 **Why this is logged and not fixed (2026-08-21):** it is the render half of
 `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`, and it has the same single cause —
 the shell has no compositor/IPC event loop yet. That entry covers the outbound

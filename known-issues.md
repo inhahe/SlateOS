@@ -49699,3 +49699,85 @@ three. `doas` already keeps per-uid state under `/var/run/doas` for its
 `persist` timestamps, which is the shape the tally would take. Tracked here
 rather than done now because it changes `authlib`'s contract for every caller.
 
+
+## B-PASSWD-VERIFIES-WITHOUT-AUTHLIB — 2026-08-21 — OPEN (tech debt, small)
+
+**In short:** every program on this system that asks "is this your password?"
+routes through one of two shared verifiers, which count failed attempts and
+slow an attacker down. One program does not: `passwd`, when it asks for your
+*current* password before letting you set a new one. It gets the answer right —
+it uses the same underlying comparison as everything else — but it does the
+counting-and-slowing part not at all, so guesses against that one prompt are
+free and unlimited. Whether that should change is a genuine tradeoff, written
+out below.
+
+**Where:** `userspace/passwd/src/main.rs:651`, the `verify_password(&old_pw,
+&entry.hash)` call behind the `Current password:` prompt. `verify_password`
+(line 336) is a one-line wrapper over `posix::crypt::verify`.
+
+**How it got this way — not by decision.** `passwd` was moved onto
+`posix::crypt::verify` on 2026-08-17, closing
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`. `authlib` did not
+exist yet; it was built later, after `design-decisions.md` §329 and §341 found
+that several programs were each answering the password question with their own
+arithmetic. Programs written or repaired after that point adopted `authlib`.
+`passwd` was already correct by the standard of its own day, so nothing ever
+sent anyone back to it. It is debt by omission, not by choice — which is the
+only reason it is filed rather than simply fixed: the fix has a real cost.
+
+**The tradeoff.**
+
+| | Leave it | Route it through `authlib` |
+|---|---|---|
+| Guessing at the `Current password:` prompt | unlimited and free | shares the per-user tally with `login`, `su`, `doas` |
+| Someone mistypes at a `doas` prompt three times | your own `passwd` still works | your own `passwd` prompt is now delayed too |
+| Locked account (`!` prefix) | already refused outright at line 623, before any prompt | `authlib` returns `Locked`, which agrees — nothing to special-case |
+
+**A dead condition found while writing this — FIXED 2026-08-21, and it was
+load-bearing in the wrong direction.** The old-password gate read
+`if !entry.hash.is_empty() && !entry.is_locked()`. The second conjunct could
+never be false, because line 623 has already returned `1` for every locked
+account. Dead code, so removing it changes nothing today — but which way it was
+dead matters:
+
+| If someone later removes the line-623 guard | Before | After |
+|---|---|---|
+| locked account reaches the old-password gate | `is_locked()` is true, so the whole gate is skipped — **no current password is ever asked for, and the change proceeds** | gate is entered on `!hash.is_empty()` alone; the stored `!$6$…` has no recomputable method, so `crypt::verify` returns false and the change is **refused** |
+
+So the redundant conjunct was not merely noise: it was a second, silent
+implementation of the locking policy that failed *open* if the first one were
+ever touched. It now fails closed. This is the general shape of the thing —
+a guard duplicated in two places is not twice as safe, it is one guard plus one
+place for the policy to disagree with itself.
+
+The argument for leaving it is not weak. `authlib`'s tally is per *user*, not
+per program, so folding `passwd` in means anyone who can reach any prompt as
+you — a `doas` prompt in a shell you left open, a lock screen — can also stop
+you changing your password by failing at it. A password change is the one
+action you most want available to a user who suspects their password is
+compromised, and rate-limiting is the one mechanism that makes it unavailable.
+
+The argument against is that this is the only prompt in the system where an
+attacker who already has your shell can guess at your password without cost or
+trace, and "the fix would be annoying" is how every uncounted prompt stays
+uncounted.
+
+**What the proper fix looks like** (if the answer is "route it"): `authlib`
+gains a way to verify *without* consuming an attempt from the shared tally
+while still recording to the audit log — the distinction being whether a
+failure should impede a later, different program. That is a change to
+`authlib`'s contract, so it wants doing at the same time as the on-disk tally
+described under `B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS`
+→ "Still open — cross-invocation rate limiting", not separately.
+
+**Not a security hole today, and worth being precise about why:** reaching this
+prompt requires already running as the account whose password is being changed.
+An attacker there can read that account's files and act as it. What the missing
+rate limit costs is the ability to *learn the password itself* — which matters
+because users reuse passwords, and because knowing it converts shell access
+into the ability to pass a `doas` prompt. So: real, bounded, not urgent.
+
+**Found by:** the call-site scan described in the postscript to
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md` —
+`grep -rn 'crypt::verify' posix/src userspace/*/src services init`, which
+returns exactly three production call sites and requires each to be justified.

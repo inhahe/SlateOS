@@ -107,6 +107,34 @@ can equally **pass spuriously**, and a green run is exactly the evidence that
 would be cited for "auth is covered". The suite is not currently a reliable
 witness to its own claims.
 
+## Second instance, observed independently — sshd, as predicted
+
+The re-run of the same workspace gate failed again, in a **different crate and a
+different test**, with `ftpd` passing that time:
+
+```
+---- tests::guessing_is_rate_limited_across_connections_not_just_within_one stdout ----
+thread '...' panicked at userspace\sshd\src\main.rs:4880:9:
+expected a rate limit, got Rejected
+```
+
+That is `sshd`'s copy of the same `authenticator_with_shadow` → `tmp_path`
+helper, which is exactly the crate this request predicted would be exposed
+before it had been seen to fail. Both crates are green in isolation — ftpd 8/8,
+sshd 5/5 consecutive runs — and each has now failed once under the loaded
+workspace gate. Two independent confirmations of one mechanism.
+
+This instance is worth a second look for a reason of its own: the test loops
+`FREE_ATTEMPTS + 1` wrong guesses and then expects `RateLimited`. Getting
+`Rejected` means the *tally*, not just the shadow line, lost its accumulated
+state part-way through. Whatever the precise interleaving, a rate limiter whose
+counter can be reset by an unrelated concurrent writer is worth confirming is a
+test-only artefact and not a property of the limiter itself — particularly now
+that `3e689a12d authlib: share the failure tally across invocations, on disk`
+has moved the tally onto the filesystem, where it becomes a *second* piece of
+shared state reachable by a colliding path. Please check that the on-disk tally
+directory is not itself derived from a clock-based name.
+
 ## Not blocking lane C
 
 Lane C's own crates are green and this does not gate any lane-C work; the

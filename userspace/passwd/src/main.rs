@@ -635,7 +635,12 @@ fn cmd_change_password(target: &str, caller_uid: u32) -> i32 {
                     return 1;
                 }
             }
-            if !entry.hash.is_empty() && !entry.is_locked() {
+            // No `&& !entry.is_locked()` here: a locked account was already
+            // refused above, so the conjunct could never be false, and keeping
+            // it read as though a locked account reached this prompt and was
+            // waved past it -- the opposite of what happens.  Locking is
+            // decided in exactly one place, and this is not it.
+            if !entry.hash.is_empty() {
                 let old_pw = match read_password_no_echo("Current password: ") {
                     Ok(p) => p,
                     Err(e) => {
@@ -1226,6 +1231,37 @@ mod tests {
                 "{stored}"
             );
             assert!(!verify_password("correct horse", &stored), "{stored}");
+        }
+    }
+
+    /// A locked entry is unverifiable **even with the correct password**.
+    ///
+    /// `cmd_change_password` refuses locked accounts in one place, up front.
+    /// The old-password gate below it used to carry a second `!is_locked()`
+    /// check that was already unreachable — and that duplicate failed *open*:
+    /// had the up-front refusal ever been removed, the gate would have been
+    /// skipped entirely and a locked account's password changed without the
+    /// old one. With the duplicate gone, that path instead ends here, at a
+    /// stored entry whose `!` prefix leaves it with no recomputable method.
+    /// This test is what makes removing the duplicate safe, so it asserts the
+    /// property directly rather than trusting the prefix to look wrong.
+    #[test]
+    fn a_locked_entry_verifies_against_nothing_not_even_the_right_password() {
+        let hashed = hash_password("correct horse", SALT).expect("hash");
+        assert!(verify_password("correct horse", &hashed));
+
+        for locked in [
+            format!("!{hashed}"),
+            format!("!!{hashed}"),
+            format!("*{hashed}"),
+        ] {
+            assert_eq!(
+                posix::crypt::stored_method(locked.as_bytes()),
+                None,
+                "{locked}"
+            );
+            assert!(!verify_password("correct horse", &locked), "{locked}");
+            assert!(!verify_password("", &locked), "{locked}");
         }
     }
 

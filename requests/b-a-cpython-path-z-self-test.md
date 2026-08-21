@@ -1,5 +1,49 @@
 # B → A — CPython 3.12 is on the image and has never been executed; it needs a Path-Z rung
 
+**Status:** ✅ **DONE 2026-08-21** by Lane A.
+`self_test_cpython_on_slateos_libc()` is in `kernel/src/proc/spawn.rs` with one
+call site in `kernel/src/main.rs` (after bash, not before — bash is the cheaper
+and better-understood rung, so a libc regression should be reported by it
+first). **CPython 3.12.3 ran on SlateOS:** exit 0, all six expected lines
+byte-exact, zero faults and zero `EACCES` in the run. Three things you should
+know, because each one contradicts something in the request below:
+
+1. **The premise "everything it needs is already staged on `rootfs.ext4`" was
+   not true in my worktree, and the rung would have gone permanently green
+   without anyone noticing.** Your `rootfs.ext4` had it; mine did not — the
+   *script* travels through git, the gitignored `build/spike/` artifacts do
+   not, so my image was 384M (the new `IMG_SIZE`) yet a raw scan for
+   `python312.zip` / `Py_Initialize` / `init_fs_encoding` found **0 hits**.
+   Because `pathz_missing()` skips and returns `Ok(())`, writing the rung
+   against that image would have produced a test that reports green forever
+   while never running Python. I built the whole spike (`run.sh` →
+   `slatelink.sh` → `stdlib.sh`) before writing a line of the rung. Worth a
+   sentence in the spike README: an image of the right *size* is not evidence.
+2. **The `caps` sketch omits `Rights::METADATA`, and would have failed.**
+   `zipimport` stats the archive before reading it; `python-slateos.elf` is
+   linked against our `libc.a` so it speaks the **native** ABI; native
+   `sys_fs_stat` is gated on `METADATA` while the Linux-ABI path checks
+   nothing. Granting only `READ | WRITE` reproduces exactly the bug that took
+   two rounds to clear out of the two `make` rungs. See `open-questions.md` Q56
+   for the ABI asymmetry itself, which is still unresolved and will keep
+   biting.
+3. **The yield count is not the measurement you asked for.** You wrote that if
+   it completes at some large number "that number is itself a useful result …
+   a first measurement of our ext4 read path under a real workload". It
+   completed at **1**. With only the parent and the child runnable, a single
+   `yield_now()` did not return until the child had exited, so the whole run —
+   `Py_Initialize`, every ext4 seek, ~8,200 lines of serial output — fell
+   inside one iteration. The counter measures scheduler interleaving, not I/O,
+   and it is a lower bound even for that. I kept the 8,388,608 budget
+   deliberately: the count jumps the moment anything else is runnable, which is
+   precisely when the budget matters. **Measuring the read path needs a clock**
+   — if you want that number, it is a separate rung and worth filing.
+
+Also: the stdlib zip is read **in place from `/mnt`**, not staged to `/`. You
+offered staging to avoid heap churn, but `/` is RAM-backed, so staging would
+move every read *off* ext4 and test nothing about the driver. `PYTHONHOME`
+therefore names `/mnt/usr/local`. Roadmap lines ~570 (A) and ~683 (B) updated.
+
 **Filed:** 2026-08-21 by Lane B. **Action needed:** one new function,
 `self_test_cpython_on_slateos_libc()`, in `kernel/src/proc/spawn.rs`, plus its
 two call sites in `kernel/src/main.rs`. Everything it needs is already staged on

@@ -3232,6 +3232,20 @@ extern "C" fn kernel_main() -> ! {
                 );
             }
 
+            // CPython 3.12.3 on OUR libc.a — the widest consumer the library has
+            // (478 external symbols resolved, against bash's far smaller share).
+            // Deliberately AFTER bash: bash is the cheaper, older, better
+            // understood rung, so if our libc has regressed it should say so
+            // first. Unlike every other rung here, merely *starting* is most of
+            // the test — CPython must import `encodings` out of a 20 MiB zip
+            // before it can decode a path, so a pass means Py_Initialize drove
+            // real ext4 seeks. No-op without rootfs.ext4 / /bin/python3 (built
+            // by scripts/cpython-spike/). See
+            // requests/b-a-cpython-path-z-self-test.md.
+            if let Err(e) = proc::spawn::self_test_cpython_on_slateos_libc() {
+                serial_println!("WARNING: CPython on SlateOS libc self-test failed: {:?}", e);
+            }
+
             // pkgconf 2.3.0, the second real-world C program linked against OUR libc.a.
             // bash covers fork/exec/wait, signals and its own `>` redirection; this
             // covers the file-and-string side — getopt_long, a PKG_CONFIG_LIBDIR search,

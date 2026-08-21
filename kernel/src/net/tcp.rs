@@ -824,26 +824,37 @@ fn build_segment_with_options(
 pub(crate) fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
     let mut sum: u32 = 0;
 
-    // Pseudo-header: src IP, dst IP, zero, protocol (6), TCP length.
-    let pseudo = [
-        src_ip.0[0],
-        src_ip.0[1],
-        src_ip.0[2],
-        src_ip.0[3],
-        dst_ip.0[0],
-        dst_ip.0[1],
-        dst_ip.0[2],
-        dst_ip.0[3],
-        0,
-        6, // zero + protocol TCP.
-        (segment.len() >> 8) as u8,
-        segment.len() as u8,
-    ];
-
-    for chunk in pseudo.chunks(2) {
-        let word = u16::from_be_bytes([chunk[0], chunk.get(1).copied().unwrap_or(0)]);
-        sum = sum.wrapping_add(u32::from(word));
-    }
+    // Pseudo-header: src IP, dst IP, zero, protocol (6), TCP length — summed as
+    // the six 16-bit words it is, rather than materialised as 12 bytes and read
+    // back.
+    //
+    // The previous form built a `[u8; 12]` on the stack and walked it with
+    // `chunks(2)` plus a `.get(1).copied().unwrap_or(0)` that could never fire
+    // (12 is even). That is ~24 guest memory accesses to compute six adds, and
+    // under TCG a guest access costs ~218 cycles (see `bench.rs`'s calibration
+    // block), so the prologue dominated the function.
+    //
+    // It was measured, not guessed. On run `d4b03ce54` — the first run in which
+    // both checksum benchmarks timed the real functions — this one cost **7896
+    // cycles** against `tcp_checksum_v6`'s **5360**, for the same 1460-byte
+    // segment and a byte-identical main loop. IPv4 was 47% dearer than IPv6
+    // while carrying a 12-byte pseudo-header against IPv6's 40: the whole 2536
+    // cycles were this prologue.
+    //
+    // That inversion was invisible until design-decisions.md §251, and the
+    // reason is worth keeping: the `bench.rs` copy this benchmark used to time
+    // "hand-unrolled the pseudo-header into six adds" — i.e. the copy was
+    // written the way this code should have been written, so the benchmark
+    // reported the cost of code that did not exist, on the hotter of the two
+    // paths.
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src_ip.0[0], src_ip.0[1]])));
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src_ip.0[2], src_ip.0[3]])));
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst_ip.0[0], dst_ip.0[1]])));
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst_ip.0[2], dst_ip.0[3]])));
+    // The zero byte and the protocol byte form one word: 0x0006.
+    sum = sum.wrapping_add(u32::from(PROTO_TCP));
+    // TCP length is a 16-bit field here (IPv6's is 32), so only the low half.
+    sum = sum.wrapping_add(segment.len() as u32 & 0xFFFF);
 
     // TCP segment.
     let mut i = 0;
@@ -5704,10 +5715,127 @@ pub fn self_test() -> KernelResult<()> {
     test_sack_blocks()?;
     test_seq_lt()?;
     test_ipv6_checksum()?;
+    test_v4_pseudo_header_unchanged()?;
     test_dual_stack_ip_addr()?;
     test_namespace_isolation()?;
 
-    crate::serial_println!("[tcp] TCP self-test PASSED (9 tests)");
+    crate::serial_println!("[tcp] TCP self-test PASSED (10 tests)");
+    Ok(())
+}
+
+/// Test: the unrolled IPv4 pseudo-header sums exactly what the array did.
+///
+/// [`tcp_checksum`] used to build a `[u8; 12]` pseudo-header and walk it with
+/// `chunks(2)`; it now adds the same six 16-bit words directly, because the
+/// materialisation cost ~2500 TCG cycles and dominated the function (see the
+/// comment at the rewrite). That is a pure cost change, so the thing to pin is
+/// that the *value* did not move — and pinning it needs the old computation
+/// present to compare against.
+///
+/// Keeping a copy of the old code **in a test** is the legitimate use of the
+/// pattern design-decisions.md §251 removed from `bench.rs`. §251's objection
+/// was that a copy cannot stand in for the original when the question is
+/// *cost*; here the question is *behaviour*, which is exactly what a copy can
+/// answer.
+///
+/// Odd-length segments are included deliberately: the old `chunks(2)` carried a
+/// `.get(1).copied().unwrap_or(0)` tail that could never fire (12 is even), and
+/// the odd-length path that *does* exist is in the segment loop below it. A
+/// rewrite of the prologue must not disturb it.
+fn test_v4_pseudo_header_unchanged() -> KernelResult<()> {
+    /// The pre-rewrite pseudo-header computation, verbatim.
+    fn pseudo_sum_via_array(len: usize, src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u32 {
+        let pseudo = [
+            src_ip.0[0],
+            src_ip.0[1],
+            src_ip.0[2],
+            src_ip.0[3],
+            dst_ip.0[0],
+            dst_ip.0[1],
+            dst_ip.0[2],
+            dst_ip.0[3],
+            0,
+            6,
+            (len >> 8) as u8,
+            len as u8,
+        ];
+        let mut sum: u32 = 0;
+        for chunk in pseudo.chunks(2) {
+            let word = u16::from_be_bytes([chunk[0], chunk.get(1).copied().unwrap_or(0)]);
+            sum = sum.wrapping_add(u32::from(word));
+        }
+        sum
+    }
+
+    /// The rewritten computation, in the same order.
+    fn pseudo_sum_unrolled(len: usize, src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u32 {
+        let mut sum: u32 = 0;
+        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src_ip.0[0], src_ip.0[1]])));
+        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src_ip.0[2], src_ip.0[3]])));
+        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst_ip.0[0], dst_ip.0[1]])));
+        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst_ip.0[2], dst_ip.0[3]])));
+        sum = sum.wrapping_add(u32::from(PROTO_TCP));
+        sum = sum.wrapping_add(len as u32 & 0xFFFF);
+        sum
+    }
+
+    // Addresses chosen so every byte lane is distinct: a lane swapped with its
+    // neighbour would still sum equal if the bytes matched, so equal bytes
+    // would make the test blind to exactly the reordering it is checking for.
+    let cases: [(Ipv4Addr, Ipv4Addr); 3] = [
+        (
+            Ipv4Addr([0x01, 0x02, 0x03, 0x04]),
+            Ipv4Addr([0x05, 0x06, 0x07, 0x08]),
+        ),
+        // All-ones and all-zeros: the carry-heavy and carry-free extremes.
+        (Ipv4Addr([0xFF, 0xFF, 0xFF, 0xFF]), Ipv4Addr([0, 0, 0, 0])),
+        (
+            Ipv4Addr([10, 0, 0, 1]),
+            Ipv4Addr([192, 168, 255, 254]),
+        ),
+    ];
+    // 0 and 65535 bracket the 16-bit length field; 1461 is odd and realistic;
+    // 65536 checks that a length past the field's width truncates the way the
+    // array form did (`len as u8` discarded the high bits) rather than
+    // wrapping some other way.
+    let lengths: [usize; 5] = [0, 1, 1460, 1461, 65536];
+
+    for (src, dst) in cases {
+        for len in lengths {
+            let old = pseudo_sum_via_array(len, src, dst);
+            let new = pseudo_sum_unrolled(len, src, dst);
+            if old != new {
+                crate::serial_println!(
+                    "[tcp]   FAIL: v4 pseudo-header sum changed for len={len}: {old} != {new}"
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    // End-to-end: a real segment must still verify against its own checksum.
+    let src = Ipv4Addr::new(10, 0, 0, 1);
+    let dst = Ipv4Addr::new(10, 0, 0, 2);
+    // An odd payload length exercises the segment loop's trailing-byte branch.
+    let payload = [0xDEu8, 0xAD, 0xBE, 0xEF, 0x42];
+    let seg = build_segment(
+        12345,
+        80,
+        1000,
+        0,
+        TCP_SYN,
+        65535,
+        &payload,
+        IpAddr::V4(src),
+        IpAddr::V4(dst),
+    );
+    // A segment carrying a correct checksum sums to zero over its own fields.
+    if tcp_checksum(&seg, src, dst) != 0 {
+        crate::serial_println!("[tcp]   FAIL: v4 segment did not verify after pseudo-header rewrite");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[tcp]   v4 pseudo-header rewrite: value unchanged (15 vectors)");
     Ok(())
 }
 

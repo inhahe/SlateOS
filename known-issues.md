@@ -46610,6 +46610,26 @@ looks like an oversight later:
   step there too. `dns_build_query` needs no guard: it allocates, and the global
   allocator is an opaque call that cannot be moved.
 
+  **CORRECTION, 2026-08-21, from the verification run `d4b03ce54`: that bullet is
+  wrong, and wrong in the same way as the bug it was describing.** With the input
+  made opaque, `net_checksum` went 21 ns → **54 ns** (80 → 204 cycles), a 2.5×
+  step, and the comparator flagged it REGRESSED. A 20-byte header is 10
+  `chunks(2)` iterations, so the honest cost is ~20 cycles/iteration; the old 80
+  cycles was ~8. The reason is plain in the benchmark: `header` is a **fixed
+  literal array**, so `ip_checksum(&header)` is a compile-time-constant
+  expression and LLVM was free to fold the entire checksum away, leaving
+  `black_box` holding a constant. So this benchmark was *not* fine — it was the
+  third hoisted one, not a healthy control.
+
+  What makes this worth writing down rather than quietly amending: **"80 cycles =
+  10 iterations × 8 cycles/iteration, matching the suite" was the argument, and
+  it was a coincidence.** It is the identical species of reasoning that made the
+  v6 result look acceptable until the cycles-per-iteration figure was computed —
+  a plausible-looking number reverse-justified into evidence. Arithmetic
+  plausibility is a test that can only ever *refute*; passing it is not proof
+  that a window measures anything. The right answer was reached (guard it) from
+  an argument that did not support it, which is luck, not method.
+
 **What the harness did and did not do.** It reported this correctly and
 prominently — `bench-history.py` printed it under `IMPROVED (>25% faster than the
 suite AND outside its own recent range)` with the full comparison,

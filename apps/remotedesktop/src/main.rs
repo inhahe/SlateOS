@@ -3109,17 +3109,12 @@ fn format_link_bytes(bytes: u64) -> String {
 }
 
 /// Format duration in seconds to a human-readable string.
+///
+/// This was byte-for-byte identical to defrag's `format_duration` — the
+/// benign end of the family: two copies that happen to agree. They agree
+/// only until one of them is edited.
 fn format_duration(secs: u64) -> String {
-    let hours = secs / 3600;
-    let minutes = (secs % 3600) / 60;
-    let seconds = secs % 60;
-    if hours > 0 {
-        format!("{hours}h {minutes}m {seconds}s")
-    } else if minutes > 0 {
-        format!("{minutes}m {seconds}s")
-    } else {
-        format!("{seconds}s")
-    }
+    guitk::duration::units(secs)
 }
 
 // ============================================================================

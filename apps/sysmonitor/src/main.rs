@@ -3175,32 +3175,19 @@ fn format_rate(bytes_per_sec: u64) -> String {
 }
 
 /// Format uptime as "Xd Xh Xm Xs".
+///
+/// See procexplorer's `format_uptime`: the two rendered one number two ways.
 fn format_uptime(secs: u64) -> String {
-    let days = secs / 86400;
-    let hours = (secs % 86400) / 3600;
-    let minutes = (secs % 3600) / 60;
-    let seconds = secs % 60;
-
-    if days > 0 {
-        format!("{days}d {hours}h {minutes}m")
-    } else if hours > 0 {
-        format!("{hours}h {minutes}m {seconds}s")
-    } else {
-        format!("{minutes}m {seconds}s")
-    }
+    guitk::duration::units(secs)
 }
 
 /// Format uptime in a shorter form for table cells.
+///
+/// Zero-padded now (`01:01:01`, not `1:01:01`): a column of clocks that pad
+/// is a column whose fields line up, and it is the same shape the recorder
+/// overlay and the music player use for a span of the same size.
 fn format_uptime_short(secs: u64) -> String {
-    let hours = secs / 3600;
-    let minutes = (secs % 3600) / 60;
-    let seconds = secs % 60;
-
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
+    guitk::duration::clock(secs)
 }
 
 // ============================================================================
@@ -4184,15 +4171,18 @@ mod tests {
 
     #[test]
     fn test_format_uptime() {
-        assert_eq!(format_uptime(90061), "1d 1h 1m");
+        // Was "1d 1h 1m". Process Explorer showed "1d 1h 1m 1s" for the same
+        // number, and the two windows sit side by side on one desktop.
+        assert_eq!(format_uptime(90061), "1d 1h 1m 1s");
         assert_eq!(format_uptime(3661), "1h 1m 1s");
         assert_eq!(format_uptime(61), "1m 1s");
     }
 
     #[test]
     fn test_format_uptime_short() {
-        assert_eq!(format_uptime_short(3661), "1:01:01");
-        assert_eq!(format_uptime_short(61), "1:01");
+        // Zero-padded now, matching every other clock in the system.
+        assert_eq!(format_uptime_short(3661), "01:01:01");
+        assert_eq!(format_uptime_short(61), "01:01");
     }
 
     #[test]

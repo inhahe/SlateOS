@@ -2924,19 +2924,15 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 /// Format an uptime in seconds as "Xd Xh Xm Xs".
+///
+/// Process Explorer and System Monitor both read `system_info.uptime_secs`
+/// and can be open side by side on one desktop. They used to render it two
+/// ways: this one kept the seconds field past a day, sysmonitor's dropped
+/// it, so a machine up for 90 061 s was `1d 1h 1m 1s` here and `1d 1h 1m`
+/// there. Both now use the exact shape, because these are the two windows a
+/// person opens *specifically* to read exact numbers.
 fn format_uptime(secs: u64) -> String {
-    let days = secs / 86400;
-    let hours = (secs % 86400) / 3600;
-    let minutes = (secs % 3600) / 60;
-    let seconds = secs % 60;
-
-    if days > 0 {
-        format!("{days}d {hours}h {minutes}m {seconds}s")
-    } else if hours > 0 {
-        format!("{hours}h {minutes}m {seconds}s")
-    } else {
-        format!("{minutes}m {seconds}s")
-    }
+    guitk::duration::units(secs)
 }
 
 // ============================================================================

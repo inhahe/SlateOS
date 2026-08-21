@@ -6381,20 +6381,25 @@ fn bench_net_checksum() {
         0x0A, 0x00, 0x00, 0x01, 0x0A, 0x00, 0x00, 0x02,
     ];
 
-    // `black_box` on the *header*, as in the two tcp_checksum benchmarks. This
-    // one demonstrably was *not* being hoisted — run fe9882a55 reported 21ns,
-    // i.e. 80 cycles over 10 iterations, exactly the ~8 cycles/iteration the
-    // rest of the suite runs at under TCG — but "not hoisted today" is a
-    // property of this LLVM version, not of the benchmark. A future compiler
-    // that noticed `ip_checksum` is a pure function of a loop-invariant local
-    // would silently collapse the series to nothing, which is the same failure
-    // §251 exists to correct. Guarding it costs one compiler barrier and buys
-    // the property outright.
+    // `black_box` on the *header*, as in the two tcp_checksum benchmarks.
     //
-    // The one thing the unguarded form was worth — evidence that §251's
-    // re-pointing at the real function did not itself move the number — was
-    // already collected on fe9882a55, which ran re-pointed and unguarded. So
-    // adding the guard now forfeits nothing; expect a small one-time step.
+    // CORRECTED: an earlier version of this comment claimed this benchmark was
+    // "demonstrably *not* being hoisted", on the grounds that run fe9882a55's
+    // 21 ns was 80 cycles over 10 iterations — right on the ~8 cycles/iteration
+    // the rest of the suite runs at under TCG. **That was a coincidence
+    // reverse-justified into evidence, and it was wrong.** Guarding the input
+    // moved this benchmark 80 -> 204 cycles (21 -> 54 ns), which the comparator
+    // duly flagged REGRESSED. `header` below is a *fixed literal array*, so
+    // `ip_checksum(&header)` is a compile-time-constant expression that LLVM
+    // was entitled to fold away entirely, leaving `black_box` holding a
+    // constant. This was the third hoisted benchmark, not the healthy control
+    // it was described as.
+    //
+    // The 204-cycle figure is the honest one: ~20 cycles per 16-bit word, which
+    // is what a 20-byte header costs when it is actually summed. Worth keeping
+    // in view because arithmetic plausibility can only ever *refute* a
+    // measurement — passing it is not evidence that a window measures anything.
+    // See design-decisions.md §251 and its postscripts.
     let result = run("net_ip_checksum_20b", 5000, || {
         let hdr = core::hint::black_box(&header[..]);
         let _ = core::hint::black_box(crate::net::ipv4::ip_checksum(hdr));

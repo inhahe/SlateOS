@@ -326,15 +326,81 @@ fn generate_salt() -> Option<String> {
     Some(encode_salt(data.get(..len)?))
 }
 
-/// Verify a password against a stored `/etc/shadow` entry.
+// `verify_password` no longer stands here.  It was a wrapper over
+// `posix::crypt::verify` — the comparison was right, but it was a second
+// statement of the policy *around* the comparison: that `!` and `*` mark an
+// account disabled, that an empty entry means "no password" rather than "the
+// empty password", that an entry nothing can recompute is a broken system and
+// not a wrong guess.  Two statements of a policy are one policy plus one place
+// for it to disagree with itself, which is the shape of every bug §329
+// catalogued.  The `Current password:` prompt now asks
+// `authlib::check_stored`, the same function `login`, `su` and `doas` ask, and
+// this program states nothing of its own about what a stored entry means.
+// See `known-issues.md` -> `B-PASSWD-VERIFIES-WITHOUT-AUTHLIB`.
+//
+// The tests kept their `verify_password` — as a *test* helper, defined in the
+// test module, asserting the property that is this crate's to keep: that a
+// password this program **writes** is one the system's verifier **accepts**.
+// That is the bug `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`
+// was filed for, and it is worth a regression test here even though the
+// verifier itself is tested next to its own definition.
+
+/// What to do about one answer at the `Current password:` prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OldPasswordVerdict {
+    /// Verified. Go on and set the new password.
+    Proceed,
+    /// Wrong. Say "authentication failure" and stop.
+    Refuse,
+    /// The stored entry is in no format this system can recompute, so no
+    /// answer could have been right. Say so, and name the remedy.
+    Unverifiable,
+}
+
+/// Decide the verdict *and* do the shared-tally bookkeeping that goes with it.
 ///
-/// Deliberately holds no knowledge of the format: the stored entry is
-/// itself the setting, so `crypt` reads the method, the rounds and the salt
-/// back out of it.  The previous version parsed `$sha256$<salt>$<hash>` by
-/// hand and returned `false` for everything else, which is how it came to
-/// disagree with `login` about the same file.
-fn verify_password(password: &str, stored_hash: &str) -> bool {
-    posix::crypt::verify(password.as_bytes(), stored_hash.as_bytes())
+/// # Contributes, but is never delayed
+///
+/// This prompt adds to the same per-user failed-attempt tally that `login`,
+/// `su` and `doas` use, and — alone among them — never consults it
+/// (`design-decisions.md` §354). Both halves are deliberate.
+///
+/// *Contributing* means a guess made here is not free: it costs the guesser
+/// time at every other prompt afterwards. Before this, the `Current password:`
+/// prompt was the one place in the system where an attacker who already had
+/// your shell could guess at your password without cost or trace, and "the fix
+/// would be annoying" is how a prompt like that stays uncounted.
+///
+/// *Not being delayed* is the exception, and it is narrow. Changing your
+/// password is the action you most want available at the moment you suspect it
+/// is compromised, and a delay is exactly the mechanism that would take it
+/// away — including from you, at the hands of an attacker who could otherwise
+/// hold your account at a five-minute wait and so stop you locking them out.
+/// Every other prompt gates access to something; this one gates the remedy.
+/// That is why there is no `rate_limited` call here, and why its absence is
+/// load-bearing rather than an omission.
+///
+/// A verified password clears the count, exactly as a successful login does:
+/// the run of consecutive failures is over.
+///
+/// An unverifiable entry is *not* counted. No answer can ever match it, so a
+/// wrong one reveals nothing to an attacker and learns nothing for the tally;
+/// counting it would only lock a user out of `login` for the crime of having a
+/// broken entry that an administrator has to repair regardless.
+fn judge_old_password(
+    auth: &mut authlib::Authenticator,
+    username: &str,
+    outcome: authlib::Outcome,
+) -> OldPasswordVerdict {
+    if outcome.is_accepted() {
+        auth.reset(username);
+        return OldPasswordVerdict::Proceed;
+    }
+    if outcome.needs_administrator() {
+        return OldPasswordVerdict::Unverifiable;
+    }
+    auth.note_failure(username);
+    OldPasswordVerdict::Refuse
 }
 
 // The constant-time comparison that stood here went with the hand-written
@@ -648,15 +714,20 @@ fn cmd_change_password(target: &str, caller_uid: u32) -> i32 {
                         return 1;
                     }
                 };
-                if !verify_password(&old_pw, &entry.hash) {
-                    // An entry in a format nothing can recompute is not a
-                    // wrong password, and telling the user "authentication
-                    // failure" would send them away retyping a password
-                    // that was never going to work.  The remedy is root
-                    // setting a new one, so say so.  Only the account's own
-                    // owner reaches this branch — root skips the old-password
-                    // check entirely — so it discloses nothing.
-                    if posix::crypt::stored_method(entry.hash.as_bytes()).is_none() {
+                let mut auth = authlib::Authenticator::new();
+                let outcome =
+                    authlib::check_stored(old_pw.as_bytes(), entry.hash.as_bytes());
+                match judge_old_password(&mut auth, target, outcome) {
+                    OldPasswordVerdict::Proceed => {}
+                    OldPasswordVerdict::Unverifiable => {
+                        // An entry in a format nothing can recompute is not a
+                        // wrong password, and telling the user "authentication
+                        // failure" would send them away retyping a password
+                        // that was never going to work.  The remedy is root
+                        // setting a new one, so say so.  Only the account's own
+                        // owner reaches this branch — root skips the
+                        // old-password check entirely — so it discloses
+                        // nothing.
                         eprintln!(
                             "passwd: the stored password for `{target}' is not in a format \
                              this system can verify, so it cannot be confirmed; ask an \
@@ -664,8 +735,10 @@ fn cmd_change_password(target: &str, caller_uid: u32) -> i32 {
                         );
                         return 1;
                     }
-                    eprintln!("passwd: authentication failure");
-                    return 1;
+                    OldPasswordVerdict::Refuse => {
+                        eprintln!("passwd: authentication failure");
+                        return 1;
+                    }
                 }
             }
         }
@@ -1708,5 +1781,114 @@ mod tests {
         let hashed = hash_password(password, salt).expect("hash");
         assert!(verify_password(password, &hashed));
         assert!(!verify_password("wrong", &hashed));
+    }
+
+    // ---- The shared failed-attempt tally (§354) ----
+
+    /// Does the *system's* verifier accept this password for this stored
+    /// entry?
+    ///
+    /// A test helper, not a program function — see the note where the old
+    /// production `verify_password` stood. The assertions below are about what
+    /// this program writes, checked against the one verifier every other
+    /// program reads it with.
+    fn verify_password(password: &str, stored_hash: &str) -> bool {
+        authlib::check_stored(password.as_bytes(), stored_hash.as_bytes()).is_accepted()
+    }
+
+    /// A verifier that counts in memory and nowhere else, so that running this
+    /// suite cannot run up a delay against a real account on the developer's
+    /// machine. `with_stores` attaches no faillock file; `new()` would.
+    fn scratch_authenticator() -> authlib::Authenticator {
+        let missing = std::path::Path::new("/nonexistent/passwd-tests");
+        authlib::Authenticator::with_stores(missing, missing)
+    }
+
+    /// A wrong current password is charged to the shared tally, so that
+    /// guessing here is no longer the one free prompt in the system.
+    #[test]
+    fn a_wrong_current_password_is_charged_to_the_shared_tally() {
+        let mut auth = scratch_authenticator();
+        let stored = hash_password("correct horse", "0123456789abcdef").expect("hash");
+
+        for expected in 1..=3_u32 {
+            let outcome = authlib::check_stored(b"wrong", stored.as_bytes());
+            assert_eq!(
+                judge_old_password(&mut auth, "alice", outcome),
+                OldPasswordVerdict::Refuse
+            );
+            assert_eq!(auth.failures("alice"), expected);
+        }
+    }
+
+    /// …and it is *only* charged. `passwd` never asks whether the user is
+    /// delayed, so a user already past the free attempts — held there by an
+    /// attacker at some other prompt, in the case this exception exists for —
+    /// can still change their password and lock that attacker out.
+    #[test]
+    fn passwd_is_never_delayed_by_the_tally_it_contributes_to() {
+        let mut auth = scratch_authenticator();
+        let stored = hash_password("correct horse", "0123456789abcdef").expect("hash");
+
+        // Well past `FREE_ATTEMPTS`: every other prompt would refuse outright.
+        for _ in 0..(authlib::FREE_ATTEMPTS + 5) {
+            auth.note_failure("alice");
+        }
+        assert!(
+            auth.rate_limited("alice").is_some(),
+            "the premise: alice is delayed everywhere else"
+        );
+
+        let outcome = authlib::check_stored(b"correct horse", stored.as_bytes());
+        assert_eq!(
+            judge_old_password(&mut auth, "alice", outcome),
+            OldPasswordVerdict::Proceed,
+            "changing your password is the remedy, and a delay must not take it away"
+        );
+        // And succeeding clears the run of failures, as a login does.
+        assert_eq!(auth.failures("alice"), 0);
+        assert!(auth.rate_limited("alice").is_none());
+    }
+
+    /// An entry nothing can recompute is reported as broken, not counted as a
+    /// guess: no answer could ever have matched it, so taxing the attempt
+    /// would lock the user out of `login` for an administrator's mistake.
+    #[test]
+    fn an_unverifiable_entry_is_reported_not_counted() {
+        let mut auth = scratch_authenticator();
+        // 64 hex digits: what this tree's replaced hand-rolled format wrote.
+        let legacy = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let outcome = authlib::check_stored(b"anything", legacy.as_bytes());
+
+        assert_eq!(
+            judge_old_password(&mut auth, "dave", outcome),
+            OldPasswordVerdict::Unverifiable
+        );
+        assert_eq!(auth.failures("dave"), 0);
+    }
+
+    /// `verify_password` now states no policy of its own: for every shape of
+    /// stored entry it agrees with `authlib`, which is the single definition
+    /// the rest of the system authenticates against.
+    #[test]
+    fn verification_agrees_with_authlib_for_every_shape_of_entry() {
+        let good = hash_password("correct horse", "0123456789abcdef").expect("hash");
+        let locked = format!("!{good}");
+        let cases: [(&str, &str); 7] = [
+            ("correct horse", &good),
+            ("wrong", &good),
+            ("correct horse", &locked),
+            ("anything", "!"),
+            ("anything", "*"),
+            ("anything", ""),
+            ("anything", "not a hash at all"),
+        ];
+        for (password, stored) in cases {
+            assert_eq!(
+                verify_password(password, stored),
+                authlib::check_stored(password.as_bytes(), stored.as_bytes()).is_accepted(),
+                "disagreement on ({password:?}, {stored:?})"
+            );
+        }
     }
 }

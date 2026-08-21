@@ -8,7 +8,7 @@
 //!
 //! - Multi-user account management (load from /etc/users.yaml)
 //! - Password hashing via SHA-256 with salt
-//! - Account lockout after repeated failures (5 attempts / 5 minute cooldown)
+//! - Failed guesses slowed by `authlib`'s shared, system-wide tally
 //! - Auto-login support for configured accounts
 //! - Guest login (no password)
 //! - Lock screen with idle timeout
@@ -426,58 +426,33 @@ impl SessionInfo {
 }
 
 // ============================================================================
-// Account lockout tracking
+// Failed-attempt tracking
 // ============================================================================
 
-/// Tracks failed login attempts and lockout state for an account.
-#[derive(Clone, Debug)]
-pub struct LockoutState {
-    /// Number of consecutive failed attempts.
-    failed_attempts: u32,
-    /// Timestamp when the lockout expires (0 = not locked).
-    locked_until: u64,
-}
-
-impl LockoutState {
-    fn new() -> Self {
-        Self {
-            failed_attempts: 0,
-            locked_until: 0,
-        }
-    }
-
-    /// Record a failed attempt; returns true if account is now locked.
-    fn record_failure(&mut self, now: u64) -> bool {
-        // Saturating: the counter only ever has to reach MAX_FAILED_ATTEMPTS,
-        // and one that wrapped to zero would hand an attacker a fresh budget.
-        self.failed_attempts = self.failed_attempts.saturating_add(1);
-        if self.failed_attempts >= MAX_FAILED_ATTEMPTS {
-            self.locked_until = now.saturating_add(LOCKOUT_DURATION_SECS);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Check if the account is currently locked.
-    fn is_locked(&self, now: u64) -> bool {
-        self.locked_until > now
-    }
-
-    /// Remaining lockout seconds.
-    fn remaining_lockout_secs(&self, now: u64) -> u64 {
-        self.locked_until.saturating_sub(now)
-    }
-
-    /// Reset on successful login.
-    fn reset(&mut self) {
-        self.failed_attempts = 0;
-        self.locked_until = 0;
-    }
-}
-
-const MAX_FAILED_ATTEMPTS: u32 = 5;
-const LOCKOUT_DURATION_SECS: u64 = 300; // 5 minutes
+// A `LockoutState` stood here: a per-uid counter with a hard cutoff at five
+// failures and a flat five-minute lockout, held in this process's memory. It
+// is gone, replaced by `authlib::Authenticator`, and every one of its
+// properties was a problem:
+//
+// - **It shared nothing.** The console `login` prompt and `su` count against
+//   one system-wide tally (`design-decisions.md` §354). This screen counted
+//   separately, so an attacker slowed here could walk to a text console and
+//   guess at full speed, and one slowed there could come back here. A rate
+//   limit that only some prompts honour is not a rate limit — which is the
+//   whole finding §354 rests on, and this screen was the last prompt outside
+//   it.
+// - **It did not survive a restart.** The counter lived in `LoginState`, so
+//   restarting the greeter — which anyone at the keyboard can provoke —
+//   returned the budget to five. `authlib`'s tally is on disk.
+// - **It was keyed by uid**, so it could not count a guess at a username that
+//   does not exist, and had nothing to key such a guess by. The shared tally
+//   is keyed by name and counts them, which is what keeps a refusal from
+//   telling you which names are real.
+// - **A hard cutoff is the wrong shape.** Five strikes and a flat five-minute
+//   wait gives an attacker 5 guesses per 5 minutes indefinitely; `authlib`
+//   doubles the wait each time (1s, 2s, 4s, … capped at 5 minutes), so a
+//   sustained attack gets slower while a user who mistypes twice notices
+//   nothing.
 
 /// Entries in the power menu: shutdown, restart, sleep.
 const POWER_MENU_ENTRIES: usize = 3;
@@ -574,8 +549,13 @@ pub struct LoginManager {
     pub password_visible: bool,
     /// Current error message to display (cleared on input).
     pub error_message: Option<String>,
-    /// Per-account lockout state, keyed by uid.
-    pub locked_accounts: HashMap<u32, LockoutState>,
+    /// The system-wide failed-attempt tally, shared with the console `login`
+    /// prompt, `su` and `doas` (`design-decisions.md` §354).
+    ///
+    /// Public so that tests can substitute one with an in-memory store and a
+    /// fake clock. A test that used the real one would count against real
+    /// accounts in the real on-disk tally, every time the suite ran.
+    pub auth: authlib::Authenticator,
     /// Active sessions, keyed by session_id.
     pub sessions: HashMap<u64, SessionInfo>,
     /// Next session ID to assign.
@@ -615,7 +595,7 @@ impl LoginManager {
             password_input: String::new(),
             password_visible: false,
             error_message: None,
-            locked_accounts: HashMap::new(),
+            auth: authlib::Authenticator::new(),
             sessions: HashMap::new(),
             next_session_id: 1,
             lock_timeout_secs: 300, // 5 minutes default
@@ -638,6 +618,13 @@ impl LoginManager {
     }
 
     /// Internal constructor without loading from disk.
+    ///
+    /// "Without loading from disk" now covers the failed-attempt tally too:
+    /// this builds an `Authenticator` with no faillock file, so it counts in
+    /// memory and cannot run up a real delay against a real account. That
+    /// matters because `with_users` — the constructor every test uses — comes
+    /// through here, and a suite that shared the system tally would delay
+    /// whoever the fixtures happen to be named after, every time it ran.
     fn new_internal() -> Self {
         Self {
             current_view: LoginView::UserSelect,
@@ -646,7 +633,10 @@ impl LoginManager {
             password_input: String::new(),
             password_visible: false,
             error_message: None,
-            locked_accounts: HashMap::new(),
+            auth: authlib::Authenticator::with_stores(
+                std::path::Path::new("/nonexistent/login-manager"),
+                std::path::Path::new("/nonexistent/login-manager"),
+            ),
             sessions: HashMap::new(),
             next_session_id: 1,
             lock_timeout_secs: 300,
@@ -676,8 +666,46 @@ impl LoginManager {
 
     /// Authenticate a user with the given password.
     /// Returns Ok(()) on success, Err(message) on failure.
+    ///
+    /// # The shared tally
+    ///
+    /// Failures here are counted against the same system-wide, on-disk tally
+    /// the console `login` prompt and `su` use, and a delay earned at any of
+    /// them is honoured at all of them (`design-decisions.md` §354). See the
+    /// note where `LockoutState` used to stand for what this replaced and why.
+    ///
+    /// Two things are counted and two are not, and the split is the same one
+    /// `su` makes:
+    ///
+    /// | Event | Counted? | Why |
+    /// |---|---|---|
+    /// | wrong password | yes | it is a guess |
+    /// | unknown username | yes | otherwise only real accounts are ever delayed, and the delay itself says which names are real |
+    /// | account disabled by an administrator | no | no guess could open it, and counting would let anyone delay a locked account's owner for free |
+    /// | stored entry in an unrecomputable format | no | same — no password can ever match it |
+    ///
+    /// # Why this screen shows the remaining seconds and a text console does
+    /// not
+    ///
+    /// `login(1)` says only "Too many failed attempts", because a countdown
+    /// tells an attacker their guesses are landing on an account that exists.
+    /// Here the user list is drawn on the screen in front of them — the names
+    /// are not a secret this prompt is keeping — so the countdown discloses
+    /// nothing that is not already visible, and a person waiting at a graphical
+    /// greeter has a real use for knowing how long.
     pub fn authenticate(&mut self, username: &str, password: &str) -> Result<(), String> {
         let now = self.current_time;
+
+        // Asked before the user is even looked up, so that being refused for
+        // guessing cannot be told apart from being refused for not existing.
+        // `rate_limited` does not count the attempt: if it did, an attacker
+        // could hold a real user out for ever by making refused attempts that
+        // each pushed the expiry further away.
+        if let Some(remaining) = self.auth.rate_limited(username) {
+            return Err(format!(
+                "Too many failed attempts. Try again in {remaining} seconds."
+            ));
+        }
 
         // Find the user.
         let user = self
@@ -685,67 +713,60 @@ impl LoginManager {
             .iter()
             .find(|u| u.username() == username)
             .cloned();
-        let user = match user {
-            Some(u) => u,
-            None => return Err("User not found".to_string()),
+        let Some(user) = user else {
+            // Counted, and reported in the same words a wrong password gets.
+            // A greeter lists its users, so this is not the enumeration
+            // defence it is at a text console — but the tally is shared with
+            // prompts where it is, and a count that depended on which prompt
+            // you used would not be one count.
+            self.auth.note_failure(username);
+            return Err("Incorrect password.".to_string());
         };
 
-        // Check lockout.
-        if let Some(lockout) = self.locked_accounts.get(&user.uid())
-            && lockout.is_locked(now)
-        {
-            let remaining = lockout.remaining_lockout_secs(now);
-            return Err(format!(
-                "Account locked. Try again in {} seconds.",
-                remaining
-            ));
-        }
-
-        // Guest accounts don't need a password.
+        // Guest accounts don't need a password. Nothing was guessed, so
+        // nothing is counted or cleared.
         if !user.requires_password() {
             return Ok(());
         }
 
         match user.check_password(password) {
             userdb::Auth::Accepted => {
-                // Success: reset lockout, update login stats.
-                self.locked_accounts
-                    .entry(user.uid())
-                    .and_modify(LockoutState::reset);
+                // Success ends the run of failures, here and everywhere else
+                // that reads the shared tally.
+                self.auth.reset(username);
                 if let Some(u) = self.users.iter_mut().find(|u| u.uid() == user.uid()) {
                     u.record.record_login(now);
                 }
                 Ok(())
             }
             // An account the administrator has disabled is not a wrong
-            // password, and must not be reported as one: five wrong guesses
-            // would otherwise "lock" an account that is already locked, and
-            // the message would tell an attacker the password was close.
+            // password, and must not be reported as one: wrong guesses would
+            // otherwise "lock" an account that is already locked, and the
+            // message would tell an attacker the password was close. Not
+            // counted, either — no password opens it, so there is no guess to
+            // charge, and charging one would let anyone delay this account's
+            // owner at every other prompt in the system for free.
             userdb::Auth::Locked => Err("Account is locked.".to_string()),
             // No entry we can check. This is what a password written by one of
             // the two implementations that predate `userdb` looks like — see
             // `design-decisions.md` §330. Say so, because "incorrect password"
-            // would send the user round the same loop for ever.
+            // would send the user round the same loop for ever. Not counted,
+            // for the same reason as `Locked`.
             userdb::Auth::Unusable => Err(
                 "This account's password was stored in a format that can no longer be \
                  checked. An administrator must reset it with `useradm passwd'."
                     .to_string(),
             ),
             userdb::Auth::NoPassword | userdb::Auth::Rejected => {
-                // Failure: record attempt.
-                let lockout = self
-                    .locked_accounts
-                    .entry(user.uid())
-                    .or_insert_with(LockoutState::new);
-                let now_locked = lockout.record_failure(now);
-                if now_locked {
-                    Err("Account locked after too many attempts. Wait 5 minutes.".to_string())
-                } else {
-                    let remaining = MAX_FAILED_ATTEMPTS.saturating_sub(lockout.failed_attempts);
-                    Err(format!(
-                        "Incorrect password. {} attempts remaining.",
-                        remaining
-                    ))
+                self.auth.note_failure(username);
+                match self.auth.rate_limited(username) {
+                    // The guess just spent the last of the free attempts, so
+                    // say what the wait is now rather than making them find
+                    // out by trying again.
+                    Some(remaining) => Err(format!(
+                        "Incorrect password. Try again in {remaining} seconds."
+                    )),
+                    None => Err("Incorrect password.".to_string()),
                 }
             }
         }
@@ -2375,12 +2396,21 @@ mod tests {
         assert!(result.unwrap_err().contains("Incorrect password"));
     }
 
+    /// A name that does not exist is refused in the *same words* as a wrong
+    /// password.
+    ///
+    /// This test used to assert "User not found", which is the thing an
+    /// attacker most wants to be told: it turns the prompt into a list of
+    /// which accounts are real. The distinction is no use to the person
+    /// typing — they know whether they meant to type that name — and §354
+    /// made the tally shared, so a difference here would also leak through
+    /// prompts that show no user list.
     #[test]
     fn test_authenticate_nonexistent_user() {
         let mut mgr = test_manager();
         let result = mgr.authenticate("nobody", "pass");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("User not found"));
+        assert_eq!(result.unwrap_err(), "Incorrect password.");
     }
 
     #[test]
@@ -2406,82 +2436,165 @@ mod tests {
     }
 
     // ========================================================================
-    // Account lockout tests
+    // Failed-attempt tally tests (§354)
     // ========================================================================
+    //
+    // One `static` clock per test that needs one, never a shared one: `cargo
+    // test` runs these concurrently, and two tests winding the same clock in
+    // opposite directions is a flake that only appears on a loaded machine.
+    // The static is only ever read through the one `Authenticator` built with
+    // its `fn`, so a per-test static is genuinely private to that test.
 
-    #[test]
-    fn test_lockout_after_max_failures() {
-        let mut mgr = test_manager();
-        mgr.current_time = 100;
+    static FAKE_NOW_EXPIRY: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1000);
+    static FAKE_NOW_COUNTDOWN: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(4000);
 
-        // Fail 5 times.
-        for i in 0..5 {
-            let result = mgr.authenticate("alice", "wrong");
-            if i < 4 {
-                assert!(result.unwrap_err().contains("attempts remaining"));
-            } else {
-                assert!(result.unwrap_err().contains("locked"));
-            }
-        }
-
-        // Now even the correct password should fail (locked).
-        let result = mgr.authenticate("alice", "password123");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Account locked"));
+    fn fake_now_expiry() -> u64 {
+        FAKE_NOW_EXPIRY.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    fn fake_now_countdown() -> u64 {
+        FAKE_NOW_COUNTDOWN.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// An in-memory tally on a clock the test drives.
+    fn scratch_auth(now: fn() -> u64) -> authlib::Authenticator {
+        let missing = std::path::Path::new("/nonexistent/login-manager-tests");
+        authlib::Authenticator::with_stores(missing, missing).with_clock(now)
+    }
+
+    /// Guesses are free until `FREE_ATTEMPTS` is spent, and then cost a wait
+    /// that the correct password does not shorten.
     #[test]
-    fn test_lockout_expires() {
+    fn guessing_becomes_slow_and_the_right_password_does_not_skip_the_wait() {
         let mut mgr = test_manager();
         mgr.current_time = 100;
 
-        // Lock the account.
-        for _ in 0..5 {
+        // The first few are refused without a wait — a user who mistypes twice
+        // must not be punished for it.
+        for _ in 0..authlib::FREE_ATTEMPTS {
+            let err = mgr.authenticate("alice", "wrong").unwrap_err();
+            assert_eq!(err, "Incorrect password.", "no wait inside the free budget");
+        }
+
+        // The next one earns one, and says so rather than making the user find
+        // out by trying again.
+        let err = mgr.authenticate("alice", "wrong").unwrap_err();
+        assert!(err.starts_with("Incorrect password. Try again in "), "{err}");
+
+        // And now even the correct password waits its turn: the delay is on
+        // *asking*, not on being wrong, or it would be an oracle for having
+        // guessed right.
+        let err = mgr.authenticate("alice", "password123").unwrap_err();
+        assert!(err.starts_with("Too many failed attempts."), "{err}");
+    }
+
+    /// The wait runs down and then lets the user in.
+    #[test]
+    fn the_wait_expires_rather_than_locking_the_account() {
+        let mut mgr = test_manager();
+        mgr.auth = scratch_auth(fake_now_expiry);
+        FAKE_NOW_EXPIRY.store(1000, std::sync::atomic::Ordering::Relaxed);
+
+        for _ in 0..=authlib::FREE_ATTEMPTS {
             let _ = mgr.authenticate("alice", "wrong");
         }
+        assert!(mgr.auth.rate_limited("alice").is_some());
 
-        // Advance time past lockout (5 minutes = 300 seconds).
-        mgr.current_time = 100 + 301;
-
-        // Should be able to authenticate now.
-        let result = mgr.authenticate("alice", "password123");
-        assert!(result.is_ok());
+        // Past the longest wait `authlib` can impose.
+        FAKE_NOW_EXPIRY.store(
+            1000 + authlib::MAX_DELAY_SECS + 1,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        assert!(mgr.authenticate("alice", "password123").is_ok());
     }
 
+    /// A verified password clears the run of failures — here and, because the
+    /// tally is shared, at every other prompt too.
     #[test]
-    fn test_lockout_reset_on_success() {
+    fn a_successful_login_clears_the_count() {
         let mut mgr = test_manager();
 
-        // Fail a few times (but not enough to lock).
         for _ in 0..3 {
             let _ = mgr.authenticate("alice", "wrong");
         }
+        assert!(mgr.auth.failures("alice") > 0);
 
-        // Succeed.
-        let result = mgr.authenticate("alice", "password123");
-        assert!(result.is_ok());
-
-        // Lockout state should be reset; we should get 5 fresh attempts.
-        let lockout = mgr.locked_accounts.get(&1000);
-        assert!(lockout.is_none() || lockout.unwrap().failed_attempts == 0);
+        assert!(mgr.authenticate("alice", "password123").is_ok());
+        assert_eq!(mgr.auth.failures("alice"), 0);
+        assert!(mgr.auth.rate_limited("alice").is_none());
     }
 
+    /// This screen shows the remaining seconds, unlike `login(1)`, because the
+    /// user list is already on it — see `authenticate`'s doc comment.
     #[test]
-    fn test_lockout_countdown() {
+    fn the_message_counts_down_and_the_refusal_does_not_restart_it() {
         let mut mgr = test_manager();
-        mgr.current_time = 100;
+        mgr.auth = scratch_auth(fake_now_countdown);
+        FAKE_NOW_COUNTDOWN.store(4000, std::sync::atomic::Ordering::Relaxed);
 
-        for _ in 0..5 {
-            let _ = mgr.authenticate("alice", "wrong");
+        // Seeded through `note_failure` rather than by calling `authenticate`
+        // in a loop, and the reason is itself the property under test: once
+        // the first wait is earned, every further call is *refused* and
+        // therefore not counted, so a loop of guesses against a frozen clock
+        // never gets past a one-second wait. That is exactly right — it is
+        // what stops an attacker refreshing a victim's delay — but it means a
+        // long wait has to be built directly.
+        for _ in 0..(authlib::FREE_ATTEMPTS + 6) {
+            mgr.auth.note_failure("alice");
+        }
+        let first = mgr
+            .auth
+            .rate_limited("alice")
+            .expect("well past the free attempts");
+        assert!(first > 10, "want a wait long enough to observe: {first}s");
+
+        // Ten seconds later the message says ten seconds less...
+        FAKE_NOW_COUNTDOWN.store(4010, std::sync::atomic::Ordering::Relaxed);
+        let err = mgr.authenticate("alice", "password123").unwrap_err();
+        let later = mgr.auth.rate_limited("alice").expect("still waiting");
+        assert!(
+            later < first,
+            "the wait must run down, not restart: {first}s then {later}s"
+        );
+        assert!(err.contains(&later.to_string()), "{err} should name {later}");
+    }
+
+    /// A guess at a name that does not exist is counted, and answered in the
+    /// same words as a wrong password. Otherwise only real accounts are ever
+    /// delayed, and the delay itself becomes the list of real accounts — which
+    /// matters because this tally is shared with prompts that show no list.
+    #[test]
+    fn an_unknown_username_is_counted_and_answered_identically() {
+        let mut mgr = test_manager();
+
+        let unknown = mgr.authenticate("nobody-here", "wrong").unwrap_err();
+        let known = mgr.authenticate("alice", "wrong").unwrap_err();
+        assert_eq!(unknown, known);
+        assert_eq!(mgr.auth.failures("nobody-here"), 1);
+    }
+
+    /// A disabled account is refused without being counted. Counting would
+    /// make `authenticate` a free denial of service: a handful of guesses at a
+    /// locked account, costing the attacker nothing and telling them nothing,
+    /// would delay its owner at every prompt in the system once an
+    /// administrator unlocked it.
+    #[test]
+    fn refusing_a_disabled_account_is_not_an_attempt() {
+        let mut mgr = test_manager();
+        if let Some(alice) = mgr.users.iter_mut().find(|u| u.username() == "alice") {
+            alice.record.set_locked(true);
         }
 
-        // Check countdown.
-        mgr.current_time = 200;
-        let result = mgr.authenticate("alice", "password123");
-        let err = result.unwrap_err();
-        assert!(err.contains("Account locked"));
-        // Should show approximately 200 seconds remaining.
-        assert!(err.contains("200"));
+        for _ in 0..(authlib::FREE_ATTEMPTS + 4) {
+            assert_eq!(
+                mgr.authenticate("alice", "wrong").unwrap_err(),
+                "Account is locked."
+            );
+        }
+        assert_eq!(mgr.auth.failures("alice"), 0);
+        assert!(mgr.auth.rate_limited("alice").is_none());
     }
 
     // ========================================================================

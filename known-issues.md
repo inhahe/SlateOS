@@ -51444,7 +51444,7 @@ having had root. That is the operator's call, not mine: it is queued as
 `design-decisions.md` §347 records it as the open half.
 
 
-## B-PASSWD-VERIFIES-WITHOUT-AUTHLIB — 2026-08-21 — OPEN (tech debt, small)
+## B-PASSWD-VERIFIES-WITHOUT-AUTHLIB — 2026-08-21 — **FIXED 2026-08-21**, see Resolution at the end
 
 **In short:** every program on this system that asks "is this your password?"
 routes through one of two shared verifiers, which count failed attempts and
@@ -51537,6 +51537,53 @@ into the ability to pass a `doas` prompt. So: real, bounded, not urgent.
 `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md` —
 `grep -rn 'crypt::verify' posix/src userspace/*/src services init`, which
 returns exactly three production call sites and requires each to be justified.
+
+### Resolution — 2026-08-21, and the tradeoff was split rather than picked
+
+B-Q6 was answered as `design-decisions.md` **§354**, and this followed from it
+exactly as the entry above said it would. The answer to the table's tradeoff is
+**neither column**: `passwd` **contributes to the tally and is never delayed by
+it**. Guessing at `Current password:` is no longer free — it costs the guesser
+time at `login`, `su` and `doas` afterwards — but no delay earned anywhere can
+stop you changing your password. That is the whole of the counter-argument the
+entry raised ("a password change is the one action you most want available to a
+user who suspects their password is compromised") granted in full, at no cost
+to the thing the rate limit was for.
+
+What changed in `userspace/passwd/src/main.rs`:
+
+| Before | After |
+|---|---|
+| `verify_password` → `posix::crypt::verify` | the prompt asks `authlib::check_stored`, the same function every other program asks |
+| a second `posix::crypt::stored_method` probe to tell "unverifiable" from "wrong" | `Outcome::needs_administrator()` — the classification comes back *with* the verdict |
+| nothing counted | `judge_old_password` does the bookkeeping, and is a plain function so the policy is testable without a terminal |
+| — | a verified current password **clears** the run of failures, as a successful login does |
+
+Three failures are deliberately *not* counted, each for its own reason:
+
+- **An unverifiable entry** (`Outcome::Unusable`). No answer can ever match it,
+  so a wrong one teaches an attacker nothing and taxing it would lock a user
+  out of `login` for an administrator's mistake.
+- **A locked account.** Refused before the prompt exists, so nothing was typed.
+- **Root changing another user's password.** Skips the old-password check
+  entirely; there is no guess to charge.
+
+`verify_password` is gone from production code and now lives in the test
+module, because it had stopped being the program's verifier and a production
+function kept alive only for its tests is the same duplicate-policy problem in
+a quieter form. What it asserts there is the property that *is* this crate's to
+keep, and the one
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md` was filed over: a
+password this program **writes** is one the system's verifier **accepts**.
+
+**Tests:** `cargo test -p passwd` — 73 passed, up from 69. The four new ones:
+`a_wrong_current_password_is_charged_to_the_shared_tally`,
+`passwd_is_never_delayed_by_the_tally_it_contributes_to`,
+`an_unverifiable_entry_is_reported_not_counted`,
+`verification_agrees_with_authlib_for_every_shape_of_entry`. Each uses
+`Authenticator::with_stores`, which counts in memory and attaches no faillock
+file — a suite that used `Authenticator::new()` would run up a real delay
+against a real account on the developer's machine every time it ran.
 
 ---
 

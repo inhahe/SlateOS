@@ -5666,6 +5666,7 @@ version = "0.1.0"
 name = "login"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "guitk",
  "userdb",
 ]
@@ -7744,6 +7745,7 @@ version = "0.1.0"
 name = "passwd"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "posix",
 ]
 

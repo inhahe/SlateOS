@@ -470,6 +470,11 @@ BENCH_CRITICAL_PATHS=(
     "kernel/src/crypto.rs"
     "kernel/src/apic.rs"      # handle_timer_irq -- the only code isr_latency
                               #   actually times, and it was not being watched
+    "kernel/src/sync.rs"      # the kernel Mutex: on essentially every hot path,
+                              #   and measured by lock_uncontended
+    "kernel/src/lockdep.rs"   # per-acquire cost rides on every tracked lock;
+                              #   bench.rs records that an O(edges) scan in
+                              #   record_edge "went unread" for two runs
 )
 
 # --- Which benchmark, if any, actually measures a given file ----------------
@@ -483,17 +488,22 @@ BENCH_CRITICAL_PATHS=(
 # cannot carry out -- the suite has no number for them and comes back green
 # whatever the change did.
 #
-# Worse than coarse: the directory annotations named benchmarks that measure a
+# Worse than coarse: the directory annotations named benchmarks that measured a
 # *copy* of the code rather than the code itself.
 #
-#   net_checksum     -> bench.rs's own internet_checksum()       (bench.rs:6395)
-#   tcp_checksum_v4  -> bench.rs's own tcp_checksum_bench()      (bench.rs:6451)
-#   tcp_checksum_v6  -> bench.rs's own tcp_checksum_v6_bench()   (bench.rs:6520)
-#   dns_build_query  -> bench.rs's own build_dns_query_bench()   (bench.rs:6664)
+#   net_checksum     -> bench.rs's own internet_checksum()       [FIXED §251]
+#   tcp_checksum_v4  -> bench.rs's own tcp_checksum_bench()      [FIXED §251]
+#   tcp_checksum_v6  -> bench.rs's own tcp_checksum_v6_bench()   [FIXED §251]
+#   dns_build_query  -> bench.rs's own build_dns_query_bench()   [FIXED §251]
 #
-# Four of the 86 recorded benchmarks measure no kernel file at all -- they
-# measure bench.rs.  Make net/dns.rs's real label encoder ten times slower and
-# every one of them stays green.  Two more were cited for files they never
+# Four of the 86 recorded benchmarks measured no kernel file at all -- they
+# measured bench.rs.  Making net/dns.rs's real label encoder ten times slower
+# left every one of them green.  design-decisions.md §251 deleted all four
+# copies and pointed the benchmarks at crate::net; the rules for them in the
+# net block below are the result, and are why this paragraph is past tense.
+# The finding that motivated it stands as the argument for the rest of this
+# map: a benchmark's *name* is not evidence about what it runs.  Two more were
+# cited for files they never
 # enter: isr_latency's measurement window opens at apic.rs:1059, inside
 # handle_timer_irq and well past the idt.rs stub, and page_fault hand-rolls
 # map/unmap through page_table with the CPU exception explicitly excluded
@@ -569,28 +579,49 @@ BENCH_COVERAGE=(
     # no benchmark at all -- see known-issues.md, "The bench gate names fs/zfs
     # as perf-critical, but no benchmark can see it".
 
-    # -- net: 9 of 49 files ------------------------------------------------
+    # -- net: 10 of 49 files -----------------------------------------------
     "kernel/src/net/arp.rs|net_arp_lookup net_ns_arp_lookup"
     "kernel/src/net/ethernet.rs|net_ethernet_parse"
-    "kernel/src/net/ipv4.rs|net_ipv4_parse"
+    "kernel/src/net/ipv4.rs|net_ipv4_parse net_checksum"
     "kernel/src/net/ipv6.rs|net_ipv6_parse"
-    "kernel/src/net/tcp.rs|net_tcp_conn_lookup"
+    "kernel/src/net/tcp.rs|net_tcp_conn_lookup tcp_checksum_v4 tcp_checksum_v6"
+    "kernel/src/net/dns.rs|dns_build_query"
     "kernel/src/net/firewall.rs|firewall_check"
     "kernel/src/net/veth.rs|net_veth_send net_veth_recv net_veth_roundtrip"
     "kernel/src/net/dashboard.rs|dashboard_api_health dashboard_api_metrics dashboard_api_status"
     "kernel/src/net/httpd.rs|http_parse_request http_build_response_1KiB http_build_response_gzip_1KiB http_mime_type http_percent_decode http_etag_4KiB http_gzip_1KiB http_gzip_8KiB"
-    # net/dns.rs is NOT here: dns_build_query measures bench.rs's copy.  Nor is
-    # net/http.rs, which the old annotation named -- the http_* benchmarks all
-    # call crate::net::httpd.  tcp.rs is listed only for the connection-table
-    # scan; its checksum is measured through a bench-local duplicate.  Nor is
-    # net/interface.rs, which four benchmarks name but only to construct an
-    # Ipv4Addr *outside* the timed closure -- appearing in a benchmark's source
-    # is not the same as being inside its measurement.
+    # The four checksum/DNS rules above are new as of design-decisions.md §251,
+    # which deleted the bench-local copies those benchmarks used to time.  Until
+    # then this block said the opposite -- "dns.rs is NOT here: dns_build_query
+    # measures bench.rs's copy", and tcp.rs was listed for its connection-table
+    # scan only.  The map was right then and is right now; what changed is the
+    # code, not the reading of it.  net_checksum is credited to ipv4.rs because
+    # it now calls ipv4::ip_checksum; the copy it replaced was
+    # character-equivalent, so that series alone is continuous across §251.
+    # net/http.rs is absent -- the pre-§250 annotation named it, but the http_*
+    # benchmarks all call crate::net::httpd.  So is net/interface.rs, which four
+    # benchmarks name but only to construct an Ipv4Addr *outside* the timed
+    # closure -- appearing in a benchmark's source is not the same as being
+    # inside its measurement.  For the same reason tcp_checksum_v6 is credited
+    # to tcp.rs and not to ipv6.rs: it takes an &Ipv6Addr, but the newtype is
+    # wrapped before the closure opens.
     # net_ns_arp_lookup is credited to arp.rs and not to netns.rs: the
     # namespace is created and destroyed either side of the closure, which
     # times arp::ns_lookup alone.
 
     # -- single files ------------------------------------------------------
+    "kernel/src/sync.rs|lock_uncontended lock_tracked_nested"
+    "kernel/src/lockdep.rs|lock_uncontended lock_tracked_nested"
+    # These two rules were added by working the map *backwards* -- asking which
+    # recorded benchmarks no rule cites -- which surfaced the inverse of §250's
+    # error: coverage that exists while the gate never asks for it.  Both
+    # benchmarks time crate::sync's Mutex with lockdep active, so both files are
+    # genuinely covered, yet neither was in BENCH_CRITICAL_PATHS: a change to
+    # the kernel's lock produced "no perf-critical changes" and skipped a suite
+    # that would have caught it.  Worth re-running that backwards check when
+    # adding benchmarks; `rdtsc_overhead` is correctly cited by nothing (it
+    # measures the harness, not the kernel) and `hpet_read` is a live question
+    # -- see known-issues.md.
     "kernel/src/crypto.rs|crypto_sha256_64B crypto_sha256_1KiB crypto_sha512_64B crypto_hmac_sha256 crypto_chacha20_1KiB crypto_poly1305_1KiB crypto_aead_1KiB crypto_ed25519_sign crypto_ed25519_verify crypto_x25519 crypto_crc32_4KiB crypto_crc32c_4KiB"
     "kernel/src/apic.rs|isr_latency"
 )

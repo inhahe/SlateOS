@@ -24610,6 +24610,300 @@ noise, and the balance above flips. Likewise if execution-trace-derived coverage
 becomes available and can distinguish "executed" from "would detect a
 regression", the hand-written map should give way to it.
 
+## §251 — Four benchmarks timed a copy of the code; they now time the code
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short.** Four of the kernel's 86 benchmarks were not measuring the kernel.
+Each one had a private copy of the function it claimed to time, written out by
+hand inside `bench.rs`, and it timed the copy. So the two TCP-checksum numbers,
+the IP-checksum number and the DNS-query number described code that never runs
+on a real packet — you could have made the shipping versions ten times slower
+and all four would still have reported the same figure and passed. The fix is
+to delete the four copies and let the benchmarks call the real functions, which
+costs widening three functions from private to crate-visible. The consequence
+to expect: three of the four numbers will move when next recorded, because the
+real code does more work than the copies did. That movement is not a
+regression — it is cost that was always being paid and never being measured.
+
+**What was there.** Found while writing §250's coverage map, which is what
+forced the question "which kernel file does this benchmark actually run?" for
+every benchmark in turn.
+
+| Benchmark | Timed | Faithful to the real function? |
+|---|---|---|
+| `net_checksum` | `bench.rs::internet_checksum` | Yes — character-equivalent to `ipv4::ip_checksum` |
+| `tcp_checksum_v4` | `bench.rs::tcp_checksum_bench` | **No** |
+| `tcp_checksum_v6` | `bench.rs::tcp_checksum_v6_bench` | No |
+| `dns_build_query` | `bench.rs::build_dns_query_bench` | **No — differs in behaviour** |
+
+The stated justification, in `tcp_checksum_bench`'s own doc comment, was
+"duplicated to avoid depending on tcp module internals"; `internet_checksum`'s
+said it measured "pure computation, not module call overhead". Both are
+arguments for a benchmark that avoids depending on the code under test, which
+is a description of a benchmark that does not test it.
+
+**Why "not faithful" is the load-bearing part.** A faithful copy is merely
+redundant — it drifts eventually, but today's number is today's truth. These
+were not faithful, and the divergences fell exactly on the thing being measured:
+
+- `tcp_checksum` builds a 12-byte `pseudo` array and walks it with
+  `chunks(2)` and `.get(1).copied().unwrap_or(0)`. The copy hand-unrolled the
+  pseudo-header into six `wrapping_add`s and never built the array. The
+  pseudo-header is the *entire subject* of comparing v4 against v6 — the v6
+  benchmark's doc comment says it exists "to show the overhead of the larger
+  pseudo-header" — and it was the one part not measured. Both sides of that
+  comparison were hand-optimised copies, so the overhead it reported was the
+  difference between two functions that do not exist.
+- `tcp_checksum_v6` sums source and destination in one interleaved 8-iteration
+  loop; the real one walks each address in its own `for i in 0..8`.
+- `build_dns_query_bench` lacked `encode_name`'s `.filter(|l| !l.is_empty())`.
+  That is not a cost difference but a **behavioural** one: the filter is what
+  makes a trailing-dot FQDN (`example.com.`) encode legally instead of emitting
+  a zero-length label before the root terminator. The benchmark reported the
+  speed of a builder that would produce an invalid packet.
+
+**What changed.** `net::ipv4::ip_checksum` was already `pub`. Three functions
+were widened to `pub(crate)`, each with a doc comment saying that `crate::bench`
+is the only reason: `net::tcp::tcp_checksum`, `net::tcp::tcp_checksum_v6`,
+`net::dns::build_query`. The four copies are deleted.
+
+`net::dns::build_query` rather than `build_query_typed`: the benchmark wants the
+A-record path, `build_query` *is* the A-record path, and exposing it keeps
+`TYPE_A` and the other qtype constants private. Widening the narrower, more
+specific function costs one call site and leaks less.
+
+For the same reason the IPv6 address newtype is wrapped *before* the timed
+closure opens, not inside it — putting `Ipv6Addr(src)` in the window would
+re-introduce, in the act of fixing this, the exact error §250's map calls out
+for `net/interface.rs`.
+
+**On keeping the benchmark names.** The three unfaithful ones will step to a new
+level. The alternative was to rename them so the old series ends cleanly. Kept
+the names, because a name here denotes the *quantity of interest* ("TCP checksum
+over a 1460-byte segment with an IPv4 pseudo-header"), which has not changed —
+only the fidelity of the instrument has. Renaming would orphan ~30 runs of
+history for a measurement that is conceptually the same one, finally taken
+correctly.
+
+The risk in that choice is a silently-reinterpreted series, which is precisely
+§250's sin. It is answered by making the discontinuity loud rather than by
+renaming: each benchmark's doc comment says which direction to expect and why,
+`known-issues.md` records it, and the commit is the boundary. A step that trips
+the regression detector on the next `--bench` run is the *correct* outcome and
+should be annotated, not tuned away — the numbers genuinely got worse, because
+the real code is slower than the copies were.
+
+**Alternatives considered.**
+
+- *Keep the copies and add a test asserting copy and original agree.* Rejected:
+  it pins behaviour, not cost, so it would have caught the DNS divergence and
+  none of the three timing ones — the copies would still have been the things
+  measured.
+- *Leave them and note it in the coverage map.* This is what §250 did as an
+  interim, and it is honest, but it settles for a permanently blind spot in
+  four of 86 benchmarks when the fix is three visibility keywords.
+- *Move the real functions into a shared inner module both call.* More
+  machinery than the problem needs; `pub(crate)` on the function that already
+  exists is the smaller change and leaves the module boundary where the design
+  put it.
+
+**How to reverse.** Restore the four `fn *_bench` copies from this commit's
+parent, point the four `run(...)` closures back at them, and narrow the three
+functions to private. Nothing outside `bench.rs` depends on the wider
+visibility.
+
+**What would change this.** If `pub(crate)` on a hot function ever inhibited an
+optimisation the private version got — cross-crate inlining is unaffected here,
+but if it were measurable — the shared-inner-module alternative becomes the
+right answer rather than merely a heavier one.
+
+### Postscript: the fix opened a *new* way to measure nothing
+
+The first run after the change (`fe9882a55`) reported
+`tcp_checksum_v6` at **18 ns**, down 99% from ~1604 ns. That is not a
+speedup; it is impossible. The segment is 1460 bytes, so the checksum loop
+runs 730 iterations, and 18 ns is ~70 cycles — 0.1 cycles per iteration,
+against a suite that runs at roughly **8 cycles per iteration** under QEMU's
+TCG interpreter, on a host where `rdtsc_overhead` alone measures 138 cycles.
+Nor can SIMD explain it: TCG *emulates* vector instructions, so
+auto-vectorisation there is slower, not faster.
+
+The call had been hoisted out of the timing loop. **And this change is what
+made it hoistable.** The copies took their arguments from mutable locals
+built inside `bench.rs`; re-pointing at the real functions meant passing a
+loop-invariant immutable local to a pure function, which is exactly the shape
+loop-invariant code motion looks for. `black_box` was already wrapped around
+the *return value*, and that is the part worth writing down:
+
+> `core::hint::black_box` on a result prevents **dead-code elimination**. It
+> does not prevent **hoisting**. To stop LLVM computing something once and
+> reusing it, the *input* must be opaque — `black_box(&segment[..])` — which
+> denies the optimiser its proof that the pointed-to bytes are unchanged
+> between iterations.
+
+All three checksum benchmarks now blackbox their input buffer.
+`net_checksum` was demonstrably *not* being hoisted (21 ns = 80 cycles over
+10 iterations, right on the suite's 8-cycles/iteration line), and it was
+guarded anyway: "not hoisted by this LLVM" is a property of a compiler
+version, not of a benchmark, and a future one noticing would collapse the
+series silently. The evidence that unguarded form was worth keeping for —
+that §251's re-pointing did not by itself move the number — had already been
+banked by `fe9882a55`, which ran re-pointed and unguarded. `dns_build_query`
+needs no guard: it allocates, and the global allocator is an opaque call the
+optimiser cannot move.
+
+The v4 and v6 benchmarks had to be guarded *identically* rather than
+individually judged. They exist to be subtracted from each other; if one were
+hoisted and the other not, the "cost of the larger IPv6 pseudo-header" would
+be the difference between a real call and no call at all — which is the same
+species of falsehood §251 was written to remove, arrived at from the opposite
+direction.
+
+**The general lesson, which is why this is recorded rather than just fixed:**
+a benchmark can fail to measure its subject in two ways, and they pull in
+opposite directions. §251's original defect was measuring *something else*
+(a copy) — findable only by reading the code. This one is measuring *nothing* —
+and it falls out of arithmetic in seconds, because a number implying 0.1 cycles
+per iteration cannot be true. **An implausible win is a bug report.**
+
+It should be said plainly that the harness reported this properly:
+`bench-history.py` printed `tcp_checksum_v6: 1604ns -> 18ns (-99% vs suite,
+-99% raw); its own range is 1595-1610ns (median 1602ns over 8 runs)` under its
+`IMPROVED` heading. Detection was never the problem. The problem is that a −99%
+move is filed as good news and the run passes — and no amount of extra
+statistics would change that, because the number is statistically flawless
+(`split 1st=70 2nd=70 (0%)`, a perfectly replicating level shift). Only a
+physical argument rejects it.
+
+The cheapest such argument is already sitting in the suite: `self_test_nop`, the
+empty-closure control, measured **72 cycles** on that same run, and the
+checksum measured **70**. *Nothing real costs less than nothing.* That check is
+exact rather than tuned, and is recorded as the follow-up in `known-issues.md`
+— along with the version of it that does **not** work ("below `rdtsc_overhead`"
+fires on eight legitimate benchmarks, because the harness amortises).
+
+**And this is the third time in this one file.** `measure_access_at`'s doc
+comment already records two: the optimiser removed the `write_volatile` stores
+being measured (nop=400 vs store=244 — the *store* arm cheaper than the empty
+one), and then it unrolled the constant-trip-count empty loop but not the store
+loop, so the delta silently included ~11 cycles of scaffolding asymmetry that
+moved 4× with `N`. That comment draws the moral itself — *"first the optimiser
+removed the thing being measured, then it removed the thing being measured
+against"* — and both fixes were local. A third instance in a different
+benchmark says the moral is right and the response was too small: the property
+"this window measures something" is worth checking mechanically, once, for
+every window, rather than reasoned about per site by whoever writes the next
+benchmark.
+
+## §252 — The Internet checksum exists once, because seven identical copies were not identical code
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short.** Every network protocol needs the same little "add up all the
+bytes" routine to detect corrupted packets. This code had written it out seven
+separate times — same twelve lines, copied into TCP, UDP, ICMP and the IPv4
+header check. The copies all behaved the same, so it looked like nothing worse
+than untidiness. It was not: the compiler optimised some copies harder than
+others, so two functions that were *supposed* to be a controlled comparison
+differed by 34% for reasons that had nothing to do with what was being
+compared — and that difference was read as a real finding and acted on. The
+decision is to keep exactly one copy, in `kernel/src/net/checksum.rs`, and have
+all seven callers use it.
+
+**The concrete failure.** `net_tcp_checksum_v4_1460b` and
+`net_tcp_checksum_v6_1460b` exist as a *pair*: they run the same 1460-byte
+segment through the same loop, differing only in which pseudo-header (the small
+block of address/length fields folded into the sum) precedes it. The pair's
+entire purpose is to price one pseudo-header against the other.
+
+On the `e1de4aaaa` kernel, v4 measured 7208 cycles and v6 measured 5364 — a
+1844-cycle, 34% gap, in the direction that says IPv4's *smaller* (12-byte)
+pseudo-header costs far more than IPv6's (40-byte) one. Disassembling that exact
+binary showed why, and it was not the pseudo-header:
+
+- `tcp_checksum_v6` survives as an out-of-line symbol and its segment loop is
+  **unrolled 2×** — `addq $0x4, %rcx`, two 16-bit words per iteration.
+- `tcp_checksum` has no symbol at all. It was inlined into its callers, and the
+  copy that landed in the benchmark was **not** unrolled.
+
+1460 bytes is 730 words: 365 iterations against 730. The benchmark pair was
+reporting an inlining decision and calling it a protocol difference.
+
+**Why duplication was the root cause and not merely an aggravating factor.**
+Seven verbatim copies of the loop existed (`ipv4.rs` ×3, `ipv6.rs` ×2,
+`tcp.rs` ×2), plus four copies of the IPv4 pseudo-header prologue and four of
+the IPv6 one. To LLVM each copy is an independent function body, free to be
+unrolled or not according to its own inlining context. Nothing anywhere
+asserted they agreed, and nothing could have: they agreed on *value*, which is
+all any test checks, while differing on *cost*, which is what the benchmark
+measured.
+
+The sharper point is about inference rather than compilers. **Duplicated code
+that is supposed to be identical invites the reader to attribute any measured
+difference to the one thing that visibly differs.** The two functions differed
+visibly only in their pseudo-headers, so a 34% gap "obviously" meant the
+pseudo-header cost 34%. That inference is valid; its premise — that the rest was
+the same code — was false, and was false in a way that no amount of reading the
+source could expose. Identical source is not identical code.
+
+**Alternatives considered.**
+
+| Option | Why not |
+|---|---|
+| Leave it; just annotate both functions `#[inline(never)]` | Fixes this pair and nothing else. The other five copies stay free to diverge, and the next person to compare two of them re-runs the same mistake. It treats the symptom in the two places we happened to look. |
+| Leave it; add a benchmark that asserts the two loops emit the same code | Enormous machinery (disassembly parsing in the test suite) to defend a property that costs nothing to simply *have*. |
+| Unify, but keep a thin per-protocol copy for "clarity" | This is what the seven copies already were. Each was individually clearer than a call to a shared helper; collectively they cost a wrong measurement and a wrong fix. |
+| **Unify into one `net::checksum` module (chosen)** | One loop, compiled once. The TCP pair now differs by exactly its pseudo-headers, which is what it always claimed to measure. |
+
+**The cost being accepted.** A shared `sum_bytes` is a call rather than
+straight-line code, which matters most for the *shortest* inputs — the
+20-byte IPv4 header check is 10 words, where call overhead is a real fraction.
+It is not being forced either way with `#[inline(never)]`/`#[inline(always)]`
+yet: LLVM may still inline it per-site and, in principle, re-diverge. That is
+deliberate — pinning inlining is a decision that should be made from a
+measurement, not in anticipation of one, and the next bench run supplies it.
+What has definitely changed is that if divergence recurs it is now one
+annotation on one function, not a reconciliation of seven bodies.
+
+**RESOLVED, 2026-08-21, and the answer is "leave it unpinned."** The measurement
+came from `llvm-objdump` rather than the bench, which is both faster and more
+direct. LLVM does inline `sum_bytes` at every site — there is no `sum_bytes`
+symbol in the kernel, and `tcp_checksum` has none either — so the literal worry
+above came true. What did *not* come true is the divergence: all three checksum
+benchmark sites now carry byte-identical loops, unrolled 4× with a 1×
+remainder, matching the still-out-of-line `tcp_checksum_v6`. Before unification
+the same three were 2×, not-at-all, and not-at-all. So `#[inline(never)]` would
+buy nothing and would cost a call on every short checksum in the stack — the
+exact cost this section was worried about — while removing the inlining that
+makes the 20-byte case cheap.
+
+The distinction worth keeping, since blurring it is what hid the original bug:
+sharing a source function did not make the copies *share code*. It made them
+present the optimiser with the same input, which is what made its decisions
+agree. That is a weaker guarantee than one out-of-line body, so it is checked
+rather than assumed — `llvm-objdump -d --disassemble-symbols=` is the check,
+recorded in `known-issues.md` §251 Postscript 2, and `#[inline(never)]` remains
+the one-line fix if a future toolchain diverges again.
+
+**One further consequence, which is really a separate finding.** The new module
+has no `#[cfg(test)] mod tests`, on purpose: `kernel/Cargo.toml` sets
+`test = false` for the kernel binary (it supplies its own `panic_impl` and
+other `no_std` lang items and cannot link against host `std`), so such a module
+would never be compiled, never run, and quietly rot — while being counted as
+coverage. **Tests that cannot run are worse than no tests.** The suite therefore
+lives in `checksum::self_test()`, invoked at boot, and pins RFC 1071 §3's own
+worked example (an external vector, so it cannot share a bug with a test derived
+from this code), the high-side padding of an odd trailing byte, split-invariance
+of the accumulator, the stamp-and-verify round trip, fold boundaries and
+idempotence, and the 64 KiB worst case on which the module's no-overflow claim
+rests. This is worth the target-side cost precisely *because* of the
+unification: every checksum in the stack now funnels through one loop, so a
+single wrong fold would corrupt TCP, UDP, ICMP, ICMPv6 and the IPv4 header check
+at once.
+
 ## §463 — Two shared RNG crates merge into the dependency-free one
 
 **Date:** 2026-08-18

@@ -6285,7 +6285,32 @@ fn stop_process_for_signal(
     // anyone is told about the stop, so that a SIGCONT racing in below finds a
     // suspended thread to resume rather than a running one to ignore. The
     // thread keeps executing until phase 2. See this function's doc comment.
+    //
+    // Preemption must be off from here until the stop is *published*, and this
+    // is a correctness requirement, not a latency tweak. From `suspend_pending`
+    // onwards this thread is marked Suspended while still executing on-CPU. An
+    // involuntary switch in that state is normally benign — `schedule_inner`'s
+    // requeue guard declines to enqueue a Suspended task, which is precisely a
+    // park, and the resume that follows unparks it. But here nothing can
+    // follow: the only thing that would ever cause a `resume()` is the
+    // `record_jc_stopped` below, which is the code that just got preempted. The
+    // thread is stranded off every run queue with nobody aware it stopped, and
+    // the parent's `waitpid(..., WUNTRACED)` blocks forever.
+    //
+    // Reported by lane B (`requests/b-a-self-stop-announcement-window-is-
+    // preemptible-and-strands-the-child.md`) as an intermittent `ctest-jobctl`
+    // failure — roughly one boot in four, flipped into visibility by a pure
+    // code-layout change in libc. `preempt_disable` defers the tick rather than
+    // masking interrupts: `do_deferred_preempt` re-arms NEED_RESCHED and lands
+    // the preemption on a later tick.
+    //
+    // The two serial prints inside the region are deliberate. They are the slow
+    // part of it, but the ordering of `[sched] Suspended` / `[signal] stopped` /
+    // `[sched] Resumed` is exactly what diagnosis of this class of bug reads,
+    // and an atomic region emits them as a faithful trace. The cost is bounded
+    // by one deferred tick on one CPU; other CPUs are unaffected.
     if let Some(t) = self_thread {
+        sched::preempt_disable();
         sched::suspend_pending(t);
     }
 
@@ -6302,6 +6327,16 @@ fn stop_process_for_signal(
     // carries on, which is the correct outcome for a continue that overtook
     // its own stop. Otherwise this returns once `continue_process` resumes us.
     if self_thread.is_some() {
+        // Balanced with the `preempt_disable` above (same condition), and
+        // dropped *before* the park because `park_if_suspended` performs a
+        // voluntary switch, and `schedule_inner` flags any voluntary switch made
+        // with a non-zero preempt count as a caller bug — the count is how it
+        // detects a spinlock carried across a yield, and it cannot tell that
+        // apart from a deliberate atomic region. Re-enabling here does not
+        // reopen the window: the stop is already published, so a preempt now
+        // is the benign kind — it parks the thread, and the SIGCONT that
+        // `record_jc_stopped` made possible will unpark it.
+        sched::preempt_enable();
         sched::park_if_suspended();
     }
 }

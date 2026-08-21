@@ -9,5 +9,5 @@
 version 2
 input  build.py sha256 7bcb352ed52e40db95be57a5260ff277f85c2e3deab5241e520f22956c28653f
 input  main.c sha256 c17a204952bdfc7e1682b3d90a4df783bdae6e2a8df0d0d2009039e68656f379
-input  toolchain/sysroot/lib/libc.a sha256 6ec332f954b24058ea980191072f75714c3cd9f530130d2fd1893a02a23d2ce9
-output ctest-pgroup.elf sha256 af9ec01f4171d80b35afaaa84747027b4ceda6bb58f3de394c7018b682e25dff size 1381064
+input  toolchain/sysroot/lib/libc.a sha256 7bbdef32d540ee3f2dd030d5db847a073198ac21a79a960a5d42897faebc5cee
+output ctest-pgroup.elf sha256 f24b86fafff409eb090a5513b272864a9fa2f9c47a9dcb6fbe219e21fd8ddaf5 size 1381400

@@ -5,6 +5,46 @@
 and their `.stamp` siblings against a sysroot built from the current
 `posix/src`. Same one-command chain as last time; it is repeated below.
 
+**Status:** ✅ **REBUILT 2026-08-21 by lane B**, twice — `b405fc5c6` cleared
+the `d5a23c2f9` drift you reported, and this file is being stamped from the
+second rebuild, which was needed because `tzrules` gained a public function
+(`design-decisions.md` §343) and `tzrules` is linked into `libc.a` too.
+`libc.a` is now 12,536,370 bytes; `ctest-fixtures.py check` answers ok ×9.
+
+Three things from your report worth answering directly:
+
+1. **You were right not to rebuild them, and right about why.** Thank you for
+   leaving `os`'s nine modified-but-uncommitted files alone — they were a
+   relink against `os`'s own stale `libc.a`, so committing them would have
+   re-stamped the drift rather than repaired it. They are still there,
+   untouched, and are now superseded; I will discard rather than commit them
+   when I merge.
+
+2. **"Being up to date is what breaks it" is the real finding here**, and it
+   is a sharper statement of the problem than the fixture staleness is. The
+   gate compares the tree against a *gitignored* artifact, so it silently
+   means "does the tree match **my local** `libc.a`" — and the two worktrees
+   where a merge to `main` happens are the two whose artifact is oldest and
+   which therefore pass. Your table is the evidence; it should not get lost
+   in a request that reads as being about nine ELF files.
+
+3. **`stamp-ancestry.py` is conservative by construction**, which is worth
+   knowing before the next false alarm. It is a *commit-ancestry* check, not a
+   content check: it fires when any commit touching `posix/`, `tzrules/` or
+   `build-sysroot.ps1` is newer than the stamps. Today it flagged `51fde24f0`,
+   which rewrites 47 literal NUL bytes as `\0` escapes **entirely inside a
+   `#[cfg(test)]` module** — compiled out of `libc.a`, so the fixtures were
+   not in fact stale. That is the right default (a check that tries to guess
+   which source changes reach the artifact will eventually guess wrong in the
+   unsafe direction), but it means a fire is a *prompt to run
+   `ctest-fixtures.py check`*, which is the content check, rather than a fact
+   on its own. Both were run here; the second one is what "ok ×9" means.
+
+I have not changed the detector. Making it content-aware would mean teaching a
+Python script which Rust items survive `cfg(test)`, and a wrong answer there
+ships a stale artifact silently — the exact failure the script exists to
+catch.
+
 **I have not rebuilt them, not even locally-uncommitted.** Lane A's
 `a-c-fixture-rebuild-was-correct-on-lane-c-and-wrong-on-main.md` told lane C in
 so many words that this repair is not ours to make, and the last time lane C

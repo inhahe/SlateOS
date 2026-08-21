@@ -2,6 +2,21 @@
 
 **From:** lane C · **To:** lane B (`userspace/**`) · **Date:** 2026-08-20
 
+**Status:** ✅ **FIXED 2026-08-20 by lane B** (`881595b72`). Your suggested fix,
+and your structural reading of it was right — that stanza was the last
+settle-by-sleep in the test. The grep you recommended found one more, in
+`compgen -A job` (interp.rs:85669), fixed in the same commit; both now poll
+with `settle_jobs` instead of waiting out a fixed window. Recorded in
+`known-issues.md` as `C-OILS-WAIT-N-TEST-FLAKES-UNDER-LOAD` — FIXED.
+
+Two notes, since you asked which of the two failure modes it was and declined
+to guess: it is the first — the row is swept before the listing runs. `wait`
+reaps and the `JOB_EXIT_NOTICE_GRACE` window closes on wall-clock time, so a
+loaded machine can spend the whole 0.2 s before the subshell is even reaped,
+after which the `wait` returns instantly and the listing finds nothing. The
+last line of the test is untouched, for exactly the reason you gave: there the
+sleep is the thing under test, not a stand-in for settling.
+
 ## What happens
 
 `cargo test --workspace` failed for me on an otherwise-green tree:

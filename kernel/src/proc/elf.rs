@@ -3172,6 +3172,358 @@ pub fn build_linux_virtgpu_getparam_test_elf() -> alloc::vec::Vec<u8> {
     buf
 }
 
+/// Build a **Linux-ABI** `ET_EXEC` test ELF that drives a full **virtio-gpu
+/// render-node round trip** on `/dev/dri/renderD128` from ring 3 — the 2D
+/// resource path that base virtio-gpu services without `VIRTIO_GPU_F_VIRGL`:
+///
+/// ```text
+///   open("/dev/dri/renderD128", O_RDWR, 0)      ; render node fd
+///   RESOURCE_CREATE  64x64 B8G8R8A8, target=2D  ; -> res handle, size, stride
+///   MAP(res)                                    ; -> fake mmap offset
+///   mmap(NULL, 16384, RW, MAP_SHARED, fd, off)  ; -> the guest backing
+///   store/load a pattern at the first and last dword of the mapping
+///   TRANSFER_TO_HOST(res, full 64x64 box)       ; a real device command
+///   WAIT(res)
+///   RESOURCE_INFO(res)                          ; size must match
+///   GEM_CLOSE(res)                              ; the destroy path
+///   RESOURCE_INFO(res) must now FAIL            ; the handle is gone
+///   the mapping must still read back            ; frames are refcounted
+///   exit(0)
+/// ```
+///
+/// Each step has its own exit sentinel so the harness can name the failing
+/// stage: `0xE1` open, `0xE2` RESOURCE_CREATE ioctl, `0xE3` zero res handle,
+/// `0xE4` wrong stride, `0xE5` wrong size, `0xE6` MAP ioctl, `0xE7` mmap,
+/// `0xE8` pattern at offset 0, `0xE9` pattern at the last dword, `0xEA`
+/// TRANSFER_TO_HOST, `0xEB` WAIT, `0xEC` RESOURCE_INFO, `0xED` wrong info
+/// size, `0xEE` GEM_CLOSE, `0xEF` the closed handle still resolved, `0xF0` the
+/// mapping stopped reading back after GEM_CLOSE.
+///
+/// The last two are the ones worth having: `0xEF` catches a destroy that
+/// forgets to drop the fd's ownership record (leaving a handle that outlives
+/// its resource), and `0xF0` catches the opposite mistake — a destroy that
+/// frees the backing frames out from under a live mapping, which would hand a
+/// recycled frame to some other allocation while userspace still writes to it.
+///
+/// The stack scratch is laid out once and reused: the 56-byte
+/// `drm_virtgpu_resource_create` at `[rsp+0]` is later overwritten by the
+/// 44-byte transfer, the 8-byte wait, the 16-byte info and the 8-byte
+/// `drm_gem_close`, since none of them overlap in time. `[rsp+64]` holds the
+/// map struct and `[rsp+80..112]` the fd, resource handle, mmap offset and
+/// mapping address. All displacements stay under 128 so every access uses a
+/// one-byte displacement.
+///
+/// Every conditional branch is a **rel32** jump to a single `fail:` label that
+/// exits with whatever `edi` was last set to; `mov` does not touch flags, so
+/// the sentinel is loaded *before* the `test`/`cmp` it guards. rel8 would not
+/// reach — the body is several hundred bytes.
+///
+/// Tagged `ELFOSABI_GNU` so the loader treats it as Linux-ABI.
+#[must_use]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines
+)]
+pub fn build_linux_virtgpu_resource_test_elf() -> alloc::vec::Vec<u8> {
+    use alloc::vec;
+    use crate::drm::virtgpu_uapi as vg;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120;
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    // Geometry: 64x64x4 = 16 KiB, exactly one 16 KiB frame, so the reported
+    // mappable size is unambiguous and the whole resource is one mmap.
+    const W: u32 = 64;
+    const H: u32 = 64;
+    const STRIDE: u32 = W * 4;
+    const BYTES: u32 = W * H * 4;
+    /// `VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM`.
+    const FMT: u32 = 1;
+    /// Gallium `PIPE_TEXTURE_2D` — the target Linux's non-virgl guard requires.
+    const PIPE_TEXTURE_2D: u32 = 2;
+    const PATTERN_A: u32 = 0x1122_3344;
+    const PATTERN_B: u32 = 0x5566_7788;
+
+    // Stack scratch displacements (all < 128 → disp8 addressing).
+    const S: u8 = 0; // reusable struct area (56 bytes)
+    const S_MAP: u8 = 64; // drm_virtgpu_map
+    const S_FD: u8 = 80;
+    const S_RES: u8 = 88;
+    const S_OFF: u8 = 96;
+    const S_ADDR: u8 = 104;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // Offsets of rel32 displacement slots that jump to `fail:`.
+    let mut fail_sites: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
+
+    // --- emitters -----------------------------------------------------------
+    /// `mov dword [rsp+d], imm32`
+    fn mov_d(code: &mut alloc::vec::Vec<u8>, d: u8, imm: u32) {
+        code.extend_from_slice(&[0xC7, 0x44, 0x24, d]);
+        code.extend_from_slice(&imm.to_le_bytes());
+    }
+    /// `mov edi, imm32` — load the failure sentinel (does not disturb flags).
+    fn sentinel(code: &mut alloc::vec::Vec<u8>, v: u32) {
+        code.push(0xBF);
+        code.extend_from_slice(&v.to_le_bytes());
+    }
+    /// Emit a two-byte-opcode rel32 jump and record its displacement slot.
+    fn jcc(code: &mut alloc::vec::Vec<u8>, sites: &mut alloc::vec::Vec<usize>, op: u8) {
+        code.extend_from_slice(&[0x0F, op]);
+        sites.push(code.len());
+        code.extend_from_slice(&[0u8; 4]);
+    }
+    /// `ioctl(fd, request, &[rsp+arg])` — leaves the result in rax.
+    fn ioctl(code: &mut alloc::vec::Vec<u8>, request: u32, arg: u8) {
+        code.extend_from_slice(&[0x48, 0x8B, 0x7C, 0x24, S_FD]); // mov rdi, [rsp+fd]
+        code.push(0xBE); // mov esi, imm32 (zero-extends into rsi)
+        code.extend_from_slice(&request.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, arg]); // lea rdx, [rsp+arg]
+        code.extend_from_slice(&[0xB8, 0x10, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,16; syscall
+    }
+    const JS: u8 = 0x88;
+    const JNZ: u8 = 0x85;
+    const JZ: u8 = 0x84;
+    const TEST_RAX: [u8; 3] = [0x48, 0x85, 0xC0];
+
+    // --- open("/dev/dri/renderD128", O_RDWR, 0) -----------------------------
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.extend_from_slice(&[0xBE, 0x02, 0x00, 0x00, 0x00]); // mov esi, 2 (O_RDWR)
+    code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx
+    code.extend_from_slice(&[0xB8, 0x02, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,2; syscall
+    sentinel(&mut code, 0xE1);
+    code.extend_from_slice(&TEST_RAX);
+    jcc(&mut code, &mut fail_sites, JS);
+    code.extend_from_slice(&[0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00]); // sub rsp, 128
+    code.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, S_FD]); // mov [rsp+fd], rax
+
+    // --- RESOURCE_CREATE ----------------------------------------------------
+    mov_d(&mut code, S, PIPE_TEXTURE_2D); // target
+    mov_d(&mut code, S + 4, FMT); // format
+    mov_d(&mut code, S + 8, 0); // bind
+    mov_d(&mut code, S + 12, W); // width
+    mov_d(&mut code, S + 16, H); // height
+    mov_d(&mut code, S + 20, 1); // depth
+    mov_d(&mut code, S + 24, 1); // array_size
+    mov_d(&mut code, S + 28, 0); // last_level
+    mov_d(&mut code, S + 32, 0); // nr_samples
+    mov_d(&mut code, S + 36, 0); // flags
+    mov_d(&mut code, S + 40, 0); // bo_handle (0 = allocate)
+    mov_d(&mut code, S + 44, 0); // res_handle (out)
+    mov_d(&mut code, S + 48, 0); // size (out)
+    mov_d(&mut code, S + 52, 0); // stride (out)
+    ioctl(&mut code, vg::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE, S);
+    sentinel(&mut code, 0xE2);
+    code.extend_from_slice(&TEST_RAX);
+    jcc(&mut code, &mut fail_sites, JNZ);
+
+    // Save the returned handle (mov to eax zero-extends into rax).
+    code.extend_from_slice(&[0x8B, 0x44, 0x24, S + 44]); // mov eax, [rsp+res_handle]
+    code.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, S_RES]); // mov [rsp+res], rax
+    sentinel(&mut code, 0xE3);
+    code.extend_from_slice(&[0x85, 0xC0]); // test eax, eax
+    jcc(&mut code, &mut fail_sites, JZ); // handle 0 is never valid
+    code.extend_from_slice(&[0x8B, 0x44, 0x24, S + 52]); // mov eax, [rsp+stride]
+    sentinel(&mut code, 0xE4);
+    code.push(0x3D); // cmp eax, imm32
+    code.extend_from_slice(&STRIDE.to_le_bytes());
+    jcc(&mut code, &mut fail_sites, JNZ);
+    code.extend_from_slice(&[0x8B, 0x44, 0x24, S + 48]); // mov eax, [rsp+size]
+    sentinel(&mut code, 0xE5);
+    code.push(0x3D);
+    code.extend_from_slice(&16384u32.to_le_bytes());
+    jcc(&mut code, &mut fail_sites, JNZ);
+
+    // --- MAP ----------------------------------------------------------------
+    code.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, S_MAP, 0, 0, 0, 0]); // qword offset = 0
+    code.extend_from_slice(&[0x8B, 0x44, 0x24, S_RES]); // mov eax, [rsp+res]
+    code.extend_from_slice(&[0x89, 0x44, 0x24, S_MAP + 8]); // mov [rsp+map.handle], eax
+    mov_d(&mut code, S_MAP + 12, 0); // pad
+    ioctl(&mut code, vg::DRM_IOCTL_VIRTGPU_MAP, S_MAP);
+    sentinel(&mut code, 0xE6);
+    code.extend_from_slice(&TEST_RAX);
+    jcc(&mut code, &mut fail_sites, JNZ);
+    code.extend_from_slice(&[0x48, 0x8B, 0x44, 0x24, S_MAP]); // mov rax, [rsp+map.offset]
+    code.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, S_OFF]); // mov [rsp+off], rax
+
+    // --- mmap(NULL, 16384, PROT_READ|PROT_WRITE, MAP_SHARED, fd, off) -------
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xBE, 0x00, 0x40, 0x00, 0x00]); // mov esi, 16384
+    code.extend_from_slice(&[0xBA, 0x03, 0x00, 0x00, 0x00]); // mov edx, 3
+    code.extend_from_slice(&[0x41, 0xBA, 0x01, 0x00, 0x00, 0x00]); // mov r10d, 1 (MAP_SHARED)
+    code.extend_from_slice(&[0x4C, 0x8B, 0x44, 0x24, S_FD]); // mov r8, [rsp+fd]
+    code.extend_from_slice(&[0x4C, 0x8B, 0x4C, 0x24, S_OFF]); // mov r9, [rsp+off]
+    code.extend_from_slice(&[0xB8, 0x09, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,9; syscall
+    sentinel(&mut code, 0xE7);
+    code.extend_from_slice(&TEST_RAX);
+    jcc(&mut code, &mut fail_sites, JS); // errors come back as small negatives
+    code.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, S_ADDR]); // mov [rsp+addr], rax
+
+    // --- write and read back through the mapping ----------------------------
+    code.extend_from_slice(&[0x48, 0x8B, 0x4C, 0x24, S_ADDR]); // mov rcx, [rsp+addr]
+    code.extend_from_slice(&[0xC7, 0x01]); // mov dword [rcx], imm32
+    code.extend_from_slice(&PATTERN_A.to_le_bytes());
+    code.extend_from_slice(&[0x8B, 0x11]); // mov edx, [rcx]
+    sentinel(&mut code, 0xE8);
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, imm32
+    code.extend_from_slice(&PATTERN_A.to_le_bytes());
+    jcc(&mut code, &mut fail_sites, JNZ);
+    // The last dword of the frame, so a short mapping is caught rather than
+    // silently working for the first page.
+    code.extend_from_slice(&[0xC7, 0x81]); // mov dword [rcx+disp32], imm32
+    code.extend_from_slice(&(BYTES - 4).to_le_bytes());
+    code.extend_from_slice(&PATTERN_B.to_le_bytes());
+    code.extend_from_slice(&[0x8B, 0x91]); // mov edx, [rcx+disp32]
+    code.extend_from_slice(&(BYTES - 4).to_le_bytes());
+    sentinel(&mut code, 0xE9);
+    code.extend_from_slice(&[0x81, 0xFA]);
+    code.extend_from_slice(&PATTERN_B.to_le_bytes());
+    jcc(&mut code, &mut fail_sites, JNZ);
+
+    // --- TRANSFER_TO_HOST (full rect) ---------------------------------------
+    code.extend_from_slice(&[0x8B, 0x44, 0x24, S_RES]); // mov eax, [rsp+res]
+    code.extend_from_slice(&[0x89, 0x04, 0x24]); // mov [rsp], eax (bo_handle)
+    mov_d(&mut code, S + 4, 0); // box.x
+    mov_d(&mut code, S + 8, 0); // box.y
+    mov_d(&mut code, S + 12, 0); // box.z
+    mov_d(&mut code, S + 16, W); // box.w
+    mov_d(&mut code, S + 20, H); // box.h
+    mov_d(&mut code, S + 24, 1); // box.d
+    mov_d(&mut code, S + 28, 0); // level
+    mov_d(&mut code, S + 32, 0); // offset
+    mov_d(&mut code, S + 36, STRIDE); // stride — the honest packed value
+    mov_d(&mut code, S + 40, 0); // layer_stride
+    ioctl(&mut code, vg::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST, S);
+    sentinel(&mut code, 0xEA);
+    code.extend_from_slice(&TEST_RAX);
+    jcc(&mut code, &mut fail_sites, JNZ);
+
+    // --- WAIT ---------------------------------------------------------------
+    code.extend_from_slice(&[0x8B, 0x44, 0x24, S_RES]);
+    code.extend_from_slice(&[0x89, 0x04, 0x24]); // wait.handle
+    mov_d(&mut code, S + 4, 0); // wait.flags
+    ioctl(&mut code, vg::DRM_IOCTL_VIRTGPU_WAIT, S);
+    sentinel(&mut code, 0xEB);
+    code.extend_from_slice(&TEST_RAX);
+    jcc(&mut code, &mut fail_sites, JNZ);
+
+    // --- RESOURCE_INFO ------------------------------------------------------
+    code.extend_from_slice(&[0x8B, 0x44, 0x24, S_RES]);
+    code.extend_from_slice(&[0x89, 0x04, 0x24]); // info.bo_handle
+    mov_d(&mut code, S + 4, 0);
+    mov_d(&mut code, S + 8, 0);
+    mov_d(&mut code, S + 12, 0);
+    ioctl(&mut code, vg::DRM_IOCTL_VIRTGPU_RESOURCE_INFO, S);
+    sentinel(&mut code, 0xEC);
+    code.extend_from_slice(&TEST_RAX);
+    jcc(&mut code, &mut fail_sites, JNZ);
+    code.extend_from_slice(&[0x8B, 0x44, 0x24, S + 8]); // mov eax, [rsp+info.size]
+    sentinel(&mut code, 0xED);
+    code.push(0x3D);
+    code.extend_from_slice(&16384u32.to_le_bytes());
+    jcc(&mut code, &mut fail_sites, JNZ);
+
+    // --- GEM_CLOSE (the destroy path) ---------------------------------------
+    code.extend_from_slice(&[0x8B, 0x44, 0x24, S_RES]);
+    code.extend_from_slice(&[0x89, 0x04, 0x24]); // gem_close.handle
+    mov_d(&mut code, S + 4, 0); // pad
+    ioctl(&mut code, crate::drm::uapi::DRM_IOCTL_GEM_CLOSE, S);
+    sentinel(&mut code, 0xEE);
+    code.extend_from_slice(&TEST_RAX);
+    jcc(&mut code, &mut fail_sites, JNZ);
+
+    // --- the closed handle must no longer resolve ---------------------------
+    code.extend_from_slice(&[0x8B, 0x44, 0x24, S_RES]);
+    code.extend_from_slice(&[0x89, 0x04, 0x24]);
+    mov_d(&mut code, S + 4, 0);
+    mov_d(&mut code, S + 8, 0);
+    mov_d(&mut code, S + 12, 0);
+    ioctl(&mut code, vg::DRM_IOCTL_VIRTGPU_RESOURCE_INFO, S);
+    sentinel(&mut code, 0xEF);
+    code.extend_from_slice(&TEST_RAX);
+    jcc(&mut code, &mut fail_sites, JZ); // success here means the handle leaked
+
+    // --- ...but the mapping must survive the close --------------------------
+    code.extend_from_slice(&[0x48, 0x8B, 0x4C, 0x24, S_ADDR]); // mov rcx, [rsp+addr]
+    code.extend_from_slice(&[0x8B, 0x11]); // mov edx, [rcx]
+    sentinel(&mut code, 0xF0);
+    code.extend_from_slice(&[0x81, 0xFA]);
+    code.extend_from_slice(&PATTERN_A.to_le_bytes());
+    jcc(&mut code, &mut fail_sites, JNZ);
+
+    // exit(0)
+    code.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+
+    // fail: exit(edi)
+    let fail = code.len();
+    code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]);
+    code.push(0xCC); // int3 — unreachable trap
+
+    for site in &fail_sites {
+        let disp = (fail as i64) - (*site as i64 + 4);
+        code[*site..*site + 4].copy_from_slice(&(disp as i32).to_le_bytes());
+    }
+
+    // --- Data layout (same PT_LOAD, after the code) ---
+    let path: &[u8] = b"/dev/dri/renderD128\0";
+    let code_len = code.len();
+    let data_base = code_offset as usize + code_len;
+    let path_off = data_base;
+    let path_end = path_off + path.len();
+    let file_size = path_end;
+
+    let vaddr_of = |fo: usize| -> u64 { load_vaddr + (fo as u64 - code_offset) };
+    let path_vaddr = vaddr_of(path_off);
+    code[path_imm..path_imm + 8].copy_from_slice(&path_vaddr.to_le_bytes());
+
+    // --- File image ---
+    let seg_len = file_size - code_offset as usize;
+    let mut buf = vec![0u8; file_size];
+
+    buf[0] = 0x7F;
+    buf[1] = b'E';
+    buf[2] = b'L';
+    buf[3] = b'F';
+    buf[EI_CLASS] = ELFCLASS64;
+    buf[EI_DATA] = ELFDATA2LSB;
+    buf[EI_VERSION] = EV_CURRENT;
+    buf[EI_OSABI] = ELFOSABI_GNU;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr); // e_entry
+    write_u64(&mut buf, 32, phdr_offset); // e_phoff
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len as u64);
+    write_u64(&mut buf, ph + 40, seg_len as u64);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[path_off..path_end].copy_from_slice(path);
+
+    buf
+}
+
 /// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises
 /// **`fallocate(2)` mode 0 (posix_fallocate grow)** (Linux syscall #285)
 /// from ring 3 — the fd-targeted path whose backing resolution goes

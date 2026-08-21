@@ -2983,6 +2983,16 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Ring-3 regression test for the 2D render-resource round trip
+    // (CREATE/MAP/mmap/TRANSFER_TO_HOST/WAIT/INFO/GEM_CLOSE). Skips cleanly
+    // when no DRM device is bound.
+    if let Err(e) = proc::spawn::self_test_linux_virtgpu_resource() {
+        serial_println!(
+            "WARNING: virtio-gpu render-resource (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     {
         #[inline(never)]
         fn case() {

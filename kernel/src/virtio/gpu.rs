@@ -1534,13 +1534,32 @@ pub fn resource_self_test() -> KernelResult<()> {
         resource_create_2d(64, 0, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM).is_err(),
         "zero height is rejected"
     );
-    // Larger than one control frame can describe a backing for.  Uses the real
-    // bound so this stays honest if MAX_RESOURCE_FRAMES ever changes.
-    let too_tall = u32::try_from(MAX_RESOURCE_FRAMES).unwrap_or(u32::MAX);
+    // Larger than one control frame can describe a backing for.  At 4096 px a
+    // row is 16 KiB — exactly one frame — so `MAX_RESOURCE_FRAMES + 1` rows is
+    // the smallest geometry over the bound.  Derived from the real constant so
+    // this stays honest if MAX_RESOURCE_FRAMES ever changes, and deliberately
+    // *one* frame over rather than absurdly large, since a wildly out-of-range
+    // request would also be caught by the `checked_mul` above it and would not
+    // prove this bound is enforced at all.
+    let too_tall = u32::try_from(MAX_RESOURCE_FRAMES.saturating_add(1)).unwrap_or(u32::MAX);
     check!(
         resource_create_2d(4096, too_tall, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM).is_err(),
-        "an over-large resource is rejected rather than partially attached"
+        "a resource one frame over the backing-descriptor bound is rejected"
     );
+    // ...and the largest one that *does* fit is accepted, so the bound is not
+    // accidentally off by one in the other direction.
+    let at_limit = u32::try_from(MAX_RESOURCE_FRAMES).unwrap_or(u32::MAX);
+    match resource_create_2d(4096, at_limit, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM) {
+        Ok(id) => resource_unref(id)?,
+        Err(e) => {
+            serial_println!(
+                "[virtio-gpu] RESOURCE SELF-TEST FAILED: a resource exactly at the bound was \
+                 rejected: {}",
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
 
     let free_before = frame::stats().map(|s| s.free_frames);
 

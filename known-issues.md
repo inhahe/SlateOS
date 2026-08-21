@@ -46214,3 +46214,45 @@ deserve unrelated budgets — but the first is what any run should do today.
 **Workaround until then.** `python scripts/run-timeout.py --poll 60 2700
 ./scripts/boot-test.sh`, backgrounded via the Bash tool's `run_in_background`,
 with no pipe on the command.
+
+## `[A]` The bench gate names `fs/zfs` as perf-critical, but no benchmark can see it
+
+**Status:** OPEN (2026-08-20)
+
+**What happens.** `boot-test.sh` compares the changed file list against its
+perf-critical path rule and, on a match, prints "Performance-critical code
+changed since the last benchmarked commit … CLAUDE.md requires benchmarking
+these" and names the files. On 2026-08-20 it named all three of
+`kernel/src/fs/zfs/{dmu,mod,tests}.rs` after the gang-block change. The
+requested `./scripts/boot-test.sh --bench` run then came back **RUN CLEAN**, 86
+benchmarks, nothing outside its own range.
+
+**Why that is worth an entry.** The suite has **no ZFS benchmark**. Its 86
+entries include sixteen `vfs_*`/`crypto_*` ones, and none of them reaches the
+ZFS reader — it is not mounted at boot and is exercised only by its in-memory
+self-test. So the clean verdict is true and also uninformative: the instrument
+that was asked to check the change is structurally incapable of observing it.
+This is the same failure shape as the 2026-08-19 "zero KASAN reports"
+correction, where the check used a matcher the kernel never emits and therefore
+could not have failed. A gate that always passes teaches the next session to
+stop reading it.
+
+**Two defensible fixes, and they are not equivalent.**
+
+1. *Give the gate something to measure.* Add a ZFS read benchmark — block read
+   with checksum verify (fletcher4 and sha256), indirect-block walk, and gang
+   reassembly are all real per-block costs, and the last is new. This makes the
+   existing rule honest and is the better answer if ZFS is ever mounted for
+   real.
+2. *Make the gate admit what it does not cover.* Have the perf-critical rule
+   report which changed paths have **no** covering benchmark, so the message
+   reads "no benchmark covers this" instead of silently implying one does.
+
+(2) is the more general fix — the same blind spot presumably exists for other
+paths in the rule, and nobody has checked which. (1) is worth doing regardless.
+Neither is urgent: nothing is wrong with the ZFS code, and the risk is one of
+false assurance, not of a missed regression that a *working* instrument would
+have caught.
+
+**Where.** The rule and its message live in `scripts/boot-test.sh`; the
+benchmark registry is under `bench/`.

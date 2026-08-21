@@ -224,6 +224,81 @@ impl Layer {
     }
 }
 
+// ============================================================================
+// Acting on somebody else's window
+// ============================================================================
+
+/// What a shell asks the compositor to do to a window it does not own.
+///
+/// Every other window request in this protocol is resolved against the sending
+/// connection's own windows, which is the whole ownership model: a client
+/// cannot name a window it did not create. A taskbar's entire job is the
+/// opposite — the button exists precisely to act on somebody else's window —
+/// so those verbs cannot be reused, and this is a separate request rather than
+/// a flag on them, so that "names a window I own" stays a property you can read
+/// off the variant.
+///
+/// The actions are the ones a shell surface actually offers: a taskbar button
+/// (activate, minimise), its context menu (maximise, restore, close), and an
+/// Alt-Tab switcher (activate). Deliberately not move/resize: placing windows
+/// is the compositor's, and a shell that could move any window would be a
+/// second window manager — the duplication this part of the tree exists to
+/// remove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ShellControlAction {
+    /// Un-minimise if minimised, then focus and raise within the window's band.
+    ///
+    /// One action rather than restore-then-focus because the two are not
+    /// independent: the compositor refuses to focus a minimised window, so a
+    /// shell issuing them separately would be relying on the order it happened
+    /// to send them in.
+    Activate,
+    /// Minimise to the taskbar.
+    Minimize,
+    /// Return from minimised or maximised to the previous geometry.
+    Restore,
+    /// Fill the work area.
+    Maximize,
+    /// *Ask* the window to close — the same request its own close button makes.
+    ///
+    /// Not a destroy: the client is told, and an editor with unsaved changes
+    /// gets to put up its dialog. A shell that could destroy a window would be
+    /// able to discard a user's work from a context menu.
+    Close,
+}
+
+impl ShellControlAction {
+    /// The wire byte for this action.
+    #[must_use]
+    pub const fn as_byte(self) -> u8 {
+        match self {
+            Self::Activate => 0,
+            Self::Minimize => 1,
+            Self::Restore => 2,
+            Self::Maximize => 3,
+            Self::Close => 4,
+        }
+    }
+
+    /// The action a wire byte names, or `None` if it names none of them.
+    ///
+    /// `None` rather than a default, for [`Layer::from_byte`]'s reason and one
+    /// of its own: the actions are not interchangeable, and guessing would let
+    /// a peer speaking a later protocol have a window minimised when it asked
+    /// for something else.
+    #[must_use]
+    pub const fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(Self::Activate),
+            1 => Some(Self::Minimize),
+            2 => Some(Self::Restore),
+            3 => Some(Self::Maximize),
+            4 => Some(Self::Close),
+            _ => None,
+        }
+    }
+}
+
 /// What a client asks for when it creates a window.
 ///
 /// Every field is a *request*: the compositor answers with the id it assigned
@@ -384,6 +459,52 @@ pub enum RequestBody {
     /// does re-send the list, which is the useful reading of a repeated
     /// subscribe — "I may have lost track, tell me again".
     SubscribeWindowList { subscribe: bool },
+    /// Tell the compositor its copy of the user's appearance settings is out
+    /// of date, so that it re-reads `appearance.yaml` and redraws.
+    ///
+    /// **Carries no data, and that is the whole point.** The compositor draws
+    /// every window frame on the desktop, so a request that *set* the
+    /// appearance would let any process able to open this socket restyle the
+    /// entire machine — invisible title-bar text, a close button the same
+    /// colour as the bar behind it. A notification cannot do that: the
+    /// compositor goes and reads the *user's* file, which the sender may well
+    /// have no permission to write. The worst a hostile client achieves is a
+    /// redundant re-read and a repaint of a screen that already looks the way
+    /// it looks.
+    ///
+    /// It is also why this is not `SetAppearance(AppearanceSettings)` even
+    /// though that would save a file read: the settings are one document with
+    /// one owner (`gui/appearance`), and a wire form for them would be a
+    /// second copy of that model, free to drift from the crate that defines it.
+    ///
+    /// Answered with [`ResponseBody::Ok`], including when the file turns out
+    /// not to have changed — "I have re-read it" is the truthful answer either
+    /// way, and a client asking has no business learning what the user's
+    /// settings say from the shape of the reply.
+    ReloadAppearance,
+    /// Act on a window the sender does not own — the request a taskbar, an
+    /// Alt-Tab switcher or a window menu is made of.
+    ///
+    /// The only request in this protocol that names somebody else's window, and
+    /// therefore the only one the compositor does not resolve against the
+    /// sender's own. See [`ShellControlAction`] for why the ordinary verbs
+    /// could not be reused, and `ClientLink::require_shell` in the compositor
+    /// for the still-open question of *who* may send it.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error. A shell acting on a
+    /// window that closed a moment ago is an ordinary race rather than a fault
+    /// — the click happens after the list snapshot the button was drawn from —
+    /// so the error is for the shell's log, not for the user.
+    ///
+    /// Unlike the owned-window requests, the error text here *does* distinguish
+    /// "no such window" from "that window refuses this" (a non-resizable window
+    /// cannot be maximised). That would be a way to probe which ids exist, were
+    /// the sender not already entitled to the whole window list by the same
+    /// privilege that let it send this at all.
+    ShellControl {
+        window: u64,
+        action: ShellControlAction,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,6 +524,8 @@ enum RequestTag {
     SetFullscreen = 0x0C,
     SetOpacity = 0x0D,
     SubscribeWindowList = 0x0E,
+    ReloadAppearance = 0x0F,
+    ShellControl = 0x10,
 }
 
 impl RequestTag {
@@ -422,6 +545,8 @@ impl RequestTag {
             0x0C => Self::SetFullscreen,
             0x0D => Self::SetOpacity,
             0x0E => Self::SubscribeWindowList,
+            0x0F => Self::ReloadAppearance,
+            0x10 => Self::ShellControl,
             _ => return None,
         })
     }
@@ -638,6 +763,12 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
         RequestBody::SubscribeWindowList { subscribe } => {
             out.push(RequestTag::SubscribeWindowList as u8);
             out.push(u8::from(*subscribe));
+        }
+        RequestBody::ReloadAppearance => out.push(RequestTag::ReloadAppearance as u8),
+        RequestBody::ShellControl { window, action } => {
+            out.push(RequestTag::ShellControl as u8);
+            write_u64(out, *window);
+            out.push(action.as_byte());
         }
     }
 }
@@ -861,6 +992,16 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::SubscribeWindowList => RequestBody::SubscribeWindowList {
             subscribe: read_bool(r)?,
         },
+        RequestTag::ReloadAppearance => RequestBody::ReloadAppearance,
+        RequestTag::ShellControl => {
+            let window = r.read_u64()?;
+            let b = r.read_u8()?;
+            RequestBody::ShellControl {
+                window,
+                action: ShellControlAction::from_byte(b)
+                    .ok_or(DecodeError::BadShellAction(b))?,
+            }
+        }
     })
 }
 
@@ -1010,8 +1151,82 @@ mod tests {
             // would round-trip one of these and not the other.
             Request::new(14, RequestBody::SubscribeWindowList { subscribe: true }),
             Request::new(15, RequestBody::SubscribeWindowList { subscribe: false }),
+            Request::new(16, RequestBody::ReloadAppearance),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// Every action, not a sample: the action is one byte and an encoder that
+    /// wrote a constant would round-trip whichever one the sample happened to
+    /// pick. Listing them also makes adding a sixth action fail here until it
+    /// is added to the list, which is the point of an exhaustive test.
+    #[test]
+    fn every_shell_control_action_survives_the_wire() {
+        let actions = [
+            ShellControlAction::Activate,
+            ShellControlAction::Minimize,
+            ShellControlAction::Restore,
+            ShellControlAction::Maximize,
+            ShellControlAction::Close,
+        ];
+        let reqs: Vec<Request> = actions
+            .iter()
+            .enumerate()
+            .map(|(i, &action)| {
+                Request::new(
+                    u32::try_from(i).expect("small"),
+                    RequestBody::ShellControl { window: 7, action },
+                )
+            })
+            .collect();
+        assert_eq!(round_trip_requests(&reqs), reqs);
+
+        // And the bytes really are distinct, which is what the round trip
+        // above is relying on without saying so.
+        let mut seen: Vec<u8> = actions.iter().map(|a| a.as_byte()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), actions.len(), "two actions share a wire byte");
+    }
+
+    /// An action byte this decoder does not know is refused, not guessed at.
+    /// Silently defaulting would let a peer speaking a later protocol have a
+    /// window minimized when it asked for something the peer had no word for.
+    #[test]
+    fn an_unknown_shell_control_action_is_refused() {
+        let bytes = encode_requests(&[Request::new(
+            1,
+            RequestBody::ShellControl {
+                window: 7,
+                action: ShellControlAction::Close,
+            },
+        )]);
+        // The action byte is the frame's last, after the tag and the u64.
+        let mut corrupt = bytes.clone();
+        let last = corrupt.len() - 1;
+        assert_eq!(corrupt[last], ShellControlAction::Close.as_byte());
+        corrupt[last] = 0xFE;
+        assert!(matches!(
+            decode_requests(&corrupt),
+            Err(DecodeError::BadShellAction(0xFE))
+        ));
+    }
+
+    #[test]
+    fn a_reload_request_carries_nothing_a_client_could_restyle_the_desktop_with() {
+        // The security argument for `ReloadAppearance` is that it is a
+        // notification and not a setter: the compositor re-reads the user's own
+        // file rather than being handed a picture of what to draw. That rests
+        // entirely on the request having no payload, so it is asserted on the
+        // bytes rather than left to the enum's shape — the day someone adds
+        // "just a corner radius, to save a file read" this fails and says why.
+        let bytes = encode_requests(&[Request::new(1, RequestBody::ReloadAppearance)]);
+        assert_eq!(
+            bytes.len(),
+            CONTROL_HEADER_LEN + 4 + 1,
+            "a reload request should be a header, a seq and a tag byte — nothing \
+             else; a payload here is a client dictating how the desktop looks"
+        );
     }
 
     #[test]

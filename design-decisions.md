@@ -28680,6 +28680,200 @@ real primitives precisely so they would start working with no edit.
 
 ---
 
+## §346 — An account with no password may log in at the console but may not become root
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** Some accounts have no password at all — the password field in
+`/etc/shadow` is simply empty. Two programs have to decide what that means.
+`login` (the console login prompt) treats it as "press Enter and you're in".
+`doas` (the program that runs one command as root after you type your password)
+treats it as a refusal. Those are opposite answers to the same stored fact, and
+this records why that is deliberate rather than an inconsistency to be tidied
+away.
+
+`authlib` — the one place SlateOS answers "is this the user's password?" —
+deliberately does not resolve this. It returns a distinct
+`Outcome::NoPassword` meaning *nothing was verified, and here is why*, and
+leaves the policy to the caller. That was already the design (§341); this
+section is the second caller arriving and confirming the split was needed.
+
+**The two answers**
+
+| Caller | `NoPassword` means | Reasoning |
+|---|---|---|
+| `login`, at the machine's own keyboard | Accepted, if the typed password was also empty | A deliberately passwordless account is a long-standing Unix choice — a kiosk, a single-user machine, a recovery console. The user is already standing at the hardware; a password adds nothing they have not already got |
+| `doas`, escalating to root | Refused | "This account needs no password to *be* itself" is not the same statement as "this account needs no password to become *root*". Reading the first as the second turns every passwordless account into a root shell |
+| A desktop lock screen | Refused | Already the position `authlib`'s docs cite. "Press Enter to unlock" is not a screen lock |
+
+**The alternative, and why not**
+
+The tidier-looking option is for `authlib` to fold `NoPassword` into either
+`Accepted` or `Rejected` so that every caller behaves the same. Both foldings
+are wrong somewhere:
+
+- **Fold into `Accepted`** and the lock screen and `doas` both open to anyone
+  who presses Enter. The lock screen case is the one that makes this
+  indefensible: the whole point of a lock screen is the person at the keyboard
+  is *not* trusted.
+- **Fold into `Rejected`** and a passwordless console account can no longer log
+  in at all, which breaks the legitimate configuration and — worse — reports it
+  as a wrong password, so the administrator's diagnosis is "I must have set a
+  password and forgotten it".
+
+The cost of the split is that the policy lives in three places and could drift
+between them. That is mitigated by making it a *named* outcome rather than an
+absence: a new caller that writes `if outcome.is_accepted()` gets the safe
+answer without having thought about it, and has to go out of its way to get the
+permissive one. `doas` needed no special code at all — the refusal is what
+`is_accepted()` already gives.
+
+**Where it bites:** `userspace/login/src/main.rs` `check_password` (maps
+`NoPassword` + empty input to `Accepted`); `userspace/doas/src/main.rs`, the
+authentication block in `main` (gates on `is_accepted()`, so no mapping). If a
+third policy is ever needed, the place to put it is a named helper in `authlib`
+— `authlib::console_login_policy(outcome, typed)` — rather than a fourth
+open-coded `match`.
+
+**Related:** §341 (`authlib` exists at all), §329 (the three disagreeing
+hashers that led to it), `known-issues.md` →
+`B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS`.
+
+---
+
+## §347 — The failure tally is one shared file with fixed slots, not one file per user
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** When you type a password wrong, the system counts it and makes
+you wait a little longer before the next try — one second, then two, then four,
+up to five minutes. Until now that count lived only in the memory of the
+program asking, so a program that runs once and exits — `doas`, the "run this
+one command as root" tool — forgot the count the instant it ended. Guessing at
+its prompt was therefore free: fail, exit, run it again, no delay. The count
+now lives in a file, so it survives. This records the three ways that file
+could have been built and why it is one shared table rather than the obvious
+one-file-per-user.
+
+**Related:** §341 (`authlib` exists at all), §329 (the three disagreeing
+hashers that led to it), §346 (the two callers that resolve `NoPassword`
+oppositely), `known-issues.md` →
+`B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS`.
+
+### The decision, in four parts
+
+**1. The tally is shared between programs, not per-program.**
+
+The alternative was to give each program its own file — `doas` already keeps
+per-uid state under `/var/run/doas` for its `persist` timestamps, so the shape
+existed. Rejected: an attacker guessing a password does not care which prompt
+answers. Three separate tallies means three independent budgets of free
+guesses, and the escalation restarts every time they switch prompts. The count
+belongs to the *account*, which is what is under attack, not to the program
+that happened to notice.
+
+The cost, and it is real: a failure in one program now delays the user in
+another. Someone who fat-fingers `doas` three times is briefly slowed at the
+next `ssh`. That is `pam_faillock`'s behaviour on Linux and is what "one tally
+per user" means; it is not a side effect to be engineered away.
+
+**2. One fixed-slot file, not one file per user.**
+
+This is the part that was not obvious, and it is a security decision rather
+than a tidiness one. A username at a login prompt is *attacker-chosen text*. A
+scheme that names a file after it hands an unauthenticated caller two
+primitives at once:
+
+- **Path traversal.** `../../etc/passwd` is a valid thing to type at `login:`.
+  Escaping it correctly is possible; getting it wrong is a root-owned write to
+  a path the attacker picked, and the escaping has to stay correct forever.
+- **Unbounded file creation.** Every invented name creates a file. A loop
+  typing random names fills the inode table of whatever filesystem `/var/run`
+  is on, which is a denial of service against every program that needs to
+  write, not just against authentication.
+
+One file with `MAX_SLOTS = 1024` rows removes both. Usernames are hex-encoded
+inside it, so no name — including one containing a space or a newline, the
+field and row separators — can forge or corrupt a neighbouring row. That is
+asserted by `a_username_cannot_inject_rows_into_the_table`.
+
+**3. An invented username occupies a slot exactly as a real one does.**
+
+Skipping names with no account would have been simpler, would have made the
+slot pressure in part 2 mostly theoretical — and would have leaked precisely
+the thing the rest of the design works to hide. If unknown users are not
+recorded, then "am I rate-limited?" answers "does this account exist?", and an
+attacker enumerates the user list by watching which names slow down. `authlib`
+already burns equal time on the no-such-user path for the same reason; a tally
+that treated the two differently would have undone that at a different layer.
+
+**4. When the table is full, evict the row with the *fewest* failures.**
+
+The naive choice is oldest-first (LRU), and it is exactly wrong here. Under
+attack, the attacked account is the row being written most often — under LRU it
+survives, but so does every junk row, and 1024 junk names still push it out
+eventually. Evicting by fewest-failures-first, oldest as the tie-break, means
+the flood of one-failure junk names consumes itself: the attacker's own rows
+are always the cheapest to discard, and the account with ten failures is the
+last thing standing. `flooding_the_table_does_not_evict_the_account_under_attack`
+is that property.
+
+### Two smaller calls recorded with it
+
+**`/var/run`, not `/var/lib`.** The tally describes an attack *in progress*,
+not a durable fact about the account, and the delay is capped at five minutes.
+State that a reboot clears is correct here — and an attacker cannot arrange a
+reboot more cheaply than waiting out the five minutes, so nothing is bought by
+crossing one.
+
+**Combining memory and disk takes the maximum of each field separately.**
+`combine` takes the larger `failures` *and* the later `last_failure_secs`,
+rather than preferring one row wholesale. Preferring the disk row would let a
+stale file shorten a delay the running process had already earned; preferring
+memory would let a fresh process ignore what another program recorded a second
+ago. Field-wise maximum has the property that matters: neither half can
+*shorten* the other's delay, only lengthen it.
+
+**The directory's mode is forced, not inherited.** `create_dir_all` applies
+the process umask, and a setuid program inherits the umask of whoever ran it —
+so a user with `umask 0` who happened to be the first to trigger a write would
+get a world-writable `/var/run/authlib`, and could then rename their own file
+over the tally to clear their failures. No permission on the *file* can prevent
+that; the directory is what has to be 0700, and it is set explicitly rather
+than left to whatever the caller's environment happened to be.
+
+**A failed write is ignored.** `write_shared` discards the error, which is the
+kind of thing this project normally forbids. The justification is that the
+in-memory tally still limits the running process, so an unwritable `/var/run`
+degrades to exactly the behaviour that existed before this change. The
+alternative — refusing to authenticate when the tally cannot be written — turns
+a full disk into a machine nobody can log into, which is a worse failure than
+the one it prevents.
+
+### The half left open
+
+`login` and `su` still do not share the tally: `login` calls the checking half
+of `authlib` directly because it owns the console's empty-password policy
+(§346), and `su` predates `authlib`. Closing that needs `authlib` to expose the
+counting half on its own — `rate_limited` / `note_failure` around the caller's
+own verdict — which is straightforward.
+
+What is not straightforward, and is deliberately not decided here, is the
+consequence: once `login` shares the tally, any unprivileged process running as
+the user can hold that user at a delayed *console* prompt by failing `doas` on
+purpose. It is bounded (five minutes, never a lockout) and it is what Linux
+does, but "any local process can add five minutes to your console login" is a
+user-visible policy, not an implementation detail. It is written up in
+`known-issues.md` → "Still open — `login` and `su` do not share the tally",
+and queued for the operator as `open-questions.md` → **B-Q6**, which lays out
+four answers. Note that `su` sharpens it: `su` guesses at the *target's*
+password, so if `su` joins too, any local user could hold **root** at a delayed
+console prompt without ever having had root.
+
+---
+
 ## §493 — The extra clocks surface in the calendar popup, not stacked in the tray
 
 **Date:** 2026-08-21
@@ -30152,3 +30346,558 @@ of a mapped kernel range must still succeed and be byte-exact, so the check
 cannot pass by rejecting everything. The test runs in kernel context by
 construction — the boot self-test task owns no process — so a regression
 re-panics the kernel inside a named test rather than a thousand lines later.
+
+## 499. The compositor reads the user's appearance settings from the shared model, and reads the whole of it
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** The Settings app has a switch for how round window corners should
+be — Square, Subtle, Rounded, Extra Rounded — and another for whether windows
+cast shadows. The program that actually draws window frames, the compositor, had
+never been told about either one. So all four corner choices produced the same
+square window, and turning shadows off left every shadow exactly where it was.
+The decision here is *how* the compositor learns those settings: it depends on
+the same small crate the Settings app writes them with, and holds the user's
+whole settings record rather than copying out the two fields it can act on
+today.
+
+### The problem
+
+`gui/appearance` exists specifically so that one user preference has one owner.
+Its own module doc says so: the shell paints from these values, the Settings
+application edits them, and both read and write the same `appearance.yaml`,
+because two crates that disagree about what "Rounded" means corrupt the user's
+settings between them.
+
+The compositor was outside that arrangement entirely. It drew every frame from a
+hardcoded `DecorationTheme` — twelve colour constants and nothing else — and had
+no dependency on `appearance` at all. Two of the settings in that file are
+*about* what the compositor draws:
+
+| Setting | What the user expects | What happened |
+|---|---|---|
+| `window_corners` | Square / Subtle (4px) / Rounded (8px) / Extra Rounded (16px) | every window square, all four choices identical |
+| `drop_shadows` | windows cast a shadow, or don't | shadow always drawn |
+
+This is the same shape of fault as §498 one layer up, and it was hidden the same
+way: a square window looks perfectly plausible. Nothing about the picture said a
+setting was being ignored.
+
+### Decision 1 — depend on `gui/appearance`, rather than passing the two values in
+
+The alternative was to keep the compositor free of the dependency and have
+whoever starts it pass in a radius and a boolean — two plain arguments, no new
+crate edge.
+
+*What changes:* nothing visible. The difference is where the meaning of
+"Rounded" lives.
+
+| | Depend on `appearance` | Pass a radius and a flag |
+|---|---|---|
+| Where `Rounded == 8px` is decided | once, in `appearance` | in whoever calls, and it must agree |
+| New crate edge | yes (`compositor` → `appearance`) | no |
+| Cost of adding the *next* setting | a field read | a new parameter through every caller |
+| Failure mode | none obvious | the display server and the settings panel disagree about a value the user picked |
+
+The dependency is safe: `appearance` depends only on `guitk` and `yamldoc`, both
+of which the compositor either already has or does not conflict with, so there
+is no cycle. And the alternative's failure mode is precisely the one
+`known-issues.md` `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` was filed about.
+
+### Decision 2 — hold the whole `AppearanceSettings`, not the two fields used
+
+The compositor can act on two of that struct's sixteen fields today. Copying
+those two into compositor-local state (`corner_radius: f32`, `shadows: bool`)
+would be a smaller footprint and would make the struct's other fourteen fields
+obviously irrelevant to this process.
+
+*What changes:* nothing visible today; it decides what the *next* setting costs.
+
+Holding the whole record wins because the two-field version is a third
+independent appearance model in miniature — a compositor-local copy of settings
+whose canonical form lives elsewhere, which is the exact thing `appearance` was
+created to stop. The twelve colours in `DecorationTheme` are the next things
+that should come from this record (they currently duplicate the Catppuccin
+palette by hand), and they will be a field read rather than four more
+parameters.
+
+### Decision 3 — the corner radius scales with the display, and has no non-zero floor
+
+Every other decoration dimension goes through `scale_dimension`, which
+deliberately never rounds a visible dimension away to nothing: a 1px border at
+0.6× must not become a 0px border, because hit-testing derives from the same
+number and a 0px border is a window that cannot be grabbed to resize.
+
+The radius is scaled the same way but must *not* inherit that floor. A radius of
+zero is not a rounding accident — it is the user having chosen `Square`, and it
+has to survive scaling as a square corner rather than being promoted to a 1px
+curve. So `decoration_radius` multiplies and clamps to zero, and does not borrow
+`scale_dimension`'s minimum.
+
+### Decision 4 — a maximized window casts no shadow
+
+*What changes:* a maximized window loses a dark smear along its top and left
+edges (visible only when it is translucent), and stops doing a full shadow's
+worth of stroking every frame.
+
+A maximized frame is fitted to the display exactly (`maximize_window` →
+`client_geometry_for_frame(display_bounds)`), so every ring of its shadow is
+either clipped off the display or drawn *underneath the window's own frame*.
+On an opaque window it is therefore invisible — pure overdraw, eight stroked
+rounded rectangles per frame for nothing, on the one window state that is the
+common case. On a translucent or `transparent` window the frame does not cover
+what is beneath it, so the rings show through as a dark smear along the top and
+left and nowhere else, which is worse than no shadow.
+
+Worth recording precisely because the reasoning is *not* the shell's. The
+shell's duplicate decorator suppresses the same shadow with the comment that one
+drawn anyway "would bleed over the screen border" — true of its `BoxShadow`,
+which fills, and not true of the compositor's rings, which do not. Two correct
+decisions for two different reasons; a future reader who assumes they are the
+same case will draw the wrong conclusion about one of them.
+
+Fullscreen needs no such test: `Window::has_title_bar` is `decorations &&
+!fullscreen`, so a fullscreen window never reaches the decoration path at all.
+
+### Decision 5 — adopting settings forces a full recomposite
+
+*What changes:* the setting takes effect on the next frame instead of whenever
+something else happens to repaint that part of the screen.
+
+The compositor normally redraws only damaged rectangles, and damage is generated
+by windows moving, resizing and submitting. An appearance change generates none
+— no window moved — yet it changes pixels *outside* every window's extent: the
+quarter-disc of frame colour a squared corner reclaims, and the strip of desktop
+a removed shadow vacates. So `set_appearance` sets `full_recomposite`. Without
+it the user drags the corner-style control and the screen does not change, which
+reads as the control being broken rather than as a stale frame.
+
+### Where the settings enter the process
+
+`main` reads `appearance.yaml` at startup and calls `set_appearance`;
+`Compositor::new` deliberately does not. A constructor that consulted `$HOME`
+would make every test in this crate depend on the machine running it — the same
+split `AppearanceFile::new` vs `AppearanceFile::load` already draws, for the same
+reason.
+
+**This is a startup-only channel, and that is a known gap, not a decision.**
+Changing a setting in the Settings app does not reach a running compositor; the
+user must restart it. The fix is a protocol verb, and the shape it should take
+is already clear: a `ReloadAppearance` request carrying *no data*, so that the
+compositor re-reads the user's own file rather than being told what to draw. A
+setter would let any connected client restyle the whole desktop; a reload
+notification lets a hostile client at worst force a redundant re-read of a file
+it cannot write. Tracked in `known-issues.md`.
+
+### Verification
+
+Ten tests, and all ten were proved regression tests by reintroducing the bug
+each one names and confirming a deterministic failure that names it back:
+storing the settings without reading them; giving every window one hardcoded
+radius; dropping the display scale from the radius; filling the title bar
+square; leaving the buttons square; tracing a square border around a rounded
+frame; keeping square corners on the shadow's rings; drawing the maximized
+shadow; ignoring the `drop_shadows` flag; and dropping the forced recomposite.
+**10/10 caught on the first pass.**
+
+Two of the tests were wrong before they were right, and both errors are worth
+recording because neither would have announced itself:
+
+- **A corner test that asserted an absolute pixel count.** "A square corner
+  paints its whole 20×20 corner block" is false: it paints 339 of 400, because
+  the block also contains the border stroke down its left edge and the first
+  letters of the window title. The count is a sound *relative* measure — the
+  contaminants do not move with the corner setting — and an unsound absolute
+  one. The test now probes a single pixel two in from the corner, which is
+  inside the border and clear of the text, and the helper's doc says why an
+  absolute assertion is not available.
+- **A test that was reading the vsync gate instead of the damage state.**
+  `compose_frame` declines both when there is nothing to draw *and* when it is
+  too soon for another frame, and three calls in a row at 60 Hz are all inside
+  one 16 ms interval. The test's middle assertion — "an unchanged desktop has
+  nothing to redraw" — was passing for entirely the wrong reason, and its last
+  one failed for that reason too. It now runs on a zero-length frame budget so
+  that what it measures is damage.
+
+One thing deliberately *not* claimed as tested: the shadow's rings grow their
+radius by their own distance out, so that the shadow is an offset curve rather
+than a stack of same-shaped outlines. Removing the growth leaves the rings
+rounded, just increasingly square-shouldered further out, and no test here
+distinguishes that from the correct shape. It is a real property with no guard.
+
+## 500. A settings change reaches a running compositor as a notification that carries nothing
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** After §499 the compositor finally drew window corners and drop
+shadows the way the user asked — but it read the user's file once, at startup.
+Change the setting in Settings and nothing happened until you logged out and
+back in. This adds a message the Settings app can send saying "your appearance
+file changed"; the compositor then re-reads the file itself. The message
+deliberately does not contain the settings, because a message that *did* would
+let any program on the machine dictate how every window is drawn.
+
+### The setter that was not written
+
+The obvious message is `SetAppearance(AppearanceSettings)`: the sender already
+has the settings in hand, and sending them saves the compositor a file read.
+It was rejected on both of its terms.
+
+**Security.** Anything that can open the display socket can send any request on
+it. If the request carried settings, every such program could restyle the whole
+desktop — and a hostile set of settings is not an abstraction: title-bar text
+the colour of the title bar, a close button the colour of the bar behind it, a
+corner radius that eats the button. None of that is a crash, which is what
+makes it a good attack; it is a desktop that quietly stops being operable.
+A *notification* inverts the trust: the compositor re-reads the user's own
+file, which the sender may have no permission to write, so the worst a hostile
+client achieves is making the compositor read a file and repaint a screen that
+already looks the way it looks.
+
+**Ownership.** `AppearanceSettings` has one owner (`gui/appearance`) precisely
+so that the shell, the Settings app and now the compositor cannot drift into
+three interpretations of one preference — that is the whole of §499. A wire
+encoding for the settings would be a fourth copy of the model, in a place where
+it must also be versioned; the day someone adds a field, a compositor and a
+Settings app of different vintages disagree about a struct rather than about a
+file that both parse with the same code.
+
+So: `RequestBody::ReloadAppearance`, tag `0x0F`, no payload. A test in
+`gui/remote/src/control.rs` asserts the *encoded length* — header, sequence,
+tag byte, nothing else — so that "just a corner radius, to save a file read"
+fails at the point where it is added rather than in review.
+
+### Why a protocol verb and not a file watch
+
+The alternative with no protocol surface at all is for the compositor to watch
+`appearance.yaml` and reload when it changes. That is strictly better in one
+respect: it works no matter *who* wrote the file, including a user editing it
+in a text editor, which the notification does not.
+
+It was not chosen because nothing in this OS can watch a file yet — there is no
+change-notification interface a userspace process can subscribe to, so a watch
+today means the compositor stat-ing a path on a timer, which is a poll in the
+one process that must not spend its frame budget on bookkeeping. The verb is
+also not wasted work if the watch arrives later: a watch would make the verb
+*redundant*, not wrong, and a compositor that both watches and accepts the
+notification is correct, because the reload is idempotent by construction (see
+below). Revisit when the filesystem gains change notifications; the trigger is
+`fs/`'s change-notification work landing.
+
+### The comparison lives in `set_appearance`
+
+Any client may send `ReloadAppearance` at any rate. If each one forced the
+full-screen recomposite that a settings change genuinely needs, the request
+would still be an unlimited-rate way to keep the compositor redrawing the whole
+desktop — a notification that carries no data but costs plenty. So
+`set_appearance` early-returns when the new settings equal the old, and only a
+real difference sets `full_recomposite`.
+
+That comparison belongs there and not in the handler: `reload_appearance` is
+not the only caller (startup calls it too, and a future file watch would), and
+a guard in the handler would be a guard one caller has and the others do not.
+`AppearanceSettings` already derives `PartialEq`, so this is a comparison of
+the model rather than a hand-written field-by-field check that could forget the
+field added next week.
+
+### The reply is `Ok` whether or not anything changed
+
+A reply that distinguished "reloaded, and it differed" from "reloaded, no
+change" would be more informative and was rejected for being exactly that: it
+tells whoever asked something about the contents of the user's settings file.
+A program that cannot read `~/.config/slateos/appearance.yaml` could learn
+whether a given guess matches it by writing nothing and watching the reply
+change. That is a small leak, but it is a leak bought for no benefit — the
+sender is the program that just wrote the file, and it already knows.
+
+What the `Ok` asserts is true either way: the compositor has re-read the file.
+
+### The sender is in `oswindow`, and the Settings app still cannot call it
+
+`oswindow::EventLoop::appearance_changed()` is the public API; applications
+never name `guiremote` directly, exactly as `watch_desktop` fronts
+`subscribe_window_list`. The one application that should call it — Settings —
+cannot: it has no compositor connection at all, because its `main` is a
+one-frame smoke test. That is `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` (142 app
+crates in the same position), not something to paper over here by opening a
+socket in a program that has no event loop to service it. Recorded there rather
+than left implied.
+
+### Verification
+
+Seven tests, each proved a real regression test by putting its bug back and
+watching it fail:
+
+| Test | Bug reinstated |
+|---|---|
+| `a_reload_request_carries_nothing_a_client_could_restyle_the_desktop_with` | a payload byte appended to the encoding |
+| `telling_the_compositor_the_settings_changed_sends_it_nothing_but_the_news` | `appearance_changed` returns `Ok` without sending anything |
+| `a_reload_adopts_what_the_users_file_now_says` | `reload_appearance` does not re-read the file |
+| `a_reload_that_changed_something_repaints_the_whole_screen` | adopting settings does not set `full_recomposite` |
+| `a_reload_that_finds_nothing_changed_costs_nothing` | the equality early-return removed |
+| `a_reload_request_off_the_wire_reaches_the_users_settings_file` | the handler arm stubbed to reply `Ok` and do nothing |
+| `a_reload_request_names_no_window_and_so_needs_no_window_to_name` | the request routed through the window-ownership check |
+
+The two `wire.rs` tests are the ones that matter for a new verb: they run the
+real bytes through the real decode path, and a verb that encodes but never
+decodes — or decodes to a request nothing maps — is the characteristic way a
+protocol addition is half-wired.
+
+`$HOME` is not read by `Compositor::new` and is read by `reload_appearance`.
+That asymmetry is deliberate: a constructor that consulted the environment
+would make every compositor test depend on the machine running it, while
+re-reading the user's file is the entire meaning of a reload. The tests point
+it somewhere harmless with `appearance::config::testing::with_scratch_config`,
+and `main` now calls `reload_appearance()` at startup rather than loading the
+file itself, so startup and reload cannot come to disagree about where the
+settings live or what a missing file means.
+
+## 501. The window frame's colours are resolved once, in the settings crate
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** Two programs draw the title bar at the top of every window — the
+compositor (the program that owns the screen) and the desktop shell (the program
+that draws the taskbar). Until now each one had its own private list of colours,
+and they did not match: if you switched the desktop to light mode, the shell
+switched and the compositor did not, so you got a dark title bar on a light
+desktop. The same was true of the accent colour and of the interface font size.
+The fix is that neither program is allowed to choose any more. There is now one
+list of frame colours, in the crate that owns the settings file, and both read
+it.
+
+### The problem, precisely
+
+The compositor's `DecorationTheme` was twelve hardcoded constants — a dark navy
+desktop, a blue-gray title bar — with a `Default` impl and no other constructor.
+It was marked `#[allow(dead_code)]`, which is what let one of its twelve fields
+(`close_button_hover`) sit unread for the whole life of the type.
+
+Three of the user's settings had no route into it:
+
+| Setting | What the shell did | What the compositor did |
+|---|---|---|
+| `theme_mode` (light/dark) | switched between Latte and Mocha | dark navy, always |
+| `accent_titlebars` + `accent_color` | recoloured the focused title bar | ignored |
+| `fonts.ui_size` | drew titles at the user's size | 16px, always |
+
+Increment 4b/4c had already routed the two *shape* settings (window corners,
+drop shadows) into the compositor. Colours and the title font were what was
+left, and they are the reason `known-issues.md`'s
+`TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS` could not
+simply be closed by deleting the shell's duplicate: deleting first would have
+shipped a visible regression for every user in light mode, every user with an
+accent colour, and every user who had enlarged the interface font.
+
+### Why the resolution lives in `gui/appearance` and not in the compositor
+
+The obvious cheap fix was to copy `DesktopTheme::from_settings` — the light/dark
+table and the accent derivation — into the compositor. That was rejected. The
+copy would have been a second, independently-editable answer to "what colour is
+a title bar", which is exactly the defect
+`TD-THREE-INDEPENDENT-APPEARANCE-MODELS` describes, reintroduced inside the very
+entry that exists to remove a duplicate. Two renderers agree about a colour only
+if neither of them decides it.
+
+So `appearance::DecorationColors` holds the eleven resolved colours, with
+`for_mode(light)` for the base palette and `from_settings` for the palette after
+the user's accent choice. `gui/appearance` is where it belongs because it is
+the crate that already owns the settings, already depends on `guitk` for
+`Color`, and is already depended on by both renderers — adding it there created
+no new edge in the dependency graph.
+
+`readable_on` and `emphasized` moved there with it (the shell still needs them
+for the taskbar), and the shell's private `with_alpha` was deleted in favour of
+`guitk::theme::with_alpha`, which had been there all along.
+
+### Why the compositor still has a type of its own
+
+`DecorationTheme` survives, reduced to `from_settings` plus eleven `u32` fields.
+It is `DecorationColors` with the ARGB packing already done. The alternative —
+holding `DecorationColors` and packing at each blit — would convert five colours
+per window per frame for a value that changes only when the user changes it.
+`set_appearance` re-resolves it, which is the one place that already knows the
+settings changed.
+
+Its `Default` now defers to `AppearanceSettings::default()` rather than
+restating a palette. That is not tidiness: a compositor that has never loaded a
+settings file and one that loaded a file saying nothing unusual used to look
+different, and the difference was only ever visible on screen.
+
+### The desktop background is in the frame palette, and the shadow is real now
+
+`desktop_bg` is not part of a frame. It is in `DecorationColors` because it is
+the surface a frame is seen against, it is painted by the same process from the
+same palette, and splitting it out would mean a caller had to find two answers
+to assemble one screen.
+
+The shadow colour was the dead field's neighbour and turned out to be a third
+opinion: the dead constant said alpha `0x40`, and `render_shadow` actually drew
+with a local constant of `40` decimal. The palette now states `rgba(0, 0, 0, 40)`
+— what is actually drawn — and `render_shadow` reads it, so the colour of a
+shadow is stated in the same place as the colour of the bar above it. Nothing
+changed on screen.
+
+### The title font follows `ui_size`, and cannot follow `ui_font`
+
+`(DEFAULT_FONT_SIZE * scale)` became `(appearance.fonts.ui_size * scale)`. A
+window title is interface text, and someone who enlarged the interface font
+because they could not read 13pt has said something about window titles too.
+The default is 13.0 rather than the old 16.0, which is a visible change and the
+correct one: the shell's own decorator has drawn titles at 13pt × the role ratio
+all along, so 16 was one half of the disagreement rather than a considered size.
+
+`fonts.ui_font` still reaches nothing. `osfont::Family` is `Ui` or `Mono` and
+has no lookup by name, so no renderer in this tree can honour a font *family*
+— the shell's decorator does not either. That is a missing capability, not a
+missing wire, and it is tracked separately.
+
+### Verification
+
+Every test below was confirmed to be a real regression test by putting its bug
+back and watching it fail with the message that names it.
+
+| Test | Bug reintroduced |
+|---|---|
+| `the_two_modes_disagree_about_every_colour_a_frame_is_drawn_with` (appearance) | light `desktop_bg` copied from dark |
+| `a_focused_bar_is_legible_against_whatever_accent_it_was_given` (appearance) | accent bar keeps the base foreground |
+| `accented_title_bars_leave_the_unfocused_windows_in_the_base_palette` (appearance) | accent applied to the unfocused bar too |
+| `the_mode_still_decides_the_palette_when_the_accent_is_off` (appearance) | accent applied unconditionally |
+| `readable_on_answers_with_the_palettes_own_extremes` (appearance) | pure black and white instead of the palette's |
+| `emphasis_stays_visible_at_both_ends_of_the_range` (appearance) | emphasis darkens unconditionally |
+| `the_users_theme_mode_reaches_the_desktop_behind_the_windows` (compositor) | the twelve hardcoded colours |
+| `the_users_accent_reaches_the_title_bar_it_asked_for` (compositor) | as above |
+| `an_accent_title_bar_leaves_every_other_window_alone` (compositor) | as above |
+| `the_users_interface_font_size_reaches_the_window_title` (compositor) | the title font back to a constant |
+| `the_shells_window_colours_are_the_compositors_window_colours` (desktop) | the shell recolours a title bar itself |
+
+The last one is the load-bearing one. It fails the moment someone recolours a
+window in `DesktopTheme`, which is the natural place to do it and the wrong one,
+and it will keep failing for as long as the shell's duplicate decorator exists.
+When that decorator is deleted, the test goes with it.
+
+The compositor tests take their expected colours from `appearance`, never from
+`comp.theme` — reading the answer back out of the thing under test is precisely
+what the old hardcoded palette would also have passed.
+
+
+## 502. Double-click-to-maximize moves to the compositor rather than dying with the shell's decorator
+
+**Date:** 2026-08-21
+**Decided by:** Claude (autonomous)
+
+**In short:** Clicking a window's title bar twice quickly makes it fill the
+screen. That gesture was written into the desktop shell, and the shell's
+title-bar code was about to be deleted as a duplicate of the compositor's. But
+it was not a duplicate: the compositor had never implemented the gesture, so
+deleting the shell's copy would have removed double-click-to-maximize from the
+product entirely, with no test failing and nothing to notice. It was moved into
+the compositor instead. This entry records that, and the three smaller choices
+the move forced.
+
+### Why this was nearly a silent feature deletion
+
+`TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS` had
+established over several increments that the shell's decorator was a strict
+subset of the compositor's: same buttons, same drag-to-move, and the compositor
+additionally does border-resize, which the shell never did. Five prerequisites
+were met to make the deletion regression-free. The natural next step is to
+delete and move on.
+
+The subset claim was true of *drawing* and true of *hit testing*, and false of
+one thing. `Hit::WindowTitleBar`'s `handle_press` arm read:
+
+```rust
+MouseEventKind::DoubleClick(_) => { /* ...toggle maximize... */ }
+```
+
+and grep for `DoubleClick` in `gui/compositor` found only a comment saying the
+compositor never emits it:
+
+> `Enter`/`Leave` and `DoubleClick` exist only on the client side and are never
+> produced here … double-click timing belongs with the widget that has to
+> honour it.
+
+So the compositor had deliberately declined to own double-click timing on the
+grounds that it is a *widget* concern — which is right for a widget inside a
+client's window, and wrong for a title bar, which is not a widget and belongs to
+no client. The comment was correct about the general case and had quietly
+misfiled the one surface the compositor itself draws.
+
+**The alternative considered and rejected:** leave the gesture in the shell and
+have the shell ask the compositor to maximize. Rejected because the shell does
+not receive the press. The compositor hit-tests its own decorations and consumes
+the event before the shell hears anything — that is the entire architecture the
+deletion exists to restore. A shell that owns the timing for an event it is
+never sent is not a design, it is the duplicate coming back in another form.
+
+### The three sub-decisions
+
+**1. The record keys on the window, not only on the time.**
+`last_title_press: Option<(WindowId, Instant)>`, not `Option<Instant>`. Two
+quick clicks on two *different* title bars are two clicks. Pairing them would
+maximize a window the user clicked once — a window moving on its own, which is
+the worst class of window-manager bug because the user cannot attribute it to
+anything they did. The alternative (time only) is one field smaller and
+indefensible.
+
+**2. Any intervening press breaks the pair.** Implemented as a `take()` at the
+top of the left-press path, before anything is dispatched, so that *only* a
+title-bar press can leave a record behind:
+
+```rust
+let previous_title_press = self.last_title_press.take();
+```
+
+Click a title bar, click the desktop, click the same title bar again — however
+fast — and that is two clicks, because the user went somewhere else and came
+back. The alternative is to clear the record only on presses that land
+somewhere "meaningful", which requires deciding what is meaningful and gets it
+wrong the first time something new is added. Clearing unconditionally and
+re-arming on the one path that wants it cannot drift.
+
+**3. A completed double-click does not re-arm.** The doubled branch leaves the
+record cleared (by the `take` above) rather than replacing it. Otherwise a third
+quick click pairs with the second and un-maximizes what the user just
+maximized — so a user who clicks three times in a hurry gets a window that
+flickers between states rather than settling. Three clicks are a double-click
+followed by a single click, which is what every other platform does.
+
+### Why the default is 400 ms and the clamp is 100–2000
+
+Both copied from `desktop::mouse_settings`, which has offered exactly that
+default and exactly that range since it was written. Nothing wires the user's
+choice through yet — that is
+`TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING`, filed with this change and
+blocked on `apps/settings` gaining a compositor connection. Matching the
+numbers now means **wiring it up later changes nothing for a user who never
+touched the slider**, which is the property that makes the pending work safe to
+land at any time.
+
+The bounds are named constants (`MIN_DOUBLE_CLICK_MS`, `MAX_DOUBLE_CLICK_MS`)
+rather than literals in the `clamp` call, because the same two numbers appear in
+the clamp, in the doc comment and in the test, and three copies of a bound is
+how a bound comes to disagree with itself. The test asserts against the
+constants for the two edges and against a literal `250` for the interior — a
+clamp that returned a bound for *every* input would satisfy both edge
+assertions.
+
+### Testing a timing-sensitive gesture without flakiness
+
+The positive tests set the interval to its 2000 ms ceiling: no plausible
+scheduling delay between two synchronous method calls approaches two seconds.
+The negative test (`two_title_clicks_far_enough_apart_are_two_separate_clicks`)
+sets the 100 ms floor and sleeps 160 ms. The asymmetry is deliberate and is the
+whole trick: **a sleep can only overshoot**, so a loaded machine makes the gap
+*larger*, which is the direction the test already expects. There is no
+scheduling outcome in which this test fails spuriously. A test written the other
+way round — sleep a little and assert the clicks *did* pair — would be a genuine
+flake, because an overshoot breaks it.
+
+`click_title_bar` re-reads `title_bar_rect()` on every call rather than caching
+it, because a maximized window's title bar is somewhere else; a cached
+rectangle would make the "click again to restore" half of the test press empty
+desktop and pass for the wrong reason.

@@ -21,6 +21,26 @@
 //! ```
 //!
 //! Rules are evaluated top-to-bottom; the first matching rule wins.
+//!
+//! # Authentication
+//!
+//! The caller's password is checked by [`authlib`], which is the one place in
+//! SlateOS that answers "is this the user's password?". This crate previously
+//! answered it itself, with a `$sha256$<salt>$<digest>` scheme that `passwd`
+//! does not write — see the comment above the authentication section for what
+//! that cost.
+//!
+//! Two rules that are easy to confuse:
+//!
+//! - **`nopass` in `/etc/doas.conf` is the only way to skip the password.** It
+//!   is an administrator writing down, per rule, that this escalation needs no
+//!   proof.
+//! - **An account with *no password set* is refused, not waved through.** That
+//!   is a different statement — it says nothing about escalation, and reading
+//!   it as consent would turn every passwordless account into a root shell.
+//!   `login` resolves the same `authlib` answer the opposite way, because a
+//!   deliberately passwordless account at the machine's own keyboard is a
+//!   long-standing Unix choice; escalating from one is not.
 
 use std::env;
 use std::fs;
@@ -33,7 +53,11 @@ use std::time::SystemTime;
 // ============================================================================
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/doas.conf";
-const SHADOW_PATH: &str = "/etc/shadow";
+// `/etc/shadow` is deliberately not named here. Which store holds the password
+// is `authlib`'s business -- it reads `/etc/users.yaml` first and `/etc/shadow`
+// second -- and a copy of the path in this crate is how it came to read only
+// one of them. `/etc/passwd` stays, because uid/gid/home/shell are not
+// passwords and `doas` really does need them itself.
 const PASSWD_PATH: &str = "/etc/passwd";
 const PERSIST_DIR: &str = "/var/run/doas";
 
@@ -41,98 +65,32 @@ const PERSIST_DIR: &str = "/var/run/doas";
 const PERSIST_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
 // ============================================================================
-// SHA-256
+// Password verification
 // ============================================================================
-
-/// Compute SHA-256 and return the hex digest string.
-///
-/// A thin name over `sha2::sha256_hex`; the 85 lines it used to hold were one
-/// of ten copies under `userspace/`. The old section header said "matches
-/// passwd utility", which is the whole difficulty with a pasted hash: the
-/// claim held only for as long as nobody edited either copy, and nothing
-/// checked that nobody had.
-fn sha256_hex(data: &[u8]) -> String {
-    sha2::sha256_hex(data).as_str().to_string()
-}
-
-// ============================================================================
-// Password hashing / verification (matches passwd utility format)
-// ============================================================================
-
-/// Hash a password with the given salt using SHA-256.
-/// Format: `$sha256$<salt>$<hash>`
-fn hash_password(password: &str, salt: &str) -> String {
-    let input = format!("{salt}${password}");
-    let digest = sha256_hex(input.as_bytes());
-    format!("$sha256${salt}${digest}")
-}
-
-/// Verify a password against a stored `$sha256$<salt>$<hash>` string.
-fn verify_password(password: &str, stored_hash: &str) -> bool {
-    if let Some(rest) = stored_hash.strip_prefix("$sha256$")
-        && let Some(dollar_pos) = rest.find('$') {
-            let salt = &rest[..dollar_pos];
-            let expected = hash_password(password, salt);
-            return constant_time_eq(stored_hash.as_bytes(), expected.as_bytes());
-        }
-    false
-}
-
-/// Constant-time byte comparison to prevent timing attacks.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-// ============================================================================
-// /etc/shadow parsing
-// ============================================================================
-
-/// A single entry from `/etc/shadow`.
-#[derive(Clone, Debug, PartialEq)]
-struct ShadowEntry {
-    username: String,
-    hash: String,
-}
-
-/// Parse `/etc/shadow` and return all entries.
-fn read_shadow_entries(path: &str) -> Vec<ShadowEntry> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    content
-        .lines()
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 2 {
-                Some(ShadowEntry {
-                    username: fields[0].to_string(),
-                    hash: fields[1].to_string(),
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-/// Look up a user's password hash in `/etc/shadow`.
-fn lookup_shadow_hash(username: &str) -> Option<String> {
-    let entries = read_shadow_entries(SHADOW_PATH);
-    entries
-        .into_iter()
-        .find(|e| e.username == username)
-        .map(|e| e.hash)
-}
+//
+// This crate used to answer "is this the user's password?" itself, and it was
+// the fifth program in this tree to do so with its own arithmetic. It hashed
+// `$sha256$<salt>$<digest>` as `sha256(salt || "$" || password)` and returned
+// `false` for every other format -- including `$6$`, which is what `passwd`
+// actually writes. The section header said "matches passwd utility"; it had
+// not matched for as long as `passwd` had been going through `posix::crypt`.
+//
+// The practical effect was that `doas` could not be used at all: a password
+// set the normal way produced "authentication failed" no matter how carefully
+// it was typed, which reads to the user as a forgotten password rather than as
+// a broken program. It failed closed, so it was never an escalation hole -- but
+// a privilege gate nobody can pass is repaired by turning it off, and that is
+// the hole it would eventually have become.
+//
+// It also read `/etc/shadow` directly, so a user who exists only in the native
+// `/etc/users.yaml` database had no password `doas` could find.
+//
+// Both are now `authlib`'s problem -- the one place SlateOS answers this
+// question (design-decisions.md sections 329 and 341). It consults
+// `/etc/users.yaml` first and `/etc/shadow` second, recomputes the stored entry
+// *as a setting* rather than taking it apart to find a salt, distinguishes a
+// locked account and an unrecomputable entry from a wrong password, and spends
+// the same time on a user who does not exist as on one who does.
 
 // ============================================================================
 // /etc/passwd parsing
@@ -546,9 +504,10 @@ fn evaluate_rules(
         }
 
         if let Some(ref target) = rule.target
-            && target != target_name {
-                continue;
-            }
+            && target != target_name
+        {
+            continue;
+        }
 
         if let Some(ref cmd) = rule.cmd {
             match command {
@@ -801,9 +760,10 @@ fn current_uid() -> u32 {
         for line in content.lines() {
             if let Some(rest) = line.strip_prefix("Uid:")
                 && let Some(uid_str) = rest.split_whitespace().next()
-                    && let Ok(uid) = uid_str.parse::<u32>() {
-                        return uid;
-                    }
+                && let Ok(uid) = uid_str.parse::<u32>()
+            {
+                return uid;
+            }
         }
     }
 
@@ -1054,20 +1014,10 @@ fn main() {
                 process::exit(1);
             }
 
-            let stored_hash = match lookup_shadow_hash(&caller_name) {
-                Some(h) => h,
-                None => {
-                    eprintln!("doas: cannot read password for {caller_name}");
-                    process::exit(1);
-                }
-            };
-
-            // Locked or empty accounts cannot authenticate.
-            if stored_hash.is_empty() || stored_hash.starts_with('!') {
-                eprintln!("doas: account {caller_name} is locked or has no password");
-                process::exit(1);
-            }
-
+            // Ask first, then look the account up. The old order did the
+            // lookup first and exited with a different message for "no shadow
+            // entry" and for "locked" *before* the prompt appeared, which told
+            // anyone running `doas` which accounts were in which state.
             let password = match read_password_no_echo(&format!("doas ({caller_name}) password: "))
             {
                 Ok(p) => p,
@@ -1077,8 +1027,26 @@ fn main() {
                 }
             };
 
-            if !verify_password(&password, &stored_hash) {
-                eprintln!("doas: authentication failed");
+            // `authenticate` does the store lookup itself, and spends the same
+            // time on a caller with no entry as on one with a wrong password —
+            // so there is no `burn` here, which would only double the cost of
+            // every path.
+            let outcome =
+                authlib::Authenticator::new().authenticate(&caller_name, password.as_bytes());
+
+            if !outcome.is_accepted() {
+                // One wording for every failure, per `Outcome::user_message`:
+                // which of them it was is exactly what an attacker wants to
+                // learn. An entry no password can ever match is the one case
+                // that also needs saying out loud, because only an
+                // administrator can clear it and nobody else will notice.
+                eprintln!("doas: {}", outcome.user_message());
+                if outcome.needs_administrator() {
+                    eprintln!(
+                        "doas: the stored password entry for {caller_name} is in a format this \
+                         system cannot recompute; an administrator must set a new password"
+                    );
+                }
                 process::exit(1);
             }
 
@@ -1114,163 +1082,152 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     // ========================================================================
-    // SHA-256 tests
+    // Password verification
+    //
+    // These replace a set that tested this crate's own `$sha256$salt$digest`
+    // hasher against itself: `hash_password` then `verify_password`, which
+    // agree by construction and would have kept agreeing had the format been
+    // anything at all. What they never asked was whether the format was the one
+    // `passwd` writes -- and it was not, so `doas` refused every real password
+    // on the system while its tests were green.
+    //
+    // The tests below therefore never state a hash. They build the stored entry
+    // with the same `posix::crypt` calls `passwd` uses, so if `passwd`'s format
+    // moves and `doas` does not follow, these fail rather than drift.
     // ========================================================================
+
+    /// A `/etc/shadow` line for `user` whose password is `password`, hashed the
+    /// way `passwd` hashes it.
+    fn shadow_line(user: &str, password: &str) -> String {
+        let mut setting_buf = posix::crypt::buf();
+        let setting =
+            posix::crypt::setting_into(posix::crypt::Method::Sha512, b"doastest", &mut setting_buf)
+                .expect("valid crypt setting");
+        let setting = setting.to_string();
+        let mut hash_buf = posix::crypt::buf();
+        let hashed =
+            posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hash_buf)
+                .expect("hashable password");
+        format!("{user}:{hashed}:19500:0:99999:7:::\n")
+    }
+
+    /// A path in the OS temp directory that nothing else in this run will use.
+    fn tmp_path(tag: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        std::env::temp_dir().join(format!("doas-{tag}-{unique}-{}.test", process::id()))
+    }
+
+    /// An [`authlib::Authenticator`] backed by a temporary shadow file holding
+    /// `content`, and by a `users.yaml` that does not exist -- so the shadow
+    /// file is the only thing that can answer.
+    fn authenticator_with_shadow(tag: &str, content: &str) -> (authlib::Authenticator, PathBuf) {
+        let shadow = tmp_path(tag);
+        fs::write(&shadow, content).expect("write temp shadow");
+        let missing = tmp_path(&format!("{tag}-no-users-yaml"));
+        (
+            authlib::Authenticator::with_stores(&missing, &shadow),
+            shadow,
+        )
+    }
 
     #[test]
-    fn sha256_empty_string() {
+    fn a_password_set_with_passwd_opens_a_doas_prompt() {
+        // The whole point of the change: before it, this was `Rejected`, and
+        // there was no password anyone could type that would not be.
+        let (mut auth, path) = authenticator_with_shadow("ok", &shadow_line("alice", "hunter2"));
         assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            auth.authenticate("alice", b"hunter2"),
+            authlib::Outcome::Accepted
         );
+        let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn sha256_abc() {
+    fn a_wrong_password_does_not() {
+        let (mut auth, path) = authenticator_with_shadow("bad", &shadow_line("alice", "hunter2"));
         assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            auth.authenticate("alice", b"hunter3"),
+            authlib::Outcome::Rejected
         );
+        let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn sha256_longer_input() {
+    fn a_locked_account_cannot_escalate() {
+        let (mut auth, path) = authenticator_with_shadow("locked", "alice:!:19500:0:99999:7:::\n");
+        // Not `Rejected`: no password opens it, and `is_accepted` is the only
+        // thing `main` asks, so an `Outcome` that is not `Accepted` is a refusal
+        // however it got there.
+        let outcome = auth.authenticate("alice", b"hunter2");
+        assert_eq!(outcome, authlib::Outcome::Locked);
+        assert!(!outcome.is_accepted());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_account_with_no_password_cannot_escalate() {
+        // `login` answers this one the other way for a console login. Escalation
+        // is not a login: `nopass` in doas.conf is the only consent that counts.
+        let (mut auth, path) = authenticator_with_shadow("empty", "alice::19500:0:99999:7:::\n");
+        let outcome = auth.authenticate("alice", b"");
+        assert_eq!(outcome, authlib::Outcome::NoPassword);
+        assert!(!outcome.is_accepted());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_hash_this_crate_used_to_write_is_reported_broken_not_wrong() {
+        // A system that ran the old `doas`, or the old `passwd`, has entries in
+        // this shape. They must be distinguishable from a typo, because no
+        // amount of retyping will ever clear one.
+        let (mut auth, path) = authenticator_with_shadow(
+            "legacy",
+            "alice:$sha256$battery_staple$0123456789abcdef:19500:0:99999:7:::\n",
+        );
+        let outcome = auth.authenticate("alice", b"correct_horse");
+        assert_eq!(outcome, authlib::Outcome::Unusable);
+        assert!(outcome.needs_administrator());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_caller_with_no_entry_looks_exactly_like_a_wrong_password() {
+        let (mut auth, path) =
+            authenticator_with_shadow("absent", &shadow_line("alice", "hunter2"));
         assert_eq!(
-            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
-            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+            auth.authenticate("mallory", b"anything"),
+            authlib::Outcome::Rejected
         );
-    }
-
-    #[test]
-    fn sha256_hello() {
+        // And says the same thing, so the prompt is not an account oracle.
         assert_eq!(
-            sha256_hex(b"hello"),
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            authlib::Outcome::Rejected.user_message(),
+            authlib::Outcome::Locked.user_message()
         );
-    }
-
-    // ========================================================================
-    // Password hashing tests
-    // ========================================================================
-
-    #[test]
-    fn hash_password_format() {
-        let hashed = hash_password("test123", "abcdef");
-        assert!(hashed.starts_with("$sha256$abcdef$"));
+        let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn hash_password_deterministic() {
-        let h1 = hash_password("mypassword", "salt123");
-        let h2 = hash_password("mypassword", "salt123");
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
-    fn verify_correct_password() {
-        let hashed = hash_password("correct_horse", "battery_staple");
-        assert!(verify_password("correct_horse", &hashed));
-    }
-
-    #[test]
-    fn verify_wrong_password() {
-        let hashed = hash_password("correct_horse", "battery_staple");
-        assert!(!verify_password("wrong_horse", &hashed));
-    }
-
-    #[test]
-    fn verify_empty_hash() {
-        assert!(!verify_password("anything", ""));
-    }
-
-    #[test]
-    fn verify_malformed_hash() {
-        assert!(!verify_password("test", "$sha256$noseparator"));
-    }
-
-    #[test]
-    fn verify_hash_round_trip() {
-        let password = "S3cur3!Pass";
-        let salt = "0123456789abcdef";
-        let hashed = hash_password(password, salt);
-        assert!(verify_password(password, &hashed));
-        assert!(!verify_password("wrong", &hashed));
-    }
-
-    // ========================================================================
-    // Constant-time comparison tests
-    // ========================================================================
-
-    #[test]
-    fn constant_time_eq_same() {
-        assert!(constant_time_eq(b"hello", b"hello"));
-    }
-
-    #[test]
-    fn constant_time_eq_different() {
-        assert!(!constant_time_eq(b"hello", b"world"));
-    }
-
-    #[test]
-    fn constant_time_eq_different_lengths() {
-        assert!(!constant_time_eq(b"short", b"longer"));
-    }
-
-    #[test]
-    fn constant_time_eq_empty() {
-        assert!(constant_time_eq(b"", b""));
-    }
-
-    // ========================================================================
-    // Shadow parsing tests
-    // ========================================================================
-
-    #[test]
-    fn shadow_parse_valid() {
-        let content = "alice:$sha256$salt$hash:19500:0:99999:7:30:20000:\n\
-                        bob:!:19000:0:99999:7:::\n";
-        let entries = read_shadow_entries_from_str(content);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].username, "alice");
-        assert_eq!(entries[0].hash, "$sha256$salt$hash");
-        assert_eq!(entries[1].username, "bob");
-        assert_eq!(entries[1].hash, "!");
-    }
-
-    #[test]
-    fn shadow_parse_comments_and_blanks() {
-        let content = "# comment\n\nroot:$sha256$s$h:0:0:99999:7:::\n";
-        let entries = read_shadow_entries_from_str(content);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].username, "root");
-    }
-
-    #[test]
-    fn shadow_parse_too_few_fields() {
-        let content = "badline\n";
-        let entries = read_shadow_entries_from_str(content);
-        assert_eq!(entries.len(), 0);
-    }
-
-    /// Helper: parse shadow entries from a string (avoids file I/O in tests).
-    fn read_shadow_entries_from_str(content: &str) -> Vec<ShadowEntry> {
-        content
-            .lines()
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .filter_map(|line| {
-                let fields: Vec<&str> = line.split(':').collect();
-                if fields.len() >= 2 {
-                    Some(ShadowEntry {
-                        username: fields[0].to_string(),
-                        hash: fields[1].to_string(),
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect()
+    fn only_accepted_is_a_yes() {
+        // `main` gates on `is_accepted`. If that ever became `!= Rejected`,
+        // `Locked`, `NoPassword`, `Unusable` and `RateLimited` would all become
+        // root, so it is worth a test of its own.
+        for outcome in [
+            authlib::Outcome::Rejected,
+            authlib::Outcome::Locked,
+            authlib::Outcome::NoPassword,
+            authlib::Outcome::Unusable,
+            authlib::Outcome::RateLimited {
+                retry_after_secs: 30,
+            },
+        ] {
+            assert!(!outcome.is_accepted(), "{outcome:?} must not admit anyone");
+        }
+        assert!(authlib::Outcome::Accepted.is_accepted());
     }
 
     // ========================================================================

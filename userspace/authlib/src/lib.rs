@@ -51,14 +51,27 @@
 
 #![deny(clippy::all, clippy::pedantic)]
 
+mod faillock;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use faillock::Tally;
 
 /// The native user database (`design.txt`'s YAML rule).
 pub const DEFAULT_USERS_YAML: &str = "/etc/users.yaml";
 
 /// The `shadow(5)` password file.
 pub const DEFAULT_SHADOW: &str = "/etc/shadow";
+
+/// The shared failure tally.
+///
+/// Under `/var/run` rather than `/var/lib` because it describes an attack in
+/// progress, not a fact about the accounts: it should not survive a reboot. A
+/// tally that persisted across one would let a burst of failures before a crash
+/// keep delaying a user afterwards, with nothing left on the machine explaining
+/// why.
+pub const DEFAULT_FAILLOCK: &str = "/var/run/authlib/tally";
 
 /// Failures a user gets before the delay starts.
 ///
@@ -340,11 +353,24 @@ enum Resolved {
     Unknown,
 }
 
-/// One user's recent failures.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Tally {
-    failures: u32,
-    last_failure_secs: u64,
+/// Merge this process's view of a user's failures with the system's.
+///
+/// Field-by-field maximum, not "whichever record is newer". The two counters
+/// advance independently — a daemon's memory knows about failures it saw before
+/// the shared file existed, and the shared file knows about failures this
+/// process never saw — so taking either record whole would discard the other's
+/// evidence. Taking the larger of each field can only ever *lengthen* a delay,
+/// which is the direction a rate limit is allowed to be wrong in.
+#[must_use]
+fn combine(mine: Option<Tally>, shared: Option<Tally>) -> Option<Tally> {
+    match (mine, shared) {
+        (None, None) => None,
+        (Some(t), None) | (None, Some(t)) => Some(t),
+        (Some(a), Some(b)) => Some(Tally {
+            failures: a.failures.max(b.failures),
+            last_failure_secs: a.last_failure_secs.max(b.last_failure_secs),
+        }),
+    }
 }
 
 /// How long a user with `failures` failures is refused for.
@@ -391,12 +417,27 @@ fn wall_clock_secs() -> u64 {
 /// place that guess lives, rather than a guess each caller makes. Whichever way
 /// B-Q4 lands, one of the two branches becomes dead code here and no caller
 /// changes.
+/// # Where the failure tally lives
+///
+/// In memory *and*, for a verifier built by [`Authenticator::new`], in a file
+/// shared with every other program that asks — see [`faillock`]. The in-memory
+/// half alone is enough for a daemon, which outlives its connections, and does
+/// nothing for `doas`/`su`/`login`, which do not; the shared half is what makes
+/// the growing delay apply to a program that runs once and exits.
+///
+/// The two are combined by taking the **larger** count, so neither can shorten
+/// the other's delay: a machine whose `/var/run` is unwritable still rate-limits
+/// a daemon exactly as it did before this file existed.
 #[derive(Debug, Clone)]
 pub struct Authenticator {
     users_yaml: PathBuf,
     shadow: PathBuf,
     now: fn() -> u64,
     tally: BTreeMap<String, Tally>,
+    /// `None` for a verifier that counts only in memory — the historical
+    /// behaviour, kept for [`Authenticator::with_stores`] so that a test or a
+    /// chroot does not write to the live system's tally.
+    faillock: Option<PathBuf>,
 }
 
 impl Default for Authenticator {
@@ -406,16 +447,20 @@ impl Default for Authenticator {
 }
 
 impl Authenticator {
-    /// A verifier over the system's real stores.
+    /// A verifier over the system's real stores, sharing the system's tally.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_stores(
-            Path::new(DEFAULT_USERS_YAML),
-            Path::new(DEFAULT_SHADOW),
-        )
+        Self::with_stores(Path::new(DEFAULT_USERS_YAML), Path::new(DEFAULT_SHADOW))
+            .with_faillock(Path::new(DEFAULT_FAILLOCK))
     }
 
     /// A verifier over stores at given paths — for tests, and for a chroot.
+    ///
+    /// Counts failures **in memory only**. A caller that wants the tally shared
+    /// with the rest of the system adds [`Authenticator::with_faillock`]; this
+    /// constructor deliberately does not, so that a test cannot delay a real
+    /// user by running, and a chroot cannot be used to run up a tally outside
+    /// it.
     #[must_use]
     pub fn with_stores(users_yaml: &Path, shadow: &Path) -> Self {
         Self {
@@ -423,7 +468,26 @@ impl Authenticator {
             shadow: shadow.to_path_buf(),
             now: wall_clock_secs,
             tally: BTreeMap::new(),
+            faillock: None,
         }
+    }
+
+    /// Share the failure tally with every other program that uses `path`.
+    ///
+    /// The file is read before each answer and rewritten after each failure, so
+    /// a `doas` that runs once still sees what the last `su` recorded. An
+    /// unreadable or unwritable file is not an error: the in-memory tally still
+    /// applies, and refusing to authenticate anyone because `/var/run` is full
+    /// would be a worse failure than losing the shared count.
+    ///
+    /// The file and its directory are created if absent, owner-only (0600 and
+    /// 0700). The caller is expected to be privileged at the point it
+    /// authenticates; one that is not simply loses the shared count, which is
+    /// the same degradation as an unwritable file.
+    #[must_use]
+    pub fn with_faillock(mut self, path: &Path) -> Self {
+        self.faillock = Some(path.to_path_buf());
+        self
     }
 
     /// Replace the clock the rate limit reads.
@@ -445,7 +509,17 @@ impl Authenticator {
     pub fn authenticate(&mut self, username: &str, password: &[u8]) -> Outcome {
         let now = (self.now)();
 
-        if let Some(tally) = self.tally.get(username) {
+        // The shared table is read fresh on every call rather than cached, for
+        // the same reason the password store is: a failure recorded by another
+        // program a moment ago must count against this attempt, not against the
+        // next time this process starts.
+        let mut shared = self.shared_table();
+        let combined = combine(
+            self.tally.get(username).copied(),
+            Self::shared_get(shared.as_ref(), username),
+        );
+
+        if let Some(tally) = combined {
             let ready = tally
                 .last_failure_secs
                 .saturating_add(delay_for(tally.failures));
@@ -472,11 +546,24 @@ impl Authenticator {
 
         if outcome.is_accepted() {
             self.tally.remove(username);
+            if let Some(table) = shared.as_mut() {
+                table.clear(username);
+            }
         } else {
-            let tally = self.tally.entry(username.to_string()).or_default();
-            tally.failures = tally.failures.saturating_add(1);
-            tally.last_failure_secs = now;
+            // Both halves are advanced from the *combined* count, so a program
+            // that starts with an empty memory does not restart the escalation
+            // at one when the shared table already says five.
+            let base = combined.unwrap_or_default();
+            let next = Tally {
+                failures: base.failures.saturating_add(1),
+                last_failure_secs: now,
+            };
+            self.tally.insert(username.to_string(), next);
+            if let Some(table) = shared.as_mut() {
+                table.set(username, next);
+            }
         }
+        self.write_shared(shared.as_ref());
         outcome
     }
 
@@ -484,12 +571,46 @@ impl Authenticator {
     /// `faillock --reset`.
     pub fn reset(&mut self, username: &str) {
         self.tally.remove(username);
+        let mut shared = self.shared_table();
+        if let Some(table) = shared.as_mut() {
+            table.clear(username);
+        }
+        self.write_shared(shared.as_ref());
     }
 
     /// How many consecutive failures are recorded for `username`.
+    ///
+    /// The larger of what this verifier has seen and what the shared table says,
+    /// which is the number the delay is actually computed from.
     #[must_use]
     pub fn failures(&self, username: &str) -> u32 {
-        self.tally.get(username).map_or(0, |t| t.failures)
+        let shared = self.shared_table();
+        combine(
+            self.tally.get(username).copied(),
+            Self::shared_get(shared.as_ref(), username),
+        )
+        .map_or(0, |t| t.failures)
+    }
+
+    /// The shared table, or `None` for a memory-only verifier.
+    fn shared_table(&self) -> Option<faillock::Table> {
+        self.faillock.as_deref().map(faillock::Table::load)
+    }
+
+    /// `username`'s row in the shared table, if there is a shared table at all.
+    fn shared_get(table: Option<&faillock::Table>, username: &str) -> Option<Tally> {
+        table.and_then(|t| t.get(username))
+    }
+
+    /// Persist the shared table, ignoring failure — see
+    /// [`Authenticator::with_faillock`].
+    fn write_shared(&self, table: Option<&faillock::Table>) {
+        if let (Some(path), Some(table)) = (self.faillock.as_deref(), table) {
+            // Deliberately unchecked: the in-memory tally still limits this
+            // process, so a failed write costs the shared count and nothing
+            // else. See `with_faillock`.
+            let _ = table.store(path);
+        }
     }
 
     /// Which stored entry answers for `username`.
@@ -500,11 +621,7 @@ impl Authenticator {
             if record.is_locked() {
                 return Resolved::Locked;
             }
-            return Resolved::Entry(
-                record
-                    .get(userdb::field::PASSWORD_HASH)
-                    .unwrap_or_default(),
-            );
+            return Resolved::Entry(record.get(userdb::field::PASSWORD_HASH).unwrap_or_default());
         }
         match shadow::lookup(&self.shadow, username) {
             Some(entry) => Resolved::Entry(entry.password_hash),
@@ -518,7 +635,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::{
-        Authenticator, FREE_ATTEMPTS, MAX_DELAY_SECS, Outcome, check_stored, delay_for, shadow,
+        Authenticator, FREE_ATTEMPTS, MAX_DELAY_SECS, Outcome, Tally, check_stored, combine,
+        delay_for, shadow,
     };
     use std::path::PathBuf;
 
@@ -651,10 +769,15 @@ mod tests {
     fn a_lookup_skips_comments_and_blank_lines() {
         let text = "# comment\n\nalice:$6$a$b:1:2:3:4:5:6:\nbob:!:::::::\n";
         assert_eq!(
-            shadow::lookup_in(text, "alice").expect("alice").password_hash,
+            shadow::lookup_in(text, "alice")
+                .expect("alice")
+                .password_hash,
             "$6$a$b"
         );
-        assert_eq!(shadow::lookup_in(text, "bob").expect("bob").password_hash, "!");
+        assert_eq!(
+            shadow::lookup_in(text, "bob").expect("bob").password_hash,
+            "!"
+        );
         assert!(shadow::lookup_in(text, "carol").is_none());
         assert!(
             shadow::lookup_in(text, "# comment").is_none(),
@@ -675,7 +798,10 @@ mod tests {
     fn the_shadow_store_answers_when_the_native_one_has_no_such_user() {
         let stored = entry_for("correct horse");
         let (mut auth, path) = authenticator_over_shadow(&format!("alice:{stored}:1:2:3:4:5:6:\n"));
-        assert_eq!(auth.authenticate("alice", b"correct horse"), Outcome::Accepted);
+        assert_eq!(
+            auth.authenticate("alice", b"correct horse"),
+            Outcome::Accepted
+        );
         assert_eq!(auth.authenticate("alice", b"wrong"), Outcome::Rejected);
         assert_eq!(auth.authenticate("nobody", b"wrong"), Outcome::Rejected);
         let _ = std::fs::remove_file(path);
@@ -725,7 +851,10 @@ mod tests {
         db.save(&yaml_path).expect("save yaml");
 
         let mut auth = Authenticator::with_stores(&yaml_path, &tmp("absent-shadow"));
-        assert_eq!(auth.authenticate("alice", b"correct horse"), Outcome::Locked);
+        assert_eq!(
+            auth.authenticate("alice", b"correct horse"),
+            Outcome::Locked
+        );
         let _ = std::fs::remove_file(yaml_path);
     }
 
@@ -763,8 +892,7 @@ mod tests {
     /// fails with a time it never set. That is exactly how these two first
     /// failed. A lock would serialise them but would also hide the coupling;
     /// separate cells mean there is nothing to serialise.
-    static FAKE_NOW_BUDGET: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(1000);
+    static FAKE_NOW_BUDGET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1000);
     static FAKE_NOW_TWO_USERS: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(5000);
 
@@ -781,8 +909,8 @@ mod tests {
         let stored = entry_for("correct horse");
         let path = tmp("ratelimit-shadow");
         std::fs::write(&path, format!("alice:{stored}:1:2:3:4:5:6:\n")).expect("write");
-        let mut auth = Authenticator::with_stores(&tmp("absent.yaml"), &path)
-            .with_clock(fake_now_budget);
+        let mut auth =
+            Authenticator::with_stores(&tmp("absent.yaml"), &path).with_clock(fake_now_budget);
 
         FAKE_NOW_BUDGET.store(1000, std::sync::atomic::Ordering::Relaxed);
         for n in 1..=FREE_ATTEMPTS {
@@ -808,7 +936,10 @@ mod tests {
 
         // Past the window, the correct password works and clears the tally.
         FAKE_NOW_BUDGET.store(1002, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(auth.authenticate("alice", b"correct horse"), Outcome::Accepted);
+        assert_eq!(
+            auth.authenticate("alice", b"correct horse"),
+            Outcome::Accepted
+        );
         assert_eq!(auth.failures("alice"), 0);
 
         // And an administrative reset does the same without a password.
@@ -819,7 +950,10 @@ mod tests {
         assert!(auth.failures("alice") > FREE_ATTEMPTS);
         auth.reset("alice");
         assert_eq!(auth.failures("alice"), 0);
-        assert_eq!(auth.authenticate("alice", b"correct horse"), Outcome::Accepted);
+        assert_eq!(
+            auth.authenticate("alice", b"correct horse"),
+            Outcome::Accepted
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -833,8 +967,8 @@ mod tests {
             format!("alice:{stored}:1:2:3:4:5:6:\nbob:{stored}:1:2:3:4:5:6:\n"),
         )
         .expect("write");
-        let mut auth = Authenticator::with_stores(&tmp("absent.yaml"), &path)
-            .with_clock(fake_now_two_users);
+        let mut auth =
+            Authenticator::with_stores(&tmp("absent.yaml"), &path).with_clock(fake_now_two_users);
         FAKE_NOW_TWO_USERS.store(5000, std::sync::atomic::Ordering::Relaxed);
         for _ in 0..=FREE_ATTEMPTS {
             let _ = auth.authenticate("alice", b"wrong");
@@ -843,7 +977,159 @@ mod tests {
             auth.authenticate("alice", b"correct horse"),
             Outcome::RateLimited { .. }
         ));
-        assert_eq!(auth.authenticate("bob", b"correct horse"), Outcome::Accepted);
+        assert_eq!(
+            auth.authenticate("bob", b"correct horse"),
+            Outcome::Accepted
+        );
         let _ = std::fs::remove_file(path);
+    }
+
+    // ---- The shared tally ----
+    //
+    // One static clock per test, for the reason spelled out above
+    // `FAKE_NOW_BUDGET`: `cargo test` runs these concurrently.
+
+    static FAKE_NOW_SHARED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(7000);
+    static FAKE_NOW_SHARED_CLEAR: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(9000);
+    static FAKE_NOW_ISOLATED: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(11_000);
+
+    fn fake_now_shared() -> u64 {
+        FAKE_NOW_SHARED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn fake_now_shared_clear() -> u64 {
+        FAKE_NOW_SHARED_CLEAR.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn fake_now_isolated() -> u64 {
+        FAKE_NOW_ISOLATED.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A shadow file holding `alice` with the password `correct horse`, plus a
+    /// scratch path for the shared tally. Both are the caller's to delete.
+    fn shared_fixture(tag: &str) -> (PathBuf, PathBuf) {
+        let stored = entry_for("correct horse");
+        let shadow = tmp(&format!("{tag}-shadow"));
+        std::fs::write(&shadow, format!("alice:{stored}:1:2:3:4:5:6:\n")).expect("write shadow");
+        let lock = tmp(&format!("{tag}-tally"));
+        let _ = std::fs::remove_file(&lock);
+        (shadow, lock)
+    }
+
+    /// The whole point of the shared tally: a program that runs once and exits
+    /// must inherit the failures of the last one. Before this, every `doas`
+    /// invocation started at zero, so the growing delay never grew and guessing
+    /// at the prompt was free.
+    #[test]
+    fn a_program_that_runs_once_inherits_the_previous_run_s_failures() {
+        let (shadow, lock) = shared_fixture("inherit");
+        FAKE_NOW_SHARED.store(7000, std::sync::atomic::Ordering::Relaxed);
+
+        // Each `Authenticator` here stands for one short-lived process: it is
+        // built, it asks once, and it is dropped with its memory.
+        for _ in 0..=FREE_ATTEMPTS {
+            let mut once = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+                .with_faillock(&lock)
+                .with_clock(fake_now_shared);
+            assert_eq!(once.authenticate("alice", b"wrong"), Outcome::Rejected);
+        }
+
+        // A brand-new process, with nothing in memory, is refused outright —
+        // and refused even though the password it presents is the right one.
+        let mut fresh = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            .with_faillock(&lock)
+            .with_clock(fake_now_shared);
+        assert!(
+            matches!(
+                fresh.authenticate("alice", b"correct horse"),
+                Outcome::RateLimited { .. }
+            ),
+            "a fresh process must inherit the shared delay"
+        );
+        assert_eq!(fresh.failures("alice"), FREE_ATTEMPTS + 1);
+
+        let _ = std::fs::remove_file(shadow);
+        let _ = std::fs::remove_file(lock);
+    }
+
+    /// A success clears the count for every program, not just the one that saw
+    /// it — otherwise the user who just proved who they are stays delayed
+    /// everywhere else.
+    #[test]
+    fn a_success_in_one_program_clears_the_tally_for_the_next() {
+        let (shadow, lock) = shared_fixture("clear");
+        FAKE_NOW_SHARED_CLEAR.store(9000, std::sync::atomic::Ordering::Relaxed);
+
+        for _ in 0..FREE_ATTEMPTS {
+            let mut once = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+                .with_faillock(&lock)
+                .with_clock(fake_now_shared_clear);
+            assert_eq!(once.authenticate("alice", b"wrong"), Outcome::Rejected);
+        }
+
+        let mut good = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            .with_faillock(&lock)
+            .with_clock(fake_now_shared_clear);
+        assert_eq!(
+            good.authenticate("alice", b"correct horse"),
+            Outcome::Accepted
+        );
+
+        let next = Authenticator::with_stores(&tmp("absent.yaml"), &shadow)
+            .with_faillock(&lock)
+            .with_clock(fake_now_shared_clear);
+        assert_eq!(next.failures("alice"), 0, "the success must clear the file");
+
+        let _ = std::fs::remove_file(shadow);
+        let _ = std::fs::remove_file(lock);
+    }
+
+    /// `with_stores` alone must not touch the system's tally: a test suite that
+    /// ran up a real user's failures, or a chroot that could, would be a worse
+    /// bug than the one the shared tally fixes.
+    #[test]
+    fn a_memory_only_verifier_writes_no_shared_file() {
+        let (shadow, lock) = shared_fixture("isolated");
+        FAKE_NOW_ISOLATED.store(11_000, std::sync::atomic::Ordering::Relaxed);
+
+        let mut auth =
+            Authenticator::with_stores(&tmp("absent.yaml"), &shadow).with_clock(fake_now_isolated);
+        for _ in 0..=FREE_ATTEMPTS {
+            let _ = auth.authenticate("alice", b"wrong");
+        }
+        // In-memory limiting still works — this is the daemon's behaviour, and
+        // it is what a machine with an unwritable `/var/run` falls back to.
+        assert!(matches!(
+            auth.authenticate("alice", b"correct horse"),
+            Outcome::RateLimited { .. }
+        ));
+        assert!(!lock.exists(), "a memory-only verifier wrote a tally file");
+
+        let _ = std::fs::remove_file(shadow);
+    }
+
+    #[test]
+    fn combining_two_tallies_takes_the_longer_delay_from_each_field() {
+        let mine = Tally {
+            failures: 5,
+            last_failure_secs: 100,
+        };
+        let shared = Tally {
+            failures: 2,
+            last_failure_secs: 900,
+        };
+        assert_eq!(combine(None, None), None);
+        assert_eq!(combine(Some(mine), None), Some(mine));
+        assert_eq!(combine(None, Some(shared)), Some(shared));
+        assert_eq!(
+            combine(Some(mine), Some(shared)),
+            Some(Tally {
+                failures: 5,
+                last_failure_secs: 900,
+            }),
+            "neither half may shorten the other's delay"
+        );
     }
 }

@@ -17573,17 +17573,21 @@ sites). Fixing it surfaced a separate divergence, logged next.
 **In short.** Every process has a set of "resource limits" — ceilings on things
 like stack size, open files, or how much priority it may ask for. Our kernel
 keeps the real ones. Our libc keeps a *second*, private copy and never consults
-the kernel's. Today they happen to agree, because both were written from the
-same Linux defaults. Nothing keeps them agreeing: if the kernel lowers a limit
-for a process, libc will keep reporting and enforcing the old one, and a
-program that checks its limit will be told something the kernel does not
-believe.
+the kernel's. **They already disagree** — so a program that asks "how many
+files may I open?" is told 1024 or 256 depending on which ABI it was compiled
+for, on the same machine, in the same process.
 
-**Where it lives.** `posix/src/resource.rs` → `mod limit_store` (around line
-174): on target a `static mut RLIMITS`, on host a `thread_local!`. Every
-`getrlimit` / `setrlimit` / `prlimit64` reads and writes *that*. The kernel's
-authoritative table is `kernel/src/proc/pcb.rs` (the `RLIMIT_*_INDEX`
-constants and its own `INIT_RLIMITS`-equivalent).
+(This entry originally said the two "happen to agree" and that the hazard was
+latent. Both were assumptions, not measurements, and both were false. See
+**Correction 2026-08-21** below.)
+
+**Where it lives.** `posix/src/resource.rs` → `mod limit_store` (line 140; the
+table itself is `RLIMITS_INIT` at line 151): on target a `static mut RLIMITS`,
+on host a `thread_local!`. Every `getrlimit` / `setrlimit` / `prlimit64` reads
+and writes *that*. The kernel's authoritative table is `DEFAULT_RLIMITS`
+(`kernel/src/proc/pcb.rs:2382`), copied into `Process::rlimits` at creation
+(`pcb.rs:1342`), inherited across `fork`, and read by the kernel's own
+`setpriority`, `sched_setscheduler`, `brk` and `write` paths.
 
 **Why libc cannot simply ask.** There is no native SlateOS syscall for
 rlimits. The kernel's table is reachable only through the Linux-compat
@@ -17594,25 +17598,81 @@ the path a *ported Linux program* takes, not the path our own libc's
 own calls through the compat numbers. Both are lane A's tree, so this needs a
 `requests/b-a-*.md` before it can be done.
 
-**Why it is not urgent.** Nothing today lowers a process's rlimits from the
-kernel side, so the two copies are still in sync — this is a latent
-correctness hazard, not a live bug. It becomes live the moment the kernel
-starts enforcing or adjusting a limit on its own (a container/namespace
-policy, an `execve` that resets limits, a service manager that sets them at
-spawn).
+**Correction 2026-08-21 — it is not latent, and it was never two rows.** This
+entry claimed the copies "are still in sync" and had drifted "on two rows."
+Neither had been checked; both were wrong. Reading `DEFAULT_RLIMITS`
+(`kernel/src/proc/pcb.rs:2382`) against `RLIMITS_INIT`
+(`posix/src/resource.rs:151`) row by row gives **three** disagreements out of
+sixteen, present today at cold start:
 
-**Proper fix.** File `requests/b-a-native-rlimit-syscalls.md` asking for a
-native rlimit get/set pair keyed on the kernel's `RLIMIT_*_INDEX` table, then
-make `limit_store` a cache-through to it (or delete the store entirely and
-call every time — rlimit reads are not a hot path). Until then, do **not** add
-more libc logic that treats the local table as authoritative beyond what
-`can_nice()` / `current_rtprio_limit()` / `check_mlock_caps()` already do.
+| # | Resource | kernel | libc |
+|---|---|---|---|
+| 7 | `RLIMIT_NOFILE` | `(1024, 4096)` | `(256, 256)` — `fdtable::MAX_FDS` |
+| 11 | `RLIMIT_SIGPENDING` | `(65_536, 65_536)` | `(INFINITY, INFINITY)` |
+| 12 | `RLIMIT_MSGQUEUE` | `(819_200, 819_200)` | `(INFINITY, INFINITY)` |
+
+Every other row matches exactly. So the "it becomes live the moment the kernel
+adjusts a limit" framing was backwards — it is live now, without the kernel
+doing anything, purely because the two tables were typed twice.
+
+Note the shape of the mistake, because it is the reusable part: the original
+entry inferred "they agree" from "both were written from the same Linux
+defaults." That is a plausible story about the code's history, not an
+observation of the code. Two hand-maintained copies of one fact do not stay
+equal because of where they came from.
+
+**Two related bugs, in lane A's tree, found while measuring the above.** Both
+are written up in the request; neither is Lane B's to fix. (i) The kernel's
+`RLIMIT_NOFILE` default of `(1024, 4096)` contradicts the kernel's own Linux fd
+table, `kernel/src/proc/linux_fd.rs:57`, which is `MAX_FDS = 256` — so the
+kernel promises ported programs a number it cannot honour, and they get
+`EMFILE` at 256. (ii) The kernel's `prlimit64` has no `sysctl_nr_open`
+equivalent: Linux rejects any `RLIMIT_NOFILE` hard limit above it
+unconditionally, but our handler (`kernel/src/syscall/linux.rs:45323`) checks
+only `cur > max`. libc *does* enforce that ceiling (`posix/src/resource.rs:407`,
+`EPERM` above `MAX_FDS`) — a third way the two ABIs answer one question
+differently.
+
+On (ii), note what the first draft of this correction got wrong, since it is
+the same failure the entry is about. I wrote that a process could therefore
+install `RLIMIT_NOFILE = (u64::MAX, u64::MAX)`. It cannot: `pcb::set_rlimit`
+(`pcb.rs:2470`) independently rejects `new_max > old_max` for every resource,
+so the reachable ceiling is the seeded hard limit, `4096`. Still 16× the
+256-entry table, still `EMFILE` for anyone who believes it — but bounded. I had
+inferred "no ceiling check on the path" from reading the `prlimit64` handler
+and not read the function it delegates to. Reading one layer and predicting the
+next is how this entry's original "they happen to agree" got written.
+
+A related asymmetry found the same way: `pcb::set_rlimit`'s blanket
+no-raise rule has *no* privileged escape (its doc: `CAP_SYS_RESOURCE` "we have
+no equivalent"), and that is accurate — the kernel defines no such constant and
+`pcb.rs:994` records that capabilities aren't enforced. libc's raise-gate keys
+on `sys_capability::CAP_SYS_RESOURCE` (`posix/src/sys_capability.rs:157`),
+which the kernel never sees, so it is self-asserted rather than authoritative.
+When the syscalls land, libc drops its local check and inherits the kernel's
+rule.
+
+**Proper fix.** ✅ `requests/b-a-native-rlimit-syscalls.md` **filed 2026-08-21**
+— asks for a native `SYS_RLIMIT_GET`/`SYS_RLIMIT_SET` pair keyed on the
+kernel's `RLIMIT_*_INDEX` numbering, modelled on `SYS_TTY_GET_TERMIOS` /
+`SYS_TTY_SET_TERMIOS` (which lane A built to fix this exact shape of bug for
+`termios` — its own doc comment says *"libc previously answered this from a
+hardcoded constant of its own"*). When it lands, **delete `limit_store`
+outright** and call through every time. Do *not* build a cache: rlimit reads
+are not a hot path, and a cache is how the same class of bug gets reintroduced
+at smaller scale. The host-build `thread_local!` half stays as the test double.
+
+Until it lands, do **not** add more libc logic that treats the local table as
+authoritative beyond what `can_nice()` / `current_rtprio_limit()` /
+`check_mlock_caps()` already do. Copying the kernel's three values across as an
+interim fix is explicitly **not** wanted — it restores the appearance of
+agreement, which is what stopped anyone checking for five days.
 
 **Found** 2026-08-16 by lane B while fixing
 TD-POSIX-CAP-GATES-OMIT-LINUX-S-NON-CAPABILITY-ALTERNATIVE, on discovering
 that `RLIMITS_INIT` and `kernel/src/proc/pcb.rs` are two independent
-hand-written copies of Linux's `INIT_RLIMITS` that had already drifted apart
-on two rows.
+hand-written copies of Linux's `INIT_RLIMITS`. Re-measured 2026-08-21 while
+filing the request.
 
 ---
 
@@ -31722,6 +31782,28 @@ from it. This entry stays open for the remaining 137 apps, none of which is
 wired yet, and because a window whose pixels never reach a screen is not yet a
 usable desktop — `TD-COMPOSITOR-HAS-NO-SCANOUT` is now the last link in the
 chain from an app's `RenderTree` to a photon.
+
+
+**One of the 137 now has something specific it cannot call (2026-08-21).**
+`apps/settings` is the only application in the tree that edits the user's
+appearance settings, and the compositor now accepts a `ReloadAppearance`
+request so that a change to window corners or drop shadows reaches windows that
+are already open (`design-decisions.md` §500). The sender API exists —
+`oswindow::EventLoop::appearance_changed()` — and Settings cannot call it,
+because it is one of the unwired 137: its `Cargo.toml` names only `guitk` and
+`appearance`, and its `main()` says *"In a real Slate OS environment, this
+would enter the compositor event loop. For now, render one frame to verify the
+UI builds correctly."*
+
+So the live-reload path is complete on the compositor's side and has no caller.
+That is recorded here rather than papered over: opening a socket inside a
+program with no event loop to service it would put a connection in a process
+that cannot answer anything that arrives on it, which is the `oswindow`
+simulation mistake of (d½) in a new place. Until Settings is wired, changing an
+appearance setting still requires restarting the compositor, and the fix is
+step (e) applied to Settings — an `oswindow` event loop, a window, and one
+`appearance_changed()` call after `AppearanceFile::save()` in
+`save_appearance` (`apps/settings/src/main.rs`, ~line 880).
 
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
@@ -48402,6 +48484,16 @@ demo and its own tests.
 `render_start_menu` (:2564), `render_calendar` (:2948).
 `gui/desktop/Cargo.toml` — no `[lib]`.
 
+*(Both paragraphs above are as-written and now partly historical. The `[lib]`
+exists — see progress note (3) below — and the file is `src/lib.rs`, not
+`src/main.rs`. **There are four render methods, not five:**
+`render_window_decorations` was deleted with the shell's duplicate decorator
+(`TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS`, resolved),
+which is a simplification for this entry rather than a complication: the loop
+below can submit everything `DesktopShell` renders, with no carve-out for a
+surface the compositor also draws. The remaining four are `render_taskbar`,
+`render_alt_tab`, `render_start_menu` and `render_calendar`.)*
+
 **Why this is logged and not fixed (2026-08-21):** it is the render half of
 `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`, and it has the same single cause —
 the shell has no compositor/IPC event loop yet. That entry covers the outbound
@@ -48472,8 +48564,14 @@ corresponding bug is reintroduced. A taskbar can now be told what to list.
 **What remains is exactly one thing: the loop itself.** `desktop` gains a
 `[lib]`, a binary opens three `Layer`-banded windows (wallpaper, taskbar,
 popups) through `oswindow`, calls `watch_desktop(true)`, and on each
-`desktop_revision` change re-renders the five trees and submits them. Both
+`desktop_revision` change re-renders the four trees and submits them. Both
 named blockers are gone; nothing is waiting on another lane.
+
+*(Was "five trees" when written. It is four: the fifth was
+`render_window_decorations`, and submitting it would have double-drawn every
+title bar in the desktop. It has since been deleted — see
+`TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS`, resolved —
+so the loop can now render everything the shell has without qualification.)*
 
 **Progress 2026-08-21 (3) — `desktop` is a library.** The `[lib]` above now
 exists: `src/main.rs` became `src/lib.rs`, the crate declares both a `[lib]`
@@ -48495,6 +48593,70 @@ keeping both and mapping between them. The shell's map has to become a
 shell's own (virtual-desktop assignment being the real one). Doing that first
 is what stops the loop from being written against a model that disagrees with
 the compositor.
+
+**Progress 2026-08-21 (4) — the second design question the loop has to answer,
+found by reading rather than by writing the loop and hitting it: the shell
+hit-tests in screen coordinates, and a client is only ever told window-local
+ones.** Three facts, each checked in the code rather than assumed:
+
+- *The shell's rects are screen-space.* `taskbar_rect` (`gui/desktop/src/lib.rs`
+  :979) computes its `y` as `(self.screen_height as f32 - height).max(0.0)`, and
+  `start_button_rect` (:1001) and `clock_rect` (:2592) both derive from it. On a
+  1080-tall screen the start button is at y ≈ 1040.
+- *A client is told window-local ones.* `guiremote::InputEvent`'s own doc
+  (`gui/remote/src/input.rs`:71-73): "Mouse coordinates inside `event` are
+  already window-local, so the client needs no knowledge of where it sits on
+  screen to interpret them." The compositor subtracts the client rect's origin
+  before it sends (`gui/compositor/src/lib.rs`:4881, and `wire_event` at :2499
+  only widens `i32`→`f32`). A press on the start button arrives at y ≈ 8.
+- *So a naive loop mis-routes every click it receives.* Feeding the delivered
+  coordinates straight into `DesktopShell::hit_test` tests y ≈ 8 against a
+  taskbar that believes it starts at y ≈ 1040, falls through every chrome arm,
+  and lands on `Hit::Desktop`. The discrepancy is exactly
+  `screen_height - taskbar_height`, i.e. it is invisible on a screen the same
+  height as the taskbar and grows with the display — the shape of bug that
+  passes every test written on a small fixture.
+
+**The fix is an explicit per-surface origin, applied in *both* directions, and
+it is symmetric — which is the reason to state it before writing either half.**
+The loop places the surfaces, so it alone knows each origin. Input needs
+`+origin` on the way in (window-local → screen) before `hit_test` sees it;
+rendering needs `−origin` on the way out (screen → window-local) before the
+tree is submitted, because `render_taskbar` emits its commands at y ≈ 1040
+while the taskbar surface's own buffer starts at 0. Getting one direction right
+and the other wrong yields a desktop that draws correctly and responds to
+clicks in the wrong place, or vice versa, so the two belong to one abstraction
+and one test: a point that hit-tests to a given element must be a point that
+element was drawn at.
+
+**Do not fix it by re-basing the shell's rects per surface.** That would make
+`taskbar_rect` return `y = 0` and put the shell back to two answers for where
+the taskbar is — the thing this entry exists to remove — and it would break the
+hit-test ordering in `hit_test`, which relies on all the chrome rects living in
+one comparable space (start button before taskbar panel before window, :1313-
+1341).
+
+**A related consequence worth deciding before the loop, not during it: two of
+`Hit`'s variants become unreachable, and one popup behaviour stops working on
+its own.**
+
+- `Hit::WindowContent` and `Hit::Desktop` cannot be produced in production once
+  the shell is a client. The compositor routes a press to the topmost window
+  whose *client* rect contains it (`Compositor::window_at`, :4974), so a click
+  on another application's window is delivered to that application and never
+  reaches the shell at all. They stay reachable — and useful — from the shell's
+  own tests, which drive `hit_test` directly over a whole screen; but the loop
+  must not be written as though it will see them.
+- *Click-outside-to-dismiss.* The start menu and the calendar close when the
+  user clicks away from them. If each popup is its own small window, the click
+  that should dismiss it lands on somebody else's window and the shell is never
+  told, so the menu stays open under the window the user just clicked. The
+  answer is the one every real desktop uses: while a popup is open, the shell's
+  `Overlay` surface covers the whole screen and is the popup's dismiss layer,
+  and is unmapped when no popup is open so ordinary clicks pass through. That
+  makes the overlay's origin `(0, 0)` — screen space, no translation — which is
+  why the offset abstraction above must be per-surface rather than one global
+  constant.
 
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 
@@ -48556,7 +48718,7 @@ nothing obeys it. 49 of the shell's modules — every settings page, every
 dialog, the taskbar, the launcher, the login screen, the on-screen displays —
 each declare their own private list of colour constants and paint with those.
 The user can set the desktop to Light and watch the whole of it stay dark
-except the five surfaces `DesktopShell` renders itself. The setting is real,
+except the four surfaces `DesktopShell` renders itself. The setting is real,
 it is saved to disk, it is read back correctly, and then it is ignored.
 
 **Where:** `gui/desktop/src/*.rs` — 549 `const NAME: Color = …` declarations
@@ -48568,7 +48730,7 @@ times. The canonical answer lives in `gui/appearance/src/lib.rs`
 `TransparencyLevel::panel_alpha`, `AppearanceSettings::effective_accent`).
 
 **Reproduce:** set `theme.mode: light` in the appearance config and start the
-shell. `DesktopShell`'s own five render methods respond. Open any settings
+shell. `DesktopShell`'s own four render methods respond. Open any settings
 page, the launcher, or a dialog: unchanged, still Catppuccin Mocha. Same for
 a non-default accent — `effective_accent()` reaches nothing that draws.
 
@@ -49031,6 +49193,12 @@ The fifth is `render_window_decorations`, and submitting it would double-draw
 every title bar in the desktop, at the wrong size. The loop must render four,
 not five, and this entry is why.
 
+*(Resolved: the decorator is deleted, so the shell now has exactly four public
+`render_*` methods and the qualification is no longer needed — the loop
+renders all of them. The note is left standing because it is the reason the
+count in that entry changed, and a future reader comparing the two entries
+would otherwise have to rediscover it.)*
+
 **It also explains a hole in the window-list protocol that is not a hole.**
 `WindowInfo` (`gui/remote/src/window_list.rs`) carries no geometry — no x, y,
 width or height. That looks like an oversight the moment you try to decorate a
@@ -49142,6 +49310,287 @@ does not know the user's `WindowCorners` choice (its own decorations are still
 drawn with the flat primitives) nor the `drop_shadows` toggle, and it still
 draws a shadow on maximized windows. Note that `gui/appearance` depends only on
 `guitk` and `yamldoc`, so `compositor` can depend on it without a cycle.
+
+**Progress 2026-08-21 — prerequisite 2 is done, except for live reload.** ✅
+The compositor now depends on `gui/appearance` and holds an
+`AppearanceSettings` (the whole record, not the two fields it can act on — see
+`design-decisions.md` §499 for why that is the point rather than an oversight).
+All three items above are closed:
+
+- **`WindowCorners` reaches the frame.** `Compositor::decoration_radius` scales
+  the user's radius by the display factor and feeds the title bar's fill, the
+  border's stroke, the title-bar buttons and every ring of the shadow. All four
+  corner choices now produce four different windows; before this they produced
+  one. Note the radius deliberately does *not* inherit `scale_dimension`'s
+  non-zero floor: a radius of 0 is the user having chosen `Square`, not a
+  rounding accident, and must survive scaling as a square corner.
+- **`drop_shadows` is honoured.** `render_window` consults it before calling
+  `render_shadow`.
+- **A maximized window casts no shadow.** The compositor's reason is *not* the
+  shell's, and §499 records the difference: the shell suppresses a fill-based
+  `BoxShadow` that would bleed over the screen border; the compositor's
+  concentric rings cannot bleed — a maximized frame is fitted to the display
+  exactly, so every ring is either clipped off-display or drawn underneath the
+  window's own frame. It is pure overdraw on an opaque window and a dark smear
+  along the top and left on a translucent one.
+
+Ten tests, each proved a real regression test by reintroducing the bug it names
+— 10/10 caught on the first pass. Two of the ten were wrong before they were
+right, and §499 records both, because neither error would have announced
+itself: one asserted an absolute pixel count that is simply false (a "square"
+20×20 corner block also contains the border stroke and the first letters of the
+title), and one was reading `compose_frame`'s vsync gate instead of its damage
+state, so its middle assertion passed for entirely the wrong reason.
+
+**Progress 2026-08-21 — the startup-only channel is now a live one.** ✅ The
+`ReloadAppearance` verb described here as "the last piece before the deletion"
+is built, exactly to the shape this entry specified: tag `0x0F` in
+`gui/remote/src/control.rs`, **no payload**, mapped in `to_compositor_request`
+with no `link.resolve` (it names no window, so a client that has never opened
+one may still send it — which matters, because Settings is such a client), and
+handled by `Compositor::reload_appearance`, which re-reads the user's file.
+`main` now calls the same method at startup instead of loading the file itself,
+so startup and reload cannot disagree about where the settings live. Adopting
+settings that turn out to be identical does *nothing*, so an unlimited-rate
+notification cannot become an unlimited-rate full-screen repaint. The
+application-facing sender is `oswindow::EventLoop::appearance_changed()`.
+Rationale in `design-decisions.md` §500; seven tests, each proved a real
+regression test by reinstating its bug and watching the named test fail.
+
+**What remains before the deletion is a caller, and it belongs to another
+entry.** `apps/settings` cannot send the request: it has no compositor
+connection at all, which is `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` (noted there
+under "One of the 137 now has something specific it cannot call"). Nothing in
+*this* entry's scope is blocked by that — the compositor draws the user's
+corners and shadows, and adopts a change the moment anyone tells it to — so the
+deletion below is unblocked.
+
+The deletion: `DesktopShell::render_window_decorations`
+(`gui/desktop/src/lib.rs:2367`), `window_chrome` (`:1238`), and the
+`ManagedWindow` geometry fields that exist only to feed them.
+
+
+**Correction 2026-08-21 — there are five prerequisites, not two, and the entry
+undercounted the deletion as well.** Found by reading the shell's decorator line
+by line before deleting it, rather than trusting this entry's own summary of
+what it does. Two findings, both the same shape as everything else here:
+
+1. **The shell's decorator honours three more user settings than the
+   compositor does.** `render_window_decorations` draws its title bars from
+   `DesktopTheme::from_settings` (`gui/desktop/src/lib.rs:745`) and its title
+   text at `self.font_size(TextRole::Body)`, so it follows:
+   - `theme_mode` — the light palette gives a `0xCCD0DA` title bar, the dark one
+     `0x313244`. The compositor's `DecorationTheme` is one hardcoded set of
+     twelve Catppuccin Mocha colours, so a user in light mode gets dark title
+     bars.
+   - `accent_color` + **`accent_titlebars`** — a setting whose *entire subject*
+     is window title bars, ignored by the process that draws window title bars.
+     `from_settings` paints the focused bar in the accent and picks a readable
+     foreground for it; the inactive bar deliberately keeps the base palette.
+   - `fonts.ui_size` and `fonts.ui_font` — the compositor's title text is
+     `DEFAULT_FONT_SIZE * scale` in `Family::Ui`, a constant and a hardcoded
+     family. A user who enlarged the UI font for readability keeps small title
+     bars, which is an accessibility setting rather than a cosmetic one.
+
+   So the ordering argument this entry already makes for scaling and corners
+   applies unchanged to these three: **deleting first ships a visible
+   regression** for anyone in light mode, anyone with an accent colour, and
+   anyone who changed the UI font. They are prerequisites 3, 4 and 5.
+
+   The fix is *not* to copy `DesktopTheme::from_settings` into the compositor —
+   the light/dark table and the accent derivation would then exist twice, which
+   is `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` reappearing in the place this
+   entry is trying to remove a duplicate from. It is to resolve the decoration
+   colours **in `gui/appearance`**, where the settings live, and have both
+   `DesktopTheme` and `DecorationTheme` read that one answer.
+
+2. **`window_chrome` has a second caller this entry does not mention:
+   `DesktopShell::hit_test` (`gui/desktop/src/lib.rs:1418`).** The shell does not
+   merely *draw* a duplicate title bar; it hit-tests one, resolving clicks into
+   `Hit::WindowClose` / `WindowMaximize` / `WindowMinimize` / `WindowTitleBar`
+   against button rectangles built from `WINDOW_BUTTON_SIZE = 16.0` while the
+   compositor hit-tests the same buttons at `TITLE_BUTTON_SIZE = 20`. That is
+   the same drift as the drawing and is invisible for the same reason. So the
+   deletion is: the renderer, `window_chrome`, `WindowChrome`, those four `Hit`
+   variants and their `handle_mouse` arms.
+
+   What **stays** is `ManagedWindow::frame_rect`, and the line is worth naming
+   because it is not arbitrary: the frame rect is the window's own outer
+   rectangle, arrives from the compositor in physical pixels and is not scaled
+   by the shell — its own doc says so. *Where* a window is may be known to a
+   shell (the taskbar and Alt-Tab need to say which window is which); *what its
+   title bar looks like* may not. Everything the shell puts through `self.scale`
+   here is chrome and goes.
+
+   Roughly fifteen tests in `gui/desktop/src/pointer_tests.rs` sit on the
+   deleted surface. Those asserting a *duplicate* (button rects, chrome radii,
+   chrome shadows) go with it; those asserting real shell behaviour reached
+   *through* a chrome click — `maximizing_and_restoring_returns_the_window_to_
+   where_it_was` and its neighbours, which pin `ManagedWindow::restored` — are
+   rewritten to call the API directly rather than deleted, because the
+   behaviour survives and only its trigger moves.
+
+**Progress 2026-08-21 — prerequisites 3, 4 and 5 are done; only the deletion is
+left.** ✅ `gui/appearance` now owns `DecorationColors`: eleven resolved frame
+colours with `for_mode(light)` and `from_settings`. Both renderers read it —
+`DesktopTheme::window_fields_from` takes the shell's six window fields from it,
+and the compositor's `DecorationTheme` is now `from_settings` plus the ARGB
+packing, its twelve hardcoded Catppuccin-ish constants gone along with the
+`#[allow(dead_code)]` that had been hiding a field nothing read. The
+compositor's title font follows `appearance.fonts.ui_size` instead of a
+constant 16. See `design-decisions.md` §501.
+
+So a user in light mode, a user with accented title bars and a user who
+enlarged the interface font now get the same frame from the compositor that the
+shell's duplicate has been drawing all along — which is precisely the condition
+this entry set for the duplicate to be removable without shipping a regression.
+
+Two notes for whoever does the deletion:
+
+- **`the_shells_window_colours_are_the_compositors_window_colours`
+  (`gui/desktop/src/lib.rs`) is a scaffold, not a keeper.** It exists to fail
+  the moment someone recolours a window in `DesktopTheme`, which is the natural
+  place to do it and the wrong one. It is meaningful only while the shell has a
+  decorator at all; delete it with the decorator.
+
+- **`fonts.ui_font` is still unreachable and is not a sixth prerequisite.**
+  `osfont::Family` is `Ui` or `Mono` with no lookup by name, so no renderer in
+  this tree honours a font *family* — the shell's decorator does not either, and
+  `RenderTree::text` takes no family argument. Deleting the duplicate therefore
+  loses nothing on this axis. Tracked as a missing capability rather than a
+  missing wire.
+
+What remains for this entry is the deletion itself, exactly as scoped in the
+correction above: `render_window_decorations`, `window_chrome`, `WindowChrome`,
+the four `Hit::Window{Close,Maximize,Minimize,TitleBar}` variants and their
+`handle_mouse` arms, the `gui/desktop/src/main.rs:45` demo caller, and the
+`pointer_tests.rs` tests that assert the duplicate. `ManagedWindow::frame_rect`
+stays.
+
+## RESOLVED 2026-08-21 — the duplicate is gone, and one feature moved rather than died
+
+✅ **The deletion is done and this entry is closed.** All five prerequisites had
+been met, so the shell's copy came out exactly as scoped: the 92-line
+`render_window_decorations`, `window_chrome`, `WindowChrome`, the
+`TITLE_BAR_HEIGHT`/`WINDOW_BUTTON_*` constant block, `top_corner_radii`, the
+four `Hit::Window{Close,Maximize,Minimize,TitleBar}` variants with their
+`handle_mouse` arms, the `main.rs` demo caller, and six `pointer_tests.rs` tests
+that asserted the duplicate. `ManagedWindow::frame_rect` stays, as specified.
+`Hit` is now `WindowContent(id)` for a window and nothing finer, because
+everything finer belonged to the compositor and was consumed before this shell
+heard about the press. Two processes now draw one title bar. Net −467/+425 lines
+across five files.
+
+**Two things the deletion would have silently taken with it were caught by
+reading the duplicate line by line first, and were moved rather than dropped.**
+This is the third time in this entry that reading beat trusting the entry's own
+summary, and it is why the deletion was done last rather than first:
+
+1. **Double-click-to-maximize was only ever implemented in the shell.** The
+   `Hit::WindowTitleBar` arm was its sole home, and the compositor never
+   produces `MouseEventKind::DoubleClick` at all — its own comment says so:
+   `Enter`/`Leave` and `DoubleClick` "exist only on the client side and are
+   never produced here". So deleting the arm would have removed the gesture
+   from the product with nothing to notice. It now lives in
+   `Compositor::handle_mouse_button`, beside the hit test that already resolves
+   a press on the same strip. See `design-decisions.md` §502 for the three
+   sub-decisions it needed (keying on the window, breaking the pair on an
+   intervening press, and not re-arming after a completed double-click).
+2. **The shell's decorator test was the only WCAG contrast check in the tree.**
+   `accented_title_bars_still_mark_only_the_focused_window` measured real
+   contrast *ratios* (≥ 4.5 focused, ≥ 3.0 unfocused) across 14 accents × 2
+   modes. The surviving `gui/appearance` tests asserted only the *identity*
+   `title_focused_fg == readable_on(accent)`, which a drifted luma threshold
+   satisfies perfectly while returning the wrong extreme. The ratio assertions
+   moved to `gui/appearance` as
+   `a_title_is_readable_on_every_bar_the_settings_can_produce`, and the
+   distinction is not theoretical: drifting `readable_on`'s threshold from 140
+   to 200 leaves `readable_on_answers_with_the_palettes_own_extremes` passing
+   and produces a **1.86:1** blue title bar, which the new test catches.
+
+**One survivor was renamed, because the deletion revealed it was misnamed.**
+`DesktopTheme::window_border_color` is still read — by the start menu and the
+power menu — but the shell draws no window borders any more, so it is now
+`panel_border_color`. It is still sourced from `DecorationColors::border_focused`
+on purpose: a panel outlined in a different shade from the window beside it
+looks like a bug, and would be one, because two processes had each picked a
+colour. `window_fields_from` shrank from six fields to two and is now
+`frame_fields_from`. The scaffold test named in the notes above
+(`the_shells_window_colours_are_the_compositors_window_colours`) was deleted
+with the decorator as instructed, replaced by
+`the_shell_reads_its_frame_colours_rather_than_choosing_them`, which guards the
+two fields that remain.
+
+**Eleven reintroductions, eleven caught — but one only after the test was
+repaired**, and that failure is the more useful half of the exercise.
+`a_double_click_is_the_same_event_to_this_shell_as_a_single_one` originally
+asserted that a double-click returns `Pass` and does not maximize. Both remain
+true of a `DoubleClick` arm that silently returns `Pass` without dispatching
+anything — so the test would have watched the shell drop click-to-focus and
+every menu it opens on a press, and said nothing. It now asserts the *positive*:
+that a double-click focuses a background window and opens the start menu, on
+both kinds of surface the shell hit-tests. The general lesson, which has now bitten
+three times in this entry's history: **a test that asserts the absence of the
+behaviour you just deleted is satisfied by deleting too much.** Assert what
+survives, not what went.
+
+---
+
+## TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING
+
+**In short:** Settings has a mouse panel with sliders for double-click speed,
+pointer speed and so on. Moving them changes a number in a file and nothing
+else. The compositor — the only thing in the tree that actually acts on a
+double-click — has never heard of that file and uses its own built-in default.
+So the double-click-speed slider does nothing today, and it is the one setting
+on the panel that now has a real consumer sitting right there ignoring it.
+
+**Where:**
+
+| | |
+|---|---|
+| The setting | `desktop::mouse_settings` (`gui/desktop/src/mouse_settings.rs`), `double_click_ms`, default **400**, clamped 100–2000 (`:185`, `:205`) |
+| The consumer | `Compositor::double_click_interval` (`gui/compositor/src/lib.rs`), default `DEFAULT_DOUBLE_CLICK_MS = 400`, clamped by `set_double_click_ms` to `MIN_DOUBLE_CLICK_MS`..=`MAX_DOUBLE_CLICK_MS` = 100–2000 |
+| What connects them | nothing |
+
+The two defaults and the two clamp ranges were deliberately made to match when
+the double-click gesture moved into the compositor, precisely so that **a user
+who never touches the slider sees no change when this is wired up**. That is the
+mitigation, not the fix: a user who *does* move it still sees nothing.
+
+**Why it is not simply a missing function call.** `set_double_click_ms` is
+public and takes the value the panel already produces, so the compositor end is
+done. The missing piece is the same one that blocks the appearance settings from
+reloading live: **`apps/settings` has no compositor connection at all**
+(`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`). The appearance half of this problem
+was solved by adding a `ReloadAppearance` control verb (tag `0x0F`, no payload,
+no `link.resolve` — see `TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS`
+above), and the mouse settings want the same shape.
+
+**The design question to answer first, and it is a real one:** should this be a
+second verb (`ReloadInput`), or should the input settings move *into*
+`AppearanceSettings` so the existing `ReloadAppearance` carries both? The second
+is tempting because it needs no protocol change, but "appearance" is the wrong
+home for pointer behaviour, and a struct that accretes every settings panel
+because it happens to have a reload verb is how a settings blob becomes
+untyped. Lean toward a second verb reading a second file.
+
+**Scope beyond double-click.** `mouse_settings` also holds pointer speed,
+acceleration, scroll direction/lines and left-handed button swap. The compositor
+consumes none of them, and unlike double-click speed most have no consumer
+anywhere — pointer acceleration in particular has nothing to apply it to,
+because the compositor is fed absolute coordinates by
+`handle_mouse_button`/`handle_mouse_move` rather than raw deltas. Wiring
+double-click alone is honest and small; wiring the rest is a larger question
+about where input transformation belongs and should not be bundled in.
+
+**Trigger:** do this when `apps/settings` gains a compositor connection — the
+same moment `ReloadAppearance` gets its first real caller. Both are lane C's.
+
+**If never fixed:** a slider that lies. The user moves it, the panel writes the
+file, and the double-click speed is whatever the compositor's constant says.
+Worse than an absent setting, because an absent one cannot be misread as tried
+and rejected.
 
 ## B-SSHD-EXEC-REPLIED-WITH-THE-COMMAND-INSTEAD-OF-RUNNING-IT — 2026-08-21 — FIXED
 
@@ -50111,3 +50560,437 @@ all exact. `sem_t` (32→4), `regex_t` (64→16) and `glob_t` (72→24) are
 *undersized*, which does not smash anything; noted in the request as a
 lower-priority correctness point, not a safety one. `posix_spawn_file_actions_t`
 is the only one in the dangerous direction.
+
+## B-THE-SSH-STACK-AUTHENTICATED-NOBODY — 2026-08-21 — FIXED
+
+**In short:** SlateOS's SSH server, SSH client and FTP server all performed
+authentication that could not fail. The SSH server let anyone log in who knew
+a user's *public* key — which is public, travels in the clear, and sits
+world-readable in `authorized_keys`. The SSH client never checked that the
+server it reached was the server it asked for. The FTP server did not read the
+password at all. Each of these is a full remote authentication bypass on its
+own, and all three shipped together, so a user of this tree who ran `sshd` on
+a network was running an open door with a lock painted on it.
+
+Nine defects across three programs, found in one pass — seven in the SSH key
+exchange and public-key path, two in password checking. They are listed
+together because they are one failure, not nine: at no point did anything in
+the SSH stack do the arithmetic that authentication *is*. Every place a
+signature or a hash was supposed to be checked, something cheaper was checked
+instead, and a comment explained that this was a simplification.
+
+### The seven in the key exchange and public-key path
+
+| # | Where | What it did | Effect |
+|---|---|---|---|
+| 1 | `sshd` `handle_pubkey_auth` | Matched the offered public key against `authorized_keys` and returned success **without reading the signature** | **Remote auth bypass.** Anyone who had seen the user connect, or could read `~/.ssh/id_ed25519.pub`, could log in as them |
+| 2 | `sshd` `HostKey::sign` | Returned an HMAC-SHA256 zero-padded to 64 bytes and labelled `ssh-ed25519` | No real client could ever connect; the label was a lie about the maths |
+| 3 | `sshd` `generate_dh_private` | `sha256(pid ‖ uptime_ms)` | **Session keys recoverable.** ~2^32 of search space, and both inputs are partly observable |
+| 4 | `sshd` DH | Never range-checked the client's `e` | `e = 0` or `e = 1` pins the shared secret to a value the *client* chose |
+| 5 | `sshd` host key file | Unparseable file → `sha256(first_line)` as the seed; missing file → a pid-derived key that changed at every restart | Every restart was a new host key, so `known_hosts` warned constantly and users learned to ignore it |
+| 6 | `ssh` client | `let _ = sig_blob; // Acknowledge we received it.` — the host key signature was read and discarded, and the `known_hosts` prompt ran *before* the exchange hash existed | **The entire host key mechanism was decorative.** Any machine answering on port 22 could name itself with someone else's key and be permanently trusted under it |
+| 7 | `ssh` client | The DH private exponent was `sha256` of two hard-coded 64-bit constants | Not weak — **constant**. Every connection by every copy of the binary used one exponent, so anyone with the binary could decrypt any session it made |
+
+And two more in password handling, filed under the same head because they are
+the same shape:
+
+| # | Where | What it did | Effect |
+|---|---|---|---|
+| 8 | `ftpd` `validate_password` | Took the password as `_password`, never read it, and returned `lookup_user(username).is_some()` | **Remote auth bypass.** Any password logged in any account in the world-readable `/etc/passwd`, which also served as the target list |
+| 9 | `sshd` `verify_password` | A fourth hasher disagreeing with the three in §329: `$5$`/`$6$` were checked as `sha256(password ‖ salt)` in hex, and anything unrecognised fell through to a **plaintext** comparison | A password set with `passwd` could never be used over ssh, and the failure looked exactly like a typo |
+
+### The pattern, which is the actual finding
+
+Every one of the nine was *documented*. The code said
+`(signature verification skipped in simplified implementation)`, and
+`In a real implementation this would use a CSPRNG`, and
+`simplified: accept any non-empty password for now since our OS does not yet
+have a full shadow mechanism`. Nothing was hidden. What made them dangerous is
+that each one **still returned the answer a working implementation returns** —
+`true`, `Ok(())`, a 64-byte blob of the right shape — so every test passed,
+every connection succeeded, and nothing anywhere reported that the security
+property was absent.
+
+Two lessons worth keeping:
+
+1. **A placeholder that returns success is not a placeholder, it is a bug that
+   has been written down.** Where the real check cannot be implemented yet, the
+   stub must return the *failing* answer, so the gap announces itself the first
+   time anyone relies on it. `unimplemented!()` in a daemon is better than
+   `true`.
+2. **"We cannot verify this one" must resolve to no.** Defect 9's plaintext
+   fallback and the old pubkey path's willingness to accept an algorithm it
+   did not implement are the same mistake: an unknown case routed to the
+   permissive branch. Both now refuse.
+
+Also worth noting: the shadow-hash problem had already been found once,
+between `passwd`, `login` and `chpasswd`, and fixed by centralising into
+`posix::crypt` and then `authlib` (`design-decisions.md` §329, §341). It
+recurred in `sshd` anyway, because centralising does nothing for a program
+that never looks. Two of the three daemons had their own copy at the moment
+the "one verifier" crate was being written.
+
+### The fix
+
+- **`posix::ed25519`** — a real RFC 8032 Ed25519, ~900 lines, with all four
+  §7.1 test vectors and curve constants derived rather than transcribed. It
+  went in `posix` rather than a new crate because it is a libc primitive and
+  because the top-level `sha2/` crate is lane A's.
+- **`posix::random::fill`** — the safe-Rust entry point to the existing
+  ChaCha20 CSPRNG, so a Rust binary needing key material does not have to
+  reach for a raw pointer, which is what pushed both daemons toward hashing
+  the clock in the first place.
+- **`sshd`** signs the exchange hash for real, loads and persists an OpenSSH-
+  format host key (refusing an unparseable one rather than inventing a seed
+  from it), verifies the RFC 4252 §7 publickey signed blob — binding session
+  id, user and service — answers the query phase with `SSH_MSG_USERAUTH_PK_OK`
+  instead of a failure, range-checks `e`, and takes its DH exponent from the
+  CSPRNG.
+- **`ssh`** verifies the host key signature *before* consulting `known_hosts`,
+  refuses an algorithm it cannot check rather than accepting it, requires the
+  key and signature blobs to name the same algorithm, sends a random KEXINIT
+  cookie, range-checks `f`, and takes its exponent from the CSPRNG.
+- **`sshd` and `ftpd`** hand passwords to `authlib::Authenticator`, one per
+  daemon so the per-user failure tally outlives a connection. `sshd` passes
+  the raw bytes rather than a lossy UTF-8 conversion, which was silently
+  rewriting any password containing an invalid byte.
+
+### Verification
+
+`posix` 36 new tests (RFC 8032 vectors, a 512-bit-flip rejection sweep),
+`sshd` 139, `ssh` 23 (11 new; it had 11 total before), `ftpd` 111. The
+security tests are written as the attack rather than as the API: an attacker
+holding the victim's public key and signing with its own is rejected; a
+signature from another session, another user, another service is rejected; a
+real host key replayed by a party without the private half is rejected; an
+existing account with the wrong password is rejected. Clippy and rustfmt clean
+on the host and for `x86_64-slateos`.
+
+### Still open
+
+`ftpd` sends the password in the clear — a property of FTP, not of this
+implementation, and now stated in its module documentation so that the
+authentication fix is not read as making the daemon safe to expose. The real
+answer is `sftp` over the now-working `sshd`, which is
+`TD-B-SSHD-RUNS-A-COMMAND-BUT-CANNOT-HOST-A-SESSION`'s neighbour and not yet
+built.
+
+## B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS — 2026-08-21 — FIXED
+
+**In short:** `doas` is the program that lets an ordinary user run one command
+as root after typing their password — SlateOS's equivalent of `sudo`. It
+checked that password with arithmetic of its own that no other program in the
+system used, so a password set with `passwd` could never open a `doas` prompt.
+Every attempt printed "authentication failed", which reads to the person typing
+as a forgotten password rather than as a broken program.
+
+Found by asking, after `B-THE-SSH-STACK-AUTHENTICATED-NOBODY`, which *other*
+programs in this tree still answer "is this the user's password?" themselves.
+`doas` was the only one left, and it was the one guarding root.
+
+### What it did
+
+`doas` understood exactly one stored format:
+
+```text
+$sha256$<salt>$<hex digest of sha256(salt || "$" || password)>
+```
+
+and returned `false` for anything else. `passwd` writes `$6$` SHA-crypt through
+`posix::crypt`. The two had nothing in common. The section header above the
+function read `Password hashing / verification (matches passwd utility
+format)` — a claim that was true when it was written, stopped being true when
+`passwd` was centralised (`design-decisions.md` §329), and was checked by
+nothing, because the tests hashed with `hash_password` and verified with
+`verify_password` and so agreed with themselves no matter what the format was.
+
+Three consequences, in descending order of how bad they were:
+
+| | |
+|---|---|
+| **`doas` did not work at all** | Not "worked weakly" — a correctly-typed password was refused, always. The only accounts that could escalate were ones covered by a `nopass` rule, i.e. the ones that never type a password |
+| **`/etc/users.yaml` was invisible to it** | It read `/etc/shadow` directly, so a user in the native database had no entry `doas` would even look for. Same message |
+| **No distinction between a typo and an entry nothing can recompute** | Both printed "authentication failed". The second needs an administrator and will never clear on its own; the first clears on the next attempt |
+
+### Why this is filed as a security defect and not a bug
+
+It failed *closed*, so nobody ever got root they should not have had. The
+danger is the second-order one: a privilege gate that no legitimate user can
+pass does not stay in place. It gets a `permit nopass` rule written around it,
+or it gets removed, and either way the arithmetic that was supposed to protect
+root is gone — this time on purpose, and with a comment explaining that `doas`
+"doesn't work". That is a worse position than the bug, and it is where this was
+heading.
+
+It is also the fifth instance of one root cause. §329 found three programs
+disagreeing about `/etc/shadow` and centralised them into `posix::crypt`; §341
+added `authlib` on top; `sshd` turned out to have a fourth copy while `authlib`
+was being written; `doas` is the fifth. Centralising does nothing for a program
+that never looks, and nothing in the build fails when one does not.
+
+### The fix
+
+`doas` now calls `authlib::Authenticator::authenticate`, which consults
+`/etc/users.yaml` then `/etc/shadow`, hands the stored entry to `crypt` as its
+own *setting* rather than taking it apart to find a salt, and reports `Locked`,
+`NoPassword` and `Unusable` separately from `Rejected`. `main` gates on
+`is_accepted()`, so only `Accepted` admits anyone. The `sha2` dependency existed
+solely for the private hasher and is gone.
+
+Two deliberate choices:
+
+- **The prompt now comes before the lookup.** The old order exited with a
+  distinct message for "no shadow entry" and for "locked" *before* printing a
+  prompt at all. Now every failure says the same thing, except that an entry
+  nothing can recompute additionally says so — that one is a broken system,
+  not a wrong password, and only an administrator can clear it.
+- **An account with no password set is refused.** `login` resolves the same
+  `authlib::Outcome::NoPassword` the *opposite* way, because a deliberately
+  passwordless account at the machine's own keyboard is a long-standing Unix
+  choice. Escalating to root from one is not the same statement, and reading it
+  as consent would turn every passwordless account into a root shell.
+  `nopass` in `/etc/doas.conf` is the only consent that counts here.
+
+### Cross-invocation rate limiting — FIXED 2026-08-21
+
+**Was:** `authlib`'s failure tally lived in the `Authenticator`, which for
+`doas` lives for one invocation. `sshd` and `ftpd` keep one per daemon, so
+their tallies outlive a connection; `doas` cannot, because it *is* the process.
+So repeated `doas` attempts were not rate-limited relative to each other —
+every invocation started the escalating delay again at zero — which is exactly
+the shape of an attacker who already has a shell as the user and is guessing
+toward root. The same held for `login` and `su`, and for `passwd`'s
+`Current password:` prompt by way of a different gap (see
+`B-PASSWD-VERIFIES-WITHOUT-AUTHLIB`).
+
+**Now:** `authlib` keeps the tally on disk as well as in memory, in one shared
+table at `authlib::DEFAULT_FAILLOCK` (`/var/run/authlib/tally`), so every
+program that authenticates through `authlib::Authenticator` counts against
+*one* tally per user. Today that is `doas`, `sshd`, `ftpd` and `logind` — but
+not yet `login` or `su`, which is the remaining half of the gap and is written
+up under "Still open" below. `Authenticator::new()` uses it; `with_stores`
+stays memory-only, so a
+test suite or a chroot cannot run up a real user's failures. Every call reads
+the file fresh (a failure another program recorded a moment ago must count
+against *this* attempt), takes the field-wise maximum of the in-memory and
+on-disk rows, and writes the advanced count back to both. A write that fails is
+ignored on purpose: the in-memory tally still limits the running process, so an
+unwritable `/var/run` degrades to the old behaviour rather than refusing to
+authenticate anyone.
+
+The table's shape is `userspace/authlib/src/faillock.rs`, and three attacks
+drove it — see `design-decisions.md` §347 for the alternatives:
+
+| Attack | What stops it |
+|---|---|
+| A username from the login prompt is attacker-chosen text; a file *named* for it is a path-traversal and an unbounded-file-creation primitive | One fixed-size file, 1024 slots, usernames hex-encoded so no name can forge or corrupt a row |
+| Probing which accounts exist by watching which ones get rate-limited | An invented username takes a slot exactly as a real one does; nothing distinguishes them |
+| Flooding the table with invented names to evict the record of the account actually under attack | Eviction is by *fewest* failures, oldest first — the attacked account is evicted last |
+
+**What did not change:** a refused (rate-limited) attempt is still not counted,
+so an attacker cannot hold a real user out by refreshing their own refusal; and
+the delay is still `delay_for` — doubling from 1s once `FREE_ATTEMPTS` are
+spent, capped at `MAX_DELAY_SECS`. The state lives under `/var/run` rather than
+`/var/lib` deliberately: it describes an attack in progress, not a durable fact
+about the account, and a reboot is not something an attacker can arrange more
+cheaply than waiting out five minutes.
+
+**Tests:** `a_program_that_runs_once_inherits_the_previous_run_s_failures`
+builds a fresh `Authenticator` per attempt to stand for a short-lived process
+and asserts a brand-new one is refused *even when presenting the correct
+password*; `a_success_in_one_program_clears_the_tally_for_the_next`;
+`a_memory_only_verifier_writes_no_shared_file`;
+`combining_two_tallies_takes_the_longer_delay_from_each_field`; plus twelve in
+`faillock` covering injection, truncation, damaged rows, the slot cap, eviction
+order and the temp-file-and-rename store.
+
+### Still open — `login` and `su` do not share the tally
+
+Both reach the right *verdict* through shared code, but neither goes through
+`Authenticator`, so neither reads or writes the shared count:
+
+| Program | What it calls | Why it is not `Authenticator` |
+|---|---|---|
+| `login` | `authlib::check_stored` (`userspace/login/src/main.rs:176`) | It owns one policy `authlib` deliberately declines to rule on: an account with an empty password field is entered by pressing Enter *at the machine's own keyboard*. `Authenticator::authenticate` reports that as `NoPassword` and leaves the caller to decide, so `login` calls the checking half directly and never touches the counting half. |
+| `su` | `userdb::Record::check_password` | It predates `authlib` and reads `/etc/users.yaml` through `userdb` for other reasons anyway. |
+
+The consequence is worth stating plainly: `login` still caps a *single process*
+at `MAX_LOGIN_ATTEMPTS` and then exits, so the delay never escalates across the
+getty respawn, and failures at the console do not slow down a subsequent `doas`
+guess or vice versa. One tally per user is the point of the change, and there
+are still three tallies.
+
+The fix `login` wants is not "call `authenticate` instead" — that would take
+the console's empty-password policy away from it. It is for `authlib` to expose
+the counting half on its own, so a caller that owns its verdict can still share
+the count: a `rate_limited(user) -> Option<retry_after>` to consult before
+prompting and a `note_failure(user)` after, with the existing `reset` for
+success, and `authenticate` refactored to be exactly those two around
+`check_stored` so there is one implementation rather than two.
+
+**That change has a tradeoff that should be decided, not assumed.** Once
+`login` shares the tally, an unprivileged process running as the user can hold
+that user at a delayed console prompt by failing `doas` on purpose — which is
+`pam_faillock`'s behaviour on Linux too, and is bounded here by
+`MAX_DELAY_SECS` (five minutes, never a permanent lockout). Whether five
+minutes of console delay purchasable by any local process is the right price
+for one tally per user is a judgement call — and if `su` joins at the same
+time it is sharper still, because `su` guesses at the *target's* password, so
+any local user could hold **root** at a delayed console prompt without ever
+having had root. That is the operator's call, not mine: it is queued as
+`open-questions.md` → **B-Q6**, with four options and a recommendation.
+`design-decisions.md` §347 records it as the open half.
+
+
+## B-PASSWD-VERIFIES-WITHOUT-AUTHLIB — 2026-08-21 — OPEN (tech debt, small)
+
+**In short:** every program on this system that asks "is this your password?"
+routes through one of two shared verifiers, which count failed attempts and
+slow an attacker down. One program does not: `passwd`, when it asks for your
+*current* password before letting you set a new one. It gets the answer right —
+it uses the same underlying comparison as everything else — but it does the
+counting-and-slowing part not at all, so guesses against that one prompt are
+free and unlimited. Whether that should change is a genuine tradeoff, written
+out below.
+
+**Where:** `userspace/passwd/src/main.rs:651`, the `verify_password(&old_pw,
+&entry.hash)` call behind the `Current password:` prompt. `verify_password`
+(line 336) is a one-line wrapper over `posix::crypt::verify`.
+
+**How it got this way — not by decision.** `passwd` was moved onto
+`posix::crypt::verify` on 2026-08-17, closing
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`. `authlib` did not
+exist yet; it was built later, after `design-decisions.md` §329 and §341 found
+that several programs were each answering the password question with their own
+arithmetic. Programs written or repaired after that point adopted `authlib`.
+`passwd` was already correct by the standard of its own day, so nothing ever
+sent anyone back to it. It is debt by omission, not by choice — which is the
+only reason it is filed rather than simply fixed: the fix has a real cost.
+
+**The tradeoff.**
+
+| | Leave it | Route it through `authlib` |
+|---|---|---|
+| Guessing at the `Current password:` prompt | unlimited and free | shares the per-user tally with `login`, `su`, `doas` |
+| Someone mistypes at a `doas` prompt three times | your own `passwd` still works | your own `passwd` prompt is now delayed too |
+| Locked account (`!` prefix) | already refused outright at line 623, before any prompt | `authlib` returns `Locked`, which agrees — nothing to special-case |
+
+**A dead condition found while writing this — FIXED 2026-08-21, and it was
+load-bearing in the wrong direction.** The old-password gate read
+`if !entry.hash.is_empty() && !entry.is_locked()`. The second conjunct could
+never be false, because line 623 has already returned `1` for every locked
+account. Dead code, so removing it changes nothing today — but which way it was
+dead matters:
+
+| If someone later removes the line-623 guard | Before | After |
+|---|---|---|
+| locked account reaches the old-password gate | `is_locked()` is true, so the whole gate is skipped — **no current password is ever asked for, and the change proceeds** | gate is entered on `!hash.is_empty()` alone; the stored `!$6$…` has no recomputable method, so `crypt::verify` returns false and the change is **refused** |
+
+So the redundant conjunct was not merely noise: it was a second, silent
+implementation of the locking policy that failed *open* if the first one were
+ever touched. It now fails closed. This is the general shape of the thing —
+a guard duplicated in two places is not twice as safe, it is one guard plus one
+place for the policy to disagree with itself.
+
+The argument for leaving it is not weak. `authlib`'s tally is per *user*, not
+per program, so folding `passwd` in means anyone who can reach any prompt as
+you — a `doas` prompt in a shell you left open, a lock screen — can also stop
+you changing your password by failing at it. A password change is the one
+action you most want available to a user who suspects their password is
+compromised, and rate-limiting is the one mechanism that makes it unavailable.
+
+The argument against is that this is the only prompt in the system where an
+attacker who already has your shell can guess at your password without cost or
+trace, and "the fix would be annoying" is how every uncounted prompt stays
+uncounted.
+
+**What the proper fix looks like** (if the answer is "route it"): `authlib`
+gains a way to verify *without* consuming an attempt from the shared tally
+while still recording to the audit log — the distinction being whether a
+failure should impede a later, different program. That is a change to
+`authlib`'s contract, so it wants doing at the same time as the on-disk tally
+described under `B-DOAS-COULD-NOT-VERIFY-ANY-PASSWORD-THE-SYSTEM-ACTUALLY-SETS`
+→ "Cross-invocation rate limiting", not separately.
+
+**Update 2026-08-21 — the tally now exists, and this question folded into a
+larger one.** The on-disk shared tally landed the same day (see the entry
+above). That did not settle this; it sharpened it. The counter-argument in the
+paragraphs below — "anyone who can reach any prompt as you can stop you
+changing your password" — was hypothetical while the tally was per-process and
+is concrete now that it is per-user and persistent. It is also the *same*
+question, in a different prompt, as whether `login` should obey the shared
+tally. Both are queued together as `open-questions.md` → **B-Q6**; answer that
+and this follows from it. Do not decide this one in isolation — the two prompts
+disagreeing about whether a shared count applies to them is precisely the
+inconsistency `authlib` exists to prevent.
+
+**Not a security hole today, and worth being precise about why:** reaching this
+prompt requires already running as the account whose password is being changed.
+An attacker there can read that account's files and act as it. What the missing
+rate limit costs is the ability to *learn the password itself* — which matters
+because users reuse passwords, and because knowing it converts shell access
+into the ability to pass a `doas` prompt. So: real, bounded, not urgent.
+
+**Found by:** the call-site scan described in the postscript to
+`requests/c-b-passwd-and-login-disagree-about-etc-shadow.md` —
+`grep -rn 'crypt::verify' posix/src userspace/*/src services init`, which
+returns exactly three production call sites and requires each to be justified.
+
+
+---
+
+## B-FTPD-SSHD-AUTH-TESTS-SHARE-TEMP-FILES-AND-FLAKE — 2026-08-21 — lane B
+
+**In short:** The tests that check FTP and SSH password handling build their
+throwaway `/etc/shadow` files by stamping the current time into the filename.
+The clock is not fine-grained enough for that: when cargo runs the tests side by
+side, two of them get the *same* file, one overwrites the other, and whichever
+reads second is authenticating against the wrong data. Measured collision rate
+on this machine: **13%**. It shows up as an occasional red in a full-workspace
+run and is otherwise invisible.
+
+**Found by:** lane C, during the full-workspace gate for the window-decorator
+deletion. Not lane C's change — `ftpd` depends only on `authlib`, and the
+change touched nothing outside `gui/**`. Filed to lane B as
+`requests/c-b-ftpd-sshd-auth-tests-share-tmp-files-and-flake.md`, which carries
+the full diagnosis and three suggested fixes; this entry exists so the bug is
+tracked rather than living only in a request another lane may not merge for a
+while.
+
+**Where:** `userspace/ftpd/src/main.rs:3040` (`tmp_path`), and the same helper at
+`userspace/sshd/src/main.rs:4700`. sshd's copy adds a `get_pid()` prefix, which
+does **not** help — every test in a binary shares one process, so it separates
+concurrent *runs* of the suite and not the concurrent *threads* inside one.
+
+**Symptom:**
+
+```
+---- tests::an_unrecomputable_entry_is_broken_not_wrong stdout ----
+assertion `left == right` failed
+  left: Rejected
+ right: Unusable
+```
+
+`Rejected` instead of `Unusable` is the diagnostic, not noise: the test writes a
+plaintext shadow field (which must report `Unusable`) and reads back some other
+test's line — a locked or validly-hashed one — which it then correctly
+rejects. The assertion is right; the file under it changed.
+
+**Reproduce:** `cargo test --workspace --target x86_64-pc-windows-gnu`. It is
+load-dependent — `cargo test -p ftpd --bin ftpd` alone was 8/8 green across
+eight consecutive runs.
+
+**Why it matters more than an ordinary flake.** These tests pin *authentication
+outcomes*: locked accounts, plaintext shadow fields, unknown users, rate
+limiting. A test reading another test's shadow file can fail spuriously — which
+is what was seen — but it can just as easily **pass** spuriously, and a green
+run is precisely the evidence that would be cited for "auth is covered". Until
+this is fixed the suite is not a reliable witness to its own claims.
+
+**Secondary defect in the same helper:** cleanup is `let _ =
+fs::remove_file(shadow)` at the end of each test body, so a panicking test leaks
+its file. No `Drop` guard. A per-test temp *directory* would fix uniqueness and
+cleanup together.
+
+**If never fixed:** an intermittent red in the shared merge gate that each lane
+pays for in turn, over exactly the code where a false green is most expensive.

@@ -40,6 +40,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+pub use appearance::{AppearanceSettings, WindowCorners};
 #[allow(unused_imports)]
 use guitk::color::Color;
 // Aliased because this crate has its own `MouseButton` and `MouseEventKind`
@@ -100,6 +101,9 @@ pub use guiremote::control::CursorShape;
 // Re-exported because `Window::layer` is public and a caller reading it needs
 // to be able to name the type without depending on `guiremote` directly.
 pub use guiremote::control::Layer;
+// Same reason: `CompositorRequest::ShellControl` carries one, so a caller
+// building that request must be able to name it.
+pub use guiremote::control::ShellControlAction;
 use guiremote::control::WindowSpec;
 use guiremote::scene::{SceneFrame, SceneSession, WindowSnapshot};
 // Same reason: `window_list` returns these, and a shell reading one should not
@@ -124,6 +128,23 @@ const TITLE_BUTTON_SIZE: u32 = 20;
 
 /// Spacing between title bar buttons.
 const TITLE_BUTTON_SPACING: u32 = 4;
+
+/// How close together two title-bar clicks must be to be one double-click.
+///
+/// The same 400 ms the mouse settings panel offers as its default, so that
+/// wiring the user's choice through later changes nothing for a user who never
+/// touched it.
+const DEFAULT_DOUBLE_CLICK_MS: u64 = 400;
+
+/// The narrowest and widest double-click intervals that can be set.
+///
+/// The same range the mouse settings panel offers, so a value from there cannot
+/// arrive out of range. The floor is what stops a caller passing zero from
+/// making a double-click impossible to perform; the ceiling stops two unrelated
+/// clicks a second apart from being read as one gesture.
+const MIN_DOUBLE_CLICK_MS: u32 = 100;
+/// See [`MIN_DOUBLE_CLICK_MS`].
+const MAX_DOUBLE_CLICK_MS: u32 = 2000;
 
 /// Default window opacity (fully opaque).
 const DEFAULT_OPACITY: f32 = 1.0;
@@ -155,10 +176,6 @@ const fn frame_interval_for(refresh_rate: u32) -> Duration {
 /// Smallest client-area height the compositor will resize a window to. See
 /// [`MIN_WINDOW_WIDTH`].
 const MIN_WINDOW_HEIGHT: u32 = 50;
-
-/// Size, in pixels, for text the compositor draws itself — window titles and
-/// the like. Text inside a window carries its own size in the render command.
-const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 /// Maximum framebuffer width supported.
 const MAX_FB_WIDTH: u32 = 7680;
@@ -2349,12 +2366,31 @@ pub enum CompositorRequest {
     SetOpacity { window_id: WindowId, opacity: f32 },
     /// Query display information.
     GetDisplayInfo,
+    /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
+    ///
+    /// Carries no settings: see
+    /// [`guiremote::control::RequestBody::ReloadAppearance`] for why a
+    /// notification rather than a setter, and [`Compositor::reload_appearance`]
+    /// for what it does.
+    ReloadAppearance,
     /// Begin a remote draw-command stream session (returns a stream id).
     StreamStart,
     /// Capture the current scene for a stream session as an encoded wire frame.
     StreamCapture { stream_id: u64 },
     /// End a remote draw-command stream session.
     StreamStop { stream_id: u64 },
+    /// Act on a window on a shell's behalf, rather than on its owner's.
+    ///
+    /// Every other window request here arrives having been checked against the
+    /// windows the sending connection owns (`ClientLink::resolve`). This one
+    /// cannot be — a taskbar button exists to act on somebody else's window —
+    /// so it is a separate variant precisely so that the exception is visible
+    /// at the point the compositor decides what to do, rather than hidden
+    /// inside a shared verb.
+    ShellControl {
+        window_id: WindowId,
+        action: ShellControlAction,
+    },
 }
 
 /// Responses from the compositor to clients.
@@ -3777,8 +3813,19 @@ fn color_to_argb(color: &Color) -> u32 {
 // Theme colors for window decorations
 // ---------------------------------------------------------------------------
 
-/// Colors used for window decoration rendering.
-#[allow(dead_code)]
+/// Colors used for window decoration rendering, in the framebuffer's own ARGB.
+///
+/// This is [`appearance::DecorationColors`] with the channel packing already
+/// done. It is a separate type rather than the settings' own because the
+/// conversion is per-colour arithmetic and the alternative is doing it at every
+/// blit: a frame draws a title bar, a border and three buttons per window, and
+/// the colours only change when the user changes them.
+///
+/// Which is also why there is no constructor that invents a palette. The
+/// twelve hardcoded constants that used to live here were a fourth opinion
+/// about what a title bar looks like, and the visible symptom was that a user
+/// in light mode got a dark-navy desktop and a dark blue-gray title bar from
+/// the process that actually draws them.
 struct DecorationTheme {
     /// Title bar background when focused.
     title_bar_focused: u32,
@@ -3790,8 +3837,6 @@ struct DecorationTheme {
     title_text_unfocused: u32,
     /// Close button color.
     close_button: u32,
-    /// Close button hover color.
-    close_button_hover: u32,
     /// Maximize button color.
     maximize_button: u32,
     /// Minimize button color.
@@ -3806,22 +3851,36 @@ struct DecorationTheme {
     desktop_background: u32,
 }
 
-impl Default for DecorationTheme {
-    fn default() -> Self {
+impl DecorationTheme {
+    /// Resolve the frame colours from the user's settings, packed for the
+    /// framebuffer.
+    fn from_settings(settings: &AppearanceSettings) -> Self {
+        let colors = appearance::DecorationColors::from_settings(settings);
         Self {
-            title_bar_focused: 0xFF_2B_2B_3D,    // Dark blue-gray
-            title_bar_unfocused: 0xFF_3C_3C_4A,  // Lighter gray
-            title_text_focused: 0xFF_FF_FF_FF,   // White
-            title_text_unfocused: 0xFF_A0_A0_A0, // Gray text
-            close_button: 0xFF_E8_4D_4D,         // Red
-            close_button_hover: 0xFF_FF_60_60,   // Bright red
-            maximize_button: 0xFF_4D_C8_4D,      // Green
-            minimize_button: 0xFF_E8_C8_4D,      // Yellow
-            border_focused: 0xFF_50_50_70,       // Subtle border
-            border_unfocused: 0xFF_40_40_50,     // Dimmer border
-            shadow_color: 0x40_00_00_00,         // Semi-transparent black
-            desktop_background: 0xFF_1A_1A_2E,   // Dark navy
+            title_bar_focused: color_to_argb(&colors.title_focused_bg),
+            title_bar_unfocused: color_to_argb(&colors.title_unfocused_bg),
+            title_text_focused: color_to_argb(&colors.title_focused_fg),
+            title_text_unfocused: color_to_argb(&colors.title_unfocused_fg),
+            close_button: color_to_argb(&colors.close_button),
+            maximize_button: color_to_argb(&colors.maximize_button),
+            minimize_button: color_to_argb(&colors.minimize_button),
+            border_focused: color_to_argb(&colors.border_focused),
+            border_unfocused: color_to_argb(&colors.border_unfocused),
+            shadow_color: color_to_argb(&colors.shadow),
+            desktop_background: color_to_argb(&colors.desktop_bg),
         }
+    }
+}
+
+impl Default for DecorationTheme {
+    /// The palette for the default settings.
+    ///
+    /// Deferring to [`AppearanceSettings::default`] rather than restating a
+    /// palette is what makes a compositor that has never loaded a settings file
+    /// look identical to one that loaded a file saying nothing unusual — the
+    /// two used to differ, and the difference was only ever visible on screen.
+    fn default() -> Self {
+        Self::from_settings(&AppearanceSettings::default())
     }
 }
 
@@ -3871,10 +3930,34 @@ pub struct Compositor {
     cursor_shape: CursorShape,
     /// Active drag operation (if any).
     drag: Option<DragState>,
+    /// The previous left-press on a title bar, for recognising a double-click.
+    ///
+    /// The window is part of it, not just the time: two quick clicks on two
+    /// different title bars are two clicks, and maximising the second window
+    /// because the first was clicked recently is a window moving on its own.
+    last_title_press: Option<(WindowId, Instant)>,
+    /// How close together two title-bar clicks must be to count as one
+    /// double-click.
+    ///
+    /// Matches the default of the mouse settings panel
+    /// (`desktop::mouse_settings`). Nothing wires the user's choice through to
+    /// here yet — see `known-issues.md`
+    /// `TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING`.
+    double_click_interval: Duration,
     /// Rendering engine instance.
     render_engine: RenderEngine,
     /// Decoration theme.
     theme: DecorationTheme,
+    /// The user's appearance preferences, as far as the compositor can act on
+    /// them: how round window corners are and whether windows cast shadows.
+    ///
+    /// Held as the whole [`AppearanceSettings`] rather than as the two fields
+    /// used today, because the settings are one document with one owner
+    /// (`gui/appearance`), and copying two of its fields out into compositor-
+    /// local state is how a third independent appearance model gets started —
+    /// the exact thing that crate exists to prevent. The colours in
+    /// [`DecorationTheme`] are the next thing to come from here.
+    appearance: AppearanceSettings,
     /// Outbound event notifications for clients (stub queue).
     pending_notifications: VecDeque<EventNotification>,
     /// Reused encoding buffer for
@@ -3929,8 +4012,14 @@ impl Compositor {
             cursor_y: height as i32 / 2,
             cursor_shape: CursorShape::Arrow,
             drag: None,
+            last_title_press: None,
+            double_click_interval: Duration::from_millis(DEFAULT_DOUBLE_CLICK_MS),
             render_engine: RenderEngine::new(),
             theme: DecorationTheme::default(),
+            // The defaults, not the user's file: a constructor that read
+            // `$HOME` would make every test of this crate depend on the machine
+            // running it. `main` loads the file and calls `set_appearance`.
+            appearance: AppearanceSettings::default(),
             pending_notifications: VecDeque::new(),
             window_list_scratch: Vec::new(),
             modifiers: ModifierState::new(),
@@ -3940,6 +4029,85 @@ impl Compositor {
             stream_sessions: BTreeMap::new(),
             next_stream_id: 1,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Appearance
+    // -----------------------------------------------------------------------
+
+    /// Adopt the user's appearance preferences.
+    ///
+    /// Forces a full recomposite, because the settings that reach here change
+    /// pixels *outside* any window's damage: turning shadows off leaves the old
+    /// shadow lying on the desktop until something else happens to repaint that
+    /// strip, and squaring a corner leaves the quarter-disc of frame colour that
+    /// used to fill it. Nothing marks those regions dirty — no window moved —
+    /// so the repaint has to be asked for here.
+    ///
+    /// *Unless nothing changed*, in which case there is nothing to repaint and
+    /// the damage state is left alone. This is the one place that comparison
+    /// belongs: [`reload_appearance`](Self::reload_appearance) can be sent by
+    /// any connected client at any rate, and a full-screen repaint per request
+    /// would make a harmless notification into a way to keep the compositor
+    /// redrawing the whole desktop for nothing.
+    pub fn set_appearance(&mut self, settings: AppearanceSettings) {
+        if settings == self.appearance {
+            return;
+        }
+        self.appearance = settings;
+        // Resolved once here rather than per frame: the packing is arithmetic
+        // on eleven colours, and they change only when this is called.
+        self.theme = DecorationTheme::from_settings(&self.appearance);
+        self.full_recomposite = true;
+    }
+
+    /// How close together two title-bar clicks must be to maximize the window.
+    ///
+    /// Clamped to [`MIN_DOUBLE_CLICK_MS`]..=[`MAX_DOUBLE_CLICK_MS`].
+    pub fn set_double_click_ms(&mut self, ms: u32) {
+        self.double_click_interval = Duration::from_millis(u64::from(
+            ms.clamp(MIN_DOUBLE_CLICK_MS, MAX_DOUBLE_CLICK_MS),
+        ));
+    }
+
+    /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
+    ///
+    /// This is the only place in the library that touches the filesystem, and
+    /// the asymmetry with [`Compositor::new`] is deliberate rather than
+    /// inconsistent: a *constructor* that consulted `$HOME` would make every
+    /// test in this crate depend on the machine running it, whereas re-reading
+    /// the user's file is the entire meaning of this call — a caller that did
+    /// not want it would not have made it. Tests point it somewhere harmless
+    /// with `appearance::config::testing::with_scratch_config`.
+    ///
+    /// A missing or unreadable file yields the defaults, exactly as at startup:
+    /// a user who has never opened the Personalization page is the ordinary
+    /// case, not a failure to report.
+    pub fn reload_appearance(&mut self) {
+        self.set_appearance(appearance::AppearanceFile::load().settings);
+    }
+
+    /// The appearance preferences currently in force.
+    #[must_use]
+    pub fn appearance(&self) -> &AppearanceSettings {
+        &self.appearance
+    }
+
+    /// The corner radius for decorations on a display of the given scale.
+    ///
+    /// Scaled like every other decoration dimension, and for the same reason: a
+    /// frame that grows with the display while its corners keep an 8px curve
+    /// reads as a frame with sharper corners, not as one drawn at the same size.
+    /// Unlike [`scale_dimension`] there is no non-zero floor — a radius of 0 is
+    /// the user having chosen [`WindowCorners::Square`], which must survive
+    /// scaling as a square corner rather than becoming a 1px curve.
+    fn decoration_radius(&self, scale: f32) -> f32 {
+        let radius = self.appearance.corner_radius() * scale;
+        if radius.is_finite() && radius > 0.0 {
+            radius
+        } else {
+            0.0
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4356,6 +4524,64 @@ impl Compositor {
         }
     }
 
+    /// Bring a window to the user: un-minimize it if it is minimized, then
+    /// focus and raise it within its band.
+    ///
+    /// What a taskbar button and an Alt-Tab switcher do, and the reason it is
+    /// one operation rather than two: [`focus_window`](Self::focus_window)
+    /// deliberately refuses a minimized window — a window nobody can see must
+    /// not hold the keyboard — so un-minimizing has to come *first*. A caller
+    /// issuing the two separately would be depending on that order without
+    /// anything stating it, and would silently do nothing to a minimized
+    /// window if it got them the wrong way round.
+    ///
+    /// Distinct from [`restore_window`](Self::restore_window), which also
+    /// un-*maximizes*. A taskbar button on a minimized-while-maximized window
+    /// must give the window back exactly as the user left it; restoring it
+    /// would un-maximize a window the user never asked to un-maximize.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist —
+    /// which for a shell is an ordinary race, not a fault: a window may close
+    /// between the list snapshot the button was drawn from and the click.
+    pub fn activate_window(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        let window = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        if window.minimized {
+            window.minimized = false;
+            window.visible = true;
+            window.dirty = true;
+            self.full_recomposite = true;
+        }
+        self.damage_window(window_id);
+        self.focus_window(window_id);
+        Ok(())
+    }
+
+    /// Ask a window to close, as its own close button does.
+    ///
+    /// Sends the client [`EventNotification::WindowClose`] rather than
+    /// destroying the window: the client is being *told*, so an editor with
+    /// unsaved changes gets to put up its dialog. A shell that could destroy a
+    /// window outright would be able to discard a user's work from a context
+    /// menu.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist. The
+    /// check is what stops a notification being queued for an id nothing will
+    /// ever deliver.
+    pub fn request_close(&mut self, window_id: WindowId) -> CompositorResult<()> {
+        if self.window_ref(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        self.pending_notifications
+            .push_back(EventNotification::WindowClose { window_id });
+        Ok(())
+    }
+
     /// Set a window's title.
     pub fn set_title(&mut self, window_id: WindowId, title: String) -> CompositorResult<()> {
         let window = self
@@ -4641,6 +4867,12 @@ impl Compositor {
 
         // Left button press: check window decorations first, then client area.
         if button == MouseButton::Left {
+            // Taken and cleared before anything is dispatched, so that only a
+            // title-bar press can leave one behind. Two title clicks with a
+            // press on the desktop between them are two clicks, however fast:
+            // the user went somewhere else and came back.
+            let previous_title_press = self.last_title_press.take();
+
             // Check windows from top to bottom z-order.
             let hit_window = self.window_at_with_decorations(x, y);
 
@@ -4670,14 +4902,38 @@ impl Compositor {
                         let _ = self.minimize_window(window_id);
                         return;
                     }
-                    // Title bar drag?
+                    // Title bar: a double-click toggles maximize, a single one
+                    // begins a move.
                     if win.title_bar_rect().is_some_and(|r| r.contains(x, y)) {
+                        let now = Instant::now();
+                        let doubled = previous_title_press.is_some_and(|(prev, at)| {
+                            prev == window_id
+                                && now.duration_since(at) <= self.double_click_interval
+                        });
+                        if doubled {
+                            // Left cleared by the `take` above rather than
+                            // replaced: otherwise a third click pairs with the
+                            // second and un-maximizes what the user just
+                            // maximized.
+                            let maximized = win.maximized;
+                            if maximized {
+                                let _ = self.restore_window(window_id);
+                            } else {
+                                let _ = self.maximize_window(window_id);
+                            }
+                            return;
+                        }
+                        // Read off the window before recording the press: the
+                        // record is a write to `self`, and `win` borrows it.
+                        let start_window_pos = Point::new(win.x, win.y);
+                        let start_window_size = (win.width, win.height);
+                        self.last_title_press = Some((window_id, now));
                         self.drag = Some(DragState {
                             window_id,
                             mode: DragMode::MoveWindow,
                             start_mouse: Point::new(x, y),
-                            start_window_pos: Point::new(win.x, win.y),
-                            start_window_size: (win.width, win.height),
+                            start_window_pos,
+                            start_window_size,
                         });
                         return;
                     }
@@ -5339,6 +5595,7 @@ impl Compositor {
                 win.buffer.is_some(),
                 win.title_bar_layout(),
                 win.transparent,
+                win.maximized,
             ),
             _ => return,
         };
@@ -5355,14 +5612,30 @@ impl Compositor {
             has_buffer,
             title_bar,
             transparent,
+            maximized,
         ) = win_data;
 
         // Undecorated and fullscreen windows get no frame: the first asked to
         // be a bare surface (a menu, a tooltip, a splash screen), the second
         // owns the whole display. Both report it by having no title bar.
         if let Some(bar) = title_bar {
-            // 1. Draw window shadow.
-            self.render_shadow(bar.frame, bar.scale, opacity);
+            // 1. Draw window shadow — if the user wants shadows, and if this
+            //    window has an edge to cast one from. A maximized window's frame
+            //    is fitted to the display exactly (`maximize_window`), so every
+            //    ring of its shadow is either clipped off the display or drawn
+            //    under the window's own frame and painted over: on an opaque
+            //    window it is invisible, and always it is a full shadow's worth
+            //    of stroking per frame for nothing — on the one window state
+            //    that is the common case. It is not merely wasted, either: a
+            //    translucent or `transparent` window does not cover what is
+            //    beneath it, so the rings show through as a dark smear along the
+            //    top and left of a maximized window and nowhere else.
+            //
+            //    Fullscreen needs no test here — `Window::has_title_bar` is
+            //    false for it, so a fullscreen window never reaches this branch.
+            if self.appearance.drop_shadows && !maximized {
+                self.render_shadow(bar.frame, bar.scale, opacity);
+            }
 
             // 2. Draw window border.
             let border_color = if focused {
@@ -5443,12 +5716,23 @@ impl Compositor {
 
     /// Render the window shadow: concentric outlines around the frame box,
     /// offset down-right and fading with distance.
+    ///
+    /// Each ring is rounded by the window's own radius *grown by that ring's
+    /// distance out*, which is what an offset curve actually is: a shadow whose
+    /// rings all shared the frame's radius would be a stack of same-shaped
+    /// outlines at increasing sizes, and its corners would bulge squarer the
+    /// further out they went until the outermost ring poked past the curve it
+    /// is supposed to be sitting behind.
     fn render_shadow(&mut self, frame: Rect, scale: f32, opacity: f32) {
         /// How far down and right the shadow is cast from the frame, at 1×.
         const SHADOW_OFFSET: u32 = 3;
-        /// Alpha of the innermost shadow layer, falling off to nothing at the
-        /// outermost.
-        const SHADOW_ALPHA: u32 = 40;
+
+        // Colour and peak alpha both from the palette rather than from a local
+        // constant, so that the one place that says what a shadow looks like is
+        // the same place that says what a title bar looks like. The alpha is
+        // the innermost layer's; it falls off to nothing at the outermost.
+        let shadow_rgb = self.theme.shadow_color & 0x00FF_FFFF;
+        let shadow_alpha = self.theme.shadow_color >> 24;
 
         let extent = scale_dimension(SHADOW_SIZE, scale);
         let offset = scale_dimension(SHADOW_OFFSET, scale);
@@ -5464,28 +5748,37 @@ impl Compositor {
         // already guarantees a non-zero extent for a non-zero constant, but a
         // guard is a second place that has to keep agreeing with the first. The
         // fallback value is unreachable anyway — a zero extent runs no layers.
-        let falloff = SHADOW_ALPHA.checked_div(extent).unwrap_or(SHADOW_ALPHA);
+        let falloff = shadow_alpha.checked_div(extent).unwrap_or(shadow_alpha);
 
         #[allow(
             clippy::cast_possible_wrap,
             reason = "a scaled 3px offset cannot approach i32::MAX"
         )]
         let base = frame.offset(offset as i32, offset as i32);
+        let radius = self.decoration_radius(scale);
         for layer in 0..extent {
-            let alpha = SHADOW_ALPHA
+            let alpha = shadow_alpha
                 .saturating_sub(layer.saturating_mul(falloff))
                 .min(255);
             let ring = base.inflate(layer);
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "the layer index is bounded by the scaled shadow extent \
+                          — a handful of pixels, exact in f32"
+            )]
+            let grown = radius + layer as f32;
+            let radii = CornerRadii::all(grown);
             // Only the outline of each layer: the interior is covered by the
             // window itself or by the next layer in.
-            self.render_engine.stroke_rect(
+            self.render_engine.stroke_round_rect(
                 &mut self.backend,
                 ring.x,
                 ring.y,
                 ring.width,
                 ring.height,
                 1,
-                alpha << 24,
+                &radii,
+                (alpha << 24) | shadow_rgb,
                 opacity,
             );
         }
@@ -5507,13 +5800,19 @@ impl Compositor {
             frame.width,
             frame.height.saturating_add(width),
         );
-        self.render_engine.stroke_rect(
+        // The border traces the outside of the frame, so it takes the frame's
+        // radius as-is — the same curve the title bar's top corners are drawn
+        // with, from the same call, which is what keeps the two from parting
+        // company by a pixel at the join.
+        let radii = CornerRadii::all(self.decoration_radius(scale));
+        self.render_engine.stroke_round_rect(
             &mut self.backend,
             border.x,
             border.y,
             border.width,
             border.height,
             width,
+            &radii,
             color,
             opacity,
         );
@@ -5537,12 +5836,17 @@ impl Compositor {
         } else {
             self.theme.title_bar_unfocused
         };
-        self.render_engine.fill_rect(
+        // Rounded across the top only: the title bar shares its lower edge with
+        // the client area, and curving that edge would cut two notches out of
+        // the middle of the window where the bar meets the content beneath it.
+        let radius = self.decoration_radius(bar.scale);
+        self.render_engine.fill_round_rect(
             &mut self.backend,
             tb_x,
             tb_y,
             tb_width,
             bar.bar.height,
+            &CornerRadii::top(radius),
             bg_color,
             opacity,
         );
@@ -5556,11 +5860,15 @@ impl Compositor {
         /// Gap between the left edge of the title bar and the title text, at 1×.
         const TITLE_TEXT_INSET: u32 = 8;
         let inset = scale_dimension(TITLE_TEXT_INSET, bar.scale);
-        // A 16px title inside a 60px bar is the visible half of an unscaled
-        // title bar: the frame grows and the writing on it does not, which
-        // reads as a bug long before anyone measures the pixels. `max` keeps a
-        // fractional scale from producing a font size of zero.
-        let font_size = (DEFAULT_FONT_SIZE * bar.scale).max(1.0);
+        // The user's UI size, not a constant: a title bar is interface text,
+        // and someone who enlarged the interface font because they cannot read
+        // 13pt has said something about window titles too. Scaled on top of
+        // that, because a title that stayed 13px inside a bar that grew with
+        // the display is the visible half of an unscaled title bar — the frame
+        // grows and the writing on it does not, which reads as a bug long
+        // before anyone measures the pixels. `max` keeps a fractional scale, or
+        // a font size a config file made tiny, from producing zero.
+        let font_size = (self.appearance.fonts.ui_size * bar.scale).max(1.0);
         let text_x = tb_x.saturating_add(inset as i32);
         // Centred on the font's own line height rather than a hardcoded cell
         // size, so the title stays centred if the title-bar font ever changes.
@@ -5602,18 +5910,33 @@ impl Compositor {
         // Buttons: close (red), maximize (green), minimize (yellow). Each is
         // drawn exactly where the hit test will look for it, and skipped
         // entirely when the window does not have it.
+        //
+        // The buttons are round when the windows are: a square close button
+        // beside a curved corner is the mismatch, not the consistency. Capped at
+        // half the button, which is the radius at which it becomes a circle —
+        // past that the clamp inside the rasterizer would take over anyway, and
+        // capping here means the three buttons agree with each other even when
+        // they are not all the same size.
+        let button_size = scale_dimension(TITLE_BUTTON_SIZE, bar.scale);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a title-bar button is tens of pixels; exact in f32"
+        )]
+        let button_radius = radius.min(button_size as f32 / 2.0);
+        let button_radii = CornerRadii::all(button_radius);
         for (rect, color) in [
             (bar.close, self.theme.close_button),
             (bar.maximize, self.theme.maximize_button),
             (bar.minimize, self.theme.minimize_button),
         ] {
             if let Some(r) = rect {
-                self.render_engine.fill_rect(
+                self.render_engine.fill_round_rect(
                     &mut self.backend,
                     r.x,
                     r.y,
                     r.width,
                     r.height,
+                    &button_radii,
                     color,
                     opacity,
                 );
@@ -5737,6 +6060,29 @@ impl Compositor {
                     CompositorResponse::Error {
                         message: "no primary display".to_string(),
                     }
+                }
+            }
+            CompositorRequest::ReloadAppearance => {
+                self.reload_appearance();
+                // `Ok` whether or not anything changed. The client is being
+                // told the compositor has re-read the file, which is true
+                // either way, and a reply that differed would leak the state of
+                // the user's settings to anyone allowed to ask for a reload.
+                CompositorResponse::Ok
+            }
+            CompositorRequest::ShellControl { window_id, action } => {
+                let result = match action {
+                    ShellControlAction::Activate => self.activate_window(window_id),
+                    ShellControlAction::Minimize => self.minimize_window(window_id),
+                    ShellControlAction::Restore => self.restore_window(window_id),
+                    ShellControlAction::Maximize => self.maximize_window(window_id),
+                    ShellControlAction::Close => self.request_close(window_id),
+                };
+                match result {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
                 }
             }
             CompositorRequest::StreamStart => {
@@ -7044,6 +7390,332 @@ mod tests {
                 "dragging the {name} edge"
             );
         }
+    }
+
+    // ---- double-click the title bar to maximize ---------------------------
+    //
+    // The gesture every desktop has. It used to live in the desktop shell,
+    // which drew a second copy of every title bar and hit-tested its own copy;
+    // when that duplicate was deleted the gesture came here, beside the hit
+    // test that already turns a press on this same strip into a move, a close
+    // or a resize. Timing lives here too — the shell no longer has to be told
+    // which press was a "double" one.
+
+    /// A full click near the left end of `id`'s title bar, away from the
+    /// buttons at its right-hand end. Asked of the window each time because a
+    /// maximized window's title bar is somewhere else.
+    fn click_title_bar(comp: &mut Compositor, id: WindowId) {
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_rect()
+            .expect("a decorated window has a title bar");
+        let x = bar.x + 10;
+        let y = bar.y + bar.height as i32 / 2;
+        comp.handle_mouse_button(MouseButton::Left, true, x, y);
+        comp.handle_mouse_button(MouseButton::Left, false, x, y);
+    }
+
+    fn maximized(comp: &Compositor, id: WindowId) -> bool {
+        comp.window_ref(id).expect("window").maximized
+    }
+
+    /// A compositor with one resizable window at (100, 100), and a
+    /// double-click interval long enough that no scheduling delay between two
+    /// synchronous calls can exceed it.
+    fn with_one_window() -> (Compositor, WindowId) {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.set_double_click_ms(2000);
+        let mut spec = WindowSpec::new("Resizable", 200, 150);
+        spec.position = Some((100, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        (comp, id)
+    }
+
+    #[test]
+    fn a_double_click_on_the_title_bar_maximizes_and_a_second_one_restores() {
+        let (mut comp, id) = with_one_window();
+
+        click_title_bar(&mut comp, id);
+        assert!(!maximized(&comp, id), "one click is not the gesture");
+        click_title_bar(&mut comp, id);
+        assert!(maximized(&comp, id), "two quick clicks must maximize");
+
+        click_title_bar(&mut comp, id);
+        assert!(
+            maximized(&comp, id),
+            "the third click pairs with nothing — the second consumed the pair"
+        );
+        click_title_bar(&mut comp, id);
+        assert!(!maximized(&comp, id), "the gesture toggles");
+    }
+
+    /// The first click of a pair still begins a move. A title bar that only
+    /// responded on the second click could not be dragged at all.
+    #[test]
+    fn the_first_click_of_the_pair_still_starts_a_move() {
+        let (mut comp, id) = with_one_window();
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_rect()
+            .expect("title bar");
+        comp.handle_mouse_button(MouseButton::Left, true, bar.x + 10, bar.y + 5);
+        let drag = comp.drag.as_ref().expect("a title press starts a move");
+        assert_eq!(drag.window_id, id);
+        assert!(matches!(drag.mode, DragMode::MoveWindow));
+    }
+
+    /// Two clicks minutes apart are two clicks. Nothing else in the compositor
+    /// measures elapsed time, so the interval has to actually be consulted.
+    #[test]
+    fn two_title_clicks_far_enough_apart_are_two_separate_clicks() {
+        let (mut comp, id) = with_one_window();
+        // The shortest interval the setter allows; the sleep is comfortably
+        // past it, and can only ever overshoot, never undershoot.
+        comp.set_double_click_ms(100);
+
+        click_title_bar(&mut comp, id);
+        std::thread::sleep(Duration::from_millis(160));
+        click_title_bar(&mut comp, id);
+        assert!(
+            !maximized(&comp, id),
+            "clicks outside the interval must not pair"
+        );
+    }
+
+    /// Two windows, one click each, as fast as the machine can manage. Pairing
+    /// them would maximize a window the user clicked exactly once — a window
+    /// moving on its own.
+    #[test]
+    fn a_quick_click_on_each_of_two_title_bars_maximizes_neither() {
+        let (mut comp, first) = with_one_window();
+        let mut spec = WindowSpec::new("Second", 200, 150);
+        spec.position = Some((400, 100));
+        let second = comp.create_window_from_spec(&spec, 2);
+
+        click_title_bar(&mut comp, first);
+        click_title_bar(&mut comp, second);
+        assert!(!maximized(&comp, first));
+        assert!(!maximized(&comp, second));
+    }
+
+    /// The user went somewhere else and came back. However fast that was, it
+    /// was not a double-click.
+    #[test]
+    fn a_press_somewhere_else_between_two_title_clicks_breaks_the_pair() {
+        let (mut comp, id) = with_one_window();
+
+        click_title_bar(&mut comp, id);
+        // The bare desktop, well clear of the window and its shadow.
+        comp.handle_mouse_button(MouseButton::Left, true, 700, 500);
+        comp.handle_mouse_button(MouseButton::Left, false, 700, 500);
+        click_title_bar(&mut comp, id);
+        assert!(!maximized(&comp, id));
+    }
+
+    /// A value from the mouse settings panel arrives as a `u32` of milliseconds
+    /// and is not this crate's to trust. Zero in particular would make the
+    /// gesture impossible to perform rather than merely hard.
+    #[test]
+    fn the_double_click_interval_is_clamped_to_a_performable_range() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.set_double_click_ms(0);
+        assert_eq!(
+            comp.double_click_interval,
+            Duration::from_millis(u64::from(MIN_DOUBLE_CLICK_MS))
+        );
+        comp.set_double_click_ms(u32::MAX);
+        assert_eq!(
+            comp.double_click_interval,
+            Duration::from_millis(u64::from(MAX_DOUBLE_CLICK_MS))
+        );
+        // And a value inside the range is passed through untouched — a clamp
+        // that returned a bound for everything would satisfy the two above.
+        comp.set_double_click_ms(250);
+        assert_eq!(comp.double_click_interval, Duration::from_millis(250));
+    }
+
+    // ======================================================================
+    // Acting on a window on a shell's behalf
+    // ======================================================================
+
+    /// The whole point of the operation: a taskbar button on a minimized
+    /// window gives it back *and* focuses it.
+    ///
+    /// This is the ordering invariant `activate_window` exists to hold.
+    /// `focus_window` refuses a minimized window on purpose — a window nobody
+    /// can see must not hold the keyboard — so un-minimizing has to happen
+    /// first. Swap the two halves of `activate_window` and this fails on the
+    /// focus assertion while the visibility one still passes, which is exactly
+    /// the half-working button a user would report as "it comes back but I
+    /// have to click it again".
+    #[test]
+    fn activating_a_minimized_window_unminimizes_it_and_gives_it_focus() {
+        let (mut comp, id) = with_one_window();
+        comp.minimize_window(id).expect("minimize");
+        assert_ne!(comp.focused_window, Some(id), "minimizing dropped focus");
+
+        comp.activate_window(id).expect("activate");
+
+        let win = comp.window_ref(id).expect("window");
+        assert!(!win.minimized, "still minimized");
+        assert!(win.visible, "un-minimized but still hidden");
+        assert_eq!(comp.focused_window, Some(id), "un-minimized but not focused");
+    }
+
+    /// A taskbar button must give a window back exactly as the user left it.
+    ///
+    /// `restore_window` un-maximizes as well as un-minimizes, which is right
+    /// for the client's own `Restore` request and wrong here: a window the
+    /// user maximized and then minimized would come back at its old small
+    /// size, having silently lost a state it never asked to leave. That is why
+    /// `activate_window` is not a call to `restore_window`.
+    #[test]
+    fn activating_a_window_minimized_while_maximized_leaves_it_maximized() {
+        let (mut comp, id) = with_one_window();
+        comp.maximize_window(id).expect("maximize");
+        comp.minimize_window(id).expect("minimize");
+
+        comp.activate_window(id).expect("activate");
+        assert!(
+            maximized(&comp, id),
+            "activating un-maximized a window the user never un-maximized"
+        );
+
+        // And the contrast is real rather than asserted: `restore_window` on
+        // the same starting state does drop the maximize.
+        comp.minimize_window(id).expect("minimize again");
+        comp.restore_window(id).expect("restore");
+        assert!(!maximized(&comp, id), "restore is supposed to un-maximize");
+    }
+
+    /// Activation raises within the band and no further. A taskbar button that
+    /// lifted an application window over the taskbar would put the button
+    /// under the window it just summoned.
+    #[test]
+    fn activating_a_window_does_not_lift_it_over_the_shell() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut app = WindowSpec::new("App", 200, 150);
+        app.position = Some((100, 100));
+        let app_id = comp.create_window_from_spec(&app, 1);
+
+        let mut bar = WindowSpec::new("Taskbar", 800, 40);
+        bar.position = Some((0, 560));
+        bar.layer = Layer::Overlay;
+        let bar_id = comp.create_window_from_spec(&bar, 2);
+
+        comp.activate_window(app_id).expect("activate");
+
+        let app_at = comp.z_stack.iter().position(|&w| w == app_id);
+        let bar_at = comp.z_stack.iter().position(|&w| w == bar_id);
+        assert!(
+            app_at < bar_at,
+            "an activated application window climbed over the overlay band"
+        );
+    }
+
+    /// Activating a window that has already closed is a race, not a fault: the
+    /// click lands after the list the button was drawn from. It must report,
+    /// not panic, and must leave focus where it was.
+    #[test]
+    fn activating_a_window_that_has_gone_is_an_error_and_changes_nothing() {
+        let (mut comp, id) = with_one_window();
+        let ghost = WindowId::from_raw(id.raw().wrapping_add(999));
+        let before = comp.focused_window;
+
+        assert!(matches!(
+            comp.activate_window(ghost),
+            Err(CompositorError::WindowNotFound(_))
+        ));
+        assert_eq!(comp.focused_window, before);
+    }
+
+    /// Closing from a shell *asks*. The window is still there afterwards, and
+    /// its client has been told — which is what lets an editor with unsaved
+    /// changes put up its dialog instead of losing the user's work.
+    #[test]
+    fn a_shell_close_asks_the_window_rather_than_destroying_it() {
+        let (mut comp, id) = with_one_window();
+
+        comp.request_close(id).expect("close");
+
+        assert!(
+            comp.window_ref(id).is_some(),
+            "a shell close destroyed the window outright"
+        );
+        assert!(
+            comp.pending_notifications
+                .iter()
+                .any(|n| matches!(n, EventNotification::WindowClose { window_id } if *window_id == id)),
+            "the client was never told to close"
+        );
+    }
+
+    /// And a close aimed at a window that has gone queues nothing. A
+    /// notification addressed to a dead id is one no link will ever claim,
+    /// which is a slow leak in the pending queue rather than a visible bug.
+    #[test]
+    fn a_shell_close_of_a_window_that_has_gone_queues_no_notification() {
+        let (mut comp, id) = with_one_window();
+        let ghost = WindowId::from_raw(id.raw().wrapping_add(999));
+        let before = comp.pending_notifications.len();
+
+        assert!(matches!(
+            comp.request_close(ghost),
+            Err(CompositorError::WindowNotFound(_))
+        ));
+        assert_eq!(comp.pending_notifications.len(), before);
+    }
+
+    /// Every action reaches the operation it names.
+    ///
+    /// Listed rather than sampled: the dispatch is a five-arm match and an arm
+    /// wired to the wrong method is invisible to a test that only sends one
+    /// action. Each assertion is chosen to distinguish that arm from the other
+    /// four.
+    #[test]
+    fn every_shell_control_action_reaches_its_own_operation() {
+        let (mut comp, id) = with_one_window();
+
+        let send = |comp: &mut Compositor, action| {
+            comp.handle_request(CompositorRequest::ShellControl {
+                window_id: id,
+                action,
+            })
+        };
+
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Maximize),
+            CompositorResponse::Ok
+        ));
+        assert!(maximized(&comp, id), "Maximize");
+
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Restore),
+            CompositorResponse::Ok
+        ));
+        assert!(!maximized(&comp, id), "Restore");
+
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Minimize),
+            CompositorResponse::Ok
+        ));
+        assert!(comp.window_ref(id).expect("window").minimized, "Minimize");
+
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Activate),
+            CompositorResponse::Ok
+        ));
+        assert!(!comp.window_ref(id).expect("window").minimized, "Activate");
+
+        let before = comp.pending_notifications.len();
+        assert!(matches!(
+            send(&mut comp, ShellControlAction::Close),
+            CompositorResponse::Ok
+        ));
+        assert!(comp.window_ref(id).is_some(), "Close must not destroy");
+        assert!(comp.pending_notifications.len() > before, "Close");
     }
 
     #[test]
@@ -10300,5 +10972,780 @@ mod tests {
                 "a rounded fill painted ({x}, {y}), outside its clip {clip:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The user's appearance settings reaching the decorations
+    //
+    // The compositor drew its own window frames from a hardcoded
+    // `DecorationTheme` and nothing else. Two of the user's choices in the
+    // Settings app — how round window corners are, and whether windows cast
+    // shadows — had no route into the process that draws the frames, so both
+    // were ignored outright: `Square` and `ExtraRounded` produced the same
+    // square frame, and turning shadows off left every shadow exactly where it
+    // was. These tests assert on the composited pixels, because "the field is
+    // stored" is precisely what was true before and was not enough.
+    // -----------------------------------------------------------------------
+
+    /// The display these tests composite onto. Large enough that a window can
+    /// sit well inside it with room for its shadow to fall on the desktop.
+    const DECOR_W: u32 = 400;
+    /// See [`DECOR_W`].
+    const DECOR_H: u32 = 300;
+
+    /// A compositor with one decorated window at a known place, rendered once
+    /// onto a cleared desktop under the given appearance settings.
+    ///
+    /// Renders one window rather than composing a frame so that what lands in
+    /// the buffer is exactly this window's decorations over a known background
+    /// — the same idiom as `a_scaled_shadow_is_actually_drawn_to_its_scaled_extent`.
+    fn decorated(settings: AppearanceSettings) -> (Compositor, WindowId) {
+        let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+        comp.set_appearance(settings);
+        let mut spec = WindowSpec::new("Framed", 160, 120);
+        spec.position = Some((120, 100));
+        let id = comp.create_window_from_spec(&spec, 1);
+        comp.refresh_window_scales();
+        let bg = comp.theme.desktop_background;
+        comp.backend.clear(bg);
+        comp.render_window(id);
+        (comp, id)
+    }
+
+    /// Settings that differ from the defaults only in their corner style.
+    fn with_corners(corners: WindowCorners) -> AppearanceSettings {
+        AppearanceSettings {
+            window_corners: corners,
+            ..AppearanceSettings::default()
+        }
+    }
+
+    /// How many pixels of `rect`'s top-left `size`×`size` block are painted in
+    /// exactly `color`.
+    ///
+    /// A count over a block rather than a probe at one coordinate, because it
+    /// measures *how much* of the corner was cut away. That is what lets one
+    /// measurement tell `Subtle` from `ExtraRounded`, without this test carrying
+    /// a second copy of the arc arithmetic that could agree with a wrong
+    /// original. Exact equality is deliberate: the antialiased rim pixels are
+    /// blends and do not count, so what is counted is the solid interior, which
+    /// is unambiguous.
+    ///
+    /// It is a *relative* measure only. A block over a window frame also
+    /// contains the border stroke down its left edge and the first letters of
+    /// the title, neither of which is frame colour — so the count sits well
+    /// below the block's area even for a perfectly square corner (339 of 400,
+    /// when this was written). Those contaminants do not move with the corner
+    /// setting, which is why comparing two counts over the same block is sound
+    /// and asserting an absolute one is not.
+    fn corner_ink(comp: &Compositor, rect: Rect, size: u32, color: u32) -> u32 {
+        let mut count: u32 = 0;
+        for dy in 0..size {
+            for dx in 0..size {
+                #[allow(
+                    clippy::cast_sign_loss,
+                    reason = "the sampled block is inside the window, which is \
+                              inside the buffer"
+                )]
+                let (x, y) = ((rect.x + dx as i32) as u32, (rect.y + dy as i32) as u32);
+                if working_pixel(&comp.backend, x, y) == Some(color) {
+                    count = count.saturating_add(1);
+                }
+            }
+        }
+        count
+    }
+
+    /// The title bar's own rectangle and background colour, for a focused
+    /// window. Read from the window rather than recomputed, so a change to the
+    /// layout cannot leave these tests probing empty desktop.
+    fn title_bar_of(comp: &Compositor, id: WindowId) -> (Rect, u32) {
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_layout()
+            .expect("a decorated window has a title bar");
+        let focused = comp.window_ref(id).expect("window").focused;
+        let color = if focused {
+            comp.theme.title_bar_focused
+        } else {
+            comp.theme.title_bar_unfocused
+        };
+        (bar.bar, color)
+    }
+
+    /// How big a block to measure a corner over. Larger than the largest radius
+    /// the settings offer (16), so `ExtraRounded` still leaves solid pixels in
+    /// the block and the counts stay comparable.
+    const CORNER_BLOCK: u32 = 20;
+
+    #[test]
+    fn the_users_corner_setting_reaches_the_window_frame() {
+        // The bug: it did not. Every window was drawn with a square frame no
+        // matter what the user chose, because the compositor had no connection
+        // to the appearance settings at all — `Square` and `ExtraRounded` were
+        // the same picture.
+        //
+        // Probed two pixels in from the frame's top-left rather than counted
+        // over a block, because this one pixel is unambiguous: it is inside the
+        // border stroke and well clear of the title text, so the only thing
+        // that decides its colour is whether the corner was cut away. A square
+        // corner paints it; a 16px arc is still 8px away from it at that depth.
+        let corner_painted = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let (bar, color) = title_bar_of(&comp, id);
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let probe = ((bar.x + 2) as u32, (bar.y + 2) as u32);
+            working_pixel(&comp.backend, probe.0, probe.1) == Some(color)
+        };
+        assert!(
+            corner_painted(WindowCorners::Square),
+            "a square corner left its own corner pixel unpainted"
+        );
+        assert!(
+            !corner_painted(WindowCorners::ExtraRounded),
+            "the user asked for extra-rounded windows and the corner pixel was \
+             painted anyway — the setting never reached the frame"
+        );
+    }
+
+    #[test]
+    fn a_deeper_corner_setting_cuts_more_of_the_corner_away() {
+        // Not just "some rounding happened": the *amount* has to follow the
+        // setting. A compositor that rounded every window by one hardcoded
+        // radius would pass the test above and fail this one, and would ignore
+        // three of the four choices the settings panel offers.
+        let inks: Vec<(WindowCorners, u32)> = [
+            WindowCorners::Square,
+            WindowCorners::Subtle,
+            WindowCorners::Rounded,
+            WindowCorners::ExtraRounded,
+        ]
+        .into_iter()
+        .map(|corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let (bar, color) = title_bar_of(&comp, id);
+            (corners, corner_ink(&comp, bar, CORNER_BLOCK, color))
+        })
+        .collect();
+
+        for pair in inks.windows(2) {
+            let [(shallow, more), (deep, less)] = pair else {
+                unreachable!("windows(2) yields pairs")
+            };
+            assert!(
+                less < more,
+                "{deep:?} (radius {}) left {less} painted pixels, which is not fewer \
+                 than {shallow:?} (radius {}) at {more}",
+                deep.radius(),
+                shallow.radius(),
+            );
+        }
+    }
+
+    #[test]
+    fn the_border_rounds_with_the_frame_it_traces() {
+        // The border is a separate call from the title bar, so rounding one
+        // does not round the other — and a square border around a rounded frame
+        // is not a subtle defect: it is a hard rectangular outline standing off
+        // the window's curved corners with desktop showing between them.
+        let border_at_the_corner = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let frame = comp.window_ref(id).expect("window").frame_rect();
+            let width = scale_dimension(
+                BORDER_WIDTH,
+                comp.window_ref(id).expect("window").scale_factor,
+            );
+            // The border box starts one stroke above the frame; see
+            // `render_border`. Its own top-left is the pixel a square stroke
+            // paints and a rounded one leaves alone.
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let probe = (frame.x as u32, (frame.y - width as i32) as u32);
+            let focused = comp.window_ref(id).expect("window").focused;
+            let expected = if focused {
+                comp.theme.border_focused
+            } else {
+                comp.theme.border_unfocused
+            };
+            working_pixel(&comp.backend, probe.0, probe.1) == Some(expected)
+        };
+        assert!(
+            border_at_the_corner(WindowCorners::Square),
+            "a square border did not paint its own corner pixel"
+        );
+        assert!(
+            !border_at_the_corner(WindowCorners::ExtraRounded),
+            "the border stayed square while the frame rounded"
+        );
+    }
+
+    #[test]
+    fn the_shadow_rounds_with_the_window_it_falls_from() {
+        // A shadow is the window's own silhouette, offset and blurred. Rings
+        // that kept square corners under a rounded window would show as dark
+        // right angles poking diagonally out past the curve they are supposed
+        // to be sitting behind — the one place a shadow is most visible.
+        let shadow_ink = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let frame = comp.window_ref(id).expect("window").frame_rect();
+            let bg = comp.theme.desktop_background;
+            // The block diagonally off the frame's bottom-right, which is
+            // shadow and nothing else: the window does not reach it and the
+            // desktop behind it is a flat colour.
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let origin = (
+                (frame.x + frame.width as i32) as u32,
+                (frame.y + frame.height as i32) as u32,
+            );
+            let mut painted = 0u32;
+            for dy in 0..SHADOW_SIZE {
+                for dx in 0..SHADOW_SIZE {
+                    let (x, y) = (origin.0.saturating_add(dx), origin.1.saturating_add(dy));
+                    if working_pixel(&comp.backend, x, y).is_some_and(|p| p != bg) {
+                        painted = painted.saturating_add(1);
+                    }
+                }
+            }
+            painted
+        };
+        let square = shadow_ink(WindowCorners::Square);
+        let rounded = shadow_ink(WindowCorners::ExtraRounded);
+        assert!(square > 0, "no shadow was drawn at all beside the window");
+        assert!(
+            rounded < square,
+            "the shadow's corner stayed square ({rounded} painted pixels) under a \
+             rounded window; the square one painted {square}"
+        );
+    }
+
+    #[test]
+    fn the_corner_radius_grows_with_the_display_scale() {
+        // Every other decoration dimension is scaled to the display
+        // (`scale_dimension`). A radius that was not would leave a 2x window —
+        // twice the frame, twice the title bar, twice the border — wearing the
+        // same 8px curve, which reads as a window with sharper corners rather
+        // than as the same window drawn larger.
+        //
+        // Measured as the depth at which the title bar's top row starts being
+        // painted, rather than predicted from the radius: re-deriving the arc
+        // here would be a second copy of it that can agree with a wrong
+        // original.
+        let corner_depth = |scale: f32| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            if let Some(d) = comp.display_manager.displays.first_mut() {
+                d.scale_factor = scale;
+            }
+            comp.set_appearance(with_corners(WindowCorners::ExtraRounded));
+            let mut spec = WindowSpec::new("Framed", 160, 120);
+            spec.position = Some((120, 100));
+            let id = comp.create_window_from_spec(&spec, 1);
+            comp.refresh_window_scales();
+            comp.backend.clear(comp.theme.desktop_background);
+            comp.render_window(id);
+
+            let (bar, color) = title_bar_of(&comp, id);
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let row = bar.y as u32;
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "the window is placed well inside the 400x300 buffer"
+            )]
+            let left = bar.x as u32;
+            (0..bar.width)
+                .find(|&dx| {
+                    working_pixel(&comp.backend, left.saturating_add(dx), row) == Some(color)
+                })
+                .expect("the title bar's top row is painted somewhere")
+        };
+        let single = corner_depth(1.0);
+        let double = corner_depth(2.0);
+        assert!(
+            single > 0,
+            "an extra-rounded corner cut nothing from the top row"
+        );
+        assert!(
+            double > single,
+            "the corner bit {double} pixels into the top row at 2x and {single} at \
+             1x — the radius did not scale with the display"
+        );
+    }
+
+    #[test]
+    fn the_window_buttons_round_with_the_windows() {
+        // A square close button beside a curved frame corner is the mismatch,
+        // not the consistency — and the buttons are drawn by a different call
+        // than the frame, so rounding one does not round the other.
+        let button_of = |corners| {
+            let (comp, id) = decorated(with_corners(corners));
+            let close = comp
+                .window_ref(id)
+                .expect("window")
+                .close_button_rect()
+                .expect("an ordinary window has a close button");
+            let ink = corner_ink(
+                &comp,
+                close,
+                close.width.min(close.height),
+                comp.theme.close_button,
+            );
+            (close, ink)
+        };
+        let (square_rect, square_ink) = button_of(WindowCorners::Square);
+        let (round_rect, round_ink) = button_of(WindowCorners::ExtraRounded);
+        assert_eq!(
+            square_rect, round_rect,
+            "the button geometry must not move, or the two counts are of different things"
+        );
+        assert!(
+            round_ink < square_ink,
+            "the close button stayed square ({round_ink} painted pixels) while the \
+             frame rounded; square's was {square_ink}"
+        );
+    }
+
+    #[test]
+    fn turning_drop_shadows_off_leaves_the_desktop_beside_the_window_bare() {
+        let settings = |drop_shadows| AppearanceSettings {
+            drop_shadows,
+            ..AppearanceSettings::default()
+        };
+        let (with, id) = decorated(settings(true));
+        let (without, _) = decorated(settings(false));
+
+        let frame = with.window_ref(id).expect("window").frame_rect();
+        let bg = with.theme.desktop_background;
+        // A row through the middle of the window, sampled to the right of the
+        // frame: shadow country, and nothing else is drawn out there.
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "the window is placed well inside the 400x300 buffer"
+        )]
+        let row = (frame.y + frame.height as i32 / 2) as u32;
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "the window is placed well inside the 400x300 buffer"
+        )]
+        let right = (frame.x + frame.width as i32) as u32;
+        let band = right..right.saturating_add(SHADOW_SIZE);
+
+        let shaded = band
+            .clone()
+            .filter(|&x| working_pixel(&with.backend, x, row) != Some(bg))
+            .count();
+        assert!(
+            shaded > 0,
+            "with shadows on, nothing was painted in the shadow band — this test \
+             cannot tell suppression from an empty band"
+        );
+        let unshaded = band
+            .filter(|&x| working_pixel(&without.backend, x, row) != Some(bg))
+            .count();
+        assert_eq!(
+            unshaded, 0,
+            "the user turned drop shadows off and {unshaded} shadow pixels were \
+             still painted beside the window"
+        );
+    }
+
+    #[test]
+    fn a_maximized_window_casts_no_shadow_it_could_only_smear_over_itself() {
+        // A maximized frame is fitted to the display exactly, so every ring of
+        // its shadow is clipped away or drawn under the window's own frame. On
+        // an opaque window that is pure overdraw; on a translucent one the
+        // rings show through as a dark smear along the top and left edges,
+        // which is what this test can see. The comparison is against the same
+        // scene with shadows turned off: if the suppression works, maximizing
+        // is indistinguishable from having asked for no shadows at all.
+        let scene = |drop_shadows| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            comp.set_appearance(AppearanceSettings {
+                drop_shadows,
+                ..AppearanceSettings::default()
+            });
+            let id = comp.create_window("Framed".to_string(), 160, 120, 1);
+            // Translucent, so the frame blends over whatever is beneath it
+            // instead of hiding it. An opaque maximized window would look
+            // identical either way and prove nothing.
+            comp.set_opacity(id, 0.5).expect("opacity");
+            comp.maximize_window(id).expect("maximize");
+            comp.refresh_window_scales();
+            comp.backend.clear(comp.theme.desktop_background);
+            comp.render_window(id);
+            comp.backend.working_pixels().to_vec()
+        };
+        assert_eq!(
+            scene(true),
+            scene(false),
+            "a maximized window was drawn differently with shadows on than with \
+             them off, which means a shadow it can only smear over itself was drawn"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_window_still_casts_one() {
+        // Non-vacuity for the test above: the comparison it makes must be
+        // capable of coming out unequal.
+        let scene = |drop_shadows| {
+            let (comp, _) = decorated(AppearanceSettings {
+                drop_shadows,
+                ..AppearanceSettings::default()
+            });
+            comp.backend.working_pixels().to_vec()
+        };
+        assert_ne!(
+            scene(true),
+            scene(false),
+            "an ordinary window looked the same with shadows on and off"
+        );
+    }
+
+    #[test]
+    fn changing_the_appearance_repaints_what_is_already_on_screen() {
+        // A settings change moves pixels that no window's damage covers: the
+        // quarter-disc a squared corner reclaims, and the strip a removed
+        // shadow vacates. Nothing marks those dirty, so without a forced
+        // recomposite the user changes the setting and the screen does not
+        // change until something else happens to repaint that area.
+        //
+        // A refresh rate past 1 MHz, because `frame_interval_for` divides into
+        // it and lands on a zero-length frame budget: `compose_frame` also
+        // declines when it is *too soon* for another frame, and at 60 Hz three
+        // calls in a row are all inside one 16 ms interval — so the assertions
+        // below would be reading the vsync gate rather than the damage state,
+        // and the middle one would pass for entirely the wrong reason.
+        let mut comp = Compositor::new(DECOR_W, DECOR_H, 2_000_000).expect("compositor");
+        comp.create_window("Framed".to_string(), 160, 120, 1);
+        assert!(comp.compose_frame(), "the first frame draws the new window");
+        assert!(
+            !comp.compose_frame(),
+            "an unchanged desktop should have nothing to redraw"
+        );
+        comp.set_appearance(with_corners(WindowCorners::Square));
+        assert!(
+            comp.compose_frame(),
+            "the corner setting changed and nothing was redrawn"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The user's colours and title font reaching the decorations
+    //
+    // Corners and shadows arrived first because they are *shapes*; the colours
+    // stayed behind in twelve constants at the top of this file, and the title
+    // font in one. So a user in light mode got a dark-navy desktop and a
+    // blue-gray title bar from the process that actually draws them, a user
+    // with accented title bars got the same blue-gray, and a user who enlarged
+    // the interface font because they could not read it got window titles at
+    // 16px regardless. Each of those is a difference the desktop shell's own
+    // (duplicate) decorator got right, which is what made the divergence
+    // visible: the two renderers disagreed about the same window.
+    //
+    // These tests take their expected values from `appearance`, never from
+    // `comp.theme` — reading the answer back out of the thing under test is
+    // exactly what the old hardcoded palette would also have passed.
+    // -----------------------------------------------------------------------
+
+    /// Settings that differ from the defaults only in their theme mode.
+    fn with_mode(mode: appearance::ThemeMode) -> AppearanceSettings {
+        AppearanceSettings {
+            theme_mode: mode,
+            ..AppearanceSettings::default()
+        }
+    }
+
+    #[test]
+    fn the_users_theme_mode_reaches_the_desktop_behind_the_windows() {
+        // The clearest single pixel in the whole increment: the desktop, where
+        // nothing covers it. It was `0xFF1A1A2E` — a dark navy that appears in
+        // neither palette — in light mode and in dark mode alike.
+        let painted = |mode| {
+            let (comp, _) = decorated(with_mode(mode));
+            // Top-left, far from the window at (120, 100) and outside its
+            // shadow.
+            working_pixel(&comp.backend, 4, 4)
+        };
+        let expected = |light| {
+            Some(color_to_argb(
+                &appearance::DecorationColors::for_mode(light).desktop_bg,
+            ))
+        };
+
+        assert_eq!(
+            painted(appearance::ThemeMode::Light),
+            expected(true),
+            "a user in light mode got a desktop colour that is not the light \
+             palette's"
+        );
+        assert_eq!(
+            painted(appearance::ThemeMode::Dark),
+            expected(false),
+            "a user in dark mode got a desktop colour that is not the dark \
+             palette's"
+        );
+        assert_ne!(
+            painted(appearance::ThemeMode::Light),
+            painted(appearance::ThemeMode::Dark),
+            "both modes produced the same desktop — a compositor that ignores \
+             the mode passes the two assertions above only if the palettes are \
+             equal, which they are not"
+        );
+    }
+
+    #[test]
+    fn the_users_accent_reaches_the_title_bar_it_asked_for() {
+        // `accent_titlebars` is a checkbox in the Settings app that, for the
+        // process drawing the title bars, did nothing whatsoever.
+        let settings = AppearanceSettings {
+            accent_titlebars: true,
+            accent_color: appearance::AccentColor::Red,
+            ..AppearanceSettings::default()
+        };
+        let accent = color_to_argb(&settings.effective_accent());
+        let (comp, id) = decorated(settings);
+
+        // Sampled at the vertical middle of the bar and to the right of the
+        // title text but left of the buttons, so the only thing that can be
+        // painted there is the bar's own background.
+        let bar = comp
+            .window_ref(id)
+            .expect("window")
+            .title_bar_layout()
+            .expect("a decorated window has a title bar")
+            .bar;
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "the window is placed well inside the 400x300 buffer"
+        )]
+        let (x, y) = (
+            (bar.x + bar.width as i32 / 2) as u32,
+            (bar.y + bar.height as i32 / 2) as u32,
+        );
+
+        assert_eq!(
+            working_pixel(&comp.backend, x, y),
+            Some(accent),
+            "the user asked for accent-coloured title bars and the focused \
+             window's bar is not the accent colour"
+        );
+    }
+
+    #[test]
+    fn an_accent_title_bar_leaves_every_other_window_alone() {
+        // The unfocused bar keeps the base palette on purpose: an accent that
+        // marks every window marks none of them, and telling the focused window
+        // apart is the title bar's first job. Stated as a test because it is a
+        // one-line difference in `DecorationColors::from_settings` that a later
+        // "apply the accent consistently" tidy-up would quietly remove.
+        let plain = AppearanceSettings::default();
+        let accented = AppearanceSettings {
+            accent_titlebars: true,
+            accent_color: appearance::AccentColor::Red,
+            ..AppearanceSettings::default()
+        };
+        let accent = color_to_argb(&accented.effective_accent());
+
+        let with = DecorationTheme::from_settings(&accented);
+        let without = DecorationTheme::from_settings(&plain);
+
+        assert_eq!(
+            with.title_bar_unfocused, without.title_bar_unfocused,
+            "turning on accented title bars recoloured the unfocused ones too"
+        );
+        assert_ne!(
+            with.title_bar_focused, without.title_bar_focused,
+            "turning on accented title bars did nothing to the focused one — \
+             the assertion above would then hold for the wrong reason"
+        );
+        assert_eq!(
+            with.title_bar_focused, accent,
+            "the focused bar changed to something that is not the accent"
+        );
+    }
+
+    #[test]
+    fn the_users_interface_font_size_reaches_the_window_title() {
+        // The title was drawn at a constant 16px. Someone who enlarged the UI
+        // font — the one setting a person with poor eyesight is most likely to
+        // reach for — got every part of the desktop bigger except the titles.
+        //
+        // Counted rather than probed: where a glyph's ink lands depends on the
+        // font, but *how much* of it there is has to grow with the size. What
+        // is counted is every pixel of the bar that is not the bar's own
+        // background — glyphs are antialiased, so their edge pixels are blends
+        // and matching the text colour exactly would find almost none of them.
+        // The buttons and the rounded corners are counted too, but they do not
+        // move with the font size, which is why comparing two counts is sound
+        // and asserting an absolute one is not.
+        let bar_ink = |title: &str, ui_size: f32| {
+            let mut settings = AppearanceSettings::default();
+            settings.fonts.ui_size = ui_size;
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            comp.set_appearance(settings);
+            let mut spec = WindowSpec::new(title, 160, 120);
+            spec.position = Some((120, 100));
+            let id = comp.create_window_from_spec(&spec, 1);
+            comp.refresh_window_scales();
+            comp.backend.clear(comp.theme.desktop_background);
+            comp.render_window(id);
+
+            let bar = comp
+                .window_ref(id)
+                .expect("window")
+                .title_bar_layout()
+                .expect("a decorated window has a title bar")
+                .bar;
+            let bg = comp.theme.title_bar_focused;
+            let mut count: u32 = 0;
+            for dy in 0..bar.height {
+                for dx in 0..bar.width {
+                    #[allow(
+                        clippy::cast_sign_loss,
+                        reason = "the window is placed well inside the 400x300 buffer"
+                    )]
+                    let (x, y) = ((bar.x + dx as i32) as u32, (bar.y + dy as i32) as u32);
+                    if working_pixel(&comp.backend, x, y) != Some(bg) {
+                        count = count.saturating_add(1);
+                    }
+                }
+            }
+            count
+        };
+
+        // The same bar with nothing written on it, to establish that what grows
+        // below is the writing and not the furniture around it.
+        let blank = bar_ink("", 8.0);
+        let small = bar_ink("Framed", 8.0);
+        let large = bar_ink("Framed", 24.0);
+        assert!(
+            small > blank,
+            "an empty title and a six-letter one inked the same {small} pixels — \
+             this test is measuring the buttons, not the text"
+        );
+        assert!(
+            large > small,
+            "the user tripled the interface font size and the window title went \
+             from {small} inked pixels to {large}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Live reload
+    //
+    // Reading the settings once at startup left the user changing a setting and
+    // watching nothing happen until they logged out. These tests cover the
+    // reload path itself; that a wire request reaches it is covered in
+    // `wire.rs`, where both halves of the protocol are in scope.
+    // -----------------------------------------------------------------------
+
+    /// Write `settings` to the scratch configuration directory as the user's
+    /// own `appearance.yaml`, through the same type the Settings app saves
+    /// with.
+    ///
+    /// Deliberately not a hand-written YAML literal: the file's key spellings
+    /// belong to `gui/appearance`, and a literal here would be a second copy of
+    /// them that could agree with a wrong reader or drift from a renamed key
+    /// and fail for a reason that has nothing to do with the compositor.
+    fn save_user_appearance(settings: AppearanceSettings) {
+        let mut file = appearance::AppearanceFile::new();
+        file.settings = settings;
+        file.save().expect("write scratch appearance.yaml");
+    }
+
+    #[test]
+    fn a_reload_adopts_what_the_users_file_now_says() {
+        // The gap this closes: the settings were read once, in `main`, before
+        // the first frame. Everything after that ran on whatever the file said
+        // at login, so the Settings app could write a change the running
+        // compositor would never see.
+        appearance::config::testing::with_scratch_config("compositor-reload", |_root| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 60).expect("compositor");
+            assert_eq!(
+                comp.appearance().window_corners,
+                WindowCorners::Rounded,
+                "the constructor should start from the defaults, not the disk"
+            );
+
+            save_user_appearance(AppearanceSettings {
+                window_corners: WindowCorners::Square,
+                drop_shadows: false,
+                ..AppearanceSettings::default()
+            });
+            comp.reload_appearance();
+
+            assert_eq!(
+                comp.appearance().window_corners,
+                WindowCorners::Square,
+                "the corner setting written to the file did not reach the compositor"
+            );
+            assert!(
+                !comp.appearance().drop_shadows,
+                "the shadow setting written to the file did not reach the compositor"
+            );
+        });
+    }
+
+    #[test]
+    fn a_reload_that_changed_something_repaints_the_whole_screen() {
+        // The same argument as `changing_the_appearance_repaints_what_is_
+        // already_on_screen`, asserted through the reload path: the pixels a
+        // corner or shadow change moves are outside every window's damage, so
+        // without a forced recomposite the file changes and the screen does
+        // not.
+        appearance::config::testing::with_scratch_config("compositor-reload-damage", |_root| {
+            // See `changing_the_appearance_repaints_what_is_already_on_screen`
+            // for why the refresh rate is absurd: at 60 Hz these three calls
+            // fall inside one frame interval and would measure the vsync gate.
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 2_000_000).expect("compositor");
+            comp.create_window("Framed".to_string(), 160, 120, 1);
+            assert!(comp.compose_frame(), "the first frame draws the new window");
+            assert!(
+                !comp.compose_frame(),
+                "an unchanged desktop should have nothing to redraw"
+            );
+
+            save_user_appearance(with_corners(WindowCorners::Square));
+            comp.reload_appearance();
+
+            assert!(
+                comp.compose_frame(),
+                "the reload changed the corners and nothing was redrawn"
+            );
+        });
+    }
+
+    #[test]
+    fn a_reload_that_finds_nothing_changed_costs_nothing() {
+        // Any client that can open the display socket can ask for a reload, as
+        // often as it likes. If each one repainted the screen, a request whose
+        // whole safety argument is that it carries no data would still be a way
+        // to hold the compositor at a full-screen redraw indefinitely. So the
+        // damage state must survive a reload that read the same settings back.
+        appearance::config::testing::with_scratch_config("compositor-reload-noop", |_root| {
+            let mut comp = Compositor::new(DECOR_W, DECOR_H, 2_000_000).expect("compositor");
+            comp.create_window("Framed".to_string(), 160, 120, 1);
+            assert!(comp.compose_frame(), "the first frame draws the new window");
+
+            // No file written at all: a fresh install, where `load` yields the
+            // defaults the compositor is already holding.
+            for _ in 0..3 {
+                comp.reload_appearance();
+                assert!(
+                    !comp.compose_frame(),
+                    "a reload that changed nothing forced a full repaint"
+                );
+            }
+        });
     }
 }

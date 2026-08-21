@@ -77,7 +77,7 @@ use guiremote::control::{CursorShape, DisplayInfo, RequestBody, ResponseBody, Wi
 
 pub use guiremote::client::{ClientError as ConnectionError, Transport as ConnectionTransport};
 pub use guiremote::control::{
-    CursorShape as Cursor, DisplayInfo as Display, Layer, WindowSpec as Spec,
+    CursorShape as Cursor, DisplayInfo as Display, Layer, ShellControlAction, WindowSpec as Spec,
 };
 /// What a shell learns about the windows it does not own. See
 /// [`EventLoop::watch_desktop`].
@@ -706,6 +706,53 @@ impl<T: Transport> EventLoop<T> {
     /// As [`Connection::confirm`].
     pub fn watch_desktop(&mut self, on: bool) -> Result<(), Error<T>> {
         self.conn.subscribe_window_list(on)
+    }
+
+    /// Activate, minimise, restore, maximise or close a window this loop does
+    /// not own.
+    ///
+    /// The other half of [`watch_desktop`](Self::watch_desktop), and for the
+    /// same callers: a list of the desktop's windows is only useful to a shell
+    /// that can then act on one. `window` is an id from
+    /// [`desktop_windows`](Self::desktop_windows) — this loop's own windows go
+    /// through [`WindowHandle`], which needs no such privilege.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]. A refusal usually means the window closed
+    /// between the list the button was drawn from and the click, which is an
+    /// ordinary race: a shell should repaint rather than treat it as a fault.
+    pub fn control_window(
+        &mut self,
+        window: u64,
+        action: ShellControlAction,
+    ) -> Result<(), Error<T>> {
+        self.conn.shell_control(window, action)
+    }
+
+    /// Tell the compositor the user's appearance settings have changed on disk.
+    ///
+    /// For the one application that edits them — Settings — to call *after* it
+    /// has written `appearance.yaml`, so that window corners and drop shadows
+    /// change on the windows already open instead of at the next login.
+    ///
+    /// Note what this does not take: the settings. It is a notification, not a
+    /// setter, and the compositor answers it by re-reading the user's own file.
+    /// The reason is that any process which can open the display socket could
+    /// otherwise dictate how every window on the desktop is drawn — a title bar
+    /// the colour of its own text is a perfectly legal set of settings. Here the
+    /// worst a hostile client achieves is making the compositor re-read a file
+    /// it may have no permission to write. See
+    /// [`RequestBody::ReloadAppearance`] for the wire form.
+    ///
+    /// Sending this when nothing changed is harmless: the compositor compares
+    /// what it read against what it holds and repaints only on a difference.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn appearance_changed(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::ReloadAppearance)
     }
 
     /// Every window on the desktop, bottom-to-top, as of the last update.
@@ -1691,6 +1738,31 @@ mod tests {
             )),
             "unwatching should have unsubscribed on the wire"
         );
+    }
+
+    #[test]
+    fn telling_the_compositor_the_settings_changed_sends_it_nothing_but_the_news() {
+        // Two claims in one, and both are the point of the call. First that it
+        // is on the wire at all: an application writing `appearance.yaml`
+        // changes nothing about a compositor that has already read it, so a
+        // local no-op here would look identical until the user noticed their
+        // window corners did not change until they logged out.
+        let (mut events, server) = wired();
+        events.appearance_changed().unwrap();
+        assert!(
+            server
+                .borrow()
+                .seen
+                .iter()
+                .any(|r| matches!(r.body, RequestBody::ReloadAppearance)),
+            "appearance_changed should have asked the compositor to re-read the file"
+        );
+
+        // Second that it works on a loop that owns no windows — which this one
+        // does not, and which is not incidental: the application that has cause
+        // to send it is a settings dialog, and requiring it to have opened a
+        // window first would be requiring it for no reason the protocol has.
+        assert_eq!(events.window_count(), 0);
     }
 
     #[test]

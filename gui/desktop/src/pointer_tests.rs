@@ -23,8 +23,8 @@ use crate::datetime_settings::AdditionalClock;
 use crate::launcher::{self, Category};
 use crate::{
     DesktopShell, Hit, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, Rect,
-    START_MENU_ROW_HEIGHT, ShellAction, TextRole, WindowChrome, WindowId, WindowState, click,
-    scroll, scroll_rows,
+    START_MENU_ROW_HEIGHT, ShellAction, TextRole, WindowId, WindowState, click, scroll,
+    scroll_rows,
 };
 use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
@@ -45,9 +45,10 @@ fn click_at(shell: &mut DesktopShell, rect: Rect) -> ShellAction {
     shell.handle_mouse(&click(x, y))
 }
 
-/// Where one window's decorations are, as the shell would draw them.
-fn chrome(shell: &DesktopShell, id: WindowId) -> WindowChrome {
-    shell.window_chrome(&shell.windows[&id])
+/// Where a window is. The shell knows this much — the taskbar and the hit test
+/// both need it — but not what its frame looks like; that is the compositor's.
+fn frame(shell: &DesktopShell, id: WindowId) -> Rect {
+    shell.windows[&id].frame_rect()
 }
 
 // ---- the start menu -------------------------------------------------------
@@ -255,7 +256,7 @@ fn a_click_outside_an_open_menu_dismisses_it_and_is_spent() {
     let id = shell.add_window("Terminal", 400, 100, 500, 400, 1);
     shell.toggle_start_menu();
 
-    let (x, y) = centre(chrome(&shell, id).content);
+    let (x, y) = centre(frame(&shell, id));
     assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Consumed);
     assert!(!shell.start_menu_open);
     // Spent means spent: the window under it must not also have seen the click
@@ -953,70 +954,26 @@ fn reopening_the_calendar_rewinds_it() {
 
 // ---- windows --------------------------------------------------------------
 
-#[test]
-fn the_title_bar_buttons_sit_inside_the_title_bar_and_do_not_overlap() {
-    let mut shell = shell();
-    let id = shell.add_window("A", 100, 100, 400, 300, 1);
-    let decorations = chrome(&shell, id);
-    let bar = decorations.title_bar;
-    let buttons = [
-        decorations.close,
-        decorations.maximize,
-        decorations.minimize,
-    ];
-    for button in buttons {
-        assert!(bar.contains(button.x, button.y));
-        assert!(bar.contains(button.x + button.w - 1.0, button.y + button.h - 1.0));
-    }
-    assert!(buttons[1].x + buttons[1].w <= buttons[0].x);
-    assert!(buttons[2].x + buttons[2].w <= buttons[1].x);
-
-    for (button, expected) in buttons.into_iter().zip([
-        Hit::WindowClose(id),
-        Hit::WindowMaximize(id),
-        Hit::WindowMinimize(id),
-    ]) {
-        let (x, y) = centre(button);
-        assert_eq!(shell.hit_test(x, y), expected);
-    }
-}
-
-#[test]
-fn the_close_button_closes_the_window() {
-    let mut shell = shell();
-    let id = shell.add_window("A", 100, 100, 400, 300, 1);
-    let rect = chrome(&shell, id).close;
-    assert_eq!(click_at(&mut shell, rect), ShellAction::Consumed);
-    assert!(!shell.windows.contains_key(&id));
-}
-
-#[test]
-fn the_minimize_button_minimizes_the_window() {
-    let mut shell = shell();
-    let id = shell.add_window("A", 100, 100, 400, 300, 1);
-    let rect = chrome(&shell, id).minimize;
-    click_at(&mut shell, rect);
-    assert_eq!(shell.windows[&id].state, WindowState::Minimized);
-}
-
 /// Restoring has to put the window back where it was. Before the geometry was
 /// remembered, "restore" only changed the state flag and left the window
 /// filling the screen — a button that looked broken.
+///
+/// Driven through `toggle_maximize` rather than through a click on a maximize
+/// button, because the shell has no maximize button: the compositor draws and
+/// hit-tests the title bar. What survives here is the state machine the
+/// compositor drives, and that is what this asserts.
 #[test]
 fn maximizing_and_restoring_returns_the_window_to_where_it_was() {
     let mut shell = shell();
     let id = shell.add_window("A", 120, 90, 400, 300, 1);
 
-    let rect = chrome(&shell, id).maximize;
-    click_at(&mut shell, rect);
+    shell.toggle_maximize(id);
     let (_, _, work_w, work_h) = shell.work_area();
     assert_eq!(shell.windows[&id].state, WindowState::Maximized);
     assert_eq!(shell.windows[&id].width, work_w);
     assert_eq!(shell.windows[&id].height, work_h);
 
-    // The button has moved with the window, so ask where it is now.
-    let rect = chrome(&shell, id).maximize;
-    click_at(&mut shell, rect);
+    shell.toggle_maximize(id);
     let window = &shell.windows[&id];
     assert_eq!(window.state, WindowState::Normal);
     assert_eq!((window.x, window.y), (120, 90));
@@ -1053,18 +1010,53 @@ fn moving_a_maximized_window_forgets_where_it_came_from() {
     assert_eq!((window.x, window.y), (10, 10));
 }
 
+/// A double-click is not the shell's gesture any more — the compositor owns the
+/// title bar and resolves the timing itself — so the shell must treat the two
+/// alike rather than keep a second, divergent answer for one of them.
+///
+/// "Alike" is asserted as *doing the same thing*, not as declining to do the old
+/// thing. A `DoubleClick` arm that quietly returned `Pass` without dispatching
+/// would satisfy "it no longer maximizes" perfectly while silently dropping
+/// click-to-focus and every menu the shell opens on a press — the first draft of
+/// this test asserted exactly that and caught exactly nothing. So each half
+/// below checks an effect the do-nothing arm loses, on both kinds of surface the
+/// shell hit-tests: a window, and its own chrome.
 #[test]
-fn a_double_click_on_the_title_bar_toggles_maximize() {
-    let mut shell = shell();
-    let id = shell.add_window("A", 120, 90, 400, 300, 1);
-    let (x, y) = centre(chrome(&shell, id).title_bar);
-    let event = MouseEvent {
+fn a_double_click_is_the_same_event_to_this_shell_as_a_single_one() {
+    let doubled = |x: f32, y: f32| MouseEvent {
         x,
         y,
         kind: MouseEventKind::DoubleClick(MouseButton::Left),
     };
-    assert_eq!(shell.handle_mouse(&event), ShellAction::Consumed);
-    assert_eq!(shell.windows[&id].state, WindowState::Maximized);
+
+    // On a window: it focuses, and it still does not maximize.
+    let mut shell = shell();
+    let a = shell.add_window("A", 120, 90, 400, 300, 1);
+    let b = shell.add_window("B", 700, 90, 400, 300, 2);
+    assert_eq!(shell.focused_window, Some(b));
+    let (x, y) = centre(frame(&shell, a));
+    assert_eq!(shell.handle_mouse(&doubled(x, y)), ShellAction::Pass);
+    assert_eq!(shell.focused_window, Some(a), "double-click did not focus");
+    assert_eq!(
+        shell.windows[&a].state,
+        WindowState::Normal,
+        "double-click maximized — that gesture is the compositor's now"
+    );
+
+    // On the shell's own chrome: it opens the menu a press opens.
+    let start = shell.start_button_rect();
+    let (sx, sy) = (start.x + 8.0, start.y + 8.0);
+    assert!(!shell.start_menu_open);
+    shell.handle_mouse(&doubled(sx, sy));
+    assert!(
+        shell.start_menu_open,
+        "double-click on the start button did nothing"
+    );
+
+    // And they are interchangeable in the other direction too: a press closes
+    // what a double-click opened.
+    shell.handle_mouse(&click(sx, sy));
+    assert!(!shell.start_menu_open);
 }
 
 /// Click-to-focus raises the window and still lets the click reach it, so that
@@ -1076,20 +1068,8 @@ fn a_click_in_a_window_focuses_it_and_is_passed_on() {
     let b = shell.add_window("B", 500, 0, 400, 300, 2);
     assert_eq!(shell.focused_window, Some(b));
 
-    let (x, y) = centre(chrome(&shell, a).content);
+    let (x, y) = centre(frame(&shell, a));
     assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Pass);
-    assert_eq!(shell.focused_window, Some(a));
-}
-
-/// A title-bar click focuses too, but is the shell's — it is where a drag
-/// begins, and the client has no business seeing it.
-#[test]
-fn a_click_on_a_title_bar_focuses_but_is_consumed() {
-    let mut shell = shell();
-    let a = shell.add_window("A", 0, 0, 400, 300, 1);
-    let _b = shell.add_window("B", 500, 0, 400, 300, 2);
-    let (x, y) = centre(chrome(&shell, a).title_bar);
-    assert_eq!(shell.handle_mouse(&click(x, y)), ShellAction::Consumed);
     assert_eq!(shell.focused_window, Some(a));
 }
 
@@ -1204,17 +1184,17 @@ fn a_screen_smaller_than_the_taskbar_does_not_invert_the_geometry() {
     assert_eq!(shell.start_menu_visible_rows(), 0);
 }
 
-/// A window shorter than the title bar it would be given must not be handed a
-/// content area of negative height.
+/// A window can be any size the compositor gives it, including one too small to
+/// have held the title bar the shell used to draw. It is still a window, and a
+/// point on it still belongs to it.
 #[test]
-fn a_window_shorter_than_its_own_title_bar_has_an_empty_content_area() {
+fn a_window_smaller_than_any_decoration_is_still_hit() {
     let mut shell = shell();
     let id = shell.add_window("A", 100, 100, 200, 10, 1);
-    let decorations = chrome(&shell, id);
-    assert_eq!(decorations.title_bar.h, 10.0);
-    assert_eq!(decorations.content.h, 0.0);
-    let (x, y) = centre(decorations.frame);
-    assert_eq!(shell.hit_test(x, y), Hit::WindowTitleBar(id));
+    let rect = frame(&shell, id);
+    assert_eq!(rect.h, 10.0);
+    let (x, y) = centre(rect);
+    assert_eq!(shell.hit_test(x, y), Hit::WindowContent(id));
 }
 
 // ---- display scaling ------------------------------------------------------
@@ -1228,43 +1208,27 @@ fn scaled(percent: u16) -> DesktopShell {
     shell
 }
 
-/// The chrome is authored in logical pixels and drawn in physical ones. The
-/// window itself is the compositor's and arrives already physical, so it is the
-/// one measurement that must *not* be scaled again.
+/// The shell's own chrome is authored in logical pixels and drawn in physical
+/// ones. A window is the compositor's and arrives already physical, so it is
+/// the one measurement that must *not* be scaled again — a shell that scaled it
+/// would hit-test a window somewhere other than where it is.
 #[test]
-fn the_window_chrome_grows_with_the_display_scaling_but_the_window_does_not() {
+fn the_display_scaling_moves_the_shells_chrome_and_leaves_the_windows_alone() {
     let mut hundred = shell();
     let a = hundred.add_window("A", 100, 100, 400, 300, 1);
     let mut two_hundred = scaled(200);
     let b = two_hundred.add_window("A", 100, 100, 400, 300, 1);
 
-    let small = chrome(&hundred, a);
-    let large = chrome(&two_hundred, b);
-
-    assert_eq!(small.frame, large.frame);
-    assert!((large.title_bar.h - small.title_bar.h * 2.0).abs() < 0.01);
-    assert!((large.close.w - small.close.w * 2.0).abs() < 0.01);
-    assert!((large.content.y - large.frame.y) > (small.content.y - small.frame.y));
-}
-
-#[test]
-fn the_title_bar_buttons_are_clickable_where_they_are_drawn_at_every_scale() {
+    assert_eq!(frame(&hundred, a), frame(&two_hundred, b));
     for percent in [100, 125, 150, 200] {
         let mut shell = scaled(percent);
         let id = shell.add_window("A", 100, 100, 600, 400, 1);
-        let decorations = chrome(&shell, id);
-        for (rect, expected) in [
-            (decorations.close, Hit::WindowClose(id)),
-            (decorations.maximize, Hit::WindowMaximize(id)),
-            (decorations.minimize, Hit::WindowMinimize(id)),
-        ] {
-            assert!(
-                decorations.title_bar.contains(rect.x, rect.y),
-                "at {percent}% a button escaped the title bar"
-            );
-            let (x, y) = centre(rect);
-            assert_eq!(shell.hit_test(x, y), expected, "at {percent}% scaling");
-        }
+        let (x, y) = centre(frame(&shell, id));
+        assert_eq!(
+            shell.hit_test(x, y),
+            Hit::WindowContent(id),
+            "at {percent}% the window moved out from under itself"
+        );
     }
 }
 
@@ -1373,8 +1337,12 @@ fn with_corners(corners: WindowCorners) -> DesktopShell {
     shell
 }
 
+/// The setting has to reach every surface the shell rounds, not just the one
+/// that happened to be checked. Windows are absent on purpose: the compositor
+/// rounds those, and proves it in
+/// `compositor::tests::the_users_corner_setting_reaches_the_window_frame`.
 #[test]
-fn the_corner_setting_reaches_the_windows_the_shell_draws() {
+fn the_corner_setting_reaches_the_surfaces_the_shell_draws() {
     for corners in [
         WindowCorners::Square,
         WindowCorners::Subtle,
@@ -1382,13 +1350,13 @@ fn the_corner_setting_reaches_the_windows_the_shell_draws() {
         WindowCorners::ExtraRounded,
     ] {
         let mut shell = with_corners(corners);
-        shell.add_window("A", 100, 100, 400, 300, 1);
-        let tree = shell.render_window_decorations();
-        let title_bar = fill_radii(&tree)[0];
-        assert_eq!(title_bar.top_left, corners.radius(), "{corners:?}");
-        // Rounded across the top only — rounding the lower corners would cut a
-        // notch out of the join with the client area.
-        assert_eq!(title_bar.bottom_left, 0.0, "{corners:?}");
+        shell.toggle_start_menu();
+        let menu = shell.render_start_menu().expect("the menu is open");
+        assert_eq!(
+            fill_radii(&menu)[0],
+            CornerRadii::all(corners.radius()),
+            "{corners:?}"
+        );
     }
 }
 
@@ -1417,11 +1385,9 @@ fn the_corner_setting_reaches_the_start_menu_and_the_taskbar_buttons() {
 #[test]
 fn the_corner_radius_grows_with_the_display_scaling() {
     let mut shell = scaled(200);
-    shell.add_window("A", 100, 100, 400, 300, 1);
-    assert_eq!(
-        fill_radii(&shell.render_window_decorations())[0].top_left,
-        16.0
-    );
+    shell.toggle_start_menu();
+    let menu = shell.render_start_menu().expect("the menu is open");
+    assert_eq!(fill_radii(&menu)[0].top_left, 16.0);
 }
 
 #[test]
@@ -1431,10 +1397,8 @@ fn drop_shadows_are_drawn_only_when_the_user_asks_for_them() {
         let mut appearance = AppearanceSettings::default();
         appearance.drop_shadows = wanted;
         shell.set_appearance(appearance);
-        shell.add_window("A", 100, 100, 400, 300, 1);
         shell.toggle_start_menu();
 
-        assert_eq!(shadow_count(&shell.render_window_decorations()), expected);
         assert_eq!(
             shadow_count(&shell.render_start_menu().expect("the menu is open")),
             expected
@@ -1447,8 +1411,8 @@ fn drop_shadows_are_drawn_only_when_the_user_asks_for_them() {
 #[test]
 fn a_shadow_is_painted_before_the_surface_that_casts_it() {
     let mut shell = shell();
-    shell.add_window("A", 100, 100, 400, 300, 1);
-    let tree = shell.render_window_decorations();
+    shell.toggle_start_menu();
+    let tree = shell.render_start_menu().expect("the menu is open");
     let shadow = tree
         .commands
         .iter()
@@ -1458,21 +1422,8 @@ fn a_shadow_is_painted_before_the_surface_that_casts_it() {
         .commands
         .iter()
         .position(|cmd| matches!(cmd, RenderCommand::FillRect { .. }))
-        .expect("the title bar");
+        .expect("the menu panel");
     assert!(shadow < surface);
-}
-
-/// There is nothing beside a maximized window for a shadow to fall on, and one
-/// drawn anyway bleeds over the screen edge.
-#[test]
-fn a_maximized_window_casts_no_shadow() {
-    let mut shell = shell();
-    let id = shell.add_window("A", 100, 100, 400, 300, 1);
-    assert_eq!(shadow_count(&shell.render_window_decorations()), 1);
-    shell.maximize_window(id);
-    assert_eq!(shadow_count(&shell.render_window_decorations()), 0);
-    shell.restore_window(id);
-    assert_eq!(shadow_count(&shell.render_window_decorations()), 1);
 }
 
 #[test]
@@ -1502,7 +1453,6 @@ fn every_drawn_string_follows_the_users_font_size() {
         shell.power_menu_open = true;
         shell.alt_tab_active = true;
         let mut sizes = text_sizes(&shell.render_taskbar());
-        sizes.extend(text_sizes(&shell.render_window_decorations()));
         sizes.extend(text_sizes(
             &shell.render_start_menu().expect("the menu is open"),
         ));

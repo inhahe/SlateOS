@@ -287,7 +287,10 @@ mod tests {
     #[test]
     fn home_is_the_fallback() {
         let dir = with_env(None, Some("/h"), config_dir);
-        assert_eq!(dir, Some(PathBuf::from("/h").join(".config").join("slateos")));
+        assert_eq!(
+            dir,
+            Some(PathBuf::from("/h").join(".config").join("slateos"))
+        );
     }
 
     #[test]
@@ -309,7 +312,9 @@ mod tests {
     #[test]
     fn a_missing_file_loads_as_an_empty_document() {
         let temp = TempDir::new("missing");
-        let doc = with_env(Some(temp.0.to_str().unwrap()), None, || load("nothing-here"));
+        let doc = with_env(Some(temp.0.to_str().unwrap()), None, || {
+            load("nothing-here")
+        });
         assert!(doc.is_empty());
     }
 

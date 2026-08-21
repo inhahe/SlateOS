@@ -257,6 +257,35 @@ impl ClientLink {
             })
         }
     }
+
+    /// The single place the compositor asks "is this connection a shell?".
+    ///
+    /// **It does not currently check anything, and saying so is the point.**
+    /// Two requests are a shell's and not an application's — reading the whole
+    /// desktop's window list, and acting on windows the sender does not own —
+    /// and the honest gate for them does not exist yet: the answer has to come
+    /// from a capability the kernel attests at connection accept, and kernel
+    /// channel IPC does not yet carry one to the compositor. A check written
+    /// against a value the *client* supplies would not be a gate but the
+    /// appearance of one, which is worse than none because it looks solved.
+    /// `design-decisions.md` §495 has the full reasoning; the consequence is
+    /// tracked as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`.
+    ///
+    /// What it buys today is that the privileged requests are named, greppable
+    /// and routed through **one** function, so the day the capability arrives
+    /// the fix is a body here rather than a hunt for every place that should
+    /// have asked. That was already the shape of the recorded proper fix when
+    /// there was one such request; this keeps it true now that there are two.
+    ///
+    /// Returns the refusal to send, so a caller writes `link.require_shell()?`
+    /// exactly as it writes `link.resolve(window)?`.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the signature is the seam; the day it checks, it returns Err"
+    )]
+    fn require_shell(&self) -> Result<(), ResponseBody> {
+        Ok(())
+    }
 }
 
 /// Translate a control request into the compositor's own vocabulary.
@@ -321,6 +350,11 @@ fn to_compositor_request(
             opacity,
         },
         RequestBody::GetDisplayInfo => CompositorRequest::GetDisplayInfo,
+        // Unlike every window request above there is no `link.resolve` here,
+        // and nothing to resolve: a reload names no window and carries no
+        // settings, so there is no ownership question to ask. It is the one
+        // request whose whole safety argument is what it does *not* contain.
+        RequestBody::ReloadAppearance => CompositorRequest::ReloadAppearance,
         // Handled by `answer_requests` before it reaches here, because it
         // changes the *link*, not the compositor: nothing about a subscription
         // belongs in the window/display state a `CompositorRequest` describes,
@@ -331,6 +365,20 @@ fn to_compositor_request(
             return Err(ResponseBody::Error {
                 message: "window-list subscription is a link-level request".to_string(),
             });
+        }
+        // The one window request that is deliberately *not* resolved against
+        // the sender's own windows: a taskbar button exists to act on somebody
+        // else's window, so `resolve` would refuse every legitimate use. What
+        // stands in its place is `require_shell`, which asks a different
+        // question — not "is this yours" but "are you the shell" — and is the
+        // only thing between any connected program and every window on the
+        // desktop. See its doc for why it does not yet answer.
+        RequestBody::ShellControl { window, action } => {
+            link.require_shell()?;
+            CompositorRequest::ShellControl {
+                window_id: WindowId::from_raw(window),
+                action,
+            }
         }
     })
 }
@@ -446,9 +494,18 @@ impl Compositor {
         for req in requests {
             // Subscription is the one request whose subject is the connection
             // rather than a window, so it is answered here and never converted.
+            // It goes through the same privilege seam as `ShellControl`: the
+            // desktop's window list is a shell's to read, and asking in one
+            // place is what keeps the eventual capability check to one edit.
             if let RequestBody::SubscribeWindowList { subscribe } = req.body {
-                link.set_window_list_subscription(subscribe);
-                replies.push(Response::new(req.seq, ResponseBody::Ok));
+                let body = match link.require_shell() {
+                    Ok(()) => {
+                        link.set_window_list_subscription(subscribe);
+                        ResponseBody::Ok
+                    }
+                    Err(refusal) => refusal,
+                };
+                replies.push(Response::new(req.seq, body));
                 continue;
             }
             let body = match to_compositor_request(link, req.body.clone()) {
@@ -603,7 +660,7 @@ mod tests {
     )]
 
     use guiremote::control::{
-        CursorShape, Layer, Request, RequestBody, WindowSpec, decode_responses,
+        CursorShape, Layer, Request, RequestBody, ShellControlAction, WindowSpec, decode_responses,
     };
     use guiremote::input::decode_input_frame;
     use guiremote::window_list::WindowInfo;
@@ -1147,6 +1204,89 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_can_act_on_a_window_it_does_not_own_and_an_application_still_cannot() {
+        // The other half of the window list, and the thing that makes a taskbar
+        // button possible: a shell must be able to *do* something to a window it
+        // only learned about by being told. The two halves are asserted in one
+        // test on purpose — `ShellControl` is only correct if it is the sole
+        // exception, so the same foreign window is driven twice, once through
+        // the shell's request and once through the ordinary owned verb, and the
+        // second must be refused. A `ShellControl` that quietly went through
+        // `resolve` would fail the first assertion; an ownership check that had
+        // been loosened to let it through would fail the second.
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        let theirs = open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+        assert!(
+            !shell.owns(WindowId::from_raw(theirs)),
+            "the fixture is pointless if the shell owns the window"
+        );
+        assert!(!pump_lists(&mut comp, &mut shell)[0][0].minimized);
+
+        // The shell minimizes somebody else's window, as a taskbar button does.
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::ShellControl {
+                window: theirs,
+                action: ShellControlAction::Minimize,
+            }],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Ok),
+            "a shell was refused a window it was just told about: {:?}",
+            responses[0].body
+        );
+        // And it actually happened — the reply is checked against the desktop
+        // rather than taken at its word.
+        assert!(
+            pump_lists(&mut comp, &mut shell)[0][0].minimized,
+            "the compositor said Ok and did nothing"
+        );
+
+        // Clicking the button again brings it back, focused: the round trip a
+        // user performs, not just the outbound half.
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::ShellControl {
+                window: theirs,
+                action: ShellControlAction::Activate,
+            }],
+        );
+        assert!(matches!(responses[0].body, ResponseBody::Ok));
+        let list = pump_lists(&mut comp, &mut shell).remove(0);
+        assert!(!list[0].minimized, "activate left it minimized");
+        assert!(list[0].focused, "activate gave it back without focus");
+
+        // The exception is exactly one request wide. The same client asking for
+        // the same window through the ordinary verb is still refused, because
+        // that one is resolved against the sender's own windows.
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::Minimize { window: theirs }],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Error { .. }),
+            "the owned-window verb reached a window the sender does not own: {:?}",
+            responses[0].body
+        );
+        assert!(
+            !comp
+                .window_ref(WindowId::from_raw(theirs))
+                .expect("window")
+                .minimized,
+            "a refused request minimized the window anyway"
+        );
+    }
+
+    #[test]
     fn closing_the_last_window_sends_an_empty_list_rather_than_nothing() {
         // "Nothing to report" and "there is nothing left" are different, and a
         // shell told the first when the second happened leaves a taskbar button
@@ -1371,5 +1511,66 @@ mod tests {
                 .any(|e: &InputEvent| matches!(e.event, Event::Resize { .. })),
             "the resize the client asked for comes back as the event that confirms it"
         );
+    }
+
+    #[test]
+    fn a_reload_request_off_the_wire_reaches_the_users_settings_file() {
+        // The whole point of the verb, end to end: bytes a client wrote, over
+        // the same decode path every other request takes, ending in the
+        // compositor holding what the *file* says. Asserted here rather than in
+        // `lib.rs` because this is the only test module with both halves of the
+        // protocol in scope, and the two halves are exactly where a new verb
+        // gets half-wired — a variant that encodes but never decodes, or one
+        // that decodes to a request nothing maps.
+        appearance::config::testing::with_scratch_config("wire-reload", |_root| {
+            let (mut comp, mut link) = wired();
+            assert!(
+                comp.appearance().drop_shadows,
+                "the compositor should start from the defaults"
+            );
+
+            let mut file = appearance::AppearanceFile::new();
+            file.settings.drop_shadows = false;
+            file.save().expect("write scratch appearance.yaml");
+
+            let responses = exchange(&mut comp, &mut link, vec![RequestBody::ReloadAppearance]);
+            assert!(
+                matches!(
+                    responses.as_slice(),
+                    [Response {
+                        body: ResponseBody::Ok,
+                        ..
+                    }]
+                ),
+                "a reload is answered Ok, got {responses:?}"
+            );
+            assert!(
+                !comp.appearance().drop_shadows,
+                "the reload request did not reach the settings the compositor draws from"
+            );
+        });
+    }
+
+    #[test]
+    fn a_reload_request_names_no_window_and_so_needs_no_window_to_name() {
+        // Every other request that reaches the compositor carries a window id
+        // the link must vouch for. This one carries nothing, which means a
+        // client that has never opened a window can still send it — and should,
+        // because the Settings app is exactly such a client. If someone later
+        // routes it through the ownership check by reflex, this fails.
+        appearance::config::testing::with_scratch_config("wire-reload-windowless", |_root| {
+            let (mut comp, mut link) = wired();
+            let responses = exchange(&mut comp, &mut link, vec![RequestBody::ReloadAppearance]);
+            assert!(
+                matches!(
+                    responses.as_slice(),
+                    [Response {
+                        body: ResponseBody::Ok,
+                        ..
+                    }]
+                ),
+                "a windowless client's reload was refused: {responses:?}"
+            );
+        });
     }
 }

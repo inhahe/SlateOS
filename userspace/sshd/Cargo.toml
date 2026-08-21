@@ -8,8 +8,21 @@ description = "SlateOS sshd - SSH server daemon"
 # own SHA-256, as does the client in `userspace/ssh` -- two implementations of
 # one digest on the two ends of a connection, which is the arrangement where a
 # divergence hides best.
+#
+# `posix` for `ed25519` (host key signing, publickey signature verification) and
+# `random` (the Diffie-Hellman private exponent). Both were previously faked
+# here: `sign` returned an HMAC labelled "ssh-ed25519" and publickey auth never
+# looked at the signature at all.
+#
+# `authlib` for password authentication -- the one place SlateOS answers "is
+# this the user's password?". This crate was the *fourth* disagreeing hasher
+# (design-decisions.md section 329 counted three): it hashed `$5$`/`$6$` entries
+# as sha256(password || salt) in hex, which is not SHA-crypt and is not what
+# `passwd` writes, and then fell through to comparing the entry as plaintext.
 [dependencies]
 sha2 = { path = "../../sha2" }
+posix = { path = "../../posix" }
+authlib = { path = "../authlib" }
 
 [lints]
 workspace = true

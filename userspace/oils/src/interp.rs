@@ -85665,11 +85665,21 @@ st=1
         assert_eq!(run("sleep 0.4 & compgen -j x"), (String::new(), 1));
         // `running` drops a job that has already finished; `job` keeps it,
         // because a job stays in the table until something sweeps it.
-        assert_eq!(run("true & sleep 0.3; compgen -A job").0, "true\n");
-        assert_eq!(
-            run("true & sleep 0.3; compgen -A running"),
-            (String::new(), 1)
-        );
+        //
+        // `settle_jobs`, not an in-script `sleep 0.3`: both assertions turn on
+        // the shell having *noticed* the exit, and a fixed window is only a
+        // guess at when that happens — the same guess that made
+        // `wait_n_ignores_a_job_whose_status_was_already_reported` flake under a
+        // loaded `cargo test --workspace`. A fresh shell per assertion because
+        // the originals were separate `run` calls, and a listing can sweep.
+        let mut sh = new_shell();
+        sh.run_source("true &".as_bytes());
+        settle_jobs(&mut sh);
+        assert_eq!(run_in(&mut sh, "compgen -A job").0, "true\n");
+        let mut sh = new_shell();
+        sh.run_source("true &".as_bytes());
+        settle_jobs(&mut sh);
+        assert_eq!(run_in(&mut sh, "compgen -A running"), (String::new(), 1));
         // osh has no stopped jobs, so that action never answers anything.
         assert_eq!(run("sleep 0.4 & compgen -A stopped"), (String::new(), 1));
         // With no jobs at all there is nothing to offer.
@@ -99640,7 +99650,16 @@ st=1
             "a targeted wait still answers"
         );
         // A reported job does not shadow a live one: `-n` waits for the live one.
-        sh.run_source("( exit 7 ) & sleep 0.2".as_bytes());
+        //
+        // `settle_jobs`, not an in-script `sleep 0.2`: the sleep was a guess at
+        // how much of a job's spawn/exit/reap fits in a fixed window, and under
+        // a full `cargo test --workspace` — a couple of dozen test binaries
+        // competing for one machine — the guess stops holding and the listing
+        // comes back empty. Reported by lane C against a tree that passes
+        // `-p oils` on its own every time. The two stanzas above already use
+        // the helper; this was the last settle-by-sleep in the test.
+        sh.run_source("( exit 7 ) &".as_bytes());
+        settle_jobs(&mut sh);
         assert_eq!(sh.run_source("wait".as_bytes()), 0);
         assert_eq!(listing(&mut sh, "jobs").lines().count(), 1);
         sh.run_source("( sleep 0.1; exit 9 ) &".as_bytes());

@@ -45150,7 +45150,19 @@ So this is deliberately left undone rather than half-done: adding (1) without
 `C-SETTINGS-BUTTONS-WITH-NOTHING-BEHIND-THEM` records for seven buttons and
 which that entry argues against repeating. Do (1) when (2) lands.
 
-## `C-OILS-WAIT-N-TEST-FLAKES-UNDER-LOAD`
+## `C-OILS-WAIT-N-TEST-FLAKES-UNDER-LOAD` — FIXED (lane B, 2026-08-20)
+
+**Fixed 2026-08-20 by lane B, as lane C described.** The failing stanza now
+calls `settle_jobs(&mut sh)`; the `( sleep 0.1; exit 9 ) &` on the last line
+stayed, for the reason given below. The requested sweep found one other
+settle-by-sleep in the file — `compgen_job_actions_read_the_job_table` wrote
+`true & sleep 0.3; compgen -A running`, whose assertion turns on the shell
+having *noticed* the exit — and it was converted the same way. Every remaining
+`sleep 0.<n>` in the file is a job body that must still be alive when the next
+command runs, i.e. the subject rather than a stand-in. `cargo test -p oils`:
+1484 + 64 passed, 0 failed. Reply filed as
+`requests/b-c-oils-settle-by-sleep-swept.md`.
+
 
 **In short:** one test in the shell (`oils`) fails now and then during a full
 `cargo test --workspace` run, and passes every time when run on its own. It is
@@ -46274,7 +46286,7 @@ script on a console that is not cp1252, or CI moving to a host with a different
 default code page. The sweep is `grep -P '[^\x00-\x7F]' scripts/*.py` plus the
 guard copied from `check-libc-shape.py`.
 
-## TD-B-PRINTF-RS-CONTAINS-RAW-NUL-BYTES-SO-GNU-GREP-SKIPS-IT (lane B, 2026-08-20)
+## FIXED-B-PRINTF-RS-CONTAINS-RAW-NUL-BYTES-SO-GNU-GREP-SKIPS-IT (lane B, 2026-08-20)
 
 **What.** `posix/src/printf.rs` contains 47 literal `0x00` bytes, inside byte-
 string literals in its test module: `fmt_f(b"%.1f\x00", 8.25)` is written with a
@@ -46299,6 +46311,12 @@ bytes to rustc), and it makes the file plain text again. Not done here only
 because it touches 47 test lines in a file already carrying a large diff for
 the archive-granularity work, and mixing a mechanical byte-level rewrite into
 that diff would make both harder to review.
+
+**Resolved 2026-08-20**, once the archive-granularity diff (§339/§340) was
+committed and the deferral reason expired. All 47 bytes replaced with `\0`;
+the file grew by exactly 47 bytes and contains no `0x00`, which is the whole
+of the change. `grep -c fmt_f posix/src/printf.rs` now answers `74` where it
+previously answered `Binary file posix/src/printf.rs matches`.
 
 ## OPEN-A-SELF-STOP-ANNOUNCEMENT-WINDOW-IS-PREEMPTIBLE (found by lane B, 2026-08-20) — filed to lane A
 
